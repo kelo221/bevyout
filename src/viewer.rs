@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use bevy::camera::Exposure;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::occlusion_culling::OcclusionCulling;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
 use std::fs;
@@ -20,10 +23,13 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
     let asset_root = PathBuf::from(&manifest.asset_root);
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(AssetPlugin {
-        file_path: asset_root.to_string_lossy().to_string(),
-        ..default()
-    }))
+    app.add_plugins((
+        DefaultPlugins.set(AssetPlugin {
+            file_path: asset_root.to_string_lossy().to_string(),
+            ..default()
+        }),
+        FrameTimeDiagnosticsPlugin::default(),
+    ))
     .insert_resource(manifest)
     .insert_resource(UnlitMode(false))
     .insert_resource(LightingScale(8192.0))
@@ -41,6 +47,7 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
             adjust_bloom,
             toggle_lights_disabled,
             apply_lighting_scale,
+            update_fps_text,
             toggle_unlit_mode,
             apply_unlit_mode,
             inspect_center_hit,
@@ -65,6 +72,27 @@ fn spawn_reticle(mut commands: Commands) {
         BackgroundColor(Color::WHITE),
         ZIndex(100),
     ));
+    commands.spawn((
+        Text::new("FPS --"),
+        FpsText,
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            right: px(10),
+            ..default()
+        },
+    ));
+}
+
+#[derive(Component)]
+struct FpsText;
+
+fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut text: Single<&mut Text, With<FpsText>>) {
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|diagnostic| diagnostic.smoothed())
+        .unwrap_or(0.0);
+    text.0 = format!("{fps:.0} FPS");
 }
 
 fn inspect_center_hit(
@@ -113,6 +141,8 @@ fn spawn_prepared_scene(
     let focus = scene_focus(&manifest);
     commands.spawn((
         Camera3d::default(),
+        DepthPrepass,
+        OcclusionCulling,
         Bloom::NATURAL,
         Tonemapping::TonyMcMapface,
         Exposure { ev100: 12.0 },

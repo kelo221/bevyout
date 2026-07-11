@@ -46,7 +46,7 @@ pub(crate) fn is_editor_marker(path: &str) -> bool {
 pub(crate) fn is_non_rendering_effect(path: &str) -> bool {
     path.rsplit('/')
         .next()
-        .is_some_and(|name| name.starts_with("fx"))
+        .is_some_and(|name| name.starts_with("fx") || name.starts_with("spraymeshconnect"))
 }
 
 pub(crate) fn placement_transform(reference: &ReferenceRecord) -> ([f32; 3], [f32; 4], f32) {
@@ -99,6 +99,9 @@ mod tests {
             "effects/ambient/fxdustsimple01.nif"
         ));
         assert!(is_non_rendering_effect("effects/ambient/fxlightbeam05.nif"));
+        assert!(is_non_rendering_effect(
+            "effects/ambient/spraymeshconnect.nif"
+        ));
         assert!(!is_non_rendering_effect("meshes/clutter/lampgeneric01.nif"));
     }
 }
