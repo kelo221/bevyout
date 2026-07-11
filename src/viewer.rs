@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use bevy::camera::Exposure;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
@@ -36,6 +38,7 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         (
             adjust_lighting,
             adjust_ambient,
+            adjust_bloom,
             toggle_lights_disabled,
             apply_lighting_scale,
             toggle_unlit_mode,
@@ -110,6 +113,8 @@ fn spawn_prepared_scene(
     let focus = scene_focus(&manifest);
     commands.spawn((
         Camera3d::default(),
+        Bloom::NATURAL,
+        Tonemapping::TonyMcMapface,
         Exposure { ev100: 12.0 },
         Transform::from_translation(focus + Vec3::new(0.0, 4.0, 12.0)).looking_at(focus, Vec3::Y),
         FlyCamera {
@@ -228,6 +233,40 @@ fn adjust_ambient(keys: Res<ButtonInput<KeyCode>>, mut ambient: ResMut<AmbientSc
     }
     if ambient.0 != previous {
         info!("ambient scale: {:.4}", ambient.0);
+    }
+}
+
+fn adjust_bloom(keys: Res<ButtonInput<KeyCode>>, mut cameras: Query<&mut Bloom, With<Camera3d>>) {
+    let Ok(mut bloom) = cameras.single_mut() else {
+        return;
+    };
+    let mut changed = false;
+    if keys.just_pressed(KeyCode::F6) {
+        bloom.intensity = (bloom.intensity * 0.5).max(0.0);
+        changed = true;
+    } else if keys.just_pressed(KeyCode::F7) {
+        bloom.intensity = (bloom.intensity * 2.0).min(1.0);
+        changed = true;
+    } else if keys.just_pressed(KeyCode::F8) {
+        bloom.prefilter.threshold = (bloom.prefilter.threshold - 0.1).max(0.0);
+        changed = true;
+    } else if keys.just_pressed(KeyCode::F9) {
+        bloom.prefilter.threshold += 0.1;
+        changed = true;
+    } else if keys.just_pressed(KeyCode::F10) {
+        bloom.prefilter.threshold_softness =
+            (bloom.prefilter.threshold_softness - 0.1).clamp(0.0, 1.0);
+        changed = true;
+    } else if keys.just_pressed(KeyCode::F11) {
+        bloom.prefilter.threshold_softness =
+            (bloom.prefilter.threshold_softness + 0.1).clamp(0.0, 1.0);
+        changed = true;
+    }
+    if changed {
+        info!(
+            "bloom: intensity {:.2}, threshold {:.2}, softness {:.2}",
+            bloom.intensity, bloom.prefilter.threshold, bloom.prefilter.threshold_softness
+        );
     }
 }
 

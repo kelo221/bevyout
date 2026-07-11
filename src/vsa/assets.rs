@@ -293,7 +293,9 @@ for nif_path, output_path in jobs:
             for link in list(new_emission.links): tree.links.remove(link)
             tree.links.new(glow.outputs['Color'], new_emission)
             if new_emission_strength:
-                new_emission_strength.default_value = 1.0
+                # Fallout glow maps are authored as masks/colors; boost them into
+                # HDR so Bevy's bloom threshold can see them at indoor exposure.
+                new_emission_strength.default_value = 100.0
         if alpha_blend or alpha_test:
             alpha_output = diffuse.outputs.get('Alpha')
             alpha_input = principled.inputs.get('Alpha')
