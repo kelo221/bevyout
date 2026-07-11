@@ -3,7 +3,7 @@ use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-use super::manifest::CellInfo;
+use super::manifest::{CellInfo, ImageSpaceInfo};
 
 const RECORD_COMPRESSED: u32 = 0x0004_0000;
 pub(crate) const RECORD_DELETED: u32 = 0x0000_0020;
@@ -35,6 +35,7 @@ pub(crate) struct ReferenceRecord {
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPlugin {
     pub(crate) bases: HashMap<u32, BaseRecord>,
+    pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) references: Vec<ReferenceRecord>,
     pub(crate) cell: Option<CellInfo>,
 }
@@ -100,6 +101,11 @@ fn walk_container(
                 data = decompressed;
             }
             let subs = parse_subrecords(&data)?;
+            if sig == "IMGS"
+                && let Some(image_space) = parse_image_space(&subs, form_id)
+            {
+                parsed.image_spaces.insert(form_id, image_space);
+            }
             if sig == "CELL" && form_id == target_cell {
                 parsed.cell = Some(parse_cell(&subs, form_id)?);
             }
@@ -214,6 +220,11 @@ fn parse_cell(subs: &[(String, Vec<u8>)], form_id: u32) -> Result<CellInfo> {
             data[7] as f32 / 255.0,
         ];
     }
+    let image_space_form_id = subs
+        .iter()
+        .find(|(name, _)| name == "XCIM")
+        .and_then(|(_, data)| data.get(..4))
+        .map(|data| u32::from_le_bytes(data.try_into().unwrap()));
     Ok(CellInfo {
         form_id,
         editor_id,
@@ -221,7 +232,74 @@ fn parse_cell(subs: &[(String, Vec<u8>)], form_id: u32) -> Result<CellInfo> {
         interior,
         ambient_rgba: ambient,
         directional_rgba: directional,
+        image_space_form_id,
+        image_space: None,
     })
+}
+
+fn parse_image_space(subs: &[(String, Vec<u8>)], form_id: u32) -> Option<ImageSpaceInfo> {
+    let data = subs.iter().find(|(name, _)| name == "DNAM")?.1.as_slice();
+    let mut image_space = ImageSpaceInfo {
+        form_id,
+        editor_id: subs
+            .iter()
+            .find(|(name, _)| name == "EDID")
+            .map(|(_, data)| cstring(data)),
+        ..default_image_space()
+    };
+
+    image_space.eye_adapt_speed = f32_or(data, 0, image_space.eye_adapt_speed);
+    image_space.hdr_blur_radius = f32_or(data, 4, image_space.hdr_blur_radius);
+    image_space.hdr_blur_passes = f32_or(data, 8, image_space.hdr_blur_passes);
+    image_space.hdr_emissive_multiplier = f32_or(data, 12, image_space.hdr_emissive_multiplier);
+    image_space.hdr_target_lum = f32_or(data, 16, image_space.hdr_target_lum);
+    image_space.hdr_upper_lum_clamp = f32_or(data, 20, image_space.hdr_upper_lum_clamp);
+    image_space.hdr_bright_scale = f32_or(data, 24, image_space.hdr_bright_scale);
+    image_space.hdr_bright_clamp = f32_or(data, 28, image_space.hdr_bright_clamp);
+    image_space.hdr_lum_ramp_no_tex = f32_or(data, 32, image_space.hdr_lum_ramp_no_tex);
+    image_space.hdr_lum_ramp_min = f32_or(data, 36, image_space.hdr_lum_ramp_min);
+    image_space.hdr_lum_ramp_max = f32_or(data, 40, image_space.hdr_lum_ramp_max);
+    image_space.hdr_sunlight_dimmer = f32_or(data, 44, image_space.hdr_sunlight_dimmer);
+    image_space.hdr_grass_dimmer = f32_or(data, 48, image_space.hdr_grass_dimmer);
+    image_space.hdr_tree_dimmer = f32_or(data, 52, image_space.hdr_tree_dimmer);
+    image_space.hdr_skin_dimmer = f32_or(data, 56, image_space.hdr_skin_dimmer);
+    image_space.bloom_blur_radius = f32_or(data, 60, image_space.bloom_blur_radius);
+    image_space.bloom_alpha_mult_interior = f32_or(data, 64, image_space.bloom_alpha_mult_interior);
+    image_space.bloom_alpha_mult_exterior = f32_or(data, 68, image_space.bloom_alpha_mult_exterior);
+    image_space.get_hit_blur_radius = f32_or(data, 72, image_space.get_hit_blur_radius);
+    image_space.get_hit_blur_damping_constant =
+        f32_or(data, 76, image_space.get_hit_blur_damping_constant);
+    image_space.get_hit_damping_constant = f32_or(data, 80, image_space.get_hit_damping_constant);
+    image_space.night_eye_tint_rgb = rgb_or(data, 84, image_space.night_eye_tint_rgb);
+    image_space.brightness = f32_or(data, 96, image_space.brightness);
+    image_space.cinematic_saturation = f32_or(data, 100, image_space.cinematic_saturation);
+    image_space.cinematic_contrast_avg_lum =
+        f32_or(data, 104, image_space.cinematic_contrast_avg_lum);
+    image_space.cinematic_contrast = f32_or(data, 108, image_space.cinematic_contrast);
+    image_space.cinematic_brightness_tint_rgb =
+        rgb_or(data, 112, image_space.cinematic_brightness_tint_rgb);
+    image_space.cinematic_brightness_tint_value =
+        f32_or(data, 124, image_space.cinematic_brightness_tint_value);
+    image_space.flags = data.get(144).copied().unwrap_or_default();
+    Some(image_space)
+}
+
+fn default_image_space() -> ImageSpaceInfo {
+    ImageSpaceInfo::default()
+}
+
+fn f32_or(data: &[u8], offset: usize, fallback: f32) -> f32 {
+    data.get(offset..offset + 4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .unwrap_or(fallback)
+}
+
+fn rgb_or(data: &[u8], offset: usize, fallback: [f32; 3]) -> [f32; 3] {
+    [
+        f32_or(data, offset, fallback[0]),
+        f32_or(data, offset + 4, fallback[1]),
+        f32_or(data, offset + 8, fallback[2]),
+    ]
 }
 
 fn parse_reference(
@@ -279,4 +357,62 @@ fn f32_at(data: &[u8], offset: usize) -> Result<f32> {
     data.get(offset..offset + 4)
         .context("f32 out of bounds")
         .map(|d| f32::from_le_bytes(d.try_into().unwrap()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_f32(data: &mut [u8], offset: usize, value: f32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn parses_cell_image_space_form_id() {
+        let cell = parse_cell(
+            &[
+                ("DATA".into(), vec![1]),
+                ("XCIM".into(), 0x00064ECE_u32.to_le_bytes().to_vec()),
+            ],
+            0x000CC067,
+        )
+        .unwrap();
+
+        assert_eq!(cell.image_space_form_id, Some(0x00064ECE));
+        assert!(cell.image_space.is_none());
+    }
+
+    #[test]
+    fn parses_image_space_dnam_offsets_and_record_variants() {
+        for length in [132, 148, 152] {
+            let mut data = vec![0_u8; length];
+            write_f32(&mut data, 0, 0.9);
+            write_f32(&mut data, 16, 2.5);
+            write_f32(&mut data, 96, 1.25);
+            write_f32(&mut data, 100, 0.75);
+            write_f32(&mut data, 108, 1.4);
+            write_f32(&mut data, 124, 0.6);
+            if length > 144 {
+                data[144] = 0x0f;
+            }
+            let image_space = parse_image_space(
+                &[
+                    ("EDID".into(), b"TestImageSpace\0".to_vec()),
+                    ("DNAM".into(), data),
+                ],
+                0x1234,
+            )
+            .unwrap();
+
+            assert_eq!(image_space.form_id, 0x1234);
+            assert_eq!(image_space.editor_id.as_deref(), Some("TestImageSpace"));
+            assert!((image_space.eye_adapt_speed - 0.9).abs() < f32::EPSILON);
+            assert!((image_space.hdr_target_lum - 2.5).abs() < f32::EPSILON);
+            assert!((image_space.brightness - 1.25).abs() < f32::EPSILON);
+            assert!((image_space.cinematic_saturation - 0.75).abs() < f32::EPSILON);
+            assert!((image_space.cinematic_contrast - 1.4).abs() < f32::EPSILON);
+            assert!((image_space.cinematic_brightness_tint_value - 0.6).abs() < f32::EPSILON);
+            assert_eq!(image_space.flags, if length > 144 { 0x0f } else { 0 });
+        }
+    }
 }

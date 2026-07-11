@@ -51,6 +51,84 @@ pub(crate) struct CellInfo {
     pub(crate) interior: bool,
     pub(crate) ambient_rgba: [f32; 4],
     pub(crate) directional_rgba: [f32; 4],
+    #[serde(default)]
+    pub(crate) image_space_form_id: Option<u32>,
+    #[serde(default)]
+    pub(crate) image_space: Option<ImageSpaceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ImageSpaceInfo {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) eye_adapt_speed: f32,
+    pub(crate) hdr_blur_radius: f32,
+    pub(crate) hdr_blur_passes: f32,
+    pub(crate) hdr_emissive_multiplier: f32,
+    pub(crate) hdr_target_lum: f32,
+    pub(crate) hdr_upper_lum_clamp: f32,
+    pub(crate) hdr_bright_scale: f32,
+    pub(crate) hdr_bright_clamp: f32,
+    pub(crate) hdr_lum_ramp_no_tex: f32,
+    pub(crate) hdr_lum_ramp_min: f32,
+    pub(crate) hdr_lum_ramp_max: f32,
+    pub(crate) hdr_sunlight_dimmer: f32,
+    pub(crate) hdr_grass_dimmer: f32,
+    pub(crate) hdr_tree_dimmer: f32,
+    pub(crate) hdr_skin_dimmer: f32,
+    pub(crate) bloom_blur_radius: f32,
+    pub(crate) bloom_alpha_mult_interior: f32,
+    pub(crate) bloom_alpha_mult_exterior: f32,
+    pub(crate) get_hit_blur_radius: f32,
+    pub(crate) get_hit_blur_damping_constant: f32,
+    pub(crate) get_hit_damping_constant: f32,
+    pub(crate) night_eye_tint_rgb: [f32; 3],
+    pub(crate) brightness: f32,
+    pub(crate) cinematic_saturation: f32,
+    pub(crate) cinematic_contrast_avg_lum: f32,
+    pub(crate) cinematic_contrast: f32,
+    pub(crate) cinematic_brightness_tint_rgb: [f32; 3],
+    pub(crate) cinematic_brightness_tint_value: f32,
+    pub(crate) flags: u8,
+}
+
+impl Default for ImageSpaceInfo {
+    fn default() -> Self {
+        Self {
+            form_id: 0,
+            editor_id: None,
+            eye_adapt_speed: 0.5,
+            hdr_blur_radius: 7.0,
+            hdr_blur_passes: 1.0,
+            hdr_emissive_multiplier: 1.0,
+            hdr_target_lum: 1.0,
+            hdr_upper_lum_clamp: 1.0,
+            hdr_bright_scale: 1.0,
+            hdr_bright_clamp: 0.225,
+            hdr_lum_ramp_no_tex: 1.0,
+            hdr_lum_ramp_min: 0.0,
+            hdr_lum_ramp_max: 0.0,
+            hdr_sunlight_dimmer: 1.0,
+            hdr_grass_dimmer: 1.0,
+            hdr_tree_dimmer: 1.0,
+            hdr_skin_dimmer: 1.0,
+            bloom_blur_radius: 0.0,
+            bloom_alpha_mult_interior: 1.0,
+            bloom_alpha_mult_exterior: 1.0,
+            get_hit_blur_radius: 0.0,
+            get_hit_blur_damping_constant: 0.0,
+            get_hit_damping_constant: 0.0,
+            night_eye_tint_rgb: [0.0, 0.0, 0.0],
+            brightness: 1.0,
+            cinematic_saturation: 1.0,
+            cinematic_contrast_avg_lum: 0.5,
+            cinematic_contrast: 1.0,
+            cinematic_brightness_tint_rgb: [1.0, 1.0, 1.0],
+            cinematic_brightness_tint_value: 0.0,
+            flags: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -53,7 +53,21 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         });
     }
     let mut parsed = parse_plugin(&bytes, cell_id).context("failed to parse Fallout plugin")?;
-    let cell = parsed.cell.take().context("requested cell was not found")?;
+    let mut cell = parsed.cell.take().context("requested cell was not found")?;
+    if let Some(image_space_form_id) = cell.image_space_form_id {
+        if let Some(image_space) = parsed.image_spaces.get(&image_space_form_id).cloned() {
+            info_image_space(&mut diagnostics, &image_space);
+            cell.image_space = Some(image_space);
+        } else {
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                message: format!(
+                    "cell {:08x} references unresolved ImageSpace {:08x}",
+                    cell_id, image_space_form_id
+                ),
+            });
+        }
+    }
     if !cell.interior {
         bail!("cell {cell_id:08x} is not an interior cell; LAND support is not part of this slice")
     }
@@ -221,4 +235,20 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         manifest_path.display()
     );
     Ok(())
+}
+
+fn info_image_space(
+    diagnostics: &mut Vec<Diagnostic>,
+    image_space: &super::manifest::ImageSpaceInfo,
+) {
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: format!(
+            "resolved ImageSpace {:08x} ({}) eye_adapt_speed={:.3} target_lum={:.3}",
+            image_space.form_id,
+            image_space.editor_id.as_deref().unwrap_or("<unnamed>"),
+            image_space.eye_adapt_speed,
+            image_space.hdr_target_lum,
+        ),
+    });
 }

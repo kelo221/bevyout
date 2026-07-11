@@ -7,12 +7,16 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::math::Rect;
+use bevy::math::{Rect, cubic_splines::LinearSpline, vec2};
 use bevy::pbr::Lightmap;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
+use bevy::post_process::auto_exposure::{
+    AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
+};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::occlusion_culling::OcclusionCulling;
+use bevy::render::view::ColorGrading;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
 use std::collections::HashMap;
@@ -20,7 +24,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::cli::ViewArgs;
-use crate::vsa::PreparedSceneManifest;
+use crate::vsa::{ImageSpaceInfo, PreparedSceneManifest};
 
 pub(crate) fn view(args: ViewArgs) -> Result<()> {
     let manifest_path = fs::canonicalize(&args.manifest).context("manifest does not exist")?;
@@ -34,10 +38,11 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
             ..default()
         }),
         FrameTimeDiagnosticsPlugin::default(),
+        AutoExposurePlugin,
     ))
     .insert_resource(manifest)
     .insert_resource(UnlitMode(false))
-    .insert_resource(LightingScale(8192.0))
+    .insert_resource(LightingScale(128.0))
     .insert_resource(AmbientScale(0.05))
     .insert_resource(LightsDisabled(false))
     .insert_resource(LightmapOnlyMode::default())
@@ -143,6 +148,7 @@ fn inspect_center_hit(
 fn spawn_prepared_scene(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut compensation_curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     manifest: Res<PreparedSceneManifest>,
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
@@ -152,13 +158,16 @@ fn spawn_prepared_scene(
         .bake
         .as_ref()
         .is_none_or(|bake| bake.runtime_lighting);
-    commands.spawn((
+    let (color_grading, auto_exposure) =
+        camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
+    let mut camera = commands.spawn((
         Camera3d::default(),
         DepthPrepass,
         OcclusionCulling,
         Bloom::NATURAL,
         Tonemapping::TonyMcMapface,
         Exposure { ev100: 12.0 },
+        color_grading,
         Transform::from_translation(focus + Vec3::new(0.0, 4.0, 12.0)).looking_at(focus, Vec3::Y),
         FlyCamera {
             yaw: 0.0,
@@ -166,6 +175,23 @@ fn spawn_prepared_scene(
             speed: 8.0,
         },
     ));
+    if let Some(auto_exposure) = auto_exposure {
+        camera.insert(auto_exposure);
+        if let Some(image_space) = manifest.cell.image_space.as_ref() {
+            info!(
+                "applying ImageSpace {:08x} ({}) eye_adapt_speed={:.3} target_lum={:.3}",
+                image_space.form_id,
+                image_space.editor_id.as_deref().unwrap_or("<unnamed>"),
+                image_space.eye_adapt_speed,
+                image_space.hdr_target_lum,
+            );
+        }
+    } else {
+        warn!(
+            "cell {:08x} has no resolved ImageSpace; retaining fixed viewer post-processing",
+            manifest.cell.form_id
+        );
+    }
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(
             manifest.cell.ambient_rgba[0],
@@ -230,6 +256,79 @@ fn spawn_prepared_scene(
         manifest.diagnostics.len(),
         focus,
     );
+}
+
+fn camera_post_processing(
+    image_space: Option<&ImageSpaceInfo>,
+    compensation_curves: &mut Assets<AutoExposureCompensationCurve>,
+) -> (ColorGrading, Option<AutoExposure>) {
+    let Some(image_space) = image_space else {
+        return (ColorGrading::default(), None);
+    };
+
+    let flags = image_space.flags;
+    let mut color_grading = ColorGrading::default();
+    if flags & 0x08 != 0 {
+        color_grading.global.exposure = image_space.brightness.max(0.0001).log2();
+    }
+    if flags & 0x01 != 0 {
+        color_grading.global.post_saturation = image_space.cinematic_saturation.max(0.0);
+    }
+    if flags & 0x02 != 0 {
+        let contrast = image_space.cinematic_contrast.max(0.0);
+        color_grading.shadows.contrast = contrast;
+        color_grading.midtones.contrast = contrast;
+        color_grading.highlights.contrast = contrast;
+    }
+    if flags & 0x04 != 0
+        && let Some((temperature, tint)) = image_space_tint_to_white_balance(
+            image_space.cinematic_brightness_tint_rgb,
+            image_space.cinematic_brightness_tint_value,
+        )
+    {
+        color_grading.global.temperature = temperature;
+        color_grading.global.tint = tint;
+    }
+
+    let target_lum = image_space.hdr_target_lum.max(0.001);
+    let compensation = target_lum.log2();
+    let compensation_curve = compensation_curves.add(
+        AutoExposureCompensationCurve::from_curve(LinearSpline::new([
+            vec2(-8.0, compensation),
+            vec2(8.0, compensation),
+        ]))
+        .expect("flat auto-exposure compensation curve is valid"),
+    );
+    let speed = image_space_eye_adaptation_speed(image_space.eye_adapt_speed);
+    let auto_exposure = AutoExposure {
+        speed_brighten: speed,
+        speed_darken: speed,
+        compensation_curve,
+        ..default()
+    };
+    (color_grading, Some(auto_exposure))
+}
+
+fn image_space_eye_adaptation_speed(value: f32) -> f32 {
+    0.5 + (1.0 - value.clamp(0.0, 1.0)) * 7.5
+}
+
+fn image_space_tint_to_white_balance(rgb: [f32; 3], strength: f32) -> Option<(f32, f32)> {
+    let [r, g, b] = rgb;
+    let x = 0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b;
+    let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175 * b;
+    let z = 0.019_333_9 * r + 0.119_192 * g + 0.950_304_1 * b;
+    let sum = x + y + z;
+    if sum <= f32::EPSILON || !sum.is_finite() {
+        return None;
+    }
+    let target_x = x / sum;
+    let target_y = y / sum;
+    let strength = strength.max(0.0);
+    Some((
+        (0.3127 - target_x) * strength,
+        (target_y - 0.3290) * strength,
+    ))
 }
 
 type BakedMeshQuery<'w> = (
@@ -592,5 +691,61 @@ fn free_fly_camera(
     }
     if direction != Vec3::ZERO {
         transform.translation += direction.normalize() * camera.speed * time.delta_secs();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_space_eye_adaptation_speed_uses_documented_endpoints() {
+        assert!((image_space_eye_adaptation_speed(0.0) - 8.0).abs() < f32::EPSILON);
+        assert!((image_space_eye_adaptation_speed(1.0) - 0.5).abs() < f32::EPSILON);
+        assert!(image_space_eye_adaptation_speed(0.5) > image_space_eye_adaptation_speed(0.9));
+    }
+
+    #[test]
+    fn image_space_tint_maps_neutral_white_to_neutral_balance() {
+        let (temperature, tint) = image_space_tint_to_white_balance([1.0, 1.0, 1.0], 1.0)
+            .expect("white has a valid chromaticity");
+        assert!(temperature.abs() < 0.001);
+        assert!(tint.abs() < 0.001);
+    }
+
+    #[test]
+    fn image_space_settings_map_to_grading_and_target_exposure() {
+        let mut image_space = ImageSpaceInfo {
+            flags: 0x0f,
+            hdr_target_lum: 2.0,
+            brightness: 4.0,
+            cinematic_saturation: 0.5,
+            cinematic_contrast: 1.5,
+            cinematic_brightness_tint_rgb: [0.8, 0.9, 1.0],
+            cinematic_brightness_tint_value: 1.0,
+            ..default()
+        };
+        image_space.eye_adapt_speed = 0.25;
+        let mut curves = Assets::<AutoExposureCompensationCurve>::default();
+        let (grading, auto_exposure) = camera_post_processing(Some(&image_space), &mut curves);
+
+        assert!((grading.global.exposure - 2.0).abs() < f32::EPSILON);
+        assert!((grading.global.post_saturation - 0.5).abs() < f32::EPSILON);
+        assert!((grading.shadows.contrast - 1.5).abs() < f32::EPSILON);
+        assert!((grading.midtones.contrast - 1.5).abs() < f32::EPSILON);
+        assert!((grading.highlights.contrast - 1.5).abs() < f32::EPSILON);
+        assert!(grading.global.tint.abs() > 0.0 || grading.global.temperature.abs() > 0.0);
+        let auto_exposure = auto_exposure.expect("image space enables auto exposure");
+        assert!((auto_exposure.speed_brighten - 6.125).abs() < f32::EPSILON);
+        assert_eq!(curves.len(), 1);
+    }
+
+    #[test]
+    fn missing_image_space_keeps_fixed_camera_post_processing() {
+        let mut curves = Assets::<AutoExposureCompensationCurve>::default();
+        let (grading, auto_exposure) = camera_post_processing(None, &mut curves);
+        assert_eq!(grading.global.exposure, 0.0);
+        assert!(auto_exposure.is_none());
+        assert_eq!(curves.len(), 0);
     }
 }
