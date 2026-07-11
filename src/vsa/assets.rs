@@ -1,0 +1,412 @@
+use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use super::bsa::BsaArchive;
+use super::manifest::Diagnostic;
+use super::paths::normalize_asset_path;
+
+pub(crate) fn find_blender(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        if path.exists() {
+            return Ok(path);
+        }
+        bail!("Blender executable does not exist: {}", path.display());
+    }
+    let candidates = [
+        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"),
+        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"),
+    ];
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .context("Blender was not found; pass --blender explicitly")
+}
+
+pub(crate) fn stage_textures(
+    nif_bytes: &[u8],
+    data_root: &Path,
+    archives: &[BsaArchive],
+    staging_dir: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    for texture in texture_references(nif_bytes) {
+        let Some(bytes) = resolve_asset(data_root, archives, &texture)
+            .with_context(|| format!("reading texture {texture}"))?
+        else {
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: format!("missing texture {texture}"),
+            });
+            continue;
+        };
+        let destination = staging_dir.join(texture.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if destination.exists() {
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, bytes)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn convert_staged_textures(
+    staging_dir: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let converter = {
+        let installed = PathBuf::from(r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe");
+        if installed.exists() {
+            Some(installed)
+        } else if Command::new("magick.exe")
+            .arg("-version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            Some(PathBuf::from("magick.exe"))
+        } else {
+            None
+        }
+    };
+    let Some(converter) = converter else {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: "ImageMagick was not found; DDS textures will remain unconverted".into(),
+        });
+        return Ok(());
+    };
+    let mut dds_files = Vec::new();
+    collect_files_with_extension(staging_dir, "dds", &mut dds_files)?;
+    for dds in dds_files {
+        let png = dds.with_extension("png");
+        if png.exists() {
+            fs::remove_file(&dds)?;
+            continue;
+        }
+        let result = Command::new(&converter)
+            .arg(&dds)
+            .arg("-strip")
+            .arg(&png)
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {
+                fs::remove_file(&dds)?;
+            }
+            Ok(output) => diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                message: format!(
+                    "could not convert {} to PNG: {}",
+                    dds.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            }),
+            Err(error) => diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                message: format!("could not run ImageMagick for {}: {error}", dds.display()),
+            }),
+        }
+    }
+    Ok(())
+}
+
+fn collect_files_with_extension(
+    root: &Path,
+    extension: &str,
+    output: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files_with_extension(&path, extension, output)?;
+        } else if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn texture_references(bytes: &[u8]) -> Vec<String> {
+    const EXTENSIONS: [&str; 5] = [".dds", ".tga", ".bmp", ".png", ".jpg"];
+    let mut found = HashSet::new();
+    let mut start = None;
+    let mut inspect = |run: &[u8]| {
+        if run.len() < 5 {
+            return;
+        }
+        let text = String::from_utf8_lossy(run);
+        let lower = text.to_ascii_lowercase();
+        for extension in EXTENSIONS {
+            let mut search_from = 0;
+            while let Some(relative) = lower[search_from..].find(extension) {
+                let end = search_from + relative + extension.len();
+                let prefix = &lower[..search_from + relative];
+                let separator = prefix
+                    .rfind('\\')
+                    .max(prefix.rfind('/'))
+                    .map(|index| index + 1);
+                let candidate_start = prefix.rfind("textures").or(separator).unwrap_or(0);
+                let candidate = normalize_asset_path(&text[candidate_start..end]);
+                if candidate.ends_with(extension) && !candidate.contains(' ') {
+                    found.insert(candidate);
+                }
+                search_from = end;
+                if search_from >= lower.len() {
+                    break;
+                }
+            }
+        }
+    };
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if (0x20..=0x7e).contains(&byte) {
+            if start.is_none() {
+                start = Some(index);
+            }
+        } else if let Some(begin) = start.take() {
+            inspect(&bytes[begin..index]);
+        }
+    }
+    if let Some(begin) = start {
+        inspect(&bytes[begin..]);
+    }
+    found.into_iter().collect()
+}
+
+pub(crate) fn run_blender_batch(
+    blender: &Path,
+    jobs: &[(PathBuf, PathBuf, String)],
+    data_root: &Path,
+    staging_dir: &Path,
+) -> Result<()> {
+    let job_file = staging_dir.join("blender_jobs.ron");
+    let jobs_json = jobs
+        .iter()
+        .map(|(input, output, _)| {
+            (
+                input.to_string_lossy().to_string(),
+                output.to_string_lossy().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let job_text = serde_json_like(&jobs_json);
+    fs::write(&job_file, job_text)?;
+    let script = r#"import bpy, json, os, sys
+def patch_niftools_blender52():
+    from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
+    from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
+    from io_scene_niftools.nif_import import NifImport
+    from io_scene_niftools.modules.nif_import.collision.bound import Bound
+    from io_scene_niftools.modules.nif_import.property.material import Material
+    from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
+    def map_normals_compat(b_mesh, normals):
+        if len(b_mesh.vertices) != len(normals): raise RuntimeError('normal/vertex count mismatch')
+        no_array = Vertex.normalize(normals)
+        if hasattr(b_mesh, 'normals_split_custom_set_from_vertices'):
+            b_mesh.normals_split_custom_set_from_vertices(no_array)
+    def link_normal_node_compat(self, b_texture_node):
+        # Blender 5.x replaced ShaderNodeTree.inputs/outputs with the
+        # interface API. Niftools' normal-map group is optional for this
+        # static export, so leave the image node unlinked rather than fail.
+        b_texture_node.label = 'Normal'
+    Vertex.map_normals = staticmethod(map_normals_compat)
+    NodesWrapper.link_normal_node = link_normal_node_compat
+    # Collision meshes are not needed by the Bevy static scene and the
+    # addon's Blender 4-era rigid-body override call is rejected by Blender 5.
+    NifImport.import_collision = lambda self, n_node: []
+    Bound.import_bounding_box = lambda self, n_block: []
+    def set_alpha_compat(b_mat, n_alpha_prop):
+        # Blender 4.2+ removed Material.blend_method/shadow_method. Keep the
+        # alpha metadata and only assign properties that still exist.
+        if hasattr(b_mat, 'alpha_threshold'):
+            b_mat.alpha_threshold = n_alpha_prop.threshold / 255
+        if hasattr(b_mat, 'niftools_alpha'):
+            b_mat.niftools_alpha.alphaflag = n_alpha_prop.flags
+    Material.set_alpha = staticmethod(set_alpha_compat)
+    VertexGroup.set_face_maps = classmethod(lambda cls, face_maps, b_obj: None)
+bpy.ops.preferences.addon_enable(module='io_scene_niftools')
+patch_niftools_blender52()
+bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
+with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
+for nif_path, output_path in jobs:
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
+        for datablock in list(datablocks):
+            if datablock.users == 0: datablocks.remove(datablock)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=0.1, use_custom_normals=False, use_embedded_texture=False)
+    if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+    for obj in list(bpy.context.scene.objects):
+        if obj.display_type == 'BOUNDS': bpy.data.objects.remove(obj, do_unlink=True)
+    for material in bpy.data.materials:
+        if not material.use_nodes: continue
+        tree = material.node_tree
+        output = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeOutputMaterial'), None)
+        if output is None: continue
+        alpha_flags = getattr(getattr(material, 'niftools_alpha', None), 'alphaflag', 0)
+        alpha_threshold = getattr(material, 'alpha_threshold', 0.5)
+        alpha_blend = bool(alpha_flags & 1)
+        alpha_test = bool(alpha_flags & (1 << 9))
+        images = [node for node in tree.nodes if node.bl_idname == 'ShaderNodeTexImage' and node.image]
+        if not images: continue
+        diffuse = next((node for node in images if 'normal' not in node.label.lower() and '_n.' not in node.image.name.lower()), images[0])
+        normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
+        principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
+        tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        if alpha_blend or alpha_test:
+            alpha_output = diffuse.outputs.get('Alpha')
+            alpha_input = principled.inputs.get('Alpha')
+            if alpha_output is not None and alpha_input is not None:
+                if alpha_test and not alpha_blend:
+                    clip = tree.nodes.new('ShaderNodeMath')
+                    clip.operation = 'GREATER_THAN'
+                    clip.inputs[1].default_value = alpha_threshold
+                    tree.links.new(alpha_output, clip.inputs[0])
+                    tree.links.new(clip.outputs[0], alpha_input)
+                else:
+                    tree.links.new(alpha_output, alpha_input)
+                if hasattr(material, 'surface_render_method'):
+                    material.surface_render_method = 'BLENDED' if alpha_blend else 'DITHERED'
+        if normal:
+            normal_map = tree.nodes.new('ShaderNodeNormalMap')
+            tree.links.new(normal.outputs['Color'], normal_map.inputs['Color'])
+            tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+        for link in list(output.inputs['Surface'].links): tree.links.remove(link)
+        tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True)
+"#;
+    let result = Command::new(blender)
+        .arg("--background")
+        .arg("--factory-startup")
+        .arg("--python-expr")
+        .arg(script)
+        .arg("--")
+        .arg(&job_file)
+        .arg(staging_dir)
+        .current_dir(data_root)
+        .output()?;
+    if !result.status.success() {
+        bail!(
+            "Blender exited with {}:\n{}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    for (_, output, _) in jobs {
+        if !output.exists() {
+            let stdout_tail = String::from_utf8_lossy(&result.stdout)
+                .lines()
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let stderr_tail = String::from_utf8_lossy(&result.stderr)
+                .lines()
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Blender reported success but did not create {}\nstdout tail:\n{}\nstderr tail:\n{}",
+                output.display(),
+                stdout_tail,
+                stderr_tail
+            );
+        }
+    }
+    Ok(())
+}
+
+fn serde_json_like(jobs: &[(String, String)]) -> String {
+    let mut out = String::from("[");
+    for (index, (input, output)) in jobs.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "[\"{}\",\"{}\"]",
+            json_escape(input),
+            json_escape(output)
+        ));
+    }
+    out.push(']');
+    out
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub(crate) fn load_archives(
+    data_root: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<BsaArchive>> {
+    let names = ["Fallout - Meshes.bsa", "Fallout - Textures.bsa"];
+    let mut archives = Vec::new();
+    for name in names {
+        let path = data_root.join(name);
+        if path.exists() {
+            match BsaArchive::open(&path) {
+                Ok(archive) => archives.push(archive),
+                Err(error) => diagnostics.push(Diagnostic {
+                    severity: "warning".into(),
+                    message: format!("could not index {name}: {error}"),
+                }),
+            }
+        }
+    }
+    Ok(archives)
+}
+
+pub(crate) fn resolve_asset(
+    data_root: &Path,
+    archives: &[BsaArchive],
+    normalized: &str,
+) -> Result<Option<Vec<u8>>> {
+    let candidates = if normalized.starts_with("meshes/") || normalized.starts_with("textures/") {
+        vec![normalized.to_string()]
+    } else {
+        vec![
+            normalized.to_string(),
+            format!("meshes/{normalized}"),
+            format!("textures/{normalized}"),
+        ]
+    };
+    for candidate in candidates {
+        let loose = data_root.join(candidate.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if loose.exists() {
+            return Ok(Some(fs::read(loose)?));
+        }
+        for archive in archives {
+            if let Some(bytes) = archive.read(&candidate)? {
+                return Ok(Some(bytes));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_length_adjacent_texture_names_in_nif_bytes() {
+        let references = texture_references(b"textures\\clutter\\machine\\panel.dds4");
+        assert!(references.contains(&"textures/clutter/machine/panel.dds".to_string()));
+    }
+}

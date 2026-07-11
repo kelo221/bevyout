@@ -1,0 +1,4 @@
+[alias]
+run-dev = "run --features bevy/dynamic_linking"
+check-dev = "check --features bevy/dynamic_linking"
+test-dev = "test --features bevy/dynamic_linking"
