@@ -1,16 +1,21 @@
 use anyhow::{Context, Result};
+use bevy::asset::AssetId;
 use bevy::camera::Exposure;
+use bevy::color::LinearRgba;
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::math::Rect;
+use bevy::pbr::Lightmap;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::occlusion_culling::OcclusionCulling;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -35,6 +40,7 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
     .insert_resource(LightingScale(8192.0))
     .insert_resource(AmbientScale(0.05))
     .insert_resource(LightsDisabled(false))
+    .insert_resource(LightmapOnlyMode::default())
     .add_systems(
         Startup,
         (capture_cursor, spawn_prepared_scene, spawn_reticle),
@@ -50,6 +56,9 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
             update_fps_text,
             toggle_unlit_mode,
             apply_unlit_mode,
+            toggle_lightmap_only,
+            apply_lightmap_only_mode,
+            apply_baked_lightmaps,
             inspect_center_hit,
             free_fly_camera,
         ),
@@ -139,6 +148,10 @@ fn spawn_prepared_scene(
     ambient_scale: Res<AmbientScale>,
 ) {
     let focus = scene_focus(&manifest);
+    let runtime_lighting = manifest
+        .bake
+        .as_ref()
+        .is_none_or(|bake| bake.runtime_lighting);
     commands.spawn((
         Camera3d::default(),
         DepthPrepass,
@@ -160,7 +173,7 @@ fn spawn_prepared_scene(
             manifest.cell.ambient_rgba[2],
         ),
         brightness: 25.0 * lighting.0 * ambient_scale.0,
-        affects_lightmapped_meshes: true,
+        affects_lightmapped_meshes: runtime_lighting,
     });
     for light in &manifest.lights {
         commands.spawn((
@@ -172,29 +185,43 @@ fn spawn_prepared_scene(
                     light.color_rgba[1],
                     light.color_rgba[2],
                 ),
+                affects_lightmapped_mesh_diffuse: runtime_lighting,
                 shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_translation(Vec3::from_array(light.translation)),
         ));
     }
-    for placement in &manifest.placements {
-        let Some(path) = placement.asset_path.as_ref() else {
-            continue;
-        };
-        commands.spawn((
-            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
-            Transform {
-                translation: Vec3::from_array(placement.translation),
-                rotation: Quat::from_xyzw(
-                    placement.rotation_xyzw[0],
-                    placement.rotation_xyzw[1],
-                    placement.rotation_xyzw[2],
-                    placement.rotation_xyzw[3],
-                ),
-                scale: Vec3::splat(placement.scale),
-            },
+    if let Some(bake) = &manifest.bake {
+        commands.spawn(WorldAssetRoot(
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
         ));
+        info!(
+            "loading baked scene {} with {} lightmap pages",
+            bake.scene_path,
+            bake.lightmaps.len()
+        );
+    } else {
+        for placement in &manifest.placements {
+            let Some(path) = placement.asset_path.as_ref() else {
+                continue;
+            };
+            commands.spawn((
+                WorldAssetRoot(
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
+                ),
+                Transform {
+                    translation: Vec3::from_array(placement.translation),
+                    rotation: Quat::from_xyzw(
+                        placement.rotation_xyzw[0],
+                        placement.rotation_xyzw[1],
+                        placement.rotation_xyzw[2],
+                        placement.rotation_xyzw[3],
+                    ),
+                    scale: Vec3::splat(placement.scale),
+                },
+            ));
+        }
     }
     info!(
         "loaded cell {} with {} placements, {} diagnostics; camera focus {:?}",
@@ -203,6 +230,91 @@ fn spawn_prepared_scene(
         manifest.diagnostics.len(),
         focus,
     );
+}
+
+type BakedMeshQuery<'w> = (
+    Entity,
+    &'w GltfMeshName,
+    &'w MeshMaterial3d<StandardMaterial>,
+    Option<&'w Lightmap>,
+);
+
+fn apply_baked_lightmaps(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    manifest: Res<PreparedSceneManifest>,
+    meshes: Query<BakedMeshQuery<'_>, With<Mesh3d>>,
+    mut reported: Local<bool>,
+) {
+    let Some(bake) = manifest.bake.as_ref() else {
+        return;
+    };
+    if !*reported {
+        let count = meshes.iter().count();
+        let matching = meshes
+            .iter()
+            .filter(|(_, name, _, _)| {
+                bake.bindings
+                    .iter()
+                    .any(|binding| mesh_name_matches(&name.0, &binding.mesh_name))
+            })
+            .count();
+        if count > 0 {
+            let names = meshes
+                .iter()
+                .map(|(_, name, _, _)| name.0.as_str())
+                .take(8)
+                .collect::<Vec<_>>();
+            if matching == 0 {
+                warn!(
+                    "baked scene spawned {count} mesh entities, but none match lightmap bindings; first names: {names:?}"
+                );
+            } else {
+                info!(
+                    "baked scene spawned {count} mesh entities; {matching} match lightmap bindings"
+                );
+            }
+            *reported = true;
+        }
+    }
+    for (entity, name, material_handle, existing_lightmap) in &meshes {
+        if existing_lightmap.is_some() {
+            continue;
+        }
+        let Some(binding) = bake
+            .bindings
+            .iter()
+            .find(|binding| mesh_name_matches(&name.0, &binding.mesh_name))
+        else {
+            continue;
+        };
+        let Some(page) = bake.lightmaps.get(binding.page) else {
+            warn!(
+                "lightmap binding {} refers to missing page {}",
+                name.0, binding.page
+            );
+            continue;
+        };
+        if let Some(mut material) = materials.get_mut(material_handle) {
+            material.lightmap_exposure = bake.lightmap_exposure;
+        }
+        commands.entity(entity).insert(Lightmap {
+            image: asset_server.load(page.asset_path.clone()),
+            uv_rect: Rect {
+                min: Vec2::new(binding.uv_rect[0], binding.uv_rect[1]),
+                max: Vec2::new(binding.uv_rect[2], binding.uv_rect[3]),
+            },
+            bicubic_sampling: false,
+        });
+    }
+}
+
+fn mesh_name_matches(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || actual
+            .strip_prefix(expected)
+            .is_some_and(|suffix| suffix.starts_with(':'))
 }
 
 fn scene_focus(manifest: &PreparedSceneManifest) -> Vec3 {
@@ -241,6 +353,12 @@ struct AmbientScale(f32);
 
 #[derive(Resource)]
 struct LightsDisabled(bool);
+
+#[derive(Resource, Default)]
+struct LightmapOnlyMode {
+    enabled: bool,
+    originals: HashMap<AssetId<StandardMaterial>, StandardMaterial>,
+}
 
 fn adjust_lighting(keys: Res<ButtonInput<KeyCode>>, mut lighting: ResMut<LightingScale>) {
     let previous = lighting.0;
@@ -314,10 +432,22 @@ fn apply_lighting_scale(
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     disabled: Res<LightsDisabled>,
+    lightmap_only: Res<LightmapOnlyMode>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut points: Query<&mut PointLight>,
 ) {
-    if !lighting.is_changed() && !ambient_scale.is_changed() && !disabled.is_changed() {
+    if !lighting.is_changed()
+        && !ambient_scale.is_changed()
+        && !disabled.is_changed()
+        && !lightmap_only.is_changed()
+    {
+        return;
+    }
+    if lightmap_only.enabled {
+        ambient.brightness = 0.0;
+        for mut light in &mut points {
+            light.intensity = 0.0;
+        }
         return;
     }
     ambient.brightness = if disabled.0 {
@@ -341,6 +471,54 @@ fn toggle_unlit_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<UnlitMode
             "unlit diagnostic mode: {}",
             if mode.0 { "on" } else { "off" }
         );
+    }
+}
+
+fn toggle_lightmap_only(
+    keys: Res<ButtonInput<KeyCode>>,
+    manifest: Res<PreparedSceneManifest>,
+    mut mode: ResMut<LightmapOnlyMode>,
+) {
+    if keys.just_pressed(KeyCode::KeyL) {
+        if manifest.bake.is_none() {
+            warn!(
+                "lightmap-only mode unavailable: this manifest has no completed baked lightmap; run bake --quality quick or final first"
+            );
+            return;
+        }
+        mode.enabled = !mode.enabled;
+        info!(
+            "lightmap-only diagnostic mode: {}",
+            if mode.enabled { "on" } else { "off" }
+        );
+    }
+}
+
+fn apply_lightmap_only_mode(
+    mut mode: ResMut<LightmapOnlyMode>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if mode.enabled {
+        for (id, material) in materials.iter_mut() {
+            let original = mode.originals.entry(id).or_insert_with(|| material.clone());
+            material.base_color = Color::WHITE;
+            material.base_color_texture = None;
+            material.emissive = LinearRgba::BLACK;
+            material.emissive_texture = None;
+            material.metallic = 0.0;
+            material.metallic_roughness_texture = None;
+            material.reflectance = 0.0;
+            material.normal_map_texture = None;
+            material.occlusion_texture = None;
+            material.unlit = false;
+            material.lightmap_exposure = original.lightmap_exposure;
+        }
+    } else if mode.is_changed() {
+        for (id, original) in mode.originals.drain() {
+            if let Some(mut material) = materials.get_mut(id) {
+                *material = original;
+            }
+        }
     }
 }
 

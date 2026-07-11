@@ -1,0 +1,13 @@
+# Copy this file to .bevyout/config.toml and edit the paths for your machine.
+
+[fallout3]
+game_root = "C:/Games/Fallout 3 goty"
+plugin = "Fallout3.esm"
+
+[tools]
+# Optional: omitted values use automatic detection.
+blender = "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
+ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"
+
+[output]
+cache_dir = ".bevyout/cache"

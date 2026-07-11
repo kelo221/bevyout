@@ -17,7 +17,7 @@ The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled.
 
-`prepare` reads `Fallout3.esm`, indexes the loose files and the Fallout mesh/texture BSAs, stages the referenced NIFs and textures, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. Use `--force` after changing Blender or conversion settings. Override the game or Blender paths with `--game-root` and `--blender` when needed.
+`prepare` reads `Fallout3.esm`, indexes the loose files and the Fallout mesh/texture BSAs, stages the referenced NIFs and textures, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file or `--force` after changing Blender or conversion settings.
 
 The current slice handles interior cells and static geometry. The viewer uses the Fallout-to-Bevy coordinate conversion, starts near the prepared scene bounds, spawns the prepared GLB scenes and point lights, and provides free flight with WASD/QE plus mouse look. The mouse is captured on startup; press `Esc` to release it and click the window to capture it again. NIF alpha flags and texture alpha are exported as glTF `MASK`/`BLEND` materials, while non-rendering editor markers are omitted. Exterior LAND, animation playback, and collision are intentionally left for later passes.
 

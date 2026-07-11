@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 mod viewer;
 mod vsa;
 
@@ -8,8 +9,11 @@ use clap::Parser;
 use cli::{Cli, CommandLine};
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let mut cli = Cli::parse();
+    config::apply(&mut cli)?;
+    match cli.command {
         CommandLine::Prepare(args) => vsa::prepare(args),
+        CommandLine::Bake(args) => vsa::bake(args),
         CommandLine::View(args) => viewer::view(args),
     }
 }

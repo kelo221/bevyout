@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -7,6 +7,9 @@ use std::path::PathBuf;
     about = "Fallout 3 scene preparation and Bevy viewer"
 )]
 pub(crate) struct Cli {
+    /// Optional project/user configuration file.
+    #[arg(long, global = true)]
+    pub(crate) config: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: CommandLine,
 }
@@ -14,24 +17,22 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 pub(crate) enum CommandLine {
     Prepare(PrepareArgs),
+    Bake(BakeArgs),
     View(ViewArgs),
 }
 
 #[derive(Parser, Debug)]
 pub(crate) struct PrepareArgs {
-    #[arg(
-        long,
-        default_value = r"C:\Program Files (x86)\Steam\steamapps\common\Fallout 3 goty"
-    )]
-    pub(crate) game_root: PathBuf,
-    #[arg(long, default_value = "Fallout3.esm")]
-    pub(crate) plugin: PathBuf,
+    #[arg(long)]
+    pub(crate) game_root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) plugin: Option<PathBuf>,
     #[arg(long)]
     pub(crate) cell: String,
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
-    #[arg(long, default_value = ".bevyout/cache")]
-    pub(crate) cache_dir: PathBuf,
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
     #[arg(long)]
     pub(crate) force: bool,
     #[arg(long)]
@@ -42,4 +43,40 @@ pub(crate) struct PrepareArgs {
 pub(crate) struct ViewArgs {
     #[arg(long)]
     pub(crate) manifest: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub(crate) struct BakeArgs {
+    #[arg(long)]
+    pub(crate) manifest: PathBuf,
+    #[arg(long, value_enum, default_value_t = BakeQuality::Preview)]
+    pub(crate) quality: BakeQuality,
+    #[arg(long, value_enum, default_value_t = BakeDevice::Cpu)]
+    pub(crate) device: BakeDevice,
+    #[arg(long)]
+    pub(crate) blender: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) toktx: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) force: bool,
+    #[arg(long)]
+    pub(crate) keep_intermediate: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum BakeQuality {
+    /// Fast Eevee lighting preview; does not produce a lightmap manifest.
+    Preview,
+    /// Low-resolution direct-light bake for static architecture and large surfaces.
+    Quick,
+    /// Full-resolution direct and indirect Cycles bake for all mesh objects.
+    Final,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum BakeDevice {
+    Cpu,
+    Optix,
+    Cuda,
+    Hip,
 }

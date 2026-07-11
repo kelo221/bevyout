@@ -11,7 +11,9 @@ clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1"
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sha2 = "0.10"
+toml = "0.8"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

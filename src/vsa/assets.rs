@@ -8,6 +8,11 @@ use super::bsa::BsaArchive;
 use super::manifest::Diagnostic;
 use super::paths::normalize_asset_path;
 
+/// Bump this whenever the embedded NIFTools conversion/filtering changes.
+/// It is part of the content-addressed GLB name so stale conversions cannot
+/// silently survive a converter fix.
+pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-textures-v3";
+
 pub(crate) fn find_blender(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         if path.exists() {
@@ -154,7 +159,11 @@ fn texture_references(bytes: &[u8]) -> Vec<String> {
                     .map(|index| index + 1);
                 let candidate_start = prefix.rfind("textures").or(separator).unwrap_or(0);
                 let candidate = normalize_asset_path(&text[candidate_start..end]);
-                if candidate.ends_with(extension) && !candidate.contains(' ') {
+                // Fallout asset folders legitimately contain spaces (for
+                // example `textures/dungeons/wasteland homes`). Keep the
+                // complete normalized path instead of dropping those valid
+                // texture references.
+                if candidate.ends_with(extension) && candidate.starts_with("textures/") {
                     found.insert(candidate);
                 }
                 search_from = end;
@@ -243,8 +252,12 @@ for nif_path, output_path in jobs:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=0.1, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+    non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
+    def is_non_rendering_object(obj):
+        name=obj.name.casefold().replace('_','').replace(' ','')
+        return name.startswith(non_rendering_prefixes)
     for obj in list(bpy.context.scene.objects):
-        if obj.display_type == 'BOUNDS': bpy.data.objects.remove(obj, do_unlink=True)
+        if obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
         elif obj.type == 'MESH' and not any(
             material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
             for material in obj.data.materials
@@ -367,6 +380,67 @@ for nif_path, output_path in jobs:
                 stderr_tail
             );
         }
+        validate_glb_images(output).with_context(|| {
+            format!(
+                "converted GLB failed texture validation: {}",
+                output.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_glb_images(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)?;
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        bail!("invalid GLB header")
+    }
+    let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let json_start = 20;
+    let json_end = json_start + json_length;
+    let document: serde_json::Value = serde_json::from_slice(&bytes[json_start..json_end])?;
+    let views = document
+        .get("bufferViews")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let images = document
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let binary_start = json_end + 8;
+    for image in images {
+        let Some(view_index) = image.get("bufferView").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(view) = views.get(view_index as usize) else {
+            bail!("image references missing bufferView")
+        };
+        let offset = view
+            .get("byteOffset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let length = view
+            .get("byteLength")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        let end = binary_start + offset + length;
+        if end > bytes.len() {
+            bail!("image bufferView extends beyond GLB")
+        }
+        let data = &bytes[binary_start + offset..end];
+        if data.starts_with(b"\\x89PNG\\r\\n\\x1a\\n") && data.len() >= 24 {
+            let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
+            let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
+            if width <= 1 || height <= 1 {
+                let name = image
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unnamed");
+                bail!("image {name} is a 1x1 placeholder")
+            }
+        }
     }
     Ok(())
 }
@@ -451,5 +525,14 @@ mod tests {
     fn finds_length_adjacent_texture_names_in_nif_bytes() {
         let references = texture_references(b"textures\\clutter\\machine\\panel.dds4");
         assert!(references.contains(&"textures/clutter/machine/panel.dds".to_string()));
+    }
+
+    #[test]
+    fn keeps_texture_paths_with_spaces() {
+        let references =
+            texture_references(b"textures\\dungeons\\wasteland homes\\Wastehome01.dds3");
+        assert!(
+            references.contains(&"textures/dungeons/wasteland homes/wastehome01.dds".to_string())
+        );
     }
 }

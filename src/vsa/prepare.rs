@@ -2,10 +2,11 @@ use anyhow::{Context, Result, bail};
 use ron::ser::{PrettyConfig, to_string_pretty};
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 use super::assets::{
-    convert_staged_textures, find_blender, load_archives, resolve_asset, run_blender_batch,
-    stage_textures,
+    NIF_CONVERTER_REVISION, convert_staged_textures, find_blender, load_archives, resolve_asset,
+    run_blender_batch, stage_textures,
 };
 use super::manifest::{Diagnostic, PreparedLight, PreparedPlacement, PreparedSceneManifest};
 use super::paths::{
@@ -16,16 +17,24 @@ use super::plugin::{RECORD_DELETED, RECORD_DISABLED, parse_plugin};
 use crate::cli::PrepareArgs;
 
 pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
-    let root = fs::canonicalize(&args.game_root).context("game root does not exist")?;
-    let plugin_path = if args.plugin.is_absolute() {
-        args.plugin.clone()
+    let game_root = args
+        .game_root
+        .context("Fallout 3 is not configured; pass --game-root or create .bevyout/config.toml")?;
+    let root = fs::canonicalize(game_root).context("game root does not exist")?;
+    let plugin = args.plugin.unwrap_or_else(|| PathBuf::from("Fallout3.esm"));
+    let plugin_path = if plugin.is_absolute() {
+        plugin.clone()
     } else {
-        root.join("Data").join(&args.plugin)
+        root.join("Data").join(&plugin)
     };
     let plugin_path = fs::canonicalize(&plugin_path).context("plugin does not exist")?;
     let cell_id = parse_form_id(&args.cell)?;
     let data_root = root.join("Data");
-    let cache_dir = absolutize(&args.cache_dir)?;
+    let cache_dir = absolutize(
+        &args
+            .cache_dir
+            .unwrap_or_else(|| PathBuf::from(".bevyout/cache")),
+    )?;
     let staging_dir = cache_dir.join("staging");
     let assets_dir = cache_dir.join("assets");
     let scene_dir = cache_dir.join("scenes").join(format!("{cell_id:08x}"));
@@ -84,9 +93,15 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             let light = base.light.as_ref();
             let radius = light.map_or(5.0, |light| light.radius * 0.1);
             lights.push(PreparedLight {
+                reference_form_id: reference.form_id,
+                base_form_id: reference.base_form_id,
                 translation: transform.0,
+                rotation_xyzw: transform.1,
                 color_rgba: light.map_or([1.0, 0.78, 0.55, 1.0], |light| light.color_rgba),
                 radius: radius.max(0.1),
+                intensity_lumens: radius.max(0.1) * radius.max(0.1) * 2.0 * 8192.0,
+                kind: "point".into(),
+                flags: 0,
             });
             continue;
         }
@@ -134,7 +149,10 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             });
             continue;
         };
-        let model_hash = fingerprint(&nif_bytes);
+        let mut cache_key = NIF_CONVERTER_REVISION.as_bytes().to_vec();
+        cache_key.push(0);
+        cache_key.extend_from_slice(&nif_bytes);
+        let model_hash = fingerprint(&cache_key);
         let asset_name = format!("{model_hash}.glb");
         let asset_path = format!("assets/{asset_name}");
         if !seen_models.contains_key(&normalized_model) {
@@ -189,6 +207,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         placements,
         lights,
         diagnostics,
+        bake: None,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(
