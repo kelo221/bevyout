@@ -9,8 +9,8 @@ use super::assets::{
 };
 use super::manifest::{Diagnostic, PreparedLight, PreparedPlacement, PreparedSceneManifest};
 use super::paths::{
-    absolutize, fingerprint, is_editor_marker, normalize_asset_path, parse_form_id,
-    placement_transform,
+    absolutize, fingerprint, is_editor_marker, is_non_rendering_effect, normalize_asset_path,
+    parse_form_id, placement_transform,
 };
 use super::plugin::{RECORD_DELETED, RECORD_DISABLED, parse_plugin};
 use crate::cli::PrepareArgs;
@@ -81,11 +81,14 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             continue;
         };
         if base.kind == "LIGH" {
+            let light = base.light.as_ref();
+            let radius = light.map_or(5.0, |light| light.radius * 0.1);
             lights.push(PreparedLight {
                 translation: transform.0,
-                color_rgba: [1.0, 0.78, 0.55, 1.0],
-                radius: 5.0,
+                color_rgba: light.map_or([1.0, 0.78, 0.55, 1.0], |light| light.color_rgba),
+                radius: radius.max(0.1),
             });
+            continue;
         }
         let Some(model) = base.model.as_ref() else {
             diagnostics.push(Diagnostic {
@@ -102,6 +105,13 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
                 message: format!("skipping non-rendering editor marker {normalized_model}"),
+            });
+            continue;
+        }
+        if is_non_rendering_effect(&normalized_model) {
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: format!("skipping non-rendering effect {normalized_model}"),
             });
             continue;
         }

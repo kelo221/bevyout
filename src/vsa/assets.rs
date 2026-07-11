@@ -245,6 +245,12 @@ for nif_path, output_path in jobs:
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
     for obj in list(bpy.context.scene.objects):
         if obj.display_type == 'BOUNDS': bpy.data.objects.remove(obj, do_unlink=True)
+        elif obj.type == 'MESH' and not any(
+            material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
+            for material in obj.data.materials
+        ):
+            # NIF collision/helper meshes have no texture and should not be rendered.
+            bpy.data.objects.remove(obj, do_unlink=True)
     for material in bpy.data.materials:
         if not material.use_nodes: continue
         tree = material.node_tree
@@ -256,10 +262,38 @@ for nif_path, output_path in jobs:
         alpha_test = bool(alpha_flags & (1 << 9))
         images = [node for node in tree.nodes if node.bl_idname == 'ShaderNodeTexImage' and node.image]
         if not images: continue
-        diffuse = next((node for node in images if 'normal' not in node.label.lower() and '_n.' not in node.image.name.lower()), images[0])
+        diffuse = next((node for node in images if 'normal' not in node.label.lower() and '_n.' not in node.image.name.lower() and '_g.' not in node.image.name.lower()), images[0])
         normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
+        glow = next((node for node in images if '_g.' in node.image.name.lower() or 'glow' in node.label.lower()), None)
+        old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
+        emission_link = None
+        emission_color = None
+        emission_strength = None
+        if old_principled:
+            emission_input = old_principled.inputs.get('Emission Color') or old_principled.inputs.get('Emission')
+            if emission_input:
+                emission_color = emission_input.default_value[:]
+                if emission_input.links:
+                    emission_link = emission_input.links[0].from_socket
+            strength_input = old_principled.inputs.get('Emission Strength')
+            if strength_input:
+                emission_strength = strength_input.default_value
         principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
         tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        new_emission = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
+        if new_emission:
+            if emission_link:
+                tree.links.new(emission_link, new_emission)
+            elif emission_color:
+                new_emission.default_value = emission_color
+        new_emission_strength = principled.inputs.get('Emission Strength')
+        if new_emission_strength and emission_strength is not None:
+            new_emission_strength.default_value = emission_strength
+        if glow and new_emission:
+            for link in list(new_emission.links): tree.links.remove(link)
+            tree.links.new(glow.outputs['Color'], new_emission)
+            if new_emission_strength:
+                new_emission_strength.default_value = 1.0
         if alpha_blend or alpha_test:
             alpha_output = diffuse.outputs.get('Alpha')
             alpha_input = principled.inputs.get('Alpha')
@@ -280,6 +314,10 @@ for nif_path, output_path in jobs:
             tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
         for link in list(output.inputs['Surface'].links): tree.links.remove(link)
         tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+    for mesh in bpy.data.meshes:
+        # Bevy supports the primary glTF color stream, but not COLOR_1+.
+        while len(mesh.color_attributes) > 1:
+            mesh.color_attributes.remove(mesh.color_attributes[-1])
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True)
 "#;
@@ -392,7 +430,10 @@ pub(crate) fn resolve_asset(
             return Ok(Some(fs::read(loose)?));
         }
         for archive in archives {
-            if let Some(bytes) = archive.read(&candidate)? {
+            if let Some(bytes) = archive
+                .read(&candidate)
+                .with_context(|| format!("reading archive asset {candidate}"))?
+            {
                 return Ok(Some(bytes));
             }
         }

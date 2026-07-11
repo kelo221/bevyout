@@ -39,8 +39,14 @@ pub(crate) fn normalize_asset_path(value: &str) -> String {
 pub(crate) fn is_editor_marker(path: &str) -> bool {
     matches!(
         path.rsplit('/').next(),
-        Some("markerx.nif" | "marker_north.nif" | "markercocheading.nif")
+        Some("markerx.nif" | "markerxheading.nif" | "marker_north.nif" | "markercocheading.nif",)
     )
+}
+
+pub(crate) fn is_non_rendering_effect(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("fx"))
 }
 
 pub(crate) fn placement_transform(reference: &ReferenceRecord) -> ([f32; 3], [f32; 4], f32) {
@@ -79,7 +85,20 @@ mod tests {
     #[test]
     fn identifies_non_rendering_editor_markers() {
         assert!(is_editor_marker("meshes/markerx.nif"));
+        assert!(is_editor_marker("meshes/markerxheading.nif"));
         assert!(is_editor_marker("marker_north.nif"));
         assert!(!is_editor_marker("meshes/furniture/table01.nif"));
+    }
+
+    #[test]
+    fn identifies_non_rendering_effects() {
+        assert!(is_non_rendering_effect(
+            "effects/ambient/fxglowsimplefill.nif"
+        ));
+        assert!(is_non_rendering_effect(
+            "effects/ambient/fxdustsimple01.nif"
+        ));
+        assert!(is_non_rendering_effect("effects/ambient/fxlightbeam05.nif"));
+        assert!(!is_non_rendering_effect("meshes/clutter/lampgeneric01.nif"));
     }
 }

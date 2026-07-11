@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::fs::File;
@@ -102,17 +102,18 @@ impl BsaArchive {
             // four-byte unpacked-size field, while the mesh archive usually
             // starts with that field. Locate the zlib header instead of
             // assuming a fixed prefix.
-            let start = bytes
-                .windows(2)
-                .position(|window| {
-                    window[0] == 0x78
-                        && matches!(window[1], 0x01 | 0x5e | 0x9c | 0xda | 0x20 | 0x7e)
-                })
-                .context("compressed BSA entry has no zlib header")?;
-            let mut decoder = ZlibDecoder::new(Cursor::new(&bytes[start..]));
-            let mut decoded = Vec::new();
-            decoder.read_to_end(&mut decoded)?;
-            Ok(Some(decoded))
+            let starts = bytes.windows(2).enumerate().filter_map(|(index, window)| {
+                (window[0] == 0x78 && matches!(window[1], 0x01 | 0x5e | 0x9c | 0xda | 0x20 | 0x7e))
+                    .then_some(index)
+            });
+            for start in starts {
+                let mut decoder = ZlibDecoder::new(Cursor::new(&bytes[start..]));
+                let mut decoded = Vec::new();
+                if decoder.read_to_end(&mut decoded).is_ok() {
+                    return Ok(Some(decoded));
+                }
+            }
+            bail!("compressed BSA entry has no valid zlib stream")
         } else {
             Ok(Some(bytes))
         }

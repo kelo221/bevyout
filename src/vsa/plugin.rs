@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -13,6 +13,13 @@ pub(crate) const RECORD_DISABLED: u32 = 0x0000_0800;
 pub(crate) struct BaseRecord {
     pub(crate) kind: String,
     pub(crate) model: Option<String>,
+    pub(crate) light: Option<LightData>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LightData {
+    pub(crate) radius: f32,
+    pub(crate) color_rgba: [f32; 4],
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +86,7 @@ fn walk_container(
             if record_end > end {
                 bail!("record exceeds containing group")
             }
+            let sig = String::from_utf8_lossy(signature).to_string();
             let mut data = bytes[offset + 24..record_end].to_vec();
             if flags & RECORD_COMPRESSED != 0 {
                 if data.len() < 4 {
@@ -86,10 +94,11 @@ fn walk_container(
                 }
                 let mut decoder = ZlibDecoder::new(Cursor::new(&data[4..]));
                 let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
+                decoder.read_to_end(&mut decompressed).map_err(|error| {
+                    anyhow!("decompressing {sig} record {form_id:08x}: {error}")
+                })?;
                 data = decompressed;
             }
-            let sig = String::from_utf8_lossy(signature).to_string();
             let subs = parse_subrecords(&data)?;
             if sig == "CELL" && form_id == target_cell {
                 parsed.cell = Some(parse_cell(&subs, form_id)?);
@@ -145,14 +154,31 @@ fn parse_base(sig: &str, subs: &[(String, Vec<u8>)]) -> Option<BaseRecord> {
         .iter()
         .find(|(name, _)| name == "MODL")
         .map(|(_, data)| cstring(data));
+    let light = (sig == "LIGH").then(|| parse_light_data(subs)).flatten();
     if model.is_some() || sig == "LIGH" {
         Some(BaseRecord {
             kind: sig.to_string(),
             model,
+            light,
         })
     } else {
         None
     }
+}
+
+fn parse_light_data(subs: &[(String, Vec<u8>)]) -> Option<LightData> {
+    let data = subs.iter().find(|(name, _)| name == "DATA")?.1.as_slice();
+    if data.len() < 12 {
+        return None;
+    }
+    let radius = u32::from_le_bytes(data[4..8].try_into().ok()?) as f32;
+    let color_rgba = [
+        data[8] as f32 / 255.0,
+        data[9] as f32 / 255.0,
+        data[10] as f32 / 255.0,
+        1.0,
+    ];
+    Some(LightData { radius, color_rgba })
 }
 
 fn parse_cell(subs: &[(String, Vec<u8>)], form_id: u32) -> Result<CellInfo> {
