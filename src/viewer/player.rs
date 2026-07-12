@@ -14,14 +14,17 @@ use bevy_tnua_avian3d::prelude::*;
 use serde::Deserialize;
 
 use super::FlyCamera;
-use super::audio::PlayFootstep;
+use super::audio::{PlayFootstep, PlayLanding};
+use super::openmw_player::{
+    DIRECTIONAL_JUMP_HEIGHT, DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState,
+    STATIONARY_JUMP_HEIGHT, air_control_motion, jump_profile,
+};
 
 pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
 pub(crate) const CAPSULE_HEIGHT: f32 = 1.8;
 pub(crate) const EYE_HEIGHT: f32 = 1.6;
 const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
-const JUMP_HEIGHT: f32 = 1.2;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 const FOOTSTEP_DISTANCE: f32 = 1.45;
 
@@ -29,6 +32,7 @@ const FOOTSTEP_DISTANCE: f32 = 1.45;
 #[scheme(basis = TnuaBuiltinWalk)]
 pub(crate) enum ControlScheme {
     Jump(TnuaBuiltinJump),
+    DirectionalJump(TnuaBuiltinJump),
 }
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +109,14 @@ struct StaticCollisionStats {
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
 type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
+type LocomotionQuery<'w> = (
+    Entity,
+    &'w Transform,
+    &'w LinearVelocity,
+    &'w TnuaController<ControlScheme>,
+    &'w mut LocomotionState,
+    &'w mut FootstepState,
+);
 type StaticCollisionQuery<'w> = (
     Entity,
     &'w Mesh3d,
@@ -121,6 +133,7 @@ pub(crate) fn install(app: &mut App) {
         TnuaControllerPlugin::<ControlScheme>::new(FixedUpdate),
         TnuaAvian3dPlugin::new(FixedUpdate),
     ))
+    .insert_resource(Gravity(Vec3::new(0.0, -GRAVITY, 0.0)))
     .insert_resource(CameraModeState::default())
     .insert_resource(StaticCollisionStats::default())
     .add_systems(Update, build_static_colliders.before(toggle_camera_mode))
@@ -128,7 +141,8 @@ pub(crate) fn install(app: &mut App) {
         FixedUpdate,
         apply_player_controls.in_set(TnuaUserControlsSystems),
     )
-    .add_systems(Update, emit_footsteps.after(build_static_colliders));
+    .add_systems(Update, emit_landing_events.after(build_static_colliders))
+    .add_systems(Update, emit_footsteps.after(emit_landing_events));
 }
 
 pub(crate) fn toggle_camera_mode(
@@ -171,6 +185,7 @@ pub(crate) fn toggle_camera_mode(
                 .spawn((
                     FpsPlayer { yaw, pitch },
                     FootstepState::default(),
+                    LocomotionState::default(),
                     Transform::from_translation(player_center)
                         .with_rotation(Quat::from_rotation_y(yaw)),
                     RigidBody::Dynamic,
@@ -183,10 +198,11 @@ pub(crate) fn toggle_camera_mode(
                             max_slope: 45.0_f32.to_radians(),
                             ..default()
                         },
-                        jump: TnuaBuiltinJumpConfig {
-                            height: JUMP_HEIGHT,
-                            ..default()
-                        },
+                        jump: openmw_jump_config(STATIONARY_JUMP_HEIGHT, 0.0),
+                        directional_jump: openmw_jump_config(
+                            DIRECTIONAL_JUMP_HEIGHT,
+                            DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE,
+                        ),
                     })),
                     TnuaAvian3dSensorShape(Collider::cylinder(CAPSULE_RADIUS * 0.96, 0.0)),
                     LockedAxes::ROTATION_LOCKED,
@@ -269,12 +285,19 @@ pub(crate) fn fps_mouse_look(
 fn apply_player_controls(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<CameraModeState>,
-    mut players: Query<(&FpsPlayer, &mut TnuaController<ControlScheme>)>,
+    mut players: Query<(
+        &FpsPlayer,
+        &mut TnuaController<ControlScheme>,
+        &mut LocomotionState,
+    )>,
 ) {
-    let Ok((player, mut controller)) = players.single_mut() else {
+    let Ok((player, mut controller, mut locomotion)) = players.single_mut() else {
         return;
     };
     controller.initiate_action_feeding();
+    let jump_pressed = keys.pressed(KeyCode::Space);
+    let jump_started = jump_pressed && !locomotion.jump_was_pressed();
+    locomotion.set_jump_pressed(jump_pressed);
     if state.mode != CameraMode::Fps {
         controller.basis = TnuaBuiltinWalk {
             desired_motion: Vec3::ZERO,
@@ -297,12 +320,40 @@ fn apply_player_controls(
     if keys.pressed(KeyCode::KeyA) {
         input -= Vec3::X;
     }
+    let world_input = yaw * input;
+    let airborne = controller.is_airborne().unwrap_or(false);
     controller.basis = TnuaBuiltinWalk {
-        desired_motion: (yaw * input).normalize_or_zero(),
+        desired_motion: air_control_motion(world_input, airborne),
         ..default()
     };
-    if keys.pressed(KeyCode::Space) {
-        controller.action(ControlScheme::Jump(Default::default()));
+    if jump_started && !airborne {
+        let (_height, direction) = jump_profile(world_input);
+        locomotion.mark_jump_started();
+        if let Some(direction) = direction {
+            controller.action(ControlScheme::DirectionalJump(TnuaBuiltinJump {
+                horizontal_displacement: Some(direction),
+                ..default()
+            }));
+        } else {
+            controller.action(ControlScheme::Jump(TnuaBuiltinJump::default()));
+        }
+    }
+}
+
+fn openmw_jump_config(height: f32, horizontal_distance: f32) -> TnuaBuiltinJumpConfig {
+    TnuaBuiltinJumpConfig {
+        height,
+        upslope_extra_gravity: 0.0,
+        takeoff_extra_gravity: 0.0,
+        takeoff_above_velocity: f32::INFINITY,
+        fall_extra_gravity: 0.0,
+        shorten_extra_gravity: 0.0,
+        peak_prevention_at_upward_velocity: 0.0,
+        peak_prevention_extra_gravity: 0.0,
+        reschedule_cooldown: None,
+        input_buffer_time: 0.0,
+        horizontal_distance,
+        disable_force_forward_after_peak: true,
     }
 }
 
@@ -413,6 +464,45 @@ fn parse_collision_extras(extras: &GltfExtras) -> Option<CollisionExtras> {
     serde_json::from_str::<CollisionExtras>(&extras.value).ok()
 }
 
+fn emit_landing_events(
+    state: Res<CameraModeState>,
+    spatial_query: SpatialQuery,
+    surfaces: Query<&FootstepSurface>,
+    mut landings: MessageWriter<PlayLanding>,
+    mut players: Query<LocomotionQuery<'_>, With<FpsPlayer>>,
+) {
+    let Ok((entity, transform, velocity, controller, mut locomotion, mut footstep)) =
+        players.single_mut()
+    else {
+        return;
+    };
+    if state.mode != CameraMode::Fps {
+        locomotion.reset(transform.translation);
+        footstep.initialized = false;
+        footstep.distance = 0.0;
+        return;
+    }
+
+    let controller_airborne = controller.is_airborne().unwrap_or(false);
+    let surface = probe_surface(entity, transform.translation, &spatial_query, &surfaces);
+    // Tnua can briefly report grounded when a jump is stopped by a ceiling. Do
+    // not consume the jump until the ground probe also confirms a real landing.
+    let airborne = controller_airborne || surface.is_none();
+    let Some(impact) = locomotion.update(transform.translation, velocity.0.y, airborne) else {
+        return;
+    };
+    let Some(surface) = surface else {
+        return;
+    };
+    landings.write(PlayLanding {
+        surface: surface.into(),
+        variant: impact.variant,
+        hard: impact.hard,
+    });
+    footstep.last_position = transform.translation;
+    footstep.distance = 0.0;
+}
+
 fn emit_footsteps(
     state: Res<CameraModeState>,
     spatial_query: SpatialQuery,
@@ -437,21 +527,7 @@ fn emit_footsteps(
     let delta = position - footstep.last_position;
     footstep.last_position = position;
 
-    let origin = position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06);
-    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
-    let hits = spatial_query.ray_hits(origin, Dir3::NEG_Y, 0.24, 16, true, &filter);
-    let authored_hit = hits.iter().filter(|hit| {
-        surfaces
-            .get(hit.entity)
-            .is_ok_and(|surface| surface.0.is_some())
-    });
-    let Some(hit) = authored_hit
-        .min_by(|left, right| left.distance.total_cmp(&right.distance))
-        .or_else(|| {
-            hits.iter()
-                .min_by(|left, right| left.distance.total_cmp(&right.distance))
-        })
-    else {
+    let Some(surface) = probe_surface(entity, position, &spatial_query, &surfaces) else {
         footstep.distance = 0.0;
         return;
     };
@@ -465,9 +541,6 @@ fn emit_footsteps(
         return;
     }
     footstep.distance += horizontal_delta;
-    let surface = surfaces
-        .get(hit.entity)
-        .map_or("concrete", |surface| surface_family(surface.0));
     while footstep.distance >= FOOTSTEP_DISTANCE {
         footstep.distance -= FOOTSTEP_DISTANCE;
         footsteps.write(PlayFootstep {
@@ -477,6 +550,33 @@ fn emit_footsteps(
         });
         footstep.step_index = footstep.step_index.wrapping_add(1);
     }
+}
+
+fn probe_surface(
+    entity: Entity,
+    position: Vec3,
+    spatial_query: &SpatialQuery,
+    surfaces: &Query<'_, '_, &FootstepSurface>,
+) -> Option<&'static str> {
+    let origin = position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06);
+    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+    let hits = spatial_query.ray_hits(origin, Dir3::NEG_Y, 0.24, 16, true, &filter);
+    let authored_hit = hits.iter().filter(|hit| {
+        surfaces
+            .get(hit.entity)
+            .is_ok_and(|surface| surface.0.is_some())
+    });
+    let hit = authored_hit
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+        .or_else(|| {
+            hits.iter()
+                .min_by(|left, right| left.distance.total_cmp(&right.distance))
+        })?;
+    Some(
+        surfaces
+            .get(hit.entity)
+            .map_or("concrete", |surface| surface_family(surface.0)),
+    )
 }
 
 fn surface_family(material: Option<u32>) -> &'static str {

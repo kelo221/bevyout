@@ -23,6 +23,8 @@ pub(crate) struct PreparedSceneManifest {
     #[serde(default)]
     pub(crate) footstep_sets: Vec<PreparedFootstepSet>,
     #[serde(default)]
+    pub(crate) hard_landing_clips: Vec<String>,
+    #[serde(default)]
     pub(crate) bake: Option<PreparedBake>,
 }
 
@@ -333,6 +335,8 @@ pub(crate) struct PreparedFootstepSet {
     pub(crate) surface: String,
     pub(crate) left: Vec<String>,
     pub(crate) right: Vec<String>,
+    #[serde(default)]
+    pub(crate) land: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -452,7 +456,22 @@ mod tests {
             assert!(manifest.bake.is_none());
             assert!(manifest.source_plugins.is_empty());
             assert!(manifest.navmeshes.is_empty());
+            assert!(manifest.footstep_sets.is_empty());
+            assert!(manifest.hard_landing_clips.is_empty());
         }
+    }
+
+    #[test]
+    fn legacy_footstep_set_defaults_landing_clips() {
+        let set: PreparedFootstepSet = ron::de::from_str(
+            r#"(
+                surface: "concrete",
+                left: [],
+                right: [],
+            )"#,
+        )
+        .unwrap();
+        assert!(set.land.is_empty());
     }
 
     #[test]

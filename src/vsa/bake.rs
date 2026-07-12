@@ -343,7 +343,7 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     fingerprint.update(manifest.source_fingerprint.as_bytes());
     fingerprint.update(serde_json::to_vec(&job)?);
     let source_fingerprint = format!("{:x}", fingerprint.finalize());
-    manifest.schema_version = 6;
+    manifest.schema_version = 7;
     manifest.bake = Some(super::manifest::PreparedBake {
         source_fingerprint,
         scene_path,

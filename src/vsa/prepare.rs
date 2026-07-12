@@ -158,7 +158,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         &mut diagnostics,
         &cache_dir.join("audio"),
     )?;
-    let footstep_sets = stage_footsteps(
+    let (footstep_sets, hard_landing_clips) = stage_footsteps(
         &data_root,
         &audio_archive_load.archives,
         &mut diagnostics,
@@ -431,7 +431,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
     }
 
     let manifest = PreparedSceneManifest {
-        schema_version: 6,
+        schema_version: 7,
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
         source_fingerprint,
@@ -444,6 +444,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         cell_audio,
         audio_clips,
         footstep_sets,
+        hard_landing_clips,
         bake: None,
     };
     let manifest_path = scene_dir.join("scene.ron");
@@ -682,7 +683,7 @@ fn stage_footsteps(
     archives: &[super::audio_assets::AudioArchive],
     diagnostics: &mut Vec<Diagnostic>,
     audio_dir: &Path,
-) -> Result<Vec<super::manifest::PreparedFootstepSet>> {
+) -> Result<(Vec<super::manifest::PreparedFootstepSet>, Vec<String>)> {
     const FAMILIES: &[(&str, &str)] = &[
         ("concrete", "conc_solid"),
         ("concrete_broken", "conc_broken"),
@@ -695,10 +696,23 @@ fn stage_footsteps(
         ("metal_hollow", "metal_hollow"),
         ("metal_sheet", "metal_sheet"),
     ];
+    const LAND_PATTERNS: &[(&str, &str, &str, u8)] = &[
+        ("concrete", "conc_solid", "fst_conc_solid_land", 2),
+        ("concrete_broken", "conc_broken", "fst_conc_broken_land", 3),
+        ("dirt", "dirt", "fst_dirt_land", 2),
+        ("grass", "grass", "fst_grass_land", 2),
+        ("gravel", "gravel", "fst_gravel_land", 2),
+        ("wood", "wood", "fst_wood_land", 2),
+        ("water", "water", "fst_waterland", 2),
+        ("metal_solid", "metal_solid", "fst_metalsolid_land", 3),
+        ("metal_hollow", "metal_hollow", "fst_metalhollow_land", 3),
+        ("metal_sheet", "metal_sheet", "fst_metal_sheet_land", 3),
+    ];
     let mut sets = Vec::with_capacity(FAMILIES.len());
     for &(surface, archive_family) in FAMILIES {
         let mut left = Vec::new();
         let mut right = Vec::new();
+        let mut land = Vec::new();
         for (side, output, indices) in [("left", &mut left, 1..=3), ("right", &mut right, 4..=6)] {
             for index in indices {
                 let path = format!(
@@ -716,15 +730,46 @@ fn stage_footsteps(
                 }
             }
         }
-        if !left.is_empty() || !right.is_empty() {
+        let (_, land_archive_family, land_file_stem, land_count) = LAND_PATTERNS
+            .iter()
+            .find(|(land_surface, _, _, _)| *land_surface == surface)
+            .expect("every footstep family has a landing pattern");
+        for index in 1..=*land_count {
+            let path =
+                format!("sound/fx/fst/{land_archive_family}/land/{land_file_stem}_{index:02}.wav");
+            match super::audio_assets::resolve_audio_asset(data_root, archives, &path)? {
+                Some(asset) => {
+                    let staged = super::audio_assets::stage_audio_asset(&asset, audio_dir)?;
+                    land.push(relative_cache_path(audio_dir, &staged.path));
+                }
+                None => diagnostics.push(Diagnostic {
+                    severity: "info".into(),
+                    message: format!("missing native landing clip {path}"),
+                }),
+            }
+        }
+        if !left.is_empty() || !right.is_empty() || !land.is_empty() {
             sets.push(super::manifest::PreparedFootstepSet {
                 surface: surface.into(),
                 left,
                 right,
+                land,
             });
         }
     }
-    Ok(sets)
+    let hard_path = "sound/fx/fst/landhard/fst_landhard_01.wav";
+    let mut hard_landing_clips = Vec::new();
+    match super::audio_assets::resolve_audio_asset(data_root, archives, hard_path)? {
+        Some(asset) => {
+            let staged = super::audio_assets::stage_audio_asset(&asset, audio_dir)?;
+            hard_landing_clips.push(relative_cache_path(audio_dir, &staged.path));
+        }
+        None => diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: format!("missing native hard-landing clip {hard_path}"),
+        }),
+    }
+    Ok((sets, hard_landing_clips))
 }
 
 fn relative_cache_path(root: &Path, path: &Path) -> String {

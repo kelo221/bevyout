@@ -32,6 +32,7 @@ use crate::vsa::{
 
 mod audio;
 mod interaction;
+mod openmw_player;
 mod player;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
