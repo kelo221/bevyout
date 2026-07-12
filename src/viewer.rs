@@ -26,10 +26,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{RenderArgs, ViewArgs};
+use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest, cell_label,
-    is_bake_static, resolve_cached_manifest,
+    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest, bake,
+    cell_label, find_cached_manifest, is_bake_static, prepare, resolve_cached_manifest,
 };
 
 mod audio;
@@ -50,8 +50,91 @@ pub(crate) fn render(args: RenderArgs) -> Result<()> {
     let cache_dir = args
         .cache_dir
         .unwrap_or_else(|| PathBuf::from(".bevyout/cache"));
-    let manifest_path = resolve_cached_manifest(&cache_dir, &args.selector)?;
+    let manifest_path = match find_cached_manifest(&cache_dir, &args.selector)? {
+        Some(path) => path,
+        None => {
+            let prompt = format!(
+                "Prepared scene '{}' was not found. Import it now?",
+                args.selector
+            );
+            if !confirm(&prompt)? {
+                return resolve_cached_manifest(&cache_dir, &args.selector).map(|_| ());
+            }
+            prepare(PrepareArgs {
+                selector: Some(args.selector.clone()),
+                game_root: args.game_root.clone(),
+                plugin: args.plugin.clone(),
+                cell: None,
+                blender: args.blender.clone(),
+                cache_dir: Some(cache_dir.clone()),
+                force: false,
+                rebuild_assets: false,
+                strict: false,
+            })?;
+            resolve_cached_manifest(&cache_dir, &args.selector)?
+        }
+    };
+    let manifest = read_manifest(&manifest_path)?;
+    if needs_irradiance_bake(&manifest) {
+        let prompt = format!(
+            "Prepared scene '{}' has no irradiance bake. Bake it now?",
+            cell_label(&manifest.cell)
+        );
+        if confirm(&prompt)? {
+            bake(BakeArgs {
+                manifest: None,
+                selector: Some(args.selector.clone()),
+                cache_dir: Some(cache_dir.clone()),
+                quality: BakeQuality::Irradiance,
+                irradiance_spacing_meters: 8.0,
+                irradiance_samples: 64,
+                static_batch_chunk_meters: 64.0,
+                blender: args.blender.clone(),
+                irradiance_blender: args.irradiance_blender.clone(),
+                toktx: args.toktx.clone(),
+                force: false,
+                keep_intermediate: false,
+            })?;
+        }
+    }
     run_view(manifest_path, args.disable_physics, args.trace_seconds)
+}
+
+fn read_manifest(manifest_path: &Path) -> Result<PreparedSceneManifest> {
+    let manifest_path = fs::canonicalize(manifest_path).context("manifest does not exist")?;
+    let text = fs::read_to_string(manifest_path)?;
+    from_str(&text).context("invalid scene manifest")
+}
+
+fn needs_irradiance_bake(manifest: &PreparedSceneManifest) -> bool {
+    manifest
+        .bake
+        .as_ref()
+        .and_then(|bake| bake.irradiance_volume.as_ref())
+        .is_none()
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::{self, IsTerminal, Write};
+
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        return Ok(false);
+    }
+    let mut answer = String::new();
+    loop {
+        eprint!("{prompt} [Y/n] ");
+        io::stderr().flush()?;
+        answer.clear();
+        if stdin.read_line(&mut answer)? == 0 {
+            return Ok(false);
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => eprintln!("Please answer yes or no."),
+        }
+    }
 }
 
 fn run_view(

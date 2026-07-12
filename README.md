@@ -13,6 +13,13 @@ cargo run-dev -- prepare SuperDuperMart
 cargo run-dev -- render SuperDuperMart
 ```
 
+`render` is also the interactive entry point for a new cell. If the prepared
+scene is missing, it asks whether to import it (the same operation as
+`prepare SuperDuperMart`). If the scene has no irradiance bake, it asks whether
+to run the default `bake SuperDuperMart`; answering `n` continues with the
+prepared, unbaked scene. In a non-interactive terminal, these prompts default
+to `n`, so explicit `prepare` and `bake` commands remain available for scripts.
+
 The selector also accepts an eight-digit hexadecimal FormID. Prepared scenes
 continue to use their hexadecimal FormID directory internally; for example,
 `SuperDuperMart` resolves to `00017f37`. The legacy `prepare --cell`,

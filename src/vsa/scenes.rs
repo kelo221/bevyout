@@ -9,22 +9,58 @@ use super::paths::{CellSelector, absolutize, parse_cell_selector};
 pub(crate) fn resolve_cached_manifest(cache_dir: &Path, selector_input: &str) -> Result<PathBuf> {
     let cache_dir = absolutize(cache_dir)?;
     let selector = parse_cell_selector(selector_input)?;
+    match find_cached_manifest_for_selector(&cache_dir, &selector)? {
+        Some(path) => Ok(path),
+        None => match selector {
+            CellSelector::FormId(form_id) => {
+                let path = cache_dir
+                    .join("scenes")
+                    .join(format!("{form_id:08x}"))
+                    .join("scene.ron");
+                bail!(
+                    "prepared scene '{selector_input}' was not found at {}; run `prepare {selector_input}` first",
+                    path.display()
+                )
+            }
+            CellSelector::EditorId(_) => bail!(
+                "prepared scene for GECK EditorID '{selector_input}' was not found under {}; run `prepare {selector_input}` first",
+                cache_dir.join("scenes").display()
+            ),
+        },
+    }
+}
+
+pub(crate) fn find_cached_manifest(
+    cache_dir: &Path,
+    selector_input: &str,
+) -> Result<Option<PathBuf>> {
+    let cache_dir = absolutize(cache_dir)?;
+    let selector = parse_cell_selector(selector_input)?;
+    find_cached_manifest_for_selector(&cache_dir, &selector)
+}
+
+fn find_cached_manifest_for_selector(
+    cache_dir: &Path,
+    selector: &CellSelector,
+) -> Result<Option<PathBuf>> {
     match selector {
         CellSelector::FormId(form_id) => {
             let path = cache_dir
                 .join("scenes")
                 .join(format!("{form_id:08x}"))
                 .join("scene.ron");
-            canonical_manifest(path, selector_input)
+            path.is_file()
+                .then(|| fs::canonicalize(path))
+                .transpose()
+                .context("could not resolve cached scene manifest")
         }
         CellSelector::EditorId(editor_id) => {
             let scenes_dir = cache_dir.join("scenes");
-            let entries = fs::read_dir(&scenes_dir).with_context(|| {
-                format!(
-                    "prepared scene cache does not exist at {}; run `prepare {selector_input}` first",
-                    scenes_dir.display()
-                )
-            })?;
+            let entries = match fs::read_dir(&scenes_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             let mut matches = Vec::new();
             for entry in entries {
                 let entry = entry?;
@@ -47,20 +83,17 @@ pub(crate) fn resolve_cached_manifest(cache_dir: &Path, selector_input: &str) ->
                     .cell
                     .editor_id
                     .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(&editor_id))
+                    .is_some_and(|value| value.eq_ignore_ascii_case(editor_id))
                 {
                     matches.push((manifest.cell.form_id, manifest_path));
                 }
             }
             match matches.as_slice() {
-                [] => bail!(
-                    "prepared scene for GECK EditorID '{editor_id}' was not found under {}; run `prepare {selector_input}` first",
-                    scenes_dir.display()
-                ),
+                [] => Ok(None),
                 [(form_id, path)] => {
                     let path = fs::canonicalize(path)?;
                     if path.is_file() {
-                        Ok(path)
+                        Ok(Some(path))
                     } else {
                         bail!(
                             "cached scene for GECK EditorID '{editor_id}' ({form_id:08x}) is not a file"
@@ -80,16 +113,6 @@ pub(crate) fn resolve_cached_manifest(cache_dir: &Path, selector_input: &str) ->
             }
         }
     }
-}
-
-fn canonical_manifest(path: PathBuf, selector_input: &str) -> Result<PathBuf> {
-    if !path.is_file() {
-        bail!(
-            "prepared scene '{selector_input}' was not found at {}; run `prepare {selector_input}` first",
-            path.display()
-        )
-    }
-    fs::canonicalize(path).context("could not resolve cached scene manifest")
 }
 
 #[cfg(test)]
@@ -143,5 +166,14 @@ mod tests {
         );
 
         fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn reports_missing_cached_manifest_without_error_for_recovery() {
+        let cache_dir = temporary_cache();
+        assert_eq!(
+            find_cached_manifest(&cache_dir, "RooseveltHS04").unwrap(),
+            None
+        );
     }
 }

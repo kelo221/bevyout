@@ -73,8 +73,23 @@ pub(crate) fn apply(cli: &mut Cli) -> Result<()> {
             }
         }
         CommandLine::Render(args) => {
+            if args.game_root.is_none() {
+                args.game_root = config.fallout3.game_root.clone();
+            }
+            if args.plugin.is_none() {
+                args.plugin = config.fallout3.plugin.clone();
+            }
+            if args.blender.is_none() {
+                args.blender = config.tools.blender.clone();
+            }
+            if args.irradiance_blender.is_none() {
+                args.irradiance_blender = config.tools.irradiance_blender.clone();
+            }
+            if args.toktx.is_none() {
+                args.toktx = config.tools.ktx.clone();
+            }
             if args.cache_dir.is_none() {
-                args.cache_dir = config.output.cache_dir;
+                args.cache_dir = config.output.cache_dir.clone();
             }
         }
         CommandLine::View(_) => {}

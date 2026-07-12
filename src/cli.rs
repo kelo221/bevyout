@@ -79,6 +79,21 @@ pub(crate) struct RenderArgs {
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID")]
     pub(crate) selector: String,
+    /// Fallout 3 installation directory used if render needs to prepare the cell.
+    #[arg(long, hide = true)]
+    pub(crate) game_root: Option<PathBuf>,
+    /// Plugin filename used if render needs to prepare the cell.
+    #[arg(long, hide = true)]
+    pub(crate) plugin: Option<PathBuf>,
+    /// Blender executable used if render needs to prepare the cell.
+    #[arg(long, hide = true)]
+    pub(crate) blender: Option<PathBuf>,
+    /// Blender 4.5 LTS executable used if render needs to bake irradiance.
+    #[arg(long, hide = true)]
+    pub(crate) irradiance_blender: Option<PathBuf>,
+    /// KTX-Software executable used if render needs to bake irradiance.
+    #[arg(long, hide = true)]
+    pub(crate) toktx: Option<PathBuf>,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,

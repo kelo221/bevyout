@@ -18,4 +18,4 @@ pub(crate) use manifest::{
 };
 pub(crate) use paths::FO3_SCALE;
 pub(crate) use prepare::prepare;
-pub(crate) use scenes::resolve_cached_manifest;
+pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};
