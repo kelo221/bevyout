@@ -1,0 +1,254 @@
+use std::collections::{HashMap, HashSet};
+
+use bevy::audio::{PlaybackMode, Volume};
+use bevy::prelude::*;
+
+use crate::vsa::{PreparedAudioClip, PreparedSceneManifest};
+
+const LISTENER_EAR_GAP_METERS: f32 = 0.2;
+
+/// Requests a transient sound by its resolved ESM4 FormID.
+///
+/// A position enables Bevy's spatial stereo panning unless the source record
+/// explicitly marks the clip as 2D. Missing and unstaged clips are silent.
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlaySound {
+    pub(crate) form_id: u32,
+    pub(crate) position: Option<Vec3>,
+}
+
+impl PlaySound {
+    pub(crate) fn at(form_id: u32, position: Vec3) -> Self {
+        Self {
+            form_id,
+            position: Some(position),
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+struct AudioClipCatalog {
+    clips: HashMap<u32, PreparedAudioClip>,
+}
+
+#[derive(Resource, Default)]
+struct ReportedMissingClips(HashSet<u32>);
+
+#[derive(Component)]
+struct CellAmbientLoop;
+
+#[derive(Component)]
+struct PlacementLoop {
+    #[allow(dead_code)]
+    reference_form_id: u32,
+}
+
+pub(crate) fn install(app: &mut App) {
+    app.init_resource::<AudioClipCatalog>()
+        .init_resource::<ReportedMissingClips>()
+        .add_message::<PlaySound>()
+        .add_systems(Startup, build_catalog_and_spawn_loops)
+        .add_systems(Update, (ensure_single_listener, play_requested_sounds));
+}
+
+fn build_catalog_and_spawn_loops(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    manifest: Res<PreparedSceneManifest>,
+    mut catalog: ResMut<AudioClipCatalog>,
+    mut reported_missing: ResMut<ReportedMissingClips>,
+) {
+    catalog.clips.clear();
+    for clip in &manifest.audio_clips {
+        if catalog.clips.insert(clip.form_id, clip.clone()).is_some() {
+            warn!(
+                "audio FormID {:08x} appears more than once; using the last prepared clip",
+                clip.form_id
+            );
+        }
+    }
+
+    for form_id in &manifest.cell_audio.ambient_loop_sound_form_ids {
+        if let Some(entity) = spawn_catalog_sound(
+            &mut commands,
+            &asset_server,
+            &catalog,
+            &mut reported_missing,
+            *form_id,
+            None,
+            PlaybackMode::Loop,
+            true,
+        ) {
+            commands.entity(entity).insert(CellAmbientLoop);
+        }
+    }
+
+    for placement in manifest
+        .placements
+        .iter()
+        .filter(|placement| placement.initially_enabled)
+    {
+        let Some(form_id) = placement.audio.loop_sound_form_id else {
+            continue;
+        };
+        if let Some(entity) = spawn_catalog_sound(
+            &mut commands,
+            &asset_server,
+            &catalog,
+            &mut reported_missing,
+            form_id,
+            Some(Vec3::from_array(placement.translation)),
+            PlaybackMode::Loop,
+            false,
+        ) {
+            commands.entity(entity).insert(PlacementLoop {
+                reference_form_id: placement.reference_form_id,
+            });
+        }
+    }
+}
+
+/// Keeps the one Bevy spatial listener on the active 3D camera. The component
+/// stays correct when the viewer reparents that camera for FPS mode.
+fn ensure_single_listener(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Camera), With<Camera3d>>,
+    listeners: Query<Entity, With<SpatialListener>>,
+) {
+    let active_camera = cameras
+        .iter()
+        .find_map(|(entity, camera)| camera.is_active.then_some(entity));
+
+    for listener in &listeners {
+        if Some(listener) != active_camera {
+            commands.entity(listener).remove::<SpatialListener>();
+        }
+    }
+
+    if let Some(active_camera) = active_camera
+        && listeners.get(active_camera).is_err()
+    {
+        commands
+            .entity(active_camera)
+            .insert(SpatialListener::new(LISTENER_EAR_GAP_METERS));
+    }
+}
+
+fn play_requested_sounds(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    catalog: Res<AudioClipCatalog>,
+    mut reported_missing: ResMut<ReportedMissingClips>,
+    mut requests: MessageReader<PlaySound>,
+) {
+    for request in requests.read() {
+        spawn_catalog_sound(
+            &mut commands,
+            &asset_server,
+            &catalog,
+            &mut reported_missing,
+            request.form_id,
+            request.position,
+            PlaybackMode::Despawn,
+            request.position.is_none(),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_catalog_sound(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    catalog: &AudioClipCatalog,
+    reported_missing: &mut ReportedMissingClips,
+    form_id: u32,
+    position: Option<Vec3>,
+    mode: PlaybackMode,
+    force_non_spatial: bool,
+) -> Option<Entity> {
+    let Some(clip) = catalog.clips.get(&form_id) else {
+        report_missing_once(
+            reported_missing,
+            form_id,
+            "is absent from the prepared catalog",
+        );
+        return None;
+    };
+    let Some(asset_path) = clip.asset_path.as_ref() else {
+        report_missing_once(reported_missing, form_id, "has no staged asset");
+        return None;
+    };
+
+    let settings = playback_settings(clip, mode, position.is_some(), force_non_spatial);
+    let transform = Transform::from_translation(position.unwrap_or(Vec3::ZERO));
+    Some(
+        commands
+            .spawn((
+                AudioPlayer::new(asset_server.load(asset_path.clone())),
+                settings,
+                transform,
+            ))
+            .id(),
+    )
+}
+
+fn report_missing_once(reported: &mut ReportedMissingClips, form_id: u32, reason: &str) {
+    if reported.0.insert(form_id) {
+        warn!("sound {:08x} {reason}; playback skipped", form_id);
+    }
+}
+
+fn playback_settings(
+    clip: &PreparedAudioClip,
+    mode: PlaybackMode,
+    has_position: bool,
+    force_non_spatial: bool,
+) -> PlaybackSettings {
+    PlaybackSettings {
+        mode,
+        // Fallout stores this as a positive attenuation magnitude in 1/100 dB.
+        volume: Volume::Decibels(-(clip.static_attenuation_hundredths_db as f32) / 100.0),
+        spatial: has_position && !clip.is_2d && !force_non_spatial,
+        ..default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(is_2d: bool, attenuation: u16) -> PreparedAudioClip {
+        PreparedAudioClip {
+            form_id: 1,
+            editor_id: None,
+            source_path: "sound/test.wav".into(),
+            asset_path: Some("audio/test.wav".into()),
+            flags: 0,
+            min_attenuation: 0,
+            max_attenuation: 0,
+            frequency_adjustment: 0,
+            static_attenuation_hundredths_db: attenuation,
+            looping: false,
+            is_2d,
+        }
+    }
+
+    #[test]
+    fn static_attenuation_is_applied_as_negative_decibels() {
+        let settings = playback_settings(&clip(false, 650), PlaybackMode::Loop, true, false);
+        assert!((settings.volume.to_decibels() + 6.5).abs() < f32::EPSILON);
+        assert!(settings.spatial);
+    }
+
+    #[test]
+    fn two_dimensional_and_unpositioned_sounds_are_not_spatial() {
+        assert!(!playback_settings(&clip(true, 0), PlaybackMode::Loop, true, false).spatial);
+        assert!(!playback_settings(&clip(false, 0), PlaybackMode::Despawn, false, false).spatial);
+        assert!(!playback_settings(&clip(false, 0), PlaybackMode::Loop, true, true).spatial);
+    }
+
+    #[test]
+    fn sound_request_constructors_preserve_playback_space() {
+        assert_eq!(PlaySound::at(8, Vec3::X).position, Some(Vec3::X));
+    }
+}

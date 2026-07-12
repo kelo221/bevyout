@@ -54,12 +54,61 @@ def object_uv1(obj, rect, page_size, gutter):
     mesh = obj.data
     if not mesh.uv_layers:
         mesh.uv_layers.new(name="UVMap")
-    source = mesh.uv_layers.active
-    lightmap = mesh.uv_layers.get("Lightmap") or mesh.uv_layers.new(name="Lightmap")
-    # Copy the primary UV layout first. The normalization below makes this
-    # deterministic even when a NIF has UVs outside the 0..1 range.
-    for loop in mesh.loops:
-        lightmap.data[loop.index].uv = source.data[loop.index].uv
+    lightmap = mesh.uv_layers.get("Lightmap")
+    if lightmap is None:
+        lightmap = mesh.uv_layers.new(name="Lightmap")
+
+    # Fallout material UVs are frequently tiled or overlapping. They are
+    # suitable for sampling a diffuse texture, but not for a baked lightmap:
+    # two different faces would write to the same texels. Generate a separate
+    # non-overlapping chart layout before placing this object in its atlas
+    # rectangle. Smart Project is available in Blender 4.x and 5.x and is
+    # considerably more reliable here than trying to normalize the primary UV
+    # layer. The small fallback keeps unusual/degenerate meshes bakeable while
+    # making the problem visible in the Blender log.
+    mesh.uv_layers.active_index = list(mesh.uv_layers).index(lightmap)
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    for polygon in mesh.polygons:
+        polygon.select = True
+    unwrapped = False
+    try:
+        if obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.uv.smart_project(
+            angle_limit=math.radians(66.0),
+            island_margin=max(0.001, 2.0 * gutter / float(page_size)),
+            area_weight=0.0,
+            correct_aspect=True,
+            scale_to_bounds=False,
+        )
+        unwrapped = True
+    except (RuntimeError, TypeError) as error:
+        print("[bake] smart UV unwrap failed for %s: %s" % (obj.name, error), flush=True)
+    finally:
+        if obj.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+
+    if not unwrapped:
+        # Keep a deterministic fallback for meshes Blender cannot unwrap. It
+        # is better to retain the source layout than to abort an entire cell;
+        # the warning above identifies the mesh for later cleanup.
+        lightmap = mesh.uv_layers.get("Lightmap")
+        if lightmap is None:
+            raise RuntimeError("Lightmap UV layer disappeared during fallback for %s" % obj.name)
+        source = mesh.uv_layers[0]
+        for loop in mesh.loops:
+            lightmap.data[loop.index].uv = source.data[loop.index].uv
+
+    # Blender may invalidate the RNA object held by `lightmap` while leaving
+    # edit mode (the smart-project operator temporarily exposes an internal
+    # selection attribute). Reacquire the layer before reading its UV data.
+    lightmap = mesh.uv_layers.get("Lightmap")
+    if lightmap is None:
+        raise RuntimeError("Lightmap UV layer disappeared during unwrap for %s" % obj.name)
     values = [lightmap.data[loop.index].uv.copy() for loop in mesh.loops]
     if not values:
         return
@@ -262,6 +311,28 @@ def add_lights(job):
         )
 
 
+def add_cell_directional_light(job):
+    """Add the resolved CELL directional light to the bake scene.
+
+    Rust sends the already-converted Bevy quaternion so this script does not
+    duplicate Fallout's rotation convention.  A SUN light uses irradiance;
+    Blender's watts are converted from Bevy lux using the same 683 lm/W
+    reference used for placed lights.
+    """
+    illuminance = float(job.get("cell_directional_illuminance", 0.0))
+    color = job.get("cell_directional_rgba", [0.0, 0.0, 0.0, 1.0])
+    if illuminance <= 1e-6 or sum(float(value) for value in color[:3]) <= 1e-6:
+        return
+    data = bpy.data.lights.new("BevyOutCellDirectional", "SUN")
+    data.energy = max(illuminance / 683.0, 0.01)
+    data.color = tuple(float(value) for value in color[:3])
+    obj = bpy.data.objects.new(data.name, data)
+    bpy.context.collection.objects.link(obj)
+    obj.matrix_world = bevy_transform_to_blender(
+        [0.0, 0.0, 0.0], job.get("cell_directional_rotation_xyzw", [0.0, 0.0, 0.0, 1.0])
+    )
+
+
 def configure_cycles(scene, requested_device, denoise):
     scene.cycles.use_denoising = denoise
     if denoise and hasattr(scene.cycles, "denoiser"):
@@ -333,6 +404,7 @@ def main(job_path):
     objects = import_placements(job)
     stage("import")
     add_lights(job)
+    add_cell_directional_light(job)
     if not objects:
         raise RuntimeError("no mesh objects were imported")
     if job.get("preview_only", False):
@@ -431,6 +503,13 @@ def main(job_path):
         for node in list(material.node_tree.nodes):
             if node.name == "BevyOutLightmap":
                 material.node_tree.nodes.remove(node)
+    # Keep the source UV set active for ordinary material textures in the
+    # exported GLB. The generated Lightmap layer remains TEXCOORD_1 for
+    # Bevy's lightmap shader, but it must not become TEXCOORD_0 just because it
+    # was active while Cycles was baking.
+    for obj in bpy.context.scene.objects:
+        if obj.type == "MESH" and obj.data.uv_layers:
+            obj.data.uv_layers.active_index = 0
     if image.users == 0:
         bpy.data.images.remove(image)
     bpy.ops.export_scene.gltf(filepath=job["output_scene"], export_format="GLB",

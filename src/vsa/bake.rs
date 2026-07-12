@@ -9,7 +9,22 @@ use std::process::Command;
 use crate::cli::{BakeArgs, BakeDevice, BakeQuality};
 
 use super::assets::find_blender;
-use super::manifest::{PreparedLightmapBinding, PreparedLightmapPage, PreparedSceneManifest};
+use super::manifest::{
+    PreparedCellLighting, PreparedLightmapBinding, PreparedLightmapPage, PreparedPlacement,
+    PreparedSceneManifest, PreparedSemantic,
+};
+
+const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
+
+fn cell_directional_illuminance(lighting: &PreparedCellLighting) -> f32 {
+    let luminance =
+        lighting.directional_rgba[0] + lighting.directional_rgba[1] + lighting.directional_rgba[2];
+    if !luminance.is_finite() || luminance <= f32::EPSILON {
+        0.0
+    } else {
+        CELL_DIRECTIONAL_ILLUMINANCE
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct BakeJob {
@@ -31,6 +46,9 @@ struct BakeJob {
     bake_all: bool,
     emission_scale: f32,
     ambient_rgba: [f32; 4],
+    cell_directional_rgba: [f32; 4],
+    cell_directional_rotation_xyzw: [f32; 4],
+    cell_directional_illuminance: f32,
     placements: Vec<JobPlacement>,
     lights: Vec<JobLight>,
 }
@@ -128,8 +146,11 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         BakeQuality::Preview => (1024, 16, 1, 4, true, 2.0, true, true, true),
         // Quick is intentionally a direct-light bake. Indirect transport is
         // the dominant cost for a large Fallout cell and is reserved for
-        // Final, where the additional time is expected.
-        BakeQuality::Quick => (512, 4, 1, 2, false, 1.0, false, false, false),
+        // Final, where the additional time is expected. Keep enough samples
+        // for stable shadows and let OpenImageDenoise remove the remaining
+        // Monte Carlo noise; four undenoised samples produce visibly blotchy
+        // walls and ceilings even at this small atlas size.
+        BakeQuality::Quick => (512, 8, 1, 2, false, 1.0, false, true, false),
         BakeQuality::Final => (4096, 512, 4, 8, false, 0.0, true, true, true),
     };
     let runtime_lighting = matches!(args.quality, BakeQuality::Quick);
@@ -138,6 +159,16 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     let preview_output = output_dir.join("preview.png");
     let result_json = output_dir.join("result.json");
     let job_file = output_dir.join("job.json");
+    let cell_lighting =
+        manifest
+            .cell
+            .effective_lighting
+            .clone()
+            .unwrap_or_else(|| PreparedCellLighting {
+                ambient_rgba: manifest.cell.ambient_rgba,
+                directional_rgba: manifest.cell.directional_rgba,
+                ..Default::default()
+            });
     let job = BakeJob {
         asset_root: blender_path(&asset_root),
         output_scene: blender_path(&output_scene),
@@ -158,10 +189,14 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         // Runtime glow maps are intentionally much brighter than their physical
         // bake contribution so they remain visible under Bloom in the viewer.
         emission_scale: 0.01,
-        ambient_rgba: manifest.cell.ambient_rgba,
+        ambient_rgba: cell_lighting.ambient_rgba,
+        cell_directional_rgba: cell_lighting.directional_rgba,
+        cell_directional_rotation_xyzw: cell_lighting.directional_rotation_xyzw(),
+        cell_directional_illuminance: cell_directional_illuminance(&cell_lighting),
         placements: manifest
             .placements
             .iter()
+            .filter(|placement| placement.initially_enabled && is_bake_static(placement))
             .filter_map(|placement| {
                 Some(JobPlacement {
                     reference_form_id: placement.reference_form_id,
@@ -175,6 +210,7 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         lights: manifest
             .lights
             .iter()
+            .filter(|light| light.initially_enabled)
             .map(|light| JobLight {
                 translation: light.translation,
                 rotation_xyzw: light.rotation_xyzw,
@@ -305,7 +341,7 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     fingerprint.update(manifest.source_fingerprint.as_bytes());
     fingerprint.update(serde_json::to_vec(&job)?);
     let source_fingerprint = format!("{:x}", fingerprint.finalize());
-    manifest.schema_version = 2;
+    manifest.schema_version = 5;
     manifest.bake = Some(super::manifest::PreparedBake {
         source_fingerprint,
         scene_path,
@@ -338,6 +374,16 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         ktx2_path.display()
     );
     Ok(())
+}
+
+pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
+    !matches!(
+        placement.semantic,
+        PreparedSemantic::Pickup(_)
+            | PreparedSemantic::Container
+            | PreparedSemantic::Door(_)
+            | PreparedSemantic::Activator
+    )
 }
 
 fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>> {
@@ -432,4 +478,23 @@ fn tail(bytes: &[u8]) -> String {
         .rev()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bake_job_emits_resolved_cell_directional_light() {
+        let lighting = PreparedCellLighting {
+            directional_rgba: [0.5, 0.5, 0.5, 1.0],
+            directional_fade: 2.0,
+            ..Default::default()
+        };
+        assert_eq!(cell_directional_illuminance(&lighting), 10_000.0);
+        assert_eq!(
+            cell_directional_illuminance(&PreparedCellLighting::default()),
+            0.0
+        );
+    }
 }

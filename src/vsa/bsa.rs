@@ -90,7 +90,13 @@ impl BsaArchive {
     }
 
     pub(crate) fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let Some(entry) = self.entries.get(&normalize_asset_path(path)) else {
+        let normalized = normalize_asset_path(path);
+        let entry = self.entries.get(&normalized).or_else(|| {
+            normalized
+                .strip_prefix("sound/")
+                .and_then(|path| self.entries.get(path))
+        });
+        let Some(entry) = entry else {
             return Ok(None);
         };
         let mut file = File::open(&self.file)?;
@@ -98,6 +104,17 @@ impl BsaArchive {
         let mut bytes = vec![0; entry.size as usize];
         file.read_exact(&mut bytes)?;
         if entry.compressed {
+            // Fallout's sound archive marks several already-compressed media
+            // payloads with the archive-wide compression flag even though the
+            // bytes are complete RIFF/Ogg/MP3 streams. Preserve those streams
+            // instead of treating them as zlib records.
+            if bytes.starts_with(b"RIFF")
+                || bytes.starts_with(b"OggS")
+                || bytes.starts_with(b"ID3")
+                || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+            {
+                return Ok(Some(bytes));
+            }
             // FO3's texture archive embeds the original path before the
             // four-byte unpacked-size field, while the mesh archive usually
             // starts with that field. Locate the zlib header instead of

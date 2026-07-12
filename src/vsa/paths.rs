@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use super::plugin::ReferenceRecord;
 
-const FO3_SCALE: f32 = 0.1;
+/// Fallout 3 uses roughly 70 world units per metre. Keep the offline placement
+/// conversion in metres so Bevy physics and the FPS controller use metric
+/// dimensions as well.
+pub(crate) const FO3_SCALE: f32 = 1.0 / 70.0;
 
 pub(crate) fn parse_form_id(value: &str) -> Result<u32> {
     let value = value
@@ -50,28 +53,54 @@ pub(crate) fn is_non_rendering_effect(path: &str) -> bool {
 }
 
 pub(crate) fn placement_transform(reference: &ReferenceRecord) -> ([f32; 3], [f32; 4], f32) {
-    let p = reference.position;
+    placement_transform_parts(reference.position, reference.rotation, reference.scale)
+}
+
+pub(crate) fn placement_transform_parts(
+    position: [f32; 3],
+    rotation_euler: [f32; 3],
+    scale: f32,
+) -> ([f32; 3], [f32; 4], f32) {
+    let p = position;
     let translation = [p[0] * FO3_SCALE, p[2] * FO3_SCALE, -p[1] * FO3_SCALE];
     let q = Quat::from_euler(
         EulerRot::XYZ,
-        reference.rotation[0],
-        reference.rotation[1],
-        reference.rotation[2],
+        rotation_euler[0],
+        rotation_euler[1],
+        rotation_euler[2],
     );
     let basis = Mat3::from_cols(Vec3::X, Vec3::Z, -Vec3::Y);
     let converted = basis * Mat3::from_quat(q) * basis.transpose();
     let rotation = Quat::from_mat3(&converted).to_array();
-    (translation, rotation, reference.scale)
+    (translation, rotation, scale)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::plugin::ReferenceRecord;
     use super::*;
 
     #[test]
     fn parses_form_ids_with_optional_hex_prefix() {
         assert_eq!(parse_form_id("0x000151e3").unwrap(), 0x0001_51e3);
         assert_eq!(parse_form_id("151E3").unwrap(), 0x0001_51e3);
+    }
+
+    #[test]
+    fn placement_transform_uses_metric_fallout_scale() {
+        let reference = ReferenceRecord {
+            form_id: 1,
+            base_form_id: 2,
+            position: [70.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0],
+            scale: 1.0,
+            flags: 0,
+            ..Default::default()
+        };
+        let (translation, _, _) = placement_transform(&reference);
+        assert!((translation[0] - 1.0).abs() < f32::EPSILON);
+        assert!((translation[1]).abs() < f32::EPSILON);
+        assert!((translation[2]).abs() < f32::EPSILON);
     }
 
     #[test]

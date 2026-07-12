@@ -6,12 +6,19 @@ use std::process::Command;
 
 use super::bsa::BsaArchive;
 use super::manifest::Diagnostic;
-use super::paths::normalize_asset_path;
+use super::paths::{fingerprint, normalize_asset_path};
 
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-textures-v3";
+pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-textures-v4-fo3-scale-1-70";
+
+pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[u8]) -> String {
+    let mut cache_key = converter_revision.as_bytes().to_vec();
+    cache_key.push(0);
+    cache_key.extend_from_slice(nif_bytes);
+    format!("{}.glb", fingerprint(&cache_key))
+}
 
 pub(crate) fn find_blender(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
@@ -250,7 +257,7 @@ for nif_path, output_path in jobs:
         for datablock in list(datablocks):
             if datablock.users == 0: datablocks.remove(datablock)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=0.1, use_custom_normals=False, use_embedded_texture=False)
+    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
@@ -390,14 +397,19 @@ for nif_path, output_path in jobs:
     Ok(())
 }
 
-fn validate_glb_images(path: &Path) -> Result<()> {
+pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
     let bytes = fs::read(path)?;
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         bail!("invalid GLB header")
     }
     let json_length = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    let json_start = 20;
-    let json_end = json_start + json_length;
+    let json_start: usize = 20;
+    let json_end = json_start
+        .checked_add(json_length)
+        .context("GLB JSON chunk length overflows")?;
+    if json_end > bytes.len() {
+        bail!("GLB JSON chunk extends beyond file")
+    }
     let document: serde_json::Value = serde_json::from_slice(&bytes[json_start..json_end])?;
     let views = document
         .get("bufferViews")
@@ -409,7 +421,9 @@ fn validate_glb_images(path: &Path) -> Result<()> {
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let binary_start = json_end + 8;
+    let binary_start = json_end
+        .checked_add(8)
+        .context("GLB binary chunk header overflows")?;
     for image in images {
         let Some(view_index) = image.get("bufferView").and_then(serde_json::Value::as_u64) else {
             continue;
@@ -425,11 +439,16 @@ fn validate_glb_images(path: &Path) -> Result<()> {
             .get("byteLength")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
-        let end = binary_start + offset + length;
+        let data_start = binary_start
+            .checked_add(offset)
+            .context("image buffer offset overflows")?;
+        let end = data_start
+            .checked_add(length)
+            .context("image buffer length overflows")?;
         if end > bytes.len() {
             bail!("image bufferView extends beyond GLB")
         }
-        let data = &bytes[binary_start + offset..end];
+        let data = &bytes[data_start..end];
         if data.starts_with(b"\\x89PNG\\r\\n\\x1a\\n") && data.len() >= 24 {
             let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
             let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
@@ -534,5 +553,35 @@ mod tests {
         assert!(
             references.contains(&"textures/dungeons/wasteland homes/wastehome01.dds".to_string())
         );
+    }
+
+    #[test]
+    fn content_addressed_glb_names_are_stable_and_revision_sensitive() {
+        let first = content_addressed_glb_name("converter-v1", b"nif-bytes");
+        assert_eq!(
+            first,
+            content_addressed_glb_name("converter-v1", b"nif-bytes")
+        );
+        assert_ne!(
+            first,
+            content_addressed_glb_name("converter-v2", b"nif-bytes")
+        );
+        assert_ne!(
+            first,
+            content_addressed_glb_name("converter-v1", b"changed-nif")
+        );
+        assert!(first.ends_with(".glb"));
+    }
+
+    #[test]
+    fn truncated_cached_glb_is_rejected_without_panicking() {
+        let path =
+            std::env::temp_dir().join(format!("bevyout-invalid-cache-{}.glb", std::process::id()));
+        let mut bytes = vec![0_u8; 20];
+        bytes[0..4].copy_from_slice(b"glTF");
+        bytes[12..16].copy_from_slice(&1024_u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(validate_glb_images(&path).is_err());
+        let _ = std::fs::remove_file(path);
     }
 }

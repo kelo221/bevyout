@@ -8,7 +8,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::math::{Rect, cubic_splines::LinearSpline, vec2};
-use bevy::pbr::Lightmap;
+use bevy::pbr::{DistanceFog, FogFalloff, Lightmap};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
@@ -24,7 +24,18 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::cli::ViewArgs;
-use crate::vsa::{ImageSpaceInfo, PreparedSceneManifest};
+use crate::vsa::{
+    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest,
+    is_bake_static,
+};
+
+mod audio;
+mod interaction;
+mod player;
+
+const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
+const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
+const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 
 pub(crate) fn view(args: ViewArgs) -> Result<()> {
     let manifest_path = fs::canonicalize(&args.manifest).context("manifest does not exist")?;
@@ -39,36 +50,50 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         }),
         FrameTimeDiagnosticsPlugin::default(),
         AutoExposurePlugin,
-    ))
-    .insert_resource(manifest)
-    .insert_resource(UnlitMode(false))
-    .insert_resource(LightingScale(128.0))
-    .insert_resource(AmbientScale(0.05))
-    .insert_resource(LightsDisabled(false))
-    .insert_resource(LightmapOnlyMode::default())
-    .add_systems(
-        Startup,
-        (capture_cursor, spawn_prepared_scene, spawn_reticle),
-    )
-    .add_systems(
-        Update,
-        (
-            adjust_lighting,
-            adjust_ambient,
-            adjust_bloom,
-            toggle_lights_disabled,
-            apply_lighting_scale,
-            update_fps_text,
-            toggle_unlit_mode,
-            apply_unlit_mode,
-            toggle_lightmap_only,
-            apply_lightmap_only_mode,
-            apply_baked_lightmaps,
-            inspect_center_hit,
-            free_fly_camera,
-        ),
-    )
-    .run();
+    ));
+    player::install(&mut app);
+    audio::install(&mut app);
+    interaction::install(&mut app);
+    app.insert_resource(manifest)
+        .insert_resource(UnlitMode(false))
+        .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))
+        .insert_resource(AmbientScale(0.05))
+        .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
+        .insert_resource(AdjustmentTarget::default())
+        .insert_resource(LightsDisabled(false))
+        .insert_resource(LightmapOnlyMode::default())
+        .add_systems(
+            Startup,
+            (capture_cursor, spawn_prepared_scene, spawn_reticle),
+        )
+        .add_systems(
+            Update,
+            (
+                adjust_selected_value,
+                toggle_lights_disabled,
+                apply_lighting_scale,
+                apply_fog_strength,
+                update_fps_text,
+                update_adjustment_hud,
+                toggle_unlit_mode,
+                apply_unlit_mode,
+                toggle_lightmap_only,
+                apply_lightmap_only_mode,
+                apply_baked_lightmaps,
+                inspect_center_hit,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                capture_cursor_input,
+                player::toggle_camera_mode,
+                free_fly_camera,
+                player::fps_mouse_look,
+            )
+                .chain(),
+        )
+        .run();
     Ok(())
 }
 
@@ -93,6 +118,16 @@ fn spawn_reticle(mut commands: Commands) {
             position_type: PositionType::Absolute,
             top: px(8),
             right: px(10),
+            ..default()
+        },
+    ));
+    commands.spawn((
+        Text::new("Adjusting: Lighting scale\nPage Up/Down: select   F1/F2: change"),
+        AdjustmentHud,
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8),
+            left: px(10),
             ..default()
         },
     ));
@@ -152,8 +187,10 @@ fn spawn_prepared_scene(
     manifest: Res<PreparedSceneManifest>,
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
+    fog_strength: Res<FogStrength>,
 ) {
     let focus = scene_focus(&manifest);
+    let cell_lighting = effective_lighting(&manifest.cell);
     let runtime_lighting = manifest
         .bake
         .as_ref()
@@ -192,16 +229,52 @@ fn spawn_prepared_scene(
             manifest.cell.form_id
         );
     }
+    if let Some(fog) = distance_fog(&cell_lighting, fog_strength.0) {
+        camera.insert(fog);
+    }
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(
-            manifest.cell.ambient_rgba[0],
-            manifest.cell.ambient_rgba[1],
-            manifest.cell.ambient_rgba[2],
+            cell_lighting.ambient_rgba[0],
+            cell_lighting.ambient_rgba[1],
+            cell_lighting.ambient_rgba[2],
         ),
         brightness: 25.0 * lighting.0 * ambient_scale.0,
         affects_lightmapped_meshes: runtime_lighting,
     });
+    let directional_luminance = cell_lighting.directional_rgba[0]
+        + cell_lighting.directional_rgba[1]
+        + cell_lighting.directional_rgba[2];
+    if directional_luminance > f32::EPSILON
+        && cell_lighting.directional_rgba[..3]
+            .iter()
+            .all(|channel| channel.is_finite())
+    {
+        let base_illuminance = CELL_DIRECTIONAL_ILLUMINANCE;
+        commands.spawn((
+            DirectionalLight {
+                color: Color::srgb(
+                    cell_lighting.directional_rgba[0],
+                    cell_lighting.directional_rgba[1],
+                    cell_lighting.directional_rgba[2],
+                ),
+                illuminance: scaled_directional_illuminance(
+                    base_illuminance,
+                    lighting.0,
+                    false,
+                    false,
+                ),
+                affects_lightmapped_mesh_diffuse: runtime_lighting,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            CellDirectionalLight { base_illuminance },
+            Transform::from_rotation(Quat::from_array(cell_lighting.directional_rotation_xyzw())),
+        ));
+    }
     for light in &manifest.lights {
+        if !light.initially_enabled {
+            continue;
+        }
         commands.spawn((
             PointLight {
                 intensity: light.radius * light.radius * 2.0 * lighting.0,
@@ -227,8 +300,12 @@ fn spawn_prepared_scene(
             bake.scene_path,
             bake.lightmaps.len()
         );
+        spawn_interactive_placements(&mut commands, &asset_server, &manifest);
     } else {
         for placement in &manifest.placements {
+            if !placement.initially_enabled {
+                continue;
+            }
             let Some(path) = placement.asset_path.as_ref() else {
                 continue;
             };
@@ -236,6 +313,7 @@ fn spawn_prepared_scene(
                 WorldAssetRoot(
                     asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
                 ),
+                interaction::PlacementRoot::new(placement.clone()),
                 Transform {
                     translation: Vec3::from_array(placement.translation),
                     rotation: Quat::from_xyzw(
@@ -256,6 +334,134 @@ fn spawn_prepared_scene(
         manifest.diagnostics.len(),
         focus,
     );
+    info!(
+        "camera controls: Tab toggles FPS player/free camera, Esc releases cursor, left click captures cursor"
+    );
+}
+
+fn effective_lighting(cell: &CellInfo) -> PreparedCellLighting {
+    cell.effective_lighting
+        .clone()
+        .unwrap_or_else(|| PreparedCellLighting {
+            ambient_rgba: cell.ambient_rgba,
+            directional_rgba: cell.directional_rgba,
+            ..default()
+        })
+}
+
+fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Option<DistanceFog> {
+    let values = [
+        lighting.fog_near,
+        lighting.fog_far,
+        lighting.fog_clip_distance,
+        lighting.fog_power,
+        lighting.directional_fade,
+    ];
+    if values.iter().any(|value| !value.is_finite())
+        || lighting
+            .fog_rgba
+            .iter()
+            .chain(lighting.directional_rgba.iter())
+            .any(|value| !value.is_finite())
+        || lighting.fog_far <= 0.0
+        || lighting.fog_far <= lighting.fog_near
+    {
+        return None;
+    }
+    let start = lighting.fog_near.max(0.0) * FO3_SCALE;
+    let mut end = lighting.fog_far.max(0.0) * FO3_SCALE;
+    if lighting.fog_clip_distance > 0.0 {
+        end = end.min(lighting.fog_clip_distance * FO3_SCALE);
+    }
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return None;
+    }
+    if !strength.is_finite() || strength < 0.0 {
+        return None;
+    }
+    let strength = strength.clamp(0.0, 1.0);
+    let directional_fade = lighting.directional_fade.clamp(0.0, 1.0);
+    Some(DistanceFog {
+        color: Color::srgba(
+            lighting.fog_rgba[0],
+            lighting.fog_rgba[1],
+            lighting.fog_rgba[2],
+            strength,
+        ),
+        directional_light_color: Color::srgba(
+            lighting.directional_rgba[0] * directional_fade,
+            lighting.directional_rgba[1] * directional_fade,
+            lighting.directional_rgba[2] * directional_fade,
+            strength,
+        ),
+        directional_light_exponent: lighting.fog_power.max(1.0),
+        falloff: FogFalloff::Linear { start, end },
+    })
+}
+
+fn apply_fog_strength(
+    fog_strength: Res<FogStrength>,
+    manifest: Res<PreparedSceneManifest>,
+    mut cameras: Query<&mut DistanceFog, With<Camera3d>>,
+) {
+    if !fog_strength.is_changed() {
+        return;
+    }
+    let lighting = effective_lighting(&manifest.cell);
+    let Some(fog) = distance_fog(&lighting, fog_strength.0) else {
+        return;
+    };
+    for mut camera_fog in &mut cameras {
+        *camera_fog = fog.clone();
+    }
+}
+
+fn scaled_directional_illuminance(
+    base_illuminance: f32,
+    lighting_scale: f32,
+    disabled: bool,
+    lightmap_only: bool,
+) -> f32 {
+    if disabled || lightmap_only {
+        0.0
+    } else {
+        base_illuminance * lighting_scale / DEFAULT_LIGHTING_SCALE
+    }
+}
+
+#[derive(Component)]
+struct CellDirectionalLight {
+    base_illuminance: f32,
+}
+
+fn spawn_interactive_placements(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    manifest: &PreparedSceneManifest,
+) {
+    for placement in manifest
+        .placements
+        .iter()
+        .filter(|placement| placement.initially_enabled && !is_bake_static(placement))
+    {
+        let Some(path) = placement.asset_path.as_ref() else {
+            continue;
+        };
+        commands.spawn((
+            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
+            interaction::PlacementRoot::new(placement.clone()),
+            Transform {
+                translation: Vec3::from_array(placement.translation),
+                rotation: Quat::from_xyzw(
+                    placement.rotation_xyzw[0],
+                    placement.rotation_xyzw[1],
+                    placement.rotation_xyzw[2],
+                    placement.rotation_xyzw[3],
+                ),
+                scale: Vec3::splat(placement.scale),
+            },
+        ));
+    }
 }
 
 fn camera_post_processing(
@@ -441,6 +647,20 @@ fn capture_cursor(mut cursor_options: Single<&mut CursorOptions>) {
     cursor_options.grab_mode = CursorGrabMode::Locked;
 }
 
+fn capture_cursor_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mut cursor_options: Single<&mut CursorOptions>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        cursor_options.visible = true;
+        cursor_options.grab_mode = CursorGrabMode::None;
+    } else if mouse_buttons.just_pressed(MouseButton::Left) {
+        cursor_options.visible = false;
+        cursor_options.grab_mode = CursorGrabMode::Locked;
+    }
+}
+
 #[derive(Resource)]
 struct UnlitMode(bool);
 
@@ -451,6 +671,54 @@ struct LightingScale(f32);
 struct AmbientScale(f32);
 
 #[derive(Resource)]
+struct FogStrength(f32);
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AdjustmentTarget {
+    #[default]
+    LightingScale,
+    AmbientScale,
+    BloomIntensity,
+    BloomThreshold,
+    BloomSoftness,
+    FogStrength,
+}
+
+impl AdjustmentTarget {
+    const ALL: [Self; 6] = [
+        Self::LightingScale,
+        Self::AmbientScale,
+        Self::BloomIntensity,
+        Self::BloomThreshold,
+        Self::BloomSoftness,
+        Self::FogStrength,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LightingScale => "Lighting scale",
+            Self::AmbientScale => "Ambient scale",
+            Self::BloomIntensity => "Bloom intensity",
+            Self::BloomThreshold => "Bloom threshold",
+            Self::BloomSoftness => "Bloom softness",
+            Self::FogStrength => "Fog strength",
+        }
+    }
+
+    fn cycle(self, delta: i32) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|target| *target == self)
+            .unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(Self::ALL.len() as i32) as usize;
+        Self::ALL[next]
+    }
+}
+
+#[derive(Component)]
+struct AdjustmentHud;
+
+#[derive(Resource)]
 struct LightsDisabled(bool);
 
 #[derive(Resource, Default)]
@@ -459,62 +727,124 @@ struct LightmapOnlyMode {
     originals: HashMap<AssetId<StandardMaterial>, StandardMaterial>,
 }
 
-fn adjust_lighting(keys: Res<ButtonInput<KeyCode>>, mut lighting: ResMut<LightingScale>) {
-    let previous = lighting.0;
-    if keys.just_pressed(KeyCode::F1) {
-        lighting.0 = (lighting.0 * 0.5).max(0.0001);
+fn adjust_selected_value(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut target: ResMut<AdjustmentTarget>,
+    mut lighting: ResMut<LightingScale>,
+    mut ambient: ResMut<AmbientScale>,
+    mut fog_strength: ResMut<FogStrength>,
+    mut cameras: Query<&mut Bloom, With<Camera3d>>,
+) {
+    if keys.just_pressed(KeyCode::PageUp) {
+        *target = (*target).cycle(1);
+        info!("adjustment target: {}", target.label());
+    } else if keys.just_pressed(KeyCode::PageDown) {
+        *target = (*target).cycle(-1);
+        info!("adjustment target: {}", target.label());
+    }
+
+    let direction = if keys.just_pressed(KeyCode::F1) {
+        Some(-1)
     } else if keys.just_pressed(KeyCode::F2) {
-        lighting.0 = (lighting.0 * 2.0).min(262_144.0);
-    }
-    if lighting.0 != previous {
-        info!("lighting scale: {:.4}", lighting.0);
-    }
-}
-
-fn adjust_ambient(keys: Res<ButtonInput<KeyCode>>, mut ambient: ResMut<AmbientScale>) {
-    let previous = ambient.0;
-    if keys.just_pressed(KeyCode::F4) {
-        ambient.0 = (ambient.0 * 0.5).max(0.0001);
-    } else if keys.just_pressed(KeyCode::F5) {
-        ambient.0 = (ambient.0 * 2.0).min(4096.0);
-    }
-    if ambient.0 != previous {
-        info!("ambient scale: {:.4}", ambient.0);
-    }
-}
-
-fn adjust_bloom(keys: Res<ButtonInput<KeyCode>>, mut cameras: Query<&mut Bloom, With<Camera3d>>) {
-    let Ok(mut bloom) = cameras.single_mut() else {
+        Some(1)
+    } else {
+        None
+    };
+    let Some(direction) = direction else {
         return;
     };
-    let mut changed = false;
-    if keys.just_pressed(KeyCode::F6) {
-        bloom.intensity = (bloom.intensity * 0.5).max(0.0);
-        changed = true;
-    } else if keys.just_pressed(KeyCode::F7) {
-        bloom.intensity = (bloom.intensity * 2.0).min(1.0);
-        changed = true;
-    } else if keys.just_pressed(KeyCode::F8) {
-        bloom.prefilter.threshold = (bloom.prefilter.threshold - 0.1).max(0.0);
-        changed = true;
-    } else if keys.just_pressed(KeyCode::F9) {
-        bloom.prefilter.threshold += 0.1;
-        changed = true;
-    } else if keys.just_pressed(KeyCode::F10) {
-        bloom.prefilter.threshold_softness =
-            (bloom.prefilter.threshold_softness - 0.1).clamp(0.0, 1.0);
-        changed = true;
-    } else if keys.just_pressed(KeyCode::F11) {
-        bloom.prefilter.threshold_softness =
-            (bloom.prefilter.threshold_softness + 0.1).clamp(0.0, 1.0);
-        changed = true;
+
+    match *target {
+        AdjustmentTarget::LightingScale => {
+            lighting.0 = if direction < 0 {
+                (lighting.0 * 0.5).max(0.0001)
+            } else {
+                (lighting.0 * 2.0).min(262_144.0)
+            };
+            info!("lighting scale: {:.4}", lighting.0);
+        }
+        AdjustmentTarget::AmbientScale => {
+            ambient.0 = if direction < 0 {
+                (ambient.0 * 0.5).max(0.0001)
+            } else {
+                (ambient.0 * 2.0).min(4096.0)
+            };
+            info!("ambient scale: {:.4}", ambient.0);
+        }
+        AdjustmentTarget::BloomIntensity
+        | AdjustmentTarget::BloomThreshold
+        | AdjustmentTarget::BloomSoftness => {
+            let Ok(mut bloom) = cameras.single_mut() else {
+                return;
+            };
+            match *target {
+                AdjustmentTarget::BloomIntensity => {
+                    bloom.intensity = if direction < 0 {
+                        (bloom.intensity * 0.5).max(0.0)
+                    } else {
+                        (bloom.intensity * 2.0).min(1.0)
+                    };
+                }
+                AdjustmentTarget::BloomThreshold => {
+                    bloom.prefilter.threshold = if direction < 0 {
+                        (bloom.prefilter.threshold - 0.1).max(0.0)
+                    } else {
+                        bloom.prefilter.threshold + 0.1
+                    };
+                }
+                AdjustmentTarget::BloomSoftness => {
+                    bloom.prefilter.threshold_softness = (bloom.prefilter.threshold_softness
+                        + if direction < 0 { -0.1 } else { 0.1 })
+                    .clamp(0.0, 1.0);
+                }
+                _ => unreachable!(),
+            }
+            info!(
+                "bloom: intensity {:.2}, threshold {:.2}, softness {:.2}",
+                bloom.intensity, bloom.prefilter.threshold, bloom.prefilter.threshold_softness
+            );
+        }
+        AdjustmentTarget::FogStrength => {
+            fog_strength.0 = if direction < 0 {
+                (fog_strength.0 * 0.5).max(0.0)
+            } else {
+                (fog_strength.0 * 2.0).min(1.0)
+            };
+            info!("fog strength: {:.2}", fog_strength.0);
+        }
     }
-    if changed {
-        info!(
-            "bloom: intensity {:.2}, threshold {:.2}, softness {:.2}",
-            bloom.intensity, bloom.prefilter.threshold, bloom.prefilter.threshold_softness
-        );
-    }
+}
+
+fn update_adjustment_hud(
+    target: Res<AdjustmentTarget>,
+    lighting: Res<LightingScale>,
+    ambient: Res<AmbientScale>,
+    fog_strength: Res<FogStrength>,
+    cameras: Query<&Bloom, With<Camera3d>>,
+    mut text: Single<&mut Text, With<AdjustmentHud>>,
+) {
+    let value = match *target {
+        AdjustmentTarget::LightingScale => format!("{:.4}", lighting.0),
+        AdjustmentTarget::AmbientScale => format!("{:.4}", ambient.0),
+        AdjustmentTarget::BloomIntensity => cameras
+            .single()
+            .map(|bloom| format!("{:.2}", bloom.intensity))
+            .unwrap_or_else(|_| "--".into()),
+        AdjustmentTarget::BloomThreshold => cameras
+            .single()
+            .map(|bloom| format!("{:.2}", bloom.prefilter.threshold))
+            .unwrap_or_else(|_| "--".into()),
+        AdjustmentTarget::BloomSoftness => cameras
+            .single()
+            .map(|bloom| format!("{:.2}", bloom.prefilter.threshold_softness))
+            .unwrap_or_else(|_| "--".into()),
+        AdjustmentTarget::FogStrength => format!("{:.2}", fog_strength.0),
+    };
+    text.0 = format!(
+        "Adjusting: {} = {}\nPage Up/Down: select   F1/F2: change",
+        target.label(),
+        value
+    );
 }
 
 fn toggle_lights_disabled(keys: Res<ButtonInput<KeyCode>>, mut disabled: ResMut<LightsDisabled>) {
@@ -534,6 +864,7 @@ fn apply_lighting_scale(
     lightmap_only: Res<LightmapOnlyMode>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut points: Query<&mut PointLight>,
+    mut directionals: Query<(&CellDirectionalLight, &mut DirectionalLight)>,
 ) {
     if !lighting.is_changed()
         && !ambient_scale.is_changed()
@@ -546,6 +877,9 @@ fn apply_lighting_scale(
         ambient.brightness = 0.0;
         for mut light in &mut points {
             light.intensity = 0.0;
+        }
+        for (_, mut light) in &mut directionals {
+            light.illuminance = 0.0;
         }
         return;
     }
@@ -560,6 +894,14 @@ fn apply_lighting_scale(
         } else {
             light.range * light.range * 2.0 * lighting.0
         };
+    }
+    for (cell_light, mut light) in &mut directionals {
+        light.illuminance = scaled_directional_illuminance(
+            cell_light.base_illuminance,
+            lighting.0,
+            disabled.0,
+            false,
+        );
     }
 }
 
@@ -636,26 +978,19 @@ struct FlyCamera {
 
 fn free_fly_camera(
     keys: Res<ButtonInput<KeyCode>>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut mouse: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
-    mut cursor_options: Single<&mut CursorOptions>,
+    cursor_options: Single<&CursorOptions>,
+    mode: Res<player::CameraModeState>,
     mut query: Query<(&mut Transform, &mut FlyCamera), With<Camera3d>>,
     time: Res<Time>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
-        cursor_options.visible = true;
-        cursor_options.grab_mode = CursorGrabMode::None;
-    } else if mouse_buttons.just_pressed(MouseButton::Left) {
-        cursor_options.visible = false;
-        cursor_options.grab_mode = CursorGrabMode::Locked;
-    }
     let wheel_delta = wheel.read().map(|event| event.y).sum::<f32>();
     let captured = matches!(cursor_options.grab_mode, CursorGrabMode::Locked);
     let delta = mouse
         .read()
         .fold(Vec2::ZERO, |sum, event| sum + event.delta);
-    if !captured {
+    if mode.mode != player::CameraMode::Free || !captured {
         return;
     }
     let Ok((mut transform, mut camera)) = query.single_mut() else {
@@ -697,6 +1032,27 @@ fn free_fly_camera(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjustment_target_cycles_with_page_navigation_order() {
+        assert_eq!(
+            AdjustmentTarget::default().cycle(1),
+            AdjustmentTarget::AmbientScale
+        );
+        assert_eq!(
+            AdjustmentTarget::default().cycle(-1),
+            AdjustmentTarget::FogStrength
+        );
+        assert_eq!(
+            AdjustmentTarget::BloomSoftness.cycle(1),
+            AdjustmentTarget::FogStrength
+        );
+        assert_eq!(
+            AdjustmentTarget::FogStrength.cycle(1),
+            AdjustmentTarget::LightingScale
+        );
+        assert_eq!(AdjustmentTarget::BloomIntensity.label(), "Bloom intensity");
+    }
 
     #[test]
     fn image_space_eye_adaptation_speed_uses_documented_endpoints() {
@@ -747,5 +1103,61 @@ mod tests {
         assert_eq!(grading.global.exposure, 0.0);
         assert!(auto_exposure.is_none());
         assert_eq!(curves.len(), 0);
+    }
+
+    #[test]
+    fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
+        let lighting = PreparedCellLighting {
+            fog_rgba: [0.1, 0.2, 0.3, 1.0],
+            directional_rgba: [0.4, 0.5, 0.6, 1.0],
+            fog_near: 10.0,
+            fog_far: 100.0,
+            fog_clip_distance: 80.0,
+            fog_power: 0.5,
+            ..default()
+        };
+        let fog = distance_fog(&lighting, DEFAULT_FOG_STRENGTH).expect("valid FO3 fog should map");
+        match fog.falloff {
+            FogFalloff::Linear { start, end } => {
+                assert!((start - 10.0 * FO3_SCALE).abs() < f32::EPSILON);
+                assert!((end - 80.0 * FO3_SCALE).abs() < f32::EPSILON);
+            }
+            _ => panic!("expected linear fog"),
+        }
+        assert_eq!(fog.directional_light_exponent, 1.0);
+        assert!(
+            distance_fog(
+                &PreparedCellLighting {
+                    fog_near: 20.0,
+                    fog_far: 10.0,
+                    ..lighting
+                },
+                DEFAULT_FOG_STRENGTH,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn directional_rotation_and_light_scale_are_deterministic() {
+        let lighting = PreparedCellLighting {
+            directional_rotation_z: 90,
+            ..default()
+        };
+        let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let actual = Quat::from_array(lighting.directional_rotation_xyzw());
+        assert!(actual.dot(expected).abs() > 1.0 - 1e-5);
+        assert_eq!(
+            scaled_directional_illuminance(10_000.0, 256.0, false, false),
+            20_000.0
+        );
+        assert_eq!(
+            scaled_directional_illuminance(10_000.0, 256.0, true, false),
+            0.0
+        );
+        assert_eq!(
+            scaled_directional_illuminance(10_000.0, 256.0, false, true),
+            0.0
+        );
     }
 }

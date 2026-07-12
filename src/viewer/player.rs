@@ -1,0 +1,465 @@
+use avian3d::prelude::*;
+use bevy::color::LinearRgba;
+use bevy::gltf::GltfMeshName;
+use bevy::input::mouse::MouseMotion;
+use bevy::pbr::StandardMaterial;
+use bevy::prelude::*;
+use bevy::render::mesh::Mesh;
+use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_tnua::builtins::{
+    TnuaBuiltinJump, TnuaBuiltinJumpConfig, TnuaBuiltinWalk, TnuaBuiltinWalkConfig,
+};
+use bevy_tnua::prelude::*;
+use bevy_tnua_avian3d::prelude::*;
+
+use super::FlyCamera;
+
+pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
+pub(crate) const CAPSULE_HEIGHT: f32 = 1.8;
+pub(crate) const EYE_HEIGHT: f32 = 1.6;
+const PLAYER_SPEED: f32 = 4.5;
+const JUMP_HEIGHT: f32 = 1.2;
+const MOUSE_SENSITIVITY: f32 = 0.002;
+
+#[derive(TnuaScheme)]
+#[scheme(basis = TnuaBuiltinWalk)]
+pub(crate) enum ControlScheme {
+    Jump(TnuaBuiltinJump),
+}
+
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CameraMode {
+    Free,
+    Fps,
+}
+
+#[derive(Resource, Debug)]
+pub(crate) struct CameraModeState {
+    pub(crate) mode: CameraMode,
+    pub(crate) player: Option<Entity>,
+    pub(crate) collisions_ready: bool,
+}
+
+impl Default for CameraModeState {
+    fn default() -> Self {
+        Self {
+            mode: CameraMode::Free,
+            player: None,
+            collisions_ready: false,
+        }
+    }
+}
+
+#[derive(Component, Debug)]
+pub(crate) struct FpsPlayer {
+    yaw: f32,
+    pitch: f32,
+}
+
+#[derive(Component)]
+struct SceneColliderProcessed;
+
+#[derive(Resource, Default)]
+struct StaticCollisionStats {
+    processed: usize,
+    built: usize,
+    skipped: usize,
+    triangles: usize,
+    last_reported_processed: usize,
+    no_geometry_reported: bool,
+}
+
+type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
+type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
+type StaticCollisionQuery<'w> = (
+    Entity,
+    &'w Mesh3d,
+    Option<&'w GltfMeshName>,
+    &'w MeshMaterial3d<StandardMaterial>,
+    Option<&'w SceneColliderProcessed>,
+);
+
+pub(crate) fn install(app: &mut App) {
+    app.add_plugins((
+        PhysicsPlugins::default(),
+        TnuaControllerPlugin::<ControlScheme>::new(FixedUpdate),
+        TnuaAvian3dPlugin::new(FixedUpdate),
+    ))
+    .insert_resource(CameraModeState::default())
+    .insert_resource(StaticCollisionStats::default())
+    .add_systems(Update, build_static_colliders.before(toggle_camera_mode))
+    .add_systems(
+        FixedUpdate,
+        apply_player_controls.in_set(TnuaUserControlsSystems),
+    );
+}
+
+pub(crate) fn toggle_camera_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    mut state: ResMut<CameraModeState>,
+    mut control_scheme_configs: ResMut<Assets<ControlSchemeConfig>>,
+    mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
+    players: Query<&Transform, With<FpsPlayer>>,
+) {
+    if !tab_pressed(&keys) {
+        return;
+    }
+
+    let Ok((camera_entity, mut camera_transform, mut fly_camera, has_parent)) =
+        cameras.single_mut()
+    else {
+        warn!("cannot toggle camera mode: expected one camera");
+        return;
+    };
+
+    match state.mode {
+        CameraMode::Free => {
+            if !state.collisions_ready {
+                warn!(
+                    "FPS mode unavailable: no static scene collision geometry has finished building"
+                );
+                return;
+            }
+            if has_parent || state.player.is_some() {
+                warn!("cannot enter FPS mode: camera/player hierarchy is already active");
+                return;
+            }
+
+            let (yaw, pitch) = camera_angles(camera_transform.rotation);
+            fly_camera.yaw = yaw;
+            fly_camera.pitch = pitch;
+            let player_center =
+                camera_transform.translation - Vec3::Y * (EYE_HEIGHT - CAPSULE_HEIGHT * 0.5);
+            let player = commands
+                .spawn((
+                    FpsPlayer { yaw, pitch },
+                    Transform::from_translation(player_center)
+                        .with_rotation(Quat::from_rotation_y(yaw)),
+                    RigidBody::Dynamic,
+                    Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT - CAPSULE_RADIUS * 2.0),
+                    TnuaController::<ControlScheme>::default(),
+                    TnuaConfig::<ControlScheme>(control_scheme_configs.add(ControlSchemeConfig {
+                        basis: TnuaBuiltinWalkConfig {
+                            speed: PLAYER_SPEED,
+                            float_height: CAPSULE_HEIGHT * 0.5 + 0.02,
+                            max_slope: 45.0_f32.to_radians(),
+                            ..default()
+                        },
+                        jump: TnuaBuiltinJumpConfig {
+                            height: JUMP_HEIGHT,
+                            ..default()
+                        },
+                    })),
+                    TnuaAvian3dSensorShape(Collider::cylinder(CAPSULE_RADIUS * 0.96, 0.0)),
+                    LockedAxes::ROTATION_LOCKED,
+                ))
+                .id();
+
+            camera_transform.translation = Vec3::new(0.0, EYE_HEIGHT, 0.0);
+            camera_transform.rotation = Quat::from_rotation_x(pitch);
+            commands.entity(camera_entity).insert(ChildOf(player));
+            state.mode = CameraMode::Fps;
+            state.player = Some(player);
+            info!("camera mode: FPS player (Tab to return to free camera)");
+        }
+        CameraMode::Fps => {
+            let Some(player_entity) = state.player else {
+                warn!("cannot leave FPS mode: player entity is missing");
+                state.mode = CameraMode::Free;
+                return;
+            };
+            let Ok(player_transform) = players.get(player_entity) else {
+                warn!("cannot leave FPS mode: player entity is not available yet");
+                return;
+            };
+            if !has_parent {
+                warn!("cannot leave FPS mode: camera is not parented to the player");
+                return;
+            }
+
+            let world_camera =
+                GlobalTransform::from(*player_transform).mul_transform(*camera_transform);
+            let (scale, rotation, translation) = world_camera.to_scale_rotation_translation();
+            let (yaw, pitch) = camera_angles(rotation);
+            fly_camera.yaw = yaw;
+            fly_camera.pitch = pitch;
+            camera_transform.translation = translation;
+            camera_transform.rotation = rotation;
+            camera_transform.scale = scale;
+            commands.entity(camera_entity).remove::<ChildOf>();
+            commands.entity(player_entity).despawn();
+            state.mode = CameraMode::Free;
+            state.player = None;
+            info!("camera mode: free camera (Tab to enter FPS player)");
+        }
+    }
+}
+
+pub(crate) fn fps_mouse_look(
+    mut mouse: MessageReader<MouseMotion>,
+    cursor_options: Single<&CursorOptions>,
+    state: Res<CameraModeState>,
+    mut players: Query<(&mut FpsPlayer, &mut Transform), Without<ChildOf>>,
+    mut cameras: Query<FpsCameraQuery<'_>, (With<Camera3d>, With<ChildOf>)>,
+) {
+    let delta = mouse
+        .read()
+        .fold(Vec2::ZERO, |sum, event| sum + event.delta);
+    if state.mode != CameraMode::Fps
+        || !matches!(cursor_options.grab_mode, CursorGrabMode::Locked)
+        || delta == Vec2::ZERO
+    {
+        return;
+    }
+
+    let Ok((mut player, mut player_transform)) = players.single_mut() else {
+        return;
+    };
+    let Ok((mut camera_transform, mut fly_camera)) = cameras.single_mut() else {
+        return;
+    };
+    player.yaw -= delta.x * MOUSE_SENSITIVITY;
+    player.pitch = (player.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-1.5, 1.5);
+    player_transform.rotation = Quat::from_rotation_y(player.yaw);
+    camera_transform.rotation = Quat::from_rotation_x(player.pitch);
+    fly_camera.yaw = player.yaw;
+    fly_camera.pitch = player.pitch;
+}
+
+fn apply_player_controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    state: Res<CameraModeState>,
+    mut players: Query<(&FpsPlayer, &mut TnuaController<ControlScheme>)>,
+) {
+    let Ok((player, mut controller)) = players.single_mut() else {
+        return;
+    };
+    controller.initiate_action_feeding();
+    if state.mode != CameraMode::Fps {
+        controller.basis = TnuaBuiltinWalk {
+            desired_motion: Vec3::ZERO,
+            ..default()
+        };
+        return;
+    }
+
+    let yaw = Quat::from_rotation_y(player.yaw);
+    let mut input = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        input -= Vec3::Z;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        input += Vec3::Z;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        input += Vec3::X;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        input -= Vec3::X;
+    }
+    controller.basis = TnuaBuiltinWalk {
+        desired_motion: (yaw * input).normalize_or_zero(),
+        ..default()
+    };
+    if keys.pressed(KeyCode::Space) {
+        controller.action(ControlScheme::Jump(Default::default()));
+    }
+}
+
+fn build_static_colliders(
+    mut commands: Commands,
+    meshes: Res<Assets<Mesh>>,
+    materials: Res<Assets<StandardMaterial>>,
+    mut state: ResMut<CameraModeState>,
+    mut stats: ResMut<StaticCollisionStats>,
+    query: Query<StaticCollisionQuery<'_>>,
+) {
+    for (entity, mesh_handle, name, material_handle, processed) in &query {
+        if processed.is_some() {
+            continue;
+        }
+
+        let name = name.map(|name| name.0.as_str()).unwrap_or("<unnamed>");
+        if is_non_collidable_name(name) {
+            commands.entity(entity).insert(SceneColliderProcessed);
+            stats.processed += 1;
+            stats.skipped += 1;
+            continue;
+        }
+
+        let Some(material) = materials.get(material_handle) else {
+            continue;
+        };
+        if !is_collidable_material(material) {
+            commands.entity(entity).insert(SceneColliderProcessed);
+            stats.processed += 1;
+            stats.skipped += 1;
+            continue;
+        }
+
+        let Some(mesh) = meshes.get(&mesh_handle.0) else {
+            continue;
+        };
+        let Some(collider) = Collider::trimesh_from_mesh(mesh) else {
+            commands.entity(entity).insert(SceneColliderProcessed);
+            stats.processed += 1;
+            stats.skipped += 1;
+            continue;
+        };
+        let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
+        commands
+            .entity(entity)
+            .insert((RigidBody::Static, collider, SceneColliderProcessed));
+        stats.processed += 1;
+        stats.built += 1;
+        stats.triangles += triangles;
+    }
+
+    state.collisions_ready = stats.built > 0;
+    if stats.processed > stats.last_reported_processed {
+        info!(
+            "scene collision build: {} colliders, {} triangles, {} skipped",
+            stats.built, stats.triangles, stats.skipped
+        );
+        stats.last_reported_processed = stats.processed;
+    }
+    if stats.processed > 0 && stats.built == 0 && !stats.no_geometry_reported {
+        warn!(
+            "scene collision build produced no usable static geometry; FPS mode remains unavailable (processed {}, skipped {})",
+            stats.processed, stats.skipped
+        );
+        stats.no_geometry_reported = true;
+    }
+}
+
+fn is_non_collidable_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "shadefade",
+        "fxglowsimplefill",
+        "editormarker",
+        "editor_marker",
+    ]
+    .iter()
+    .any(|excluded| name.contains(excluded))
+}
+
+fn is_collidable_material(material: &StandardMaterial) -> bool {
+    matches!(material.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_))
+        && material.emissive == LinearRgba::BLACK
+        && material.emissive_texture.is_none()
+}
+
+fn camera_angles(rotation: Quat) -> (f32, f32) {
+    let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
+    (yaw, pitch.clamp(-1.5, 1.5))
+}
+
+fn tab_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::Tab)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avian3d::math::Vector;
+    use bevy::mesh::MeshPlugin;
+    use bevy::time::TimeUpdateStrategy;
+    use std::time::Duration;
+
+    #[test]
+    fn camera_angle_round_trip_preserves_yaw_and_pitch() {
+        let yaw = 0.73;
+        let pitch = -0.41;
+        let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+        let (actual_yaw, actual_pitch) = camera_angles(rotation);
+        assert!((actual_yaw - yaw).abs() < 0.0001);
+        assert!((actual_pitch - pitch).abs() < 0.0001);
+    }
+
+    #[test]
+    fn capsule_center_offset_places_eye_at_requested_height() {
+        let center_offset = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
+        assert!((center_offset - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effect_mesh_names_are_not_collidable() {
+        assert!(is_non_collidable_name("FXGlowSimpleFill:mesh"));
+        assert!(is_non_collidable_name("EditorMarker"));
+        assert!(!is_non_collidable_name("WasteRmTallCorner01"));
+    }
+
+    #[test]
+    fn tab_toggle_is_edge_triggered() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        assert!(!tab_pressed(&keys));
+        keys.press(KeyCode::Tab);
+        assert!(tab_pressed(&keys));
+        keys.clear();
+        assert!(!tab_pressed(&keys));
+    }
+
+    #[test]
+    fn emissive_and_translucent_materials_are_not_collidable() {
+        let emissive = StandardMaterial {
+            emissive: LinearRgba::WHITE,
+            ..default()
+        };
+        assert!(!is_collidable_material(&emissive));
+
+        let translucent = StandardMaterial {
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        };
+        assert!(!is_collidable_material(&translucent));
+        assert!(is_collidable_material(&StandardMaterial::default()));
+    }
+
+    #[test]
+    fn avian_capsule_falls_and_lands_on_static_floor() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            AssetPlugin::default(),
+            MeshPlugin,
+            PhysicsPlugins::default(),
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            1.0 / 60.0,
+        )));
+        app.finish();
+        assert!(
+            app.world().contains_resource::<Messages<CollisionStart>>(),
+            "Avian collision messages should be initialized"
+        );
+        let player = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT - CAPSULE_RADIUS * 2.0),
+                Position(Vector::new(0.0, 5.0, 0.0)),
+                LockedAxes::ROTATION_LOCKED,
+            ))
+            .id();
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(20.0, 1.0, 20.0),
+            Position(Vector::ZERO),
+        ));
+
+        for _ in 0..180 {
+            app.update();
+        }
+
+        let position = app
+            .world()
+            .get::<Position>(player)
+            .expect("the dynamic body has a physics position")
+            .0;
+        assert!(position.y < 5.0);
+        assert!(position.y > 0.5);
+    }
+}

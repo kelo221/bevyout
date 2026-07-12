@@ -44,9 +44,12 @@ pub(crate) struct PrepareArgs {
     /// Output cache directory.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Rebuild assets even when the cache key is unchanged.
+    /// Refresh the manifest and scene metadata.
     #[arg(long)]
     pub(crate) force: bool,
+    /// Rebuild cached NIF-to-GLB assets even when the cache key is unchanged.
+    #[arg(long)]
+    pub(crate) rebuild_assets: bool,
     /// Fail instead of recording recoverable asset diagnostics.
     #[arg(long)]
     pub(crate) strict: bool,
