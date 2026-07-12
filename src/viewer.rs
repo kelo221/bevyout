@@ -45,10 +45,19 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
     let asset_root = PathBuf::from(&manifest.asset_root);
     let mut app = App::new();
     app.add_plugins((
-        DefaultPlugins.set(AssetPlugin {
-            file_path: asset_root.to_string_lossy().to_string(),
-            ..default()
-        }),
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    resolution: (1280, 720).into(),
+                    focused: true,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: asset_root.to_string_lossy().to_string(),
+                ..default()
+            }),
         FrameTimeDiagnosticsPlugin::default(),
         AutoExposurePlugin,
     ));
