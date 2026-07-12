@@ -12,7 +12,7 @@ use super::paths::{fingerprint, normalize_asset_path};
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v11-fo3-scale-1-70-quick-ao-color0";
+    "niftools-blender52-textures-v12-specular-alpha-fo3-scale-1-70-quick-ao-color0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetConversion {
@@ -400,6 +400,13 @@ for job in jobs:
             normal_map = tree.nodes.new('ShaderNodeNormalMap')
             tree.links.new(normal.outputs['Color'], normal_map.inputs['Color'])
             tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+            # Fallout's normal maps store the authored specular strength in
+            # alpha. Keep the RGB normal data and export the same image as the
+            # glTF KHR_materials_specular scalar texture.
+            specular_input = principled.inputs.get('Specular IOR Level')
+            normal_alpha = normal.outputs.get('Alpha')
+            if specular_input is not None and normal_alpha is not None:
+                tree.links.new(normal_alpha, specular_input)
         for link in list(output.inputs['Surface'].links): tree.links.remove(link)
         tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
     for mesh in bpy.data.meshes:
