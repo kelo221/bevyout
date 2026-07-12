@@ -243,7 +243,7 @@ def import_placements(job):
             imported = []
             for obj in sorted((obj for obj in imported_all if obj.type == "MESH"),
                               key=lambda obj: obj.name):
-                if is_non_rendering_object(obj):
+                if is_non_rendering_object(obj) and not obj.get("bevyout_collision", False):
                     excluded += 1
                     continue
                 imported.append(obj)
@@ -275,6 +275,9 @@ def import_placements(job):
 
 def render_preview(job, objects):
     scene = bpy.context.scene
+    for obj, _, _ in objects:
+        if obj.get("bevyout_collision", False):
+            obj.hide_render = True
     scene.render.engine = "BLENDER_EEVEE"
     # Eevee's screen-space ray tracing and Fast GI are useful for a quick
     # lighting read, but they are intentionally preview-only: off-screen
@@ -533,7 +536,7 @@ def main(job_path):
         bpy.data.images.remove(image)
     bpy.ops.export_scene.gltf(filepath=job["output_scene"], export_format="GLB",
                               export_materials="EXPORT", export_image_format="AUTO",
-                              export_apply=True)
+                              export_apply=True, export_extras=True)
     stage("scene export")
     with open(job["result_json"], "w", encoding="utf8") as stream:
         json.dump({"bindings": bindings}, stream, indent=2)

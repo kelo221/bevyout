@@ -21,6 +21,9 @@ data, preparation, and runtime code. Expose only a narrow command/plugin API
 to `main.rs`. Prefer Bevy `Plugin` values for new runtime feature groups
 instead of growing `main.rs` or one large startup system.
 
+## OpenMW
+If any code is ported from OpenMW to Rust it must be placed in the isolated to folder.
+
 ## Local Bevy documentation
 
 Use `BevyDocs/` as the local API and architecture reference before relying on

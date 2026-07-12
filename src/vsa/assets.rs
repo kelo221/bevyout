@@ -12,7 +12,7 @@ use super::paths::{fingerprint, normalize_asset_path};
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v12-specular-alpha-fo3-scale-1-70-quick-ao-color0";
+    "niftools-blender52-textures-v12-specular-alpha-fo3-scale-1-70-quick-ao-color0-havok-extras-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetConversion {
@@ -240,7 +240,7 @@ pub(crate) fn run_blender_batch(
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
-    from io_scene_niftools.nif_import import NifImport
+    from io_scene_niftools.modules.nif_import.collision import Collision, get_material
     from io_scene_niftools.modules.nif_import.collision.bound import Bound
     from io_scene_niftools.modules.nif_import.property.material import Material
     from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
@@ -256,9 +256,40 @@ def patch_niftools_blender52():
         b_texture_node.label = 'Normal'
     Vertex.map_normals = staticmethod(map_normals_compat)
     NodesWrapper.link_normal_node = link_normal_node_compat
-    # Collision meshes are not needed by the Bevy static scene and the
-    # addon's Blender 4-era rigid-body override call is rejected by Blender 5.
-    NifImport.import_collision = lambda self, n_node: []
+    # Keep authored collision geometry. The addon uses a Blender 4-era context
+    # override which Blender 5 rejects; temp_override is the supported form.
+    def set_b_collider_compat(b_obj, radius, n_obj=None, bounds_type='BOX', display_type='BOX'):
+        b_obj.show_bounds = True
+        b_obj.display_type = 'BOUNDS'
+        b_obj.display_bounds_type = display_type
+        bpy.context.view_layer.objects.active = b_obj
+        bpy.ops.object.select_all(action='DESELECT')
+        b_obj.select_set(True)
+        with bpy.context.temp_override(
+            active_object=b_obj,
+            object=b_obj,
+            selected_objects=[b_obj],
+            selected_editable_objects=[b_obj],
+        ):
+            bpy.ops.rigidbody.object_add()
+        b_r_body = b_obj.rigid_body
+        b_r_body.enabled = True
+        b_r_body.use_margin = True
+        b_r_body.collision_margin = radius
+        b_r_body.collision_shape = bounds_type
+        b_r_body.type = 'PASSIVE'
+        b_obj['bevyout_collision'] = True
+        if n_obj is not None:
+            havok_material = getattr(n_obj, 'material', None)
+            material_enum = getattr(havok_material, 'material', None)
+            if material_enum is not None:
+                material_id = getattr(material_enum, 'value', None)
+                material_name = getattr(material_enum, 'name', str(material_enum))
+                if material_id is not None:
+                    b_obj['bevyout_havok_material'] = int(material_id)
+                b_obj['bevyout_havok_material_name'] = material_name
+                b_obj.data.materials.append(get_material(material_name))
+    Collision.set_b_collider = staticmethod(set_b_collider_compat)
     Bound.import_bounding_box = lambda self, n_block: []
     def set_alpha_compat(b_mat, n_alpha_prop):
         # Blender 4.2+ removed Material.blend_method/shadow_method. Keep the
@@ -271,7 +302,8 @@ def patch_niftools_blender52():
     VertexGroup.set_face_maps = classmethod(lambda cls, face_maps, b_obj: None)
 def bake_quick_ao():
     objects = [obj for obj in bpy.context.scene.objects
-               if obj.type == 'MESH' and len(obj.data.polygons)]
+        if obj.type == 'MESH' and len(obj.data.polygons)
+               and not obj.get('bevyout_collision', False)]
     if not objects:
         return
     scene = bpy.context.scene
@@ -323,14 +355,23 @@ for job in jobs:
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
+    authored_collision = any(obj.get('bevyout_collision', False)
+                             for obj in bpy.context.scene.objects)
     for obj in list(bpy.context.scene.objects):
-        if obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
+        if obj.get('bevyout_collision', False):
+            obj.hide_render = False
+            obj.hide_viewport = False
+        elif obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
         elif obj.type == 'MESH' and not any(
             material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
             for material in obj.data.materials
         ):
             # NIF collision/helper meshes have no texture and should not be rendered.
             bpy.data.objects.remove(obj, do_unlink=True)
+    if authored_collision:
+        for obj in bpy.context.scene.objects:
+            if obj.type == 'MESH' and not obj.get('bevyout_collision', False):
+                obj['bevyout_collision_source'] = 'authored'
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:
@@ -417,7 +458,7 @@ for job in jobs:
             mesh.color_attributes.active_color_index = 0
             mesh.color_attributes.render_color_index = 0
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False)
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_extras=True)
 "#;
     let result = Command::new(blender)
         .arg("--background")

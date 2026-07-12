@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::audio::{PlaybackMode, Volume};
 use bevy::prelude::*;
 
-use crate::vsa::{PreparedAudioClip, PreparedSceneManifest};
+use crate::vsa::{PreparedAudioClip, PreparedFootstepSet, PreparedSceneManifest};
 
 const LISTENER_EAR_GAP_METERS: f32 = 0.2;
 
@@ -15,6 +15,13 @@ const LISTENER_EAR_GAP_METERS: f32 = 0.2;
 pub(crate) struct PlaySound {
     pub(crate) form_id: u32,
     pub(crate) position: Option<Vec3>,
+}
+
+#[derive(Message, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlayFootstep {
+    pub(crate) surface: String,
+    pub(crate) right: bool,
+    pub(crate) variant: usize,
 }
 
 impl PlaySound {
@@ -32,7 +39,15 @@ struct AudioClipCatalog {
 }
 
 #[derive(Resource, Default)]
+struct FootstepCatalog {
+    sets: HashMap<String, PreparedFootstepSet>,
+}
+
+#[derive(Resource, Default)]
 struct ReportedMissingClips(HashSet<u32>);
+
+#[derive(Resource, Default)]
+struct ReportedMissingFootsteps(HashSet<String>);
 
 #[derive(Component)]
 struct CellAmbientLoop;
@@ -45,10 +60,20 @@ struct PlacementLoop {
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<AudioClipCatalog>()
+        .init_resource::<FootstepCatalog>()
         .init_resource::<ReportedMissingClips>()
+        .init_resource::<ReportedMissingFootsteps>()
         .add_message::<PlaySound>()
+        .add_message::<PlayFootstep>()
         .add_systems(Startup, build_catalog_and_spawn_loops)
-        .add_systems(Update, (ensure_single_listener, play_requested_sounds));
+        .add_systems(
+            Update,
+            (
+                ensure_single_listener,
+                play_requested_sounds,
+                play_requested_footsteps,
+            ),
+        );
 }
 
 fn build_catalog_and_spawn_loops(
@@ -56,6 +81,7 @@ fn build_catalog_and_spawn_loops(
     asset_server: Res<AssetServer>,
     manifest: Res<PreparedSceneManifest>,
     mut catalog: ResMut<AudioClipCatalog>,
+    mut footstep_catalog: ResMut<FootstepCatalog>,
     mut reported_missing: ResMut<ReportedMissingClips>,
 ) {
     catalog.clips.clear();
@@ -67,6 +93,12 @@ fn build_catalog_and_spawn_loops(
             );
         }
     }
+    footstep_catalog.sets = manifest
+        .footstep_sets
+        .iter()
+        .cloned()
+        .map(|set| (set.surface.clone(), set))
+        .collect();
 
     for form_id in &manifest.cell_audio.ambient_loop_sound_form_ids {
         if let Some(entity) = spawn_catalog_sound(
@@ -152,6 +184,48 @@ fn play_requested_sounds(
             PlaybackMode::Despawn,
             request.position.is_none(),
         );
+    }
+}
+
+fn play_requested_footsteps(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    catalog: Res<FootstepCatalog>,
+    mut reported_missing: ResMut<ReportedMissingFootsteps>,
+    mut requests: MessageReader<PlayFootstep>,
+) {
+    for request in requests.read() {
+        let set = catalog
+            .sets
+            .get(&request.surface)
+            .or_else(|| catalog.sets.get("concrete"));
+        let Some(set) = set else {
+            if reported_missing.0.insert(request.surface.clone()) {
+                warn!("no prepared footstep set for surface {}", request.surface);
+            }
+            continue;
+        };
+        let clips = if request.right { &set.right } else { &set.left };
+        let Some(asset_path) = clips
+            .get(request.variant % clips.len().max(1))
+            .filter(|path| !path.is_empty())
+        else {
+            if reported_missing.0.insert(request.surface.clone()) {
+                warn!(
+                    "prepared footstep set {} has no usable clips",
+                    request.surface
+                );
+            }
+            continue;
+        };
+        commands.spawn((
+            AudioPlayer::new(asset_server.load(asset_path.clone())),
+            PlaybackSettings {
+                mode: PlaybackMode::Despawn,
+                spatial: false,
+                ..default()
+            },
+        ));
     }
 }
 

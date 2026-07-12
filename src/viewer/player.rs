@@ -1,6 +1,6 @@
 use avian3d::prelude::*;
 use bevy::color::LinearRgba;
-use bevy::gltf::GltfMeshName;
+use bevy::gltf::{GltfExtras, GltfMeshName};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
@@ -11,8 +11,10 @@ use bevy_tnua::builtins::{
 };
 use bevy_tnua::prelude::*;
 use bevy_tnua_avian3d::prelude::*;
+use serde::Deserialize;
 
 use super::FlyCamera;
+use super::audio::PlayFootstep;
 
 pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
 pub(crate) const CAPSULE_HEIGHT: f32 = 1.8;
@@ -21,6 +23,7 @@ const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
 const JUMP_HEIGHT: f32 = 1.2;
 const MOUSE_SENSITIVITY: f32 = 0.002;
+const FOOTSTEP_DISTANCE: f32 = 1.45;
 
 #[derive(TnuaScheme)]
 #[scheme(basis = TnuaBuiltinWalk)]
@@ -60,6 +63,36 @@ pub(crate) struct FpsPlayer {
 #[derive(Component)]
 struct SceneColliderProcessed;
 
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FootstepSurface(pub(crate) Option<u32>);
+
+#[derive(Component, Debug)]
+struct FootstepState {
+    last_position: Vec3,
+    distance: f32,
+    step_index: usize,
+    initialized: bool,
+}
+
+impl Default for FootstepState {
+    fn default() -> Self {
+        Self {
+            last_position: Vec3::ZERO,
+            distance: 0.0,
+            step_index: 0,
+            initialized: false,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CollisionExtras {
+    #[serde(default)]
+    bevyout_collision: bool,
+    #[serde(default)]
+    bevyout_havok_material: Option<u32>,
+}
+
 #[derive(Resource, Default)]
 struct StaticCollisionStats {
     processed: usize,
@@ -76,7 +109,9 @@ type StaticCollisionQuery<'w> = (
     Entity,
     &'w Mesh3d,
     Option<&'w GltfMeshName>,
-    &'w MeshMaterial3d<StandardMaterial>,
+    Option<&'w MeshMaterial3d<StandardMaterial>>,
+    Option<&'w GltfExtras>,
+    Option<&'w ChildOf>,
     Option<&'w SceneColliderProcessed>,
 );
 
@@ -92,7 +127,8 @@ pub(crate) fn install(app: &mut App) {
     .add_systems(
         FixedUpdate,
         apply_player_controls.in_set(TnuaUserControlsSystems),
-    );
+    )
+    .add_systems(Update, emit_footsteps.after(build_static_colliders));
 }
 
 pub(crate) fn toggle_camera_mode(
@@ -134,6 +170,7 @@ pub(crate) fn toggle_camera_mode(
             let player = commands
                 .spawn((
                     FpsPlayer { yaw, pitch },
+                    FootstepState::default(),
                     Transform::from_translation(player_center)
                         .with_rotation(Quat::from_rotation_y(yaw)),
                     RigidBody::Dynamic,
@@ -276,13 +313,41 @@ fn build_static_colliders(
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<StaticCollisionStats>,
     query: Query<StaticCollisionQuery<'_>>,
+    parents: Query<&GltfExtras>,
 ) {
-    for (entity, mesh_handle, name, material_handle, processed) in &query {
+    for (entity, mesh_handle, name, material_handle, extras, child_of, processed) in &query {
         if processed.is_some() {
             continue;
         }
 
         let name = name.map(|name| name.0.as_str()).unwrap_or("<unnamed>");
+        let extras = extras
+            .or_else(|| child_of.and_then(|child| parents.get(child.0).ok()))
+            .and_then(parse_collision_extras);
+        if let Some(extras) = extras.as_ref().filter(|extras| extras.bevyout_collision) {
+            let Some(mesh) = meshes.get(&mesh_handle.0) else {
+                continue;
+            };
+            let Some(collider) = Collider::trimesh_from_mesh(mesh) else {
+                commands.entity(entity).insert(SceneColliderProcessed);
+                stats.processed += 1;
+                stats.skipped += 1;
+                continue;
+            };
+            let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
+            commands.entity(entity).insert((
+                RigidBody::Static,
+                Sensor,
+                collider,
+                FootstepSurface(extras.bevyout_havok_material),
+                Visibility::Hidden,
+                SceneColliderProcessed,
+            ));
+            stats.processed += 1;
+            stats.built += 1;
+            stats.triangles += triangles;
+            continue;
+        }
         if is_non_collidable_name(name) {
             commands.entity(entity).insert(SceneColliderProcessed);
             stats.processed += 1;
@@ -290,7 +355,13 @@ fn build_static_colliders(
             continue;
         }
 
-        let Some(material) = materials.get(material_handle) else {
+        let Some(material_handle) = material_handle else {
+            commands.entity(entity).insert(SceneColliderProcessed);
+            stats.processed += 1;
+            stats.skipped += 1;
+            continue;
+        };
+        let Some(material) = materials.get(&material_handle.0) else {
             continue;
         };
         if !is_collidable_material(material) {
@@ -310,9 +381,12 @@ fn build_static_colliders(
             continue;
         };
         let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
-        commands
-            .entity(entity)
-            .insert((RigidBody::Static, collider, SceneColliderProcessed));
+        commands.entity(entity).insert((
+            RigidBody::Static,
+            collider,
+            FootstepSurface(None),
+            SceneColliderProcessed,
+        ));
         stats.processed += 1;
         stats.built += 1;
         stats.triangles += triangles;
@@ -332,6 +406,96 @@ fn build_static_colliders(
             stats.processed, stats.skipped
         );
         stats.no_geometry_reported = true;
+    }
+}
+
+fn parse_collision_extras(extras: &GltfExtras) -> Option<CollisionExtras> {
+    serde_json::from_str::<CollisionExtras>(&extras.value).ok()
+}
+
+fn emit_footsteps(
+    state: Res<CameraModeState>,
+    spatial_query: SpatialQuery,
+    surfaces: Query<&FootstepSurface>,
+    mut footsteps: MessageWriter<PlayFootstep>,
+    mut players: Query<(Entity, &Transform, &LinearVelocity, &mut FootstepState), With<FpsPlayer>>,
+) {
+    let Ok((entity, transform, velocity, mut footstep)) = players.single_mut() else {
+        return;
+    };
+    if state.mode != CameraMode::Fps {
+        footstep.initialized = false;
+        footstep.distance = 0.0;
+        return;
+    }
+    let position = transform.translation;
+    if !footstep.initialized {
+        footstep.last_position = position;
+        footstep.initialized = true;
+        return;
+    }
+    let delta = position - footstep.last_position;
+    footstep.last_position = position;
+
+    let origin = position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06);
+    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+    let hits = spatial_query.ray_hits(origin, Dir3::NEG_Y, 0.24, 16, true, &filter);
+    let authored_hit = hits.iter().filter(|hit| {
+        surfaces
+            .get(hit.entity)
+            .is_ok_and(|surface| surface.0.is_some())
+    });
+    let Some(hit) = authored_hit
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+        .or_else(|| {
+            hits.iter()
+                .min_by(|left, right| left.distance.total_cmp(&right.distance))
+        })
+    else {
+        footstep.distance = 0.0;
+        return;
+    };
+    if velocity.0.y.abs() > 2.5 {
+        footstep.distance = 0.0;
+        return;
+    }
+
+    let horizontal_delta = Vec3::new(delta.x, 0.0, delta.z).length();
+    if horizontal_delta <= f32::EPSILON {
+        return;
+    }
+    footstep.distance += horizontal_delta;
+    let surface = surfaces
+        .get(hit.entity)
+        .map_or("concrete", |surface| surface_family(surface.0));
+    while footstep.distance >= FOOTSTEP_DISTANCE {
+        footstep.distance -= FOOTSTEP_DISTANCE;
+        footsteps.write(PlayFootstep {
+            surface: surface.into(),
+            right: footstep.step_index % 2 == 1,
+            variant: footstep.step_index / 2,
+        });
+        footstep.step_index = footstep.step_index.wrapping_add(1);
+    }
+}
+
+fn surface_family(material: Option<u32>) -> &'static str {
+    let Some(material) = material else {
+        return "concrete";
+    };
+    match material % 32 {
+        2 => "dirt",
+        4 => "grass",
+        5 | 11 | 13 | 14 | 15 | 20 | 21 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 => {
+            "metal_solid"
+        }
+        8 => "water",
+        9 | 12 => "wood",
+        16 => "metal_hollow",
+        17 => "metal_sheet",
+        18 => "gravel",
+        19 => "concrete_broken",
+        _ => "concrete",
     }
 }
 
@@ -417,6 +581,30 @@ mod tests {
         };
         assert!(!is_collidable_material(&translucent));
         assert!(is_collidable_material(&StandardMaterial::default()));
+    }
+
+    #[test]
+    fn havok_material_ids_map_to_footstep_families_across_variants() {
+        assert_eq!(surface_family(Some(0)), "concrete");
+        assert_eq!(surface_family(Some(34)), "dirt");
+        assert_eq!(surface_family(Some(69)), "metal_solid");
+        assert_eq!(surface_family(Some(81)), "metal_sheet");
+        assert_eq!(surface_family(Some(115)), "concrete_broken");
+        assert_eq!(surface_family(None), "concrete");
+    }
+
+    #[test]
+    fn collision_extras_parse_material() {
+        let extras = GltfExtras {
+            value: r#"{
+                "bevyout_collision": true,
+                "bevyout_havok_material": 73
+            }"#
+            .into(),
+        };
+        let parsed = parse_collision_extras(&extras).unwrap();
+        assert!(parsed.bevyout_collision);
+        assert_eq!(parsed.bevyout_havok_material, Some(73));
     }
 
     #[test]

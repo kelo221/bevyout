@@ -158,6 +158,12 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         &mut diagnostics,
         &cache_dir.join("audio"),
     )?;
+    let footstep_sets = stage_footsteps(
+        &data_root,
+        &audio_archive_load.archives,
+        &mut diagnostics,
+        &cache_dir.join("audio"),
+    )?;
     if let Some(metadata) = parsed.cell_metadata.as_ref() {
         cell.lighting_template_form_id = metadata.lighting_template_form_id;
         cell.lighting_template_flags = metadata.lighting_template_flags;
@@ -425,7 +431,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
     }
 
     let manifest = PreparedSceneManifest {
-        schema_version: 5,
+        schema_version: 6,
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
         source_fingerprint,
@@ -437,6 +443,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         navmeshes,
         cell_audio,
         audio_clips,
+        footstep_sets,
         bake: None,
     };
     let manifest_path = scene_dir.join("scene.ron");
@@ -668,6 +675,56 @@ fn stage_audio(
         clips.push(clip);
     }
     Ok((cell_audio, clips))
+}
+
+fn stage_footsteps(
+    data_root: &Path,
+    archives: &[super::audio_assets::AudioArchive],
+    diagnostics: &mut Vec<Diagnostic>,
+    audio_dir: &Path,
+) -> Result<Vec<super::manifest::PreparedFootstepSet>> {
+    const FAMILIES: &[(&str, &str)] = &[
+        ("concrete", "conc_solid"),
+        ("concrete_broken", "conc_broken"),
+        ("dirt", "dirt"),
+        ("grass", "grass"),
+        ("gravel", "gravel"),
+        ("wood", "wood"),
+        ("water", "water"),
+        ("metal_solid", "metal_solid"),
+        ("metal_hollow", "metal_hollow"),
+        ("metal_sheet", "metal_sheet"),
+    ];
+    let mut sets = Vec::with_capacity(FAMILIES.len());
+    for &(surface, archive_family) in FAMILIES {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for (side, output, indices) in [("left", &mut left, 1..=3), ("right", &mut right, 4..=6)] {
+            for index in indices {
+                let path = format!(
+                    "sound/fx/fst/{archive_family}/walk/{side}/fst_{archive_family}_walk_{index:02}.wav"
+                );
+                match super::audio_assets::resolve_audio_asset(data_root, archives, &path)? {
+                    Some(asset) => {
+                        let staged = super::audio_assets::stage_audio_asset(&asset, audio_dir)?;
+                        output.push(relative_cache_path(audio_dir, &staged.path));
+                    }
+                    None => diagnostics.push(Diagnostic {
+                        severity: "info".into(),
+                        message: format!("missing native footstep clip {path}"),
+                    }),
+                }
+            }
+        }
+        if !left.is_empty() || !right.is_empty() {
+            sets.push(super::manifest::PreparedFootstepSet {
+                surface: surface.into(),
+                left,
+                right,
+            });
+        }
+    }
+    Ok(sets)
 }
 
 fn relative_cache_path(root: &Path, path: &Path) -> String {

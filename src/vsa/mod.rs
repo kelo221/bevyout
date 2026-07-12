@@ -11,7 +11,8 @@ mod prepare;
 pub(crate) use bake::{bake, is_bake_static};
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
-    PreparedInventoryEntry, PreparedPlacement, PreparedSceneManifest, PreparedSemantic,
+    PreparedFootstepSet, PreparedInventoryEntry, PreparedPlacement, PreparedSceneManifest,
+    PreparedSemantic,
 };
 pub(crate) use paths::FO3_SCALE;
 pub(crate) use prepare::prepare;

@@ -21,6 +21,8 @@ pub(crate) struct PreparedSceneManifest {
     #[serde(default)]
     pub(crate) audio_clips: Vec<PreparedAudioClip>,
     #[serde(default)]
+    pub(crate) footstep_sets: Vec<PreparedFootstepSet>,
+    #[serde(default)]
     pub(crate) bake: Option<PreparedBake>,
 }
 
@@ -324,6 +326,13 @@ pub(crate) struct PreparedAudioClip {
     pub(crate) static_attenuation_hundredths_db: u16,
     pub(crate) looping: bool,
     pub(crate) is_2d: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedFootstepSet {
+    pub(crate) surface: String,
+    pub(crate) left: Vec<String>,
+    pub(crate) right: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
