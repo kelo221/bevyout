@@ -17,6 +17,7 @@ use super::FlyCamera;
 pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
 pub(crate) const CAPSULE_HEIGHT: f32 = 1.8;
 pub(crate) const EYE_HEIGHT: f32 = 1.6;
+const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
 const JUMP_HEIGHT: f32 = 1.2;
 const MOUSE_SENSITIVITY: f32 = 0.002;
@@ -129,8 +130,7 @@ pub(crate) fn toggle_camera_mode(
             let (yaw, pitch) = camera_angles(camera_transform.rotation);
             fly_camera.yaw = yaw;
             fly_camera.pitch = pitch;
-            let player_center =
-                camera_transform.translation - Vec3::Y * (EYE_HEIGHT - CAPSULE_HEIGHT * 0.5);
+            let player_center = camera_transform.translation - Vec3::Y * CAMERA_LOCAL_HEIGHT;
             let player = commands
                 .spawn((
                     FpsPlayer { yaw, pitch },
@@ -156,7 +156,9 @@ pub(crate) fn toggle_camera_mode(
                 ))
                 .id();
 
-            camera_transform.translation = Vec3::new(0.0, EYE_HEIGHT, 0.0);
+            // EYE_HEIGHT is measured from the ground; the camera is parented
+            // to the capsule center, so use the eye-to-center offset locally.
+            camera_transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
             camera_transform.rotation = Quat::from_rotation_x(pitch);
             commands.entity(camera_entity).insert(ChildOf(player));
             state.mode = CameraMode::Fps;
@@ -380,8 +382,8 @@ mod tests {
 
     #[test]
     fn capsule_center_offset_places_eye_at_requested_height() {
-        let center_offset = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
-        assert!((center_offset - 0.7).abs() < f32::EPSILON);
+        assert!((CAMERA_LOCAL_HEIGHT - 0.7).abs() < f32::EPSILON);
+        assert!((CAPSULE_HEIGHT * 0.5 + CAMERA_LOCAL_HEIGHT - EYE_HEIGHT).abs() < f32::EPSILON);
     }
 
     #[test]
