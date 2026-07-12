@@ -1,0 +1,50 @@
+diagnostic_path,suffix,value,average,history_len
+render/auto_exposure/elapsed_cpu,ms,0.002800,0.002799,120
+render/auto_exposure/elapsed_gpu,ms,0.051200,0.051618,120
+render/bin_unpacking/compute_shader_invocations,,768.000000,768.000000,120
+render/bin_unpacking/elapsed_cpu,ms,0.004300,0.004168,120
+render/bin_unpacking/elapsed_gpu,ms,0.034816,0.036634,120
+render/bloom/elapsed_cpu,ms,0.065100,0.079117,120
+render/bloom/elapsed_gpu,ms,0.189440,0.190217,120
+render/clustering/elapsed_cpu,ms,0.016700,0.016699,120
+render/clustering/elapsed_gpu,ms,0.158720,0.160725,120
+render/early prepass/clipper_invocations,,29009.000000,28904.575000,120
+render/early prepass/clipper_primitives_out,,16647.000000,16632.916667,120
+render/early prepass/elapsed_cpu,ms,0.016700,0.014645,120
+render/early prepass/elapsed_gpu,ms,0.489472,0.562236,120
+render/early prepass/fragment_shader_invocations,,762769.000000,778503.133333,120
+render/early prepass/vertex_shader_invocations,,56516.000000,56234.216667,120
+render/early_mesh_preprocessing/compute_shader_invocations,,512.000000,512.000000,120
+render/early_mesh_preprocessing/elapsed_cpu,ms,0.002600,0.002785,120
+render/early_mesh_preprocessing/elapsed_gpu,ms,0.028672,0.027383,120
+render/late prepass/clipper_invocations,,0.000000,0.000000,120
+render/late prepass/clipper_primitives_out,,0.000000,0.000000,120
+render/late prepass/elapsed_cpu,ms,0.011400,0.009800,120
+render/late prepass/elapsed_gpu,ms,0.003072,0.002688,120
+render/late prepass/fragment_shader_invocations,,0.000000,0.000000,120
+render/late prepass/vertex_shader_invocations,,0.000000,0.000000,120
+render/late_mesh_preprocessing/compute_shader_invocations,,5.000000,5.000000,120
+render/late_mesh_preprocessing/elapsed_cpu,ms,0.005700,0.003029,120
+render/late_mesh_preprocessing/elapsed_gpu,ms,0.063488,0.064691,120
+render/main_opaque_pass_3d/clipper_invocations,,29009.000000,28904.575000,120
+render/main_opaque_pass_3d/clipper_primitives_out,,16647.000000,16632.916667,120
+render/main_opaque_pass_3d/elapsed_cpu,ms,0.009900,0.011422,120
+render/main_opaque_pass_3d/elapsed_gpu,ms,1.920000,1.811755,120
+render/main_opaque_pass_3d/fragment_shader_invocations,,1270203.000000,1270401.116667,120
+render/main_opaque_pass_3d/vertex_shader_invocations,,56516.000000,56234.216667,120
+render/main_transparent_pass_3d/clipper_invocations,,36.000000,36.000000,120
+render/main_transparent_pass_3d/clipper_primitives_out,,0.000000,32.158333,120
+render/main_transparent_pass_3d/elapsed_cpu,ms,0.005400,0.004274,120
+render/main_transparent_pass_3d/elapsed_gpu,ms,0.004096,0.019499,120
+render/main_transparent_pass_3d/fragment_shader_invocations,,0.000000,772.858333,120
+render/main_transparent_pass_3d/vertex_shader_invocations,,35.000000,35.000000,120
+render/tonemapping/elapsed_cpu,ms,0.001900,0.002150,120
+render/tonemapping/elapsed_gpu,ms,0.032768,0.032307,120
+render/ui/clipper_invocations,,136.000000,136.200000,120
+render/ui/clipper_primitives_out,,136.000000,136.200000,120
+render/ui/elapsed_cpu,ms,0.004300,0.004493,120
+render/ui/elapsed_gpu,ms,0.012288,0.010999,120
+render/ui/fragment_shader_invocations,,9001.000000,9022.700000,120
+render/ui/vertex_shader_invocations,,272.000000,272.400000,120
+render/upscaling/elapsed_cpu,ms,0.001100,0.001619,120
+render/upscaling/elapsed_gpu,ms,0.022528,0.022417,120

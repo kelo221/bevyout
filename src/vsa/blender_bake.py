@@ -42,6 +42,11 @@ def clear_scene():
 def set_emission_scale(material, scale):
     if not material or not material.use_nodes:
         return
+    # A physical bulb promoted from a LightGlow card must remain bright at
+    # runtime.  The regular emission scale is only for static bake lighting;
+    # applying it to the bulb would remove the HDR value that drives Bloom.
+    if material.get("bevyout_emissive_bulb", False):
+        return
     for node in material.node_tree.nodes:
         if node.bl_idname != "ShaderNodeBsdfPrincipled":
             continue

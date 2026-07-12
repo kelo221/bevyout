@@ -70,6 +70,22 @@ cargo test
 
 Generated extracted game data and GLBs live under `.bevyout/`, which is ignored by git.
 
+## CodeGraph documentation indexing
+
+The checked-in `codegraph.json` maps `.md` and `.markdown` files to CodeGraph's
+file-level YAML tracker. This keeps Markdown out of the Rust symbol graph while
+making documentation visible in CodeGraph's indexed file tree:
+
+```powershell
+codegraph index .
+codegraph files --path . --pattern '*.md' --format flat
+```
+
+The mapping is intentionally file-level: Markdown headings and prose are not
+treated as Rust/YAML symbols, and CodeGraph deliberately does not print
+configuration/data-file values. Use the normal file search tools for full-text
+search or reading inside a document.
+
 ## VSA boundaries
 
 The project follows Vertical Slice Architecture (VSA):

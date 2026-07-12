@@ -1,0 +1,9 @@
+[bevy](../../index.html)::[ui\_render](../index.html)::[shader\_flags](index.html)
+
+# Constant FILL\_START 
+
+[Source](https://docs.rs/bevy_ui_render/0.19.0/x86_64-unknown-linux-gnu/src/bevy_ui_render/lib.rs.html#1500)
+
+```rust
+pub const FILL_START: u32 = 32; // 32u32
+```

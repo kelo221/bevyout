@@ -5,6 +5,7 @@ use bevy::color::LinearRgba;
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::math::{Rect, cubic_splines::LinearSpline, vec2};
@@ -16,13 +17,14 @@ use bevy::post_process::auto_exposure::{
 };
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 use bevy::render::occlusion_culling::OcclusionCulling;
 use bevy::render::view::ColorGrading;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::ViewArgs;
 use crate::vsa::{
@@ -38,12 +40,14 @@ mod player;
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
+const RENDER_REPORT_HISTORY: usize = 600;
 
 pub(crate) fn view(args: ViewArgs) -> Result<()> {
     let manifest_path = fs::canonicalize(&args.manifest).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
     let asset_root = PathBuf::from(&manifest.asset_root);
+    let report_path = render_report_path(&manifest_path);
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins
@@ -59,7 +63,8 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 file_path: asset_root.to_string_lossy().to_string(),
                 ..default()
             }),
-        FrameTimeDiagnosticsPlugin::default(),
+        FrameTimeDiagnosticsPlugin::new(RENDER_REPORT_HISTORY),
+        RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
     player::install(&mut app);
@@ -72,6 +77,8 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
         .insert_resource(AoStrength(1.0))
         .insert_resource(AoMeshBases::default())
+        .insert_resource(RenderReportPath(report_path))
+        .insert_resource(RenderReportBuffer::default())
         .insert_resource(AdjustmentTarget::default())
         .insert_resource(LightsDisabled(false))
         .insert_resource(LightmapOnlyMode::default())
@@ -91,12 +98,14 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 update_adjustment_hud,
                 toggle_unlit_mode,
                 apply_unlit_mode,
+                configure_glow_cards,
                 toggle_lightmap_only,
                 apply_lightmap_only_mode,
                 apply_baked_lightmaps,
                 inspect_center_hit,
             ),
         )
+        .add_systems(Update, (record_render_sample, save_render_report))
         .add_systems(
             Update,
             (
@@ -156,6 +165,211 @@ fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut text: Single<&mut Tex
         .and_then(|diagnostic| diagnostic.smoothed())
         .unwrap_or(0.0);
     text.0 = format!("{fps:.0} FPS");
+}
+
+#[derive(Resource)]
+struct RenderReportPath(PathBuf);
+
+#[derive(Resource, Default)]
+struct RenderReportBuffer {
+    next_sample: u64,
+    samples: VecDeque<RenderReportSample>,
+}
+
+#[derive(Clone, Copy)]
+struct RenderReportSample {
+    sample: u64,
+    frame_time_ms: f64,
+}
+
+fn render_diagnostics_report_path(report_path: &Path) -> PathBuf {
+    report_path.with_file_name("render_diagnostics.csv")
+}
+
+fn render_report_path(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(".bevyout"))
+        })
+        .and_then(Path::parent)
+        .map(|path| path.join("render_timings.csv"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("render_timings.csv")
+        })
+}
+
+fn record_render_sample(
+    diagnostics: Res<DiagnosticsStore>,
+    mut report: ResMut<RenderReportBuffer>,
+) {
+    let Some(frame_time_ms) = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|diagnostic| diagnostic.value())
+    else {
+        return;
+    };
+    if !frame_time_ms.is_finite() || frame_time_ms < 0.0 {
+        return;
+    }
+    let sample = RenderReportSample {
+        sample: report.next_sample,
+        frame_time_ms,
+    };
+    report.next_sample = report.next_sample.saturating_add(1);
+    report.samples.push_back(sample);
+    while report.samples.len() > RENDER_REPORT_HISTORY {
+        report.samples.pop_front();
+    }
+}
+
+#[derive(SystemParam)]
+struct RenderReportParams<'w, 's> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    report: Res<'w, RenderReportBuffer>,
+    report_path: Res<'w, RenderReportPath>,
+    diagnostics: Res<'w, DiagnosticsStore>,
+    meshes: Res<'w, Assets<Mesh>>,
+    materials: Res<'w, Assets<StandardMaterial>>,
+    images: Res<'w, Assets<Image>>,
+    entities: Query<'w, 's, Entity>,
+    mesh_entities: Query<'w, 's, (Entity, Option<&'static Visibility>), With<Mesh3d>>,
+    named_meshes: Query<'w, 's, &'static GltfMeshName>,
+    cameras: Query<'w, 's, &'static Bloom, With<Camera3d>>,
+    point_lights: Query<'w, 's, Entity, With<PointLight>>,
+    directional_lights: Query<'w, 's, Entity, With<DirectionalLight>>,
+    manifest: Res<'w, PreparedSceneManifest>,
+    camera_mode: Res<'w, player::CameraModeState>,
+    unlit_mode: Res<'w, UnlitMode>,
+    lightmap_only_mode: Res<'w, LightmapOnlyMode>,
+    lights_disabled: Res<'w, LightsDisabled>,
+}
+
+fn save_render_report(params: RenderReportParams) {
+    if !params.keys.just_pressed(KeyCode::F10) {
+        return;
+    }
+
+    let mesh_entity_count = params.mesh_entities.iter().count();
+    let entity_count = params.entities.iter().count();
+    let named_mesh_count = params.named_meshes.iter().count();
+    let camera_count = params.cameras.iter().count();
+    let hidden_mesh_count = params
+        .mesh_entities
+        .iter()
+        .filter(|(_, visibility)| matches!(visibility, Some(Visibility::Hidden)))
+        .count();
+    let bloom = params.cameras.single().ok();
+    let bloom_intensity = bloom.map_or(0.0, |value| value.intensity);
+    let bloom_threshold = bloom.map_or(0.0, |value| value.prefilter.threshold);
+    let bloom_softness = bloom.map_or(0.0, |value| value.prefilter.threshold_softness);
+    let point_light_count = params.point_lights.iter().count();
+    let directional_light_count = params.directional_lights.iter().count();
+    let camera_mode = format!("{:?}", params.camera_mode.mode);
+
+    let mut csv = String::from(
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lightmap_only_mode,lights_disabled\n",
+    );
+    for sample in &params.report.samples {
+        let fps = if sample.frame_time_ms > f64::EPSILON {
+            1000.0 / sample.frame_time_ms
+        } else {
+            0.0
+        };
+        csv.push_str(&format!(
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{}\n",
+            sample.sample,
+            sample.frame_time_ms,
+            fps,
+            entity_count,
+            mesh_entity_count,
+            hidden_mesh_count,
+            named_mesh_count,
+            point_light_count,
+            directional_light_count,
+            camera_count,
+            params.meshes.len(),
+            params.materials.len(),
+            params.images.len(),
+            params.manifest.placements.len(),
+            params.manifest.lights.len(),
+            bloom_intensity,
+            bloom_threshold,
+            bloom_softness,
+            camera_mode,
+            u8::from(params.unlit_mode.0),
+            u8::from(params.lightmap_only_mode.enabled),
+            u8::from(params.lights_disabled.0),
+        ));
+    }
+    if let Err(error) = fs::write(&params.report_path.0, csv) {
+        warn!(
+            "failed to write render report {}: {error}",
+            params.report_path.0.display()
+        );
+    } else {
+        let mut render_diagnostics = params
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.path().as_str().starts_with("render/"))
+            .filter_map(|diagnostic| {
+                let value = diagnostic.value()?;
+                if !value.is_finite() {
+                    return None;
+                }
+                Some((
+                    diagnostic.path().as_str().to_owned(),
+                    diagnostic.suffix.as_ref().to_owned(),
+                    value,
+                    diagnostic.average().unwrap_or(value),
+                    diagnostic.history_len(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        render_diagnostics.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+        let diagnostics_path = render_diagnostics_report_path(&params.report_path.0);
+        let mut diagnostics_csv =
+            String::from("diagnostic_path,suffix,value,average,history_len\n");
+        for (path, suffix, value, average, history_len) in render_diagnostics {
+            diagnostics_csv.push_str(&format!(
+                "{},{},{value:.6},{average:.6},{history_len}\n",
+                csv_field(&path),
+                csv_field(&suffix),
+            ));
+        }
+        if let Err(error) = fs::write(&diagnostics_path, diagnostics_csv) {
+            warn!(
+                "failed to write render diagnostics report {}: {error}",
+                diagnostics_path.display()
+            );
+        } else {
+            info!(
+                "wrote render diagnostics report to {}",
+                diagnostics_path.display()
+            );
+        }
+        info!(
+            "wrote render report with {} samples to {}",
+            params.report.samples.len(),
+            params.report_path.0.display()
+        );
+    }
+}
+
+fn csv_field(value: &str) -> String {
+    if value
+        .chars()
+        .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 fn inspect_center_hit(
@@ -558,6 +772,8 @@ type BakedMeshQuery<'w> = (
     Option<&'w Lightmap>,
 );
 
+type GlowCardMeshQuery<'w> = (Entity, &'w GltfMeshName);
+
 fn apply_baked_lightmaps(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -627,6 +843,30 @@ fn apply_baked_lightmaps(
             bicubic_sampling: false,
         });
     }
+}
+
+fn configure_glow_cards(
+    mut commands: Commands,
+    meshes: Query<GlowCardMeshQuery<'_>, (With<Mesh3d>, Without<GlowCard>)>,
+) {
+    for (entity, name) in &meshes {
+        if !is_glow_card_mesh_name(&name.0) {
+            continue;
+        }
+        // Converted assets promote the physical bulb to an emissive material
+        // and no longer export this hint card. Keep this fallback for older
+        // cached GLBs so they cannot reintroduce the large flat billboard.
+        commands
+            .entity(entity)
+            .insert((Visibility::Hidden, GlowCard));
+    }
+}
+
+#[derive(Component)]
+struct GlowCard;
+
+fn is_glow_card_mesh_name(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("lightglow")
 }
 
 fn mesh_name_matches(actual: &str, expected: &str) -> bool {
@@ -1231,6 +1471,22 @@ mod tests {
             AdjustmentTarget::LightingScale
         );
         assert_eq!(AdjustmentTarget::BloomIntensity.label(), "Bloom intensity");
+    }
+
+    #[test]
+    fn glow_card_names_are_detected_without_matching_regular_meshes() {
+        assert!(is_glow_card_mesh_name("LightGlow01:0.001"));
+        assert!(is_glow_card_mesh_name("lightglow01"));
+        assert!(!is_glow_card_mesh_name("ShackHangingLight02:51"));
+    }
+
+    #[test]
+    fn render_report_path_resolves_to_project_root() {
+        let manifest = Path::new(r"C:\project\.bevyout\cache\scenes\000151e3\scene.ron");
+        assert_eq!(
+            render_report_path(manifest),
+            PathBuf::from(r"C:\project\render_timings.csv")
+        );
     }
 
     #[test]

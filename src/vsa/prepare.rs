@@ -264,14 +264,6 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                 flags: 0,
                 initially_enabled: reference.initially_enabled,
             });
-            placements.push(prepared_placement(
-                &reference,
-                Some(base),
-                None,
-                None,
-                &parsed.bases,
-            ));
-            continue;
         }
         let model = (reference.kind != ReferenceKind::Npc)
             .then_some(base.model.as_ref())

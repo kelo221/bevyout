@@ -1,0 +1,17 @@
+[bevy](../../index.html)::[ecs](../index.html)::[schedule](index.html)
+
+# Type Alias AndThen 
+
+[Source](https://docs.rs/bevy_ecs/0.19.0/x86_64-unknown-linux-gnu/src/bevy_ecs/schedule/condition.rs.html#1385)
+
+```rust
+pub type AndThen<A, B> = CombinatorSystem<AndThenMarker, A, B>;
+```
+
+Combines the outputs of two systems using the `&&` operator (short-circuiting).
+
+## Aliased Type
+
+```rust
+pub struct AndThen<A, B> { /* private fields */ }
+```

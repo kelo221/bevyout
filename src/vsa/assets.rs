@@ -12,7 +12,7 @@ use super::paths::{fingerprint, normalize_asset_path};
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v12-specular-alpha-fo3-scale-1-70-quick-ao-color0-havok-extras-v1";
+    "niftools-blender52-textures-v14-emissive-bulb-card-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetConversion {
@@ -237,6 +237,7 @@ pub(crate) fn run_blender_batch(
     let job_text = blender_jobs_json(jobs);
     fs::write(&job_file, job_text)?;
     let script = r#"import bpy, json, os, sys
+from mathutils import Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
@@ -372,6 +373,37 @@ for job in jobs:
         for obj in bpy.context.scene.objects:
             if obj.type == 'MESH' and not obj.get('bevyout_collision', False):
                 obj['bevyout_collision_source'] = 'authored'
+    def object_world_center(obj):
+        points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+        return sum(points, Vector()) / len(points) if points else obj.matrix_world.translation.copy()
+    def object_root(obj):
+        seen = set()
+        while obj.parent is not None and obj.name not in seen:
+            seen.add(obj.name)
+            obj = obj.parent
+        return obj
+    render_meshes = [obj for obj in bpy.context.scene.objects
+                     if obj.type == 'MESH' and not obj.get('bevyout_collision', False)]
+    glow_cards = [obj for obj in render_meshes
+                  if obj.name.casefold().startswith('lightglow')]
+    for glow_card in glow_cards:
+        root = object_root(glow_card)
+        candidates = [obj for obj in render_meshes
+                      if obj is not glow_card and object_root(obj) is root]
+        if not candidates:
+            continue
+        glow_center = object_world_center(glow_card)
+        bulb = min(candidates,
+                   key=lambda obj: (object_world_center(obj) - glow_center).length)
+        for slot, source_material in enumerate(list(bulb.data.materials)):
+            if source_material is None:
+                continue
+            material = source_material.copy()
+            material['bevyout_emissive_bulb'] = True
+            bulb.data.materials[slot] = material
+        # The card is only an authored halo hint. The physical bulb below is
+        # rendered with its own diffuse texture and emission instead.
+        bpy.data.objects.remove(glow_card, do_unlink=True)
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:
@@ -385,9 +417,16 @@ for job in jobs:
         alpha_test = bool(alpha_flags & (1 << 9))
         images = [node for node in tree.nodes if node.bl_idname == 'ShaderNodeTexImage' and node.image]
         if not images: continue
-        diffuse = next((node for node in images if 'normal' not in node.label.lower() and '_n.' not in node.image.name.lower() and '_g.' not in node.image.name.lower()), images[0])
+        def image_name(node):
+            return node.image.name.lower() if node.image else ''
+        def is_glow_image(node):
+            name = image_name(node)
+            label = node.label.lower()
+            return ('_g.' in name or '_em.' in name or 'glow' in name or
+                    'emiss' in name or 'glow' in label or 'emiss' in label)
+        glow = next((node for node in images if is_glow_image(node)), None)
+        diffuse = next((node for node in images if node is not glow and 'normal' not in node.label.lower() and '_n.' not in image_name(node) and not is_glow_image(node)), images[0])
         normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
-        glow = next((node for node in images if '_g.' in node.image.name.lower() or 'glow' in node.label.lower()), None)
         old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
         emission_link = None
         emission_color = None
@@ -412,6 +451,12 @@ for job in jobs:
         new_emission_strength = principled.inputs.get('Emission Strength')
         if new_emission_strength and emission_strength is not None:
             new_emission_strength.default_value = emission_strength
+        if material.get('bevyout_emissive_bulb', False) and new_emission:
+            for link in list(new_emission.links):
+                tree.links.remove(link)
+            tree.links.new(diffuse.outputs['Color'], new_emission)
+            if new_emission_strength:
+                new_emission_strength.default_value = max(emission_strength or 0.0, 2.0)
         if glow and new_emission:
             for link in list(new_emission.links): tree.links.remove(link)
             tree.links.new(glow.outputs['Color'], new_emission)

@@ -26,7 +26,7 @@ If any code is ported from OpenMW to Rust it must be placed in the isolated to f
 
 ## Local Bevy documentation
 
-Use `BevyDocs/` as the local API and architecture reference before relying on
+Use `BevyCheatSheet/` as the local API and architecture reference before relying on
 generic Bevy examples. In particular:
 
 - `BevyDocs/programming/app-builder.md` and `plugins.md` describe app/plugin
@@ -34,6 +34,8 @@ generic Bevy examples. In particular:
 - `BevyDocs/programming/systems.md` describes system organization.
 - `BevyDocs/setup/bevy-config.md` documents dynamic linking.
 - `BevyDocs/setup/perf.md` covers development and release profiles.
+
+`bevy_markdown_docs/` is an offline copy of the cargo
 
 If the local docs do not cover a version-specific detail, verify it against the
 Bevy version in `Cargo.toml`.

@@ -1,0 +1,11 @@
+[bevy](../../index.html)::[feathers](../index.html)::[tokens](index.html)
+
+# Constant SCROLLBAR\_BG 
+
+[Source](https://docs.rs/bevy_feathers/0.19.0/x86_64-unknown-linux-gnu/src/bevy_feathers/tokens.rs.html#95)
+
+```rust
+pub const SCROLLBAR_BG: ThemeToken;
+```
+
+Background for scrollbar

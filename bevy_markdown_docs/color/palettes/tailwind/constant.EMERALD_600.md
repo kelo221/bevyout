@@ -1,0 +1,9 @@
+[bevy](../../../index.html)::[color](../../index.html)::[palettes](../index.html)::[tailwind](index.html)
+
+# Constant EMERALD\_600 
+
+[Source](https://docs.rs/bevy_color/0.19.0/x86_64-unknown-linux-gnu/src/bevy_color/palettes/tailwind.rs.html#112)
+
+```rust
+pub const EMERALD_600: Srgba;
+```
