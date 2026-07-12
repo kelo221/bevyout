@@ -21,7 +21,7 @@ use super::manifest::{
 use super::openmw_esm4::LightingData;
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
-    normalize_asset_path, parse_form_id, placement_transform, placement_transform_parts,
+    normalize_asset_path, parse_cell_selector, placement_transform, placement_transform_parts,
 };
 use super::plugin::{
     BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, ReferenceKind,
@@ -60,6 +60,12 @@ fn legacy_lighting(cell: &super::manifest::CellInfo) -> LightingData {
 }
 
 pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
+    let selector_input = args
+        .selector
+        .clone()
+        .or(args.cell.clone())
+        .context("provide a GECK EditorID/FormID selector or legacy --cell")?;
+    let selector = parse_cell_selector(&selector_input)?;
     let game_root = args
         .game_root
         .context("Fallout 3 is not configured; pass --game-root or create .bevyout/config.toml")?;
@@ -71,7 +77,6 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         root.join("Data").join(&plugin)
     };
     let plugin_path = fs::canonicalize(&plugin_path).context("plugin does not exist")?;
-    let cell_id = parse_form_id(&args.cell)?;
     let data_root = root.join("Data");
     let cache_dir = absolutize(
         &args
@@ -80,10 +85,8 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
     )?;
     let staging_dir = cache_dir.join("staging");
     let assets_dir = cache_dir.join("assets");
-    let scene_dir = cache_dir.join("scenes").join(format!("{cell_id:08x}"));
     fs::create_dir_all(&staging_dir)?;
     fs::create_dir_all(&assets_dir)?;
-    fs::create_dir_all(&scene_dir)?;
 
     let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
     let source_fingerprint = content_set_fingerprint(&loaded_plugins);
@@ -110,13 +113,19 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             bytes: &plugin.bytes,
         })
         .collect::<Vec<_>>();
-    let mut parsed = parse_content_set(&plugin_sources, cell_id)
+    let mut parsed = parse_content_set(&plugin_sources, &selector)
         .context("failed to parse Fallout content set")?;
     diagnostics.extend(parsed.diagnostics.drain(..).map(|message| Diagnostic {
         severity: "info".into(),
         message,
     }));
-    let mut cell = parsed.cell.take().context("requested cell was not found")?;
+    let mut cell = parsed
+        .cell
+        .take()
+        .with_context(|| format!("requested cell selector '{selector_input}' was not found"))?;
+    let cell_id = cell.form_id;
+    let scene_dir = cache_dir.join("scenes").join(format!("{cell_id:08x}"));
+    fs::create_dir_all(&scene_dir)?;
     if let Some(image_space_form_id) = cell.image_space_form_id {
         if let Some(image_space) = parsed.image_spaces.get(&image_space_form_id).cloned() {
             info_image_space(&mut diagnostics, &image_space);
@@ -125,14 +134,18 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             diagnostics.push(Diagnostic {
                 severity: "warning".into(),
                 message: format!(
-                    "cell {:08x} references unresolved ImageSpace {:08x}",
-                    cell_id, image_space_form_id
+                    "{} references unresolved ImageSpace {:08x}",
+                    super::manifest::cell_label(&cell),
+                    image_space_form_id
                 ),
             });
         }
     }
     if !cell.interior {
-        bail!("cell {cell_id:08x} is not an interior cell; LAND support is not part of this slice")
+        bail!(
+            "{} is not an interior cell; LAND support is not part of this slice",
+            super::manifest::cell_label(&cell)
+        )
     }
 
     let archives = load_archives(&data_root, &mut diagnostics)?;
@@ -194,8 +207,9 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                     diagnostics.push(Diagnostic {
                         severity: "warning".into(),
                         message: format!(
-                            "cell {:08x} references LightingTemplate {:08x} without usable DATA; retained CELL lighting",
-                            cell_id, template_form_id
+                            "{} references LightingTemplate {:08x} without usable DATA; retained CELL lighting",
+                            super::manifest::cell_label(&cell),
+                            template_form_id
                         ),
                     });
                 }
@@ -203,8 +217,9 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                 diagnostics.push(Diagnostic {
                     severity: "warning".into(),
                     message: format!(
-                        "cell {:08x} references unresolved LightingTemplate {:08x}",
-                        cell_id, template_form_id
+                        "{} references unresolved LightingTemplate {:08x}",
+                        super::manifest::cell_label(&cell),
+                        template_form_id
                     ),
                 });
             }
@@ -419,7 +434,10 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         bail!("strict preparation failed with {failures} unresolved placements")
     }
     if placements.iter().all(|p| p.asset_path.is_none()) && lights.is_empty() {
-        bail!("no renderable assets were found in cell {cell_id:08x}")
+        bail!(
+            "no renderable assets were found in {}",
+            super::manifest::cell_label(&cell)
+        )
     }
 
     let manifest = PreparedSceneManifest {
@@ -445,7 +463,8 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     println!(
-        "prepared {} placements ({} unresolved) -> {}",
+        "prepared {} ({} placements, {} unresolved) -> {}",
+        super::manifest::cell_label(&manifest.cell),
         manifest.placements.len(),
         failures,
         manifest_path.display()

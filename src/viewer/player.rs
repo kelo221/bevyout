@@ -107,6 +107,9 @@ struct StaticCollisionStats {
     no_geometry_reported: bool,
 }
 
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub(crate) struct PhysicsDisabled(pub(crate) bool);
+
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
 type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
 type LocomotionQuery<'w> = (
@@ -124,10 +127,9 @@ type StaticCollisionQuery<'w> = (
     Option<&'w MeshMaterial3d<StandardMaterial>>,
     Option<&'w GltfExtras>,
     Option<&'w ChildOf>,
-    Option<&'w SceneColliderProcessed>,
 );
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins((
         PhysicsPlugins::default(),
         TnuaControllerPlugin::<ControlScheme>::new(FixedUpdate),
@@ -136,13 +138,34 @@ pub(crate) fn install(app: &mut App) {
     .insert_resource(Gravity(Vec3::new(0.0, -GRAVITY, 0.0)))
     .insert_resource(CameraModeState::default())
     .insert_resource(StaticCollisionStats::default())
+    .insert_resource(PhysicsDisabled(disable_physics))
     .add_systems(Update, build_static_colliders.before(toggle_camera_mode))
     .add_systems(
         FixedUpdate,
         apply_player_controls.in_set(TnuaUserControlsSystems),
     )
+    .add_systems(
+        Update,
+        pause_physics_in_free_camera.after(toggle_camera_mode),
+    )
     .add_systems(Update, emit_landing_events.after(build_static_colliders))
     .add_systems(Update, emit_footsteps.after(emit_landing_events));
+}
+
+fn pause_physics_in_free_camera(
+    state: Res<CameraModeState>,
+    physics_disabled: Res<PhysicsDisabled>,
+    mut physics_time: ResMut<Time<Physics>>,
+) {
+    let should_pause = physics_disabled.0 || state.mode == CameraMode::Free;
+    if should_pause == physics_time.is_paused() {
+        return;
+    }
+    if should_pause {
+        physics_time.pause();
+    } else {
+        physics_time.unpause();
+    }
 }
 
 pub(crate) fn toggle_camera_mode(
@@ -357,20 +380,21 @@ fn openmw_jump_config(height: f32, horizontal_distance: f32) -> TnuaBuiltinJumpC
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_static_colliders(
     mut commands: Commands,
     meshes: Res<Assets<Mesh>>,
     materials: Res<Assets<StandardMaterial>>,
+    physics_disabled: Res<PhysicsDisabled>,
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<StaticCollisionStats>,
-    query: Query<StaticCollisionQuery<'_>>,
+    query: Query<StaticCollisionQuery<'_>, Without<SceneColliderProcessed>>,
     parents: Query<&GltfExtras>,
 ) {
-    for (entity, mesh_handle, name, material_handle, extras, child_of, processed) in &query {
-        if processed.is_some() {
-            continue;
-        }
-
+    if physics_disabled.0 {
+        return;
+    }
+    for (entity, mesh_handle, name, material_handle, extras, child_of) in &query {
         let name = name.map(|name| name.0.as_str()).unwrap_or("<unnamed>");
         let extras = extras
             .or_else(|| child_of.and_then(|child| parents.get(child.0).ok()))

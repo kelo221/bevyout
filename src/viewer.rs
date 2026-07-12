@@ -1,16 +1,16 @@
 use anyhow::{Context, Result};
 use bevy::asset::AssetId;
 use bevy::camera::Exposure;
-use bevy::color::LinearRgba;
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::math::{Rect, cubic_splines::LinearSpline, vec2};
+use bevy::light::{IrradianceVolume, LightProbe};
+use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
-use bevy::pbr::{DistanceFog, FogFalloff, Lightmap};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
@@ -20,16 +20,16 @@ use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 use bevy::render::occlusion_culling::OcclusionCulling;
 use bevy::render::view::ColorGrading;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, PresentMode};
 use ron::de::from_str;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::ViewArgs;
+use crate::cli::{RenderArgs, ViewArgs};
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest,
-    is_bake_static,
+    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest, cell_label,
+    is_bake_static, resolve_cached_manifest,
 };
 
 mod audio;
@@ -43,7 +43,23 @@ const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
 
 pub(crate) fn view(args: ViewArgs) -> Result<()> {
-    let manifest_path = fs::canonicalize(&args.manifest).context("manifest does not exist")?;
+    run_view(args.manifest, args.disable_physics, args.trace_seconds)
+}
+
+pub(crate) fn render(args: RenderArgs) -> Result<()> {
+    let cache_dir = args
+        .cache_dir
+        .unwrap_or_else(|| PathBuf::from(".bevyout/cache"));
+    let manifest_path = resolve_cached_manifest(&cache_dir, &args.selector)?;
+    run_view(manifest_path, args.disable_physics, args.trace_seconds)
+}
+
+fn run_view(
+    manifest_path: PathBuf,
+    disable_physics: bool,
+    trace_seconds: Option<f32>,
+) -> Result<()> {
+    let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
     let asset_root = PathBuf::from(&manifest.asset_root);
@@ -55,6 +71,7 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 primary_window: Some(Window {
                     resolution: (1280, 720).into(),
                     focused: true,
+                    present_mode: PresentMode::AutoNoVsync,
                     ..default()
                 }),
                 ..default()
@@ -67,12 +84,13 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
-    player::install(&mut app);
+    player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);
     app.insert_resource(manifest)
         .insert_resource(UnlitMode(false))
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))
+        .insert_resource(IrradianceIntensity(1.0))
         .insert_resource(AmbientScale(0.05))
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
         .insert_resource(AoStrength(1.0))
@@ -81,7 +99,6 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(AdjustmentTarget::default())
         .insert_resource(LightsDisabled(false))
-        .insert_resource(LightmapOnlyMode::default())
         .add_systems(
             Startup,
             (capture_cursor, spawn_prepared_scene, spawn_reticle),
@@ -94,14 +111,12 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 apply_lighting_scale,
                 apply_fog_strength,
                 apply_ao_strength,
+                apply_irradiance_intensity,
                 update_fps_text,
                 update_adjustment_hud,
                 toggle_unlit_mode,
                 apply_unlit_mode,
                 configure_glow_cards,
-                toggle_lightmap_only,
-                apply_lightmap_only_mode,
-                apply_baked_lightmaps,
                 inspect_center_hit,
             ),
         )
@@ -115,9 +130,32 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 player::fps_mouse_look,
             )
                 .chain(),
-        )
-        .run();
+        );
+    if let Some(seconds) = trace_seconds {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            anyhow::bail!("--trace-seconds must be finite and greater than zero");
+        }
+        app.insert_resource(TraceCaptureLimit { remaining: seconds })
+            .add_systems(Update, stop_trace_capture);
+    }
+    app.run();
     Ok(())
+}
+
+#[derive(Resource)]
+struct TraceCaptureLimit {
+    remaining: f32,
+}
+
+fn stop_trace_capture(
+    time: Res<Time>,
+    mut limit: ResMut<TraceCaptureLimit>,
+    mut app_exit: MessageWriter<AppExit>,
+) {
+    limit.remaining -= time.delta_secs();
+    if limit.remaining <= 0.0 {
+        app_exit.write(AppExit::Success);
+    }
 }
 
 fn spawn_reticle(mut commands: Commands) {
@@ -240,13 +278,15 @@ struct RenderReportParams<'w, 's> {
     mesh_entities: Query<'w, 's, (Entity, Option<&'static Visibility>), With<Mesh3d>>,
     named_meshes: Query<'w, 's, &'static GltfMeshName>,
     cameras: Query<'w, 's, &'static Bloom, With<Camera3d>>,
+    irradiance_volumes: Query<'w, 's, Entity, With<IrradianceVolume>>,
     point_lights: Query<'w, 's, Entity, With<PointLight>>,
     directional_lights: Query<'w, 's, Entity, With<DirectionalLight>>,
     manifest: Res<'w, PreparedSceneManifest>,
     camera_mode: Res<'w, player::CameraModeState>,
+    physics_disabled: Res<'w, player::PhysicsDisabled>,
     unlit_mode: Res<'w, UnlitMode>,
-    lightmap_only_mode: Res<'w, LightmapOnlyMode>,
     lights_disabled: Res<'w, LightsDisabled>,
+    colliders: Query<'w, 's, Entity, With<avian3d::prelude::Collider>>,
 }
 
 fn save_render_report(params: RenderReportParams) {
@@ -269,10 +309,12 @@ fn save_render_report(params: RenderReportParams) {
     let bloom_softness = bloom.map_or(0.0, |value| value.prefilter.threshold_softness);
     let point_light_count = params.point_lights.iter().count();
     let directional_light_count = params.directional_lights.iter().count();
+    let irradiance_volume_count = params.irradiance_volumes.iter().count();
     let camera_mode = format!("{:?}", params.camera_mode.mode);
+    let collider_count = params.colliders.iter().count();
 
     let mut csv = String::from(
-        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lightmap_only_mode,lights_disabled\n",
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities\n",
     );
     for sample in &params.report.samples {
         let fps = if sample.frame_time_ms > f64::EPSILON {
@@ -281,7 +323,7 @@ fn save_render_report(params: RenderReportParams) {
             0.0
         };
         csv.push_str(&format!(
-            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{}\n",
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{}\n",
             sample.sample,
             sample.frame_time_ms,
             fps,
@@ -291,6 +333,7 @@ fn save_render_report(params: RenderReportParams) {
             named_mesh_count,
             point_light_count,
             directional_light_count,
+            irradiance_volume_count,
             camera_count,
             params.meshes.len(),
             params.materials.len(),
@@ -302,8 +345,9 @@ fn save_render_report(params: RenderReportParams) {
             bloom_softness,
             camera_mode,
             u8::from(params.unlit_mode.0),
-            u8::from(params.lightmap_only_mode.enabled),
             u8::from(params.lights_disabled.0),
+            u8::from(params.physics_disabled.0),
+            collider_count,
         ));
     }
     if let Err(error) = fs::write(&params.report_path.0, csv) {
@@ -419,10 +463,6 @@ fn spawn_prepared_scene(
 ) {
     let focus = scene_focus(&manifest);
     let cell_lighting = effective_lighting(&manifest.cell);
-    let runtime_lighting = manifest
-        .bake
-        .as_ref()
-        .is_none_or(|bake| bake.runtime_lighting);
     let (color_grading, auto_exposure) =
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
     let mut camera = commands.spawn((
@@ -453,8 +493,8 @@ fn spawn_prepared_scene(
         }
     } else {
         warn!(
-            "cell {:08x} has no resolved ImageSpace; retaining fixed viewer post-processing",
-            manifest.cell.form_id
+            "{} has no resolved ImageSpace; retaining fixed viewer post-processing",
+            cell_label(&manifest.cell)
         );
     }
     if let Some(fog) = distance_fog(&cell_lighting, fog_strength.0) {
@@ -467,7 +507,7 @@ fn spawn_prepared_scene(
             cell_lighting.ambient_rgba[2],
         ),
         brightness: 25.0 * lighting.0 * ambient_scale.0,
-        affects_lightmapped_meshes: runtime_lighting,
+        affects_lightmapped_meshes: true,
     });
     let directional_luminance = cell_lighting.directional_rgba[0]
         + cell_lighting.directional_rgba[1]
@@ -485,13 +525,8 @@ fn spawn_prepared_scene(
                     cell_lighting.directional_rgba[1],
                     cell_lighting.directional_rgba[2],
                 ),
-                illuminance: scaled_directional_illuminance(
-                    base_illuminance,
-                    lighting.0,
-                    false,
-                    false,
-                ),
-                affects_lightmapped_mesh_diffuse: runtime_lighting,
+                illuminance: scaled_directional_illuminance(base_illuminance, lighting.0, false),
+                affects_lightmapped_mesh_diffuse: true,
                 shadow_maps_enabled: false,
                 ..default()
             },
@@ -512,7 +547,7 @@ fn spawn_prepared_scene(
                     light.color_rgba[1],
                     light.color_rgba[2],
                 ),
-                affects_lightmapped_mesh_diffuse: runtime_lighting,
+                affects_lightmapped_mesh_diffuse: true,
                 shadow_maps_enabled: false,
                 ..default()
             },
@@ -523,11 +558,36 @@ fn spawn_prepared_scene(
         commands.spawn(WorldAssetRoot(
             asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
         ));
-        info!(
-            "loading baked scene {} with {} lightmap pages",
-            bake.scene_path,
-            bake.lightmaps.len()
-        );
+        if let Some(volume) = &bake.irradiance_volume {
+            commands.spawn((
+                LightProbe::default(),
+                IrradianceVolume {
+                    voxels: asset_server.load(volume.asset_path.clone()),
+                    intensity: volume.intensity,
+                    affects_lightmapped_meshes: true,
+                },
+                Transform {
+                    translation: Vec3::from_array(volume.translation),
+                    rotation: Quat::from_xyzw(
+                        volume.rotation_xyzw[0],
+                        volume.rotation_xyzw[1],
+                        volume.rotation_xyzw[2],
+                        volume.rotation_xyzw[3],
+                    ),
+                    scale: Vec3::from_array(volume.scale),
+                },
+            ));
+            info!(
+                "loading baked scene {} with irradiance volume {} at {:?}",
+                bake.scene_path, volume.asset_path, volume.resolution
+            );
+        } else {
+            warn!(
+                "baked scene {} has no irradiance volume; run `bake {}`",
+                bake.scene_path,
+                cell_label(&manifest.cell)
+            );
+        }
         spawn_interactive_placements(&mut commands, &asset_server, &manifest);
     } else {
         for placement in &manifest.placements {
@@ -556,8 +616,8 @@ fn spawn_prepared_scene(
         }
     }
     info!(
-        "loaded cell {} with {} placements, {} diagnostics; camera focus {:?}",
-        manifest.cell.form_id,
+        "loaded {} with {} placements, {} diagnostics; camera focus {:?}",
+        cell_label(&manifest.cell),
         manifest.placements.len(),
         manifest.diagnostics.len(),
         focus,
@@ -648,9 +708,8 @@ fn scaled_directional_illuminance(
     base_illuminance: f32,
     lighting_scale: f32,
     disabled: bool,
-    lightmap_only: bool,
 ) -> f32 {
-    if disabled || lightmap_only {
+    if disabled {
         0.0
     } else {
         base_illuminance * lighting_scale / DEFAULT_LIGHTING_SCALE
@@ -765,91 +824,23 @@ fn image_space_tint_to_white_balance(rgb: [f32; 3], strength: f32) -> Option<(f3
     ))
 }
 
-type BakedMeshQuery<'w> = (
-    Entity,
-    &'w GltfMeshName,
-    &'w MeshMaterial3d<StandardMaterial>,
-    Option<&'w Lightmap>,
-);
-
 type GlowCardMeshQuery<'w> = (Entity, &'w GltfMeshName);
-
-fn apply_baked_lightmaps(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    manifest: Res<PreparedSceneManifest>,
-    meshes: Query<BakedMeshQuery<'_>, With<Mesh3d>>,
-    mut reported: Local<bool>,
-) {
-    let Some(bake) = manifest.bake.as_ref() else {
-        return;
-    };
-    if !*reported {
-        let count = meshes.iter().count();
-        let matching = meshes
-            .iter()
-            .filter(|(_, name, _, _)| {
-                bake.bindings
-                    .iter()
-                    .any(|binding| mesh_name_matches(&name.0, &binding.mesh_name))
-            })
-            .count();
-        if count > 0 {
-            let names = meshes
-                .iter()
-                .map(|(_, name, _, _)| name.0.as_str())
-                .take(8)
-                .collect::<Vec<_>>();
-            if matching == 0 {
-                warn!(
-                    "baked scene spawned {count} mesh entities, but none match lightmap bindings; first names: {names:?}"
-                );
-            } else {
-                info!(
-                    "baked scene spawned {count} mesh entities; {matching} match lightmap bindings"
-                );
-            }
-            *reported = true;
-        }
-    }
-    for (entity, name, material_handle, existing_lightmap) in &meshes {
-        if existing_lightmap.is_some() {
-            continue;
-        }
-        let Some(binding) = bake
-            .bindings
-            .iter()
-            .find(|binding| mesh_name_matches(&name.0, &binding.mesh_name))
-        else {
-            continue;
-        };
-        let Some(page) = bake.lightmaps.get(binding.page) else {
-            warn!(
-                "lightmap binding {} refers to missing page {}",
-                name.0, binding.page
-            );
-            continue;
-        };
-        if let Some(mut material) = materials.get_mut(material_handle) {
-            material.lightmap_exposure = bake.lightmap_exposure;
-        }
-        commands.entity(entity).insert(Lightmap {
-            image: asset_server.load(page.asset_path.clone()),
-            uv_rect: Rect {
-                min: Vec2::new(binding.uv_rect[0], binding.uv_rect[1]),
-                max: Vec2::new(binding.uv_rect[2], binding.uv_rect[3]),
-            },
-            bicubic_sampling: false,
-        });
-    }
-}
 
 fn configure_glow_cards(
     mut commands: Commands,
     meshes: Query<GlowCardMeshQuery<'_>, (With<Mesh3d>, Without<GlowCard>)>,
+    mut inspected: Local<HashSet<Entity>>,
+    mut last_mesh_count: Local<Option<usize>>,
 ) {
+    let mesh_count = meshes.iter().count();
+    if *last_mesh_count == Some(mesh_count) {
+        return;
+    }
+    *last_mesh_count = Some(mesh_count);
     for (entity, name) in &meshes {
+        if !inspected.insert(entity) {
+            continue;
+        }
         if !is_glow_card_mesh_name(&name.0) {
             continue;
         }
@@ -867,13 +858,6 @@ struct GlowCard;
 
 fn is_glow_card_mesh_name(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("lightglow")
-}
-
-fn mesh_name_matches(actual: &str, expected: &str) -> bool {
-    actual == expected
-        || actual
-            .strip_prefix(expected)
-            .is_some_and(|suffix| suffix.starts_with(':'))
 }
 
 fn scene_focus(manifest: &PreparedSceneManifest) -> Vec3 {
@@ -922,6 +906,9 @@ struct UnlitMode(bool);
 struct LightingScale(f32);
 
 #[derive(Resource)]
+struct IrradianceIntensity(f32);
+
+#[derive(Resource)]
 struct AmbientScale(f32);
 
 #[derive(Resource)]
@@ -935,10 +922,17 @@ struct AoMeshBases {
     values: HashMap<AssetId<Mesh>, VertexAttributeValues>,
 }
 
+#[derive(Default)]
+struct AoScanState {
+    last_mesh_entity_count: usize,
+    last_mesh_asset_count: usize,
+}
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum AdjustmentTarget {
     #[default]
     LightingScale,
+    IrradianceIntensity,
     AmbientScale,
     BloomIntensity,
     BloomThreshold,
@@ -948,8 +942,9 @@ enum AdjustmentTarget {
 }
 
 impl AdjustmentTarget {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::LightingScale,
+        Self::IrradianceIntensity,
         Self::AmbientScale,
         Self::BloomIntensity,
         Self::BloomThreshold,
@@ -961,6 +956,7 @@ impl AdjustmentTarget {
     fn label(self) -> &'static str {
         match self {
             Self::LightingScale => "Lighting scale",
+            Self::IrradianceIntensity => "Irradiance intensity",
             Self::AmbientScale => "Ambient scale",
             Self::BloomIntensity => "Bloom intensity",
             Self::BloomThreshold => "Bloom threshold",
@@ -986,16 +982,12 @@ struct AdjustmentHud;
 #[derive(Resource)]
 struct LightsDisabled(bool);
 
-#[derive(Resource, Default)]
-struct LightmapOnlyMode {
-    enabled: bool,
-    originals: HashMap<AssetId<StandardMaterial>, StandardMaterial>,
-}
-
+#[allow(clippy::too_many_arguments)]
 fn adjust_selected_value(
     keys: Res<ButtonInput<KeyCode>>,
     mut target: ResMut<AdjustmentTarget>,
     mut lighting: ResMut<LightingScale>,
+    mut irradiance: ResMut<IrradianceIntensity>,
     mut ambient: ResMut<AmbientScale>,
     mut fog_strength: ResMut<FogStrength>,
     mut ao_strength: ResMut<AoStrength>,
@@ -1028,6 +1020,14 @@ fn adjust_selected_value(
                 (lighting.0 * 2.0).min(262_144.0)
             };
             info!("lighting scale: {:.4}", lighting.0);
+        }
+        AdjustmentTarget::IrradianceIntensity => {
+            irradiance.0 = if direction < 0 {
+                (irradiance.0 * 0.5).max(0.0)
+            } else {
+                (irradiance.0 * 2.0).min(4096.0)
+            };
+            info!("irradiance intensity: {:.4}", irradiance.0);
         }
         AdjustmentTarget::AmbientScale => {
             ambient.0 = if direction < 0 {
@@ -1086,9 +1086,11 @@ fn adjust_selected_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_adjustment_hud(
     target: Res<AdjustmentTarget>,
     lighting: Res<LightingScale>,
+    irradiance: Res<IrradianceIntensity>,
     ambient: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
     ao_strength: Res<AoStrength>,
@@ -1097,6 +1099,7 @@ fn update_adjustment_hud(
 ) {
     let value = match *target {
         AdjustmentTarget::LightingScale => format!("{:.4}", lighting.0),
+        AdjustmentTarget::IrradianceIntensity => format!("{:.4}", irradiance.0),
         AdjustmentTarget::AmbientScale => format!("{:.4}", ambient.0),
         AdjustmentTarget::BloomIntensity => cameras
             .single()
@@ -1120,6 +1123,18 @@ fn update_adjustment_hud(
     );
 }
 
+fn apply_irradiance_intensity(
+    intensity: Res<IrradianceIntensity>,
+    mut volumes: Query<&mut IrradianceVolume>,
+) {
+    if !intensity.is_changed() {
+        return;
+    }
+    for mut volume in &mut volumes {
+        volume.intensity = intensity.0;
+    }
+}
+
 fn apply_ao_strength(
     strength: Res<AoStrength>,
     mut bases: ResMut<AoMeshBases>,
@@ -1131,7 +1146,19 @@ fn apply_ao_strength(
     )>,
     parents: Query<&ChildOf>,
     roots: Query<&interaction::PlacementRoot>,
+    mut scan_state: Local<AoScanState>,
 ) {
+    let mesh_entity_count = mesh_entities.iter().count();
+    let mesh_asset_count = meshes.len();
+    if !strength.is_changed()
+        && scan_state.last_mesh_entity_count == mesh_entity_count
+        && scan_state.last_mesh_asset_count == mesh_asset_count
+    {
+        return;
+    }
+    scan_state.last_mesh_entity_count = mesh_entity_count;
+    scan_state.last_mesh_asset_count = mesh_asset_count;
+
     let mut seen = HashSet::new();
     for (mesh_handle, child_of, own_root) in &mesh_entities {
         let Some(child_of) = child_of else {
@@ -1276,26 +1303,11 @@ fn apply_lighting_scale(
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     disabled: Res<LightsDisabled>,
-    lightmap_only: Res<LightmapOnlyMode>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut points: Query<&mut PointLight>,
     mut directionals: Query<(&CellDirectionalLight, &mut DirectionalLight)>,
 ) {
-    if !lighting.is_changed()
-        && !ambient_scale.is_changed()
-        && !disabled.is_changed()
-        && !lightmap_only.is_changed()
-    {
-        return;
-    }
-    if lightmap_only.enabled {
-        ambient.brightness = 0.0;
-        for mut light in &mut points {
-            light.intensity = 0.0;
-        }
-        for (_, mut light) in &mut directionals {
-            light.illuminance = 0.0;
-        }
+    if !lighting.is_changed() && !ambient_scale.is_changed() && !disabled.is_changed() {
         return;
     }
     ambient.brightness = if disabled.0 {
@@ -1311,12 +1323,8 @@ fn apply_lighting_scale(
         };
     }
     for (cell_light, mut light) in &mut directionals {
-        light.illuminance = scaled_directional_illuminance(
-            cell_light.base_illuminance,
-            lighting.0,
-            disabled.0,
-            false,
-        );
+        light.illuminance =
+            scaled_directional_illuminance(cell_light.base_illuminance, lighting.0, disabled.0);
     }
 }
 
@@ -1330,55 +1338,11 @@ fn toggle_unlit_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<UnlitMode
     }
 }
 
-fn toggle_lightmap_only(
-    keys: Res<ButtonInput<KeyCode>>,
-    manifest: Res<PreparedSceneManifest>,
-    mut mode: ResMut<LightmapOnlyMode>,
-) {
-    if keys.just_pressed(KeyCode::KeyL) {
-        if manifest.bake.is_none() {
-            warn!(
-                "lightmap-only mode unavailable: this manifest has no completed baked lightmap; run bake --quality quick or final first"
-            );
-            return;
-        }
-        mode.enabled = !mode.enabled;
-        info!(
-            "lightmap-only diagnostic mode: {}",
-            if mode.enabled { "on" } else { "off" }
-        );
-    }
-}
-
-fn apply_lightmap_only_mode(
-    mut mode: ResMut<LightmapOnlyMode>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    if mode.enabled {
-        for (id, material) in materials.iter_mut() {
-            let original = mode.originals.entry(id).or_insert_with(|| material.clone());
-            material.base_color = Color::WHITE;
-            material.base_color_texture = None;
-            material.emissive = LinearRgba::BLACK;
-            material.emissive_texture = None;
-            material.metallic = 0.0;
-            material.metallic_roughness_texture = None;
-            material.reflectance = 0.0;
-            material.normal_map_texture = None;
-            material.occlusion_texture = None;
-            material.unlit = false;
-            material.lightmap_exposure = original.lightmap_exposure;
-        }
-    } else if mode.is_changed() {
-        for (id, original) in mode.originals.drain() {
-            if let Some(mut material) = materials.get_mut(id) {
-                *material = original;
-            }
-        }
-    }
-}
-
 fn apply_unlit_mode(mode: Res<UnlitMode>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    if !mode.is_changed() {
+        return;
+    }
+
     for material in materials.iter_mut().map(|(_, material)| material) {
         material.unlit = mode.0;
     }
@@ -1452,7 +1416,7 @@ mod tests {
     fn adjustment_target_cycles_with_page_navigation_order() {
         assert_eq!(
             AdjustmentTarget::default().cycle(1),
-            AdjustmentTarget::AmbientScale
+            AdjustmentTarget::IrradianceIntensity
         );
         assert_eq!(
             AdjustmentTarget::default().cycle(-1),
@@ -1470,7 +1434,18 @@ mod tests {
             AdjustmentTarget::AoStrength.cycle(1),
             AdjustmentTarget::LightingScale
         );
+        assert_eq!(
+            AdjustmentTarget::LightingScale.cycle(1),
+            AdjustmentTarget::IrradianceIntensity
+        );
         assert_eq!(AdjustmentTarget::BloomIntensity.label(), "Bloom intensity");
+    }
+
+    #[test]
+    fn irradiance_intensity_changes_exponentially_and_reaches_zero() {
+        assert_eq!((1.0_f32 * 0.5).max(0.0), 0.5);
+        assert_eq!((1.0_f32 * 2.0).min(4096.0), 2.0);
+        assert_eq!((0.0_f32 * 0.5).max(0.0), 0.0);
     }
 
     #[test]
@@ -1611,16 +1586,9 @@ mod tests {
         let actual = Quat::from_array(lighting.directional_rotation_xyzw());
         assert!(actual.dot(expected).abs() > 1.0 - 1e-5);
         assert_eq!(
-            scaled_directional_illuminance(10_000.0, 256.0, false, false),
+            scaled_directional_illuminance(10_000.0, 256.0, false),
             20_000.0
         );
-        assert_eq!(
-            scaled_directional_illuminance(10_000.0, 256.0, true, false),
-            0.0
-        );
-        assert_eq!(
-            scaled_directional_illuminance(10_000.0, 256.0, false, true),
-            0.0
-        );
+        assert_eq!(scaled_directional_illuminance(10_000.0, 256.0, true), 0.0);
     }
 }

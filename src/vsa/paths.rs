@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bevy::prelude::*;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -10,12 +10,47 @@ use super::plugin::ReferenceRecord;
 /// dimensions as well.
 pub(crate) const FO3_SCALE: f32 = 1.0 / 70.0;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CellSelector {
+    FormId(u32),
+    EditorId(String),
+}
+
+impl std::fmt::Display for CellSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FormId(form_id) => write!(formatter, "{form_id:08x}"),
+            Self::EditorId(editor_id) => formatter.write_str(editor_id),
+        }
+    }
+}
+
 pub(crate) fn parse_form_id(value: &str) -> Result<u32> {
     let value = value
         .trim()
         .trim_start_matches("0x")
         .trim_start_matches("0X");
     u32::from_str_radix(value, 16).context("cell must be a hexadecimal FormID")
+}
+
+pub(crate) fn parse_cell_selector(value: &str) -> Result<CellSelector> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("cell selector must be a GECK EditorID or hexadecimal FormID")
+    }
+    let form_id_value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
+    let looks_like_form_id = form_id_value.is_some_and(|value| {
+        !value.is_empty()
+            && value.len() <= 8
+            && value.chars().all(|character| character.is_ascii_hexdigit())
+    }) || (value.len() <= 8
+        && value.chars().all(|character| character.is_ascii_hexdigit()));
+    if looks_like_form_id {
+        return Ok(CellSelector::FormId(parse_form_id(value)?));
+    }
+    Ok(CellSelector::EditorId(value.to_owned()))
 }
 
 pub(crate) fn absolutize(path: &Path) -> Result<PathBuf> {
@@ -78,6 +113,31 @@ pub(crate) fn placement_transform_parts(
 #[cfg(test)]
 mod tests {
     use super::super::plugin::ReferenceRecord;
+
+    #[test]
+    fn parses_editor_id_and_form_id_selectors() {
+        assert_eq!(
+            parse_cell_selector("SuperDuperMart").unwrap(),
+            CellSelector::EditorId("SuperDuperMart".into())
+        );
+        assert_eq!(
+            parse_cell_selector("00017f37").unwrap(),
+            CellSelector::FormId(0x0001_7f37)
+        );
+        assert_eq!(
+            parse_cell_selector("0x151e3").unwrap(),
+            CellSelector::FormId(0x0001_51e3)
+        );
+        assert_eq!(
+            parse_cell_selector("151e3").unwrap(),
+            CellSelector::FormId(0x0001_51e3)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_cell_selectors() {
+        assert!(parse_cell_selector(" ").is_err());
+    }
     use super::*;
 
     #[test]

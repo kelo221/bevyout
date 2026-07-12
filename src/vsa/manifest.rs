@@ -39,28 +39,18 @@ pub(crate) struct PreparedPluginSource {
 pub(crate) struct PreparedBake {
     pub(crate) source_fingerprint: String,
     pub(crate) scene_path: String,
-    pub(crate) lightmaps: Vec<PreparedLightmapPage>,
-    pub(crate) bindings: Vec<PreparedLightmapBinding>,
-    pub(crate) lightmap_exposure: f32,
-    /// Quick/direct bakes still need the runtime ambient and point lights to
-    /// provide the missing indirect fill. Final bakes can disable them on
-    /// lightmapped meshes because they contain the complete transport.
     #[serde(default)]
-    pub(crate) runtime_lighting: bool,
+    pub(crate) irradiance_volume: Option<PreparedIrradianceVolume>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreparedLightmapPage {
+pub(crate) struct PreparedIrradianceVolume {
     pub(crate) asset_path: String,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreparedLightmapBinding {
-    pub(crate) mesh_name: String,
-    pub(crate) page: usize,
-    pub(crate) uv_rect: [f32; 4],
+    pub(crate) translation: [f32; 3],
+    pub(crate) rotation_xyzw: [f32; 4],
+    pub(crate) scale: [f32; 3],
+    pub(crate) resolution: [u32; 3],
+    pub(crate) intensity: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +79,13 @@ pub(crate) struct CellInfo {
     pub(crate) water_form_id: Option<u32>,
     #[serde(default)]
     pub(crate) water_height: Option<f32>,
+}
+
+pub(crate) fn cell_label(cell: &CellInfo) -> String {
+    match cell.editor_id.as_deref() {
+        Some(editor_id) => format!("{editor_id} ({:08x})", cell.form_id),
+        None => format!("{:08x}", cell.form_id),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

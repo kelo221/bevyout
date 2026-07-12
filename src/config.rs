@@ -25,6 +25,7 @@ struct FalloutConfig {
 #[serde(default)]
 struct ToolsConfig {
     blender: Option<PathBuf>,
+    irradiance_blender: Option<PathBuf>,
     ktx: Option<PathBuf>,
 }
 
@@ -58,11 +59,22 @@ pub(crate) fn apply(cli: &mut Cli) -> Result<()> {
             }
         }
         CommandLine::Bake(args) => {
+            if args.cache_dir.is_none() {
+                args.cache_dir = config.output.cache_dir.clone();
+            }
             if args.blender.is_none() {
                 args.blender = config.tools.blender;
             }
+            if args.irradiance_blender.is_none() {
+                args.irradiance_blender = config.tools.irradiance_blender;
+            }
             if args.toktx.is_none() {
                 args.toktx = config.tools.ktx;
+            }
+        }
+        CommandLine::Render(args) => {
+            if args.cache_dir.is_none() {
+                args.cache_dir = config.output.cache_dir;
             }
         }
         CommandLine::View(_) => {}

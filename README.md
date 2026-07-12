@@ -2,16 +2,22 @@
 
 Offline Fallout 3 interior-cell preparation and a small Bevy viewer.
 
-## Prepare and view a cell
+## Prepare and render a cell
 
-From this directory, use a hexadecimal FormID. During development, prefer the
-dynamic-linking alias so Bevy itself does not need to be statically relinked on
-each iteration:
+From this directory, use the Fallout GECK EditorID. During development, prefer
+the dynamic-linking alias so Bevy itself does not need to be statically relinked
+on each iteration:
 
 ```powershell
-cargo run-dev -- prepare --cell 000151e3
-cargo run-dev -- view --manifest .bevyout/cache/scenes/000151e3/scene.ron
+cargo run-dev -- prepare SuperDuperMart
+cargo run-dev -- render SuperDuperMart
 ```
+
+The selector also accepts an eight-digit hexadecimal FormID. Prepared scenes
+continue to use their hexadecimal FormID directory internally; for example,
+`SuperDuperMart` resolves to `00017f37`. The legacy `prepare --cell`,
+`view --manifest`, and `bake --manifest` forms remain available for scripts and
+low-level debugging.
 
 The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
@@ -21,26 +27,25 @@ unless the Bevy runtime DLLs are deliberately bundled.
 
 The preparation pipeline converts Fallout's approximately 70 world units per
 metre to Bevy metres. Changing this conversion requires preparing the cell again
-so the cached GLBs and any baked lightmaps use the same scale.
+so the cached GLBs and any baked irradiance volumes use the same scale.
 
 ## Bake lighting
 
-Light baking is a separate step after `prepare`. It writes baked assets under
-the scene's cache directory and updates the same manifest, so the normal viewer
-command automatically loads the baked scene after a successful quick or final
-bake:
+Irradiance baking is a separate step after `prepare`. It writes a Blender 4.5
+Eevee irradiance volume, a composed static-batched GLB, and a 3D KTX2 atlas
+under the scene's cache directory, then updates the same manifest:
 
 ```powershell
+# Blender 4.5 Eevee irradiance volume plus 64 m static batching.
+cargo run-dev -- bake SuperDuperMart
+
 # Fast Eevee preview; writes preview.png and leaves the manifest unchanged.
-cargo run-dev -- bake --manifest .bevyout/cache/scenes/000151e3/scene.ron --quality preview
+cargo run-dev -- bake SuperDuperMart --quality preview
 
-# Low-cost Cycles direct-light bake; runtime Fallout lights remain enabled.
-cargo run-dev -- bake --manifest .bevyout/cache/scenes/000151e3/scene.ron --quality quick --device optix
+# Replace an existing baked output.
+cargo run-dev -- bake SuperDuperMart --force
 
-# Production Cycles bake with indirect light and denoising.
-cargo run-dev -- bake --manifest .bevyout/cache/scenes/000151e3/scene.ron --quality final --device optix
-
-cargo run-dev -- view --manifest .bevyout/cache/scenes/000151e3/scene.ron
+cargo run-dev -- render SuperDuperMart
 ```
 
 The modes are intentionally different:
@@ -48,17 +53,23 @@ The modes are intentionally different:
 | Mode | Renderer and settings | Result |
 | --- | --- | --- |
 | `preview` | Eevee screen-space ray tracing and Fast GI | A quick `preview.png`; no KTX2 or manifest bake metadata |
-| `quick` | Cycles, 512px page, 8 samples, 1 bounce, direct light only, OpenImageDenoise | KTX2 lightmap with runtime ambient/point lights retained for indirect fill |
-| `final` | Cycles, 4096px page, 512 samples, 4 bounces, direct + indirect, OpenImageDenoise | Full KTX2 lightmap; runtime lights are disabled on lightmapped meshes |
+| `irradiance` | Blender 4.5 Eevee volume, 8 m probe spacing, 64 samples by default | 3D RGB9E5 KTX2 irradiance atlas plus static-batched GLB |
 
-`--device` accepts `cpu`, `optix`, `cuda`, or `hip` for Cycles modes. The
-requested GPU backend must be available in Blender; `preview` always uses
-Eevee. `--force` replaces an existing `baked` directory. `--keep-intermediate`
-keeps the generated Blender job, Python script, result JSON, and EXR for
-diagnostics. KTX-Software is required for `quick` and `final` unless you pass
-`--keep-intermediate` to retain the EXR without producing KTX2.
+`irradiance` is the default bake mode and is pinned to Blender 4.5 LTS because
+the exporter reads the uniform Eevee light-probe cache from the saved `.blend`.
+The EEVEE rendering portion is GPU-backed, but this pipeline does not select or
+report a specific GPU; Rust's irradiance extraction and KTX2 packaging remain
+CPU-side. Use
+`--irradiance-spacing-meters` from 2 through 32 to trade probe detail for bake
+time, and `--irradiance-samples` from 1 through 512. Static render geometry is
+grouped by equivalent material within 64 metre world-space chunks by default;
+use `--static-batch-chunk-meters` from 8 through 256 metres to evaluate the
+culling/draw-call tradeoff. `--force` replaces an existing `baked` directory.
+`--keep-intermediate` keeps the generated Blender job, script, result JSON,
+`.blend` cache, and raw KTX slices. KTX-Software's unified `ktx.exe` is required
+for irradiance export.
 
-The current slice handles interior cells and static geometry plus the first semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate conversion, starts near the prepared scene bounds, spawns the prepared GLB scenes and point lights, plays staged ambient/placement loops, and provides free flight with WASD/QE plus mouse look. Aim at a pickup, container, door, or activator and press `Enter` for the initial interaction path; door travel and animation remain deferred. Press `Tab` to switch to the metric FPS capsule controller (WASD and Space): it keeps the working render-derived movement colliders, plays distance-based native Fallout footsteps selected from authored Havok collision-material extras, and uses an OpenMW-derived stationary/directional jump, reduced air control, and surface landing sounds. Press `Tab` again to return to free camera. The Page Up/Down menu adjusts lighting, ambient, bloom, fog, and AO strength diagnostics; F1/F2 change the selected value. AO strength `0.00` disables the generated AO contribution and `1.00` uses the full baked value. The mouse is captured on startup; press `Esc` to release it and click the window to capture it again. NIF alpha flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials. Fallout normal-map RGB is used for tangent-space normals and its alpha is exported as `KHR_materials_specular` specular strength; non-rendering editor markers are omitted. Exterior LAND, music/voice playback, MP3 decoding, NPC assembly, and runtime NAVM pathfinding remain outside this slice.
+The current slice handles interior cells and static geometry plus the first semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate conversion, starts near the prepared scene bounds, spawns the prepared GLB scenes and point lights, plays staged ambient/placement loops, and provides free flight with WASD/QE plus mouse look. Aim at a pickup, container, door, or activator and press `Enter` for the initial interaction path; door travel and animation remain deferred. Press `Tab` to switch to the metric FPS capsule controller (WASD and Space): it keeps the working render-derived movement colliders, plays distance-based native Fallout footsteps selected from authored Havok collision-material extras, and uses an OpenMW-derived stationary/directional jump, reduced air control, and surface landing sounds. Press `Tab` again to return to free camera. The Page Up/Down menu adjusts lighting, irradiance intensity, ambient, bloom, fog, and AO strength diagnostics; F1/F2 change the selected value. Irradiance intensity starts at `1.00` and changes exponentially for quick A/B comparisons. AO strength `0.00` disables the generated AO contribution and `1.00` uses the full baked value. The mouse is captured on startup; press `Esc` to release it and click the window to capture it again. NIF alpha flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials. Fallout normal-map RGB is used for tangent-space normals and its alpha is exported as `KHR_materials_specular` specular strength; non-rendering editor markers are omitted. Exterior LAND, music/voice playback, MP3 decoding, NPC assembly, and runtime NAVM pathfinding remain outside this slice.
 
 ## Checks
 

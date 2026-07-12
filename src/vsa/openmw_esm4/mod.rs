@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use super::manifest::{CellInfo, ImageSpaceInfo};
+use super::paths::CellSelector;
 
 const RECORD_COMPRESSED: u32 = 0x0004_0000;
 pub(crate) const RECORD_DELETED: u32 = 0x0000_0020;
@@ -419,13 +420,13 @@ fn parse_plugin(bytes: &[u8], target_cell: u32) -> Result<ParsedPlugin> {
             name: "Fallout3.esm",
             bytes,
         }],
-        target_cell,
+        &CellSelector::FormId(target_cell),
     )
 }
 
 pub(crate) fn parse_content_set(
     sources: &[PluginSource<'_>],
-    target_cell: u32,
+    selector: &CellSelector,
 ) -> Result<ParsedPlugin> {
     if sources.len() > 256 {
         bail!("ESM4 content set exceeds the 256-file FormID limit")
@@ -463,6 +464,36 @@ pub(crate) fn parse_content_set(
         )
         .with_context(|| format!("parsing {}", source.name))?;
     }
+
+    let target_cell = match selector {
+        CellSelector::FormId(form_id) => *form_id,
+        CellSelector::EditorId(editor_id) => {
+            let matches = state
+                .cells
+                .values()
+                .filter(|cell| {
+                    cell.editor_id
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(editor_id))
+                })
+                .map(|cell| cell.form_id)
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [] => bail!("GECK EditorID '{editor_id}' was not found in the loaded content set"),
+                [form_id] => *form_id,
+                _ => {
+                    let form_ids = matches
+                        .iter()
+                        .map(|form_id| format!("{form_id:08x}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    bail!(
+                        "GECK EditorID '{editor_id}' is ambiguous; matching cell FormIDs: {form_ids}"
+                    )
+                }
+            }
+        }
+    };
 
     let all_references = state.references;
     let mut references = all_references
@@ -1962,6 +1993,29 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("REFR.UNKN"))
         );
+
+        let parsed_by_editor_id = parse_content_set(
+            &[PluginSource {
+                name: "Fallout3.esm",
+                bytes: &plugin,
+            }],
+            &CellSelector::EditorId("testcell".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed_by_editor_id.cell.as_ref().map(|cell| cell.form_id),
+            Some(cell_id)
+        );
+        assert!(
+            parse_content_set(
+                &[PluginSource {
+                    name: "Fallout3.esm",
+                    bytes: &plugin,
+                }],
+                &CellSelector::EditorId("missing-cell".into()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2019,12 +2073,41 @@ mod tests {
                     bytes: &override_plugin,
                 },
             ],
-            cell_id,
+            &CellSelector::FormId(cell_id),
         )
         .unwrap();
         assert_eq!(parsed.references[0].form_id, reference_id);
         assert_eq!(parsed.references[0].base_form_id, base_id);
         assert_eq!(parsed.bases[&base_id].name.as_deref(), Some("Overridden"));
+    }
+
+    #[test]
+    fn editor_id_resolution_rejects_ambiguous_cells() {
+        let mut plugin = tes4(&[]);
+        for cell_id in [0x100_u32, 0x200_u32] {
+            plugin.extend(record(
+                b"CELL",
+                0,
+                cell_id,
+                &[
+                    subrecord(b"EDID", b"DuplicateCell\0"),
+                    subrecord(b"DATA", &[1]),
+                ]
+                .concat(),
+            ));
+        }
+
+        let error = parse_content_set(
+            &[PluginSource {
+                name: "Fallout3.esm",
+                bytes: &plugin,
+            }],
+            &CellSelector::EditorId("duplicatecell".into()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(error.to_string().contains("00000100"));
+        assert!(error.to_string().contains("00000200"));
     }
 
     #[test]

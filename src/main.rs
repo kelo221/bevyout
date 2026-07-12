@@ -14,6 +14,7 @@ fn main() -> Result<()> {
     match cli.command {
         CommandLine::Prepare(args) => vsa::prepare(args),
         CommandLine::Bake(args) => vsa::bake(args),
+        CommandLine::Render(args) => viewer::render(args),
         CommandLine::View(args) => viewer::view(args),
     }
 }

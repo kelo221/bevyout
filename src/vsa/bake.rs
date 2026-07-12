@@ -6,13 +6,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{BakeArgs, BakeDevice, BakeQuality};
+use crate::cli::{BakeArgs, BakeQuality};
 
 use super::assets::find_blender;
+use super::irradiance::export_rgb9e5_atlas;
 use super::manifest::{
-    PreparedCellLighting, PreparedLightmapBinding, PreparedLightmapPage, PreparedPlacement,
-    PreparedSceneManifest, PreparedSemantic,
+    PreparedCellLighting, PreparedIrradianceVolume, PreparedPlacement, PreparedSceneManifest,
+    PreparedSemantic, cell_label,
 };
+use super::scenes::resolve_cached_manifest;
 
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 
@@ -30,20 +32,13 @@ fn cell_directional_illuminance(lighting: &PreparedCellLighting) -> f32 {
 struct BakeJob {
     asset_root: String,
     output_scene: String,
-    output_exr: String,
     preview_output: String,
     result_json: String,
-    page_size: u32,
-    samples: u32,
-    bounces: u32,
-    gutter: u32,
-    device: String,
+    irradiance_blend: String,
+    irradiance_spacing_meters: f32,
+    irradiance_samples: u32,
     preview_only: bool,
-    fast_gi: bool,
-    indirect_clamp: f32,
-    include_indirect: bool,
-    denoise: bool,
-    bake_all: bool,
+    static_batch_chunk_meters: f32,
     emission_scale: f32,
     ambient_rgba: [f32; 4],
     cell_directional_rgba: [f32; 4],
@@ -58,6 +53,7 @@ struct JobPlacement {
     reference_form_id: u32,
     asset_path: String,
     ao_mode: String,
+    batchable_static: bool,
     translation: [f32; 3],
     rotation_xyzw: [f32; 4],
     scale: f32,
@@ -75,7 +71,33 @@ struct JobLight {
 
 #[derive(Debug, Deserialize)]
 struct BlenderBakeResult {
-    bindings: Vec<PreparedLightmapBinding>,
+    irradiance: Option<BlenderIrradianceResult>,
+    batching: BlenderBatchingStats,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlenderIrradianceResult {
+    blend_path: String,
+    resolution: [u32; 3],
+    translation: [f32; 3],
+    rotation_xyzw: [f32; 4],
+    scale: [f32; 3],
+}
+
+#[derive(Debug, Deserialize)]
+struct BlenderBatchingStats {
+    chunk_size_meters: f32,
+    visual_objects_before: usize,
+    visual_objects_after: usize,
+    render_primitives_before: usize,
+    render_primitives_after: usize,
+    materials_before: usize,
+    materials_after: usize,
+    batches_created: usize,
+    largest_batch: usize,
+    excluded_collision: usize,
+    excluded_large: usize,
+    excluded_non_static: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,7 +113,21 @@ struct KtxTool {
 }
 
 pub(crate) fn bake(args: BakeArgs) -> Result<()> {
-    let manifest_path = fs::canonicalize(&args.manifest).context("manifest does not exist")?;
+    let manifest_path = match (args.selector.as_deref(), args.manifest.as_deref()) {
+        (Some(_), Some(_)) => {
+            bail!("choose either a GECK EditorID/FormID selector or --manifest, not both")
+        }
+        (Some(selector), None) => resolve_cached_manifest(
+            args.cache_dir
+                .as_deref()
+                .unwrap_or_else(|| Path::new(".bevyout/cache")),
+            selector,
+        )?,
+        (None, Some(manifest)) => fs::canonicalize(manifest).context("manifest does not exist")?,
+        (None, None) => bail!(
+            "provide a GECK EditorID/FormID selector or --manifest; run `bevyout bake --help` for usage"
+        ),
+    };
     let text = fs::read_to_string(&manifest_path).context("could not read scene manifest")?;
     let mut manifest: PreparedSceneManifest =
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
@@ -103,20 +139,16 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         bail!("scene manifest contains no renderable placements");
     }
 
-    let blender = find_blender(args.blender)?;
-    let ktx_tool = if matches!(args.quality, BakeQuality::Preview) {
-        None
+    let blender = if matches!(args.quality, BakeQuality::Irradiance) {
+        find_irradiance_blender(args.irradiance_blender.as_deref(), args.blender.as_deref())?
     } else {
-        find_ktx_tool(args.toktx)?
+        find_blender(args.blender.clone())?
     };
-    if ktx_tool.is_none()
-        && !args.keep_intermediate
-        && !matches!(args.quality, BakeQuality::Preview)
-    {
-        bail!(
-            "KTX-Software was not found; install it or pass --toktx with ktx.exe/toktx.exe. Use --keep-intermediate to produce an EXR-only bake"
-        );
-    }
+    let ktx_tool = if matches!(args.quality, BakeQuality::Irradiance) {
+        Some(find_irradiance_ktx_tool(args.toktx)?)
+    } else {
+        None
+    };
     let asset_root = fs::canonicalize(&manifest.asset_root)
         .with_context(|| format!("asset root does not exist: {}", manifest.asset_root))?;
     let cell_dir = asset_root
@@ -131,34 +163,11 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     }
     fs::create_dir_all(&output_dir)?;
 
-    let (
-        page_size,
-        samples,
-        bounces,
-        gutter,
-        fast_gi,
-        indirect_clamp,
-        include_indirect,
-        denoise,
-        bake_all,
-    ) = match args.quality {
-        // Fast GI and a finite indirect clamp keep an interactive preview from
-        // spending minutes on bright multi-bounce interiors.
-        BakeQuality::Preview => (1024, 16, 1, 4, true, 2.0, true, true, true),
-        // Quick is intentionally a direct-light bake. Indirect transport is
-        // the dominant cost for a large Fallout cell and is reserved for
-        // Final, where the additional time is expected. Keep enough samples
-        // for stable shadows and let OpenImageDenoise remove the remaining
-        // Monte Carlo noise; four undenoised samples produce visibly blotchy
-        // walls and ceilings even at this small atlas size.
-        BakeQuality::Quick => (512, 8, 1, 2, false, 1.0, false, true, false),
-        BakeQuality::Final => (4096, 512, 4, 8, false, 0.0, true, true, true),
-    };
-    let runtime_lighting = matches!(args.quality, BakeQuality::Quick);
     let output_scene = output_dir.join("scene.glb");
-    let output_exr = output_dir.join("lightmap.exr");
     let preview_output = output_dir.join("preview.png");
     let result_json = output_dir.join("result.json");
+    let irradiance_blend = output_dir.join("irradiance.blend");
+    let irradiance_raw = output_dir.join("irradiance.raw");
     let job_file = output_dir.join("job.json");
     let cell_lighting =
         manifest
@@ -173,20 +182,13 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     let job = BakeJob {
         asset_root: blender_path(&asset_root),
         output_scene: blender_path(&output_scene),
-        output_exr: blender_path(&output_exr),
         preview_output: blender_path(&preview_output),
         result_json: blender_path(&result_json),
-        page_size,
-        samples,
-        bounces,
-        gutter,
-        device: bake_device_name(args.device).to_owned(),
+        irradiance_blend: blender_path(&irradiance_blend),
+        irradiance_spacing_meters: args.irradiance_spacing_meters,
+        irradiance_samples: args.irradiance_samples,
         preview_only: matches!(args.quality, BakeQuality::Preview),
-        fast_gi,
-        indirect_clamp,
-        include_indirect,
-        denoise,
-        bake_all,
+        static_batch_chunk_meters: args.static_batch_chunk_meters,
         // Runtime glow maps are intentionally much brighter than their physical
         // bake contribution so they remain visible under Bloom in the viewer.
         emission_scale: 0.01,
@@ -203,6 +205,7 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
                     reference_form_id: placement.reference_form_id,
                     asset_path: placement.asset_path.clone()?,
                     ao_mode: placement.ao_mode.clone(),
+                    batchable_static: is_batchable_static(placement),
                     translation: placement.translation,
                     rotation_xyzw: placement.rotation_xyzw,
                     scale: placement.scale,
@@ -235,6 +238,13 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
 
     let script_file = output_dir.join("blender_bake.py");
     fs::write(&script_file, include_str!("blender_bake.py"))?;
+    if matches!(args.quality, BakeQuality::Preview) {
+        let _ = fs::remove_file(&preview_output);
+    } else {
+        for path in [&output_scene, &irradiance_blend, &result_json] {
+            let _ = fs::remove_file(path);
+        }
+    }
     let blender_status = Command::new(&blender)
         .arg("--background")
         .arg("--factory-startup")
@@ -262,102 +272,113 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         println!("Eevee preview rendered -> {}", preview_output.display());
         return Ok(());
     }
-    if !output_scene.exists() || !output_exr.exists() || !result_json.exists() {
+    if !output_scene.exists() || !irradiance_blend.exists() || !result_json.exists() {
         bail!(
             "Blender reported success but did not create the expected bake outputs in {}",
             output_dir.display()
         );
     }
 
-    let Some(ktx_tool) = ktx_tool else {
-        if !args.keep_intermediate {
-            bail!(
-                "Blender bake completed to {} but KTX-Software is unavailable; pass --toktx with ktx.exe/toktx.exe. EXR was kept at {}",
-                output_dir.display(),
-                output_exr.display()
-            );
-        }
-        println!(
-            "Blender bake completed; KTX2 conversion skipped because KTX-Software is unavailable. EXR: {}",
-            output_exr.display()
-        );
-        return Ok(());
-    };
-
-    let ktx2_path = output_dir.join("lightmap.ktx2");
+    let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
+    let bake_result: BlenderBakeResult =
+        serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
+    let irradiance = bake_result
+        .irradiance
+        .as_ref()
+        .context("Blender produced no irradiance volume metadata")?;
+    let exported = export_rgb9e5_atlas(
+        Path::new(&irradiance.blend_path),
+        &irradiance_raw,
+        irradiance.resolution,
+    )?;
+    let ktx2_path = output_dir.join("irradiance.ktx2");
     let mut ktx_command = Command::new(&ktx_tool.path);
     match ktx_tool.kind {
         KtxToolKind::LegacyToktx => {
-            ktx_command
-                .arg("--t2")
-                .arg("--target_type")
-                .arg("RGBA16F")
-                .arg("--assign_oetf")
-                .arg("linear")
-                .arg("--zcmp")
-                .arg("18");
+            bail!(
+                "irradiance volume export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
+            );
         }
         KtxToolKind::UnifiedKtx => {
             ktx_command
                 .arg("create")
+                .arg("--raw")
                 .arg("--format")
-                .arg("R16G16B16A16_SFLOAT")
+                .arg("E5B9G9R9_UFLOAT_PACK32")
+                .arg("--width")
+                .arg(exported.resolution[0].to_string())
+                .arg("--height")
+                .arg((2 * exported.resolution[1]).to_string())
+                .arg("--depth")
+                .arg((3 * exported.resolution[2]).to_string())
                 .arg("--assign-tf")
                 .arg("linear")
                 .arg("--assign-texcoord-origin")
-                .arg("top-left")
+                .arg("top-left-front")
                 .arg("--zstd")
-                .arg("18");
+                .arg("3");
         }
     }
+    for raw_slice in &exported.raw_slices {
+        ktx_command.arg(raw_slice);
+    }
     let ktx_output = ktx_command
-        .arg(&output_exr)
         .arg(&ktx2_path)
         .output()
         .context("failed to start KTX-Software")?;
     if !ktx_output.status.success() {
         if !args.keep_intermediate {
             bail!(
-                "KTX-Software failed with {}:\n{}\n{}\nEXR was kept at {}",
+                "KTX-Software failed with {}:\n{}\n{}\nraw irradiance data was kept at {}",
                 ktx_output.status,
                 tail(&ktx_output.stdout),
                 tail(&ktx_output.stderr),
-                output_exr.display()
+                irradiance_raw.display()
             );
         }
         bail!(
-            "KTX-Software failed with {}; EXR was kept at {}",
+            "KTX-Software failed with {}:\n{}\n{}\nraw irradiance data was kept at {}",
             ktx_output.status,
-            output_exr.display()
+            tail(&ktx_output.stdout),
+            tail(&ktx_output.stderr),
+            irradiance_raw.display()
         );
     }
 
-    let bake_result: BlenderBakeResult =
-        serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
-    if bake_result.bindings.is_empty() {
-        bail!("Blender produced no lightmap bindings");
-    }
+    let batching = &bake_result.batching;
+    println!(
+        "static batching ({:.1} m chunks): objects {} -> {}, primitives {} -> {}, materials {} -> {}; {} batches (largest {}), excluded {} collision / {} large / {} non-static",
+        batching.chunk_size_meters,
+        batching.visual_objects_before,
+        batching.visual_objects_after,
+        batching.render_primitives_before,
+        batching.render_primitives_after,
+        batching.materials_before,
+        batching.materials_after,
+        batching.batches_created,
+        batching.largest_batch,
+        batching.excluded_collision,
+        batching.excluded_large,
+        batching.excluded_non_static,
+    );
     let scene_path = relative_asset_path(&asset_root, &output_scene)?;
-    let lightmap_path = relative_asset_path(&asset_root, &ktx2_path)?;
+    let irradiance_path = relative_asset_path(&asset_root, &ktx2_path)?;
     let mut fingerprint = Sha256::new();
     fingerprint.update(manifest.source_fingerprint.as_bytes());
     fingerprint.update(serde_json::to_vec(&job)?);
     let source_fingerprint = format!("{:x}", fingerprint.finalize());
-    manifest.schema_version = 7;
+    manifest.schema_version = 8;
     manifest.bake = Some(super::manifest::PreparedBake {
         source_fingerprint,
         scene_path,
-        lightmaps: vec![PreparedLightmapPage {
-            asset_path: lightmap_path,
-            width: page_size,
-            height: page_size,
-        }],
-        bindings: bake_result.bindings,
-        // Blender's direct-bake values are HDR radiance, not display-referred
-        // colors. Bevy's lightmap shader expects this calibration factor so
-        // indoor Fallout surfaces remain visible under the camera exposure.
-        lightmap_exposure: 250.0,
-        runtime_lighting,
+        irradiance_volume: Some(PreparedIrradianceVolume {
+            asset_path: irradiance_path,
+            translation: irradiance.translation,
+            rotation_xyzw: irradiance.rotation_xyzw,
+            scale: irradiance.scale,
+            resolution: exported.resolution,
+            intensity: 1.0,
+        }),
     });
     fs::write(
         &manifest_path,
@@ -367,12 +388,16 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         let _ = fs::remove_file(&job_file);
         let _ = fs::remove_file(&script_file);
         let _ = fs::remove_file(&result_json);
-        let _ = fs::remove_file(&output_exr);
+        for raw_slice in &exported.raw_slices {
+            let _ = fs::remove_file(raw_slice);
+        }
+        let _ = fs::remove_file(&irradiance_raw);
+        let _ = fs::remove_file(&irradiance_blend);
     }
     println!(
-        "baked cell {:08x}: {} bindings -> {}",
-        manifest.cell.form_id,
-        manifest.bake.as_ref().map_or(0, |bake| bake.bindings.len()),
+        "baked {}: irradiance volume {:?} -> {}",
+        cell_label(&manifest.cell),
+        exported.resolution,
         ktx2_path.display()
     );
     Ok(())
@@ -386,6 +411,10 @@ pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
             | PreparedSemantic::Door(_)
             | PreparedSemantic::Activator
     )
+}
+
+fn is_batchable_static(placement: &PreparedPlacement) -> bool {
+    matches!(placement.semantic, PreparedSemantic::Static)
 }
 
 fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>> {
@@ -427,13 +456,113 @@ fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>> {
     Ok(None)
 }
 
-fn bake_device_name(device: BakeDevice) -> &'static str {
-    match device {
-        BakeDevice::Cpu => "CPU",
-        BakeDevice::Optix => "OPTIX",
-        BakeDevice::Cuda => "CUDA",
-        BakeDevice::Hip => "HIP",
+fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
+    if let Some(path) = explicit {
+        let tool = KtxTool {
+            kind: ktx_tool_kind(&path),
+            path,
+        };
+        if !matches!(tool.kind, KtxToolKind::UnifiedKtx) {
+            bail!(
+                "irradiance volume export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
+            );
+        }
+        if !tool.path.exists() {
+            bail!("KTX executable does not exist: {}", tool.path.display());
+        }
+        return Ok(tool);
     }
+    for path in [
+        PathBuf::from("ktx"),
+        PathBuf::from(r"C:\Program Files\KTX-Software\bin\ktx.exe"),
+    ] {
+        if (path.is_absolute() && path.exists())
+            || (!path.is_absolute()
+                && Command::new(&path)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|output| output.status.success()))
+        {
+            return Ok(KtxTool {
+                kind: KtxToolKind::UnifiedKtx,
+                path,
+            });
+        }
+    }
+    let Some(tool) = find_ktx_tool(None)? else {
+        bail!(
+            "KTX-Software was not found; install the unified ktx.exe or pass --toktx with its path"
+        );
+    };
+    if !matches!(tool.kind, KtxToolKind::UnifiedKtx) {
+        bail!(
+            "irradiance volume export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
+        );
+    }
+    Ok(tool)
+}
+
+fn find_irradiance_blender(
+    irradiance_explicit: Option<&Path>,
+    general_explicit: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(path) = irradiance_explicit {
+        validate_blender_45(path)?;
+        return Ok(path.to_path_buf());
+    }
+    if let Some(path) = general_explicit {
+        if !path.exists() {
+            bail!("Blender executable does not exist: {}", path.display());
+        }
+        if validate_blender_45(path).is_ok() {
+            return Ok(path.to_path_buf());
+        }
+        let preferred =
+            PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe");
+        if preferred.exists() {
+            validate_blender_45(&preferred)?;
+            println!(
+                "configured Blender {} is not 4.5 LTS; using {} for irradiance baking",
+                path.display(),
+                preferred.display()
+            );
+            return Ok(preferred);
+        }
+        validate_blender_45(path)?;
+        unreachable!("validated Blender path must return above")
+    }
+    let preferred = PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe");
+    if preferred.exists() {
+        validate_blender_45(&preferred)?;
+        return Ok(preferred);
+    }
+    let blender = find_blender(None)?;
+    validate_blender_45(&blender)?;
+    Ok(blender)
+}
+
+fn validate_blender_45(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("Blender executable does not exist: {}", path.display());
+    }
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("could not run Blender at {}", path.display()))?;
+    let version = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success()
+        || !version
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("4.5"))
+    {
+        bail!(
+            "irradiance-volume baking requires Blender 4.5 LTS; {} reported {}",
+            path.display(),
+            version.lines().next().unwrap_or("an unknown version")
+        );
+    }
+    Ok(())
 }
 
 fn ktx_tool_kind(path: &Path) -> KtxToolKind {
@@ -498,5 +627,52 @@ mod tests {
             cell_directional_illuminance(&PreparedCellLighting::default()),
             0.0
         );
+    }
+
+    #[test]
+    fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
+        fn placement(semantic: PreparedSemantic) -> PreparedPlacement {
+            PreparedPlacement {
+                reference_form_id: 1,
+                base_form_id: 2,
+                asset_path: Some("assets/test.glb".into()),
+                translation: [0.0; 3],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: 1.0,
+                error: None,
+                reference_kind: "REFR".into(),
+                base_kind: "STAT".into(),
+                editor_id: None,
+                display_name: None,
+                count: 1,
+                semantic,
+                initially_enabled: true,
+                enable_parent: None,
+                owner_form_id: None,
+                owner_faction_rank: None,
+                inventory: Vec::new(),
+                audio: Default::default(),
+                ao_mode: "ao-none".into(),
+            }
+        }
+
+        let static_placement = placement(PreparedSemantic::Static);
+        assert!(is_bake_static(&static_placement));
+        assert!(is_batchable_static(&static_placement));
+
+        for semantic in [
+            PreparedSemantic::Furniture,
+            PreparedSemantic::Npc(super::super::manifest::PreparedActor {
+                base_template_form_id: None,
+            }),
+            PreparedSemantic::Creature(super::super::manifest::PreparedActor {
+                base_template_form_id: None,
+            }),
+            PreparedSemantic::Unsupported,
+        ] {
+            let placement = placement(semantic);
+            assert!(is_bake_static(&placement));
+            assert!(!is_batchable_static(&placement));
+        }
     }
 }

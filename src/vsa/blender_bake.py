@@ -1,9 +1,14 @@
 import bpy
+import hashlib
 import json
 import math
 import os
+import struct
 import sys
+import tempfile
 import time
+import traceback
+from collections import defaultdict
 from mathutils import Matrix, Quaternion, Vector
 
 
@@ -18,6 +23,7 @@ BLENDER_TO_BEVY = Matrix((
     (0.0, 0.0, 0.0, 1.0),
 ))
 BEVY_TO_BLENDER = BLENDER_TO_BEVY.transposed()
+STATIC_BATCH_SIZE_METERS = 64.0
 
 
 def bevy_transform_to_blender(translation, rotation_xyzw, scale=1.0):
@@ -27,6 +33,119 @@ def bevy_transform_to_blender(translation, rotation_xyzw, scale=1.0):
     bevy = Matrix.Translation(Vector(translation)) @ rotation
     bevy @= Matrix.Diagonal((scale, scale, scale, 1.0))
     return BEVY_TO_BLENDER @ bevy @ BLENDER_TO_BEVY
+
+
+def stable_value(value):
+    """Return a deterministic, JSON-compatible representation of Blender values."""
+    if isinstance(value, float):
+        return round(value, 8)
+    if isinstance(value, (bool, int, str)) or value is None:
+        return value
+    try:
+        return tuple(stable_value(item) for item in value)
+    except TypeError:
+        return str(value)
+
+
+def image_content_signature(image, cache):
+    if image is None:
+        return None
+    key = image.as_pointer()
+    if key in cache:
+        return cache[key]
+    digest = hashlib.sha256()
+    digest.update(str(tuple(image.size)).encode("ascii"))
+    digest.update(image.source.encode("utf8"))
+    digest.update(image.colorspace_settings.name.encode("utf8"))
+    packed = image.packed_file
+    path = bpy.path.abspath(image.filepath_raw or image.filepath)
+    if packed is not None:
+        digest.update(bytes(packed.data))
+    elif path and os.path.isfile(path):
+        with open(path, "rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    else:
+        # Generated images are uncommon in converted GLBs. Pixel text is slower
+        # than packed bytes, but keeps equivalent generated fixtures canonical.
+        digest.update(repr(tuple(round(float(value), 7) for value in image.pixels)).encode("ascii"))
+    cache[key] = digest.hexdigest()
+    return cache[key]
+
+
+def shader_socket_signature(socket, image_cache, visiting):
+    links = sorted(
+        (link for link in socket.links if link.is_valid),
+        key=lambda link: (link.from_node.bl_idname, link.from_socket.identifier),
+    )
+    if not links:
+        return ("value", stable_value(getattr(socket, "default_value", None)))
+    return tuple(node_signature(link.from_node, image_cache, visiting) for link in links)
+
+
+def node_signature(node, image_cache, visiting):
+    pointer = node.as_pointer()
+    if pointer in visiting:
+        return (node.bl_idname, "cycle")
+    visiting.add(pointer)
+    properties = []
+    for name in (
+        "blend_type", "clamp", "data_type", "extension", "interpolation",
+        "invert", "operation", "projection", "projection_blend", "space", "uv_map",
+    ):
+        if hasattr(node, name):
+            properties.append((name, stable_value(getattr(node, name))))
+    if node.bl_idname == "ShaderNodeTexImage":
+        properties.append(("image", image_content_signature(node.image, image_cache)))
+    inputs = tuple(
+        (socket.identifier, shader_socket_signature(socket, image_cache, visiting))
+        for socket in node.inputs
+        if socket.enabled and socket.name != "BevyOutLightmap"
+    )
+    visiting.remove(pointer)
+    return (node.bl_idname, tuple(properties), inputs)
+
+
+def canonical_material_signature(material, image_cache=None):
+    """Describe all render-affecting imported glTF PBR state, independent of names."""
+    if material is None:
+        return ("default-material",)
+    image_cache = image_cache if image_cache is not None else {}
+    state = (
+        stable_value(material.diffuse_color),
+        stable_value(getattr(material, "metallic", 0.0)),
+        stable_value(getattr(material, "roughness", 0.5)),
+        stable_value(getattr(material, "surface_render_method", None)),
+        stable_value(getattr(material, "blend_method", None)),
+        stable_value(getattr(material, "alpha_threshold", 0.5)),
+        stable_value(getattr(material, "use_backface_culling", False)),
+        stable_value(getattr(material, "show_transparent_back", True)),
+    )
+    if not material.use_nodes or material.node_tree is None:
+        return ("material", state, None)
+    output = next(
+        (node for node in material.node_tree.nodes
+         if node.bl_idname == "ShaderNodeOutputMaterial" and node.is_active_output),
+        None,
+    )
+    surface = output.inputs.get("Surface") if output is not None else None
+    graph = shader_socket_signature(surface, image_cache, set()) if surface is not None else None
+    return ("material", state, graph)
+
+
+def world_bounds(obj):
+    values = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    minimum = Vector(tuple(min(value[axis] for value in values) for axis in range(3)))
+    maximum = Vector(tuple(max(value[axis] for value in values) for axis in range(3)))
+    return minimum, maximum
+
+
+def static_chunk(center, size=STATIC_BATCH_SIZE_METERS):
+    return tuple(math.floor(float(center[axis]) / size) for axis in range(3))
+
+
+def fits_static_chunk(extent, size=STATIC_BATCH_SIZE_METERS):
+    return all(float(extent[axis]) <= size + 1e-6 for axis in range(3))
 
 
 def clear_scene():
@@ -263,13 +382,18 @@ def import_placements(job):
         local_index = 0
         for template in templates:
             obj = template.copy()
-            if not job.get("preview_only", False) and should_bake_object(template, job):
+            batchable_static = bool(placement.get("batchable_static", False))
+            if not job.get("preview_only", False) and (
+                should_bake_object(template, job)
+                or (batchable_static and not template.get("bevyout_collision", False))
+            ):
                 obj.data = template.data.copy()
             obj.parent = None
             obj.matrix_world = placement_matrix @ template.matrix_world
             bpy.context.collection.objects.link(obj)
             obj["bevyout_reference_form_id"] = placement["reference_form_id"]
             obj["bevyout_ao_mode"] = placement.get("ao_mode", "ao-none")
+            obj["bevyout_batchable_static"] = batchable_static
             objects.append((obj, placement["reference_form_id"], local_index))
             local_index += 1
     for template in imported_templates:
@@ -283,7 +407,7 @@ def render_preview(job, objects):
     for obj, _, _ in objects:
         if obj.get("bevyout_collision", False):
             obj.hide_render = True
-    scene.render.engine = "BLENDER_EEVEE"
+    set_eevee_engine(scene)
     # Eevee's screen-space ray tracing and Fast GI are useful for a quick
     # lighting read, but they are intentionally preview-only: off-screen
     # surfaces and final indirect transport still require the Cycles bake.
@@ -358,6 +482,89 @@ def add_cell_directional_light(job):
     )
 
 
+def set_eevee_engine(scene):
+    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
+        try:
+            scene.render.engine = engine
+            return engine
+        except TypeError:
+            continue
+    raise RuntimeError("this Blender build does not expose a supported EEVEE engine")
+
+
+def irradiance_volume_bounds(objects, spacing):
+    minimum = Vector((float("inf"),) * 3)
+    maximum = Vector((float("-inf"),) * 3)
+    for obj in objects:
+        object_minimum, object_maximum = world_bounds(obj)
+        minimum = Vector(tuple(min(minimum[i], object_minimum[i]) for i in range(3)))
+        maximum = Vector(tuple(max(maximum[i], object_maximum[i]) for i in range(3)))
+    if not objects:
+        raise RuntimeError("cannot create an irradiance volume without renderable meshes")
+    # Put the outermost probes one spacing inside the scene bounds. This gives
+    # interpolation room at walls without adding a second, mostly empty cell.
+    padding = Vector((float(spacing),) * 3)
+    minimum -= padding
+    maximum += padding
+    extent = maximum - minimum
+    resolution = tuple(
+        max(2, int(math.ceil(float(extent[axis]) / float(spacing))) + 1)
+        for axis in range(3)
+    )
+    center = (minimum + maximum) * 0.5
+    return center, extent, resolution
+
+
+def bake_irradiance_volume(job, objects):
+    if tuple(bpy.app.version[:2]) != (4, 5):
+        raise RuntimeError(
+            "irradiance volume baking is pinned to Blender 4.5 LTS; found %s"
+            % bpy.app.version_string
+        )
+    spacing = max(float(job.get("irradiance_spacing_meters", 8.0)), 0.01)
+    center, extent, resolution = irradiance_volume_bounds(objects, spacing)
+    bpy.ops.object.select_all(action="DESELECT")
+    bpy.ops.object.lightprobe_add(type="VOLUME", location=center)
+    probe = bpy.context.object
+    probe.name = "BevyOutIrradianceVolume"
+    probe.data.name = "BevyOutIrradianceVolume"
+    probe.scale = extent
+    probe.data.resolution_x = resolution[0]
+    probe.data.resolution_y = resolution[1]
+    probe.data.resolution_z = resolution[2]
+    probe.data.bake_samples = int(job.get("irradiance_samples", 64))
+    probe.data.surfel_density = 1
+    probe.data.capture_world = False
+    probe.data.capture_indirect = True
+    probe.data.capture_emission = True
+    if hasattr(probe.data, "visibility_buffer_bias"):
+        probe.data.visibility_buffer_bias = 0.5
+    bpy.context.view_layer.objects.active = probe
+    probe.select_set(True)
+    print(
+        "[bake] irradiance volume bounds center=%s extent=%s resolution=%s samples=%d"
+        % (tuple(round(value, 2) for value in center),
+           tuple(round(value, 2) for value in extent),
+           resolution, probe.data.bake_samples),
+        flush=True,
+    )
+    result = bpy.ops.object.lightprobe_cache_bake(subset="ACTIVE")
+    if "FINISHED" not in result:
+        raise RuntimeError("Blender irradiance volume cache bake failed")
+    # The cache is stored in Blender's DNA rather than exposed through the
+    # Python API. Save uncompressed and let Rust extract its SH coefficients.
+    bpy.ops.wm.save_as_mainfile(filepath=job["irradiance_blend"], compress=False)
+    if not os.path.exists(job["irradiance_blend"]):
+        raise RuntimeError("Blender irradiance volume bake did not save its .blend cache")
+    return {
+        "blend_path": job["irradiance_blend"],
+        "resolution": list(resolution),
+        "translation": [float(center.x), float(center.z), float(-center.y)],
+        "rotation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "scale": [float(extent.x), float(extent.z), float(extent.y)],
+    }
+
+
 def configure_cycles(scene, requested_device, denoise):
     scene.cycles.use_denoising = denoise
     if denoise and hasattr(scene.cycles, "denoiser"):
@@ -378,6 +585,334 @@ def configure_cycles(scene, requested_device, denoise):
     scene.cycles.device = "GPU"
 
 
+def used_materials(obj):
+    indices = sorted({polygon.material_index for polygon in obj.data.polygons})
+    materials = []
+    for index in indices:
+        materials.append(obj.data.materials[index] if index < len(obj.data.materials) else None)
+    return materials or [None]
+
+
+def visual_mesh_objects():
+    return [
+        obj for obj in bpy.context.scene.objects
+        if obj.type == "MESH" and obj.data.polygons
+        and not obj.get("bevyout_collision", False)
+        and not is_non_rendering_object(obj)
+    ]
+
+
+def render_primitive_count(objects):
+    return sum(len(used_materials(obj)) for obj in objects)
+
+
+def referenced_material_count(objects):
+    return len({
+        material.as_pointer()
+        for obj in objects
+        for material in used_materials(obj)
+        if material is not None
+    })
+
+
+def split_object_by_material(obj):
+    if len(used_materials(obj)) <= 1:
+        return [obj]
+    before = set(bpy.context.scene.objects)
+    if bpy.context.object and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.separate(type="MATERIAL")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    fragments = [obj] + [
+        item for item in bpy.context.scene.objects
+        if item not in before and item.type == "MESH"
+    ]
+    for index, fragment in enumerate(sorted(fragments, key=lambda item: item.name)):
+        bpy.ops.object.select_all(action="DESELECT")
+        fragment.select_set(True)
+        bpy.context.view_layer.objects.active = fragment
+        bpy.ops.object.material_slot_remove_unused()
+        fragment.name = "%s_mat_%02d" % (obj.name, index)
+        fragment.data.name = fragment.name
+    return fragments
+
+
+def remap_fragment_material(obj, material):
+    obj.data.materials.clear()
+    if material is not None:
+        obj.data.materials.append(material)
+    for polygon in obj.data.polygons:
+        polygon.material_index = 0
+
+
+def join_static_group(group, name, material):
+    for obj in group:
+        remap_fragment_material(obj, material)
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in group:
+        obj.select_set(True)
+    joined = group[0]
+    bpy.context.view_layer.objects.active = joined
+    bpy.ops.object.join()
+    joined.name = name
+    joined.data.name = name
+    joined["bevyout_batch_size"] = len(group)
+    if joined.get("bevyout_lightmapped", False):
+        joined["bevyout_lightmap_rect"] = [0.0, 0.0, 1.0, 1.0]
+    return joined
+
+
+def batch_static_meshes(chunk_size=STATIC_BATCH_SIZE_METERS):
+    """Batch static render fragments while preserving collision and spatial culling."""
+    before = visual_mesh_objects()
+    stats = {
+        "chunk_size_meters": float(chunk_size),
+        "visual_objects_before": len(before),
+        "render_primitives_before": render_primitive_count(before),
+        "materials_before": referenced_material_count(before),
+        "batches_created": 0,
+        "largest_batch": 0,
+        "excluded_collision": sum(
+            1 for obj in bpy.context.scene.objects
+            if obj.type == "MESH" and obj.data.polygons
+            and obj.get("bevyout_collision", False)
+        ),
+        "excluded_large": 0,
+        "excluded_non_static": sum(
+            1 for obj in before if not obj.get("bevyout_batchable_static", False)
+        ),
+    }
+
+    image_cache = {}
+    representatives = {}
+    groups = defaultdict(list)
+    candidates = [obj for obj in before if obj.get("bevyout_batchable_static", False)]
+    fragments = []
+    for obj in candidates:
+        fragments.extend(split_object_by_material(obj))
+
+    for fragment in fragments:
+        minimum, maximum = world_bounds(fragment)
+        extent = maximum - minimum
+        if not fits_static_chunk(extent, chunk_size):
+            stats["excluded_large"] += 1
+            continue
+        material = used_materials(fragment)[0]
+        signature = canonical_material_signature(material, image_cache)
+        representative = representatives.setdefault(signature, material)
+        remap_fragment_material(fragment, representative)
+        center = (minimum + maximum) * 0.5
+        lightmapped = bool(fragment.get("bevyout_lightmapped", False))
+        groups[(static_chunk(center, chunk_size), signature, lightmapped)].append(fragment)
+
+    for (chunk, signature, lightmapped), group in sorted(
+        groups.items(), key=lambda item: (item[0][0], repr(item[0][1]), item[0][2])
+    ):
+        if len(group) < 2:
+            continue
+        digest = hashlib.sha256(repr(signature).encode("utf8")).hexdigest()[:10]
+        name = "batch_%s_%d_%d_%d_%s" % (
+            "lm" if lightmapped else "dyn", chunk[0], chunk[1], chunk[2], digest
+        )
+        join_static_group(group, name, representatives[signature])
+        stats["batches_created"] += 1
+        stats["largest_batch"] = max(stats["largest_batch"], len(group))
+
+    after = visual_mesh_objects()
+    stats.update({
+        "visual_objects_after": len(after),
+        "render_primitives_after": render_primitive_count(after),
+        "materials_after": referenced_material_count(after),
+    })
+    print(
+        "[bake] static batch %.1f m chunks: objects %d -> %d, primitives %d -> %d, materials %d -> %d, batches %d (largest %d)"
+        % (
+            stats["chunk_size_meters"],
+            stats["visual_objects_before"], stats["visual_objects_after"],
+            stats["render_primitives_before"], stats["render_primitives_after"],
+            stats["materials_before"], stats["materials_after"],
+            stats["batches_created"], stats["largest_batch"],
+        ),
+        flush=True,
+    )
+    return stats
+
+
+def lightmap_bindings():
+    bindings = []
+    for obj in sorted(visual_mesh_objects(), key=lambda item: item.name):
+        if not obj.get("bevyout_lightmapped", False):
+            continue
+        obj.data.name = obj.name
+        rect = list(obj.get("bevyout_lightmap_rect", [0.0, 0.0, 1.0, 1.0]))
+        bindings.append({"mesh_name": obj.name, "page": 0, "uv_rect": rect})
+    return bindings
+
+
+def self_test_material(name, color, image=None):
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    principled = next(
+        node for node in material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    principled.inputs["Base Color"].default_value = color
+    if image is not None:
+        texture = material.node_tree.nodes.new("ShaderNodeTexImage")
+        texture.image = image
+        material.node_tree.links.new(texture.outputs["Color"], principled.inputs["Base Color"])
+    return material
+
+
+def self_test_cube(name, location, material, *, batchable=True, lightmapped=True, size=1.0):
+    bpy.ops.mesh.primitive_cube_add(size=size, location=location)
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.name = name
+    obj.data.materials.append(material)
+    obj["bevyout_batchable_static"] = batchable
+    obj["bevyout_lightmapped"] = lightmapped
+    obj["bevyout_lightmap_rect"] = [0.0, 0.0, 1.0, 1.0]
+    obj.data.uv_layers.new(name="Lightmap")
+    color = obj.data.color_attributes.new(
+        name="BevyOutQuickAO", type="FLOAT_COLOR", domain="CORNER"
+    )
+    for item in color.data:
+        item.color = (0.8, 0.8, 0.8, 1.0)
+    obj.data.color_attributes.active_color_index = list(obj.data.color_attributes).index(color)
+    return obj
+
+
+def glb_mesh_attributes(path):
+    with open(path, "rb") as stream:
+        magic, version, _ = struct.unpack("<III", stream.read(12))
+        if magic != 0x46546C67 or version != 2:
+            raise AssertionError("self-test export is not a glTF 2 GLB")
+        json_length, json_type = struct.unpack("<II", stream.read(8))
+        if json_type != 0x4E4F534A:
+            raise AssertionError("self-test GLB has no JSON chunk")
+        document = json.loads(stream.read(json_length).decode("utf8").rstrip("\x00 "))
+    meshes = document.get("meshes", [])
+    return {
+        node.get("name", ""): [
+            set(primitive.get("attributes", {}))
+            for primitive in meshes[node["mesh"]].get("primitives", [])
+        ]
+        for node in document.get("nodes", [])
+        if "mesh" in node
+    }
+
+
+def run_self_tests():
+    clear_scene()
+    assert static_chunk(Vector((63.999, 0.0, -0.001))) == (0, 0, -1)
+    assert static_chunk(Vector((64.0, -64.0, 0.0))) == (1, -1, 0)
+    assert fits_static_chunk(Vector((64.0, 1.0, 1.0)))
+    assert not fits_static_chunk(Vector((64.001, 1.0, 1.0)))
+
+    image_a = bpy.data.images.new("canonical_a", width=1, height=1)
+    image_b = bpy.data.images.new("canonical_b", width=1, height=1)
+    image_a.pixels = [0.25, 0.5, 0.75, 1.0]
+    image_b.pixels = [0.25, 0.5, 0.75, 1.0]
+    material_a = self_test_material("material_a", (1.0, 1.0, 1.0, 1.0), image_a)
+    material_b = self_test_material("material_b", (1.0, 1.0, 1.0, 1.0), image_b)
+    material_other = self_test_material("material_other", (0.2, 0.3, 0.4, 0.5))
+    assert canonical_material_signature(material_a) == canonical_material_signature(material_b)
+    assert canonical_material_signature(material_a) != canonical_material_signature(material_other)
+
+    self_test_cube("equivalent_a", (0.5, 0.5, 0.5), material_a)
+    self_test_cube("equivalent_b", (1.5, 0.5, 0.5), material_b)
+    multi = self_test_cube("multi_material", (2.5, 0.5, 0.5), material_a)
+    multi.data.materials.append(material_other)
+    for index, polygon in enumerate(multi.data.polygons):
+        if index % 2 == 0:
+            polygon.material_index = 1
+    self_test_cube("different_material", (3.5, 0.5, 0.5), material_other)
+    self_test_cube("other_chunk", (65.0, 0.5, 0.5), material_a)
+    self_test_cube("large_static", (160.0, 0.5, 0.5), material_a, size=65.0)
+    self_test_cube("non_static", (4.5, 0.5, 0.5), material_a, batchable=False)
+    collision = self_test_cube("physics_surface", (0.5, 0.5, -1.0), material_a)
+    collision["bevyout_collision"] = True
+    collision["bevyout_havok_material"] = 17
+
+    stats = batch_static_meshes()
+    assert stats["chunk_size_meters"] == 64.0
+    assert stats["batches_created"] >= 2
+    assert stats["largest_batch"] >= 2
+    assert stats["excluded_collision"] == 1
+    assert stats["excluded_large"] == 1
+    assert stats["excluded_non_static"] == 1
+    assert collision.name in bpy.context.scene.objects
+    assert collision["bevyout_havok_material"] == 17
+    assert all(
+        "Lightmap" in obj.data.uv_layers
+        for obj in visual_mesh_objects()
+        if obj.get("bevyout_lightmapped", False)
+    )
+
+    bindings = lightmap_bindings()
+    bound_names = {binding["mesh_name"] for binding in bindings}
+    assert bound_names
+    assert bound_names == {
+        obj.name for obj in visual_mesh_objects()
+        if obj.get("bevyout_lightmapped", False)
+    }
+    expected_names = set(bound_names)
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "batch_fixture.glb")
+        bpy.ops.export_scene.gltf(
+            filepath=output, export_format="GLB", export_materials="EXPORT",
+            export_image_format="AUTO", export_apply=True, export_extras=True,
+        )
+        assert os.path.isfile(output)
+        attributes = glb_mesh_attributes(output)
+        assert expected_names.issubset(attributes)
+        for name in expected_names:
+            assert attributes[name]
+            assert all("TEXCOORD_1" in item for item in attributes[name])
+            assert all("COLOR_0" in item for item in attributes[name])
+        clear_scene()
+        bpy.ops.import_scene.gltf(filepath=output)
+        imported_meshes = {
+            obj.data.name: obj for obj in bpy.context.scene.objects if obj.type == "MESH"
+        }
+        assert expected_names.issubset(imported_meshes)
+        for name in expected_names:
+            assert len(imported_meshes[name].data.uv_layers) >= 2
+            assert imported_meshes[name].data.color_attributes
+        imported_collision = next(
+            obj for obj in bpy.context.scene.objects
+            if obj.get("bevyout_collision", False)
+        )
+        assert imported_collision.get("bevyout_havok_material") == 17
+    print("[bake-test] static batching fixtures passed", flush=True)
+
+    clear_scene()
+    material = self_test_material("irradiance_material", (0.6, 0.7, 0.8, 1.0))
+    bpy.ops.mesh.primitive_cube_add(size=2.0, location=(0.0, 0.0, 0.0))
+    cube = bpy.context.object
+    cube.data.materials.append(material)
+    bpy.ops.object.light_add(type="POINT", location=(2.0, -2.0, 3.0))
+    bpy.context.object.data.energy = 1000.0
+    with tempfile.TemporaryDirectory() as directory:
+        irradiance = bake_irradiance_volume(
+            {
+                "irradiance_spacing_meters": 8.0,
+                "irradiance_samples": 1,
+                "irradiance_blend": os.path.join(directory, "irradiance.blend"),
+            },
+            [cube],
+        )
+        assert tuple(irradiance["resolution"]) == (4, 4, 4)
+        assert os.path.isfile(irradiance["blend_path"])
+    print("[bake-test] irradiance volume fixture passed", flush=True)
+
+
 def main(job_path):
     started = time.perf_counter()
 
@@ -388,37 +923,8 @@ def main(job_path):
         job = json.load(stream)
     clear_scene()
     scene = bpy.context.scene
-    if job.get("preview_only", False):
-        scene.render.engine = "BLENDER_EEVEE"
-    else:
-        scene.render.engine = "CYCLES"
-        configure_cycles(scene, job.get("device", "CPU"), bool(job.get("denoise", True)))
-        scene.cycles.samples = int(job["samples"])
-        scene.cycles.max_bounces = int(job["bounces"])
-        scene.cycles.sample_clamp_indirect = float(job.get("indirect_clamp", 0.0))
-        scene.cycles.use_fast_gi = bool(job.get("fast_gi", False))
-        if scene.cycles.use_fast_gi:
-            scene.cycles.fast_gi_method = "REPLACE"
-        if hasattr(scene.cycles, "use_adaptive_sampling"):
-            scene.cycles.use_adaptive_sampling = True
-        if hasattr(scene.cycles, "adaptive_threshold"):
-            scene.cycles.adaptive_threshold = 0.1
-        if hasattr(scene.cycles, "max_diffuse_bounces"):
-            scene.cycles.max_diffuse_bounces = int(job["bounces"])
-        if hasattr(scene.cycles, "max_glossy_bounces"):
-            scene.cycles.max_glossy_bounces = 0
-        if hasattr(scene.cycles, "max_transmission_bounces"):
-            scene.cycles.max_transmission_bounces = 0
-        if hasattr(scene.cycles, "max_volume_bounces"):
-            scene.cycles.max_volume_bounces = 0
-        if hasattr(scene.cycles, "use_caustics"):
-            scene.cycles.use_caustics = False
-    scene.render.resolution_x = int(job["page_size"])
-    scene.render.resolution_y = int(job["page_size"])
+    set_eevee_engine(scene)
     scene.render.resolution_percentage = 100
-    scene.render.image_settings.file_format = "OPEN_EXR"
-    scene.render.image_settings.color_depth = "32"
-    scene.render.image_settings.color_mode = "RGBA"
     scene.world.color = tuple(job["ambient_rgba"][:3])
     scene.world.use_nodes = True
     background = scene.world.node_tree.nodes.get("Background")
@@ -436,118 +942,37 @@ def main(job_path):
         render_preview(job, objects)
         stage("preview")
         return
-    bake_objects = [entry for entry in objects if should_bake_object(entry[0], job)]
-    print("[bake] receivers     %d / %d mesh objects" % (len(bake_objects), len(objects)), flush=True)
-    if not bake_objects:
-        raise RuntimeError("no substantial mesh objects were selected for lightmap baking")
-    for obj, _, _ in bake_objects:
-        neutralize_quick_vertex_ao(obj)
-    image = bpy.data.images.new("BevyOutLightmap", width=job["page_size"],
-                                height=job["page_size"], alpha=False, float_buffer=True)
-    grid = int(math.ceil(math.sqrt(len(bake_objects))))
-    bindings = []
-    for index, (obj, reference_id, local_index) in enumerate(bake_objects):
-        gx = index % grid
-        gy = index // grid
-        rect = (gx / grid, gy / grid, (gx + 1) / grid, (gy + 1) / grid)
-        object_uv1(obj, rect, job["page_size"], job["gutter"])
-        mesh_name = "lm_%08x_%03d" % (reference_id, local_index)
-        obj.name = mesh_name
-        obj.data.name = mesh_name
-        for material in obj.data.materials:
-            set_emission_scale(material, float(job["emission_scale"]))
-        # Blender and Cycles use an OpenGL-style lower-left image origin;
-        # Bevy's Lightmap rect uses the top-left Vulkan convention.
-        bindings.append({
-            "mesh_name": mesh_name,
-            "page": 0,
-            "uv_rect": [rect[0], 1.0 - rect[3], rect[2], 1.0 - rect[1]],
-        })
 
-    if not job.get("bake_all", False) and len(bake_objects) > 1:
-        # A Cycles bake has significant per-object overhead. Quick joins the
-        # static receiver meshes after assigning non-overlapping UV islands;
-        # the final GLB still contains all props as separate runtime objects.
-        bpy.ops.object.select_all(action="DESELECT")
-        for obj, _, _ in bake_objects:
-            obj.select_set(True)
-        bpy.context.view_layer.objects.active = bake_objects[0][0]
-        bpy.ops.object.join()
-        joined = bake_objects[0][0]
-        joined.name = "lm_cell_static"
-        joined.data.name = "lm_cell_static"
-        for material in joined.data.materials:
-            add_bake_image(material, image)
-        bake_objects = [(joined, 0, 0)]
-        bindings = [{
-            "mesh_name": joined.name,
-            "page": 0,
-            "uv_rect": [0.0, 0.0, 1.0, 1.0],
-        }]
-    else:
-        for obj, _, _ in bake_objects:
-            for material in obj.data.materials:
-                add_bake_image(material, image)
+    irradiance = bake_irradiance_volume(job, [obj for obj, _, _ in objects])
+    stage("irradiance bake")
 
-    stage("uv setup")
+    batching = batch_static_meshes(float(job.get(
+        "static_batch_chunk_meters", STATIC_BATCH_SIZE_METERS
+    )))
+    stage("static batch")
 
-    bake_object_ids = {id(obj) for obj, _, _ in bake_objects}
-    for obj in bpy.context.scene.objects:
-        if id(obj) not in bake_object_ids:
-            # Keep props in the exported scene, but remove them from the Cycles
-            # dependency graph for Quick. Their runtime Bevy lights remain.
-            obj.hide_render = True
-
-    bpy.ops.object.select_all(action="DESELECT")
-    for obj, _, _ in bake_objects:
-        obj.select_set(True)
-    bpy.context.view_layer.objects.active = bake_objects[0][0]
-    scene.render.filepath = job["output_exr"]
-    pass_filter = {"DIRECT"}
-    if job.get("include_indirect", True):
-        pass_filter.add("INDIRECT")
-    print("[bake] cycles start (passes: %s)" % ",".join(sorted(pass_filter)), flush=True)
-    result = bpy.ops.object.bake(type="DIFFUSE", pass_filter=pass_filter,
-                                 filepath=job["output_exr"], width=job["page_size"],
-                                 height=job["page_size"], margin=job["gutter"],
-                                 margin_type="ADJACENT_FACES", use_clear=True)
-    if "FINISHED" not in result:
-        raise RuntimeError("Cycles lightmap bake failed")
-    image.filepath_raw = job["output_exr"]
-    image.file_format = "OPEN_EXR"
-    image.save()
-    if not os.path.exists(job["output_exr"]):
-        raise RuntimeError("Cycles lightmap bake did not save the EXR")
-    stage("cycles bake")
-    for obj in bpy.context.scene.objects:
-        obj.hide_render = False
-
-    # The lightmap is a separate Bevy asset. Do not embed the temporary bake
-    # image in every material of the composed GLB.
-    for material in bpy.data.materials:
-        if not material.use_nodes:
-            continue
-        for node in list(material.node_tree.nodes):
-            if node.name == "BevyOutLightmap":
-                material.node_tree.nodes.remove(node)
     # Keep the source UV set active for ordinary material textures in the
-    # exported GLB. The generated Lightmap layer remains TEXCOORD_1 for
-    # Bevy's lightmap shader, but it must not become TEXCOORD_0 just because it
-    # was active while Cycles was baking.
+    # exported GLB. The irradiance volume is independent of mesh UVs.
     for obj in bpy.context.scene.objects:
         if obj.type == "MESH" and obj.data.uv_layers:
             obj.data.uv_layers.active_index = 0
-    if image.users == 0:
-        bpy.data.images.remove(image)
     bpy.ops.export_scene.gltf(filepath=job["output_scene"], export_format="GLB",
                               export_materials="EXPORT", export_image_format="AUTO",
                               export_apply=True, export_extras=True)
     stage("scene export")
     with open(job["result_json"], "w", encoding="utf8") as stream:
-        json.dump({"bindings": bindings}, stream, indent=2)
+        json.dump({"irradiance": irradiance, "batching": batching}, stream, indent=2)
 
 
 if __name__ == "__main__":
-    if "--" not in sys.argv:
-        raise RuntimeError("expected -- job.json")
-    main(sys.argv[sys.argv.index("--") + 1])
+    try:
+        if "--" not in sys.argv:
+            raise RuntimeError("expected -- job.json")
+        argument = sys.argv[sys.argv.index("--") + 1]
+        if argument == "--self-test":
+            run_self_tests()
+        else:
+            main(argument)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)

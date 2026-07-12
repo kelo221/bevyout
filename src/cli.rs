@@ -19,9 +19,12 @@ pub(crate) enum CommandLine {
     /// Extract a Fallout cell, stage its assets, and create a Bevy manifest.
     #[command(name = "prepare")]
     Prepare(PrepareArgs),
-    /// Render a preview or bake lightmaps for a prepared scene.
+    /// Render or bake a prepared scene.
     #[command(name = "bake")]
     Bake(BakeArgs),
+    /// Render a prepared scene selected by GECK EditorID.
+    #[command(name = "render")]
+    Render(RenderArgs),
     /// Open a prepared scene manifest in the Bevy viewer.
     #[command(name = "view")]
     View(ViewArgs),
@@ -29,15 +32,18 @@ pub(crate) enum CommandLine {
 
 #[derive(Parser, Debug)]
 pub(crate) struct PrepareArgs {
+    /// GECK EditorID, or an eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID", conflicts_with = "cell")]
+    pub(crate) selector: Option<String>,
     /// Fallout 3 installation directory (normally supplied by config.toml).
     #[arg(long)]
     pub(crate) game_root: Option<PathBuf>,
     /// Plugin filename under Data, or an absolute plugin path.
     #[arg(long)]
     pub(crate) plugin: Option<PathBuf>,
-    /// Cell FormID, in hexadecimal.
-    #[arg(long)]
-    pub(crate) cell: String,
+    /// Legacy hexadecimal cell FormID input.
+    #[arg(long, hide = true, conflicts_with = "selector")]
+    pub(crate) cell: Option<String>,
     /// Blender executable path.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
@@ -60,51 +66,226 @@ pub(crate) struct ViewArgs {
     /// Prepared scene manifest to open.
     #[arg(long)]
     pub(crate) manifest: PathBuf,
+    /// Skip Avian collider construction for render-only performance testing.
+    #[arg(long)]
+    pub(crate) disable_physics: bool,
+    /// Exit after this many seconds; useful for bounded trace captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
+}
+
+#[derive(Parser, Debug)]
+pub(crate) struct RenderArgs {
+    /// GECK EditorID, or an eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Skip Avian collider construction for render-only performance testing.
+    #[arg(long)]
+    pub(crate) disable_physics: bool,
+    /// Exit after this many seconds; useful for bounded trace captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
 }
 
 #[derive(Parser, Debug)]
 pub(crate) struct BakeArgs {
     /// Prepared scene manifest to bake. The final bake metadata is written back to it.
+    #[arg(long, conflicts_with = "selector")]
+    pub(crate) manifest: Option<PathBuf>,
+    /// GECK EditorID, or an eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID", conflicts_with = "manifest")]
+    pub(crate) selector: Option<String>,
+    /// Prepared scene cache directory used by selector-based baking.
     #[arg(long)]
-    pub(crate) manifest: PathBuf,
-    /// Preview, quick direct-light bake, or final indirect-light bake.
-    #[arg(long, value_enum, default_value_t = BakeQuality::Preview)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Fast Eevee preview or Blender 4.5 irradiance-volume bake.
+    #[arg(long, value_enum, default_value_t = BakeQuality::Irradiance)]
     pub(crate) quality: BakeQuality,
-    /// Cycles device for quick/final modes; preview always uses Eevee.
-    #[arg(long, value_enum, default_value_t = BakeDevice::Cpu)]
-    pub(crate) device: BakeDevice,
+    /// World-space distance between irradiance probes, in metres.
+    #[arg(
+        long,
+        default_value_t = 8.0,
+        value_parser = parse_irradiance_spacing_meters
+    )]
+    pub(crate) irradiance_spacing_meters: f32,
+    /// Eevee irradiance samples per probe.
+    #[arg(
+        long,
+        default_value_t = 64,
+        value_parser = parse_irradiance_samples
+    )]
+    pub(crate) irradiance_samples: u32,
+    /// World-space size of material-compatible static geometry batches, in metres.
+    #[arg(
+        long,
+        default_value_t = 64.0,
+        value_parser = parse_static_batch_chunk_meters
+    )]
+    pub(crate) static_batch_chunk_meters: f32,
     /// Blender executable path.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
+    /// Blender 4.5 LTS executable used only for irradiance-volume baking.
+    #[arg(long)]
+    pub(crate) irradiance_blender: Option<PathBuf>,
     /// KTX-Software `ktx.exe` or legacy `toktx.exe` path.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
     /// Replace an existing baked output directory.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Keep the generated Blender job, script, result, and EXR files.
+    /// Keep the generated Blender job, script, result, and Blender cache files.
     #[arg(long)]
     pub(crate) keep_intermediate: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum BakeQuality {
-    /// Fast Eevee lighting preview; does not produce a lightmap manifest.
+    /// Fast Eevee lighting preview; does not produce a baked-GI manifest.
     Preview,
-    /// Low-resolution direct-light bake for static architecture and large surfaces.
-    Quick,
-    /// Full-resolution direct and indirect Cycles bake for all mesh objects.
-    Final,
+    /// Bake one Blender 4.5 Eevee irradiance volume for the cell.
+    Irradiance,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum BakeDevice {
-    /// Run Cycles on the CPU.
-    Cpu,
-    /// Run Cycles on an NVIDIA GPU through OptiX.
-    Optix,
-    /// Run Cycles on an NVIDIA GPU through CUDA.
-    Cuda,
-    /// Run Cycles on a supported AMD GPU through HIP.
-    Hip,
+fn parse_static_batch_chunk_meters(value: &str) -> Result<f32, String> {
+    let value = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid batch chunk size: {error}"))?;
+    if value.is_finite() && (8.0..=256.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("batch chunk size must be between 8 and 256 metres".into())
+    }
+}
+
+fn parse_irradiance_spacing_meters(value: &str) -> Result<f32, String> {
+    let value = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid irradiance spacing: {error}"))?;
+    if value.is_finite() && (2.0..=32.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("irradiance spacing must be between 2 and 32 metres".into())
+    }
+}
+
+fn parse_irradiance_samples(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid irradiance sample count: {error}"))?;
+    if (1..=512).contains(&value) {
+        Ok(value)
+    } else {
+        Err("irradiance samples must be between 1 and 512".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
+        let cli = Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--quality",
+            "irradiance",
+        ])
+        .unwrap();
+        let CommandLine::Bake(args) = cli.command else {
+            panic!("expected bake command");
+        };
+        assert_eq!(args.static_batch_chunk_meters, 64.0);
+        assert_eq!(args.irradiance_spacing_meters, 8.0);
+        assert_eq!(args.irradiance_samples, 64);
+        assert!(matches!(args.quality, BakeQuality::Irradiance));
+
+        for value in ["7.99", "256.01", "NaN", "inf"] {
+            assert!(
+                Cli::try_parse_from([
+                    "bevyout",
+                    "bake",
+                    "--manifest",
+                    "scene.ron",
+                    "--static-batch-chunk-meters",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+
+        for value in ["1.99", "32.01", "NaN", "inf"] {
+            assert!(
+                Cli::try_parse_from([
+                    "bevyout",
+                    "bake",
+                    "--manifest",
+                    "scene.ron",
+                    "--irradiance-spacing-meters",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+
+        for value in ["0", "513"] {
+            assert!(
+                Cli::try_parse_from([
+                    "bevyout",
+                    "bake",
+                    "--manifest",
+                    "scene.ron",
+                    "--irradiance-samples",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_editor_id_selectors_and_legacy_paths() {
+        let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
+        let CommandLine::Prepare(args) = cli.command else {
+            panic!("expected prepare command");
+        };
+        assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
+
+        let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart"]).unwrap();
+        let CommandLine::Bake(args) = cli.command else {
+            panic!("expected bake command");
+        };
+        assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
+        assert!(args.manifest.is_none());
+        assert!(matches!(args.quality, BakeQuality::Irradiance));
+
+        let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
+        let CommandLine::Render(args) = cli.command else {
+            panic!("expected render command");
+        };
+        assert_eq!(args.selector, "SuperDuperMart");
+
+        let cli = Cli::try_parse_from(["bevyout", "prepare", "--cell", "00017f37"]).unwrap();
+        let CommandLine::Prepare(args) = cli.command else {
+            panic!("expected prepare command");
+        };
+        assert_eq!(args.cell.as_deref(), Some("00017f37"));
+
+        assert!(
+            Cli::try_parse_from([
+                "bevyout",
+                "bake",
+                "SuperDuperMart",
+                "--manifest",
+                "scene.ron",
+            ])
+            .is_err()
+        );
+    }
 }

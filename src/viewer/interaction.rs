@@ -9,6 +9,7 @@ use super::audio::PlaySound;
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
 const NOTICE_SECONDS: f32 = 3.0;
+const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
 const MAX_PARENT_DEPTH: usize = 64;
 
 /// Attach this component to the root that owns a prepared placement's scene.
@@ -119,6 +120,7 @@ fn spawn_interaction_ui(mut commands: Commands) {
 
 #[allow(clippy::too_many_arguments)]
 fn update_focused_placement(
+    time: Res<Time>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut raycast: MeshRayCast,
     parents: Query<&ChildOf>,
@@ -126,7 +128,14 @@ fn update_focused_placement(
     inventory: Res<PlayerInventory>,
     mut state: ResMut<InteractionState>,
     mut prompt: Query<&mut Text, With<InteractionPromptText>>,
+    mut raycast_elapsed: Local<f32>,
 ) {
+    *raycast_elapsed += time.delta_secs();
+    if *raycast_elapsed < FOCUS_RAYCAST_INTERVAL_SECONDS {
+        return;
+    }
+    *raycast_elapsed = 0.0;
+
     let focused = active_center_ray(&cameras).and_then(|ray| {
         let settings = MeshRayCastSettings {
             visibility: RayCastVisibility::VisibleInView,
