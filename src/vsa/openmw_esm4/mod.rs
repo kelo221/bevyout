@@ -3,6 +3,10 @@
 //! This is private to the Fallout cell vertical slice. See README.md and
 //! NOTICE.md in this directory for provenance and license information.
 
+mod nif_vertex_color;
+
+pub(crate) use nif_vertex_color::{VertexColorMode, inspect_nif_vertex_colors};
+
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;

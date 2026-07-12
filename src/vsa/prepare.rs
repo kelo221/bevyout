@@ -6,8 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::assets::{
-    NIF_CONVERTER_REVISION, content_addressed_glb_name, convert_staged_textures, find_blender,
-    load_archives, resolve_asset, run_blender_batch, stage_textures, validate_glb_images,
+    BlenderAssetJob, NIF_CONVERTER_REVISION, content_addressed_glb_name, convert_staged_textures,
+    find_blender, load_archives, resolve_asset, run_blender_batch, stage_textures,
+    validate_glb_images, vertex_color_conversion,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{
@@ -17,7 +18,7 @@ use super::manifest::{
     PreparedPickup, PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource,
     PreparedSceneManifest, PreparedSemantic,
 };
-use super::openmw_esm4::LightingData;
+use super::openmw_esm4::{LightingData, VertexColorMode, inspect_nif_vertex_colors};
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
     normalize_asset_path, parse_form_id, placement_transform, placement_transform_parts,
@@ -209,14 +210,16 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         cell.effective_lighting = Some(prepared_lighting(legacy_lighting(&cell)));
     }
     let blender = find_blender(args.blender)?;
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<BlenderAssetJob> = Vec::new();
     let mut placements = Vec::new();
     let mut lights = Vec::new();
     let mut seen_models = HashMap::<String, String>::new();
+    let model_static_usage = model_static_usage(&parsed.references, &parsed.bases);
     let mut cache_hits = 0usize;
     let mut cache_missing = 0usize;
     let mut cache_invalid = 0usize;
     let mut cache_explicit_rebuilds = 0usize;
+    let mut vertex_mode_counts = [0usize; 4];
     let navmeshes = stage_navmeshes(&scene_dir, &mut diagnostics, &parsed.navmeshes)?;
 
     for reference in parsed.references.drain(..) {
@@ -326,9 +329,42 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             ));
             continue;
         };
-        let asset_name = content_addressed_glb_name(NIF_CONVERTER_REVISION, &nif_bytes);
+        let nif_vertex_colors = inspect_nif_vertex_colors(&nif_bytes);
+        let static_asset = model_static_usage
+            .get(&normalized_model)
+            .copied()
+            .unwrap_or(false);
+        let conversion = vertex_color_conversion(nif_vertex_colors.mode, static_asset);
+        let converter_profile = format!("{NIF_CONVERTER_REVISION}-{}", conversion.profile_tag());
+        let asset_name = content_addressed_glb_name(&converter_profile, &nif_bytes);
         let asset_path = format!("assets/{asset_name}");
         if !seen_models.contains_key(&normalized_model) {
+            let mode_index = match nif_vertex_colors.mode {
+                VertexColorMode::Ignore => 0,
+                VertexColorMode::Emissive => 1,
+                VertexColorMode::AmbientDiffuse => 2,
+                VertexColorMode::Unknown => 3,
+            };
+            vertex_mode_counts[mode_index] += 1;
+            if nif_vertex_colors.mode == VertexColorMode::Unknown {
+                diagnostics.push(Diagnostic {
+                    severity: if nif_vertex_colors.malformed {
+                        "warning"
+                    } else {
+                        "info"
+                    }
+                    .into(),
+                    message: format!(
+                        "NIF vertex-color mode is {} for {}; preserving source colors",
+                        if nif_vertex_colors.malformed {
+                            "malformed or unsupported"
+                        } else {
+                            "not declared"
+                        },
+                        normalized_model
+                    ),
+                });
+            }
             let staging_nif = staging_dir.join(&normalized_model);
             if let Some(parent) = staging_nif.parent() {
                 fs::create_dir_all(parent)?;
@@ -347,7 +383,12 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                 AssetCacheDecision::Reuse => cache_hits += 1,
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
-                    jobs.push((staging_nif, output, normalized_model.clone()));
+                    jobs.push(BlenderAssetJob {
+                        input: staging_nif,
+                        output,
+                        model: normalized_model.clone(),
+                        vertex_color: conversion,
+                    });
                 }
                 AssetCacheDecision::RebuildInvalid => {
                     cache_invalid += 1;
@@ -358,22 +399,34 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                             output.display()
                         ),
                     });
-                    jobs.push((staging_nif, output, normalized_model.clone()));
+                    jobs.push(BlenderAssetJob {
+                        input: staging_nif,
+                        output,
+                        model: normalized_model.clone(),
+                        vertex_color: conversion,
+                    });
                 }
                 AssetCacheDecision::RebuildRequested => {
                     cache_explicit_rebuilds += 1;
-                    jobs.push((staging_nif, output, normalized_model.clone()));
+                    jobs.push(BlenderAssetJob {
+                        input: staging_nif,
+                        output,
+                        model: normalized_model.clone(),
+                        vertex_color: conversion,
+                    });
                 }
             }
             seen_models.insert(normalized_model.clone(), asset_path.clone());
         }
-        placements.push(prepared_placement(
+        let mut placement = prepared_placement(
             &reference,
             Some(base),
             Some(asset_path),
             None,
             &parsed.bases,
-        ));
+        );
+        placement.vertex_color_mode = conversion.profile_tag().into();
+        placements.push(placement);
     }
 
     convert_staged_textures(&staging_dir, &mut diagnostics)?;
@@ -386,6 +439,15 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         message: cache_summary.clone(),
     });
     println!("{cache_summary}");
+    let vertex_summary = format!(
+        "vertex colors: ignore {}, emissive {}, ambient/diffuse {}, unknown {}",
+        vertex_mode_counts[0], vertex_mode_counts[1], vertex_mode_counts[2], vertex_mode_counts[3]
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: vertex_summary.clone(),
+    });
+    println!("{vertex_summary}");
     if !jobs.is_empty() {
         run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
             .context("headless Blender conversion failed")?;
@@ -830,6 +892,7 @@ fn prepared_placement(
                 drop_sound_form_id: base.audio.drop_sound_form_id,
             })
             .unwrap_or_default(),
+        vertex_color_mode: "vertex-preserve".into(),
     }
 }
 
@@ -847,6 +910,32 @@ fn prepared_inventory_entry(
         leveled: item_base
             .is_some_and(|base| matches!(base.kind.as_str(), "LVLI" | "LVLN" | "LVLC")),
     }
+}
+
+fn model_static_usage(
+    references: &[ReferenceRecord],
+    bases: &HashMap<u32, BaseRecord>,
+) -> HashMap<String, bool> {
+    let mut usage = HashMap::new();
+    for reference in references {
+        let Some(base) = bases.get(&reference.base_form_id) else {
+            continue;
+        };
+        let Some(model) = base.model.as_deref() else {
+            continue;
+        };
+        let model = normalize_asset_path(model);
+        if is_editor_marker(&model) || is_non_rendering_effect(&model) {
+            continue;
+        }
+        let static_asset = reference.kind == ReferenceKind::Object
+            && matches!(base.kind.as_str(), "STAT" | "MSTT");
+        usage
+            .entry(model)
+            .and_modify(|value| *value &= static_asset)
+            .or_insert(static_asset);
+    }
+    usage
 }
 
 fn prepared_semantic(reference: &ReferenceRecord, base: Option<&BaseRecord>) -> PreparedSemantic {

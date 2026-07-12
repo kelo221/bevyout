@@ -6,12 +6,52 @@ use std::process::Command;
 
 use super::bsa::BsaArchive;
 use super::manifest::Diagnostic;
+use super::openmw_esm4::VertexColorMode;
 use super::paths::{fingerprint, normalize_asset_path};
 
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-textures-v4-fo3-scale-1-70";
+pub(crate) const NIF_CONVERTER_REVISION: &str =
+    "niftools-blender52-textures-v6-fo3-scale-1-70-vertex-color-modes-nif-emissive";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VertexColorConversion {
+    Preserve,
+    IntrinsicAo,
+    Neutralize,
+}
+
+impl VertexColorConversion {
+    pub(crate) fn profile_tag(self) -> &'static str {
+        match self {
+            Self::Preserve => "vertex-preserve",
+            Self::IntrinsicAo => "vertex-intrinsic-ao-035",
+            Self::Neutralize => "vertex-neutralize",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BlenderAssetJob {
+    pub(crate) input: PathBuf,
+    pub(crate) output: PathBuf,
+    pub(crate) model: String,
+    pub(crate) vertex_color: VertexColorConversion,
+}
+
+pub(crate) fn vertex_color_conversion(
+    mode: VertexColorMode,
+    static_asset: bool,
+) -> VertexColorConversion {
+    match mode {
+        VertexColorMode::Ignore => VertexColorConversion::Neutralize,
+        VertexColorMode::AmbientDiffuse if static_asset => VertexColorConversion::IntrinsicAo,
+        VertexColorMode::AmbientDiffuse | VertexColorMode::Emissive | VertexColorMode::Unknown => {
+            VertexColorConversion::Preserve
+        }
+    }
+}
 
 pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[u8]) -> String {
     let mut cache_key = converter_revision.as_bytes().to_vec();
@@ -197,21 +237,12 @@ fn texture_references(bytes: &[u8]) -> Vec<String> {
 
 pub(crate) fn run_blender_batch(
     blender: &Path,
-    jobs: &[(PathBuf, PathBuf, String)],
+    jobs: &[BlenderAssetJob],
     data_root: &Path,
     staging_dir: &Path,
 ) -> Result<()> {
     let job_file = staging_dir.join("blender_jobs.ron");
-    let jobs_json = jobs
-        .iter()
-        .map(|(input, output, _)| {
-            (
-                input.to_string_lossy().to_string(),
-                output.to_string_lossy().to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let job_text = serde_json_like(&jobs_json);
+    let job_text = blender_jobs_json(jobs);
     fs::write(&job_file, job_text)?;
     let script = r#"import bpy, json, os, sys
 def patch_niftools_blender52():
@@ -246,11 +277,35 @@ def patch_niftools_blender52():
             b_mat.niftools_alpha.alphaflag = n_alpha_prop.flags
     Material.set_alpha = staticmethod(set_alpha_compat)
     VertexGroup.set_face_maps = classmethod(lambda cls, face_maps, b_obj: None)
+def apply_vertex_color_conversion(mode):
+    if mode not in ('intrinsic-ao-035', 'neutralize'):
+        return
+    for mesh in bpy.data.meshes:
+        if not mesh.color_attributes:
+            continue
+        attribute = mesh.color_attributes[0]
+        for item in attribute.data:
+            values = tuple(item.color)
+            alpha = values[3] if len(values) > 3 else 1.0
+            if mode == 'neutralize':
+                red = green = blue = 1.0
+            else:
+                luminance = (0.2126 * values[0] +
+                             0.7152 * values[1] +
+                             0.0722 * values[2])
+                luminance = max(0.0, min(1.0, luminance))
+                ao = max(0.65, min(1.0, 1.0 - 0.35 * (1.0 - luminance)))
+                red = green = blue = ao
+            item.color = (red, green, blue, alpha)
+
 bpy.ops.preferences.addon_enable(module='io_scene_niftools')
 patch_niftools_blender52()
 bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
 with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
-for nif_path, output_path in jobs:
+for job in jobs:
+    nif_path = job['input']
+    output_path = job['output']
+    vertex_color_mode = job.get('vertex_color', 'preserve')
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
     for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
@@ -259,6 +314,7 @@ for nif_path, output_path in jobs:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+    apply_vertex_color_conversion(vertex_color_mode)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
@@ -313,9 +369,13 @@ for nif_path, output_path in jobs:
             for link in list(new_emission.links): tree.links.remove(link)
             tree.links.new(glow.outputs['Color'], new_emission)
             if new_emission_strength:
-                # Fallout glow maps are authored as masks/colors; boost them into
-                # HDR so Bevy's bloom threshold can see them at indoor exposure.
-                new_emission_strength.default_value = 100.0
+                # Fallout's NIF shader properties provide the authored emissive
+                # multiplier.  NIFTools imports it into the old Principled
+                # material, which we copied above.  Glow maps are masks/colors,
+                # not calibrated light intensities, so retain that multiplier
+                # instead of replacing it with an arbitrary HDR boost.
+                if emission_strength is None:
+                    new_emission_strength.default_value = 1.0
         if alpha_blend or alpha_test:
             alpha_output = diffuse.outputs.get('Alpha')
             alpha_input = principled.inputs.get('Alpha')
@@ -360,8 +420,8 @@ for nif_path, output_path in jobs:
             String::from_utf8_lossy(&result.stderr)
         );
     }
-    for (_, output, _) in jobs {
-        if !output.exists() {
+    for job in jobs {
+        if !job.output.exists() {
             let stdout_tail = String::from_utf8_lossy(&result.stdout)
                 .lines()
                 .rev()
@@ -382,15 +442,15 @@ for nif_path, output_path in jobs:
                 .join("\n");
             bail!(
                 "Blender reported success but did not create {}\nstdout tail:\n{}\nstderr tail:\n{}",
-                output.display(),
+                job.output.display(),
                 stdout_tail,
                 stderr_tail
             );
         }
-        validate_glb_images(output).with_context(|| {
+        validate_glb_images(&job.output).with_context(|| {
             format!(
                 "converted GLB failed texture validation: {}",
-                output.display()
+                job.output.display()
             )
         })?;
     }
@@ -464,16 +524,18 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn serde_json_like(jobs: &[(String, String)]) -> String {
+fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
     let mut out = String::from("[");
-    for (index, (input, output)) in jobs.iter().enumerate() {
+    for (index, job) in jobs.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         out.push_str(&format!(
-            "[\"{}\",\"{}\"]",
-            json_escape(input),
-            json_escape(output)
+            "{{\"input\":\"{}\",\"output\":\"{}\",\"model\":\"{}\",\"vertex_color\":\"{}\"}}",
+            json_escape(&job.input.to_string_lossy()),
+            json_escape(&job.output.to_string_lossy()),
+            json_escape(&job.model),
+            job.vertex_color.profile_tag(),
         ));
     }
     out.push(']');
@@ -583,5 +645,41 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert!(validate_glb_images(&path).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn vertex_color_modes_choose_safe_conversion_profiles() {
+        assert_eq!(
+            vertex_color_conversion(VertexColorMode::Ignore, false),
+            VertexColorConversion::Neutralize
+        );
+        assert_eq!(
+            vertex_color_conversion(VertexColorMode::Emissive, true),
+            VertexColorConversion::Preserve
+        );
+        assert_eq!(
+            vertex_color_conversion(VertexColorMode::AmbientDiffuse, true),
+            VertexColorConversion::IntrinsicAo
+        );
+        assert_eq!(
+            vertex_color_conversion(VertexColorMode::AmbientDiffuse, false),
+            VertexColorConversion::Preserve
+        );
+        assert_eq!(
+            vertex_color_conversion(VertexColorMode::Unknown, true),
+            VertexColorConversion::Preserve
+        );
+    }
+
+    #[test]
+    fn blender_job_json_carries_vertex_color_profile() {
+        let json = blender_jobs_json(&[BlenderAssetJob {
+            input: PathBuf::from("C:\\staging\\mesh.nif"),
+            output: PathBuf::from("C:\\cache\\mesh.glb"),
+            model: "architecture/test.nif".into(),
+            vertex_color: VertexColorConversion::IntrinsicAo,
+        }]);
+        assert!(json.contains("\"vertex_color\":\"vertex-intrinsic-ao-035\""));
+        assert!(json.contains("architecture/test.nif"));
     }
 }

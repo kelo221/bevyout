@@ -209,6 +209,22 @@ def should_bake_object(obj, job):
     )
 
 
+def neutralize_intrinsic_vertex_ao(obj):
+    """Remove source intrinsic AO from a copied lightmap receiver.
+
+    The receiver's placement-specific atlas already contains local and
+    neighbouring geometry occlusion. Dynamic/non-receiver objects keep their
+    original vertex colors.
+    """
+    if obj.get("bevyout_vertex_color_mode", "vertex-preserve") != "vertex-intrinsic-ao-035":
+        return
+    for attribute in obj.data.color_attributes:
+        for item in attribute.data:
+            values = tuple(item.color)
+            alpha = values[3] if len(values) > 3 else 1.0
+            item.color = (1.0, 1.0, 1.0, alpha)
+
+
 def import_placements(job):
     objects = []
     template_cache = {}
@@ -248,6 +264,7 @@ def import_placements(job):
             obj.matrix_world = placement_matrix @ template.matrix_world
             bpy.context.collection.objects.link(obj)
             obj["bevyout_reference_form_id"] = placement["reference_form_id"]
+            obj["bevyout_vertex_color_mode"] = placement.get("vertex_color_mode", "vertex-preserve")
             objects.append((obj, placement["reference_form_id"], local_index))
             local_index += 1
     for template in imported_templates:
@@ -415,6 +432,8 @@ def main(job_path):
     print("[bake] receivers     %d / %d mesh objects" % (len(bake_objects), len(objects)), flush=True)
     if not bake_objects:
         raise RuntimeError("no substantial mesh objects were selected for lightmap baking")
+    for obj, _, _ in bake_objects:
+        neutralize_intrinsic_vertex_ao(obj)
     image = bpy.data.images.new("BevyOutLightmap", width=job["page_size"],
                                 height=job["page_size"], alpha=False, float_buffer=True)
     grid = int(math.ceil(math.sqrt(len(bake_objects))))
