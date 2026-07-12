@@ -49,9 +49,6 @@ cargo run-dev -- bake SuperDuperMart
 # Fast Eevee preview; writes preview.png and leaves the manifest unchanged.
 cargo run-dev -- bake SuperDuperMart --quality preview
 
-# Replace an existing baked output.
-cargo run-dev -- bake SuperDuperMart --force
-
 cargo run-dev -- render SuperDuperMart
 ```
 
@@ -71,7 +68,9 @@ CPU-side. Use
 time, and `--irradiance-samples` from 1 through 512. Static render geometry is
 grouped by equivalent material within 64 metre world-space chunks by default;
 use `--static-batch-chunk-meters` from 8 through 256 metres to evaluate the
-culling/draw-call tradeoff. `--force` replaces an existing `baked` directory.
+culling/draw-call tradeoff. Calling `bake` again replaces the existing bake
+artifacts; the hidden `--force` flag remains accepted as a legacy compatibility
+alias.
 `--keep-intermediate` keeps the generated Blender job, script, result JSON,
 `.blend` cache, and raw KTX slices. KTX-Software's unified `ktx.exe` is required
 for irradiance export.

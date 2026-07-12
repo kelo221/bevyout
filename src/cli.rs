@@ -149,8 +149,8 @@ pub(crate) struct BakeArgs {
     /// KTX-Software `ktx.exe` or legacy `toktx.exe` path.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
-    /// Replace an existing baked output directory.
-    #[arg(long)]
+    /// Legacy compatibility flag; bake already replaces existing outputs.
+    #[arg(long, hide = true)]
     pub(crate) force: bool,
     /// Keep the generated Blender job, script, result, and Blender cache files.
     #[arg(long)]
@@ -279,6 +279,12 @@ mod tests {
         assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
         assert!(args.manifest.is_none());
         assert!(matches!(args.quality, BakeQuality::Irradiance));
+
+        let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart", "--force"]).unwrap();
+        let CommandLine::Bake(args) = cli.command else {
+            panic!("expected bake command");
+        };
+        assert!(args.force);
 
         let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
         let CommandLine::Render(args) = cli.command else {

@@ -155,12 +155,10 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
         .join("scenes")
         .join(format!("{:08x}", manifest.cell.form_id));
     let output_dir = cell_dir.join("baked");
-    if output_dir.exists() && !args.force {
-        bail!(
-            "bake output already exists: {}; pass --force to replace it",
-            output_dir.display()
-        );
-    }
+    // Calling bake is itself the user's request to regenerate this output.
+    // Keep reading the legacy --force flag for existing scripts, but do not
+    // require a second confirmation before replacing known bake artifacts.
+    let _legacy_force = args.force;
     fs::create_dir_all(&output_dir)?;
 
     let output_scene = output_dir.join("scene.glb");

@@ -12,7 +12,7 @@ use super::paths::{fingerprint, normalize_asset_path};
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v14-emissive-bulb-card-v1";
+    "niftools-blender52-textures-v16-breakable-constraint-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetConversion {
@@ -245,6 +245,8 @@ def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.collision.bound import Bound
     from io_scene_niftools.modules.nif_import.property.material import Material
     from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
+    from io_scene_niftools.modules.nif_import.constraint import Constraint
+    from nifgen.formats.nif.bshavok.niobjects.BhkConstraint import BhkConstraint
     def map_normals_compat(b_mesh, normals):
         if len(b_mesh.vertices) != len(normals): raise RuntimeError('normal/vertex count mismatch')
         no_array = Vertex.normalize(normals)
@@ -301,6 +303,16 @@ def patch_niftools_blender52():
             b_mat.niftools_alpha.alphaflag = n_alpha_prop.flags
     Material.set_alpha = staticmethod(set_alpha_compat)
     VertexGroup.set_face_maps = classmethod(lambda cls, face_maps, b_obj: None)
+    def apply_constraint_scale_compat(self, scale):
+        # NIFTools 5.2 calls self.constraint here, but bhkBreakableConstraint
+        # stores constraint_data instead. Constraint records contain no render
+        # geometry, so skip this broken physics-only traversal during import.
+        pass
+    BhkConstraint.apply_scale = apply_constraint_scale_compat
+    # Constraint import is likewise physics-only and its 5.2 importer assumes
+    # every Havok record has the obsolete `constraint` field. Collision meshes
+    # are exported separately, so skip Blender rigid-body joint construction.
+    Constraint.import_bhk_constraints = lambda self: None
 def bake_quick_ao():
     objects = [obj for obj in bpy.context.scene.objects
         if obj.type == 'MESH' and len(obj.data.polygons)
