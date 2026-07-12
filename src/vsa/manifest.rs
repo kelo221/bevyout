@@ -256,10 +256,10 @@ pub(crate) struct PreparedPlacement {
     pub(crate) inventory: Vec<PreparedInventoryEntry>,
     #[serde(default)]
     pub(crate) audio: PreparedPlacementAudio,
-    /// Conversion profile used for the source NIF's vertex colors. Older
-    /// manifests did not carry this metadata and retain the source colors.
-    #[serde(default = "default_vertex_color_mode")]
-    pub(crate) vertex_color_mode: String,
+    /// Conversion profile used for the source mesh's optional quick AO pass.
+    /// The alias keeps older manifests readable.
+    #[serde(default = "default_ao_mode", alias = "vertex_color_mode")]
+    pub(crate) ao_mode: String,
 }
 
 fn default_count() -> i32 {
@@ -270,8 +270,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_vertex_color_mode() -> String {
-    "vertex-preserve".into()
+fn default_ao_mode() -> String {
+    "ao-none".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -554,7 +554,7 @@ mod tests {
             owner_faction_rank: None,
             inventory: Vec::new(),
             audio: PreparedPlacementAudio::default(),
-            vertex_color_mode: "vertex-preserve".into(),
+            ao_mode: "ao-none".into(),
         };
         let text = ron::ser::to_string(&placement).unwrap();
         let decoded: PreparedPlacement = ron::de::from_str(&text).unwrap();

@@ -57,7 +57,7 @@ struct BakeJob {
 struct JobPlacement {
     reference_form_id: u32,
     asset_path: String,
-    vertex_color_mode: String,
+    ao_mode: String,
     translation: [f32; 3],
     rotation_xyzw: [f32; 4],
     scale: f32,
@@ -202,7 +202,7 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
                 Some(JobPlacement {
                     reference_form_id: placement.reference_form_id,
                     asset_path: placement.asset_path.clone()?,
-                    vertex_color_mode: placement.vertex_color_mode.clone(),
+                    ao_mode: placement.ao_mode.clone(),
                     translation: placement.translation,
                     rotation_xyzw: placement.rotation_xyzw,
                     scale: placement.scale,

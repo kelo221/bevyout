@@ -6,29 +6,34 @@ use std::process::Command;
 
 use super::bsa::BsaArchive;
 use super::manifest::Diagnostic;
-use super::openmw_esm4::VertexColorMode;
 use super::paths::{fingerprint, normalize_asset_path};
 
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v6-fo3-scale-1-70-vertex-color-modes-nif-emissive";
+    "niftools-blender52-textures-v11-fo3-scale-1-70-quick-ao-color0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VertexColorConversion {
+pub(crate) enum AssetConversion {
     Preserve,
-    IntrinsicAo,
-    Neutralize,
+    QuickAo,
 }
 
-impl VertexColorConversion {
+impl AssetConversion {
     pub(crate) fn profile_tag(self) -> &'static str {
         match self {
-            Self::Preserve => "vertex-preserve",
-            Self::IntrinsicAo => "vertex-intrinsic-ao-035",
-            Self::Neutralize => "vertex-neutralize",
+            Self::Preserve => "ao-none",
+            Self::QuickAo => "ao-quick-v1",
         }
+    }
+}
+
+pub(crate) fn asset_conversion(static_asset: bool) -> AssetConversion {
+    if static_asset {
+        AssetConversion::QuickAo
+    } else {
+        AssetConversion::Preserve
     }
 }
 
@@ -37,20 +42,7 @@ pub(crate) struct BlenderAssetJob {
     pub(crate) input: PathBuf,
     pub(crate) output: PathBuf,
     pub(crate) model: String,
-    pub(crate) vertex_color: VertexColorConversion,
-}
-
-pub(crate) fn vertex_color_conversion(
-    mode: VertexColorMode,
-    static_asset: bool,
-) -> VertexColorConversion {
-    match mode {
-        VertexColorMode::Ignore => VertexColorConversion::Neutralize,
-        VertexColorMode::AmbientDiffuse if static_asset => VertexColorConversion::IntrinsicAo,
-        VertexColorMode::AmbientDiffuse | VertexColorMode::Emissive | VertexColorMode::Unknown => {
-            VertexColorConversion::Preserve
-        }
-    }
+    pub(crate) conversion: AssetConversion,
 }
 
 pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[u8]) -> String {
@@ -277,26 +269,39 @@ def patch_niftools_blender52():
             b_mat.niftools_alpha.alphaflag = n_alpha_prop.flags
     Material.set_alpha = staticmethod(set_alpha_compat)
     VertexGroup.set_face_maps = classmethod(lambda cls, face_maps, b_obj: None)
-def apply_vertex_color_conversion(mode):
-    if mode not in ('intrinsic-ao-035', 'neutralize'):
+def bake_quick_ao():
+    objects = [obj for obj in bpy.context.scene.objects
+               if obj.type == 'MESH' and len(obj.data.polygons)]
+    if not objects:
         return
-    for mesh in bpy.data.meshes:
-        if not mesh.color_attributes:
-            continue
-        attribute = mesh.color_attributes[0]
+    scene = bpy.context.scene
+    previous_engine = scene.render.engine
+    scene.render.engine = 'CYCLES'
+    scene.cycles.samples = 4
+    scene.cycles.max_bounces = 1
+    scene.cycles.use_denoising = False
+    for obj in objects:
+        mesh = obj.data
+        while mesh.color_attributes:
+            mesh.color_attributes.remove(mesh.color_attributes[-1])
+        mesh.color_attributes.new(name='BevyOutQuickAO', type='FLOAT_COLOR', domain='CORNER')
+        mesh.color_attributes.active_color_index = len(mesh.color_attributes) - 1
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in objects: obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0]
+    result = bpy.ops.object.bake(type='AO', target='VERTEX_COLORS', width=8, height=8,
+                                 max_ray_distance=1.0, margin=2)
+    if 'FINISHED' not in result:
+        scene.render.engine = previous_engine
+        raise RuntimeError('quick AO vertex bake failed')
+    for obj in objects:
+        attribute = obj.data.color_attributes.active_color
         for item in attribute.data:
             values = tuple(item.color)
-            alpha = values[3] if len(values) > 3 else 1.0
-            if mode == 'neutralize':
-                red = green = blue = 1.0
-            else:
-                luminance = (0.2126 * values[0] +
-                             0.7152 * values[1] +
-                             0.0722 * values[2])
-                luminance = max(0.0, min(1.0, luminance))
-                ao = max(0.65, min(1.0, 1.0 - 0.35 * (1.0 - luminance)))
-                red = green = blue = ao
-            item.color = (red, green, blue, alpha)
+            raw = max(0.0, min(1.0, values[0]))
+            ao = 0.72 + 0.28 * raw
+            item.color = (ao, ao, ao, values[3] if len(values) > 3 else 1.0)
+    scene.render.engine = previous_engine
 
 bpy.ops.preferences.addon_enable(module='io_scene_niftools')
 patch_niftools_blender52()
@@ -305,7 +310,7 @@ with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
     nif_path = job['input']
     output_path = job['output']
-    vertex_color_mode = job.get('vertex_color', 'preserve')
+    conversion = job.get('conversion', 'ao-none')
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
     for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
@@ -314,7 +319,6 @@ for job in jobs:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
-    apply_vertex_color_conversion(vertex_color_mode)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
@@ -327,6 +331,8 @@ for job in jobs:
         ):
             # NIF collision/helper meshes have no texture and should not be rendered.
             bpy.data.objects.remove(obj, do_unlink=True)
+    if conversion == 'ao-quick-v1':
+        bake_quick_ao()
     for material in bpy.data.materials:
         if not material.use_nodes: continue
         tree = material.node_tree
@@ -400,8 +406,11 @@ for job in jobs:
         # Bevy supports the primary glTF color stream, but not COLOR_1+.
         while len(mesh.color_attributes) > 1:
             mesh.color_attributes.remove(mesh.color_attributes[-1])
+        if mesh.color_attributes:
+            mesh.color_attributes.active_color_index = 0
+            mesh.color_attributes.render_color_index = 0
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True)
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False)
 "#;
     let result = Command::new(blender)
         .arg("--background")
@@ -531,11 +540,11 @@ fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"input\":\"{}\",\"output\":\"{}\",\"model\":\"{}\",\"vertex_color\":\"{}\"}}",
+            "{{\"input\":\"{}\",\"output\":\"{}\",\"model\":\"{}\",\"conversion\":\"{}\"}}",
             json_escape(&job.input.to_string_lossy()),
             json_escape(&job.output.to_string_lossy()),
             json_escape(&job.model),
-            job.vertex_color.profile_tag(),
+            job.conversion.profile_tag(),
         ));
     }
     out.push(']');
@@ -648,38 +657,20 @@ mod tests {
     }
 
     #[test]
-    fn vertex_color_modes_choose_safe_conversion_profiles() {
-        assert_eq!(
-            vertex_color_conversion(VertexColorMode::Ignore, false),
-            VertexColorConversion::Neutralize
-        );
-        assert_eq!(
-            vertex_color_conversion(VertexColorMode::Emissive, true),
-            VertexColorConversion::Preserve
-        );
-        assert_eq!(
-            vertex_color_conversion(VertexColorMode::AmbientDiffuse, true),
-            VertexColorConversion::IntrinsicAo
-        );
-        assert_eq!(
-            vertex_color_conversion(VertexColorMode::AmbientDiffuse, false),
-            VertexColorConversion::Preserve
-        );
-        assert_eq!(
-            vertex_color_conversion(VertexColorMode::Unknown, true),
-            VertexColorConversion::Preserve
-        );
+    fn static_assets_use_quick_ao_and_dynamic_assets_preserve_materials() {
+        assert_eq!(asset_conversion(true), AssetConversion::QuickAo);
+        assert_eq!(asset_conversion(false), AssetConversion::Preserve);
     }
 
     #[test]
-    fn blender_job_json_carries_vertex_color_profile() {
+    fn blender_job_json_carries_quick_ao_profile() {
         let json = blender_jobs_json(&[BlenderAssetJob {
             input: PathBuf::from("C:\\staging\\mesh.nif"),
             output: PathBuf::from("C:\\cache\\mesh.glb"),
             model: "architecture/test.nif".into(),
-            vertex_color: VertexColorConversion::IntrinsicAo,
+            conversion: AssetConversion::QuickAo,
         }]);
-        assert!(json.contains("\"vertex_color\":\"vertex-intrinsic-ao-035\""));
+        assert!(json.contains("\"conversion\":\"ao-quick-v1\""));
         assert!(json.contains("architecture/test.nif"));
     }
 }

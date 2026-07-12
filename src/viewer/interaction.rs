@@ -22,6 +22,10 @@ impl PlacementRoot {
     pub(crate) fn new(placement: PreparedPlacement) -> Self {
         Self { placement }
     }
+
+    pub(crate) fn uses_quick_ao(&self) -> bool {
+        self.placement.ao_mode == "ao-quick-v1"
+    }
 }
 
 #[derive(Resource, Default, Debug)]

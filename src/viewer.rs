@@ -8,6 +8,7 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::math::{Rect, cubic_splines::LinearSpline, vec2};
+use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::{DistanceFog, FogFalloff, Lightmap};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::auto_exposure::{
@@ -19,7 +20,7 @@ use bevy::render::occlusion_culling::OcclusionCulling;
 use bevy::render::view::ColorGrading;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use ron::de::from_str;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -59,6 +60,8 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))
         .insert_resource(AmbientScale(0.05))
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
+        .insert_resource(AoStrength(1.0))
+        .insert_resource(AoMeshBases::default())
         .insert_resource(AdjustmentTarget::default())
         .insert_resource(LightsDisabled(false))
         .insert_resource(LightmapOnlyMode::default())
@@ -73,6 +76,7 @@ pub(crate) fn view(args: ViewArgs) -> Result<()> {
                 toggle_lights_disabled,
                 apply_lighting_scale,
                 apply_fog_strength,
+                apply_ao_strength,
                 update_fps_text,
                 update_adjustment_hud,
                 toggle_unlit_mode,
@@ -673,6 +677,14 @@ struct AmbientScale(f32);
 #[derive(Resource)]
 struct FogStrength(f32);
 
+#[derive(Resource)]
+struct AoStrength(f32);
+
+#[derive(Resource, Default)]
+struct AoMeshBases {
+    values: HashMap<AssetId<Mesh>, VertexAttributeValues>,
+}
+
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum AdjustmentTarget {
     #[default]
@@ -682,16 +694,18 @@ enum AdjustmentTarget {
     BloomThreshold,
     BloomSoftness,
     FogStrength,
+    AoStrength,
 }
 
 impl AdjustmentTarget {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::LightingScale,
         Self::AmbientScale,
         Self::BloomIntensity,
         Self::BloomThreshold,
         Self::BloomSoftness,
         Self::FogStrength,
+        Self::AoStrength,
     ];
 
     fn label(self) -> &'static str {
@@ -702,6 +716,7 @@ impl AdjustmentTarget {
             Self::BloomThreshold => "Bloom threshold",
             Self::BloomSoftness => "Bloom softness",
             Self::FogStrength => "Fog strength",
+            Self::AoStrength => "AO strength",
         }
     }
 
@@ -733,6 +748,7 @@ fn adjust_selected_value(
     mut lighting: ResMut<LightingScale>,
     mut ambient: ResMut<AmbientScale>,
     mut fog_strength: ResMut<FogStrength>,
+    mut ao_strength: ResMut<AoStrength>,
     mut cameras: Query<&mut Bloom, With<Camera3d>>,
 ) {
     if keys.just_pressed(KeyCode::PageUp) {
@@ -812,6 +828,11 @@ fn adjust_selected_value(
             };
             info!("fog strength: {:.2}", fog_strength.0);
         }
+        AdjustmentTarget::AoStrength => {
+            ao_strength.0 =
+                (ao_strength.0 + if direction < 0 { -0.1 } else { 0.1 }).clamp(0.0, 1.0);
+            info!("AO strength: {:.2}", ao_strength.0);
+        }
     }
 }
 
@@ -820,6 +841,7 @@ fn update_adjustment_hud(
     lighting: Res<LightingScale>,
     ambient: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
+    ao_strength: Res<AoStrength>,
     cameras: Query<&Bloom, With<Camera3d>>,
     mut text: Single<&mut Text, With<AdjustmentHud>>,
 ) {
@@ -839,12 +861,155 @@ fn update_adjustment_hud(
             .map(|bloom| format!("{:.2}", bloom.prefilter.threshold_softness))
             .unwrap_or_else(|_| "--".into()),
         AdjustmentTarget::FogStrength => format!("{:.2}", fog_strength.0),
+        AdjustmentTarget::AoStrength => format!("{:.2}", ao_strength.0),
     };
     text.0 = format!(
         "Adjusting: {} = {}\nPage Up/Down: select   F1/F2: change",
         target.label(),
         value
     );
+}
+
+fn apply_ao_strength(
+    strength: Res<AoStrength>,
+    mut bases: ResMut<AoMeshBases>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mesh_entities: Query<(
+        &Mesh3d,
+        Option<&ChildOf>,
+        Option<&interaction::PlacementRoot>,
+    )>,
+    parents: Query<&ChildOf>,
+    roots: Query<&interaction::PlacementRoot>,
+) {
+    let mut seen = HashSet::new();
+    for (mesh_handle, child_of, own_root) in &mesh_entities {
+        let Some(child_of) = child_of else {
+            if !own_root.is_some_and(interaction::PlacementRoot::uses_quick_ao) {
+                continue;
+            }
+            let id = mesh_handle.0.id();
+            if !seen.insert(id) {
+                continue;
+            }
+            if !strength.is_changed() && bases.values.contains_key(&id) {
+                continue;
+            }
+            let Some(mut mesh) = meshes.get_mut(id) else {
+                continue;
+            };
+            let Ok(colors) = mesh.try_attribute(Mesh::ATTRIBUTE_COLOR) else {
+                continue;
+            };
+            let baseline = bases.values.entry(id).or_insert_with(|| colors.clone());
+            let Ok(colors) = mesh.try_attribute_mut(Mesh::ATTRIBUTE_COLOR) else {
+                continue;
+            };
+            scale_ao_colors(colors, baseline, strength.0);
+            continue;
+        };
+        let mut entity = child_of.0;
+        let mut quick_ao = false;
+        for _ in 0..64 {
+            if roots
+                .get(entity)
+                .is_ok_and(interaction::PlacementRoot::uses_quick_ao)
+            {
+                quick_ao = true;
+                break;
+            }
+            let Ok(parent) = parents.get(entity) else {
+                break;
+            };
+            entity = parent.0;
+        }
+        if !quick_ao {
+            continue;
+        }
+        let id = mesh_handle.0.id();
+        if !seen.insert(id) {
+            continue;
+        }
+        if !strength.is_changed() && bases.values.contains_key(&id) {
+            continue;
+        }
+        let Some(mut mesh) = meshes.get_mut(id) else {
+            continue;
+        };
+        let Ok(colors) = mesh.try_attribute(Mesh::ATTRIBUTE_COLOR) else {
+            continue;
+        };
+        let baseline = bases.values.entry(id).or_insert_with(|| colors.clone());
+        let Ok(colors) = mesh.try_attribute_mut(Mesh::ATTRIBUTE_COLOR) else {
+            continue;
+        };
+        scale_ao_colors(colors, baseline, strength.0);
+    }
+}
+
+fn scale_ao_colors(
+    values: &mut VertexAttributeValues,
+    baseline: &VertexAttributeValues,
+    strength: f32,
+) {
+    let strength = strength.clamp(0.0, 1.0);
+    match (values, baseline) {
+        (VertexAttributeValues::Float32x3(values), VertexAttributeValues::Float32x3(base)) => {
+            for (value, base) in values.iter_mut().zip(base) {
+                value[0] = scale_ao_channel(base[0], strength);
+                value[1] = scale_ao_channel(base[1], strength);
+                value[2] = scale_ao_channel(base[2], strength);
+            }
+        }
+        (VertexAttributeValues::Float32x4(values), VertexAttributeValues::Float32x4(base)) => {
+            for (value, base) in values.iter_mut().zip(base) {
+                value[0] = scale_ao_channel(base[0], strength);
+                value[1] = scale_ao_channel(base[1], strength);
+                value[2] = scale_ao_channel(base[2], strength);
+                value[3] = base[3];
+            }
+        }
+        (VertexAttributeValues::Unorm8x4(values), VertexAttributeValues::Unorm8x4(base)) => {
+            for (value, base) in values.iter_mut().zip(base) {
+                value[0] = scale_ao_byte(base[0], strength);
+                value[1] = scale_ao_byte(base[1], strength);
+                value[2] = scale_ao_byte(base[2], strength);
+                value[3] = base[3];
+            }
+        }
+        (VertexAttributeValues::Unorm16x4(values), VertexAttributeValues::Unorm16x4(base)) => {
+            for (value, base) in values.iter_mut().zip(base) {
+                value[0] = scale_ao_u16(base[0], strength);
+                value[1] = scale_ao_u16(base[1], strength);
+                value[2] = scale_ao_u16(base[2], strength);
+                value[3] = base[3];
+            }
+        }
+        (
+            VertexAttributeValues::Unorm8x4Bgra(values),
+            VertexAttributeValues::Unorm8x4Bgra(base),
+        ) => {
+            for (value, base) in values.iter_mut().zip(base) {
+                value[0] = scale_ao_byte(base[0], strength);
+                value[1] = scale_ao_byte(base[1], strength);
+                value[2] = scale_ao_byte(base[2], strength);
+                value[3] = base[3];
+            }
+        }
+        _ => {}
+    }
+}
+
+fn scale_ao_channel(value: f32, strength: f32) -> f32 {
+    (1.0 - (1.0 - value.clamp(0.0, 1.0)) * strength).clamp(0.0, 1.0)
+}
+
+fn scale_ao_byte(value: u8, strength: f32) -> u8 {
+    (scale_ao_channel(f32::from(value) / 255.0, strength) * 255.0).round() as u8
+}
+
+fn scale_ao_u16(value: u16, strength: f32) -> u16 {
+    (scale_ao_channel(f32::from(value) / 65_535.0, strength) * 65_535.0).round() as u16
 }
 
 fn toggle_lights_disabled(keys: Res<ButtonInput<KeyCode>>, mut disabled: ResMut<LightsDisabled>) {
@@ -1041,7 +1206,7 @@ mod tests {
         );
         assert_eq!(
             AdjustmentTarget::default().cycle(-1),
-            AdjustmentTarget::FogStrength
+            AdjustmentTarget::AoStrength
         );
         assert_eq!(
             AdjustmentTarget::BloomSoftness.cycle(1),
@@ -1049,9 +1214,41 @@ mod tests {
         );
         assert_eq!(
             AdjustmentTarget::FogStrength.cycle(1),
+            AdjustmentTarget::AoStrength
+        );
+        assert_eq!(
+            AdjustmentTarget::AoStrength.cycle(1),
             AdjustmentTarget::LightingScale
         );
         assert_eq!(AdjustmentTarget::BloomIntensity.label(), "Bloom intensity");
+    }
+
+    #[test]
+    fn ao_strength_scales_baked_darkness_without_changing_alpha() {
+        let baseline = VertexAttributeValues::Float32x4(vec![[0.72, 0.8, 0.9, 0.5]]);
+        let mut values = baseline.clone();
+        scale_ao_colors(&mut values, &baseline, 0.5);
+        let VertexAttributeValues::Float32x4(values) = values else {
+            panic!("expected float colors");
+        };
+        assert!((values[0][0] - 0.86).abs() < 0.001);
+        assert!((values[0][1] - 0.9).abs() < 0.001);
+        assert!((values[0][3] - 0.5).abs() < 0.001);
+
+        let mut disabled = baseline.clone();
+        scale_ao_colors(&mut disabled, &baseline, 0.0);
+        let VertexAttributeValues::Float32x4(disabled) = disabled else {
+            panic!("expected float colors");
+        };
+        assert_eq!(disabled[0], [1.0, 1.0, 1.0, 0.5]);
+
+        let baseline = VertexAttributeValues::Unorm16x4(vec![[47_185, 52_428, 58_982, 65_535]]);
+        let mut values = baseline.clone();
+        scale_ao_colors(&mut values, &baseline, 0.0);
+        let VertexAttributeValues::Unorm16x4(values) = values else {
+            panic!("expected normalized 16-bit colors");
+        };
+        assert_eq!(values[0], [65_535, 65_535, 65_535, 65_535]);
     }
 
     #[test]

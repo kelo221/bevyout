@@ -16,9 +16,6 @@ The adaptation is intentionally limited to the Fallout cell vertical slice:
   links, ownership, enable-parent state, inventory entries, and water fields;
 - OpenMW's ESM4 teleport-door rule: resolve `XTEL`'s destination reference and
   use that reference's parent cell as the destination cell.
-- Minimal Fallout NIF `NiVertexColorProperty` mode inspection used to
-  distinguish ignored, emissive, and ambient/diffuse vertex colors before the
-  attributed Blender conversion step.
 
 It is a Rust adaptation, not a C++ binding. No OpenMW runtime, OSG, Bullet,
 Detour, or VFS code is compiled into bevyout. Fallout 3's `NAVM` chunks are

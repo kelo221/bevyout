@@ -94,28 +94,6 @@ components/esm4/loadsoun.cpp: Copyright (C) 2016, 2018, 2020 cc9cii
 `apps/openmw/mwworld/cellref.cpp` has no per-file header in this snapshot; its
 license is inherited from the GPL-3.0 package.
 
-## NIF vertex-color mode adaptation
-
-The minimal `NiVertexColorProperty` mode reader in
-`nif_vertex_color.rs` was adapted from the supplied OpenMW NIF reader. It
-uses only the record-header layout, `NiObjectNET` prefix, and the
-`NiVertexColorProperty` flag interpretation; no OpenMW NIF renderer, OSG
-state, or collision code is included.
-
-The adapted upstream files and source hashes are:
-
-```text
-components/nif/property.hpp: 7C1501485EB9CE16FFA96B87E5A812209648D6CA07AC73B8A9A8F23D00F667C9
-components/nif/property.cpp: C430F9B99D3251AA72CEED417896D3C214B463DF05882E88ABCD032A0273F71A
-components/nif/niffile.hpp:  2E4ED53C93FB8B22FBB74DBAFA13547A3D68EDD257B0BA03393F6ABA0EC973F0
-components/nif/niffile.cpp:  4778F8370AD63CC8A8683EF9977010E5094580A8C757567CC92570F04DDEE4D9
-components/nif/nifstream.hpp: 66923F2AD946AC457E1AC8F55D6B94382E47585DC501F100584C97ED15F207CE
-components/nif/nifstream.cpp: D838F7EED287D03D76FB7A97023F9102797A421727EE59A268850D476B86DE0D
-```
-
-These NIF files use the same OpenMW GPL-3.0 package license. The exact
-upstream commit remains unavailable in the supplied snapshot.
-
 ## Source map and SHA-256
 
 Each entry is relative to `openmw-master`:
