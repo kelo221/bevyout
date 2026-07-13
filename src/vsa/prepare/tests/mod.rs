@@ -29,6 +29,46 @@ fn missing_and_invalid_cached_assets_are_rebuilt() {
     );
 }
 
+#[test]
+fn structural_static_paths_are_the_only_stair_support_candidates() {
+    for path in [
+        "architecture/megaton/interior/stairs.nif",
+        "dungeons/vault/stairwell.nif",
+        "landscape/rocks/cliffstep.nif",
+    ] {
+        assert!(is_structural_step_support(&PreparedSemantic::Static, path));
+    }
+
+    for path in [
+        "furniture/chair01.nif",
+        "clutter/office/shelf01.nif",
+        "vehicles/car01.nif",
+        "terminals/terminal01.nif",
+    ] {
+        assert!(!is_structural_step_support(&PreparedSemantic::Static, path));
+    }
+}
+
+#[test]
+fn non_static_semantics_never_become_stair_support() {
+    for semantic in [
+        PreparedSemantic::Furniture,
+        PreparedSemantic::Door(PreparedDoor {
+            lock_level: None,
+            key_form_id: None,
+            destination: None,
+        }),
+        PreparedSemantic::Activator,
+        PreparedSemantic::Container,
+        PreparedSemantic::Unsupported,
+    ] {
+        assert!(!is_structural_step_support(
+            &semantic,
+            "architecture/megaton/interior/stairs.nif"
+        ));
+    }
+}
+
 fn plugin(name: &str, bytes: &[u8]) -> LoadedPlugin {
     LoadedPlugin {
         name: name.to_string(),
@@ -308,4 +348,24 @@ fn sound_descriptor_reads_loop_and_2d_flags_for_a_different_extension() {
     assert_eq!(descriptor.max_attenuation, 200);
     assert_eq!(descriptor.frequency_adjustment, -3);
     assert_eq!(descriptor.static_attenuation_hundredths_db, 1200);
+}
+
+#[test]
+fn non_static_physics_classifications_remove_stair_support() {
+    assert!(retain_static_step_support(
+        true,
+        PreparedPhysicsClassification::Static
+    ));
+    assert!(!retain_static_step_support(
+        true,
+        PreparedPhysicsClassification::Kinematic
+    ));
+    assert!(!retain_static_step_support(
+        true,
+        PreparedPhysicsClassification::Dynamic
+    ));
+    assert!(!retain_static_step_support(
+        false,
+        PreparedPhysicsClassification::Static
+    ));
 }

@@ -15,10 +15,10 @@ Feature: Schema-7 prepared scene manifest
   # regenerate/update features/fixtures/scene.ron (and this feature file if
   # the promised fields themselves changed) in the same change.
 
-  Scenario: The golden fixture parses as a schema-7 manifest
+  Scenario: The golden fixture parses as a schema-11 manifest
     Given the golden manifest fixture "features/fixtures/scene.ron"
     Then it parses as a PreparedSceneManifest
-    And the schema version is 10
+    And the schema version is 11
 
   Scenario: Retained container inventory and ownership/enable-parent metadata
     Given the golden manifest fixture "features/fixtures/scene.ron"

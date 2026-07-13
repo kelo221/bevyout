@@ -217,7 +217,7 @@ fn play_requested_footsteps(
             }
             continue;
         };
-        let clips = if request.right { &set.right } else { &set.left };
+        let clips = footstep_clips(set, request.right);
         spawn_footstep_clip(
             &mut commands,
             &asset_server,
@@ -278,17 +278,14 @@ fn spawn_footstep_clip(
     gain_db: f32,
     reported_missing: &mut ResMut<ReportedMissingFootsteps>,
 ) {
-    let Some(asset_path) = clips
-        .get(variant % clips.len().max(1))
-        .filter(|path| !path.is_empty())
-    else {
+    let Some(asset_path) = select_clip_path(clips, variant) else {
         if reported_missing.0.insert(missing_key.to_string()) {
             warn!("prepared footstep set {missing_key} has no usable clips");
         }
         return;
     };
     commands.spawn((
-        AudioPlayer::new(asset_server.load(asset_path.clone())),
+        AudioPlayer::new(asset_server.load(asset_path.to_owned())),
         PlaybackSettings {
             mode: PlaybackMode::Despawn,
             spatial: false,
@@ -296,6 +293,17 @@ fn spawn_footstep_clip(
             ..default()
         },
     ));
+}
+
+fn footstep_clips(set: &PreparedFootstepSet, right: bool) -> &[String] {
+    if right { &set.right } else { &set.left }
+}
+
+fn select_clip_path(clips: &[String], variant: usize) -> Option<&str> {
+    clips
+        .get(variant % clips.len().max(1))
+        .map(String::as_str)
+        .filter(|path| !path.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]

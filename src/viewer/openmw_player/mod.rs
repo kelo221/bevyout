@@ -15,6 +15,8 @@ pub(crate) const STATIONARY_JUMP_HEIGHT: f32 = 1.2;
 // the native BoxDDD controller.
 pub(crate) const DIRECTIONAL_JUMP_HEIGHT: f32 = STATIONARY_JUMP_HEIGHT;
 pub(crate) const DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE: f32 = STATIONARY_JUMP_HEIGHT;
+/// OpenMW's default 34-unit upward step converted with its metric scale.
+pub(crate) const DEFAULT_STEP_HEIGHT: f32 = 34.0 / 69.991_25;
 pub(crate) const MIN_LANDING_SOUND_DISTANCE: f32 = 0.1;
 pub(crate) const HARD_LANDING_DISTANCE: f32 = 400.0 / 70.0;
 

@@ -23,26 +23,26 @@ pub(crate) fn emit_landing_events(
     };
     if state.mode != CameraMode::Fps {
         locomotion.reset(transform.translation);
-        footstep.initialized = false;
-        footstep.distance = 0.0;
+        footstep.reset_tracking();
         return;
     }
 
-    let surface = probe_surface(entity, transform.translation, &context, &collision_world);
-    let airborne = !kcc.grounded || surface.is_none();
+    let airborne = !kcc.grounded;
     let Some(impact) = locomotion.update(transform.translation, kcc.velocity.y, airborne) else {
         return;
     };
-    let Some(surface) = surface else {
-        return;
-    };
+    let surface = footstep_surface_or_default(probe_surface(
+        entity,
+        transform.translation,
+        &context,
+        &collision_world,
+    ));
     landings.write(PlayLanding {
         surface: surface.into(),
         variant: impact.variant,
         hard: impact.hard,
     });
-    footstep.last_position = transform.translation;
-    footstep.distance = 0.0;
+    footstep.reset_at(transform.translation);
 }
 
 pub(crate) fn emit_footsteps(
@@ -56,40 +56,22 @@ pub(crate) fn emit_footsteps(
         return;
     };
     if state.mode != CameraMode::Fps {
-        footstep.initialized = false;
-        footstep.distance = 0.0;
+        footstep.reset_tracking();
         return;
     }
     let position = transform.translation;
-    if !footstep.initialized {
-        footstep.last_position = position;
-        footstep.initialized = true;
+    footstep.record_motion(position, kcc.grounded && kcc.velocity.y.abs() <= 2.5);
+    if footstep.distance < FOOTSTEP_DISTANCE {
         return;
     }
-    let delta = position - footstep.last_position;
-    footstep.last_position = position;
-    let Some(surface) = probe_surface(entity, position, &context, &collision_world) else {
-        footstep.distance = 0.0;
-        return;
-    };
-    if kcc.velocity.y.abs() > 2.5 || !kcc.grounded {
-        footstep.distance = 0.0;
-        return;
-    }
-
-    let horizontal_delta = Vec3::new(delta.x, 0.0, delta.z).length();
-    if horizontal_delta <= f32::EPSILON {
-        return;
-    }
-    footstep.distance += horizontal_delta;
-    while footstep.distance >= FOOTSTEP_DISTANCE {
-        footstep.distance -= FOOTSTEP_DISTANCE;
+    let surface =
+        footstep_surface_or_default(probe_surface(entity, position, &context, &collision_world));
+    while let Some((right, variant)) = footstep.take_step() {
         footsteps.write(PlayFootstep {
             surface: surface.into(),
-            right: footstep.step_index % 2 == 1,
-            variant: footstep.step_index / 2,
+            right,
+            variant,
         });
-        footstep.step_index = footstep.step_index.wrapping_add(1);
     }
 }
 
@@ -115,6 +97,10 @@ pub(crate) fn probe_surface(
         .and_then(|surface| surface.material)
         .or_else(|| (hit.user_material_id != 0).then_some(hit.user_material_id as u32));
     Some(surface_family(material))
+}
+
+pub(crate) fn footstep_surface_or_default(surface: Option<&'static str>) -> &'static str {
+    surface.unwrap_or(DEFAULT_FOOTSTEP_SURFACE)
 }
 
 pub(crate) fn has_walkable_plane(planes: &[boxddd::MoverPlane]) -> bool {

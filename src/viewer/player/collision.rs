@@ -187,7 +187,11 @@ pub(crate) fn create_prepared_shape(
             placement_rotation * local
         }
     };
-    let category = if dynamic { WORLD_DYNAMIC } else { WORLD_STATIC };
+    let category = prepared_shape_category(
+        dynamic,
+        placement.step_support,
+        placement.physics_classification,
+    );
     let mask = if dynamic {
         WORLD_STATIC | WORLD_DYNAMIC | PLAYER_PROXY | PLAYER_QUERY
     } else {
@@ -271,6 +275,20 @@ pub(crate) fn create_prepared_shape(
         }
     };
     Some((shape_id, shape.triangle_count()))
+}
+
+pub(crate) fn prepared_shape_category(
+    dynamic: bool,
+    step_support: bool,
+    classification: PreparedPhysicsClassification,
+) -> u64 {
+    if dynamic {
+        WORLD_DYNAMIC
+    } else if step_support && classification == PreparedPhysicsClassification::Static {
+        WORLD_STATIC | STEP_SUPPORT
+    } else {
+        WORLD_STATIC
+    }
 }
 
 pub(crate) fn normalize_dynamic_mass(

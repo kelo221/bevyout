@@ -12,9 +12,10 @@ pub(crate) fn capture_player_render_history(
 }
 
 pub(crate) fn interpolate_fps_camera(
+    time: Res<Time>,
     fixed_time: Res<Time<Fixed>>,
     state: Res<CameraModeState>,
-    players: Query<(&Transform, &PlayerRenderHistory), With<FpsPlayer>>,
+    mut players: Query<(&Transform, &KccState, &mut PlayerRenderHistory), With<FpsPlayer>>,
     mut cameras: Query<(&Transform, &mut GlobalTransform), With<Camera3d>>,
 ) {
     if state.mode != CameraMode::Fps {
@@ -23,17 +24,23 @@ pub(crate) fn interpolate_fps_camera(
     let Some(player_entity) = state.player else {
         return;
     };
-    let Ok((player_transform, history)) = players.get(player_entity) else {
+    let Ok((player_transform, kcc, mut history)) = players.get_mut(player_entity) else {
         return;
     };
     let Ok((camera_transform, mut camera_global)) = cameras.single_mut() else {
         return;
     };
 
-    let interpolated_player_position = interpolate_render_position(
+    let mut interpolated_player_position = interpolate_render_position(
         history.previous_position,
         player_transform.translation,
         fixed_time.overstep_fraction(),
+    );
+    interpolated_player_position.y = smooth_grounded_camera_y(
+        &mut history,
+        interpolated_player_position.y,
+        kcc.grounded,
+        time.delta_secs(),
     );
 
     // Rebuild the authoritative camera pose from local transforms instead of
@@ -49,6 +56,31 @@ pub(crate) fn interpolate_fps_camera(
         rotation,
         scale,
     });
+}
+
+pub(crate) fn smooth_grounded_camera_y(
+    history: &mut PlayerRenderHistory,
+    target_y: f32,
+    grounded: bool,
+    delta_seconds: f32,
+) -> f32 {
+    let discontinuity = (target_y - history.last_target_y).abs() > STEP_SWEEP_DISTANCE;
+    let reset =
+        !history.vertical_initialized || !grounded || !history.was_grounded || discontinuity;
+
+    if reset {
+        history.smoothed_y = target_y;
+        history.vertical_initialized = true;
+    } else {
+        let exponent = -CAMERA_VERTICAL_SETTLE_LOG_FACTOR * delta_seconds.max(0.0)
+            / CAMERA_VERTICAL_SETTLE_SECONDS;
+        let alpha = 1.0 - exponent.exp();
+        history.smoothed_y += (target_y - history.smoothed_y) * alpha;
+    }
+
+    history.last_target_y = target_y;
+    history.was_grounded = grounded;
+    history.smoothed_y
 }
 
 pub(crate) fn interpolate_render_position(previous: Vec3, current: Vec3, alpha: f32) -> Vec3 {

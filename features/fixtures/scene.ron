@@ -1,4 +1,4 @@
-// Golden fixture for the schema-10 `PreparedSceneManifest` (see
+// Golden fixture for the schema-11 `PreparedSceneManifest` (see
 // `src/vsa/manifest/mod.rs`). Hand-written, not machine-generated, to stay
 // readable as a spec artifact: it is deliberately small but touches every
 // field category README.md promises the manifest retains -- item/container
@@ -12,7 +12,7 @@
 // edit it just to make a failing test pass; that defeats the point of an
 // executable spec.
 (
-    schema_version: 10,
+    schema_version: 11,
     asset_root: "cache/00017f37",
     source_plugin: "Fallout3.esm",
     source_fingerprint: "9f2b6e4d5c3a10ef",

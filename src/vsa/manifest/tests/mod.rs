@@ -116,6 +116,7 @@ fn legacy_placement_defaults_to_static_semantics() {
     assert!(placement.initially_enabled);
     assert!(placement.inventory.is_empty());
     assert_eq!(placement.audio, PreparedPlacementAudio::default());
+    assert!(!placement.step_support);
 }
 
 #[test]
@@ -189,6 +190,7 @@ fn schema_three_semantics_round_trip_through_ron() {
         physics_asset_path: None,
         physics_source: None,
         physics_classification: PreparedPhysicsClassification::Static,
+        step_support: false,
         reference_kind: "REFR".into(),
         base_kind: "DOOR".into(),
         editor_id: Some("TestDoor".into()),
