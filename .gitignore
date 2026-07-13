@@ -1,6 +1,7 @@
 /target
 /.bevyout
 /openmw-master
+/GECK-Notes
 render_diagnostics.csv
 render_timings.csv
 cpu_trace_small.json

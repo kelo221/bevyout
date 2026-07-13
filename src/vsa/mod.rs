@@ -6,16 +6,24 @@ mod irradiance;
 mod manifest;
 mod openmw_esm4;
 mod paths;
+mod physics;
 mod plugin;
 mod prepare;
 mod scenes;
 
-pub(crate) use bake::{bake, is_bake_static};
+pub(crate) use assets::NIF_CONVERTER_REVISION;
+pub use bake::bake;
+pub(crate) use bake::is_bake_static;
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
-    PreparedFootstepSet, PreparedInventoryEntry, PreparedPlacement, PreparedSceneManifest,
-    PreparedSemantic, cell_label,
+    PreparedFootstepSet, PreparedInventoryEntry, PreparedPhysicsClassification, PreparedPlacement,
+    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
+    ensure_prepared_manifest_compatible,
 };
 pub(crate) use paths::FO3_SCALE;
-pub(crate) use prepare::prepare;
+pub(crate) use physics::{
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
+    PreparedPhysicsSource, body_blocks_player, read_physics_asset,
+};
+pub use prepare::prepare;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

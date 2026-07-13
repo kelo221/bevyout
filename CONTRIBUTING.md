@@ -29,7 +29,7 @@ Direct pushes to `master` are still fine for routine changes. But get a second
 pair of eyes — a quick look from the other person, doesn't need to be a formal
 PR review — before landing anything that's expensive to get wrong:
 
-- The prepared scene manifest schema (`src/vsa/manifest.rs`).
+- The prepared scene manifest schema (`src/vsa/manifest/`).
 - The Fallout↔Bevy coordinate scale (`src/vsa/paths.rs`, ~70 units/metre).
   Changing it invalidates every cached GLB and bake.
 - Bumping `NIF_CONVERTER_REVISION` (invalidates the NIF→GLB cache for

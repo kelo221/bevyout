@@ -1,9 +1,8 @@
 //! Executable-spec seed (WP6): runs the three `features/*.feature` files
 //! against real `bevyout` code via the `cucumber` crate.
 //!
-//! `bevyout` is a binary crate (`src/main.rs`, no `src/lib.rs`), so this
-//! integration test cannot `use bevyout::...`. Rather than add a `src/lib.rs`
-//! (out of scope for this work package -- that file is not ours to add),
+//! `src/lib.rs` keeps `vsa` private, so this integration test cannot
+//! `use bevyout::vsa::...`. Rather than widen the library's public surface,
 //! the modules under test are pulled in verbatim with `#[path]` so the exact
 //! same source compiles into this test binary. Concretely:
 //!
@@ -47,7 +46,7 @@ mod plugin {
 #[allow(dead_code, unused_imports)]
 mod paths;
 
-#[path = "../src/vsa/manifest.rs"]
+#[path = "../src/vsa/manifest/mod.rs"]
 #[allow(dead_code, unused_imports)]
 mod manifest;
 
@@ -55,7 +54,13 @@ mod manifest;
 #[allow(dead_code, unused_imports)]
 mod bsa;
 
-#[path = "../src/vsa/assets.rs"]
+// `manifest` and `assets` both lean on the physics sidecar module since the
+// native-Havok refactor, so it rides along on the same verbatim-include basis.
+#[path = "../src/vsa/physics.rs"]
+#[allow(dead_code, unused_imports)]
+mod physics;
+
+#[path = "../src/vsa/assets/mod.rs"]
 #[allow(dead_code, unused_imports)]
 mod assets;
 

@@ -6,16 +6,16 @@ use std::path::PathBuf;
     name = "bevyout",
     about = "Fallout 3 scene preparation and Bevy viewer"
 )]
-pub(crate) struct Cli {
+pub struct Cli {
     /// Optional project/user configuration file.
     #[arg(long, global = true)]
     pub(crate) config: Option<PathBuf>,
     #[command(subcommand)]
-    pub(crate) command: CommandLine,
+    pub command: CommandLine,
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum CommandLine {
+pub enum CommandLine {
     /// Extract a Fallout cell, stage its assets, and create a Bevy manifest.
     #[command(name = "prepare")]
     Prepare(PrepareArgs),
@@ -31,7 +31,7 @@ pub(crate) enum CommandLine {
 }
 
 #[derive(Parser, Debug)]
-pub(crate) struct PrepareArgs {
+pub struct PrepareArgs {
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID", conflicts_with = "cell")]
     pub(crate) selector: Option<String>,
@@ -62,11 +62,11 @@ pub(crate) struct PrepareArgs {
 }
 
 #[derive(Parser, Debug)]
-pub(crate) struct ViewArgs {
+pub struct ViewArgs {
     /// Prepared scene manifest to open.
     #[arg(long)]
     pub(crate) manifest: PathBuf,
-    /// Skip Avian collider construction for render-only performance testing.
+    /// Skip BoxDDD collider construction for render-only performance testing.
     #[arg(long)]
     pub(crate) disable_physics: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
@@ -75,7 +75,7 @@ pub(crate) struct ViewArgs {
 }
 
 #[derive(Parser, Debug)]
-pub(crate) struct RenderArgs {
+pub struct RenderArgs {
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID")]
     pub(crate) selector: String,
@@ -97,7 +97,7 @@ pub(crate) struct RenderArgs {
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Skip Avian collider construction for render-only performance testing.
+    /// Skip BoxDDD collider construction for render-only performance testing.
     #[arg(long)]
     pub(crate) disable_physics: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
@@ -106,7 +106,7 @@ pub(crate) struct RenderArgs {
 }
 
 #[derive(Parser, Debug)]
-pub(crate) struct BakeArgs {
+pub struct BakeArgs {
     /// Prepared scene manifest to bake. The final bake metadata is written back to it.
     #[arg(long, conflicts_with = "selector")]
     pub(crate) manifest: Option<PathBuf>,
@@ -158,7 +158,7 @@ pub(crate) struct BakeArgs {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum BakeQuality {
+pub enum BakeQuality {
     /// Fast Eevee lighting preview; does not produce a baked-GI manifest.
     Preview,
     /// Bake one Blender 4.5 Eevee irradiance volume for the cell.
@@ -199,114 +199,5 @@ fn parse_irradiance_samples(value: &str) -> Result<u32, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
-        let cli = Cli::try_parse_from([
-            "bevyout",
-            "bake",
-            "--manifest",
-            "scene.ron",
-            "--quality",
-            "irradiance",
-        ])
-        .unwrap();
-        let CommandLine::Bake(args) = cli.command else {
-            panic!("expected bake command");
-        };
-        assert_eq!(args.static_batch_chunk_meters, 64.0);
-        assert_eq!(args.irradiance_spacing_meters, 8.0);
-        assert_eq!(args.irradiance_samples, 64);
-        assert!(matches!(args.quality, BakeQuality::Irradiance));
-
-        for value in ["7.99", "256.01", "NaN", "inf"] {
-            assert!(
-                Cli::try_parse_from([
-                    "bevyout",
-                    "bake",
-                    "--manifest",
-                    "scene.ron",
-                    "--static-batch-chunk-meters",
-                    value,
-                ])
-                .is_err()
-            );
-        }
-
-        for value in ["1.99", "32.01", "NaN", "inf"] {
-            assert!(
-                Cli::try_parse_from([
-                    "bevyout",
-                    "bake",
-                    "--manifest",
-                    "scene.ron",
-                    "--irradiance-spacing-meters",
-                    value,
-                ])
-                .is_err()
-            );
-        }
-
-        for value in ["0", "513"] {
-            assert!(
-                Cli::try_parse_from([
-                    "bevyout",
-                    "bake",
-                    "--manifest",
-                    "scene.ron",
-                    "--irradiance-samples",
-                    value,
-                ])
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn accepts_editor_id_selectors_and_legacy_paths() {
-        let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
-        let CommandLine::Prepare(args) = cli.command else {
-            panic!("expected prepare command");
-        };
-        assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
-
-        let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart"]).unwrap();
-        let CommandLine::Bake(args) = cli.command else {
-            panic!("expected bake command");
-        };
-        assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
-        assert!(args.manifest.is_none());
-        assert!(matches!(args.quality, BakeQuality::Irradiance));
-
-        let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart", "--force"]).unwrap();
-        let CommandLine::Bake(args) = cli.command else {
-            panic!("expected bake command");
-        };
-        assert!(args.force);
-
-        let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
-        let CommandLine::Render(args) = cli.command else {
-            panic!("expected render command");
-        };
-        assert_eq!(args.selector, "SuperDuperMart");
-
-        let cli = Cli::try_parse_from(["bevyout", "prepare", "--cell", "00017f37"]).unwrap();
-        let CommandLine::Prepare(args) = cli.command else {
-            panic!("expected prepare command");
-        };
-        assert_eq!(args.cell.as_deref(), Some("00017f37"));
-
-        assert!(
-            Cli::try_parse_from([
-                "bevyout",
-                "bake",
-                "SuperDuperMart",
-                "--manifest",
-                "scene.ron",
-            ])
-            .is_err()
-        );
-    }
-}
+#[path = "cli/tests/mod.rs"]
+mod tests;

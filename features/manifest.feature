@@ -18,7 +18,7 @@ Feature: Schema-7 prepared scene manifest
   Scenario: The golden fixture parses as a schema-7 manifest
     Given the golden manifest fixture "features/fixtures/scene.ron"
     Then it parses as a PreparedSceneManifest
-    And the schema version is 7
+    And the schema version is 10
 
   Scenario: Retained container inventory and ownership/enable-parent metadata
     Given the golden manifest fixture "features/fixtures/scene.ron"

@@ -1,7 +1,7 @@
-// Golden fixture for the schema-7 `PreparedSceneManifest` (see
-// `src/vsa/manifest.rs`). Hand-written, not machine-generated, to stay
+// Golden fixture for the schema-10 `PreparedSceneManifest` (see
+// `src/vsa/manifest/mod.rs`). Hand-written, not machine-generated, to stay
 // readable as a spec artifact: it is deliberately small but touches every
-// field category README.md promises schema 7 retains -- item/container
+// field category README.md promises the manifest retains -- item/container
 // metadata, ownership + enable-parent gating, door locks/destinations, cell
 // acoustics, native footstep/landing banks, and NAVM payloads as metadata.
 //
@@ -12,7 +12,7 @@
 // edit it just to make a failing test pass; that defeats the point of an
 // executable spec.
 (
-    schema_version: 7,
+    schema_version: 10,
     asset_root: "cache/00017f37",
     source_plugin: "Fallout3.esm",
     source_fingerprint: "9f2b6e4d5c3a10ef",
