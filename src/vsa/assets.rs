@@ -106,15 +106,16 @@ pub(crate) fn convert_staged_textures(
         let installed = PathBuf::from(r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe");
         if installed.exists() {
             Some(installed)
-        } else if let Some(name) = ["magick.exe", "magick"].into_iter().find(|name| {
-            Command::new(name)
-                .arg("-version")
-                .output()
-                .is_ok_and(|output| output.status.success())
-        }) {
-            Some(PathBuf::from(name))
         } else {
-            None
+            ["magick.exe", "magick"]
+                .into_iter()
+                .find(|name| {
+                    Command::new(name)
+                        .arg("-version")
+                        .output()
+                        .is_ok_and(|output| output.status.success())
+                })
+                .map(PathBuf::from)
         }
     };
     let Some(converter) = converter else {
@@ -624,7 +625,7 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
             bail!("image bufferView extends beyond GLB")
         }
         let data = &bytes[data_start..end];
-        if data.starts_with(b"\\x89PNG\\r\\n\\x1a\\n") && data.len() >= 24 {
+        if data.starts_with(b"\x89PNG\r\n\x1a\n") && data.len() >= 24 {
             let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
             let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
             if width <= 1 || height <= 1 {
@@ -760,6 +761,43 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert!(validate_glb_images(&path).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn placeholder_png_images_are_rejected_and_real_ones_pass() {
+        fn glb_with_png(width: u32, height: u32) -> Vec<u8> {
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            png.extend_from_slice(&13_u32.to_be_bytes());
+            png.extend_from_slice(b"IHDR");
+            png.extend_from_slice(&width.to_be_bytes());
+            png.extend_from_slice(&height.to_be_bytes());
+            let json = format!(
+                "{{\"bufferViews\":[{{\"byteOffset\":0,\"byteLength\":{}}}],\
+                 \"images\":[{{\"bufferView\":0,\"name\":\"probe\"}}]}}",
+                png.len()
+            );
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"glTF");
+            bytes.extend_from_slice(&2_u32.to_le_bytes());
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+            bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(b"JSON");
+            bytes.extend_from_slice(json.as_bytes());
+            bytes.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(b"BIN\0");
+            bytes.extend_from_slice(&png);
+            bytes
+        }
+        let dir = std::env::temp_dir();
+        let placeholder = dir.join(format!("bevyout-placeholder-{}.glb", std::process::id()));
+        std::fs::write(&placeholder, glb_with_png(1, 1)).unwrap();
+        let error = validate_glb_images(&placeholder).unwrap_err();
+        assert!(error.to_string().contains("1x1 placeholder"));
+        let real = dir.join(format!("bevyout-real-{}.glb", std::process::id()));
+        std::fs::write(&real, glb_with_png(2, 2)).unwrap();
+        assert!(validate_glb_images(&real).is_ok());
+        let _ = std::fs::remove_file(placeholder);
+        let _ = std::fs::remove_file(real);
     }
 
     #[test]

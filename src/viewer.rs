@@ -1540,10 +1540,10 @@ mod tests {
 
     #[test]
     fn render_report_path_resolves_to_project_root() {
-        let manifest = Path::new(r"C:\project\.bevyout\cache\scenes\000151e3\scene.ron");
+        let manifest = Path::new("project/.bevyout/cache/scenes/000151e3/scene.ron");
         assert_eq!(
             render_report_path(manifest),
-            PathBuf::from(r"C:\project\render_timings.csv")
+            Path::new("project").join("render_timings.csv")
         );
     }
 
