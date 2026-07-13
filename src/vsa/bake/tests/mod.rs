@@ -1,3 +1,4 @@
+use super::super::manifest::PreparedRuntimeMutability;
 use super::*;
 
 #[test]
@@ -29,6 +30,8 @@ fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
             physics_source: None,
             physics_classification: PreparedPhysicsClassification::Static,
             step_support: false,
+            mutability: PreparedRuntimeMutability::Immutable,
+            mutability_root_form_id: None,
             reference_kind: "REFR".into(),
             base_kind: "STAT".into(),
             editor_id: None,
