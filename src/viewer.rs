@@ -28,8 +28,10 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ImageSpaceInfo, PreparedCellLighting, PreparedSceneManifest, bake,
-    cell_label, find_cached_manifest, is_bake_static, prepare, resolve_cached_manifest,
+    CellInfo, FO3_SCALE, ImageSpaceInfo, NIF_CONVERTER_REVISION, PHYSICS_ASSET_SCHEMA_VERSION,
+    PreparedCellLighting, PreparedSceneManifest, bake, cell_label, ensure_baked_scene_compatible,
+    ensure_prepared_manifest_compatible, find_cached_manifest, is_bake_static, prepare,
+    resolve_cached_manifest,
 };
 
 mod audio;
@@ -145,7 +147,14 @@ fn run_view(
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
+    ensure_prepared_manifest_compatible(
+        &manifest,
+        NIF_CONVERTER_REVISION,
+        PHYSICS_ASSET_SCHEMA_VERSION,
+    )?;
+    ensure_baked_scene_compatible(&manifest)?;
     let asset_root = PathBuf::from(&manifest.asset_root);
+    let physics_assets = player::load_prepared_physics_assets(&manifest, &asset_root)?;
     let report_path = render_report_path(&manifest_path);
     let mut app = App::new();
     app.add_plugins((
@@ -167,6 +176,7 @@ fn run_view(
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
+    app.insert_resource(physics_assets);
     player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);
@@ -370,6 +380,7 @@ struct RenderReportParams<'w, 's> {
     unlit_mode: Res<'w, UnlitMode>,
     lights_disabled: Res<'w, LightsDisabled>,
     colliders: Query<'w, 's, Entity, With<player::PhysicsCollider>>,
+    physics: Res<'w, player::CollisionRuntimeStats>,
 }
 
 fn save_render_report(params: RenderReportParams) {
@@ -395,9 +406,16 @@ fn save_render_report(params: RenderReportParams) {
     let irradiance_volume_count = params.irradiance_volumes.iter().count();
     let camera_mode = format!("{:?}", params.camera_mode.mode);
     let collider_count = params.colliders.iter().count();
+    let mut shape_kinds = params.physics.shape_kinds.iter().collect::<Vec<_>>();
+    shape_kinds.sort_unstable_by_key(|(kind, _)| **kind);
+    let shape_kinds = shape_kinds
+        .into_iter()
+        .map(|(kind, count)| format!("{kind}:{count}"))
+        .collect::<Vec<_>>()
+        .join(";");
 
     let mut csv = String::from(
-        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities\n",
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_cooking_ms,physics_sidecar_bytes\n",
     );
     for sample in &params.report.samples {
         let fps = if sample.frame_time_ms > f64::EPSILON {
@@ -406,7 +424,7 @@ fn save_render_report(params: RenderReportParams) {
             0.0
         };
         csv.push_str(&format!(
-            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{}\n",
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
             sample.sample,
             sample.frame_time_ms,
             fps,
@@ -431,6 +449,16 @@ fn save_render_report(params: RenderReportParams) {
             u8::from(params.lights_disabled.0),
             u8::from(params.physics_disabled.0),
             collider_count,
+            params.physics.authored_assets,
+            params.physics.fallback_assets,
+            params.physics.bodies,
+            params.physics.shapes,
+            csv_field(&shape_kinds),
+            params.physics.packed_triangles,
+            params.physics.filtered_shapes,
+            params.physics.dynamic_bodies,
+            params.physics.cooking_millis,
+            params.physics.sidecar_bytes,
         ));
     }
     if let Err(error) = fs::write(&params.report_path.0, csv) {

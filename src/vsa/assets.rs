@@ -7,12 +7,12 @@ use std::process::Command;
 use super::bsa::BsaArchive;
 use super::manifest::Diagnostic;
 use super::paths::{fingerprint, normalize_asset_path};
+use super::physics::read_physics_asset;
 
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-textures-v16-breakable-constraint-v1";
+pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-havok-sidecar-v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetConversion {
@@ -41,6 +41,7 @@ pub(crate) fn asset_conversion(static_asset: bool) -> AssetConversion {
 pub(crate) struct BlenderAssetJob {
     pub(crate) input: PathBuf,
     pub(crate) output: PathBuf,
+    pub(crate) physics_output: PathBuf,
     pub(crate) model: String,
     pub(crate) conversion: AssetConversion,
 }
@@ -236,13 +237,14 @@ pub(crate) fn run_blender_batch(
     let job_file = staging_dir.join("blender_jobs.ron");
     let job_text = blender_jobs_json(jobs);
     fs::write(&job_file, job_text)?;
-    let script = r#"import bpy, json, os, sys
+    let script = r#"import bpy, gzip, json, os, sys
 from mathutils import Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
     from io_scene_niftools.modules.nif_import.collision import Collision, get_material
     from io_scene_niftools.modules.nif_import.collision.bound import Bound
+    from io_scene_niftools.modules.nif_import.collision.havok import BhkCollision
     from io_scene_niftools.modules.nif_import.property.material import Material
     from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
     from io_scene_niftools.modules.nif_import.constraint import Constraint
@@ -313,6 +315,256 @@ def patch_niftools_blender52():
     # every Havok record has the obsolete `constraint` field. Collision meshes
     # are exported separately, so skip Blender rigid-body joint construction.
     Constraint.import_bhk_constraints = lambda self: None
+    def enum_name(value, default=''):
+        return getattr(value, 'name', str(value) if value is not None else default)
+    def vec3_value(value, default=(0.0, 0.0, 0.0)):
+        if value is None: return list(default)
+        return [float(getattr(value, axis, default[index])) for index, axis in enumerate(('x', 'y', 'z'))]
+    def scaled_vec3(value, scale):
+        return [component * scale for component in vec3_value(value)]
+    original_rigid_body = BhkCollision._import_bhk_rigid_body
+    def import_rigid_body_metadata(self, bhkshape, collision_objs):
+        original_rigid_body(self, bhkshape, collision_objs)
+        body_info = bhkshape.rigid_body_info
+        next_group = getattr(self, '_bevyout_body_group', 0)
+        self._bevyout_body_group = next_group + 1
+        layer_filter = getattr(body_info, 'havok_filter', None)
+        body_filter = getattr(bhkshape, 'havok_filter', None)
+        layer = getattr(getattr(layer_filter, 'layer', None), 'value', 1)
+        flags = getattr(body_filter, 'flags', 0)
+        constrained = bool(getattr(bhkshape, 'constraints', None))
+        inertia = getattr(body_info, 'inertia_tensor', None)
+        source_inertia = [[float(getattr(inertia, f'm_{row}{column}', 0.0))
+                           for column in (1, 2, 3)] for row in (1, 2, 3)]
+        # Conjugate by the Blender/NIF -> Bevy basis (x, z, -y) and convert
+        # Havok distance-squared units to the scaled GLB units.
+        inertia_scale = self.HAVOK_SCALE * self.HAVOK_SCALE
+        inertia_rows = [
+            [source_inertia[0][0], source_inertia[0][2], -source_inertia[0][1]],
+            [source_inertia[2][0], source_inertia[2][2], -source_inertia[2][1]],
+            [-source_inertia[1][0], -source_inertia[1][2], source_inertia[1][1]],
+        ]
+        inertia_rows = [[value * inertia_scale for value in row] for row in inertia_rows]
+        metadata = {
+            'bevyout_body_group': next_group,
+            'bevyout_motion_type': enum_name(getattr(body_info, 'motion_system', None), 'MO_SYS_FIXED'),
+            'bevyout_quality_type': enum_name(getattr(body_info, 'quality_type', None), 'MO_QUAL_FIXED'),
+            'bevyout_mass': float(getattr(body_info, 'mass', 0.0)),
+            'bevyout_center_of_mass': scaled_vec3(getattr(body_info, 'center', None), self.HAVOK_SCALE),
+            'bevyout_inertia': [value for row in inertia_rows for value in row],
+            'bevyout_linear_velocity': scaled_vec3(getattr(body_info, 'linear_velocity', None), self.HAVOK_SCALE),
+            'bevyout_angular_velocity': vec3_value(getattr(body_info, 'angular_velocity', None)),
+            'bevyout_gravity_factor': float(getattr(body_info, 'gravity_factor', 1.0)),
+            'bevyout_linear_damping': float(getattr(body_info, 'linear_damping', 0.0)),
+            'bevyout_angular_damping': float(getattr(body_info, 'angular_damping', 0.0)),
+            'bevyout_friction': float(getattr(body_info, 'friction', 0.8)),
+            'bevyout_restitution': float(getattr(body_info, 'restitution', 0.0)),
+            'bevyout_max_linear_velocity': float(getattr(body_info, 'max_linear_velocity', 0.0)) * self.HAVOK_SCALE,
+            'bevyout_max_angular_velocity': float(getattr(body_info, 'max_angular_velocity', 0.0)),
+            'bevyout_sleep_enabled': enum_name(getattr(body_info, 'deactivator_type', None)) != 'DEACTIVATOR_NEVER',
+            'bevyout_ccd_enabled': 'BULLET' in enum_name(getattr(body_info, 'quality_type', None)).upper(),
+            'bevyout_layer': int(layer),
+            'bevyout_filter_flags': int(flags),
+            'bevyout_constrained': constrained,
+        }
+        for obj in collision_objs:
+            for key, value in metadata.items(): obj[key] = value
+    BhkCollision._import_bhk_rigid_body = import_rigid_body_metadata
+    original_phantom = BhkCollision.import_bhk_simple_shape_phantom
+    def import_phantom_metadata(self, bhkshape):
+        objects = original_phantom(self, bhkshape)
+        transform_value = getattr(bhkshape, 'transform', None)
+        if transform_value is not None:
+            try:
+                transform = __import__('mathutils').Matrix(transform_value.as_list())
+                transform.translation = transform.translation * self.HAVOK_SCALE
+                for obj in objects: obj.matrix_local = obj.matrix_local @ transform
+            except Exception:
+                pass
+        for obj in objects: obj['bevyout_phantom'] = True
+        return objects
+    BhkCollision.import_bhk_simple_shape_phantom = import_phantom_metadata
+    def mark_shape(original, kind):
+        def wrapped(self, bhkshape):
+            objects = original(self, bhkshape)
+            for obj in objects:
+                obj['bevyout_havok_shape_kind'] = kind
+            return objects
+        return wrapped
+    BhkCollision.import_bhkbox_shape = mark_shape(BhkCollision.import_bhkbox_shape, 'Box')
+    BhkCollision.import_bhksphere_shape = mark_shape(BhkCollision.import_bhksphere_shape, 'Sphere')
+    BhkCollision.import_bhkcapsule_shape = mark_shape(BhkCollision.import_bhkcapsule_shape, 'Capsule')
+    BhkCollision.import_bhkconvex_vertices_shape = mark_shape(BhkCollision.import_bhkconvex_vertices_shape, 'ConvexHull')
+    BhkCollision.import_bhkpackednitristrips_shape = mark_shape(BhkCollision.import_bhkpackednitristrips_shape, 'TriangleMesh')
+    BhkCollision.import_bhk_nitristrips_shape = mark_shape(BhkCollision.import_bhk_nitristrips_shape, 'TriangleMesh')
+    BhkCollision.import_nitristrips = mark_shape(BhkCollision.import_nitristrips, 'TriangleMesh')
+
+def blender_point_to_bevy(point):
+    return [float(point.x), float(point.z), float(-point.y)]
+
+def blender_vector_to_bevy(vector):
+    return Vector((vector.x, vector.z, -vector.y))
+
+def mesh_points(obj):
+    return [blender_point_to_bevy(obj.matrix_world @ vertex.co) for vertex in obj.data.vertices]
+
+def shape_from_collision_object(obj):
+    kind = obj.get('bevyout_havok_shape_kind')
+    if not kind:
+        kind = {'SPHERE': 'Sphere', 'CAPSULE': 'Capsule', 'BOX': 'Box',
+                'CONVEX_HULL': 'ConvexHull', 'MESH': 'TriangleMesh'}.get(
+                    getattr(obj.rigid_body, 'collision_shape', ''), 'TriangleMesh')
+    if kind == 'Sphere':
+        radius = float(getattr(obj.rigid_body, 'collision_margin', 0.0))
+        scale = max(abs(value) for value in obj.matrix_world.to_scale())
+        return {'kind': 'Sphere', 'center': blender_point_to_bevy(obj.matrix_world.translation),
+                'radius': radius * scale}
+    if kind == 'Capsule':
+        radius = float(getattr(obj.rigid_body, 'collision_margin', 0.0))
+        zs = [corner[2] for corner in obj.bound_box]
+        half_segment = max(0.0, (max(zs) - min(zs)) * 0.5 - radius)
+        point1 = obj.matrix_world @ Vector((0.0, 0.0, -half_segment))
+        point2 = obj.matrix_world @ Vector((0.0, 0.0, half_segment))
+        scale = max(abs(obj.matrix_world.to_scale().x), abs(obj.matrix_world.to_scale().y))
+        return {'kind': 'Capsule', 'point1': blender_point_to_bevy(point1),
+                'point2': blender_point_to_bevy(point2), 'radius': radius * scale}
+    if kind == 'Box':
+        mins = Vector((min(corner[i] for corner in obj.bound_box) for i in range(3)))
+        maxs = Vector((max(corner[i] for corner in obj.bound_box) for i in range(3)))
+        center = obj.matrix_world @ ((mins + maxs) * 0.5)
+        half = (maxs - mins) * 0.5
+        basis = obj.matrix_world.to_3x3()
+        sx, sy, sz = (basis @ Vector((1, 0, 0))).length, (basis @ Vector((0, 1, 0))).length, (basis @ Vector((0, 0, 1))).length
+        axis_x = blender_vector_to_bevy(basis @ Vector((1, 0, 0))).normalized()
+        axis_y = blender_vector_to_bevy(basis @ Vector((0, 0, 1))).normalized()
+        axis_z = blender_vector_to_bevy(basis @ Vector((0, -1, 0))).normalized()
+        rotation = __import__('mathutils').Matrix((axis_x, axis_y, axis_z)).transposed().to_quaternion()
+        return {'kind': 'Box', 'center': blender_point_to_bevy(center),
+                'half_extents': [float(half.x * sx), float(half.z * sz), float(half.y * sy)],
+                'rotation_xyzw': [float(rotation.x), float(rotation.y), float(rotation.z), float(rotation.w)]}
+    points = mesh_points(obj)
+    if kind == 'ConvexHull':
+        return {'kind': 'ConvexHull', 'points': points}
+    indices = []
+    for polygon in obj.data.polygons:
+        vertices = list(polygon.vertices)
+        for index in range(1, len(vertices) - 1):
+            indices.extend((int(vertices[0]), int(vertices[index]), int(vertices[index + 1])))
+    return {'kind': 'TriangleMesh', 'vertices': points, 'indices': indices}
+
+def physics_body_from_objects(group_id, objects):
+    first = objects[0]
+    flat_inertia = list(first.get('bevyout_inertia', [0.0] * 9))
+    while len(flat_inertia) < 9: flat_inertia.append(0.0)
+    def basis_vector(values):
+        values = list(values) if values is not None else [0.0, 0.0, 0.0]
+        return [float(values[0]), float(values[2]), float(-values[1])]
+    shapes = [shape_from_collision_object(obj) for obj in objects]
+    shapes = [shape for shape in shapes if (
+        (shape['kind'] == 'TriangleMesh' and len(shape['vertices']) >= 3 and len(shape['indices']) >= 3)
+        or (shape['kind'] == 'ConvexHull' and len(shape['points']) >= 4)
+        or shape['kind'] in {'Box', 'Sphere', 'Capsule'})]
+    return {
+        'group_id': int(group_id),
+        'motion_type': str(first.get('bevyout_motion_type', 'MO_SYS_FIXED')),
+        'quality_type': str(first.get('bevyout_quality_type', 'MO_QUAL_FIXED')),
+        'mass': float(first.get('bevyout_mass', 0.0)),
+        'center_of_mass': basis_vector(first.get('bevyout_center_of_mass')),
+        'inertia': [flat_inertia[0:3], flat_inertia[3:6], flat_inertia[6:9]],
+        'linear_velocity': basis_vector(first.get('bevyout_linear_velocity')),
+        'angular_velocity': basis_vector(first.get('bevyout_angular_velocity')),
+        'gravity_factor': float(first.get('bevyout_gravity_factor', 1.0)),
+        'linear_damping': max(0.0, float(first.get('bevyout_linear_damping', 0.0))),
+        'angular_damping': max(0.0, float(first.get('bevyout_angular_damping', 0.0))),
+        'friction': max(0.0, float(first.get('bevyout_friction', 0.8))),
+        'restitution': max(0.0, float(first.get('bevyout_restitution', 0.0))),
+        'max_linear_velocity': max(0.0, float(first.get('bevyout_max_linear_velocity', 0.0))),
+        'max_angular_velocity': max(0.0, float(first.get('bevyout_max_angular_velocity', 0.0))),
+        'sleep_enabled': bool(first.get('bevyout_sleep_enabled', True)),
+        'ccd_enabled': bool(first.get('bevyout_ccd_enabled', False)),
+        'layer': int(first.get('bevyout_layer', 1)),
+        'filter_flags': int(first.get('bevyout_filter_flags', 0)),
+        'material': int(first['bevyout_havok_material']) if 'bevyout_havok_material' in first else None,
+        'material_name': str(first['bevyout_havok_material_name']) if 'bevyout_havok_material_name' in first else None,
+        'phantom': any(bool(obj.get('bevyout_phantom', False)) for obj in objects),
+        'constrained': bool(first.get('bevyout_constrained', False)),
+        'shapes': shapes,
+    }
+
+def body_blocks_player(body):
+    return (not body['phantom'] and not (body['filter_flags'] & 0x40)
+            and body['layer'] not in {0, 8, 12, 15, 16, 18, 21, 22, 23, 24, 25,
+                                     29, 30, 31, 33, 34, 35, 36, 37, 38, 39, 40, 43})
+
+def render_fallback_body(objects):
+    vertices, indices = [], []
+    for obj in objects:
+        offset = len(vertices)
+        vertices.extend(mesh_points(obj))
+        for polygon in obj.data.polygons:
+            polygon_vertices = list(polygon.vertices)
+            for index in range(1, len(polygon_vertices) - 1):
+                indices.extend((offset + int(polygon_vertices[0]),
+                                offset + int(polygon_vertices[index]),
+                                offset + int(polygon_vertices[index + 1])))
+    return {
+        'group_id': 0, 'motion_type': 'MO_SYS_FIXED', 'quality_type': 'MO_QUAL_FIXED',
+        'mass': 0.0, 'center_of_mass': [0.0, 0.0, 0.0],
+        'inertia': [[0.0, 0.0, 0.0]] * 3,
+        'linear_velocity': [0.0, 0.0, 0.0], 'angular_velocity': [0.0, 0.0, 0.0],
+        'gravity_factor': 1.0, 'linear_damping': 0.0, 'angular_damping': 0.0,
+        'friction': 0.8, 'restitution': 0.0, 'max_linear_velocity': 0.0,
+        'max_angular_velocity': 0.0, 'sleep_enabled': True, 'ccd_enabled': False,
+        'layer': 1, 'filter_flags': 0, 'material': None, 'material_name': None,
+        'phantom': False, 'constrained': False,
+        'shapes': [{'kind': 'TriangleMesh', 'vertices': vertices, 'indices': indices}],
+    }
+
+def fallback_material_eligible(material):
+    if material is None or not material.use_nodes:
+        return False
+    alpha_flags = int(getattr(getattr(material, 'niftools_alpha', None), 'alphaflag', 0))
+    if alpha_flags & (1 | (1 << 9)):
+        return False
+    if material.get('bevyout_emissive_bulb', False):
+        return False
+    for node in material.node_tree.nodes:
+        if node.bl_idname == 'ShaderNodeTexImage' and node.image:
+            name = node.image.name.casefold()
+            label = node.label.casefold()
+            if '_g.' in name or '_em.' in name or 'glow' in name or 'emiss' in name or 'glow' in label or 'emiss' in label:
+                return False
+        if node.bl_idname == 'ShaderNodeBsdfPrincipled':
+            emission = node.inputs.get('Emission Color') or node.inputs.get('Emission')
+            strength = node.inputs.get('Emission Strength')
+            if emission and (emission.links or max(emission.default_value[:3]) > 0.0):
+                if strength is None or strength.default_value > 0.0:
+                    return False
+    return True
+
+def build_physics_asset():
+    collision_objects = [obj for obj in bpy.context.scene.objects
+                         if obj.type == 'MESH' and obj.get('bevyout_collision', False)]
+    groups = {}
+    for index, obj in enumerate(collision_objects):
+        group = int(obj.get('bevyout_body_group', 1000000 + index))
+        groups.setdefault(group, []).append(obj)
+    authored_bodies = [physics_body_from_objects(group, objects)
+                       for group, objects in sorted(groups.items())]
+    authored_bodies = [body for body in authored_bodies if body['shapes']]
+    if any(body_blocks_player(body) and body['shapes'] for body in authored_bodies):
+        return {'schema_version': 1, 'source': 'AuthoredHavok', 'bodies': authored_bodies}
+    render_objects = [obj for obj in bpy.context.scene.objects
+                      if obj.type == 'MESH' and len(obj.data.polygons)
+                      and not obj.get('bevyout_collision', False)
+                      and obj.visible_get()
+                      and obj.data.materials
+                      and all(fallback_material_eligible(material) for material in obj.data.materials)]
+    fallback = render_fallback_body(render_objects)
+    if not fallback['shapes'][0]['indices']:
+        return {'schema_version': 1, 'source': 'GeneratedRender', 'bodies': authored_bodies}
+    return {'schema_version': 1, 'source': 'GeneratedRender',
+            'bodies': authored_bodies + [fallback]}
 def bake_quick_ao():
     objects = [obj for obj in bpy.context.scene.objects
         if obj.type == 'MESH' and len(obj.data.polygons)
@@ -355,6 +607,7 @@ with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
     nif_path = job['input']
     output_path = job['output']
+    physics_output_path = job['physics_output']
     conversion = job.get('conversion', 'ao-none')
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
@@ -362,14 +615,13 @@ for job in jobs:
         for datablock in list(datablocks):
             if datablock.users == 0: datablocks.remove(datablock)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(os.path.dirname(physics_output_path), exist_ok=True)
     result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
-    authored_collision = any(obj.get('bevyout_collision', False)
-                             for obj in bpy.context.scene.objects)
     for obj in list(bpy.context.scene.objects):
         if obj.get('bevyout_collision', False):
             obj.hide_render = False
@@ -381,10 +633,12 @@ for job in jobs:
         ):
             # NIF collision/helper meshes have no texture and should not be rendered.
             bpy.data.objects.remove(obj, do_unlink=True)
-    if authored_collision:
-        for obj in bpy.context.scene.objects:
-            if obj.type == 'MESH' and not obj.get('bevyout_collision', False):
-                obj['bevyout_collision_source'] = 'authored'
+    physics_asset = build_physics_asset()
+    with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
+        json.dump(physics_asset, physics_file, separators=(',', ':'))
+    for obj in list(bpy.context.scene.objects):
+        if obj.get('bevyout_collision', False):
+            bpy.data.objects.remove(obj, do_unlink=True)
     def object_world_center(obj):
         points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
         return sum(points, Vector()) / len(points) if points else obj.matrix_world.translation.copy()
@@ -567,6 +821,12 @@ for job in jobs:
                 job.output.display()
             )
         })?;
+        read_physics_asset(&job.physics_output).with_context(|| {
+            format!(
+                "converted physics sidecar failed validation: {}",
+                job.physics_output.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -638,6 +898,14 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_asset_cache_pair(glb: &Path, physics: &Path) -> Result<()> {
+    validate_glb_images(glb)
+        .with_context(|| format!("cached GLB is invalid: {}", glb.display()))?;
+    read_physics_asset(physics)
+        .with_context(|| format!("cached physics sidecar is invalid: {}", physics.display()))?;
+    Ok(())
+}
+
 fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
     let mut out = String::from("[");
     for (index, job) in jobs.iter().enumerate() {
@@ -645,9 +913,10 @@ fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
             out.push(',');
         }
         out.push_str(&format!(
-            "{{\"input\":\"{}\",\"output\":\"{}\",\"model\":\"{}\",\"conversion\":\"{}\"}}",
+            "{{\"input\":\"{}\",\"output\":\"{}\",\"physics_output\":\"{}\",\"model\":\"{}\",\"conversion\":\"{}\"}}",
             json_escape(&job.input.to_string_lossy()),
             json_escape(&job.output.to_string_lossy()),
+            json_escape(&job.physics_output.to_string_lossy()),
             json_escape(&job.model),
             job.conversion.profile_tag(),
         ));
@@ -715,6 +984,9 @@ pub(crate) fn resolve_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
 
     #[test]
     fn finds_length_adjacent_texture_names_in_nif_bytes() {
@@ -762,6 +1034,33 @@ mod tests {
     }
 
     #[test]
+    fn cache_pair_rebuilds_when_sidecar_is_missing_or_invalid() {
+        let stem = format!("bevyout-cache-pair-{}", std::process::id());
+        let glb = std::env::temp_dir().join(format!("{stem}.glb"));
+        let physics = std::env::temp_dir().join(format!("{stem}.physics.json.gz"));
+        let mut glb_bytes = vec![0_u8; 24];
+        glb_bytes[0..4].copy_from_slice(b"glTF");
+        glb_bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        glb_bytes[8..12].copy_from_slice(&24_u32.to_le_bytes());
+        glb_bytes[12..16].copy_from_slice(&4_u32.to_le_bytes());
+        glb_bytes[16..20].copy_from_slice(&0x4e4f534a_u32.to_le_bytes());
+        glb_bytes[20..24].copy_from_slice(b"{}  ");
+        fs::write(&glb, glb_bytes).unwrap();
+
+        assert!(validate_asset_cache_pair(&glb, &physics).is_err());
+        let valid = br#"{"schema_version":1,"source":"GeneratedRender","bodies":[]}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(valid).unwrap();
+        fs::write(&physics, encoder.finish().unwrap()).unwrap();
+        validate_asset_cache_pair(&glb, &physics).unwrap();
+
+        fs::write(&physics, b"not gzip").unwrap();
+        assert!(validate_asset_cache_pair(&glb, &physics).is_err());
+        let _ = fs::remove_file(glb);
+        let _ = fs::remove_file(physics);
+    }
+
+    #[test]
     fn static_assets_use_quick_ao_and_dynamic_assets_preserve_materials() {
         assert_eq!(asset_conversion(true), AssetConversion::QuickAo);
         assert_eq!(asset_conversion(false), AssetConversion::Preserve);
@@ -772,10 +1071,12 @@ mod tests {
         let json = blender_jobs_json(&[BlenderAssetJob {
             input: PathBuf::from("C:\\staging\\mesh.nif"),
             output: PathBuf::from("C:\\cache\\mesh.glb"),
+            physics_output: PathBuf::from("C:\\cache\\mesh.physics.json.gz"),
             model: "architecture/test.nif".into(),
             conversion: AssetConversion::QuickAo,
         }]);
         assert!(json.contains("\"conversion\":\"ao-quick-v1\""));
+        assert!(json.contains("mesh.physics.json.gz"));
         assert!(json.contains("architecture/test.nif"));
     }
 }

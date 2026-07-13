@@ -9,7 +9,7 @@ edition = "2024"
 # to an unavailable symphonia patch in this workspace's offline cache.
 bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures"] }
 blend = { path = "third_party/blend" }
-bevy_boxddd = "0.2.0"
+bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 esplugin = "6.1.4"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

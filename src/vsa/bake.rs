@@ -8,12 +8,14 @@ use std::process::Command;
 
 use crate::cli::{BakeArgs, BakeQuality};
 
-use super::assets::find_blender;
+use super::assets::{NIF_CONVERTER_REVISION, find_blender};
 use super::irradiance::export_rgb9e5_atlas;
 use super::manifest::{
-    PreparedCellLighting, PreparedIrradianceVolume, PreparedPlacement, PreparedSceneManifest,
-    PreparedSemantic, cell_label,
+    CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
+    PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
+    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_prepared_manifest_compatible,
 };
+use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
 use super::scenes::resolve_cached_manifest;
 
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
@@ -131,6 +133,11 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     let text = fs::read_to_string(&manifest_path).context("could not read scene manifest")?;
     let mut manifest: PreparedSceneManifest =
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
+    ensure_prepared_manifest_compatible(
+        &manifest,
+        NIF_CONVERTER_REVISION,
+        PHYSICS_ASSET_SCHEMA_VERSION,
+    )?;
     if manifest
         .placements
         .iter()
@@ -365,8 +372,9 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
     fingerprint.update(manifest.source_fingerprint.as_bytes());
     fingerprint.update(serde_json::to_vec(&job)?);
     let source_fingerprint = format!("{:x}", fingerprint.finalize());
-    manifest.schema_version = 8;
+    manifest.schema_version = CURRENT_MANIFEST_SCHEMA_VERSION;
     manifest.bake = Some(super::manifest::PreparedBake {
+        bake_revision: Some(CURRENT_BAKE_REVISION.into()),
         source_fingerprint,
         scene_path,
         irradiance_volume: Some(PreparedIrradianceVolume {
@@ -402,6 +410,9 @@ pub(crate) fn bake(args: BakeArgs) -> Result<()> {
 }
 
 pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
+    if placement.physics_classification == PreparedPhysicsClassification::Dynamic {
+        return false;
+    }
     !matches!(
         placement.semantic,
         PreparedSemantic::Pickup(_)
@@ -412,7 +423,8 @@ pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
 }
 
 fn is_batchable_static(placement: &PreparedPlacement) -> bool {
-    matches!(placement.semantic, PreparedSemantic::Static)
+    placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        && matches!(placement.semantic, PreparedSemantic::Static)
 }
 
 fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>> {
@@ -638,6 +650,9 @@ mod tests {
                 rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
                 scale: 1.0,
                 error: None,
+                physics_asset_path: None,
+                physics_source: None,
+                physics_classification: PreparedPhysicsClassification::Static,
                 reference_kind: "REFR".into(),
                 base_kind: "STAT".into(),
                 editor_id: None,
@@ -657,6 +672,11 @@ mod tests {
         let static_placement = placement(PreparedSemantic::Static);
         assert!(is_bake_static(&static_placement));
         assert!(is_batchable_static(&static_placement));
+
+        let mut dynamic_placement = placement(PreparedSemantic::Static);
+        dynamic_placement.physics_classification = PreparedPhysicsClassification::Dynamic;
+        assert!(!is_bake_static(&dynamic_placement));
+        assert!(!is_batchable_static(&dynamic_placement));
 
         for semantic in [
             PreparedSemantic::Furniture,

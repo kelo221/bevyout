@@ -8,20 +8,25 @@ use std::path::{Path, PathBuf};
 use super::assets::{
     BlenderAssetJob, NIF_CONVERTER_REVISION, asset_conversion, content_addressed_glb_name,
     convert_staged_textures, find_blender, load_archives, resolve_asset, run_blender_batch,
-    stage_textures, validate_glb_images,
+    stage_textures, validate_asset_cache_pair,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{
-    Diagnostic, PreparedActor, PreparedAudioClip, PreparedCellAudio, PreparedCellLighting,
-    PreparedDoor, PreparedDoorDestination, PreparedEnableParent, PreparedInventoryEntry,
-    PreparedLight, PreparedLightingTemplate, PreparedNavMeshChunk, PreparedNavMeshSource,
-    PreparedPickup, PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource,
-    PreparedSceneManifest, PreparedSemantic,
+    CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, Diagnostic, PreparedActor,
+    PreparedAudioClip, PreparedCellAudio, PreparedCellLighting, PreparedDoor,
+    PreparedDoorDestination, PreparedEnableParent, PreparedInventoryEntry, PreparedLight,
+    PreparedLightingTemplate, PreparedNavMeshChunk, PreparedNavMeshSource,
+    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
+    PreparedPluginSource, PreparedSceneManifest, PreparedSemantic,
 };
 use super::openmw_esm4::LightingData;
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
     normalize_asset_path, parse_cell_selector, placement_transform, placement_transform_parts,
+};
+use super::physics::{
+    PHYSICS_ASSET_SCHEMA_VERSION, classify_placement, dynamic_rejection_reason,
+    physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{
     BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, ReferenceKind,
@@ -350,6 +355,8 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         let converter_profile = format!("{NIF_CONVERTER_REVISION}-{conversion_profile}");
         let asset_name = content_addressed_glb_name(&converter_profile, &nif_bytes);
         let asset_path = format!("assets/{asset_name}");
+        let physics_name = physics_sidecar_name(&asset_name);
+        let physics_asset_path = format!("assets/{physics_name}");
         if !seen_models.contains_key(&normalized_model) {
             let staging_nif = staging_dir.join(&normalized_model);
             if let Some(parent) = staging_nif.parent() {
@@ -364,14 +371,19 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                 &mut diagnostics,
             )?;
             let output = assets_dir.join(&asset_name);
-            let cache_valid = output.exists() && validate_glb_images(&output).is_ok();
-            match asset_cache_decision(output.exists(), cache_valid, args.rebuild_assets) {
+            let physics_output = assets_dir.join(&physics_name);
+            let outputs_exist = output.exists() || physics_output.exists();
+            let cache_valid = output.exists()
+                && physics_output.exists()
+                && validate_asset_cache_pair(&output, &physics_output).is_ok();
+            match asset_cache_decision(outputs_exist, cache_valid, args.rebuild_assets) {
                 AssetCacheDecision::Reuse => cache_hits += 1,
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
                     jobs.push(BlenderAssetJob {
                         input: staging_nif,
                         output,
+                        physics_output,
                         model: normalized_model.clone(),
                         conversion,
                     });
@@ -381,13 +393,14 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                     diagnostics.push(Diagnostic {
                         severity: "warning".into(),
                         message: format!(
-                            "cached GLB {} failed validation; scheduling NIF reconversion",
+                            "cached GLB/physics pair for {} is missing or invalid; scheduling NIF reconversion",
                             output.display()
                         ),
                     });
                     jobs.push(BlenderAssetJob {
                         input: staging_nif,
                         output,
+                        physics_output,
                         model: normalized_model.clone(),
                         conversion,
                     });
@@ -397,6 +410,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
                     jobs.push(BlenderAssetJob {
                         input: staging_nif,
                         output,
+                        physics_output,
                         model: normalized_model.clone(),
                         conversion,
                     });
@@ -412,6 +426,7 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
             &parsed.bases,
         );
         placement.ao_mode = conversion_profile;
+        placement.physics_asset_path = Some(physics_asset_path);
         placements.push(placement);
     }
 
@@ -429,6 +444,57 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
         run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
             .context("headless Blender conversion failed")?;
     }
+    let mut physics_assets = HashMap::new();
+    let mut authored_assets = 0_usize;
+    let mut fallback_assets = 0_usize;
+    let mut dynamic_placements = 0_usize;
+    let mut dynamic_rejections = HashSet::new();
+    for placement in &mut placements {
+        let Some(relative_path) = placement.physics_asset_path.as_ref() else {
+            continue;
+        };
+        if !physics_assets.contains_key(relative_path) {
+            let path = cache_dir.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            physics_assets.insert(relative_path.clone(), read_physics_asset(&path)?);
+        }
+        let asset = physics_assets
+            .get(relative_path)
+            .expect("physics asset was inserted above");
+        placement.physics_source = Some(asset.source.clone());
+        placement.physics_classification = classify_placement(&placement.semantic, asset);
+        if let Some(reason) = dynamic_rejection_reason(&placement.semantic, asset) {
+            dynamic_rejections.insert(format!(
+                "physics body for {} ({:08x}) remains static: {reason}",
+                placement
+                    .editor_id
+                    .as_deref()
+                    .or(placement.display_name.as_deref())
+                    .unwrap_or("<unnamed>"),
+                placement.reference_form_id
+            ));
+        }
+        if placement.physics_classification == PreparedPhysicsClassification::Dynamic {
+            dynamic_placements += 1;
+        }
+    }
+    for asset in physics_assets.values() {
+        match asset.source {
+            super::physics::PreparedPhysicsSource::AuthoredHavok => authored_assets += 1,
+            super::physics::PreparedPhysicsSource::GeneratedRender => fallback_assets += 1,
+        }
+    }
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: format!(
+            "physics sidecars: {authored_assets} authored Havok, {fallback_assets} generated fallback; {dynamic_placements} dynamic placement(s)"
+        ),
+    });
+    for message in dynamic_rejections {
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message,
+        });
+    }
     let failures = placements.iter().filter(|p| p.error.is_some()).count();
     if args.strict && failures > 0 {
         bail!("strict preparation failed with {failures} unresolved placements")
@@ -441,7 +507,10 @@ pub(crate) fn prepare(args: PrepareArgs) -> Result<()> {
     }
 
     let manifest = PreparedSceneManifest {
-        schema_version: 7,
+        schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+        prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
+        converter_revision: Some(NIF_CONVERTER_REVISION.into()),
+        physics_schema_version: Some(PHYSICS_ASSET_SCHEMA_VERSION),
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
         source_fingerprint,
@@ -937,6 +1006,9 @@ fn prepared_placement(
         rotation_xyzw: transform.1,
         scale: transform.2,
         error,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: PreparedPhysicsClassification::Static,
         reference_kind: reference.kind.as_str().into(),
         base_kind: base.map_or_else(|| "MISSING".into(), |base| base.kind.clone()),
         editor_id: base.and_then(|base| base.editor_id.clone()),

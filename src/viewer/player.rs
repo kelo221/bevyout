@@ -1,18 +1,25 @@
-use bevy::color::LinearRgba;
-use bevy::gltf::{GltfExtras, GltfMeshName};
+use anyhow::{Context, Result};
 use bevy::input::mouse::MouseMotion;
-use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::render::mesh::{Indices, Mesh, VertexAttributeValues};
-use bevy::transform::TransformSystems;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_boxddd::boxddd::{
-    self, BodyDef, BodyId, BodyType, CollisionPlane, Filter, ShapeDef, ShapeId,
+    self, BodyDef, BodyId, BodyType, BoxHull, CollisionPlane, Filter, Hull, ShapeDef, ShapeId,
 };
-use bevy_boxddd::prelude::{BoxdddPhysicsContext, BoxdddPhysicsPlugin, BoxdddPhysicsSettings};
+use bevy_boxddd::prelude::{
+    BoxdddDebugDrawSettings, BoxdddPhysicsContext, BoxdddPhysicsPlugin, BoxdddPhysicsSettings,
+    draw_debug_gizmos,
+};
 use bevy_boxddd::resources::BoxdddErrorPolicy;
-use serde::Deserialize;
-use std::collections::HashMap;
+use bevy_boxddd::systems::{step_world, sync_boxddd_transforms_to_bevy};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
+use std::time::Instant;
+
+use crate::vsa::{
+    PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
+    PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
+};
 
 use super::FlyCamera;
 use super::audio::{PlayFootstep, PlayLanding};
@@ -32,9 +39,10 @@ const MAX_SLIDE_PASSES: usize = 4;
 const STEP_HEIGHT: f32 = 0.30;
 const GROUND_SNAP_DISTANCE: f32 = 0.20;
 const WALKABLE_SLOPE_COS: f32 = 0.70710677;
-const WORLD_SOLID: u64 = 1;
-const SURFACE_HINT: u64 = 2;
+const WORLD_STATIC: u64 = 1;
+const WORLD_DYNAMIC: u64 = 2;
 const PLAYER_QUERY: u64 = 4;
+const PLAYER_PROXY: u64 = 8;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CameraMode {
@@ -65,15 +73,9 @@ pub(crate) struct FpsPlayer {
     pitch: f32,
 }
 
-#[derive(Component)]
-struct SceneColliderProcessed;
-
-/// Marker used by render diagnostics for both the player mover and static mesh bridge.
+/// Marker used by render diagnostics for player and prepared physics entities.
 #[derive(Component)]
 pub(crate) struct PhysicsCollider;
-
-#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FootstepSurface(pub(crate) Option<u32>);
 
 #[derive(Component, Debug)]
 struct FootstepState {
@@ -100,34 +102,62 @@ struct KccState {
     grounded: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct CollisionExtras {
-    #[serde(default)]
-    bevyout_collision: bool,
-    #[serde(default)]
-    bevyout_havok_material: Option<u32>,
-}
-
-#[derive(Resource, Default)]
-struct StaticCollisionStats {
-    processed: usize,
-    built: usize,
-    skipped: usize,
-    triangles: usize,
-    last_reported_processed: usize,
-    no_geometry_reported: bool,
+#[derive(Resource, Default, Debug, Clone)]
+pub(crate) struct CollisionRuntimeStats {
+    pub(crate) authored_assets: usize,
+    pub(crate) fallback_assets: usize,
+    pub(crate) bodies: usize,
+    pub(crate) shapes: usize,
+    pub(crate) filtered_shapes: usize,
+    pub(crate) packed_triangles: usize,
+    pub(crate) dynamic_bodies: usize,
+    pub(crate) sidecar_bytes: u64,
+    pub(crate) cooking_millis: f64,
+    pub(crate) shape_kinds: HashMap<&'static str, usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct CollisionSurface {
-    authored: bool,
     material: Option<u32>,
 }
 
 #[derive(Resource, Default)]
-struct StaticCollisionWorld {
-    body: Option<BodyId>,
+struct PreparedCollisionWorld {
+    static_body: Option<BodyId>,
+    dynamic_bodies: HashMap<Entity, BodyId>,
+    player_proxy: Option<BodyId>,
     surfaces: HashMap<ShapeId, CollisionSurface>,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct PreparedPhysicsAssets {
+    assets: HashMap<String, PreparedPhysicsAsset>,
+    payload_bytes: u64,
+}
+
+pub(crate) fn load_prepared_physics_assets(
+    manifest: &PreparedSceneManifest,
+    asset_root: &Path,
+) -> Result<PreparedPhysicsAssets> {
+    let mut loaded = PreparedPhysicsAssets::default();
+    for placement in &manifest.placements {
+        let Some(relative_path) = placement.physics_asset_path.as_ref() else {
+            continue;
+        };
+        if loaded.assets.contains_key(relative_path) {
+            continue;
+        }
+        let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        loaded.payload_bytes = loaded.payload_bytes.saturating_add(
+            fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        );
+        let asset = read_physics_asset(&path)
+            .with_context(|| format!("loading prepared physics for {relative_path}"))?;
+        loaded.assets.insert(relative_path.clone(), asset);
+    }
+    Ok(loaded)
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default)]
@@ -135,16 +165,6 @@ pub(crate) struct PhysicsDisabled(pub(crate) bool);
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
 type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
-type StaticCollisionQuery<'w> = (
-    Entity,
-    &'w Mesh3d,
-    &'w GlobalTransform,
-    Option<&'w GltfMeshName>,
-    Option<&'w MeshMaterial3d<StandardMaterial>>,
-    Option<&'w GltfExtras>,
-    Option<&'w ChildOf>,
-);
-
 pub(crate) fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -GRAVITY, 0.0),
@@ -152,16 +172,69 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
         ..default()
     }))
     .insert_resource(CameraModeState::default())
-    .insert_resource(StaticCollisionStats::default())
-    .insert_resource(StaticCollisionWorld::default())
+    .insert_resource(CollisionRuntimeStats::default())
+    .insert_resource(PreparedCollisionWorld::default())
     .insert_resource(PhysicsDisabled(disable_physics))
+    .add_systems(Startup, spawn_collider_debug_hud)
+    .add_systems(PostStartup, build_prepared_colliders)
     .add_systems(
-        PostUpdate,
-        build_static_colliders.after(TransformSystems::Propagate),
+        FixedUpdate,
+        (
+            cleanup_removed_dynamic_bodies.before(step_world),
+            apply_player_controls.before(sync_player_proxy),
+            sync_player_proxy.before(step_world),
+            sync_dynamic_transforms.after(sync_boxddd_transforms_to_bevy),
+        ),
     )
-    .add_systems(FixedUpdate, apply_player_controls)
-    .add_systems(Update, emit_landing_events.after(build_static_colliders))
+    .add_systems(Update, (toggle_collider_debug, update_collider_debug_hud))
+    .add_systems(Update, draw_debug_gizmos)
+    .add_systems(Update, emit_landing_events)
     .add_systems(Update, emit_footsteps.after(emit_landing_events));
+}
+
+#[derive(Component)]
+struct ColliderDebugHud;
+
+fn spawn_collider_debug_hud(mut commands: Commands) {
+    commands.spawn((
+        Text::new("Colliders: Off — F4"),
+        ColliderDebugHud,
+        TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(10),
+            bottom: px(10),
+            ..default()
+        },
+        ZIndex(120),
+    ));
+}
+
+fn toggle_collider_debug(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<BoxdddDebugDrawSettings>,
+) {
+    if keys.just_pressed(KeyCode::F4) {
+        flip_collider_debug(&mut settings);
+        info!(
+            "BoxDDD native collider overlay: {}",
+            if settings.enabled { "on" } else { "off" }
+        );
+    }
+}
+
+fn flip_collider_debug(settings: &mut BoxdddDebugDrawSettings) {
+    settings.enabled = !settings.enabled;
+}
+
+fn update_collider_debug_hud(
+    settings: Res<BoxdddDebugDrawSettings>,
+    mut text: Single<&mut Text, With<ColliderDebugHud>>,
+) {
+    text.0 = format!(
+        "Colliders: {} — F4",
+        if settings.enabled { "On" } else { "Off" }
+    );
 }
 
 pub(crate) fn toggle_camera_mode(
@@ -318,7 +391,7 @@ fn apply_player_controls(
     );
     let filter = boxddd::QueryFilter::new()
         .category_bits(PLAYER_QUERY)
-        .mask_bits(WORLD_SOLID);
+        .mask_bits(WORLD_STATIC | WORLD_DYNAMIC);
     let origin = to_box_vec3(transform.translation);
     let initial_planes = world
         .collide_mover(origin, &mover, filter)
@@ -481,17 +554,16 @@ fn try_step_up(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_static_colliders(
+fn build_prepared_colliders(
     mut commands: Commands,
-    meshes: Res<Assets<Mesh>>,
-    materials: Res<Assets<StandardMaterial>>,
     physics_disabled: Res<PhysicsDisabled>,
+    manifest: Res<PreparedSceneManifest>,
+    physics_assets: Res<PreparedPhysicsAssets>,
     mut state: ResMut<CameraModeState>,
-    mut stats: ResMut<StaticCollisionStats>,
-    mut collision_world: ResMut<StaticCollisionWorld>,
+    mut stats: ResMut<CollisionRuntimeStats>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
-    query: Query<StaticCollisionQuery<'_>, Without<SceneColliderProcessed>>,
-    parents: Query<&GltfExtras>,
+    roots: Query<(Entity, &super::interaction::PlacementRoot)>,
 ) {
     if physics_disabled.0 {
         return;
@@ -499,183 +571,420 @@ fn build_static_colliders(
     let Some(world) = context.world_mut() else {
         return;
     };
-    let body = match collision_world.body {
-        Some(body) => body,
-        None => {
-            let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
-            collision_world.body = Some(body);
-            body
+    let started = Instant::now();
+    let static_body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    collision_world.static_body = Some(static_body);
+    stats.sidecar_bytes = physics_assets.payload_bytes;
+    for asset in physics_assets.assets.values() {
+        match asset.source {
+            PreparedPhysicsSource::AuthoredHavok => stats.authored_assets += 1,
+            PreparedPhysicsSource::GeneratedRender => stats.fallback_assets += 1,
         }
-    };
-
-    for (entity, mesh_handle, global_transform, name, material_handle, extras, child_of) in &query {
-        let name = name.map(|name| name.0.as_str()).unwrap_or("<unnamed>");
-        let extras = extras
-            .or_else(|| child_of.and_then(|child| parents.get(child.0).ok()))
-            .and_then(parse_collision_extras);
-        let authored = extras.as_ref().filter(|extras| extras.bevyout_collision);
-
-        let should_build = if authored.is_some() {
-            true
-        } else if is_non_collidable_name(name) {
-            false
-        } else {
-            material_handle
-                .and_then(|handle| materials.get(&handle.0))
-                .is_some_and(is_collidable_material)
-        };
-        if !should_build {
-            commands.entity(entity).insert(SceneColliderProcessed);
-            stats.processed += 1;
-            stats.skipped += 1;
-            continue;
-        }
-
-        let Some(mesh) = meshes.get(&mesh_handle.0) else {
-            continue;
-        };
-        let authored = authored.is_some();
-        let material = extras
-            .as_ref()
-            .and_then(|extras| extras.bevyout_havok_material);
-        let category = if authored { SURFACE_HINT } else { WORLD_SOLID };
-        let sensor = authored;
-        let Some((shape_id, triangles)) = create_mesh_shape(
-            world,
-            body,
-            mesh,
-            *global_transform,
-            category,
-            sensor,
-            material,
-        ) else {
-            commands.entity(entity).insert(SceneColliderProcessed);
-            stats.processed += 1;
-            stats.skipped += 1;
-            continue;
-        };
-        collision_world
-            .surfaces
-            .insert(shape_id, CollisionSurface { authored, material });
-        if authored {
-            commands.entity(entity).insert((
-                FootstepSurface(material),
-                Visibility::Hidden,
-                SceneColliderProcessed,
-                PhysicsCollider,
-            ));
-        } else {
-            commands.entity(entity).insert((
-                FootstepSurface(None),
-                SceneColliderProcessed,
-                PhysicsCollider,
-            ));
-        }
-        stats.processed += 1;
-        stats.built += 1;
-        stats.triangles += triangles;
     }
-
-    state.collisions_ready = stats.built > 0;
-    if stats.processed > stats.last_reported_processed {
-        info!(
-            "BoxDDD scene collision build: {} colliders, {} triangles, {} skipped",
-            stats.built, stats.triangles, stats.skipped
-        );
-        stats.last_reported_processed = stats.processed;
+    let root_by_reference = roots
+        .iter()
+        .map(|(entity, root)| (root.placement().reference_form_id, entity))
+        .collect::<HashMap<_, _>>();
+    let mut unknown_layers = HashSet::new();
+    let mut static_marker_spawned = false;
+    for placement in manifest
+        .placements
+        .iter()
+        .filter(|placement| placement.initially_enabled)
+    {
+        let Some(path) = placement.physics_asset_path.as_ref() else {
+            continue;
+        };
+        let Some(asset) = physics_assets.assets.get(path) else {
+            warn!("missing preloaded physics sidecar {path}");
+            continue;
+        };
+        let dynamic_entity = (placement.physics_classification
+            == PreparedPhysicsClassification::Dynamic)
+            .then(|| root_by_reference.get(&placement.reference_form_id).copied())
+            .flatten();
+        for body in &asset.bodies {
+            if !body_blocks_player(body) {
+                stats.filtered_shapes += body.shapes.len();
+                continue;
+            }
+            if body.layer > 43 && unknown_layers.insert(body.layer) {
+                warn!(
+                    "unknown Fallout Havok layer {} remains solid (reference {:08x})",
+                    body.layer, placement.reference_form_id
+                );
+            }
+            let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
+                let body_id = create_dynamic_body(world, placement, body);
+                collision_world.dynamic_bodies.insert(entity, body_id);
+                commands.entity(entity).insert(PhysicsCollider);
+                stats.dynamic_bodies += 1;
+                (body_id, true)
+            } else {
+                if !static_marker_spawned {
+                    commands.spawn(PhysicsCollider);
+                    static_marker_spawned = true;
+                }
+                (static_body, false)
+            };
+            stats.bodies += 1;
+            for shape in &body.shapes {
+                let result = create_prepared_shape(world, body_id, body, shape, placement, dynamic);
+                let Some((shape_id, triangles)) = result else {
+                    stats.filtered_shapes += 1;
+                    warn!(
+                        "BoxDDD rejected {} Havok shape for reference {:08x} body {}",
+                        shape.kind(),
+                        placement.reference_form_id,
+                        body.group_id
+                    );
+                    continue;
+                };
+                collision_world.surfaces.insert(
+                    shape_id,
+                    CollisionSurface {
+                        material: body.material,
+                    },
+                );
+                stats.shapes += 1;
+                stats.packed_triangles += triangles;
+                *stats.shape_kinds.entry(shape.kind()).or_default() += 1;
+            }
+            if dynamic {
+                normalize_dynamic_mass(world, body_id, body, placement.scale.abs());
+            }
+        }
     }
-    if stats.processed > 0 && stats.built == 0 && !stats.no_geometry_reported {
+    stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
+    state.collisions_ready = stats.shapes > 0;
+    info!(
+        "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
+        stats.authored_assets,
+        stats.fallback_assets,
+        stats.bodies,
+        stats.dynamic_bodies,
+        stats.shapes,
+        stats.packed_triangles,
+        stats.filtered_shapes,
+        stats.cooking_millis,
+        stats.sidecar_bytes,
+    );
+    if !state.collisions_ready {
         warn!(
-            "BoxDDD scene collision build produced no usable static geometry; FPS mode remains unavailable (processed {}, skipped {})",
-            stats.processed, stats.skipped
+            "prepared physics produced no active player-blocking shapes; FPS mode is unavailable"
         );
-        stats.no_geometry_reported = true;
     }
 }
 
-fn create_mesh_shape(
+fn create_dynamic_body(
     world: &mut boxddd::World,
-    body: BodyId,
-    mesh: &Mesh,
-    transform: GlobalTransform,
-    category: u64,
-    sensor: bool,
-    material: Option<u32>,
+    placement: &crate::vsa::PreparedPlacement,
+    body: &PreparedPhysicsBody,
+) -> BodyId {
+    let rotation = Quat::from_array(placement.rotation_xyzw).normalize();
+    let scale = placement.scale.abs();
+    let mut linear_velocity = rotation * (Vec3::from_array(body.linear_velocity) * scale);
+    let mut angular_velocity = rotation * Vec3::from_array(body.angular_velocity);
+    if body.max_linear_velocity > 0.0 {
+        linear_velocity = linear_velocity.clamp_length_max(body.max_linear_velocity * scale);
+    }
+    if body.max_angular_velocity > 0.0 {
+        angular_velocity = angular_velocity.clamp_length_max(body.max_angular_velocity);
+    }
+    let body_id = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Dynamic)
+            .position(to_box_vec3(Vec3::from_array(placement.translation)))
+            .rotation(to_box_quat(rotation))
+            .linear_velocity(to_box_vec3(linear_velocity))
+            .angular_velocity(to_box_vec3(angular_velocity))
+            .gravity_scale(body.gravity_factor)
+            .bullet(body.ccd_enabled)
+            .build(),
+    );
+    let _ = world.try_set_body_linear_damping(body_id, body.linear_damping.max(0.0));
+    let _ = world.try_set_body_angular_damping(body_id, body.angular_damping.max(0.0));
+    let _ = world.try_enable_body_sleep(body_id, body.sleep_enabled);
+    body_id
+}
+
+fn create_prepared_shape(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    body: &PreparedPhysicsBody,
+    shape: &PreparedPhysicsShape,
+    placement: &crate::vsa::PreparedPlacement,
+    dynamic: bool,
 ) -> Option<(ShapeId, usize)> {
-    let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION)? {
-        VertexAttributeValues::Float32x3(values) => values,
-        _ => return None,
-    };
-    if positions.len() < 3 {
+    if dynamic && !shape.supports_dynamic() {
         return None;
     }
-    let indices = match mesh.indices() {
-        Some(Indices::U16(values)) => values.iter().map(|index| u32::from(*index)).collect(),
-        Some(Indices::U32(values)) => values.clone(),
-        None => (0..positions.len() as u32).collect(),
+    let scale = placement.scale.abs().max(0.0001);
+    let placement_rotation = Quat::from_array(placement.rotation_xyzw).normalize();
+    let placement_translation = Vec3::from_array(placement.translation);
+    let point = |value: [f32; 3]| {
+        let local = Vec3::from_array(value) * scale;
+        if dynamic {
+            local
+        } else {
+            placement_rotation * local + placement_translation
+        }
     };
-    let triangles = indices.len() / 3;
-    if triangles == 0 {
-        return None;
-    }
-    let vertices = positions
-        .iter()
-        .map(|position| {
-            let point = transform.transform_point(Vec3::from_array(*position));
-            boxddd::Vec3::new(point.x, point.y, point.z)
+    let rotation = |value: [f32; 4]| {
+        let local = Quat::from_array(value).normalize();
+        if dynamic {
+            local
+        } else {
+            placement_rotation * local
+        }
+    };
+    let category = if dynamic { WORLD_DYNAMIC } else { WORLD_STATIC };
+    let mask = if dynamic {
+        WORLD_STATIC | WORLD_DYNAMIC | PLAYER_PROXY | PLAYER_QUERY
+    } else {
+        WORLD_DYNAMIC | PLAYER_QUERY
+    };
+    let shape_def = ShapeDef::builder()
+        .density(if dynamic { 1.0 } else { 0.0 })
+        .friction(body.friction.max(0.0))
+        .restitution(body.restitution.max(0.0))
+        .filter(Filter {
+            category_bits: category,
+            mask_bits: mask,
+            group_index: 0,
         })
+        .user_material_id(u64::from(body.material.unwrap_or(0)))
+        .build();
+    let shape_id = match shape {
+        PreparedPhysicsShape::Box {
+            center,
+            half_extents,
+            rotation_xyzw,
+        } => {
+            let center = point(*center);
+            let rotation = rotation(*rotation_xyzw);
+            let half = Vec3::from_array(*half_extents) * scale;
+            let hull = BoxHull::transformed(
+                half.x,
+                half.y,
+                half.z,
+                boxddd::Transform::new(to_box_vec3(center), to_box_quat(rotation)),
+            );
+            world
+                .try_create_hull_shape(body_id, &shape_def, &hull)
+                .ok()?
+        }
+        PreparedPhysicsShape::Sphere { center, radius } => world
+            .try_create_sphere_shape(
+                body_id,
+                &shape_def,
+                &boxddd::Sphere::new(to_box_vec3(point(*center)), radius * scale),
+            )
+            .ok()?,
+        PreparedPhysicsShape::Capsule {
+            point1,
+            point2,
+            radius,
+        } => world
+            .try_create_capsule_shape(
+                body_id,
+                &shape_def,
+                &boxddd::Capsule::new(
+                    to_box_vec3(point(*point1)),
+                    to_box_vec3(point(*point2)),
+                    radius * scale,
+                ),
+            )
+            .ok()?,
+        PreparedPhysicsShape::ConvexHull { points } => {
+            let points = points
+                .iter()
+                .map(|value| to_box_vec3(point(*value)))
+                .collect::<Vec<_>>();
+            let hull = Hull::from_points(&points, 64).ok()?;
+            world
+                .try_create_created_hull_shape(body_id, &shape_def, &hull)
+                .ok()?
+        }
+        PreparedPhysicsShape::TriangleMesh { vertices, indices } => {
+            let vertices = vertices
+                .iter()
+                .map(|value| to_box_vec3(point(*value)))
+                .collect::<Vec<_>>();
+            let indices = indices
+                .iter()
+                .map(|index| i32::try_from(*index).ok())
+                .collect::<Option<Vec<_>>>()?;
+            let mesh = boxddd::MeshData::builder(vertices, indices).build().ok()?;
+            world
+                .try_create_mesh_shape(body_id, &shape_def, mesh, boxddd::Vec3::new(1.0, 1.0, 1.0))
+                .ok()?
+        }
+    };
+    Some((shape_id, shape.triangle_count()))
+}
+
+fn normalize_dynamic_mass(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    body: &PreparedPhysicsBody,
+    scale: f32,
+) {
+    if !body.mass.is_finite() || body.mass <= 0.0 {
+        return;
+    }
+    if world.try_apply_mass_from_shapes(body_id).is_err() {
+        return;
+    }
+    let Ok(mut mass_data) = world.try_body_mass_data(body_id) else {
+        return;
+    };
+    let ratio = if mass_data.mass > f32::EPSILON {
+        body.mass / mass_data.mass
+    } else {
+        1.0
+    };
+    mass_data.mass = body.mass;
+    mass_data.center = to_box_vec3(Vec3::from_array(body.center_of_mass) * scale);
+    let authored_inertia_valid = body.inertia.iter().flatten().all(|value| value.is_finite())
+        && body.inertia[0][0] > 0.0
+        && body.inertia[1][1] > 0.0
+        && body.inertia[2][2] > 0.0;
+    if authored_inertia_valid {
+        let inertia_scale = scale * scale;
+        mass_data.inertia = boxddd::Matrix3 {
+            cx: boxddd::Vec3::new(
+                body.inertia[0][0] * inertia_scale,
+                body.inertia[1][0] * inertia_scale,
+                body.inertia[2][0] * inertia_scale,
+            ),
+            cy: boxddd::Vec3::new(
+                body.inertia[0][1] * inertia_scale,
+                body.inertia[1][1] * inertia_scale,
+                body.inertia[2][1] * inertia_scale,
+            ),
+            cz: boxddd::Vec3::new(
+                body.inertia[0][2] * inertia_scale,
+                body.inertia[1][2] * inertia_scale,
+                body.inertia[2][2] * inertia_scale,
+            ),
+        };
+    } else {
+        mass_data.inertia.cx = scale_box_vec3(mass_data.inertia.cx, ratio);
+        mass_data.inertia.cy = scale_box_vec3(mass_data.inertia.cy, ratio);
+        mass_data.inertia.cz = scale_box_vec3(mass_data.inertia.cz, ratio);
+    }
+    let _ = world.try_set_body_mass_data(body_id, mass_data);
+}
+
+fn cleanup_removed_dynamic_bodies(
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    roots: Query<Entity, With<super::interaction::PlacementRoot>>,
+) {
+    let live = roots.iter().collect::<HashSet<_>>();
+    let removed = collision_world
+        .dynamic_bodies
+        .keys()
+        .filter(|entity| !live.contains(entity))
+        .copied()
         .collect::<Vec<_>>();
-    let mut triangle_indices = Vec::with_capacity(triangles * 3);
-    for triangle in indices.chunks_exact(3) {
-        if triangle
-            .iter()
-            .all(|index| (*index as usize) < vertices.len())
-        {
-            triangle_indices.extend(triangle.iter().map(|index| *index as i32));
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    for entity in removed {
+        if let Some(body) = collision_world.dynamic_bodies.remove(&entity) {
+            let _ = world.try_destroy_body(body);
         }
     }
-    if triangle_indices.is_empty() {
-        return None;
-    }
-    let triangle_count = triangle_indices.len() / 3;
-    let mesh_data = boxddd::MeshData::builder(vertices, triangle_indices)
-        .build()
-        .ok()?;
-    let filter = Filter {
-        category_bits: category,
-        mask_bits: if sensor {
-            PLAYER_QUERY | SURFACE_HINT
-        } else {
-            PLAYER_QUERY
-        },
-        group_index: 0,
+}
+
+fn sync_dynamic_transforms(
+    collision_world: Res<PreparedCollisionWorld>,
+    context: NonSend<BoxdddPhysicsContext>,
+    mut roots: Query<&mut Transform, With<super::interaction::PlacementRoot>>,
+) {
+    let Some(world) = context.world() else {
+        return;
     };
+    for (entity, body) in &collision_world.dynamic_bodies {
+        let (Ok(mut transform), Ok(physics_transform)) =
+            (roots.get_mut(*entity), world.try_body_transform(*body))
+        else {
+            continue;
+        };
+        transform.translation = Vec3::new(
+            physics_transform.p.x,
+            physics_transform.p.y,
+            physics_transform.p.z,
+        );
+        transform.rotation = from_box_quat(physics_transform.q);
+    }
+}
+
+fn sync_player_proxy(
+    physics_disabled: Res<PhysicsDisabled>,
+    state: Res<CameraModeState>,
+    time: Res<Time<Fixed>>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    players: Query<&Transform, With<FpsPlayer>>,
+) {
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let player_transform = (!physics_disabled.0 && state.mode == CameraMode::Fps)
+        .then(|| players.single().ok())
+        .flatten();
+    let Some(transform) = player_transform else {
+        if let Some(body) = collision_world.player_proxy.take() {
+            let _ = world.try_destroy_body(body);
+        }
+        return;
+    };
+    let target = boxddd::WorldTransform::new(
+        to_box_vec3(transform.translation).into(),
+        to_box_quat(transform.rotation),
+    );
+    if let Some(body) = collision_world.player_proxy {
+        let _ = world.try_set_body_target_transform(body, target, time.delta_secs(), true);
+        return;
+    }
+    let body = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Kinematic)
+            .position(to_box_vec3(transform.translation))
+            .rotation(to_box_quat(transform.rotation))
+            .build(),
+    );
     let shape_def = ShapeDef::builder()
         .density(0.0)
         .friction(0.8)
-        .filter(filter)
-        .sensor(sensor)
-        .user_material_id(u64::from(material.unwrap_or(0)))
+        .filter(Filter {
+            category_bits: PLAYER_PROXY,
+            mask_bits: WORLD_DYNAMIC,
+            group_index: 0,
+        })
         .build();
-    let shape_id = world
-        .try_create_mesh_shape(
-            body,
-            &shape_def,
-            mesh_data,
-            boxddd::Vec3::new(1.0, 1.0, 1.0),
-        )
-        .ok()?;
-    Some((shape_id, triangle_count))
-}
-
-fn parse_collision_extras(extras: &GltfExtras) -> Option<CollisionExtras> {
-    serde_json::from_str::<CollisionExtras>(&extras.value).ok()
+    let capsule = boxddd::Capsule::new(
+        [0.0, -(CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS), 0.0],
+        [0.0, CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS, 0.0],
+        CAPSULE_RADIUS,
+    );
+    if world
+        .try_create_capsule_shape(body, &shape_def, &capsule)
+        .is_ok()
+    {
+        collision_world.player_proxy = Some(body);
+    } else {
+        let _ = world.try_destroy_body(body);
+    }
 }
 
 fn emit_landing_events(
     state: Res<CameraModeState>,
     context: NonSend<BoxdddPhysicsContext>,
-    collision_world: Res<StaticCollisionWorld>,
+    collision_world: Res<PreparedCollisionWorld>,
     mut landings: MessageWriter<PlayLanding>,
     mut players: Query<
         (
@@ -718,7 +1027,7 @@ fn emit_landing_events(
 fn emit_footsteps(
     state: Res<CameraModeState>,
     context: NonSend<BoxdddPhysicsContext>,
-    collision_world: Res<StaticCollisionWorld>,
+    collision_world: Res<PreparedCollisionWorld>,
     mut footsteps: MessageWriter<PlayFootstep>,
     mut players: Query<(Entity, &Transform, &KccState, &mut FootstepState), With<FpsPlayer>>,
 ) {
@@ -767,27 +1076,18 @@ fn probe_surface(
     _entity: Entity,
     position: Vec3,
     context: &BoxdddPhysicsContext,
-    collision_world: &StaticCollisionWorld,
+    collision_world: &PreparedCollisionWorld,
 ) -> Option<&'static str> {
     let world = context.world()?;
     let origin = to_box_vec3(position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06));
     let translation = to_box_vec3(Vec3::new(0.0, -0.24, 0.0));
     let filter = boxddd::QueryFilter::new()
         .category_bits(PLAYER_QUERY)
-        .mask_bits(WORLD_SOLID | SURFACE_HINT);
+        .mask_bits(WORLD_STATIC | WORLD_DYNAMIC);
     let hits = world.cast_ray(origin, translation, filter).ok()?;
-    let authored = hits.iter().filter(|hit| {
-        collision_world
-            .surfaces
-            .get(&hit.shape_id)
-            .is_some_and(|surface| surface.authored)
-    });
-    let hit = authored
-        .min_by(|left, right| left.fraction.total_cmp(&right.fraction))
-        .or_else(|| {
-            hits.iter()
-                .min_by(|left, right| left.fraction.total_cmp(&right.fraction))
-        })?;
+    let hit = hits
+        .iter()
+        .min_by(|left, right| left.fraction.total_cmp(&right.fraction))?;
     let material = collision_world
         .surfaces
         .get(&hit.shape_id)
@@ -808,6 +1108,14 @@ fn to_box_vec3(value: Vec3) -> boxddd::Vec3 {
 
 fn from_box_vec3(value: boxddd::Vec3) -> Vec3 {
     Vec3::new(value.x, value.y, value.z)
+}
+
+fn to_box_quat(value: Quat) -> boxddd::Quat {
+    boxddd::Quat::new(boxddd::Vec3::new(value.x, value.y, value.z), value.w)
+}
+
+fn from_box_quat(value: boxddd::Quat) -> Quat {
+    Quat::from_xyzw(value.v.x, value.v.y, value.v.z, value.s).normalize()
 }
 
 fn add_box_vec3(left: boxddd::Vec3, right: boxddd::Vec3) -> boxddd::Vec3 {
@@ -862,24 +1170,6 @@ fn surface_family(material: Option<u32>) -> &'static str {
     }
 }
 
-fn is_non_collidable_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    [
-        "shadefade",
-        "fxglowsimplefill",
-        "editormarker",
-        "editor_marker",
-    ]
-    .iter()
-    .any(|excluded| name.contains(excluded))
-}
-
-fn is_collidable_material(material: &StandardMaterial) -> bool {
-    matches!(material.alpha_mode, AlphaMode::Opaque | AlphaMode::Mask(_))
-        && material.emissive == LinearRgba::BLACK
-        && material.emissive_texture.is_none()
-}
-
 fn camera_angles(rotation: Quat) -> (f32, f32) {
     let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
     (yaw, pitch.clamp(-1.5, 1.5))
@@ -913,13 +1203,6 @@ mod tests {
     }
 
     #[test]
-    fn effect_mesh_names_are_not_collidable() {
-        assert!(is_non_collidable_name("FXGlowSimpleFill:mesh"));
-        assert!(is_non_collidable_name("EditorMarker"));
-        assert!(!is_non_collidable_name("WasteRmTallCorner01"));
-    }
-
-    #[test]
     fn tab_toggle_is_edge_triggered() {
         let mut keys = ButtonInput::<KeyCode>::default();
         assert!(!tab_pressed(&keys));
@@ -927,22 +1210,6 @@ mod tests {
         assert!(tab_pressed(&keys));
         keys.clear();
         assert!(!tab_pressed(&keys));
-    }
-
-    #[test]
-    fn emissive_and_translucent_materials_are_not_collidable() {
-        let emissive = StandardMaterial {
-            emissive: LinearRgba::WHITE,
-            ..default()
-        };
-        assert!(!is_collidable_material(&emissive));
-
-        let translucent = StandardMaterial {
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        };
-        assert!(!is_collidable_material(&translucent));
-        assert!(is_collidable_material(&StandardMaterial::default()));
     }
 
     #[test]
@@ -956,17 +1223,15 @@ mod tests {
     }
 
     #[test]
-    fn collision_extras_parse_material() {
-        let extras = GltfExtras {
-            value: r#"{
-                "bevyout_collision": true,
-                "bevyout_havok_material": 73
-            }"#
-            .into(),
-        };
-        let parsed = parse_collision_extras(&extras).unwrap();
-        assert!(parsed.bevyout_collision);
-        assert_eq!(parsed.bevyout_havok_material, Some(73));
+    fn f4_state_only_changes_native_debug_collection() {
+        let mut settings = BoxdddDebugDrawSettings::default();
+        let collision_filter = WORLD_STATIC | WORLD_DYNAMIC;
+        assert!(!settings.enabled);
+        flip_collider_debug(&mut settings);
+        assert!(settings.enabled);
+        assert_eq!(collision_filter, WORLD_STATIC | WORLD_DYNAMIC);
+        flip_collider_debug(&mut settings);
+        assert!(!settings.enabled);
     }
 
     #[test]
@@ -989,6 +1254,89 @@ mod tests {
             )
             .expect("capsule cast");
         assert!(fraction < 1.0);
+    }
+
+    #[test]
+    fn dynamic_props_settle_collide_push_sync_and_cleanup() {
+        use bevy_boxddd::boxddd::{
+            Capsule, Quat as BoxQuat, Sphere, Vec3 as BoxVec3, World, WorldDef, WorldTransform,
+        };
+
+        let mut world = World::new(
+            WorldDef::builder()
+                .gravity(BoxVec3::new(0.0, -GRAVITY, 0.0))
+                .build(),
+        )
+        .expect("BoxDDD world");
+        let floor = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        world.create_hull_shape(
+            floor,
+            &ShapeDef::default(),
+            &BoxHull::transformed(
+                5.0,
+                0.25,
+                5.0,
+                boxddd::Transform::new(BoxVec3::new(0.0, -0.25, 0.0), BoxQuat::IDENTITY),
+            ),
+        );
+        let make_prop = |world: &mut World, position: [f32; 3]| {
+            let body = world.create_body(
+                BodyDef::builder()
+                    .body_type(BodyType::Dynamic)
+                    .position(position)
+                    .build(),
+            );
+            world.create_sphere_shape(
+                body,
+                &ShapeDef::builder().density(1.0).friction(0.8).build(),
+                &Sphere::new(BoxVec3::ZERO, 0.3),
+            );
+            body
+        };
+        let first = make_prop(&mut world, [0.0, 1.5, 0.0]);
+        let second = make_prop(&mut world, [0.7, 0.3, 0.0]);
+        for _ in 0..180 {
+            world.step(1.0 / 60.0, 4);
+        }
+        assert!(world.body_position(first).y < 0.45);
+        assert!(world.body_position(first).y > 0.20);
+
+        let proxy = world.create_body(
+            BodyDef::builder()
+                .body_type(BodyType::Kinematic)
+                .position([-1.5, 0.9, 0.0])
+                .build(),
+        );
+        world.create_capsule_shape(
+            proxy,
+            &ShapeDef::builder().friction(0.8).build(),
+            &Capsule::new([0.0, -0.55, 0.0], [0.0, 0.55, 0.0], 0.35),
+        );
+        let second_before = world.body_position(second).x;
+        for step in 1..=120 {
+            let x = -1.5 + step as f32 * 0.025;
+            world
+                .try_set_body_target_transform(
+                    proxy,
+                    WorldTransform::new(BoxVec3::new(x, 0.9, 0.0).into(), BoxQuat::IDENTITY),
+                    1.0 / 60.0,
+                    true,
+                )
+                .unwrap();
+            world.step(1.0 / 60.0, 4);
+        }
+        assert!(world.body_position(first).x > 0.1);
+        assert!(world.body_position(second).x > second_before);
+
+        let synced = world.body_transform(first);
+        let mut bevy_transform = Transform::from_scale(Vec3::splat(1.25));
+        bevy_transform.translation = Vec3::new(synced.p.x, synced.p.y, synced.p.z);
+        bevy_transform.rotation = from_box_quat(synced.q);
+        assert_eq!(bevy_transform.scale, Vec3::splat(1.25));
+        assert!(bevy_transform.translation.x > 0.1);
+
+        world.try_destroy_body(first).unwrap();
+        assert!(world.try_body_transform(first).is_err());
     }
 
     #[test]

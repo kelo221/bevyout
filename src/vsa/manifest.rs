@@ -1,10 +1,23 @@
+use anyhow::{Result, bail};
 use bevy::math::{EulerRot, Quat};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
+use super::physics::PreparedPhysicsSource;
+
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 10;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-native-havok-v1";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Resource)]
 pub(crate) struct PreparedSceneManifest {
     pub(crate) schema_version: u32,
+    #[serde(default)]
+    pub(crate) prepare_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) converter_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) physics_schema_version: Option<u32>,
     pub(crate) asset_root: String,
     pub(crate) source_plugin: String,
     pub(crate) source_fingerprint: String,
@@ -37,10 +50,82 @@ pub(crate) struct PreparedPluginSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PreparedBake {
+    #[serde(default)]
+    pub(crate) bake_revision: Option<String>,
     pub(crate) source_fingerprint: String,
     pub(crate) scene_path: String,
     #[serde(default)]
     pub(crate) irradiance_volume: Option<PreparedIrradianceVolume>,
+}
+
+pub(crate) fn ensure_prepared_manifest_compatible(
+    manifest: &PreparedSceneManifest,
+    expected_converter_revision: &str,
+    expected_physics_schema: u32,
+) -> Result<()> {
+    let mut issues = Vec::new();
+    if manifest.schema_version != CURRENT_MANIFEST_SCHEMA_VERSION {
+        let direction = if manifest.schema_version < CURRENT_MANIFEST_SCHEMA_VERSION {
+            "older than"
+        } else {
+            "newer than"
+        };
+        issues.push(format!(
+            "manifest schema {} is {direction} current schema {}",
+            manifest.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION
+        ));
+    }
+    if manifest.prepare_revision.as_deref() != Some(CURRENT_PREPARE_REVISION) {
+        issues.push(format!(
+            "prepare revision is {:?}, expected {CURRENT_PREPARE_REVISION}",
+            manifest.prepare_revision
+        ));
+    }
+    if manifest.converter_revision.as_deref() != Some(expected_converter_revision) {
+        issues.push(format!(
+            "converter revision is {:?}, expected {expected_converter_revision}",
+            manifest.converter_revision
+        ));
+    }
+    if manifest.physics_schema_version != Some(expected_physics_schema) {
+        issues.push(format!(
+            "physics schema is {:?}, expected {expected_physics_schema}",
+            manifest.physics_schema_version
+        ));
+    }
+    fail_for_compatibility_issues(manifest, issues)
+}
+
+pub(crate) fn ensure_baked_scene_compatible(manifest: &PreparedSceneManifest) -> Result<()> {
+    let mut issues = Vec::new();
+    if let Some(bake) = manifest.bake.as_ref()
+        && bake.bake_revision.as_deref() != Some(CURRENT_BAKE_REVISION)
+    {
+        issues.push(format!(
+            "bake revision is {:?}, expected {CURRENT_BAKE_REVISION}",
+            bake.bake_revision
+        ));
+    }
+    fail_for_compatibility_issues(manifest, issues)
+}
+
+fn fail_for_compatibility_issues(
+    manifest: &PreparedSceneManifest,
+    issues: Vec<String>,
+) -> Result<()> {
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let details = issues
+        .into_iter()
+        .map(|issue| format!("  - {issue}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "prepared scene {} is incompatible with this build:\n{}\nrun `prepare` again, then `bake` if a baked scene is required",
+        cell_label(&manifest.cell),
+        details
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +319,12 @@ pub(crate) struct PreparedPlacement {
     pub(crate) scale: f32,
     pub(crate) error: Option<String>,
     #[serde(default)]
+    pub(crate) physics_asset_path: Option<String>,
+    #[serde(default)]
+    pub(crate) physics_source: Option<PreparedPhysicsSource>,
+    #[serde(default)]
+    pub(crate) physics_classification: PreparedPhysicsClassification,
+    #[serde(default)]
     pub(crate) reference_kind: String,
     #[serde(default)]
     pub(crate) base_kind: String,
@@ -261,6 +352,14 @@ pub(crate) struct PreparedPlacement {
     /// The alias keeps older manifests readable.
     #[serde(default = "default_ao_mode", alias = "vertex_color_mode")]
     pub(crate) ao_mode: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum PreparedPhysicsClassification {
+    #[default]
+    Static,
+    Kinematic,
+    Dynamic,
 }
 
 fn default_count() -> i32 {
@@ -459,6 +558,61 @@ mod tests {
     }
 
     #[test]
+    fn prepared_artifact_versions_require_exact_pipeline_identity() {
+        let manifest: PreparedSceneManifest = ron::de::from_str(&format!(
+            r#"(
+                schema_version: {},
+                prepare_revision: Some("{}"),
+                converter_revision: Some("converter-v1"),
+                physics_schema_version: Some(1),
+                asset_root: "cache",
+                source_plugin: "Fallout3.esm",
+                source_fingerprint: "fingerprint",
+                cell: (
+                    form_id: 1,
+                    editor_id: None,
+                    name: None,
+                    interior: true,
+                    ambient_rgba: (0.0, 0.0, 0.0, 0.0),
+                    directional_rgba: (0.0, 0.0, 0.0, 0.0),
+                ),
+                placements: [],
+                lights: [],
+                diagnostics: [],
+            )"#,
+            CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION
+        ))
+        .unwrap();
+        ensure_prepared_manifest_compatible(&manifest, "converter-v1", 1).unwrap();
+
+        let mut future = manifest.clone();
+        future.schema_version += 1;
+        let error = ensure_prepared_manifest_compatible(&future, "converter-v1", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("newer than"));
+
+        let mut stale = manifest.clone();
+        stale.prepare_revision = Some("prepare-old".into());
+        let error = ensure_prepared_manifest_compatible(&stale, "converter-v1", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("prepare revision"));
+
+        let mut stale_bake = manifest;
+        stale_bake.bake = Some(PreparedBake {
+            bake_revision: Some("bake-old".into()),
+            source_fingerprint: "fingerprint".into(),
+            scene_path: "scenes/00000001/baked/scene.glb".into(),
+            irradiance_volume: None,
+        });
+        let error = ensure_baked_scene_compatible(&stale_bake)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bake revision"));
+    }
+
+    #[test]
     fn legacy_footstep_set_defaults_landing_clips() {
         let set: PreparedFootstepSet = ron::de::from_str(
             r#"(
@@ -558,6 +712,9 @@ mod tests {
             rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
             scale: 1.0,
             error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: PreparedPhysicsClassification::Static,
             reference_kind: "REFR".into(),
             base_kind: "DOOR".into(),
             editor_id: Some("TestDoor".into()),
