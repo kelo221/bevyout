@@ -117,6 +117,10 @@ fn legacy_placement_defaults_to_static_semantics() {
     assert!(placement.inventory.is_empty());
     assert_eq!(placement.audio, PreparedPlacementAudio::default());
     assert!(!placement.step_support);
+    // A legacy placement predates PreparedRuntimeMutability entirely; it
+    // must default to Unknown, never be treated as Immutable scenery.
+    assert_eq!(placement.mutability, PreparedRuntimeMutability::Unknown);
+    assert!(placement.mutability_root_form_id.is_none());
 }
 
 #[test]
@@ -177,6 +181,152 @@ fn schema_five_lighting_round_trip_and_legacy_defaults() {
     assert!(legacy_cell.effective_lighting.is_none());
 }
 
+// --- Issue #38: PreparedRuntimeMutability schema -------------------------
+
+// T38.4: golden schema test. Serialize a minimal manifest (one placement of
+// each interesting mutability class) and assert the current schema version
+// plus the new fields are present and survive an RON round trip.
+#[test]
+fn schema_twelve_mutability_fields_round_trip_through_ron() {
+    fn placement(
+        reference_form_id: u32,
+        mutability: PreparedRuntimeMutability,
+        mutability_root_form_id: Option<u32>,
+    ) -> PreparedPlacement {
+        PreparedPlacement {
+            reference_form_id,
+            base_form_id: 1,
+            asset_path: None,
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: PreparedPhysicsClassification::Static,
+            step_support: false,
+            mutability,
+            mutability_root_form_id,
+            reference_kind: "REFR".into(),
+            base_kind: "STAT".into(),
+            editor_id: None,
+            display_name: None,
+            count: 1,
+            semantic: PreparedSemantic::Static,
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory: Vec::new(),
+            audio: PreparedPlacementAudio::default(),
+            ao_mode: "ao-none".into(),
+        }
+    }
+
+    let manifest = PreparedSceneManifest {
+        schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+        prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
+        converter_revision: Some("converter-v1".into()),
+        physics_schema_version: Some(1),
+        asset_root: "cache".into(),
+        source_plugin: "Fallout3.esm".into(),
+        source_fingerprint: "fingerprint".into(),
+        source_plugins: Vec::new(),
+        cell: ron::de::from_str(
+            r#"(
+                form_id: 1,
+                editor_id: None,
+                name: None,
+                interior: true,
+                ambient_rgba: (0.0, 0.0, 0.0, 0.0),
+                directional_rgba: (0.0, 0.0, 0.0, 0.0),
+            )"#,
+        )
+        .unwrap(),
+        placements: vec![
+            placement(0x1, PreparedRuntimeMutability::Immutable, None),
+            placement(0x2, PreparedRuntimeMutability::EnableGroup, Some(0x9)),
+            placement(0x3, PreparedRuntimeMutability::ScriptAddressable, None),
+            placement(0x4, PreparedRuntimeMutability::Unknown, None),
+        ],
+        lights: Vec::new(),
+        diagnostics: Vec::new(),
+        navmeshes: Vec::new(),
+        cell_audio: PreparedCellAudio::default(),
+        audio_clips: Vec::new(),
+        footstep_sets: Vec::new(),
+        hard_landing_clips: Vec::new(),
+        bake: None,
+        mutability_summary: PreparedMutabilitySummary {
+            immutable: 1,
+            enable_group: 1,
+            script_addressable: 1,
+            unknown: 1,
+        },
+    };
+
+    assert_eq!(manifest.schema_version, 12);
+
+    let encoded = ron::ser::to_string(&manifest).unwrap();
+    assert!(encoded.contains("mutability"));
+    assert!(encoded.contains("mutability_summary"));
+    assert!(encoded.contains("EnableGroup"));
+
+    let decoded: PreparedSceneManifest = ron::de::from_str(&encoded).unwrap();
+    assert_eq!(decoded.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
+    assert_eq!(decoded.mutability_summary, manifest.mutability_summary);
+    assert_eq!(
+        decoded.placements[1].mutability,
+        PreparedRuntimeMutability::EnableGroup
+    );
+    assert_eq!(decoded.placements[1].mutability_root_form_id, Some(0x9));
+}
+
+// T38.5: an old-schema manifest fails compatibility with a precise
+// "re-run prepare for <cell>" instruction, extending the existing
+// ensure_prepared_manifest_compatible mechanism rather than a new one.
+#[test]
+fn old_schema_manifest_fails_with_a_precise_reprepare_instruction() {
+    let previous_schema = CURRENT_MANIFEST_SCHEMA_VERSION - 1;
+    let text = format!(
+        r#"(
+            schema_version: {previous_schema},
+            prepare_revision: Some("{}"),
+            converter_revision: Some("converter-v1"),
+            physics_schema_version: Some(1),
+            asset_root: "cache",
+            source_plugin: "Fallout3.esm",
+            source_fingerprint: "fingerprint",
+            cell: (
+                form_id: 305,
+                editor_id: Some("SuperDuperMart"),
+                name: None,
+                interior: true,
+                ambient_rgba: (0.0, 0.0, 0.0, 0.0),
+                directional_rgba: (0.0, 0.0, 0.0, 0.0),
+            ),
+            placements: [],
+            lights: [],
+            diagnostics: [],
+        )"#,
+        CURRENT_PREPARE_REVISION
+    );
+    let manifest: PreparedSceneManifest = ron::de::from_str(&text).unwrap();
+    assert_eq!(manifest.schema_version, previous_schema);
+    // Legacy manifests predating F38.1 must never be interpreted as if
+    // their placements were classified Immutable.
+    assert!(manifest.placements.is_empty());
+
+    let error = ensure_prepared_manifest_compatible(&manifest, "converter-v1", 1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("older than"));
+    assert!(error.contains(&previous_schema.to_string()));
+    assert!(error.contains(&CURRENT_MANIFEST_SCHEMA_VERSION.to_string()));
+    assert!(error.contains("SuperDuperMart"));
+    assert!(error.contains("run `prepare` again"));
+}
+
 #[test]
 fn schema_three_semantics_round_trip_through_ron() {
     let placement = PreparedPlacement {
@@ -191,6 +341,8 @@ fn schema_three_semantics_round_trip_through_ron() {
         physics_source: None,
         physics_classification: PreparedPhysicsClassification::Static,
         step_support: false,
+        mutability: PreparedRuntimeMutability::ScriptAddressable,
+        mutability_root_form_id: None,
         reference_kind: "REFR".into(),
         base_kind: "DOOR".into(),
         editor_id: Some("TestDoor".into()),

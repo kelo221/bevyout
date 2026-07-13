@@ -96,6 +96,11 @@ pub(crate) struct ReferenceRecord {
     pub(crate) owner_faction_rank: Option<i32>,
     pub(crate) enable_parent: Option<EnableParentRecord>,
     pub(crate) initially_enabled: bool,
+    /// Root FormID of this reference's enable-parent chain (the top-most
+    /// ancestor with no `enable_parent` of its own), resolved when
+    /// `enable_parent` is `Some`. `None` when there is no chain, or the
+    /// chain could not be resolved (unresolved/cyclic XESP).
+    pub(crate) enable_root_form_id: Option<u32>,
     pub(crate) ignored_subrecords: Vec<String>,
 }
 
@@ -508,6 +513,16 @@ pub(crate) fn parse_content_set(
                 reference.ignored_subrecords.push(format!("XESP:{error}"));
             }
         }
+        if reference.enable_parent.is_some() {
+            match resolve_enable_root(reference.form_id, &all_references) {
+                Ok(root) => reference.enable_root_form_id = Some(root),
+                Err(error) => {
+                    reference
+                        .ignored_subrecords
+                        .push(format!("XESP-root:{error}"));
+                }
+            }
+        }
     }
     references.sort_by_key(|reference| reference.form_id);
 
@@ -517,6 +532,10 @@ pub(crate) fn parse_content_set(
             if let Some(error) = signature.strip_prefix("XESP:") {
                 *ignored
                     .entry(("XESP resolution".into(), error.into()))
+                    .or_default() += 1;
+            } else if let Some(error) = signature.strip_prefix("XESP-root:") {
+                *ignored
+                    .entry(("XESP root resolution".into(), error.into()))
                     .or_default() += 1;
             } else {
                 *ignored
@@ -544,6 +563,10 @@ pub(crate) fn parse_content_set(
         .map(|((record, subrecord), count)| {
             if record == "XESP resolution" {
                 format!("{subrecord} while resolving {count} target-cell placement(s); defaulted visible")
+            } else if record == "XESP root resolution" {
+                format!(
+                    "{subrecord} while resolving {count} enable-parent chain root(s); mutability left Unknown"
+                )
             } else {
                 format!(
                     "ignored unsupported {record}.{subrecord} subrecord while importing {count} target-cell record(s)"

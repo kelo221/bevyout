@@ -504,6 +504,7 @@ pub(crate) fn parse_reference(
                 flags: u32::from_le_bytes(data[4..8].try_into().unwrap()),
             }),
         initially_enabled: flags & RECORD_DISABLED == 0,
+        enable_root_form_id: None,
         ignored_subrecords: ignored_signatures(
             subs,
             &[
