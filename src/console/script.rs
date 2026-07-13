@@ -408,7 +408,15 @@ mod tests {
         if std::env::var_os("UPDATE_GOLDENS").is_some() {
             fs::write(&golden, actual).unwrap();
         } else {
-            assert_eq!(actual, fs::read(golden).unwrap());
+            // Git may materialize tracked text files with CRLF on Windows even
+            // though the runner emits deterministic LF JSONL. Compare the
+            // logical transcript bytes so the golden remains portable across
+            // checkout line-ending policies.
+            let expected = fs::read_to_string(golden)
+                .unwrap()
+                .replace("\r\n", "\n")
+                .into_bytes();
+            assert_eq!(actual, expected);
         }
     }
 }
