@@ -11,6 +11,9 @@ The Rust adaptation is based on these source regions and whole-file hashes:
 - `apps/openmw/mwphysics/movementsolver.cpp`, actor ground and gravity rules;
   SHA-256
   `5C0CB9B243F324EB14E28099ADA20900C2D3F0D70027C543B3ABE063F17F73CE`.
+- `apps/openmw/mwphysics/stepper.cpp`, upward-horizontal-downward stair sweep;
+  SHA-256
+  `98EC4DA832FD3E9F15B708C9103578479A709B4B02BF1CF3D3D29DBB08A02300`.
 - `components/misc/constants.hpp`, metric scale and gravity constants;
   SHA-256
   `984AD3684CBB9F838DE11ED4AA32272B9A21741F78B9B8158206856A193C684D`.

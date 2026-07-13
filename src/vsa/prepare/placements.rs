@@ -21,6 +21,7 @@ pub(crate) fn prepared_placement(
         physics_asset_path: None,
         physics_source: None,
         physics_classification: PreparedPhysicsClassification::Static,
+        step_support: false,
         reference_kind: reference.kind.as_str().into(),
         base_kind: base.map_or_else(|| "MISSING".into(), |base| base.kind.clone()),
         editor_id: base.and_then(|base| base.editor_id.clone()),
@@ -150,6 +151,23 @@ pub(crate) fn prepared_semantic(
         "STAT" | "MSTT" => PreparedSemantic::Static,
         _ => PreparedSemantic::Unsupported,
     }
+}
+
+pub(crate) fn is_structural_step_support(
+    semantic: &PreparedSemantic,
+    normalized_model: &str,
+) -> bool {
+    matches!(semantic, PreparedSemantic::Static)
+        && ["architecture/", "dungeons/", "landscape/"]
+            .iter()
+            .any(|prefix| normalized_model.starts_with(prefix))
+}
+
+pub(crate) fn retain_static_step_support(
+    candidate: bool,
+    classification: PreparedPhysicsClassification,
+) -> bool {
+    candidate && classification == PreparedPhysicsClassification::Static
 }
 
 #[derive(Debug)]
@@ -353,6 +371,7 @@ pub(crate) fn stage_placements(
             prepared_placement(&reference, Some(base), Some(asset_path), None, bases);
         placement.ao_mode = conversion_profile;
         placement.physics_asset_path = Some(physics_asset_path);
+        placement.step_support = is_structural_step_support(&placement.semantic, &normalized_model);
         placements.push(placement);
     }
 

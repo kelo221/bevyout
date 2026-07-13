@@ -1,6 +1,11 @@
 use super::*;
 
 #[test]
+fn default_step_height_matches_openmw_thirty_four_units() {
+    assert!((DEFAULT_STEP_HEIGHT - 0.485_775).abs() < 0.000_001);
+}
+
+#[test]
 fn directional_jump_keeps_full_vertical_arc() {
     let (height, direction) = jump_profile(Vec3::new(3.0, 0.0, 4.0));
     assert_eq!(height, STATIONARY_JUMP_HEIGHT);

@@ -34,3 +34,27 @@ fn two_dimensional_and_unpositioned_sounds_are_not_spatial() {
 fn sound_request_constructors_preserve_playback_space() {
     assert_eq!(PlaySound::at(8, Vec3::X).position, Some(Vec3::X));
 }
+
+#[test]
+fn footstep_clip_selection_alternates_banks_and_wraps_variants() {
+    let set = PreparedFootstepSet {
+        surface: "concrete".into(),
+        left: vec!["left-0.wav".into(), "left-1.wav".into()],
+        right: vec!["right-0.wav".into(), "right-1.wav".into()],
+        land: Vec::new(),
+    };
+    assert_eq!(
+        select_clip_path(footstep_clips(&set, false), 0),
+        Some("left-0.wav")
+    );
+    assert_eq!(
+        select_clip_path(footstep_clips(&set, true), 1),
+        Some("right-1.wav")
+    );
+    assert_eq!(
+        select_clip_path(footstep_clips(&set, false), 2),
+        Some("left-0.wav")
+    );
+    assert_eq!(select_clip_path(&[], 0), None);
+    assert_eq!(select_clip_path(&[String::new()], 0), None);
+}

@@ -28,6 +28,7 @@ fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
             physics_asset_path: None,
             physics_source: None,
             physics_classification: PreparedPhysicsClassification::Static,
+            step_support: false,
             reference_kind: "REFR".into(),
             base_kind: "STAT".into(),
             editor_id: None,

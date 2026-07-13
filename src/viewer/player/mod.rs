@@ -25,8 +25,8 @@ use crate::vsa::{
 use super::FlyCamera;
 use super::audio::{PlayFootstep, PlayLanding};
 use super::openmw_player::{
-    AIR_CONTROL_FACTOR, DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState,
-    air_control_motion, jump_profile,
+    AIR_CONTROL_FACTOR, DEFAULT_STEP_HEIGHT, DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY,
+    LocomotionState, air_control_motion, jump_profile,
 };
 
 mod camera;
@@ -46,14 +46,20 @@ const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 const FOOTSTEP_DISTANCE: f32 = 1.45;
+const DEFAULT_FOOTSTEP_SURFACE: &str = "concrete";
+const CAMERA_VERTICAL_SETTLE_SECONDS: f32 = 0.12;
+const CAMERA_VERTICAL_SETTLE_LOG_FACTOR: f32 = 2.995_732_3;
 const MAX_SLIDE_PASSES: usize = 4;
-const STEP_HEIGHT: f32 = 0.30;
-const GROUND_SNAP_DISTANCE: f32 = 0.20;
+const STEP_HEIGHT: f32 = DEFAULT_STEP_HEIGHT;
+const STEP_CLEARANCE: f32 = 0.02;
+const STEP_SWEEP_DISTANCE: f32 = STEP_HEIGHT + STEP_CLEARANCE;
+const STEP_VALIDATION_EPSILON: f32 = 0.001;
 const WALKABLE_SLOPE_COS: f32 = 0.70710677;
 const WORLD_STATIC: u64 = 1;
 const WORLD_DYNAMIC: u64 = 2;
 const PLAYER_QUERY: u64 = 4;
 const PLAYER_PROXY: u64 = 8;
+const STEP_SUPPORT: u64 = 16;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CameraMode {
@@ -107,6 +113,46 @@ impl Default for FootstepState {
     }
 }
 
+impl FootstepState {
+    fn reset_tracking(&mut self) {
+        self.initialized = false;
+        self.distance = 0.0;
+    }
+
+    fn reset_at(&mut self, position: Vec3) {
+        self.last_position = position;
+        self.distance = 0.0;
+        self.initialized = true;
+    }
+
+    fn record_motion(&mut self, position: Vec3, grounded: bool) {
+        if !self.initialized {
+            self.last_position = position;
+            self.initialized = true;
+            return;
+        }
+
+        let delta = position - self.last_position;
+        self.last_position = position;
+        if !grounded {
+            self.distance = 0.0;
+            return;
+        }
+        self.distance += Vec3::new(delta.x, 0.0, delta.z).length();
+    }
+
+    fn take_step(&mut self) -> Option<(bool, usize)> {
+        if self.distance < FOOTSTEP_DISTANCE {
+            return None;
+        }
+        self.distance -= FOOTSTEP_DISTANCE;
+        let right = self.step_index % 2 == 1;
+        let variant = self.step_index / 2;
+        self.step_index = self.step_index.wrapping_add(1);
+        Some((right, variant))
+    }
+}
+
 #[derive(Component, Debug, Default)]
 pub(crate) struct KccState {
     velocity: Vec3,
@@ -120,6 +166,22 @@ pub(crate) struct KccState {
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct PlayerRenderHistory {
     previous_position: Vec3,
+    smoothed_y: f32,
+    last_target_y: f32,
+    was_grounded: bool,
+    vertical_initialized: bool,
+}
+
+impl PlayerRenderHistory {
+    fn new(position: Vec3) -> Self {
+        Self {
+            previous_position: position,
+            smoothed_y: position.y,
+            last_target_y: position.y,
+            was_grounded: false,
+            vertical_initialized: false,
+        }
+    }
 }
 
 #[derive(Resource, Default, Debug, Clone)]
@@ -183,6 +245,12 @@ pub(crate) fn load_prepared_physics_assets(
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub(crate) struct PhysicsDisabled(pub(crate) bool);
 
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub(crate) struct StepDebugSettings {
+    enabled: bool,
+    next_log_at: f64,
+}
+
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
 type ToggleCameraQuery<'w> = (
     Entity,
@@ -201,7 +269,8 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(CollisionRuntimeStats::default())
     .insert_resource(PreparedCollisionWorld::default())
     .insert_resource(PhysicsDisabled(disable_physics))
-    .add_systems(Startup, spawn_collider_debug_hud)
+    .insert_resource(StepDebugSettings::default())
+    .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
     .add_systems(PostStartup, build_prepared_colliders)
     .add_systems(
         FixedUpdate,
@@ -219,7 +288,15 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
         PostUpdate,
         interpolate_fps_camera.after(TransformSystems::Propagate),
     )
-    .add_systems(Update, (toggle_collider_debug, update_collider_debug_hud))
+    .add_systems(
+        Update,
+        (
+            toggle_collider_debug,
+            update_collider_debug_hud,
+            toggle_step_debug,
+            update_step_debug_hud,
+        ),
+    )
     .add_systems(Update, draw_debug_gizmos);
 }
 
@@ -268,6 +345,50 @@ fn update_collider_debug_hud(
     );
 }
 
+#[derive(Component)]
+struct StepDebugHud;
+
+fn spawn_step_debug_hud(mut commands: Commands) {
+    commands.spawn((
+        Text::new("Stair logs: Off — F5"),
+        StepDebugHud,
+        TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(10),
+            bottom: px(34),
+            ..default()
+        },
+        ZIndex(120),
+    ));
+}
+
+fn toggle_step_debug(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<StepDebugSettings>) {
+    if keys.just_pressed(KeyCode::F5) {
+        flip_step_debug(&mut settings);
+        info!(
+            target: "bevyout::stair_debug",
+            "[stair-debug] rejection logging {} (F5)",
+            if settings.enabled { "enabled" } else { "disabled" }
+        );
+    }
+}
+
+fn flip_step_debug(settings: &mut StepDebugSettings) {
+    settings.enabled = !settings.enabled;
+    settings.next_log_at = 0.0;
+}
+
+fn update_step_debug_hud(
+    settings: Res<StepDebugSettings>,
+    mut text: Single<&mut Text, With<StepDebugHud>>,
+) {
+    text.0 = format!(
+        "Stair logs: {} — F5",
+        if settings.enabled { "On" } else { "Off" }
+    );
+}
+
 pub(crate) fn toggle_camera_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
@@ -310,9 +431,7 @@ pub(crate) fn toggle_camera_mode(
                     LocomotionState::default(),
                     KccState::default(),
                     PhysicsCollider,
-                    PlayerRenderHistory {
-                        previous_position: player_center,
-                    },
+                    PlayerRenderHistory::new(player_center),
                     Transform::from_translation(player_center)
                         .with_rotation(Quat::from_rotation_y(yaw)),
                 ))

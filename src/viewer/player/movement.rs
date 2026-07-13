@@ -2,11 +2,37 @@
 
 use super::*;
 
+const STEP_DEBUG_LOG_INTERVAL: f64 = 0.2;
+const STEP_SUPPORT_FORWARD_OFFSET: f32 = CAPSULE_RADIUS;
+const STEP_SUPPORT_MID_FORWARD_OFFSET: f32 = CAPSULE_RADIUS * 0.5;
+const STEP_SUPPORT_LATERAL_OFFSET: f32 = CAPSULE_RADIUS * 0.5;
+
+pub(crate) fn player_collision_filter() -> boxddd::QueryFilter {
+    boxddd::QueryFilter::new()
+        .category_bits(PLAYER_QUERY)
+        .mask_bits(WORLD_STATIC | WORLD_DYNAMIC)
+}
+
+pub(crate) fn stair_support_filter() -> boxddd::QueryFilter {
+    boxddd::QueryFilter::new()
+        .category_bits(PLAYER_QUERY)
+        .mask_bits(STEP_SUPPORT)
+}
+
+macro_rules! step_debug {
+    ($enabled:expr, $($arg:tt)*) => {
+        if $enabled {
+            info!(target: "bevyout::stair_debug", $($arg)*);
+        }
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_player_controls(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<CameraModeState>,
     physics_disabled: Res<PhysicsDisabled>,
+    mut step_debug: ResMut<StepDebugSettings>,
     time: Res<Time<Fixed>>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut players: Query<(
@@ -37,15 +63,16 @@ pub(crate) fn apply_player_controls(
         [0.0, CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS, 0.0],
         CAPSULE_RADIUS,
     );
-    let filter = boxddd::QueryFilter::new()
-        .category_bits(PLAYER_QUERY)
-        .mask_bits(WORLD_STATIC | WORLD_DYNAMIC);
+    let collision_filter = player_collision_filter();
+    let support_filter = stair_support_filter();
     let origin = to_box_vec3(transform.translation);
+    let was_grounded = kcc.grounded;
     let initial_planes = world
-        .collide_mover(origin, &mover, filter)
+        .collide_mover(origin, &mover, collision_filter)
         .unwrap_or_default();
-    let mut grounded = has_walkable_plane(&initial_planes);
-    kcc.grounded = grounded;
+    // Preserve support for one solve while crossing a tread edge. The final
+    // downward sweep below decides whether that support still exists.
+    let mut grounded = was_grounded || has_walkable_plane(&initial_planes);
 
     let yaw = Quat::from_rotation_y(player.yaw);
     let mut input = Vec3::ZERO;
@@ -63,6 +90,7 @@ pub(crate) fn apply_player_controls(
     }
     let world_input = yaw * input;
     let ground_target = air_control_motion(world_input, false) * PLAYER_SPEED;
+    let mut jumped_this_tick = false;
     if jump_started && grounded {
         let (height, direction) = jump_profile(world_input);
         kcc.velocity.y = (2.0 * GRAVITY * height).sqrt();
@@ -83,6 +111,7 @@ pub(crate) fn apply_player_controls(
         }
         locomotion.mark_jump_started();
         grounded = false;
+        jumped_this_tick = true;
     }
 
     if grounded {
@@ -106,16 +135,40 @@ pub(crate) fn apply_player_controls(
     }
 
     let desired_delta = to_box_vec3(kcc.velocity * dt);
-    let (mut position, planes) = move_mover(world, origin, &mover, desired_delta, filter);
-    grounded = has_walkable_plane(&planes);
-    if !grounded && kcc.velocity.y <= 0.0 {
-        let snap = to_box_vec3(Vec3::new(0.0, -GROUND_SNAP_DISTANCE, 0.0));
-        let fraction = world
-            .cast_mover(position, &mover, snap, filter)
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
-        if fraction < 1.0 {
-            position = add_box_vec3(position, scale_box_vec3(snap, fraction));
+    let intentional_horizontal_motion =
+        ground_target.x * ground_target.x + ground_target.z * ground_target.z > f32::EPSILON;
+    let keep_grounded = grounded && !jumped_this_tick;
+    let debug_now = step_debug.enabled && time.elapsed_secs_f64() >= step_debug.next_log_at;
+    let (mut position, planes, stepped_up, step_attempted) = move_mover(
+        world,
+        origin,
+        &mover,
+        desired_delta,
+        collision_filter,
+        support_filter,
+        keep_grounded && intentional_horizontal_motion,
+        debug_now,
+    );
+    if debug_now && step_attempted {
+        step_debug.next_log_at = time.elapsed_secs_f64() + STEP_DEBUG_LOG_INTERVAL;
+    }
+    grounded = stepped_up || has_walkable_plane(&planes);
+    if !grounded && keep_grounded && kcc.velocity.y <= 0.0 {
+        if intentional_horizontal_motion
+            && let Some(supported) =
+                try_forward_step_support(world, position, desired_delta, support_filter)
+        {
+            position = supported;
+            grounded = true;
+        } else if let Some(snapped) = try_step_down(
+            world,
+            position,
+            &mover,
+            desired_delta,
+            collision_filter,
+            support_filter,
+        ) {
+            position = snapped;
             grounded = true;
         }
     }
@@ -126,37 +179,91 @@ pub(crate) fn apply_player_controls(
     transform.translation = from_box_vec3(position);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_mover(
     world: &mut boxddd::World,
     mut position: boxddd::Vec3,
     mover: &boxddd::Capsule,
     mut remaining: boxddd::Vec3,
-    filter: boxddd::QueryFilter,
-) -> (boxddd::Vec3, Vec<boxddd::MoverPlane>) {
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    allow_step_up: bool,
+    step_debug_enabled: bool,
+) -> (boxddd::Vec3, Vec<boxddd::MoverPlane>, bool, bool) {
+    let mut stepped_up = false;
+    let mut step_attempted = false;
     for _ in 0..MAX_SLIDE_PASSES {
         if box_vec_length_squared(remaining) <= f32::EPSILON {
             break;
         }
         let fraction = world
-            .cast_mover(position, mover, remaining, filter)
+            .cast_mover(position, mover, remaining, collision_filter)
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
         position = add_box_vec3(position, scale_box_vec3(remaining, fraction));
         remaining = scale_box_vec3(remaining, 1.0 - fraction);
         let planes = world
-            .collide_mover(position, mover, filter)
+            .collide_mover(position, mover, collision_filter)
             .unwrap_or_default();
         if planes.is_empty() {
             break;
         }
-        if planes
+        let has_blocking_plane = planes
             .iter()
-            .any(|plane| plane.plane.normal.y < WALKABLE_SLOPE_COS)
-            && (remaining.x * remaining.x + remaining.z * remaining.z) > f32::EPSILON
-            && let Some(stepped) = try_step_up(world, position, mover, remaining, filter)
+            .any(|plane| plane.plane.normal.y < WALKABLE_SLOPE_COS);
+        let has_horizontal_remainder =
+            (remaining.x * remaining.x + remaining.z * remaining.z) > f32::EPSILON;
+        if allow_step_up && has_blocking_plane && has_horizontal_remainder {
+            step_attempted = true;
+            let normals = step_debug_enabled.then(|| {
+                planes
+                    .iter()
+                    .map(|plane| {
+                        let normal = plane.plane.normal;
+                        [normal.x, normal.y, normal.z]
+                    })
+                    .collect::<Vec<_>>()
+            });
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] attempt position=({:.4},{:.4},{:.4}) remaining=({:.4},{:.4},{:.4}) contacts={:?}",
+                position.x,
+                position.y,
+                position.z,
+                remaining.x,
+                remaining.y,
+                remaining.z,
+                normals.unwrap_or_default()
+            );
+            if let Some(stepped) = try_step_up(
+                world,
+                position,
+                mover,
+                remaining,
+                collision_filter,
+                support_filter,
+                step_debug_enabled,
+            ) {
+                position = stepped;
+                stepped_up = true;
+                break;
+            }
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] rejected final: candidate failed; using ordinary plane sliding"
+            );
+        } else if allow_step_up
+            && step_debug_enabled
+            && has_blocking_plane
+            && !has_horizontal_remainder
         {
-            position = stepped;
-            break;
+            step_debug!(
+                true,
+                "[stair-debug] not attempted position=({:.4},{:.4},{:.4}): no horizontal displacement remains",
+                position.x,
+                position.y,
+                position.z
+            );
         }
         let mut solver_planes = planes
             .iter()
@@ -171,9 +278,9 @@ pub(crate) fn move_mover(
         }
     }
     let planes = world
-        .collide_mover(position, mover, filter)
+        .collide_mover(position, mover, collision_filter)
         .unwrap_or_default();
-    (position, planes)
+    (position, planes, stepped_up, step_attempted)
 }
 
 pub(crate) fn try_step_up(
@@ -181,22 +288,508 @@ pub(crate) fn try_step_up(
     position: boxddd::Vec3,
     mover: &boxddd::Capsule,
     remaining: boxddd::Vec3,
-    filter: boxddd::QueryFilter,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    step_debug_enabled: bool,
 ) -> Option<boxddd::Vec3> {
-    let up = boxddd::Vec3::new(0.0, STEP_HEIGHT, 0.0);
-    if world.cast_mover(position, mover, up, filter).ok()? < 1.0 {
+    let up = boxddd::Vec3::new(0.0, STEP_SWEEP_DISTANCE, 0.0);
+    let up_fraction = match world.cast_mover(position, mover, up, collision_filter) {
+        Ok(fraction) => fraction.clamp(0.0, 1.0),
+        Err(error) => {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] rejected upward sweep: BoxDDD error={error:?}"
+            );
+            return None;
+        }
+    };
+    let available_up = STEP_SWEEP_DISTANCE * up_fraction;
+    let up_distance = if up_fraction < 1.0 {
+        available_up - STEP_CLEARANCE
+    } else {
+        STEP_SWEEP_DISTANCE
+    };
+    step_debug!(
+        step_debug_enabled,
+        "[stair-debug] upward sweep fraction={up_fraction:.4} available={available_up:.4} usable={up_distance:.4} required_max={STEP_SWEEP_DISTANCE:.4}"
+    );
+    if up_distance <= f32::EPSILON {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected upward clearance: usable={up_distance:.4} after clearance={STEP_CLEARANCE:.4}"
+        );
         return None;
     }
-    let elevated = add_box_vec3(position, up);
+    let elevated = add_box_vec3(position, boxddd::Vec3::new(0.0, up_distance, 0.0));
     let horizontal = boxddd::Vec3::new(remaining.x, 0.0, remaining.z);
-    let horizontal_fraction = world.cast_mover(elevated, mover, horizontal, filter).ok()?;
-    let elevated = add_box_vec3(elevated, scale_box_vec3(horizontal, horizontal_fraction));
-    let down = boxddd::Vec3::new(0.0, -STEP_HEIGHT, 0.0);
-    let down_fraction = world.cast_mover(elevated, mover, down, filter).ok()?;
-    if down_fraction >= 1.0 {
+    if box_vec_length_squared(horizontal) <= f32::EPSILON {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected horizontal sweep: requested displacement is zero"
+        );
         return None;
     }
-    let stepped = add_box_vec3(elevated, scale_box_vec3(down, down_fraction));
-    let planes = world.collide_mover(stepped, mover, filter).ok()?;
-    has_walkable_plane(&planes).then_some(stepped)
+    let horizontal_fraction = match world.cast_mover(elevated, mover, horizontal, collision_filter)
+    {
+        Ok(fraction) => fraction.clamp(0.0, 1.0),
+        Err(error) => {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] rejected horizontal sweep: BoxDDD error={error:?}"
+            );
+            return None;
+        }
+    };
+    let elevated = add_box_vec3(elevated, scale_box_vec3(horizontal, horizontal_fraction));
+    let horizontal_progress =
+        boxddd::Vec3::new(elevated.x - position.x, 0.0, elevated.z - position.z);
+    step_debug!(
+        step_debug_enabled,
+        "[stair-debug] horizontal sweep fraction={horizontal_fraction:.4} progress=({:.4},{:.4}) requested=({:.4},{:.4})",
+        horizontal_progress.x,
+        horizontal_progress.z,
+        horizontal.x,
+        horizontal.z
+    );
+    if box_vec_length_squared(horizontal_progress) <= f32::EPSILON {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected horizontal progress: elevated sweep could not advance"
+        );
+        return None;
+    }
+    let down = boxddd::Vec3::new(0.0, -up_distance, 0.0);
+    let down_fraction = match world.cast_mover(elevated, mover, down, support_filter) {
+        Ok(fraction) => fraction.clamp(0.0, 1.0),
+        Err(error) => {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] direct downward sweep failed: BoxDDD error={error:?}; trying nosing fallback"
+            );
+            1.0
+        }
+    };
+    let collision_down_fraction = match world.cast_mover(elevated, mover, down, collision_filter) {
+        Ok(fraction) => fraction.clamp(0.0, 1.0),
+        Err(error) => {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] rejected direct candidate clearance check: BoxDDD error={error:?}"
+            );
+            return None;
+        }
+    };
+    let excluded_surface_precedes_support =
+        collision_down_fraction + STEP_VALIDATION_EPSILON < down_fraction;
+    if excluded_surface_precedes_support {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] direct candidate found only excluded non-level support before eligible level geometry general_fraction={collision_down_fraction:.4} support_fraction={down_fraction:.4}; trying nosing fallback"
+        );
+    }
+    if down_fraction < 1.0 && !excluded_surface_precedes_support {
+        let stepped = add_box_vec3(elevated, scale_box_vec3(down, down_fraction));
+        let rise = stepped.y - position.y;
+        if rise > f32::EPSILON && rise <= STEP_HEIGHT + STEP_VALIDATION_EPSILON {
+            match world.collide_mover(stepped, mover, support_filter) {
+                Ok(planes) if has_walkable_plane(&planes) => {
+                    step_debug!(
+                        step_debug_enabled,
+                        "[stair-debug] accepted direct candidate rise={rise:.4} down_fraction={down_fraction:.4}"
+                    );
+                    return Some(stepped);
+                }
+                Ok(planes) => {
+                    step_debug!(
+                        step_debug_enabled,
+                        "[stair-debug] direct candidate not walkable rise={rise:.4} contacts={} down_fraction={down_fraction:.4}; trying nosing fallback",
+                        planes.len()
+                    );
+                }
+                Err(error) => {
+                    step_debug!(
+                        step_debug_enabled,
+                        "[stair-debug] direct candidate contact query failed rise={rise:.4} error={error:?}; trying nosing fallback"
+                    );
+                }
+            }
+        } else {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] direct candidate rise out of range rise={rise:.4} accepted=(0,{:.4}]; trying nosing fallback",
+                STEP_HEIGHT + STEP_VALIDATION_EPSILON
+            );
+        }
+    } else if !excluded_surface_precedes_support {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] direct downward sweep found no eligible level support within {up_distance:.4}; trying nosing fallback"
+        );
+    }
+
+    // A rounded capsule can touch the stair nosing with a steep normal before
+    // its center reaches the tread. Probe one capsule radius ahead, then keep
+    // the real horizontal displacement while adopting only the validated tread
+    // height. Subsequent frames use `try_forward_step_support` until the center
+    // is physically over the tread.
+    let horizontal_length = box_vec_length_squared(horizontal).sqrt();
+    let direction = scale_box_vec3(horizontal, 1.0 / horizontal_length);
+    let feet_y = position.y - CAPSULE_HEIGHT * 0.5;
+    let current_probe_origin = boxddd::Vec3::new(position.x, feet_y + STEP_CLEARANCE, position.z);
+    let current_probe_origins = step_support_probe_origins(current_probe_origin, direction);
+    let current_probe_down = boxddd::Vec3::new(0.0, -STEP_CLEARANCE * 2.0, 0.0);
+    let (current_support, current_hits, current_errors) = probe_walkable_step_support(
+        world,
+        &current_probe_origins,
+        current_probe_down,
+        feet_y - STEP_CLEARANCE - STEP_VALIDATION_EPSILON,
+        feet_y + STEP_CLEARANCE + STEP_VALIDATION_EPSILON,
+        support_filter,
+    );
+    let current_support_is_excluded = current_support.is_none()
+        && step_debug_enabled
+        && probe_walkable_step_support(
+            world,
+            &current_probe_origins,
+            current_probe_down,
+            feet_y - STEP_CLEARANCE - STEP_VALIDATION_EPSILON,
+            feet_y + STEP_CLEARANCE + STEP_VALIDATION_EPSILON,
+            collision_filter,
+        )
+        .0
+        .is_some();
+    let Some((current_ground, current_forward, current_lateral)) = current_support else {
+        let reason = if current_support_is_excluded {
+            "only excluded non-level collider"
+        } else {
+            "no eligible level support"
+        };
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected fallback current support: {reason} samples={} eligible_hits={current_hits} errors={current_errors} center=({:.4},{:.4},{:.4})",
+            current_probe_origins.len(),
+            current_probe_origin.x,
+            current_probe_origin.y,
+            current_probe_origin.z
+        );
+        return None;
+    };
+    step_debug!(
+        step_debug_enabled && (current_forward > 0.0 || current_lateral != 0.0),
+        "[stair-debug] current support recovered by footprint forward={current_forward:.4} lateral={current_lateral:.4} point=({:.4},{:.4},{:.4})",
+        current_ground.x,
+        current_ground.y,
+        current_ground.z
+    );
+    let probe_origins = forward_step_probe_origins(elevated, direction, current_ground.y);
+    let probe_origin = probe_origins[0].0;
+    let probe_down = boxddd::Vec3::new(0.0, -(STEP_SWEEP_DISTANCE + STEP_CLEARANCE), 0.0);
+    let min_support_y = current_ground.y + f32::EPSILON;
+    let max_support_y = current_ground.y + STEP_HEIGHT + STEP_VALIDATION_EPSILON;
+    let (support, total_hits, ray_errors) = probe_walkable_step_support(
+        world,
+        &probe_origins,
+        probe_down,
+        min_support_y,
+        max_support_y,
+        support_filter,
+    );
+    let ahead_support_is_excluded = support.is_none()
+        && step_debug_enabled
+        && probe_walkable_step_support(
+            world,
+            &probe_origins,
+            probe_down,
+            min_support_y,
+            max_support_y,
+            collision_filter,
+        )
+        .0
+        .is_some();
+    let Some((hit_point, forward_offset, lateral_offset)) = support else {
+        let reason = if ahead_support_is_excluded {
+            "only excluded non-level collider"
+        } else {
+            "no eligible level support"
+        };
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected fallback ahead support: {reason} samples={} eligible_hits={total_hits} errors={ray_errors} center=({:.4},{:.4},{:.4})",
+            probe_origins.len(),
+            probe_origin.x,
+            probe_origin.y,
+            probe_origin.z
+        );
+        return None;
+    };
+    let rise = hit_point.y - current_ground.y;
+    if rise <= f32::EPSILON || rise > STEP_HEIGHT + STEP_VALIDATION_EPSILON {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected fallback rise: measured={rise:.4} accepted=(0,{:.4}] current_y={:.4} ahead_y={:.4}",
+            STEP_HEIGHT + STEP_VALIDATION_EPSILON,
+            current_ground.y,
+            hit_point.y
+        );
+        return None;
+    }
+    if rise + STEP_CLEARANCE > up_distance + STEP_VALIDATION_EPSILON {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected fallback overhead: rise={rise:.4} clearance={STEP_CLEARANCE:.4} usable_up={up_distance:.4}"
+        );
+        return None;
+    }
+    let stepped = boxddd::Vec3::new(elevated.x, position.y + rise, elevated.z);
+    let descent = boxddd::Vec3::new(0.0, stepped.y - elevated.y, 0.0);
+    let descent_fraction = match world.cast_mover(elevated, mover, descent, collision_filter) {
+        Ok(fraction) => fraction.clamp(0.0, 1.0),
+        Err(error) => {
+            step_debug!(
+                step_debug_enabled,
+                "[stair-debug] rejected fallback placement sweep: BoxDDD error={error:?}"
+            );
+            return None;
+        }
+    };
+    if descent_fraction < 1.0 {
+        step_debug!(
+            step_debug_enabled,
+            "[stair-debug] rejected fallback placement: sweep fraction={descent_fraction:.4} rise={rise:.4}"
+        );
+        return None;
+    }
+    step_debug!(
+        step_debug_enabled,
+        "[stair-debug] accepted nosing fallback rise={rise:.4} usable_up={up_distance:.4} forward={forward_offset:.4} lateral={lateral_offset:.4} ahead=({:.4},{:.4},{:.4})",
+        hit_point.x,
+        hit_point.y,
+        hit_point.z
+    );
+    Some(stepped)
+}
+
+pub(crate) fn forward_step_probe_origins(
+    elevated: boxddd::Vec3,
+    direction: boxddd::Vec3,
+    current_ground_y: f32,
+) -> [(boxddd::Vec3, f32, f32); 9] {
+    let center = boxddd::Vec3::new(
+        elevated.x + direction.x * (CAPSULE_RADIUS + STEP_CLEARANCE),
+        current_ground_y + STEP_SWEEP_DISTANCE,
+        elevated.z + direction.z * (CAPSULE_RADIUS + STEP_CLEARANCE),
+    );
+    step_support_probe_origins(center, direction)
+}
+
+pub(crate) fn step_support_probe_origins(
+    center: boxddd::Vec3,
+    direction: boxddd::Vec3,
+) -> [(boxddd::Vec3, f32, f32); 9] {
+    let lateral = boxddd::Vec3::new(-direction.z, 0.0, direction.x);
+    let mid_forward_center = add_box_vec3(
+        center,
+        scale_box_vec3(direction, STEP_SUPPORT_MID_FORWARD_OFFSET),
+    );
+    let forward_center = add_box_vec3(
+        center,
+        scale_box_vec3(direction, STEP_SUPPORT_FORWARD_OFFSET),
+    );
+    [
+        (center, 0.0, 0.0),
+        (
+            add_box_vec3(center, scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET)),
+            0.0,
+            STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+        (
+            add_box_vec3(
+                center,
+                scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
+            ),
+            0.0,
+            -STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+        (mid_forward_center, STEP_SUPPORT_MID_FORWARD_OFFSET, 0.0),
+        (
+            add_box_vec3(
+                mid_forward_center,
+                scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET),
+            ),
+            STEP_SUPPORT_MID_FORWARD_OFFSET,
+            STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+        (
+            add_box_vec3(
+                mid_forward_center,
+                scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
+            ),
+            STEP_SUPPORT_MID_FORWARD_OFFSET,
+            -STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+        (forward_center, STEP_SUPPORT_FORWARD_OFFSET, 0.0),
+        (
+            add_box_vec3(
+                forward_center,
+                scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET),
+            ),
+            STEP_SUPPORT_FORWARD_OFFSET,
+            STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+        (
+            add_box_vec3(
+                forward_center,
+                scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
+            ),
+            STEP_SUPPORT_FORWARD_OFFSET,
+            -STEP_SUPPORT_LATERAL_OFFSET,
+        ),
+    ]
+}
+
+pub(crate) fn probe_walkable_step_support(
+    world: &mut boxddd::World,
+    origins: &[(boxddd::Vec3, f32, f32)],
+    down: boxddd::Vec3,
+    min_y: f32,
+    max_y: f32,
+    filter: boxddd::QueryFilter,
+) -> (Option<(boxddd::Vec3, f32, f32)>, usize, usize) {
+    let mut best = None;
+    let mut total_hits = 0;
+    let mut ray_errors = 0;
+
+    for &(origin, forward_offset, lateral_offset) in origins {
+        let hits = match world.cast_ray(origin, down, filter) {
+            Ok(hits) => hits,
+            Err(_) => {
+                ray_errors += 1;
+                continue;
+            }
+        };
+        total_hits += hits.len();
+        for hit in hits.iter().filter(|hit| {
+            hit.normal.y >= WALKABLE_SLOPE_COS && (min_y..=max_y).contains(&hit.point.y)
+        }) {
+            let replace = match &best {
+                Some((_, best_fraction, _, _)) => hit.fraction < *best_fraction,
+                None => true,
+            };
+            if replace {
+                best = Some((
+                    boxddd::Vec3::new(hit.point.x, hit.point.y, hit.point.z),
+                    hit.fraction,
+                    forward_offset,
+                    lateral_offset,
+                ));
+            }
+        }
+    }
+
+    (
+        best.map(|(point, _, forward_offset, lateral_offset)| {
+            (point, forward_offset, lateral_offset)
+        }),
+        total_hits,
+        ray_errors,
+    )
+}
+
+pub(crate) fn try_step_down(
+    world: &mut boxddd::World,
+    position: boxddd::Vec3,
+    mover: &boxddd::Capsule,
+    horizontal_motion: boxddd::Vec3,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+) -> Option<boxddd::Vec3> {
+    let down = boxddd::Vec3::new(0.0, -STEP_SWEEP_DISTANCE, 0.0);
+    let fraction = world
+        .cast_mover(position, mover, down, support_filter)
+        .ok()?
+        .clamp(0.0, 1.0);
+    if fraction >= 1.0 {
+        return None;
+    }
+    let collision_fraction = world
+        .cast_mover(position, mover, down, collision_filter)
+        .ok()?
+        .clamp(0.0, 1.0);
+    if collision_fraction + STEP_VALIDATION_EPSILON < fraction {
+        return None;
+    }
+    let snapped = add_box_vec3(position, scale_box_vec3(down, fraction));
+    let drop = position.y - snapped.y;
+    if !(-STEP_VALIDATION_EPSILON..=STEP_HEIGHT + STEP_VALIDATION_EPSILON).contains(&drop) {
+        return None;
+    }
+    let planes = world.collide_mover(snapped, mover, support_filter).ok()?;
+    if has_walkable_plane(&planes) {
+        return Some(snapped);
+    }
+
+    // While rolling off a tread, the capsule can contact the upper nosing with
+    // a steep normal before its flat-foot position reaches the lower tread.
+    // Keep that intermediate contact grounded only when a walkable surface is
+    // directly below and still within the configured step-down distance.
+    let feet_y = position.y - CAPSULE_HEIGHT * 0.5;
+    let horizontal = boxddd::Vec3::new(horizontal_motion.x, 0.0, horizontal_motion.z);
+    let horizontal_length = box_vec_length_squared(horizontal).sqrt();
+    let direction = if horizontal_length > f32::EPSILON {
+        scale_box_vec3(horizontal, 1.0 / horizontal_length)
+    } else {
+        boxddd::Vec3::new(1.0, 0.0, 0.0)
+    };
+    let probe_origin = boxddd::Vec3::new(position.x, feet_y + STEP_CLEARANCE, position.z);
+    let probe_origins = step_support_probe_origins(probe_origin, direction);
+    let probe_down = boxddd::Vec3::new(0.0, -(STEP_SWEEP_DISTANCE + STEP_CLEARANCE), 0.0);
+    let (support, _, _) = probe_walkable_step_support(
+        world,
+        &probe_origins,
+        probe_down,
+        feet_y - STEP_HEIGHT - STEP_VALIDATION_EPSILON,
+        feet_y + STEP_VALIDATION_EPSILON,
+        support_filter,
+    );
+    let (hit_point, _, _) = support?;
+    let support_drop = feet_y - hit_point.y;
+    (-STEP_VALIDATION_EPSILON..=STEP_HEIGHT + STEP_VALIDATION_EPSILON)
+        .contains(&support_drop)
+        .then_some(snapped)
+}
+
+pub(crate) fn try_forward_step_support(
+    world: &mut boxddd::World,
+    position: boxddd::Vec3,
+    horizontal_motion: boxddd::Vec3,
+    support_filter: boxddd::QueryFilter,
+) -> Option<boxddd::Vec3> {
+    let horizontal = boxddd::Vec3::new(horizontal_motion.x, 0.0, horizontal_motion.z);
+    let horizontal_length = box_vec_length_squared(horizontal).sqrt();
+    if horizontal_length <= f32::EPSILON {
+        return None;
+    }
+    let direction = scale_box_vec3(horizontal, 1.0 / horizontal_length);
+    let feet_y = position.y - CAPSULE_HEIGHT * 0.5;
+    let probe_origin = boxddd::Vec3::new(
+        position.x + direction.x * (CAPSULE_RADIUS + STEP_CLEARANCE),
+        feet_y + STEP_CLEARANCE,
+        position.z + direction.z * (CAPSULE_RADIUS + STEP_CLEARANCE),
+    );
+    let probe_origins = step_support_probe_origins(probe_origin, direction);
+    let probe_down = boxddd::Vec3::new(0.0, -STEP_CLEARANCE * 2.0, 0.0);
+    let (support, _, _) = probe_walkable_step_support(
+        world,
+        &probe_origins,
+        probe_down,
+        feet_y - STEP_CLEARANCE - STEP_VALIDATION_EPSILON,
+        feet_y + STEP_CLEARANCE + STEP_VALIDATION_EPSILON,
+        support_filter,
+    );
+    let (hit_point, _, _) = support?;
+    let supported_y = hit_point.y + CAPSULE_HEIGHT * 0.5;
+    if (supported_y - position.y).abs() > STEP_CLEARANCE + f32::EPSILON {
+        return None;
+    }
+    Some(boxddd::Vec3::new(position.x, supported_y, position.z))
 }

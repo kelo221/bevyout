@@ -223,6 +223,8 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
             .expect("physics asset was inserted above");
         placement.physics_source = Some(asset.source.clone());
         placement.physics_classification = classify_placement(&placement.semantic, asset);
+        placement.step_support =
+            retain_static_step_support(placement.step_support, placement.physics_classification);
         if let Some(reason) = dynamic_rejection_reason(&placement.semantic, asset) {
             dynamic_rejections.insert(format!(
                 "physics body for {} ({:08x}) remains static: {reason}",

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 10;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-native-havok-v1";
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 11;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-native-havok-v2";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
 
 mod compatibility;
@@ -258,6 +258,8 @@ pub(crate) struct PreparedPlacement {
     pub(crate) physics_source: Option<PreparedPhysicsSource>,
     #[serde(default)]
     pub(crate) physics_classification: PreparedPhysicsClassification,
+    #[serde(default)]
+    pub(crate) step_support: bool,
     #[serde(default)]
     pub(crate) reference_kind: String,
     #[serde(default)]
