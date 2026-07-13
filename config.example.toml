@@ -5,7 +5,10 @@ game_root = "C:/Games/Fallout 3 goty"
 plugin = "Fallout3.esm"
 
 [tools]
-# Optional: omitted values use automatic detection.
+# Optional: omitted values use automatic detection (Windows default install
+# paths, or "magick"/"ktx"/"toktx" on PATH). Automatic detection does not
+# check macOS/Linux install locations for Blender, so set it explicitly there,
+# e.g. "/Applications/Blender.app/Contents/MacOS/Blender" on macOS.
 blender = "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 # Irradiance baking is pinned to Blender 4.5 LTS; preparation continues to use
 # the general Blender path above.

@@ -91,3 +91,102 @@ fn blender_job_json_carries_quick_ao_profile() {
     assert!(json.contains("mesh.physics.json.gz"));
     assert!(json.contains("architecture/test.nif"));
 }
+
+#[test]
+fn texture_references_matches_forward_slashes_and_mid_string_textures() {
+    // Forward-slash separated path, plus "textures" appearing mid-token
+    // (inside "nontextures") which the scanner still recognizes because it
+    // searches for the substring "textures" rather than a path segment.
+    // A trailing 2-byte printable run ("ab") between control bytes is
+    // shorter than the 5-byte inspection threshold and must contribute
+    // nothing.
+    let bytes = b"meshes/foo/textures/floor.dds materials/nontextures/decal.tga \x01ab\x01";
+    let refs = texture_references(bytes)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        refs,
+        std::collections::HashSet::from([
+            "textures/floor.dds".to_string(),
+            "textures/decal.tga".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn texture_references_ignores_runs_shorter_than_five_bytes() {
+    // ".dds" alone is 4 bytes: shorter than the inspection threshold, so
+    // it must never be considered even though it contains an extension.
+    let refs = texture_references(b"\x01.dds\x01");
+    assert!(refs.is_empty());
+}
+
+#[test]
+fn placeholder_png_images_are_rejected_and_real_ones_pass() {
+    fn glb_with_png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13_u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&width.to_be_bytes());
+        png.extend_from_slice(&height.to_be_bytes());
+        let json = format!(
+            "{{\"bufferViews\":[{{\"byteOffset\":0,\"byteLength\":{}}}],\
+             \"images\":[{{\"bufferView\":0,\"name\":\"probe\"}}]}}",
+            png.len()
+        );
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"glTF");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"JSON");
+        bytes.extend_from_slice(json.as_bytes());
+        bytes.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"BIN\0");
+        bytes.extend_from_slice(&png);
+        bytes
+    }
+    let dir = std::env::temp_dir();
+    let placeholder = dir.join(format!("bevyout-placeholder-{}.glb", std::process::id()));
+    std::fs::write(&placeholder, glb_with_png(1, 1)).unwrap();
+    let error = validate_glb_images(&placeholder).unwrap_err();
+    assert!(error.to_string().contains("1x1 placeholder"));
+    let real = dir.join(format!("bevyout-real-{}.glb", std::process::id()));
+    std::fs::write(&real, glb_with_png(2, 2)).unwrap();
+    assert!(validate_glb_images(&real).is_ok());
+    let _ = std::fs::remove_file(placeholder);
+    let _ = std::fs::remove_file(real);
+}
+
+fn glb_with_json(json: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"glTF");
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(b"JSON");
+    bytes.extend_from_slice(json.as_bytes());
+    bytes
+}
+
+#[test]
+fn image_referencing_out_of_range_buffer_view_is_rejected() {
+    let json = r#"{"bufferViews":[],"images":[{"bufferView":0,"name":"probe"}]}"#;
+    let path =
+        std::env::temp_dir().join(format!("bevyout-missing-view-{}.glb", std::process::id()));
+    std::fs::write(&path, glb_with_json(json)).unwrap();
+    let error = validate_glb_images(&path).unwrap_err();
+    assert!(error.to_string().contains("missing bufferView"));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn buffer_view_extending_past_the_glb_is_rejected() {
+    let json = r#"{"bufferViews":[{"byteOffset":0,"byteLength":999999}],"images":[{"bufferView":0,"name":"probe"}]}"#;
+    let path =
+        std::env::temp_dir().join(format!("bevyout-view-overflow-{}.glb", std::process::id()));
+    std::fs::write(&path, glb_with_json(json)).unwrap();
+    let error = validate_glb_images(&path).unwrap_err();
+    assert!(error.to_string().contains("extends beyond GLB"));
+    let _ = std::fs::remove_file(path);
+}
