@@ -6,6 +6,7 @@ import { z } from "zod";
 const repoRoot = resolve(import.meta.dir, "..", "..", "..");
 const defaultPort = 15_702;
 const defaultBrpUrl = process.env.BEVYOUT_BRP_URL ?? `http://127.0.0.1:${defaultPort}`;
+const consoleSessionId = `mcp-${process.pid}-${crypto.randomUUID()}`;
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type BrpError = { code?: number; message?: string; data?: Json };
@@ -291,6 +292,32 @@ server.addTool({
       include_other: effectiveIncludeOther,
     });
     return JSON.stringify(result, null, 2);
+  },
+});
+
+server.addTool({
+  name: "console_exec",
+  description: "Execute one Gamebryo-style command through bevyout's structured console core.",
+  parameters: z.object({
+    line: z.string().min(1).max(16_384),
+    session: z.string().min(1).max(128).optional(),
+  }),
+  execute: async ({ line, session }) => {
+    const client = viewer?.client ?? clientFor();
+    const result = await client.call("bevyout.console.exec", {
+      line,
+      session: session ?? consoleSessionId,
+    });
+    return JSON.stringify(result, null, 2);
+  },
+});
+
+server.addTool({
+  name: "console_help",
+  description: "Return structured metadata for every registered bevyout console command.",
+  execute: async () => {
+    const client = viewer?.client ?? clientFor();
+    return JSON.stringify(await client.call("bevyout.console.help"), null, 2);
   },
 });
 

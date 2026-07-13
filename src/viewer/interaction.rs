@@ -97,6 +97,7 @@ fn spawn_interaction_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         InteractionPromptText,
+        super::console::GameUi,
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
@@ -112,6 +113,7 @@ fn spawn_interaction_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         InteractionNoticeText,
+        super::console::GameUi,
         TextColor(Color::srgb(1.0, 0.9, 0.5)),
         Node {
             position_type: PositionType::Absolute,

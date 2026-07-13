@@ -45,6 +45,8 @@ mod player;
 
 mod agent_bridge;
 mod app;
+mod console;
+mod console_ui;
 mod controls;
 mod diagnostics;
 mod scene;
@@ -177,10 +179,12 @@ fn spawn_reticle(mut commands: Commands) {
         },
         BackgroundColor(Color::WHITE),
         ZIndex(100),
+        console::GameUi,
     ));
     commands.spawn((
         Text::new("FPS --"),
         FpsText,
+        console::DiagnosticUi,
         Node {
             position_type: PositionType::Absolute,
             top: px(8),
@@ -191,6 +195,7 @@ fn spawn_reticle(mut commands: Commands) {
     commands.spawn((
         Text::new("Adjusting: Lighting scale\nPage Up/Down: select   F1/F2: change"),
         AdjustmentHud,
+        console::DiagnosticUi,
         Node {
             position_type: PositionType::Absolute,
             top: px(8),

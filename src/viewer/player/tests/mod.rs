@@ -14,6 +14,55 @@ fn camera_angle_round_trip_preserves_yaw_and_pitch() {
 }
 
 #[test]
+fn console_transform_adapter_synchronizes_fps_angles_and_clears_velocity() {
+    let mut world = World::new();
+    let position = Vec3::new(1.0, 2.0, 3.0);
+    let player_entity = world
+        .spawn((
+            FpsPlayer {
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            KccState {
+                velocity: Vec3::splat(5.0),
+                grounded: true,
+            },
+            FootstepState::default(),
+            PlayerRenderHistory::new(position),
+            Transform::from_translation(position),
+        ))
+        .id();
+    let camera_entity = world
+        .spawn((
+            Camera3d::default(),
+            Transform::default(),
+            FlyCamera {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 8.0,
+            },
+            ChildOf(player_entity),
+        ))
+        .id();
+
+    assert!(console_set_angles(
+        &mut world,
+        player_entity,
+        Vec3::new(30.0, 90.0, 0.0),
+    ));
+    let angles = console_get_angles(&world, player_entity).unwrap();
+    assert!((angles.x - 30.0).abs() < 0.001);
+    assert!((angles.y - 90.0).abs() < 0.001);
+    let player = world.get::<FpsPlayer>(player_entity).unwrap();
+    assert!((player.yaw.to_degrees() - 90.0).abs() < 0.001);
+    let camera = world.get::<FlyCamera>(camera_entity).unwrap();
+    assert!((camera.pitch.to_degrees() - 30.0).abs() < 0.001);
+    let kcc = world.get::<KccState>(player_entity).unwrap();
+    assert_eq!(kcc.velocity, Vec3::ZERO);
+    assert!(!kcc.grounded);
+}
+
+#[test]
 fn capsule_center_offset_places_eye_at_requested_height() {
     assert!((CAMERA_LOCAL_HEIGHT - 0.7).abs() < f32::EPSILON);
     assert!((CAPSULE_HEIGHT * 0.5 + CAMERA_LOCAL_HEIGHT - EYE_HEIGHT).abs() < f32::EPSILON);

@@ -8,13 +8,45 @@ fn run_cli(arguments: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn help_lists_the_five_supported_commands() {
+fn help_lists_the_supported_commands() {
     let output = run_cli(&["--help"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for command in ["prepare", "bake", "render", "view", "report"] {
+    for command in ["prepare", "bake", "render", "view", "report", "script"] {
         assert!(stdout.contains(command), "help should mention {command}");
     }
+}
+
+#[test]
+fn script_runner_reports_success_failure_and_writes_transcripts() {
+    let directory = std::env::temp_dir().join(format!("bevyout-script-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let success = directory.join("success.bscript");
+    let failure = directory.join("failure.bscript");
+    let transcript = directory.join("failure.jsonl");
+    std::fs::write(&success, "prid TestCrate\nexpect (getpos x) == 1\n").unwrap();
+    std::fs::write(
+        &failure,
+        "prid TestCrate\nexpect (getpos x) == 9\ngetpos z\n",
+    )
+    .unwrap();
+
+    let success_output = run_cli(&["script", "run", success.to_str().unwrap(), "--headless"]);
+    assert!(success_output.status.success());
+
+    let failure_output = run_cli(&[
+        "script",
+        "run",
+        failure.to_str().unwrap(),
+        "--keep-going",
+        "--transcript",
+        transcript.to_str().unwrap(),
+    ]);
+    assert!(!failure_output.status.success());
+    let lines = std::fs::read_to_string(&transcript).unwrap();
+    assert_eq!(lines.lines().count(), 3);
+    assert!(lines.contains("assertion_failed"));
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]

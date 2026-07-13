@@ -38,6 +38,7 @@ pub(crate) fn run_view(
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
+    app.add_plugins(crate::console::ConsolePlugin);
     app.insert_resource(physics_assets);
     if let Some(port) = agent_port {
         agent_bridge::install(&mut app, port);
@@ -46,10 +47,12 @@ pub(crate) fn run_view(
     app.insert_resource(LoadingTarget::NewGame {
         manifest: manifest_path.clone(),
     });
-    
+
     player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);
+    console::install(&mut app);
+    console_ui::install(&mut app);
     app.insert_resource(manifest)
         .insert_resource(UnlitMode(false))
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))

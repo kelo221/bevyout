@@ -239,7 +239,7 @@ fn save_affecting_is_set_for_a_state_carrying_record_class() {
 #[test]
 fn report_json_matches_golden_snapshot() {
     let report = generate_report("Fixture.esm", &fixture_plugin()).unwrap();
-    let golden = include_str!("fixtures/golden_report.json");
+    let golden = include_str!("fixtures/golden_report.json").replace("\r\n", "\n");
     assert_eq!(
         report.to_json(),
         golden,

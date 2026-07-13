@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::interaction::PlacementRoot;
 use super::player::FpsPlayer;
+use crate::console::{ConsoleExecutor, ConsoleRegistry, ConsoleRequest, ConsoleSessionId};
 use crate::vsa::PreparedSceneManifest;
 
 const DEFAULT_SNAPSHOT_LIMIT: usize = 100;
@@ -39,7 +40,9 @@ pub(crate) fn install(app: &mut App, port: u16) {
     let remote = RemotePlugin::default()
         .with_method_main("bevyout.session", session)
         .with_method_main("bevyout.scene_snapshot", scene_snapshot)
-        .with_method_main("bevyout.capture_viewport", capture_viewport);
+        .with_method_main("bevyout.capture_viewport", capture_viewport)
+        .with_method_main("bevyout.console.exec", console_exec)
+        .with_method_main("bevyout.console.help", console_help);
     let http = RemoteHttpPlugin::default()
         .with_address(std::net::Ipv4Addr::LOCALHOST)
         .with_port(port);
@@ -220,10 +223,112 @@ fn capture_viewport(In(params): In<Option<Value>>, mut commands: Commands) -> Br
     }))
 }
 
+fn console_exec(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = params.unwrap_or_else(|| json!({}));
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid_params("params must be an object"))?;
+    let line = object
+        .get("line")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_params("console.exec requires a string 'line'"))?;
+    if line.len() > 16_384 {
+        return Err(invalid_params("console line exceeds 16384 bytes"));
+    }
+    let session = object
+        .get("session")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| world.resource::<AgentBridgeInfo>().session_id.clone());
+    if session.is_empty() || session.len() > 128 {
+        return Err(invalid_params(
+            "console session must contain between 1 and 128 bytes",
+        ));
+    }
+    serde_json::to_value(ConsoleExecutor::execute(
+        world,
+        ConsoleRequest {
+            session: ConsoleSessionId::new(session),
+            line: line.to_string(),
+        },
+    ))
+    .map_err(BrpError::internal)
+}
+
+fn console_help(In(params): In<Option<Value>>, world: &World) -> BrpResult {
+    if let Some(params) = params
+        && !params.is_null()
+        && !params.as_object().is_some_and(serde_json::Map::is_empty)
+    {
+        return Err(invalid_params("console.help does not accept parameters"));
+    }
+    serde_json::to_value(world.resource::<ConsoleRegistry>().metadata()).map_err(BrpError::internal)
+}
+
 fn invalid_params(message: impl Into<String>) -> BrpError {
     BrpError {
         code: INVALID_PARAMS,
         message: message.into(),
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::console::{ConsolePlugin, RefRegistry};
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, ConsolePlugin))
+            .insert_resource(AgentBridgeInfo {
+                port: 15_702,
+                session_id: "bridge-test".into(),
+            });
+        let entity = app
+            .world_mut()
+            .spawn(Transform::from_xyz(1.0, 2.0, 3.0))
+            .id();
+        app.world_mut()
+            .resource_mut::<RefRegistry>()
+            .register(entity, 1, Some("TestRef"));
+        app.update();
+        app
+    }
+
+    #[test]
+    fn brp_console_result_matches_direct_executor_shape() {
+        let mut direct = app();
+        let expected = serde_json::to_value(ConsoleExecutor::execute(
+            direct.world_mut(),
+            ConsoleRequest {
+                session: ConsoleSessionId::new("same"),
+                line: "00000001.getpos".into(),
+            },
+        ))
+        .unwrap();
+
+        let mut remote = app();
+        let actual = console_exec(
+            In(Some(
+                json!({ "session": "same", "line": "00000001.getpos" }),
+            )),
+            remote.world_mut(),
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn brp_console_help_exposes_registry_metadata() {
+        let app = app();
+        let value = console_help(In(None), app.world()).unwrap();
+        assert!(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "getpos")
+        );
     }
 }

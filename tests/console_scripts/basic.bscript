@@ -1,0 +1,7 @@
+seed 42
+prid TestCrate
+getpos
+setpos z 4.5
+expect (getpos z) == 4.5 tol 0.0001
+advance 2
+getangle

@@ -64,10 +64,11 @@ bun run tools/bevyout-mcp/src/server.ts
 ```
 
 The adapter can attach to an existing viewer or launch one, inspect compact
-scene snapshots and reflected ECS data, call raw Bevy Remote Protocol methods
-for entity/resource mutation, watch events, and return a primary-window
-screenshot as MCP image content. Changes are runtime-only and are not written
-back to prepared manifests or source assets.
+scene snapshots and reflected ECS data, execute the shared Gamebryo-style
+console, call raw Bevy Remote Protocol methods for entity/resource mutation,
+watch events, and return a primary-window screenshot as MCP image content.
+Changes are runtime-only and are not written back to prepared manifests or
+source assets.
 
 Install the MCP entry for Codex, Claude Desktop, and Claude Code with:
 
@@ -86,6 +87,31 @@ Code uses the repository-root `.mcp.json`.
 The shared agent reference is [skills.md](skills.md). It is intentionally a
 manual reference rather than a native `AGENTS.md` or `CLAUDE.md` file, so an
 agent should read it explicitly for Bevy scene tasks.
+
+### Gamebryo console and scripts
+
+Press `~`/Backquote in a running viewer to open the console. It pauses virtual
+time, releases the cursor, and keeps an OpenMW-style persistent history with
+draft restoration and Tab completion. Backquote or Escape closes it. Useful
+commands include `help`, `prid`, `getpos`/`setpos`, `getangle`/`setangle`,
+`moveto`, `dump`, `tcl`, `tm`, `tdt`, `sgtm`, and `screenshot`. Positions use
+Bevy metres and angles use degrees. `tcl` is a dedicated FPS no-clip mode with
+WASD plus Space/Ctrl vertical movement; it does not use the viewer's global
+physics-disable switch.
+
+The same command core is exposed to agents as `console_exec` and
+`console_help`. Repros can be committed as line-oriented scripts and stable
+JSONL transcripts:
+
+```powershell
+cargo run-dev -- script run tests/console_scripts/basic.bscript --headless
+cargo run-dev -- script run .bevyout/scripts/repro.bscript --headless --transcript .bevyout/scripts/repro.jsonl --keep-going
+```
+
+Script-only commands are `seed`, `advance`, and
+`expect (<command>) <op> <literal> [tol <value>]`. The headless harness uses a
+fixed 1/60-second step and synthetic fixtures; Fallout-data scripts belong in
+ignored `.bevyout/scripts/`.
 
 `render` is also the interactive entry point for a new cell. If the prepared
 scene is missing, it asks whether to import it (the same operation as
@@ -149,7 +175,31 @@ alias.
 `.blend` cache, and raw KTX slices. KTX-Software's unified `ktx.exe` is required
 for irradiance export.
 
-The current slice handles interior cells and static geometry plus the first semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate conversion, starts near the prepared scene bounds, spawns the prepared GLB scenes and point lights, plays staged ambient/placement loops, and provides free flight with WASD/QE plus mouse look. Aim at a pickup, container, door, or activator and press `Enter` for the initial interaction path; door travel and animation remain deferred. Press `Tab` to switch to the metric FPS capsule controller (WASD and Space): native BoxDDD capsule casts and plane solving handle movement, while the compatibility bridge cooks the current render-derived meshes into static BoxDDD triangle shapes. Distance-based native Fallout footsteps still use authored Havok collision-material extras as surface hints, and the controller keeps the OpenMW-derived directional launch, full-height jump arc, reduced air-control steering, and surface landing sounds. Press `Tab` again to return to free camera. The Page Up/Down menu adjusts lighting, irradiance intensity, ambient, bloom, fog, and AO strength diagnostics; F1/F2 change the selected value. Irradiance intensity starts at `1.00` and changes exponentially for quick A/B comparisons. AO strength `0.00` disables the generated AO contribution and `1.00` uses the full baked value. The mouse is captured on startup; press `Esc` to release it and click the window to capture it again. NIF alpha flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials. Fallout normal-map RGB is used for tangent-space normals and its alpha is exported as `KHR_materials_specular` specular strength; non-rendering editor markers are omitted. Exterior LAND, music/voice playback, MP3 decoding, NPC assembly, and runtime NAVM pathfinding remain outside this slice.
+The current slice handles interior cells and static geometry plus the first
+semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate
+conversion, starts near the prepared scene bounds, spawns the prepared GLB
+scenes and point lights, plays staged ambient/placement loops, and provides
+free flight with WASD/QE plus mouse look. Aim at a pickup, container, door, or
+activator and press `Enter` for the initial interaction path; door travel and
+animation remain deferred. Press `V` to switch to the metric FPS capsule
+controller (WASD and Space): native BoxDDD capsule casts and plane solving
+handle movement, while the compatibility bridge cooks the current
+render-derived meshes into static BoxDDD triangle shapes. Distance-based native
+Fallout footsteps still use authored Havok collision-material extras as surface
+hints, and the controller keeps the OpenMW-derived directional launch,
+full-height jump arc, reduced air-control steering, and surface landing sounds.
+Press `V` again to return to free camera; Tab opens the Pip-Boy modal
+placeholder. The Page Up/Down menu adjusts lighting, irradiance intensity,
+ambient, bloom, fog, and AO strength diagnostics; F1/F2 change the selected
+value. Irradiance intensity starts at `1.00` and changes exponentially for
+quick A/B comparisons. AO strength `0.00` disables the generated AO contribution
+and `1.00` uses the full baked value. The mouse is captured on startup; press
+`Esc` to pause/release it and click the window to capture it again. NIF alpha
+flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials.
+Fallout normal-map RGB is used for tangent-space normals and its alpha is
+exported as `KHR_materials_specular` specular strength; non-rendering editor
+markers are omitted. Exterior LAND, music/voice playback, MP3 decoding, NPC
+assembly, and runtime NAVM pathfinding remain outside this slice.
 
 ## Checks
 

@@ -391,6 +391,7 @@ pub(crate) fn sync_dynamic_transforms(
 
 pub(crate) fn sync_player_proxy(
     physics_disabled: Res<PhysicsDisabled>,
+    no_clip: Res<PlayerNoClip>,
     state: Res<CameraModeState>,
     time: Res<Time<Fixed>>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
@@ -400,7 +401,7 @@ pub(crate) fn sync_player_proxy(
     let Some(world) = context.world_mut() else {
         return;
     };
-    let player_transform = (!physics_disabled.0 && state.mode == CameraMode::Fps)
+    let player_transform = (!physics_disabled.0 && !no_clip.0 && state.mode == CameraMode::Fps)
         .then(|| players.single().ok())
         .flatten();
     let Some(transform) = player_transform else {
