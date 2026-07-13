@@ -87,9 +87,9 @@ fn legacy_lighting(cell: &super::manifest::CellInfo) -> LightingData {
 
 #[derive(Debug)]
 pub(crate) struct LoadedPlugin {
-    name: String,
-    path: PathBuf,
-    bytes: Vec<u8>,
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

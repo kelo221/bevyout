@@ -109,6 +109,32 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
 }
 
 #[test]
+fn cell_catalogue_contract_parses() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "cells",
+        "--game-root",
+        "game",
+        "--plugin",
+        "Patch.esp",
+        "--interiors-only",
+    ])
+    .unwrap();
+    let CommandLine::Cells(args) = cli.command else {
+        panic!("expected cells command");
+    };
+    assert_eq!(
+        args.game_root.as_deref(),
+        Some(std::path::Path::new("game"))
+    );
+    assert_eq!(
+        args.plugin.as_deref(),
+        Some(std::path::Path::new("Patch.esp"))
+    );
+    assert!(args.interiors_only);
+}
+
+#[test]
 fn script_run_contract_parses() {
     let cli = Cli::try_parse_from([
         "bevyout",

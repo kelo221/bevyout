@@ -9,6 +9,7 @@ pub(crate) fn walk_container(
     current_cell: Option<u32>,
     resolver: &FormIdResolver,
     state: &mut ParsedState,
+    source_name: &str,
 ) -> Result<()> {
     while offset + 4 <= end {
         let signature = &bytes[offset..offset + 4];
@@ -34,6 +35,7 @@ pub(crate) fn walk_container(
                 child_cell,
                 resolver,
                 state,
+                source_name,
             )?;
             offset += size;
             continue;
@@ -59,6 +61,8 @@ pub(crate) fn walk_container(
                 if flags & RECORD_DELETED != 0 {
                     state.cells.remove(&form_id);
                     state.cell_metadata.remove(&form_id);
+                    state.cell_winning_plugins.remove(&form_id);
+                    state.cell_provenance.remove(&form_id);
                 } else {
                     state
                         .cells
@@ -66,6 +70,14 @@ pub(crate) fn walk_container(
                     state
                         .cell_metadata
                         .insert(form_id, parse_cell_metadata(&subs, resolver));
+                    state
+                        .cell_winning_plugins
+                        .insert(form_id, source_name.to_string());
+                    state
+                        .cell_provenance
+                        .entry(form_id)
+                        .or_default()
+                        .push(source_name.to_string());
                 }
             }
             "IMGS" => {

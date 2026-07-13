@@ -12,7 +12,9 @@ fn help_lists_the_supported_commands() {
     let output = run_cli(&["--help"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for command in ["prepare", "bake", "render", "view", "report", "script"] {
+    for command in [
+        "prepare", "bake", "render", "view", "report", "cells", "script",
+    ] {
         assert!(stdout.contains(command), "help should mention {command}");
     }
 }
