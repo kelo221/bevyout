@@ -54,7 +54,7 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
             bail!("image bufferView extends beyond GLB")
         }
         let data = &bytes[data_start..end];
-        if data.starts_with(b"\\x89PNG\\r\\n\\x1a\\n") && data.len() >= 24 {
+        if data.starts_with(b"\x89PNG\r\n\x1a\n") && data.len() >= 24 {
             let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
             let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
             if width <= 1 || height <= 1 {
@@ -78,24 +78,18 @@ pub(crate) fn validate_asset_cache_pair(glb: &Path, physics: &Path) -> Result<()
 }
 
 pub(crate) fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
-    let mut out = String::from("[");
-    for (index, job) in jobs.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(&format!(
-            "{{\"input\":\"{}\",\"output\":\"{}\",\"physics_output\":\"{}\",\"model\":\"{}\",\"conversion\":\"{}\"}}",
-            json_escape(&job.input.to_string_lossy()),
-            json_escape(&job.output.to_string_lossy()),
-            json_escape(&job.physics_output.to_string_lossy()),
-            json_escape(&job.model),
-            job.conversion.profile_tag(),
-        ));
-    }
-    out.push(']');
-    out
-}
-
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    serde_json::Value::Array(
+        jobs.iter()
+            .map(|job| {
+                serde_json::json!({
+                    "input": job.input.to_string_lossy(),
+                    "output": job.output.to_string_lossy(),
+                    "physics_output": job.physics_output.to_string_lossy(),
+                    "model": job.model,
+                    "conversion": job.conversion.profile_tag(),
+                })
+            })
+            .collect(),
+    )
+    .to_string()
 }

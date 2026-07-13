@@ -39,14 +39,16 @@ pub(crate) fn convert_staged_textures(
         let installed = PathBuf::from(r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe");
         if installed.exists() {
             Some(installed)
-        } else if Command::new("magick.exe")
-            .arg("-version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        {
-            Some(PathBuf::from("magick.exe"))
         } else {
-            None
+            ["magick.exe", "magick"]
+                .into_iter()
+                .find(|name| {
+                    Command::new(name)
+                        .arg("-version")
+                        .output()
+                        .is_ok_and(|output| output.status.success())
+                })
+                .map(PathBuf::from)
         }
     };
     let Some(converter) = converter else {
