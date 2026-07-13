@@ -206,6 +206,30 @@ fn toggle_pipboy_on_tab(
     requests.write(RequestStateTransition::Modal(target));
 }
 
+/// Logs every applied state change (F35.8 diagnostics); rejected requests
+/// are logged by `apply_state_transition_requests`.
+fn log_state_transitions(
+    mut app_transitions: MessageReader<StateTransitionEvent<AppState>>,
+    mut modal_transitions: MessageReader<StateTransitionEvent<GameplayModal>>,
+) {
+    for transition in app_transitions.read() {
+        if transition.exited != transition.entered {
+            info!(
+                "app state: {:?} -> {:?}",
+                transition.exited, transition.entered
+            );
+        }
+    }
+    for transition in modal_transitions.read() {
+        if transition.exited != transition.entered {
+            info!(
+                "gameplay modal: {:?} -> {:?}",
+                transition.exited, transition.entered
+            );
+        }
+    }
+}
+
 /// Paused freezes gameplay time; exiting resumes it (F35.7).
 fn pause_virtual_time(mut time: ResMut<Time<Virtual>>) {
     time.pause();
@@ -236,7 +260,14 @@ impl Plugin for AppStatePlugin {
             .init_state::<GameplayModal>()
             .add_message::<RequestStateTransition>()
             .init_resource::<ButtonInput<KeyCode>>()
-            .add_systems(Update, (toggle_paused_on_escape, toggle_pipboy_on_tab))
+            .add_systems(
+                Update,
+                (
+                    toggle_paused_on_escape,
+                    toggle_pipboy_on_tab,
+                    log_state_transitions,
+                ),
+            )
             .add_systems(PostUpdate, apply_state_transition_requests)
             .add_systems(OnEnter(GameplayModal::Paused), pause_virtual_time)
             .add_systems(OnExit(GameplayModal::Paused), resume_virtual_time);

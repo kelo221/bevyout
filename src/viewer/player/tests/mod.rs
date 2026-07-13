@@ -84,13 +84,13 @@ fn camera_vertical_smoothing_resets_for_air_landings_and_discontinuities() {
 }
 
 #[test]
-fn tab_toggle_is_edge_triggered() {
+fn camera_toggle_is_edge_triggered() {
     let mut keys = ButtonInput::<KeyCode>::default();
-    assert!(!tab_pressed(&keys));
-    keys.press(KeyCode::Tab);
-    assert!(tab_pressed(&keys));
+    assert!(!camera_toggle_pressed(&keys));
+    keys.press(KeyCode::KeyV);
+    assert!(camera_toggle_pressed(&keys));
     keys.clear();
-    assert!(!tab_pressed(&keys));
+    assert!(!camera_toggle_pressed(&keys));
 }
 
 #[test]

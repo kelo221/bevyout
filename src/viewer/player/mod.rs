@@ -402,7 +402,7 @@ pub(crate) fn toggle_camera_mode(
     mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
     players: Query<&Transform, With<FpsPlayer>>,
 ) {
-    if !tab_pressed(&keys) {
+    if !camera_toggle_pressed(&keys) {
         return;
     }
 
@@ -448,7 +448,7 @@ pub(crate) fn toggle_camera_mode(
             commands.entity(camera_entity).insert(ChildOf(player));
             state.mode = CameraMode::Fps;
             state.player = Some(player);
-            info!("camera mode: FPS player (Tab to return to free camera)");
+            info!("camera mode: FPS player (V to return to free camera)");
         }
         CameraMode::Fps => {
             let Some(player_entity) = state.player else {
@@ -479,7 +479,7 @@ pub(crate) fn toggle_camera_mode(
             commands.entity(player_entity).despawn();
             state.mode = CameraMode::Free;
             state.player = None;
-            info!("camera mode: free camera (Tab to enter FPS player)");
+            info!("camera mode: free camera (V to enter FPS player)");
         }
     }
 }

@@ -179,7 +179,7 @@ pub(crate) fn spawn_prepared_scene(
         focus,
     );
     info!(
-        "camera controls: Tab toggles FPS player/free camera, Esc releases cursor, left click captures cursor"
+        "controls: V toggles FPS player/free camera, Tab opens Pip-Boy, Esc pauses and releases cursor, left click captures cursor"
     );
 }
 
