@@ -30,3 +30,20 @@ fn malformed_bake_arguments_are_rejected_by_clap() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("batch chunk size"));
 }
+
+#[test]
+fn agent_port_requires_the_opt_in_bridge() {
+    let output = run_cli(&["render", "SmokeCell", "--agent-port", "15703"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("agent-bridge"), "stderr was: {stderr}");
+}
+
+#[test]
+fn viewer_help_describes_the_agent_bridge() {
+    let output = run_cli(&["view", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("agent-bridge"));
+    assert!(stdout.contains("agent-port"));
+}

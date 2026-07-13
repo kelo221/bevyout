@@ -2,5 +2,8 @@
   "extensions": {
     ".md": "yaml",
     ".markdown": "yaml"
-  }
+  },
+  "include": [
+    "GECK-Notes/markdown/**",
+  ]
 }

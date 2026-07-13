@@ -6,3 +6,4 @@ render_diagnostics.csv
 render_timings.csv
 cpu_trace_small.json
 .DS_Store
+tools/bevyout-mcp/node_modules/**

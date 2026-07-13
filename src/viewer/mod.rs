@@ -39,6 +39,7 @@ mod interaction;
 mod openmw_player;
 mod player;
 
+mod agent_bridge;
 mod app;
 mod controls;
 mod diagnostics;
@@ -55,7 +56,12 @@ const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
 
 pub fn view(args: ViewArgs) -> Result<()> {
-    run_view(args.manifest, args.disable_physics, args.trace_seconds)
+    run_view(
+        args.manifest,
+        args.disable_physics,
+        args.trace_seconds,
+        args.agent_bridge.then_some(args.agent_port),
+    )
 }
 
 pub fn render(args: RenderArgs) -> Result<()> {
@@ -109,7 +115,12 @@ pub fn render(args: RenderArgs) -> Result<()> {
             })?;
         }
     }
-    run_view(manifest_path, args.disable_physics, args.trace_seconds)
+    run_view(
+        manifest_path,
+        args.disable_physics,
+        args.trace_seconds,
+        args.agent_bridge.then_some(args.agent_port),
+    )
 }
 
 fn read_manifest(manifest_path: &Path) -> Result<PreparedSceneManifest> {

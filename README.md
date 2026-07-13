@@ -46,6 +46,47 @@ cargo run-dev -- prepare SuperDuperMart
 cargo run-dev -- render SuperDuperMart
 ```
 
+### Agent bridge
+
+The viewer can expose its live ECS to local agents through Bevy Remote
+Protocol. The bridge is opt-in and listens only on loopback:
+
+```powershell
+cargo run-dev -- render SuperDuperMart --agent-bridge
+```
+
+The repository includes a Bun/FastMCP stdio adapter in
+`tools/bevyout-mcp`. It is registered as `bevyout` in the local Codex MCP
+configuration and can also be started directly:
+
+```powershell
+bun run tools/bevyout-mcp/src/server.ts
+```
+
+The adapter can attach to an existing viewer or launch one, inspect compact
+scene snapshots and reflected ECS data, call raw Bevy Remote Protocol methods
+for entity/resource mutation, watch events, and return a primary-window
+screenshot as MCP image content. Changes are runtime-only and are not written
+back to prepared manifests or source assets.
+
+Install the MCP entry for Codex, Claude Desktop, and Claude Code with:
+
+```powershell
+bun run tools/bevyout-mcp/src/install.ts --all
+```
+
+Use `--codex`, `--claude-desktop`, or `--claude-code` to install one target,
+and add `--dry-run` to preview changes. The installer updates only the
+`bevyout` entry, preserves unrelated settings and servers, and creates a
+timestamped `.bevyout` backup before changing an existing configuration file.
+Codex uses `$CODEX_HOME/config.toml` (or `~/.codex/config.toml`), Claude
+Desktop uses its platform-specific `claude_desktop_config.json`, and Claude
+Code uses the repository-root `.mcp.json`.
+
+The shared agent reference is [skills.md](skills.md). It is intentionally a
+manual reference rather than a native `AGENTS.md` or `CLAUDE.md` file, so an
+agent should read it explicitly for Bevy scene tasks.
+
 `render` is also the interactive entry point for a new cell. If the prepared
 scene is missing, it asks whether to import it (the same operation as
 `prepare SuperDuperMart`). If the scene has no irradiance bake, it asks whether

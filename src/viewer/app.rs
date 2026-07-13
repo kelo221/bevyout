@@ -4,6 +4,7 @@ pub(crate) fn run_view(
     manifest_path: PathBuf,
     disable_physics: bool,
     trace_seconds: Option<f32>,
+    agent_port: Option<u16>,
 ) -> Result<()> {
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
@@ -38,6 +39,9 @@ pub(crate) fn run_view(
         AutoExposurePlugin,
     ));
     app.insert_resource(physics_assets);
+    if let Some(port) = agent_port {
+        agent_bridge::install(&mut app, port);
+    }
     player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);

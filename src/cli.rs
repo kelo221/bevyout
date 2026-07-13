@@ -72,6 +72,12 @@ pub struct ViewArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Expose the running viewer to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]
@@ -103,6 +109,12 @@ pub struct RenderArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Expose the running viewer to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]

@@ -7,7 +7,7 @@ edition = "2024"
 # WAV covers the ambient and interaction clips staged by the importer. MP3
 # metadata is retained in manifests, but Bevy's MP3 feature currently resolves
 # to an unavailable symphonia patch in this workspace's offline cache.
-bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures"] }
+bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "bevy_remote"] }
 blend = { path = "third_party/blend" }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 esplugin = "6.1.4"
