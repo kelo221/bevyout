@@ -1,23 +1,24 @@
-use avian3d::prelude::*;
 use bevy::color::LinearRgba;
 use bevy::gltf::{GltfExtras, GltfMeshName};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::*;
-use bevy::render::mesh::Mesh;
+use bevy::render::mesh::{Indices, Mesh, VertexAttributeValues};
+use bevy::transform::TransformSystems;
 use bevy::window::{CursorGrabMode, CursorOptions};
-use bevy_tnua::builtins::{
-    TnuaBuiltinJump, TnuaBuiltinJumpConfig, TnuaBuiltinWalk, TnuaBuiltinWalkConfig,
+use bevy_boxddd::boxddd::{
+    self, BodyDef, BodyId, BodyType, CollisionPlane, Filter, ShapeDef, ShapeId,
 };
-use bevy_tnua::prelude::*;
-use bevy_tnua_avian3d::prelude::*;
+use bevy_boxddd::prelude::{BoxdddPhysicsContext, BoxdddPhysicsPlugin, BoxdddPhysicsSettings};
+use bevy_boxddd::resources::BoxdddErrorPolicy;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use super::FlyCamera;
 use super::audio::{PlayFootstep, PlayLanding};
 use super::openmw_player::{
-    DIRECTIONAL_JUMP_HEIGHT, DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState,
-    STATIONARY_JUMP_HEIGHT, air_control_motion, jump_profile,
+    DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState, air_control_motion,
+    jump_profile,
 };
 
 pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
@@ -27,13 +28,13 @@ const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 const FOOTSTEP_DISTANCE: f32 = 1.45;
-
-#[derive(TnuaScheme)]
-#[scheme(basis = TnuaBuiltinWalk)]
-pub(crate) enum ControlScheme {
-    Jump(TnuaBuiltinJump),
-    DirectionalJump(TnuaBuiltinJump),
-}
+const MAX_SLIDE_PASSES: usize = 4;
+const STEP_HEIGHT: f32 = 0.30;
+const GROUND_SNAP_DISTANCE: f32 = 0.20;
+const WALKABLE_SLOPE_COS: f32 = 0.70710677;
+const WORLD_SOLID: u64 = 1;
+const SURFACE_HINT: u64 = 2;
+const PLAYER_QUERY: u64 = 4;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CameraMode {
@@ -67,6 +68,10 @@ pub(crate) struct FpsPlayer {
 #[derive(Component)]
 struct SceneColliderProcessed;
 
+/// Marker used by render diagnostics for both the player mover and static mesh bridge.
+#[derive(Component)]
+pub(crate) struct PhysicsCollider;
+
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FootstepSurface(pub(crate) Option<u32>);
 
@@ -89,6 +94,12 @@ impl Default for FootstepState {
     }
 }
 
+#[derive(Component, Debug, Default)]
+struct KccState {
+    velocity: Vec3,
+    grounded: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct CollisionExtras {
     #[serde(default)]
@@ -107,22 +118,27 @@ struct StaticCollisionStats {
     no_geometry_reported: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CollisionSurface {
+    authored: bool,
+    material: Option<u32>,
+}
+
+#[derive(Resource, Default)]
+struct StaticCollisionWorld {
+    body: Option<BodyId>,
+    surfaces: HashMap<ShapeId, CollisionSurface>,
+}
+
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub(crate) struct PhysicsDisabled(pub(crate) bool);
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
 type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
-type LocomotionQuery<'w> = (
-    Entity,
-    &'w Transform,
-    &'w LinearVelocity,
-    &'w TnuaController<ControlScheme>,
-    &'w mut LocomotionState,
-    &'w mut FootstepState,
-);
 type StaticCollisionQuery<'w> = (
     Entity,
     &'w Mesh3d,
+    &'w GlobalTransform,
     Option<&'w GltfMeshName>,
     Option<&'w MeshMaterial3d<StandardMaterial>>,
     Option<&'w GltfExtras>,
@@ -130,49 +146,28 @@ type StaticCollisionQuery<'w> = (
 );
 
 pub(crate) fn install(app: &mut App, disable_physics: bool) {
-    app.add_plugins((
-        PhysicsPlugins::default(),
-        TnuaControllerPlugin::<ControlScheme>::new(FixedUpdate),
-        TnuaAvian3dPlugin::new(FixedUpdate),
-    ))
-    .insert_resource(Gravity(Vec3::new(0.0, -GRAVITY, 0.0)))
+    app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
+        gravity: Vec3::new(0.0, -GRAVITY, 0.0),
+        error_policy: BoxdddErrorPolicy::MessageAndLog,
+        ..default()
+    }))
     .insert_resource(CameraModeState::default())
     .insert_resource(StaticCollisionStats::default())
+    .insert_resource(StaticCollisionWorld::default())
     .insert_resource(PhysicsDisabled(disable_physics))
-    .add_systems(Update, build_static_colliders.before(toggle_camera_mode))
     .add_systems(
-        FixedUpdate,
-        apply_player_controls.in_set(TnuaUserControlsSystems),
+        PostUpdate,
+        build_static_colliders.after(TransformSystems::Propagate),
     )
-    .add_systems(
-        Update,
-        pause_physics_in_free_camera.after(toggle_camera_mode),
-    )
+    .add_systems(FixedUpdate, apply_player_controls)
     .add_systems(Update, emit_landing_events.after(build_static_colliders))
     .add_systems(Update, emit_footsteps.after(emit_landing_events));
-}
-
-fn pause_physics_in_free_camera(
-    state: Res<CameraModeState>,
-    physics_disabled: Res<PhysicsDisabled>,
-    mut physics_time: ResMut<Time<Physics>>,
-) {
-    let should_pause = physics_disabled.0 || state.mode == CameraMode::Free;
-    if should_pause == physics_time.is_paused() {
-        return;
-    }
-    if should_pause {
-        physics_time.pause();
-    } else {
-        physics_time.unpause();
-    }
 }
 
 pub(crate) fn toggle_camera_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     mut state: ResMut<CameraModeState>,
-    mut control_scheme_configs: ResMut<Assets<ControlSchemeConfig>>,
     mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
     players: Query<&Transform, With<FpsPlayer>>,
 ) {
@@ -209,31 +204,13 @@ pub(crate) fn toggle_camera_mode(
                     FpsPlayer { yaw, pitch },
                     FootstepState::default(),
                     LocomotionState::default(),
+                    KccState::default(),
+                    PhysicsCollider,
                     Transform::from_translation(player_center)
                         .with_rotation(Quat::from_rotation_y(yaw)),
-                    RigidBody::Dynamic,
-                    Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT - CAPSULE_RADIUS * 2.0),
-                    TnuaController::<ControlScheme>::default(),
-                    TnuaConfig::<ControlScheme>(control_scheme_configs.add(ControlSchemeConfig {
-                        basis: TnuaBuiltinWalkConfig {
-                            speed: PLAYER_SPEED,
-                            float_height: CAPSULE_HEIGHT * 0.5 + 0.02,
-                            max_slope: 45.0_f32.to_radians(),
-                            ..default()
-                        },
-                        jump: openmw_jump_config(STATIONARY_JUMP_HEIGHT, 0.0),
-                        directional_jump: openmw_jump_config(
-                            DIRECTIONAL_JUMP_HEIGHT,
-                            DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE,
-                        ),
-                    })),
-                    TnuaAvian3dSensorShape(Collider::cylinder(CAPSULE_RADIUS * 0.96, 0.0)),
-                    LockedAxes::ROTATION_LOCKED,
                 ))
                 .id();
 
-            // EYE_HEIGHT is measured from the ground; the camera is parented
-            // to the capsule center, so use the eye-to-center offset locally.
             camera_transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
             camera_transform.rotation = Quat::from_rotation_x(pitch);
             commands.entity(camera_entity).insert(ChildOf(player));
@@ -308,26 +285,46 @@ pub(crate) fn fps_mouse_look(
 fn apply_player_controls(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<CameraModeState>,
+    physics_disabled: Res<PhysicsDisabled>,
+    time: Res<Time<Fixed>>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
     mut players: Query<(
         &FpsPlayer,
-        &mut TnuaController<ControlScheme>,
+        &mut Transform,
+        &mut KccState,
         &mut LocomotionState,
     )>,
 ) {
-    let Ok((player, mut controller, mut locomotion)) = players.single_mut() else {
+    let Ok((player, mut transform, mut kcc, mut locomotion)) = players.single_mut() else {
         return;
     };
-    controller.initiate_action_feeding();
     let jump_pressed = keys.pressed(KeyCode::Space);
     let jump_started = jump_pressed && !locomotion.jump_was_pressed();
     locomotion.set_jump_pressed(jump_pressed);
-    if state.mode != CameraMode::Fps {
-        controller.basis = TnuaBuiltinWalk {
-            desired_motion: Vec3::ZERO,
-            ..default()
-        };
+    if physics_disabled.0 || state.mode != CameraMode::Fps {
+        kcc.velocity = Vec3::ZERO;
+        kcc.grounded = false;
         return;
     }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+
+    let dt = time.delta_secs();
+    let mover = boxddd::Capsule::new(
+        [0.0, -(CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS), 0.0],
+        [0.0, CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS, 0.0],
+        CAPSULE_RADIUS,
+    );
+    let filter = boxddd::QueryFilter::new()
+        .category_bits(PLAYER_QUERY)
+        .mask_bits(WORLD_SOLID);
+    let origin = to_box_vec3(transform.translation);
+    let initial_planes = world
+        .collide_mover(origin, &mover, filter)
+        .unwrap_or_default();
+    let mut grounded = has_walkable_plane(&initial_planes);
+    kcc.grounded = grounded;
 
     let yaw = Quat::from_rotation_y(player.yaw);
     let mut input = Vec3::ZERO;
@@ -344,40 +341,126 @@ fn apply_player_controls(
         input -= Vec3::X;
     }
     let world_input = yaw * input;
-    let airborne = controller.is_airborne().unwrap_or(false);
-    controller.basis = TnuaBuiltinWalk {
-        desired_motion: air_control_motion(world_input, airborne),
-        ..default()
-    };
-    if jump_started && !airborne {
-        let (_height, direction) = jump_profile(world_input);
-        locomotion.mark_jump_started();
+    if jump_started && grounded {
+        let (height, direction) = jump_profile(world_input);
+        kcc.velocity.y = (2.0 * GRAVITY * height).sqrt();
         if let Some(direction) = direction {
-            controller.action(ControlScheme::DirectionalJump(TnuaBuiltinJump {
-                horizontal_displacement: Some(direction),
-                ..default()
-            }));
-        } else {
-            controller.action(ControlScheme::Jump(TnuaBuiltinJump::default()));
+            let airtime = 2.0 * kcc.velocity.y / GRAVITY;
+            kcc.velocity.x = direction.x * DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE / airtime;
+            kcc.velocity.z = direction.z * DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE / airtime;
+        }
+        locomotion.mark_jump_started();
+        grounded = false;
+    }
+
+    let desired = air_control_motion(world_input, !grounded) * PLAYER_SPEED;
+    if grounded {
+        kcc.velocity.x = desired.x;
+        kcc.velocity.z = desired.z;
+        if kcc.velocity.y < 0.0 {
+            kcc.velocity.y = 0.0;
+        }
+    } else {
+        let blend = (dt * 8.0).min(1.0);
+        kcc.velocity.x = kcc.velocity.x.lerp(desired.x, blend);
+        kcc.velocity.z = kcc.velocity.z.lerp(desired.z, blend);
+        kcc.velocity.y -= GRAVITY * dt;
+    }
+
+    let desired_delta = to_box_vec3(kcc.velocity * dt);
+    let (mut position, planes) = move_mover(world, origin, &mover, desired_delta, filter);
+    grounded = has_walkable_plane(&planes);
+    if !grounded && kcc.velocity.y <= 0.0 {
+        let snap = to_box_vec3(Vec3::new(0.0, -GROUND_SNAP_DISTANCE, 0.0));
+        let fraction = world
+            .cast_mover(position, &mover, snap, filter)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        if fraction < 1.0 {
+            position = add_box_vec3(position, scale_box_vec3(snap, fraction));
+            grounded = true;
         }
     }
+    if grounded && kcc.velocity.y < 0.0 {
+        kcc.velocity.y = 0.0;
+    }
+    kcc.grounded = grounded;
+    transform.translation = from_box_vec3(position);
 }
 
-fn openmw_jump_config(height: f32, horizontal_distance: f32) -> TnuaBuiltinJumpConfig {
-    TnuaBuiltinJumpConfig {
-        height,
-        upslope_extra_gravity: 0.0,
-        takeoff_extra_gravity: 0.0,
-        takeoff_above_velocity: f32::INFINITY,
-        fall_extra_gravity: 0.0,
-        shorten_extra_gravity: 0.0,
-        peak_prevention_at_upward_velocity: 0.0,
-        peak_prevention_extra_gravity: 0.0,
-        reschedule_cooldown: None,
-        input_buffer_time: 0.0,
-        horizontal_distance,
-        disable_force_forward_after_peak: true,
+fn move_mover(
+    world: &mut boxddd::World,
+    mut position: boxddd::Vec3,
+    mover: &boxddd::Capsule,
+    mut remaining: boxddd::Vec3,
+    filter: boxddd::QueryFilter,
+) -> (boxddd::Vec3, Vec<boxddd::MoverPlane>) {
+    for _ in 0..MAX_SLIDE_PASSES {
+        if box_vec_length_squared(remaining) <= f32::EPSILON {
+            break;
+        }
+        let fraction = world
+            .cast_mover(position, mover, remaining, filter)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        position = add_box_vec3(position, scale_box_vec3(remaining, fraction));
+        remaining = scale_box_vec3(remaining, 1.0 - fraction);
+        let planes = world
+            .collide_mover(position, mover, filter)
+            .unwrap_or_default();
+        if planes.is_empty() {
+            break;
+        }
+        if planes
+            .iter()
+            .any(|plane| plane.plane.normal.y < WALKABLE_SLOPE_COS)
+            && (remaining.x * remaining.x + remaining.z * remaining.z) > f32::EPSILON
+            && let Some(stepped) = try_step_up(world, position, mover, remaining, filter)
+        {
+            position = stepped;
+            break;
+        }
+        let mut solver_planes = planes
+            .iter()
+            .filter_map(|plane| CollisionPlane::new(plane.plane, STEP_HEIGHT, true).ok())
+            .collect::<Vec<_>>();
+        if let Ok(correction) = boxddd::solve_planes(boxddd::Vec3::ZERO, &mut solver_planes) {
+            position = add_box_vec3(position, correction.delta);
+        }
+        remaining = boxddd::clip_vector(remaining, &solver_planes).unwrap_or(boxddd::Vec3::ZERO);
+        if fraction >= 1.0 && box_vec_length_squared(remaining) <= f32::EPSILON {
+            break;
+        }
     }
+    let planes = world
+        .collide_mover(position, mover, filter)
+        .unwrap_or_default();
+    (position, planes)
+}
+
+fn try_step_up(
+    world: &mut boxddd::World,
+    position: boxddd::Vec3,
+    mover: &boxddd::Capsule,
+    remaining: boxddd::Vec3,
+    filter: boxddd::QueryFilter,
+) -> Option<boxddd::Vec3> {
+    let up = boxddd::Vec3::new(0.0, STEP_HEIGHT, 0.0);
+    if world.cast_mover(position, mover, up, filter).ok()? < 1.0 {
+        return None;
+    }
+    let elevated = add_box_vec3(position, up);
+    let horizontal = boxddd::Vec3::new(remaining.x, 0.0, remaining.z);
+    let horizontal_fraction = world.cast_mover(elevated, mover, horizontal, filter).ok()?;
+    let elevated = add_box_vec3(elevated, scale_box_vec3(horizontal, horizontal_fraction));
+    let down = boxddd::Vec3::new(0.0, -STEP_HEIGHT, 0.0);
+    let down_fraction = world.cast_mover(elevated, mover, down, filter).ok()?;
+    if down_fraction >= 1.0 {
+        return None;
+    }
+    let stepped = add_box_vec3(elevated, scale_box_vec3(down, down_fraction));
+    let planes = world.collide_mover(stepped, mover, filter).ok()?;
+    has_walkable_plane(&planes).then_some(stepped)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,58 +471,43 @@ fn build_static_colliders(
     physics_disabled: Res<PhysicsDisabled>,
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<StaticCollisionStats>,
+    mut collision_world: ResMut<StaticCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
     query: Query<StaticCollisionQuery<'_>, Without<SceneColliderProcessed>>,
     parents: Query<&GltfExtras>,
 ) {
     if physics_disabled.0 {
         return;
     }
-    for (entity, mesh_handle, name, material_handle, extras, child_of) in &query {
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let body = match collision_world.body {
+        Some(body) => body,
+        None => {
+            let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+            collision_world.body = Some(body);
+            body
+        }
+    };
+
+    for (entity, mesh_handle, global_transform, name, material_handle, extras, child_of) in &query {
         let name = name.map(|name| name.0.as_str()).unwrap_or("<unnamed>");
         let extras = extras
             .or_else(|| child_of.and_then(|child| parents.get(child.0).ok()))
             .and_then(parse_collision_extras);
-        if let Some(extras) = extras.as_ref().filter(|extras| extras.bevyout_collision) {
-            let Some(mesh) = meshes.get(&mesh_handle.0) else {
-                continue;
-            };
-            let Some(collider) = Collider::trimesh_from_mesh(mesh) else {
-                commands.entity(entity).insert(SceneColliderProcessed);
-                stats.processed += 1;
-                stats.skipped += 1;
-                continue;
-            };
-            let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
-            commands.entity(entity).insert((
-                RigidBody::Static,
-                Sensor,
-                collider,
-                FootstepSurface(extras.bevyout_havok_material),
-                Visibility::Hidden,
-                SceneColliderProcessed,
-            ));
-            stats.processed += 1;
-            stats.built += 1;
-            stats.triangles += triangles;
-            continue;
-        }
-        if is_non_collidable_name(name) {
-            commands.entity(entity).insert(SceneColliderProcessed);
-            stats.processed += 1;
-            stats.skipped += 1;
-            continue;
-        }
+        let authored = extras.as_ref().filter(|extras| extras.bevyout_collision);
 
-        let Some(material_handle) = material_handle else {
-            commands.entity(entity).insert(SceneColliderProcessed);
-            stats.processed += 1;
-            stats.skipped += 1;
-            continue;
+        let should_build = if authored.is_some() {
+            true
+        } else if is_non_collidable_name(name) {
+            false
+        } else {
+            material_handle
+                .and_then(|handle| materials.get(&handle.0))
+                .is_some_and(is_collidable_material)
         };
-        let Some(material) = materials.get(&material_handle.0) else {
-            continue;
-        };
-        if !is_collidable_material(material) {
+        if !should_build {
             commands.entity(entity).insert(SceneColliderProcessed);
             stats.processed += 1;
             stats.skipped += 1;
@@ -449,19 +517,43 @@ fn build_static_colliders(
         let Some(mesh) = meshes.get(&mesh_handle.0) else {
             continue;
         };
-        let Some(collider) = Collider::trimesh_from_mesh(mesh) else {
+        let authored = authored.is_some();
+        let material = extras
+            .as_ref()
+            .and_then(|extras| extras.bevyout_havok_material);
+        let category = if authored { SURFACE_HINT } else { WORLD_SOLID };
+        let sensor = authored;
+        let Some((shape_id, triangles)) = create_mesh_shape(
+            world,
+            body,
+            mesh,
+            *global_transform,
+            category,
+            sensor,
+            material,
+        ) else {
             commands.entity(entity).insert(SceneColliderProcessed);
             stats.processed += 1;
             stats.skipped += 1;
             continue;
         };
-        let triangles = mesh.indices().map(|indices| indices.len() / 3).unwrap_or(0);
-        commands.entity(entity).insert((
-            RigidBody::Static,
-            collider,
-            FootstepSurface(None),
-            SceneColliderProcessed,
-        ));
+        collision_world
+            .surfaces
+            .insert(shape_id, CollisionSurface { authored, material });
+        if authored {
+            commands.entity(entity).insert((
+                FootstepSurface(material),
+                Visibility::Hidden,
+                SceneColliderProcessed,
+                PhysicsCollider,
+            ));
+        } else {
+            commands.entity(entity).insert((
+                FootstepSurface(None),
+                SceneColliderProcessed,
+                PhysicsCollider,
+            ));
+        }
         stats.processed += 1;
         stats.built += 1;
         stats.triangles += triangles;
@@ -470,18 +562,93 @@ fn build_static_colliders(
     state.collisions_ready = stats.built > 0;
     if stats.processed > stats.last_reported_processed {
         info!(
-            "scene collision build: {} colliders, {} triangles, {} skipped",
+            "BoxDDD scene collision build: {} colliders, {} triangles, {} skipped",
             stats.built, stats.triangles, stats.skipped
         );
         stats.last_reported_processed = stats.processed;
     }
     if stats.processed > 0 && stats.built == 0 && !stats.no_geometry_reported {
         warn!(
-            "scene collision build produced no usable static geometry; FPS mode remains unavailable (processed {}, skipped {})",
+            "BoxDDD scene collision build produced no usable static geometry; FPS mode remains unavailable (processed {}, skipped {})",
             stats.processed, stats.skipped
         );
         stats.no_geometry_reported = true;
     }
+}
+
+fn create_mesh_shape(
+    world: &mut boxddd::World,
+    body: BodyId,
+    mesh: &Mesh,
+    transform: GlobalTransform,
+    category: u64,
+    sensor: bool,
+    material: Option<u32>,
+) -> Option<(ShapeId, usize)> {
+    let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION)? {
+        VertexAttributeValues::Float32x3(values) => values,
+        _ => return None,
+    };
+    if positions.len() < 3 {
+        return None;
+    }
+    let indices = match mesh.indices() {
+        Some(Indices::U16(values)) => values.iter().map(|index| u32::from(*index)).collect(),
+        Some(Indices::U32(values)) => values.clone(),
+        None => (0..positions.len() as u32).collect(),
+    };
+    let triangles = indices.len() / 3;
+    if triangles == 0 {
+        return None;
+    }
+    let vertices = positions
+        .iter()
+        .map(|position| {
+            let point = transform.transform_point(Vec3::from_array(*position));
+            boxddd::Vec3::new(point.x, point.y, point.z)
+        })
+        .collect::<Vec<_>>();
+    let mut triangle_indices = Vec::with_capacity(triangles * 3);
+    for triangle in indices.chunks_exact(3) {
+        if triangle
+            .iter()
+            .all(|index| (*index as usize) < vertices.len())
+        {
+            triangle_indices.extend(triangle.iter().map(|index| *index as i32));
+        }
+    }
+    if triangle_indices.is_empty() {
+        return None;
+    }
+    let triangle_count = triangle_indices.len() / 3;
+    let mesh_data = boxddd::MeshData::builder(vertices, triangle_indices)
+        .build()
+        .ok()?;
+    let filter = Filter {
+        category_bits: category,
+        mask_bits: if sensor {
+            PLAYER_QUERY | SURFACE_HINT
+        } else {
+            PLAYER_QUERY
+        },
+        group_index: 0,
+    };
+    let shape_def = ShapeDef::builder()
+        .density(0.0)
+        .friction(0.8)
+        .filter(filter)
+        .sensor(sensor)
+        .user_material_id(u64::from(material.unwrap_or(0)))
+        .build();
+    let shape_id = world
+        .try_create_mesh_shape(
+            body,
+            &shape_def,
+            mesh_data,
+            boxddd::Vec3::new(1.0, 1.0, 1.0),
+        )
+        .ok()?;
+    Some((shape_id, triangle_count))
 }
 
 fn parse_collision_extras(extras: &GltfExtras) -> Option<CollisionExtras> {
@@ -490,14 +657,21 @@ fn parse_collision_extras(extras: &GltfExtras) -> Option<CollisionExtras> {
 
 fn emit_landing_events(
     state: Res<CameraModeState>,
-    spatial_query: SpatialQuery,
-    surfaces: Query<&FootstepSurface>,
+    context: NonSend<BoxdddPhysicsContext>,
+    collision_world: Res<StaticCollisionWorld>,
     mut landings: MessageWriter<PlayLanding>,
-    mut players: Query<LocomotionQuery<'_>, With<FpsPlayer>>,
+    mut players: Query<
+        (
+            Entity,
+            &Transform,
+            &KccState,
+            &mut LocomotionState,
+            &mut FootstepState,
+        ),
+        With<FpsPlayer>,
+    >,
 ) {
-    let Ok((entity, transform, velocity, controller, mut locomotion, mut footstep)) =
-        players.single_mut()
-    else {
+    let Ok((entity, transform, kcc, mut locomotion, mut footstep)) = players.single_mut() else {
         return;
     };
     if state.mode != CameraMode::Fps {
@@ -507,12 +681,9 @@ fn emit_landing_events(
         return;
     }
 
-    let controller_airborne = controller.is_airborne().unwrap_or(false);
-    let surface = probe_surface(entity, transform.translation, &spatial_query, &surfaces);
-    // Tnua can briefly report grounded when a jump is stopped by a ceiling. Do
-    // not consume the jump until the ground probe also confirms a real landing.
-    let airborne = controller_airborne || surface.is_none();
-    let Some(impact) = locomotion.update(transform.translation, velocity.0.y, airborne) else {
+    let surface = probe_surface(entity, transform.translation, &context, &collision_world);
+    let airborne = !kcc.grounded || surface.is_none();
+    let Some(impact) = locomotion.update(transform.translation, kcc.velocity.y, airborne) else {
         return;
     };
     let Some(surface) = surface else {
@@ -529,12 +700,12 @@ fn emit_landing_events(
 
 fn emit_footsteps(
     state: Res<CameraModeState>,
-    spatial_query: SpatialQuery,
-    surfaces: Query<&FootstepSurface>,
+    context: NonSend<BoxdddPhysicsContext>,
+    collision_world: Res<StaticCollisionWorld>,
     mut footsteps: MessageWriter<PlayFootstep>,
-    mut players: Query<(Entity, &Transform, &LinearVelocity, &mut FootstepState), With<FpsPlayer>>,
+    mut players: Query<(Entity, &Transform, &KccState, &mut FootstepState), With<FpsPlayer>>,
 ) {
-    let Ok((entity, transform, velocity, mut footstep)) = players.single_mut() else {
+    let Ok((entity, transform, kcc, mut footstep)) = players.single_mut() else {
         return;
     };
     if state.mode != CameraMode::Fps {
@@ -550,12 +721,11 @@ fn emit_footsteps(
     }
     let delta = position - footstep.last_position;
     footstep.last_position = position;
-
-    let Some(surface) = probe_surface(entity, position, &spatial_query, &surfaces) else {
+    let Some(surface) = probe_surface(entity, position, &context, &collision_world) else {
         footstep.distance = 0.0;
         return;
     };
-    if velocity.0.y.abs() > 2.5 {
+    if kcc.velocity.y.abs() > 2.5 || !kcc.grounded {
         footstep.distance = 0.0;
         return;
     }
@@ -577,30 +747,62 @@ fn emit_footsteps(
 }
 
 fn probe_surface(
-    entity: Entity,
+    _entity: Entity,
     position: Vec3,
-    spatial_query: &SpatialQuery,
-    surfaces: &Query<'_, '_, &FootstepSurface>,
+    context: &BoxdddPhysicsContext,
+    collision_world: &StaticCollisionWorld,
 ) -> Option<&'static str> {
-    let origin = position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06);
-    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
-    let hits = spatial_query.ray_hits(origin, Dir3::NEG_Y, 0.24, 16, true, &filter);
-    let authored_hit = hits.iter().filter(|hit| {
-        surfaces
-            .get(hit.entity)
-            .is_ok_and(|surface| surface.0.is_some())
+    let world = context.world()?;
+    let origin = to_box_vec3(position - Vec3::Y * (CAPSULE_HEIGHT * 0.5 - 0.06));
+    let translation = to_box_vec3(Vec3::new(0.0, -0.24, 0.0));
+    let filter = boxddd::QueryFilter::new()
+        .category_bits(PLAYER_QUERY)
+        .mask_bits(WORLD_SOLID | SURFACE_HINT);
+    let hits = world.cast_ray(origin, translation, filter).ok()?;
+    let authored = hits.iter().filter(|hit| {
+        collision_world
+            .surfaces
+            .get(&hit.shape_id)
+            .is_some_and(|surface| surface.authored)
     });
-    let hit = authored_hit
-        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+    let hit = authored
+        .min_by(|left, right| left.fraction.total_cmp(&right.fraction))
         .or_else(|| {
             hits.iter()
-                .min_by(|left, right| left.distance.total_cmp(&right.distance))
+                .min_by(|left, right| left.fraction.total_cmp(&right.fraction))
         })?;
-    Some(
-        surfaces
-            .get(hit.entity)
-            .map_or("concrete", |surface| surface_family(surface.0)),
-    )
+    let material = collision_world
+        .surfaces
+        .get(&hit.shape_id)
+        .and_then(|surface| surface.material)
+        .or_else(|| (hit.user_material_id != 0).then_some(hit.user_material_id as u32));
+    Some(surface_family(material))
+}
+
+fn has_walkable_plane(planes: &[boxddd::MoverPlane]) -> bool {
+    planes
+        .iter()
+        .any(|plane| plane.plane.normal.y >= WALKABLE_SLOPE_COS)
+}
+
+fn to_box_vec3(value: Vec3) -> boxddd::Vec3 {
+    boxddd::Vec3::new(value.x, value.y, value.z)
+}
+
+fn from_box_vec3(value: boxddd::Vec3) -> Vec3 {
+    Vec3::new(value.x, value.y, value.z)
+}
+
+fn add_box_vec3(left: boxddd::Vec3, right: boxddd::Vec3) -> boxddd::Vec3 {
+    boxddd::Vec3::new(left.x + right.x, left.y + right.y, left.z + right.z)
+}
+
+fn scale_box_vec3(value: boxddd::Vec3, scalar: f32) -> boxddd::Vec3 {
+    boxddd::Vec3::new(value.x * scalar, value.y * scalar, value.z * scalar)
+}
+
+fn box_vec_length_squared(value: boxddd::Vec3) -> f32 {
+    value.x * value.x + value.y * value.y + value.z * value.z
 }
 
 fn surface_family(material: Option<u32>) -> &'static str {
@@ -653,7 +855,6 @@ fn tab_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use avian3d::math::Vector;
     use bevy::mesh::MeshPlugin;
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
@@ -732,48 +933,41 @@ mod tests {
     }
 
     #[test]
-    fn avian_capsule_falls_and_lands_on_static_floor() {
+    fn boxddd_capsule_cast_stops_on_static_floor() {
+        use bevy_boxddd::boxddd::{
+            BoxHull, Capsule, QueryFilter, Vec3 as BoxVec3, World, WorldDef,
+        };
+
+        let mut world = World::new(WorldDef::default()).expect("BoxDDD world");
+        let floor = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        world.create_hull_shape(floor, &ShapeDef::default(), &BoxHull::new(10.0, 0.5, 10.0));
+        let mover = Capsule::new([0.0, -0.55, 0.0], [0.0, 0.55, 0.0], CAPSULE_RADIUS);
+        let start = BoxVec3::new(0.0, 5.0, 0.0);
+        let fraction = world
+            .cast_mover(
+                start,
+                &mover,
+                BoxVec3::new(0.0, -10.0, 0.0),
+                QueryFilter::default(),
+            )
+            .expect("capsule cast");
+        assert!(fraction < 1.0);
+    }
+
+    #[test]
+    fn boxddd_plugin_initializes_native_context() {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
             TransformPlugin,
             AssetPlugin::default(),
             MeshPlugin,
-            PhysicsPlugins::default(),
+            BoxdddPhysicsPlugin::default(),
         ))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
             1.0 / 60.0,
         )));
-        app.finish();
-        assert!(
-            app.world().contains_resource::<Messages<CollisionStart>>(),
-            "Avian collision messages should be initialized"
-        );
-        let player = app
-            .world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                Collider::capsule(CAPSULE_RADIUS, CAPSULE_HEIGHT - CAPSULE_RADIUS * 2.0),
-                Position(Vector::new(0.0, 5.0, 0.0)),
-                LockedAxes::ROTATION_LOCKED,
-            ))
-            .id();
-        app.world_mut().spawn((
-            RigidBody::Static,
-            Collider::cuboid(20.0, 1.0, 20.0),
-            Position(Vector::ZERO),
-        ));
-
-        for _ in 0..180 {
-            app.update();
-        }
-
-        let position = app
-            .world()
-            .get::<Position>(player)
-            .expect("the dynamic body has a physics position")
-            .0;
-        assert!(position.y < 5.0);
-        assert!(position.y > 0.5);
+        app.update();
+        assert!(app.world().get_non_send::<BoxdddPhysicsContext>().is_some());
     }
 }

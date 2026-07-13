@@ -369,7 +369,7 @@ struct RenderReportParams<'w, 's> {
     physics_disabled: Res<'w, player::PhysicsDisabled>,
     unlit_mode: Res<'w, UnlitMode>,
     lights_disabled: Res<'w, LightsDisabled>,
-    colliders: Query<'w, 's, Entity, With<avian3d::prelude::Collider>>,
+    colliders: Query<'w, 's, Entity, With<player::PhysicsCollider>>,
 }
 
 fn save_render_report(params: RenderReportParams) {

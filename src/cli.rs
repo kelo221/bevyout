@@ -66,7 +66,7 @@ pub(crate) struct ViewArgs {
     /// Prepared scene manifest to open.
     #[arg(long)]
     pub(crate) manifest: PathBuf,
-    /// Skip Avian collider construction for render-only performance testing.
+    /// Skip BoxDDD collider construction for render-only performance testing.
     #[arg(long)]
     pub(crate) disable_physics: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
@@ -97,7 +97,7 @@ pub(crate) struct RenderArgs {
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Skip Avian collider construction for render-only performance testing.
+    /// Skip BoxDDD collider construction for render-only performance testing.
     #[arg(long)]
     pub(crate) disable_physics: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
