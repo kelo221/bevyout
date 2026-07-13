@@ -73,6 +73,9 @@ pub(crate) struct CameraModeState {
     pub(crate) mode: CameraMode,
     pub(crate) player: Option<Entity>,
     pub(crate) collisions_ready: bool,
+    /// FPS is the default: enter it automatically once collision is ready,
+    /// unless the user has already toggled the camera manually.
+    pub(crate) auto_enter: bool,
 }
 
 impl Default for CameraModeState {
@@ -81,6 +84,7 @@ impl Default for CameraModeState {
             mode: CameraMode::Free,
             player: None,
             collisions_ready: false,
+            auto_enter: true,
         }
     }
 }
@@ -395,6 +399,65 @@ fn update_step_debug_hud(
     );
 }
 
+fn enter_fps_mode(
+    commands: &mut Commands,
+    state: &mut CameraModeState,
+    camera_entity: Entity,
+    camera_transform: &mut Transform,
+    fly_camera: &mut FlyCamera,
+) {
+    let (yaw, pitch) = camera_angles(camera_transform.rotation);
+    fly_camera.yaw = yaw;
+    fly_camera.pitch = pitch;
+    let player_center = camera_transform.translation - Vec3::Y * CAMERA_LOCAL_HEIGHT;
+    let player = commands
+        .spawn((
+            FpsPlayer { yaw, pitch },
+            FootstepState::default(),
+            LocomotionState::default(),
+            KccState::default(),
+            PhysicsCollider,
+            PlayerRenderHistory::new(player_center),
+            Transform::from_translation(player_center).with_rotation(Quat::from_rotation_y(yaw)),
+        ))
+        .id();
+
+    camera_transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
+    camera_transform.rotation = Quat::from_rotation_x(pitch);
+    commands.entity(camera_entity).insert(ChildOf(player));
+    state.mode = CameraMode::Fps;
+    state.player = Some(player);
+    info!("camera mode: FPS player (V to return to free camera)");
+}
+
+/// FPS is the default camera: enter it as soon as scene collision is ready.
+/// One-shot — a manual V toggle beforehand or afterwards takes ownership.
+pub(crate) fn auto_enter_fps(
+    mut commands: Commands,
+    mut state: ResMut<CameraModeState>,
+    mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
+) {
+    if !state.auto_enter || state.mode != CameraMode::Free || !state.collisions_ready {
+        return;
+    }
+    let Ok((camera_entity, mut camera_transform, mut fly_camera, _, has_parent)) =
+        cameras.single_mut()
+    else {
+        return;
+    };
+    state.auto_enter = false;
+    if has_parent || state.player.is_some() {
+        return;
+    }
+    enter_fps_mode(
+        &mut commands,
+        &mut state,
+        camera_entity,
+        &mut camera_transform,
+        &mut fly_camera,
+    );
+}
+
 pub(crate) fn toggle_camera_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
@@ -405,6 +468,8 @@ pub(crate) fn toggle_camera_mode(
     if !camera_toggle_pressed(&keys) {
         return;
     }
+    // A manual toggle takes over camera-mode ownership from auto-entry.
+    state.auto_enter = false;
 
     let Ok((camera_entity, mut camera_transform, mut fly_camera, camera_global, has_parent)) =
         cameras.single_mut()
@@ -426,29 +491,13 @@ pub(crate) fn toggle_camera_mode(
                 return;
             }
 
-            let (yaw, pitch) = camera_angles(camera_transform.rotation);
-            fly_camera.yaw = yaw;
-            fly_camera.pitch = pitch;
-            let player_center = camera_transform.translation - Vec3::Y * CAMERA_LOCAL_HEIGHT;
-            let player = commands
-                .spawn((
-                    FpsPlayer { yaw, pitch },
-                    FootstepState::default(),
-                    LocomotionState::default(),
-                    KccState::default(),
-                    PhysicsCollider,
-                    PlayerRenderHistory::new(player_center),
-                    Transform::from_translation(player_center)
-                        .with_rotation(Quat::from_rotation_y(yaw)),
-                ))
-                .id();
-
-            camera_transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
-            camera_transform.rotation = Quat::from_rotation_x(pitch);
-            commands.entity(camera_entity).insert(ChildOf(player));
-            state.mode = CameraMode::Fps;
-            state.player = Some(player);
-            info!("camera mode: FPS player (V to return to free camera)");
+            enter_fps_mode(
+                &mut commands,
+                &mut state,
+                camera_entity,
+                &mut camera_transform,
+                &mut fly_camera,
+            );
         }
         CameraMode::Fps => {
             let Some(player_entity) = state.player else {

@@ -87,6 +87,7 @@ pub(crate) fn run_view(
             Update,
             (
                 capture_cursor_input,
+                player::auto_enter_fps,
                 player::toggle_camera_mode,
                 free_fly_camera,
                 player::fps_mouse_look,
