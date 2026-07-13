@@ -10,7 +10,10 @@ use bevy::prelude::*;
 pub(crate) const GRAVITY: f32 = 8.96;
 pub(crate) const AIR_CONTROL_FACTOR: f32 = 0.5;
 pub(crate) const STATIONARY_JUMP_HEIGHT: f32 = 1.2;
-pub(crate) const DIRECTIONAL_JUMP_HEIGHT: f32 = STATIONARY_JUMP_HEIGHT * 0.5;
+// Direction changes the launch direction, not the vertical arc. Keeping the
+// same height avoids the forward-jump dip that was especially noticeable in
+// the native BoxDDD controller.
+pub(crate) const DIRECTIONAL_JUMP_HEIGHT: f32 = STATIONARY_JUMP_HEIGHT;
 pub(crate) const DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE: f32 = STATIONARY_JUMP_HEIGHT;
 pub(crate) const MIN_LANDING_SOUND_DISTANCE: f32 = 0.1;
 pub(crate) const HARD_LANDING_DISTANCE: f32 = 400.0 / 70.0;
@@ -138,8 +141,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn directional_jump_uses_openmw_diagonal_profile() {
+    fn directional_jump_keeps_full_vertical_arc() {
         let (height, direction) = jump_profile(Vec3::new(3.0, 0.0, 4.0));
+        assert_eq!(height, STATIONARY_JUMP_HEIGHT);
         assert_eq!(height, DIRECTIONAL_JUMP_HEIGHT);
         assert_eq!(direction, Some(Vec3::new(0.6, 0.0, 0.8)));
     }

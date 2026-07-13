@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use super::FlyCamera;
 use super::audio::{PlayFootstep, PlayLanding};
 use super::openmw_player::{
-    DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState, air_control_motion,
-    jump_profile,
+    AIR_CONTROL_FACTOR, DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE, GRAVITY, LocomotionState,
+    air_control_motion, jump_profile,
 };
 
 pub(crate) const CAPSULE_RADIUS: f32 = 0.35;
@@ -341,29 +341,46 @@ fn apply_player_controls(
         input -= Vec3::X;
     }
     let world_input = yaw * input;
+    let ground_target = air_control_motion(world_input, false) * PLAYER_SPEED;
     if jump_started && grounded {
         let (height, direction) = jump_profile(world_input);
         kcc.velocity.y = (2.0 * GRAVITY * height).sqrt();
         if let Some(direction) = direction {
             let airtime = 2.0 * kcc.velocity.y / GRAVITY;
-            kcc.velocity.x = direction.x * DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE / airtime;
-            kcc.velocity.z = direction.z * DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE / airtime;
+            let inherited_speed = Vec3::new(kcc.velocity.x, 0.0, kcc.velocity.z)
+                .dot(direction)
+                .max(0.0);
+            let distance_speed = DIRECTIONAL_JUMP_HORIZONTAL_DISTANCE / airtime;
+            let launch_speed = inherited_speed
+                .max(ground_target.length())
+                .max(distance_speed);
+            kcc.velocity.x = direction.x * launch_speed;
+            kcc.velocity.z = direction.z * launch_speed;
+        } else {
+            kcc.velocity.x = ground_target.x;
+            kcc.velocity.z = ground_target.z;
         }
         locomotion.mark_jump_started();
         grounded = false;
     }
 
-    let desired = air_control_motion(world_input, !grounded) * PLAYER_SPEED;
     if grounded {
-        kcc.velocity.x = desired.x;
-        kcc.velocity.z = desired.z;
+        kcc.velocity.x = ground_target.x;
+        kcc.velocity.z = ground_target.z;
         if kcc.velocity.y < 0.0 {
             kcc.velocity.y = 0.0;
         }
     } else {
-        let blend = (dt * 8.0).min(1.0);
-        kcc.velocity.x = kcc.velocity.x.lerp(desired.x, blend);
-        kcc.velocity.z = kcc.velocity.z.lerp(desired.z, blend);
+        // Air control changes the horizontal velocity gradually. It no longer
+        // treats the reduced OpenMW air-control factor as a lower terminal
+        // speed, which used to make a forward jump visibly lose momentum.
+        let air_velocity = apply_air_control(
+            Vec3::new(kcc.velocity.x, 0.0, kcc.velocity.z),
+            world_input,
+            dt,
+        );
+        kcc.velocity.x = air_velocity.x;
+        kcc.velocity.z = air_velocity.z;
         kcc.velocity.y -= GRAVITY * dt;
     }
 
@@ -805,6 +822,26 @@ fn box_vec_length_squared(value: boxddd::Vec3) -> f32 {
     value.x * value.x + value.y * value.y + value.z * value.z
 }
 
+fn approach(current: f32, target: f32, max_change: f32) -> f32 {
+    let delta = target - current;
+    if delta.abs() <= max_change {
+        target
+    } else {
+        current + delta.signum() * max_change
+    }
+}
+
+fn apply_air_control(current: Vec3, input: Vec3, dt: f32) -> Vec3 {
+    let air_direction = air_control_motion(input, true).normalize_or_zero();
+    let air_target = air_direction * PLAYER_SPEED;
+    let max_change = PLAYER_SPEED * AIR_CONTROL_FACTOR * 8.0 * dt;
+    Vec3::new(
+        approach(current.x, air_target.x, max_change),
+        0.0,
+        approach(current.z, air_target.z, max_change),
+    )
+}
+
 fn surface_family(material: Option<u32>) -> &'static str {
     let Some(material) = material else {
         return "concrete";
@@ -969,5 +1006,12 @@ mod tests {
         )));
         app.update();
         assert!(app.world().get_non_send::<BoxdddPhysicsContext>().is_some());
+    }
+
+    #[test]
+    fn forward_air_control_preserves_jump_momentum() {
+        let velocity = apply_air_control(Vec3::new(PLAYER_SPEED, 0.0, 0.0), Vec3::X, 1.0 / 60.0);
+        assert!((velocity.x - PLAYER_SPEED).abs() < f32::EPSILON);
+        assert!(velocity.z.abs() < f32::EPSILON);
     }
 }
