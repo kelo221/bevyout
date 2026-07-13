@@ -10,6 +10,7 @@ mod paths;
 mod physics;
 mod plugin;
 mod prepare;
+mod report;
 mod scenes;
 
 pub(crate) use assets::NIF_CONVERTER_REVISION;
@@ -27,4 +28,5 @@ pub(crate) use physics::{
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
 pub use prepare::prepare;
+pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};
