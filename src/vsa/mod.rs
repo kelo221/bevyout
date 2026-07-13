@@ -16,6 +16,11 @@ mod scenes;
 pub(crate) use assets::NIF_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
+#[cfg(test)]
+pub(crate) use manifest::{
+    CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,
+    PreparedIrradianceVolume,
+};
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
     PreparedFootstepSet, PreparedInventoryEntry, PreparedPhysicsClassification, PreparedPlacement,

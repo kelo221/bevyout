@@ -1,39 +1,59 @@
 use super::*;
 
-#[test]
-fn adjustment_target_cycles_with_page_navigation_order() {
-    assert_eq!(
-        AdjustmentTarget::default().cycle(1),
-        AdjustmentTarget::IrradianceIntensity
-    );
-    assert_eq!(
-        AdjustmentTarget::default().cycle(-1),
-        AdjustmentTarget::AoStrength
-    );
-    assert_eq!(
-        AdjustmentTarget::BloomSoftness.cycle(1),
-        AdjustmentTarget::FogStrength
-    );
-    assert_eq!(
-        AdjustmentTarget::FogStrength.cycle(1),
-        AdjustmentTarget::AoStrength
-    );
-    assert_eq!(
-        AdjustmentTarget::AoStrength.cycle(1),
-        AdjustmentTarget::LightingScale
-    );
-    assert_eq!(
-        AdjustmentTarget::LightingScale.cycle(1),
-        AdjustmentTarget::IrradianceIntensity
-    );
-    assert_eq!(AdjustmentTarget::BloomIntensity.label(), "Bloom intensity");
+fn compatible_render_manifest() -> PreparedSceneManifest {
+    let mut manifest: PreparedSceneManifest =
+        ron::de::from_str(include_str!("../../../features/fixtures/scene.ron"))
+            .expect("schema fixture should parse");
+    manifest.schema_version = crate::vsa::CURRENT_MANIFEST_SCHEMA_VERSION;
+    manifest.prepare_revision = Some(crate::vsa::CURRENT_PREPARE_REVISION.into());
+    manifest.converter_revision = Some(NIF_CONVERTER_REVISION.into());
+    manifest.physics_schema_version = Some(PHYSICS_ASSET_SCHEMA_VERSION);
+    manifest.bake = None;
+    manifest
 }
 
 #[test]
-fn irradiance_intensity_changes_exponentially_and_reaches_zero() {
-    assert_eq!((1.0_f32 * 0.5).max(0.0), 0.5);
-    assert_eq!((1.0_f32 * 2.0).min(4096.0), 2.0);
-    assert_eq!((0.0_f32 * 0.5).max(0.0), 0.0);
+fn render_recovery_refreshes_preparation_before_offering_a_bake() {
+    let mut manifest = compatible_render_manifest();
+    manifest.schema_version -= 1;
+    assert_eq!(
+        next_render_cache_action(&manifest),
+        RenderCacheAction::Reprepare
+    );
+
+    manifest.schema_version = crate::vsa::CURRENT_MANIFEST_SCHEMA_VERSION;
+    assert_eq!(
+        next_render_cache_action(&manifest),
+        RenderCacheAction::Rebake
+    );
+}
+
+#[test]
+fn render_recovery_rebakes_stale_bakes_and_accepts_current_ones() {
+    let mut manifest = compatible_render_manifest();
+    manifest.bake = Some(crate::vsa::PreparedBake {
+        bake_revision: Some(crate::vsa::CURRENT_BAKE_REVISION.into()),
+        source_fingerprint: "fixture".into(),
+        scene_path: "baked/scene.glb".into(),
+        irradiance_volume: Some(crate::vsa::PreparedIrradianceVolume {
+            asset_path: "baked/irradiance.ktx2".into(),
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            resolution: [1; 3],
+            intensity: 1.0,
+        }),
+    });
+    assert_eq!(
+        next_render_cache_action(&manifest),
+        RenderCacheAction::Ready
+    );
+
+    manifest.bake.as_mut().unwrap().bake_revision = Some("stale-bake".into());
+    assert_eq!(
+        next_render_cache_action(&manifest),
+        RenderCacheAction::Rebake
+    );
 }
 
 #[test]

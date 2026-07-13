@@ -15,6 +15,7 @@ pub(crate) fn build_prepared_colliders(
     roots: Query<(Entity, &super::super::interaction::PlacementRoot)>,
 ) {
     if physics_disabled.0 {
+        state.collision_build_complete = true;
         return;
     }
     let Some(world) = context.world_mut() else {
@@ -105,6 +106,7 @@ pub(crate) fn build_prepared_colliders(
         }
     }
     stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
+    state.collision_build_complete = true;
     state.collisions_ready = stats.shapes > 0;
     info!(
         "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
@@ -120,7 +122,7 @@ pub(crate) fn build_prepared_colliders(
     );
     if !state.collisions_ready {
         warn!(
-            "prepared physics produced no active player-blocking shapes; FPS mode is unavailable"
+            "prepared physics produced no active player-blocking shapes; FPS will use forced no-clip"
         );
     }
 }

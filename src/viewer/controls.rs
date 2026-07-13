@@ -11,8 +11,12 @@ pub(crate) fn capture_cursor(mut cursor_options: Single<&mut CursorOptions>) {
 pub(crate) fn capture_cursor_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    modal: Res<State<GameplayModal>>,
     mut cursor_options: Single<&mut CursorOptions>,
 ) {
+    if modal.get() != &GameplayModal::None {
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) {
         cursor_options.visible = true;
         cursor_options.grab_mode = CursorGrabMode::None;
@@ -20,6 +24,22 @@ pub(crate) fn capture_cursor_input(
         cursor_options.visible = false;
         cursor_options.grab_mode = CursorGrabMode::Locked;
     }
+}
+
+/// Mouse motion generated while a modal owns the cursor, plus the synthetic
+/// warp emitted when pointer lock resumes, must never reach a camera.
+pub(crate) fn mouse_look_is_safe(
+    was_captured: &mut bool,
+    captured: bool,
+    gameplay_active: bool,
+) -> bool {
+    if !gameplay_active {
+        *was_captured = false;
+        return false;
+    }
+    let newly_captured = captured && !*was_captured;
+    *was_captured = captured;
+    captured && !newly_captured
 }
 
 #[derive(Resource)]
@@ -51,200 +71,8 @@ pub(crate) struct AoScanState {
     last_mesh_asset_count: usize,
 }
 
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum AdjustmentTarget {
-    #[default]
-    LightingScale,
-    IrradianceIntensity,
-    AmbientScale,
-    BloomIntensity,
-    BloomThreshold,
-    BloomSoftness,
-    FogStrength,
-    AoStrength,
-}
-
-impl AdjustmentTarget {
-    const ALL: [Self; 8] = [
-        Self::LightingScale,
-        Self::IrradianceIntensity,
-        Self::AmbientScale,
-        Self::BloomIntensity,
-        Self::BloomThreshold,
-        Self::BloomSoftness,
-        Self::FogStrength,
-        Self::AoStrength,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::LightingScale => "Lighting scale",
-            Self::IrradianceIntensity => "Irradiance intensity",
-            Self::AmbientScale => "Ambient scale",
-            Self::BloomIntensity => "Bloom intensity",
-            Self::BloomThreshold => "Bloom threshold",
-            Self::BloomSoftness => "Bloom softness",
-            Self::FogStrength => "Fog strength",
-            Self::AoStrength => "AO strength",
-        }
-    }
-
-    pub(crate) fn cycle(self, delta: i32) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|target| *target == self)
-            .unwrap_or(0);
-        let next = (index as i32 + delta).rem_euclid(Self::ALL.len() as i32) as usize;
-        Self::ALL[next]
-    }
-}
-
-#[derive(Component)]
-pub(crate) struct AdjustmentHud;
-
 #[derive(Resource)]
 pub(crate) struct LightsDisabled(pub(crate) bool);
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn adjust_selected_value(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut target: ResMut<AdjustmentTarget>,
-    mut lighting: ResMut<LightingScale>,
-    mut irradiance: ResMut<IrradianceIntensity>,
-    mut ambient: ResMut<AmbientScale>,
-    mut fog_strength: ResMut<FogStrength>,
-    mut ao_strength: ResMut<AoStrength>,
-    mut cameras: Query<&mut Bloom, With<Camera3d>>,
-) {
-    if keys.just_pressed(KeyCode::PageUp) {
-        *target = (*target).cycle(1);
-        info!("adjustment target: {}", target.label());
-    } else if keys.just_pressed(KeyCode::PageDown) {
-        *target = (*target).cycle(-1);
-        info!("adjustment target: {}", target.label());
-    }
-
-    let direction = if keys.just_pressed(KeyCode::F1) {
-        Some(-1)
-    } else if keys.just_pressed(KeyCode::F2) {
-        Some(1)
-    } else {
-        None
-    };
-    let Some(direction) = direction else {
-        return;
-    };
-
-    match *target {
-        AdjustmentTarget::LightingScale => {
-            lighting.0 = if direction < 0 {
-                (lighting.0 * 0.5).max(0.0001)
-            } else {
-                (lighting.0 * 2.0).min(262_144.0)
-            };
-            info!("lighting scale: {:.4}", lighting.0);
-        }
-        AdjustmentTarget::IrradianceIntensity => {
-            irradiance.0 = if direction < 0 {
-                (irradiance.0 * 0.5).max(0.0)
-            } else {
-                (irradiance.0 * 2.0).min(4096.0)
-            };
-            info!("irradiance intensity: {:.4}", irradiance.0);
-        }
-        AdjustmentTarget::AmbientScale => {
-            ambient.0 = if direction < 0 {
-                (ambient.0 * 0.5).max(0.0001)
-            } else {
-                (ambient.0 * 2.0).min(4096.0)
-            };
-            info!("ambient scale: {:.4}", ambient.0);
-        }
-        AdjustmentTarget::BloomIntensity
-        | AdjustmentTarget::BloomThreshold
-        | AdjustmentTarget::BloomSoftness => {
-            let Ok(mut bloom) = cameras.single_mut() else {
-                return;
-            };
-            match *target {
-                AdjustmentTarget::BloomIntensity => {
-                    bloom.intensity = if direction < 0 {
-                        (bloom.intensity * 0.5).max(0.0)
-                    } else {
-                        (bloom.intensity * 2.0).min(1.0)
-                    };
-                }
-                AdjustmentTarget::BloomThreshold => {
-                    bloom.prefilter.threshold = if direction < 0 {
-                        (bloom.prefilter.threshold - 0.1).max(0.0)
-                    } else {
-                        bloom.prefilter.threshold + 0.1
-                    };
-                }
-                AdjustmentTarget::BloomSoftness => {
-                    bloom.prefilter.threshold_softness = (bloom.prefilter.threshold_softness
-                        + if direction < 0 { -0.1 } else { 0.1 })
-                    .clamp(0.0, 1.0);
-                }
-                _ => unreachable!(),
-            }
-            info!(
-                "bloom: intensity {:.2}, threshold {:.2}, softness {:.2}",
-                bloom.intensity, bloom.prefilter.threshold, bloom.prefilter.threshold_softness
-            );
-        }
-        AdjustmentTarget::FogStrength => {
-            fog_strength.0 = if direction < 0 {
-                (fog_strength.0 * 0.5).max(0.0)
-            } else {
-                (fog_strength.0 * 2.0).min(1.0)
-            };
-            info!("fog strength: {:.2}", fog_strength.0);
-        }
-        AdjustmentTarget::AoStrength => {
-            ao_strength.0 =
-                (ao_strength.0 + if direction < 0 { -0.1 } else { 0.1 }).clamp(0.0, 1.0);
-            info!("AO strength: {:.2}", ao_strength.0);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn update_adjustment_hud(
-    target: Res<AdjustmentTarget>,
-    lighting: Res<LightingScale>,
-    irradiance: Res<IrradianceIntensity>,
-    ambient: Res<AmbientScale>,
-    fog_strength: Res<FogStrength>,
-    ao_strength: Res<AoStrength>,
-    cameras: Query<&Bloom, With<Camera3d>>,
-    mut text: Single<&mut Text, With<AdjustmentHud>>,
-) {
-    let value = match *target {
-        AdjustmentTarget::LightingScale => format!("{:.4}", lighting.0),
-        AdjustmentTarget::IrradianceIntensity => format!("{:.4}", irradiance.0),
-        AdjustmentTarget::AmbientScale => format!("{:.4}", ambient.0),
-        AdjustmentTarget::BloomIntensity => cameras
-            .single()
-            .map(|bloom| format!("{:.2}", bloom.intensity))
-            .unwrap_or_else(|_| "--".into()),
-        AdjustmentTarget::BloomThreshold => cameras
-            .single()
-            .map(|bloom| format!("{:.2}", bloom.prefilter.threshold))
-            .unwrap_or_else(|_| "--".into()),
-        AdjustmentTarget::BloomSoftness => cameras
-            .single()
-            .map(|bloom| format!("{:.2}", bloom.prefilter.threshold_softness))
-            .unwrap_or_else(|_| "--".into()),
-        AdjustmentTarget::FogStrength => format!("{:.2}", fog_strength.0),
-        AdjustmentTarget::AoStrength => format!("{:.2}", ao_strength.0),
-    };
-    text.0 = format!(
-        "Adjusting: {} = {}\nPage Up/Down: select   F1/F2: change",
-        target.label(),
-        value
-    );
-}
 
 pub(crate) fn apply_irradiance_intensity(
     intensity: Res<IrradianceIntensity>,
@@ -412,19 +240,6 @@ pub(crate) fn scale_ao_u16(value: u16, strength: f32) -> u16 {
     (scale_ao_channel(f32::from(value) / 65_535.0, strength) * 65_535.0).round() as u16
 }
 
-pub(crate) fn toggle_lights_disabled(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut disabled: ResMut<LightsDisabled>,
-) {
-    if keys.just_pressed(KeyCode::F3) {
-        disabled.0 = !disabled.0;
-        info!(
-            "all runtime lights: {}",
-            if disabled.0 { "off" } else { "on" }
-        );
-    }
-}
-
 pub(crate) fn apply_lighting_scale(
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
@@ -454,16 +269,6 @@ pub(crate) fn apply_lighting_scale(
     }
 }
 
-pub(crate) fn toggle_unlit_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<UnlitMode>) {
-    if keys.just_pressed(KeyCode::KeyQ) {
-        mode.0 = !mode.0;
-        info!(
-            "unlit diagnostic mode: {}",
-            if mode.0 { "on" } else { "off" }
-        );
-    }
-}
-
 pub(crate) fn apply_unlit_mode(
     mode: Res<UnlitMode>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -474,5 +279,20 @@ pub(crate) fn apply_unlit_mode(
 
     for material in materials.iter_mut().map(|(_, material)| material) {
         material.unlit = mode.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mouse_look_is_safe;
+
+    #[test]
+    fn mouse_look_discards_modal_motion_and_first_recaptured_frame() {
+        let mut captured = true;
+        assert!(!mouse_look_is_safe(&mut captured, true, false));
+        assert!(!captured);
+        assert!(!mouse_look_is_safe(&mut captured, true, true));
+        assert!(captured);
+        assert!(mouse_look_is_safe(&mut captured, true, true));
     }
 }

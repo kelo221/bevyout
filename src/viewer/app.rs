@@ -63,7 +63,6 @@ pub(crate) fn run_view(
         .insert_resource(AoMeshBases::default())
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
-        .insert_resource(AdjustmentTarget::default())
         .insert_resource(LightsDisabled(false))
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
@@ -76,32 +75,25 @@ pub(crate) fn run_view(
         .add_systems(
             Update,
             (
-                adjust_selected_value,
-                toggle_lights_disabled,
                 apply_lighting_scale,
                 apply_fog_strength,
                 apply_ao_strength,
                 apply_irradiance_intensity,
                 update_fps_text,
-                update_adjustment_hud,
-                toggle_unlit_mode,
                 apply_unlit_mode,
                 configure_glow_cards,
-                inspect_center_hit,
             ),
         )
-        .add_systems(Update, (record_render_sample, save_render_report))
+        .add_systems(Update, record_render_sample)
         .add_systems(
             Update,
             (
                 capture_cursor_input,
-                player::toggle_camera_mode,
                 free_fly_camera,
                 player::fps_mouse_look,
             )
                 .chain()
-                .run_if(in_state(AppState::InGame))
-                .run_if(in_state(GameplayModal::None)),
+                .run_if(in_state(AppState::InGame)),
         );
     if let Some(seconds) = trace_seconds {
         if !seconds.is_finite() || seconds <= 0.0 {

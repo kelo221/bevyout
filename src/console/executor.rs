@@ -29,6 +29,10 @@ impl ConsoleSessionStore {
     pub fn select(&mut self, session: ConsoleSessionId, entity: Entity) {
         self.selected.insert(session, entity);
     }
+
+    pub fn clear_entity(&mut self, entity: Entity) {
+        self.selected.retain(|_, selected| *selected != entity);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -188,7 +188,7 @@ const server = new FastMCP({
   name: "bevyout",
   version: "0.1.0",
   instructions:
-    "Connect to a running bevyout viewer through Bevy Remote Protocol. Entity edits are runtime-only and may be overwritten by game systems.",
+    "Use .agents/skills/bevyout-mcp/SKILL.md for the live-scene workflow. Connect through loopback Bevy Remote Protocol; console and entity edits are runtime-only and may be overwritten by game systems.",
 });
 
 server.addTool({

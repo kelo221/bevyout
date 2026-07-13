@@ -90,15 +90,19 @@ pub(crate) fn interpolate_render_position(previous: Vec3, current: Vec3, alpha: 
 pub(crate) fn fps_mouse_look(
     mut mouse: MessageReader<MouseMotion>,
     cursor_options: Single<&CursorOptions>,
+    modal: Res<State<GameplayModal>>,
     state: Res<CameraModeState>,
     mut players: Query<(&mut FpsPlayer, &mut Transform), Without<ChildOf>>,
     mut cameras: Query<FpsCameraQuery<'_>, (With<Camera3d>, With<ChildOf>)>,
+    mut was_captured: Local<bool>,
 ) {
     let delta = mouse
         .read()
         .fold(Vec2::ZERO, |sum, event| sum + event.delta);
-    if state.mode != CameraMode::Fps
-        || !matches!(cursor_options.grab_mode, CursorGrabMode::Locked)
+    let captured = matches!(cursor_options.grab_mode, CursorGrabMode::Locked);
+    let gameplay_active = modal.get() == &GameplayModal::None;
+    if !super::super::controls::mouse_look_is_safe(&mut was_captured, captured, gameplay_active)
+        || state.mode != CameraMode::Fps
         || delta == Vec2::ZERO
     {
         return;
@@ -121,9 +125,4 @@ pub(crate) fn fps_mouse_look(
 pub(crate) fn camera_angles(rotation: Quat) -> (f32, f32) {
     let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
     (yaw, pitch.clamp(-1.5, 1.5))
-}
-
-// V, not Tab: Tab belongs to the Pip-Boy modal (app_state slice).
-pub(crate) fn camera_toggle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.just_pressed(KeyCode::KeyV)
 }
