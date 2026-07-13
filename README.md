@@ -1,6 +1,39 @@
 # bevyout
 
-Offline Fallout 3 interior-cell preparation and a small Bevy viewer.
+An offline, modernized recreation of Fallout 3 built on Bevy: it reads the
+original GECK-authored `Fallout3.esm`, its masters, and the Fallout mesh/
+texture/sound BSAs directly, converts interior cells into Bevy-native scenes,
+and renders them with a from-scratch renderer, audio, and interaction layer.
+No GECK or original engine runtime is involved at any point.
+
+## Requirements
+
+- **Rust**, edition 2024 (rustc 1.85+). Install via [rustup](https://rustup.rs).
+- **A licensed copy of Fallout 3 GOTY**, for `Fallout3.esm` and its BSAs. Not
+  redistributed here; point `game_root` at your install in
+  `.bevyout/config.toml`.
+- **[Blender](https://www.blender.org/download/)** 5.2 (for `prepare`) and
+  **4.5 LTS** (pinned, for `bake`'s irradiance step — see below), both with the
+  **[Blender Niftools Addon](https://github.com/niftools/blender_niftools_addon)**
+  installed and enabled (`io_scene_niftools`).
+- **[ImageMagick](https://imagemagick.org/script/download.php)** (`magick` on
+  `PATH`, or the default Windows install path) — converts staged DDS textures
+  to PNG during `prepare`. Optional: `prepare` still runs without it, but
+  textures are left unconverted.
+- **[KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases)**,
+  unified `ktx` binary (`ktx` or legacy `toktx` on `PATH`) — required for
+  `bake`'s default irradiance mode. Not needed for `prepare`, `view`/`render`,
+  or `bake --quality preview`.
+
+On Windows the tools above are auto-detected at their default install
+locations; otherwise put them on `PATH` or set `[tools]` in
+`.bevyout/config.toml` (see `config.example.toml`). Auto-detection only checks
+Windows install paths, so macOS/Linux users must set `blender` and
+`irradiance_blender` explicitly even if the binaries are installed.
+Without a project-local `.bevyout/config.toml`, a user-level config is also
+read from `%APPDATA%\bevyout\config.toml` on Windows, or
+`$XDG_CONFIG_HOME/bevyout/config.toml` (falling back to
+`~/.config/bevyout/config.toml`) on macOS/Linux.
 
 ## Prepare and render a cell
 
