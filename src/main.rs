@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use bevyout::{Cli, CommandLine, apply, bake, prepare, render, report, view};
+use bevyout::{Cli, CommandLine, apply, bake, prepare, render, report, script, view};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -12,5 +12,6 @@ fn main() -> Result<()> {
         CommandLine::Render(args) => render(args),
         CommandLine::View(args) => view(args),
         CommandLine::Report(args) => report(args),
+        CommandLine::Script(args) => script(args),
     }
 }

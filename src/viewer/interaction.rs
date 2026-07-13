@@ -4,6 +4,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, Ra
 use bevy::prelude::*;
 
 use crate::app_state::{AppState, GameplayModal};
+use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
 
 use super::audio::PlaySound;
@@ -90,13 +91,17 @@ pub(crate) fn install(app: &mut App) {
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
-        .add_systems(Update, update_interaction_notice);
+        .add_systems(
+            Update,
+            (update_interaction_notice, cleanup_removed_placements),
+        );
 }
 
 fn spawn_interaction_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         InteractionPromptText,
+        super::console::GameUi,
         TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
@@ -112,6 +117,7 @@ fn spawn_interaction_ui(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         InteractionNoticeText,
+        super::console::GameUi,
         TextColor(Color::srgb(1.0, 0.9, 0.5)),
         Node {
             position_type: PositionType::Absolute,
@@ -181,7 +187,7 @@ fn active_center_ray(
     })
 }
 
-fn find_placement_root(
+pub(crate) fn find_placement_root(
     mut entity: Entity,
     parents: &Query<&ChildOf>,
     roots: &Query<&PlacementRoot>,
@@ -194,6 +200,17 @@ fn find_placement_root(
     }
     warn!("placement hierarchy exceeded {MAX_PARENT_DEPTH} ancestors");
     None
+}
+
+fn cleanup_removed_placements(
+    mut removed: RemovedComponents<PlacementRoot>,
+    mut references: ResMut<RefRegistry>,
+    mut sessions: ResMut<ConsoleSessionStore>,
+) {
+    for entity in removed.read() {
+        references.unregister(entity);
+        sessions.clear_entity(entity);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

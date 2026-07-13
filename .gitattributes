@@ -1,0 +1,4 @@
+# Keep deterministic script inputs and JSONL transcripts LF-only on every
+# checkout. The golden test also normalizes CRLF defensively for older clones.
+tests/console_scripts/*.bscript text eol=lf
+tests/goldens/*.jsonl text eol=lf

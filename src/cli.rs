@@ -31,6 +31,38 @@ pub enum CommandLine {
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
+    /// Run deterministic Gamebryo-style console scripts.
+    #[command(name = "script")]
+    Script(ScriptArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ScriptArgs {
+    #[command(subcommand)]
+    pub(crate) command: ScriptCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ScriptCommand {
+    /// Run a .bscript file through the headless console harness.
+    #[command(name = "run")]
+    Run(ScriptRunArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ScriptRunArgs {
+    /// Console script containing one command per line.
+    #[arg(value_name = "FILE")]
+    pub(crate) file: PathBuf,
+    /// Explicitly select the deterministic headless runner (currently the only script runtime).
+    #[arg(long)]
+    pub(crate) headless: bool,
+    /// Write the stable JSONL transcript to this file instead of stdout.
+    #[arg(long)]
+    pub(crate) transcript: Option<PathBuf>,
+    /// Continue after structured command or expectation failures.
+    #[arg(long)]
+    pub(crate) keep_going: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -75,6 +107,12 @@ pub struct ViewArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Expose the running viewer to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]
@@ -106,6 +144,12 @@ pub struct RenderArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Expose the running viewer to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]

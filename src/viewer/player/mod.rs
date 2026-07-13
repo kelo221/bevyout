@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::app_state::{AppState, GameplayModal};
+use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
     PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
     PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
@@ -72,7 +73,9 @@ pub(crate) enum CameraMode {
 pub(crate) struct CameraModeState {
     pub(crate) mode: CameraMode,
     pub(crate) player: Option<Entity>,
+    pub(crate) collision_build_complete: bool,
     pub(crate) collisions_ready: bool,
+    pub(crate) startup_initialized: bool,
 }
 
 impl Default for CameraModeState {
@@ -80,7 +83,9 @@ impl Default for CameraModeState {
         Self {
             mode: CameraMode::Free,
             player: None,
+            collision_build_complete: false,
             collisions_ready: false,
+            startup_initialized: false,
         }
     }
 }
@@ -159,6 +164,9 @@ pub(crate) struct KccState {
     velocity: Vec3,
     grounded: bool,
 }
+
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub(crate) struct PlayerNoClip(pub(crate) bool);
 
 /// Previous fixed-step position used only to render an interpolated FPS camera.
 ///
@@ -253,13 +261,6 @@ pub(crate) struct StepDebugSettings {
 }
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
-type ToggleCameraQuery<'w> = (
-    Entity,
-    &'w mut Transform,
-    &'w mut FlyCamera,
-    &'w GlobalTransform,
-    Has<ChildOf>,
-);
 pub(crate) fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -GRAVITY, 0.0),
@@ -270,6 +271,7 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(CollisionRuntimeStats::default())
     .insert_resource(PreparedCollisionWorld::default())
     .insert_resource(PhysicsDisabled(disable_physics))
+    .insert_resource(PlayerNoClip::default())
     .insert_resource(StepDebugSettings::default())
     .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
     .add_systems(PostStartup, build_prepared_colliders)
@@ -294,14 +296,10 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
             .run_if(in_state(AppState::InGame))
             .run_if(in_state(GameplayModal::None)),
     )
+    .add_systems(Update, (update_collider_debug_hud, update_step_debug_hud))
     .add_systems(
         Update,
-        (
-            toggle_collider_debug,
-            update_collider_debug_hud,
-            toggle_step_debug,
-            update_step_debug_hud,
-        ),
+        initialize_default_fps.run_if(in_state(AppState::InGame)),
     )
     .add_systems(Update, draw_debug_gizmos);
 }
@@ -311,8 +309,9 @@ struct ColliderDebugHud;
 
 fn spawn_collider_debug_hud(mut commands: Commands) {
     commands.spawn((
-        Text::new("Colliders: Off — F4"),
+        Text::new("Colliders: Off"),
         ColliderDebugHud,
+        super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
         Node {
             position_type: PositionType::Absolute,
@@ -324,20 +323,7 @@ fn spawn_collider_debug_hud(mut commands: Commands) {
     ));
 }
 
-fn toggle_collider_debug(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut settings: ResMut<BoxdddDebugDrawSettings>,
-) {
-    if keys.just_pressed(KeyCode::F4) {
-        flip_collider_debug(&mut settings);
-        info!(
-            "BoxDDD native collider overlay: {}",
-            if settings.enabled { "on" } else { "off" }
-        );
-    }
-}
-
-fn flip_collider_debug(settings: &mut BoxdddDebugDrawSettings) {
+pub(crate) fn flip_collider_debug(settings: &mut BoxdddDebugDrawSettings) {
     settings.enabled = !settings.enabled;
 }
 
@@ -345,10 +331,7 @@ fn update_collider_debug_hud(
     settings: Res<BoxdddDebugDrawSettings>,
     mut text: Single<&mut Text, With<ColliderDebugHud>>,
 ) {
-    text.0 = format!(
-        "Colliders: {} — F4",
-        if settings.enabled { "On" } else { "Off" }
-    );
+    text.0 = format!("Colliders: {}", if settings.enabled { "On" } else { "Off" });
 }
 
 #[derive(Component)]
@@ -356,8 +339,9 @@ struct StepDebugHud;
 
 fn spawn_step_debug_hud(mut commands: Commands) {
     commands.spawn((
-        Text::new("Stair logs: Off — F5"),
+        Text::new("Stair logs: Off"),
         StepDebugHud,
+        super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
         Node {
             position_type: PositionType::Absolute,
@@ -369,20 +353,13 @@ fn spawn_step_debug_hud(mut commands: Commands) {
     ));
 }
 
-fn toggle_step_debug(keys: Res<ButtonInput<KeyCode>>, mut settings: ResMut<StepDebugSettings>) {
-    if keys.just_pressed(KeyCode::F5) {
-        flip_step_debug(&mut settings);
-        info!(
-            target: "bevyout::stair_debug",
-            "[stair-debug] rejection logging {} (F5)",
-            if settings.enabled { "enabled" } else { "disabled" }
-        );
-    }
-}
-
-fn flip_step_debug(settings: &mut StepDebugSettings) {
+pub(crate) fn flip_step_debug(settings: &mut StepDebugSettings) {
     settings.enabled = !settings.enabled;
     settings.next_log_at = 0.0;
+}
+
+pub(crate) fn step_debug_enabled(settings: &StepDebugSettings) -> bool {
+    settings.enabled
 }
 
 fn update_step_debug_hud(
@@ -390,47 +367,84 @@ fn update_step_debug_hud(
     mut text: Single<&mut Text, With<StepDebugHud>>,
 ) {
     text.0 = format!(
-        "Stair logs: {} — F5",
+        "Stair logs: {}",
         if settings.enabled { "On" } else { "Off" }
     );
 }
 
-pub(crate) fn toggle_camera_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    mut state: ResMut<CameraModeState>,
-    mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
-    players: Query<&Transform, With<FpsPlayer>>,
-) {
-    if !camera_toggle_pressed(&keys) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CameraModeError {
+    CameraUnavailable,
+    HierarchyInvalid,
+    PlayerUnavailable,
+}
+
+pub(crate) fn initialize_default_fps(world: &mut World) {
+    let state = world.resource::<CameraModeState>();
+    if state.startup_initialized || !state.collision_build_complete {
         return;
     }
+    match set_camera_mode(world, CameraMode::Fps) {
+        Ok(_) => {
+            world.resource_mut::<CameraModeState>().startup_initialized = true;
+            let no_clip = world.resource::<PlayerNoClip>().0;
+            info!(
+                "camera mode: FPS player{}",
+                if no_clip { " (forced no-clip)" } else { "" }
+            );
+        }
+        Err(CameraModeError::CameraUnavailable) => {}
+        Err(error) => warn!("could not initialize FPS camera: {error:?}"),
+    }
+}
 
-    let Ok((camera_entity, mut camera_transform, mut fly_camera, camera_global, has_parent)) =
-        cameras.single_mut()
-    else {
-        warn!("cannot toggle camera mode: expected one camera");
-        return;
+pub(crate) fn toggle_camera_mode_now(world: &mut World) -> Result<CameraMode, CameraModeError> {
+    let target = match world.resource::<CameraModeState>().mode {
+        CameraMode::Free => CameraMode::Fps,
+        CameraMode::Fps => CameraMode::Free,
+    };
+    set_camera_mode(world, target)
+}
+
+pub(crate) fn set_camera_mode(
+    world: &mut World,
+    target: CameraMode,
+) -> Result<CameraMode, CameraModeError> {
+    if world.resource::<CameraModeState>().mode == target {
+        return Ok(target);
+    }
+    let camera = {
+        let mut cameras = world.query_filtered::<(
+            Entity,
+            &Transform,
+            &FlyCamera,
+            &GlobalTransform,
+            Option<&ChildOf>,
+        ), With<Camera3d>>();
+        let mut cameras = cameras.iter(world);
+        let Some((entity, transform, fly, global, parent)) = cameras.next() else {
+            return Err(CameraModeError::CameraUnavailable);
+        };
+        if cameras.next().is_some() {
+            return Err(CameraModeError::CameraUnavailable);
+        }
+        (
+            entity,
+            *transform,
+            (fly.yaw, fly.pitch),
+            *global,
+            parent.map(ChildOf::parent),
+        )
     };
 
-    match state.mode {
-        CameraMode::Free => {
-            if !state.collisions_ready {
-                warn!(
-                    "FPS mode unavailable: no static scene collision geometry has finished building"
-                );
-                return;
+    match target {
+        CameraMode::Fps => {
+            if camera.4.is_some() || world.resource::<CameraModeState>().player.is_some() {
+                return Err(CameraModeError::HierarchyInvalid);
             }
-            if has_parent || state.player.is_some() {
-                warn!("cannot enter FPS mode: camera/player hierarchy is already active");
-                return;
-            }
-
-            let (yaw, pitch) = camera_angles(camera_transform.rotation);
-            fly_camera.yaw = yaw;
-            fly_camera.pitch = pitch;
-            let player_center = camera_transform.translation - Vec3::Y * CAMERA_LOCAL_HEIGHT;
-            let player = commands
+            let (yaw, pitch) = camera_angles(camera.1.rotation);
+            let player_center = camera.1.translation - Vec3::Y * CAMERA_LOCAL_HEIGHT;
+            let player = world
                 .spawn((
                     FpsPlayer { yaw, pitch },
                     FootstepState::default(),
@@ -442,46 +456,115 @@ pub(crate) fn toggle_camera_mode(
                         .with_rotation(Quat::from_rotation_y(yaw)),
                 ))
                 .id();
-
-            camera_transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
-            camera_transform.rotation = Quat::from_rotation_x(pitch);
-            commands.entity(camera_entity).insert(ChildOf(player));
+            if let Some(mut transform) = world.get_mut::<Transform>(camera.0) {
+                transform.translation = Vec3::new(0.0, CAMERA_LOCAL_HEIGHT, 0.0);
+                transform.rotation = Quat::from_rotation_x(pitch);
+            }
+            if let Some(mut fly) = world.get_mut::<FlyCamera>(camera.0) {
+                fly.yaw = yaw;
+                fly.pitch = pitch;
+            }
+            world.entity_mut(camera.0).insert(ChildOf(player));
+            world.resource_mut::<RefRegistry>().set_player(player);
+            let forced_no_clip = {
+                let state = world.resource::<CameraModeState>();
+                world.resource::<PhysicsDisabled>().0 || !state.collisions_ready
+            };
+            if forced_no_clip {
+                world.resource_mut::<PlayerNoClip>().0 = true;
+            }
+            let mut state = world.resource_mut::<CameraModeState>();
             state.mode = CameraMode::Fps;
             state.player = Some(player);
-            info!("camera mode: FPS player (V to return to free camera)");
         }
-        CameraMode::Fps => {
-            let Some(player_entity) = state.player else {
-                warn!("cannot leave FPS mode: player entity is missing");
-                state.mode = CameraMode::Free;
-                return;
+        CameraMode::Free => {
+            let Some(player) = world.resource::<CameraModeState>().player else {
+                return Err(CameraModeError::PlayerUnavailable);
             };
-            let Ok(_player_transform) = players.get(player_entity) else {
-                warn!("cannot leave FPS mode: player entity is not available yet");
-                return;
-            };
-            if !has_parent {
-                warn!("cannot leave FPS mode: camera is not parented to the player");
-                return;
+            if !world.entities().contains(player) || camera.4 != Some(player) {
+                return Err(CameraModeError::HierarchyInvalid);
             }
-
-            // Use the last rendered camera pose so leaving FPS mode does not
-            // snap back to the latest unsmoothed fixed-step player position.
-            let world_camera = *camera_global;
-            let (scale, rotation, translation) = world_camera.to_scale_rotation_translation();
+            let (scale, rotation, translation) = camera.3.to_scale_rotation_translation();
             let (yaw, pitch) = camera_angles(rotation);
-            fly_camera.yaw = yaw;
-            fly_camera.pitch = pitch;
-            camera_transform.translation = translation;
-            camera_transform.rotation = rotation;
-            camera_transform.scale = scale;
-            commands.entity(camera_entity).remove::<ChildOf>();
-            commands.entity(player_entity).despawn();
+            world.entity_mut(camera.0).remove::<ChildOf>();
+            if let Some(mut transform) = world.get_mut::<Transform>(camera.0) {
+                transform.translation = translation;
+                transform.rotation = rotation;
+                transform.scale = scale;
+            }
+            if let Some(mut fly) = world.get_mut::<FlyCamera>(camera.0) {
+                fly.yaw = yaw;
+                fly.pitch = pitch;
+            }
+            world.resource_mut::<RefRegistry>().clear_player(player);
+            world
+                .resource_mut::<ConsoleSessionStore>()
+                .clear_entity(player);
+            world.despawn(player);
+            let mut state = world.resource_mut::<CameraModeState>();
             state.mode = CameraMode::Free;
             state.player = None;
-            info!("camera mode: free camera (V to enter FPS player)");
         }
     }
+    Ok(target)
+}
+
+pub(crate) fn console_transform_mutated(world: &mut World, entity: Entity) {
+    if world.get::<FpsPlayer>(entity).is_none() {
+        return;
+    }
+    let position = world
+        .get::<Transform>(entity)
+        .map(|transform| transform.translation)
+        .unwrap_or(Vec3::ZERO);
+    if let Some(mut kcc) = world.get_mut::<KccState>(entity) {
+        kcc.velocity = Vec3::ZERO;
+        kcc.grounded = false;
+    }
+    if let Some(mut footsteps) = world.get_mut::<FootstepState>(entity) {
+        footsteps.reset_at(position);
+    }
+    if let Some(mut history) = world.get_mut::<PlayerRenderHistory>(entity) {
+        *history = PlayerRenderHistory::new(position);
+    }
+}
+
+pub(crate) fn console_get_angles(world: &World, entity: Entity) -> Option<Vec3> {
+    world
+        .get::<FpsPlayer>(entity)
+        .map(|player| Vec3::new(player.pitch.to_degrees(), player.yaw.to_degrees(), 0.0))
+}
+
+pub(crate) fn console_set_angles(world: &mut World, entity: Entity, angles: Vec3) -> bool {
+    if world.get::<FpsPlayer>(entity).is_none() {
+        return false;
+    }
+    let yaw = angles.y.to_radians();
+    let pitch = angles.x.to_radians().clamp(-1.5, 1.5);
+    if let Some(mut player) = world.get_mut::<FpsPlayer>(entity) {
+        player.yaw = yaw;
+        player.pitch = pitch;
+    }
+    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+        transform.rotation = Quat::from_rotation_y(yaw);
+    }
+    let camera_entity = {
+        let mut cameras = world.query_filtered::<(Entity, &ChildOf), With<Camera3d>>();
+        cameras
+            .iter(world)
+            .find_map(|(camera, parent)| (parent.parent() == entity).then_some(camera))
+    };
+    if let Some(camera_entity) = camera_entity {
+        if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+            transform.rotation = Quat::from_rotation_x(pitch);
+        }
+        if let Some(mut camera) = world.get_mut::<FlyCamera>(camera_entity) {
+            camera.yaw = yaw;
+            camera.pitch = pitch;
+        }
+    }
+    console_transform_mutated(world, entity);
+    true
 }
 
 #[cfg(test)]

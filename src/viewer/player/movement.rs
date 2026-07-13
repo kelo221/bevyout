@@ -34,6 +34,7 @@ pub(crate) fn apply_player_controls(
     keys: Res<ButtonInput<KeyCode>>,
     state: Res<CameraModeState>,
     physics_disabled: Res<PhysicsDisabled>,
+    no_clip: Res<PlayerNoClip>,
     mut step_debug: ResMut<StepDebugSettings>,
     time: Res<Time<Fixed>>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
@@ -50,7 +51,42 @@ pub(crate) fn apply_player_controls(
     let jump_pressed = keys.pressed(KeyCode::Space);
     let jump_started = jump_pressed && !locomotion.jump_was_pressed();
     locomotion.set_jump_pressed(jump_pressed);
-    if physics_disabled.0 || state.mode != CameraMode::Fps {
+    if state.mode != CameraMode::Fps {
+        kcc.velocity = Vec3::ZERO;
+        kcc.grounded = false;
+        return;
+    }
+    if no_clip.0 {
+        let yaw = Quat::from_rotation_y(player.yaw);
+        let mut input = Vec3::ZERO;
+        if keys.pressed(KeyCode::KeyW) {
+            input -= Vec3::Z;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            input += Vec3::Z;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            input += Vec3::X;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            input -= Vec3::X;
+        }
+        let mut world_input = yaw * input;
+        if keys.pressed(KeyCode::Space) {
+            world_input += Vec3::Y;
+        }
+        if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+            world_input -= Vec3::Y;
+        }
+        if world_input != Vec3::ZERO {
+            transform.translation += world_input.normalize() * PLAYER_SPEED * time.delta_secs();
+        }
+        kcc.velocity = Vec3::ZERO;
+        kcc.grounded = false;
+        locomotion.set_jump_pressed(false);
+        return;
+    }
+    if physics_disabled.0 {
         kcc.velocity = Vec3::ZERO;
         kcc.grounded = false;
         return;

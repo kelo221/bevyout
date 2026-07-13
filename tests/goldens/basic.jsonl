@@ -1,0 +1,7 @@
+{"line_no":1,"input":"seed 42","output":{"request_id":1,"ok":true,"value":{"seed":42},"log":[],"frame":1,"error":null}}
+{"line_no":2,"input":"prid TestCrate","output":{"request_id":2,"ok":true,"value":{"editor_id":"TestCrate","form_id":"00000100","label":"TestCrate (00000100)"},"log":["selected TestCrate (00000100)"],"frame":1,"error":null}}
+{"line_no":3,"input":"getpos","output":{"request_id":3,"ok":true,"value":{"unit":"metres","x":1.0,"y":2.0,"z":3.0},"log":[],"frame":1,"error":null}}
+{"line_no":4,"input":"setpos z 4.5","output":{"request_id":4,"ok":true,"value":{"unit":"metres","x":1.0,"y":2.0,"z":4.5},"log":[],"frame":1,"error":null}}
+{"line_no":5,"input":"expect (getpos z) == 4.5 tol 0.0001","output":{"request_id":5,"ok":true,"value":{"actual":4.5,"expected":4.5,"operator":"==","tolerance":0.0001},"log":["expect passed"],"frame":1,"error":null}}
+{"line_no":6,"input":"advance 2","output":{"request_id":7,"ok":true,"value":{"frames":2},"log":[],"frame":1,"error":null}}
+{"line_no":7,"input":"getangle","output":{"request_id":8,"ok":true,"value":{"unit":"degrees","x":0.0,"y":0.0,"z":0.0},"log":[],"frame":3,"error":null}}

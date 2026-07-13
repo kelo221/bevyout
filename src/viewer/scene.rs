@@ -3,6 +3,7 @@
 use super::controls::{AmbientScale, FogStrength, LightingScale};
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_prepared_scene(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -11,6 +12,7 @@ pub(crate) fn spawn_prepared_scene(
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
+    mut references: ResMut<crate::console::RefRegistry>,
 ) {
     let focus = scene_focus(&manifest);
     let initial_camera_position =
@@ -144,7 +146,7 @@ pub(crate) fn spawn_prepared_scene(
                 cell_label(&manifest.cell)
             );
         }
-        spawn_interactive_placements(&mut commands, &asset_server, &manifest);
+        spawn_interactive_placements(&mut commands, &asset_server, &manifest, &mut references);
     } else {
         for placement in &manifest.placements {
             if !placement.initially_enabled {
@@ -153,22 +155,29 @@ pub(crate) fn spawn_prepared_scene(
             let Some(path) = placement.asset_path.as_ref() else {
                 continue;
             };
-            commands.spawn((
-                WorldAssetRoot(
-                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
-                ),
-                interaction::PlacementRoot::new(placement.clone()),
-                Transform {
-                    translation: Vec3::from_array(placement.translation),
-                    rotation: Quat::from_xyzw(
-                        placement.rotation_xyzw[0],
-                        placement.rotation_xyzw[1],
-                        placement.rotation_xyzw[2],
-                        placement.rotation_xyzw[3],
+            let entity = commands
+                .spawn((
+                    WorldAssetRoot(
+                        asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
                     ),
-                    scale: Vec3::splat(placement.scale),
-                },
-            ));
+                    interaction::PlacementRoot::new(placement.clone()),
+                    Transform {
+                        translation: Vec3::from_array(placement.translation),
+                        rotation: Quat::from_xyzw(
+                            placement.rotation_xyzw[0],
+                            placement.rotation_xyzw[1],
+                            placement.rotation_xyzw[2],
+                            placement.rotation_xyzw[3],
+                        ),
+                        scale: Vec3::splat(placement.scale),
+                    },
+                ))
+                .id();
+            references.register(
+                entity,
+                placement.reference_form_id,
+                placement.editor_id.as_deref(),
+            );
         }
     }
     info!(
@@ -281,6 +290,7 @@ pub(crate) fn spawn_interactive_placements(
     commands: &mut Commands,
     asset_server: &AssetServer,
     manifest: &PreparedSceneManifest,
+    references: &mut crate::console::RefRegistry,
 ) {
     for placement in manifest
         .placements
@@ -290,20 +300,29 @@ pub(crate) fn spawn_interactive_placements(
         let Some(path) = placement.asset_path.as_ref() else {
             continue;
         };
-        commands.spawn((
-            WorldAssetRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()))),
-            interaction::PlacementRoot::new(placement.clone()),
-            Transform {
-                translation: Vec3::from_array(placement.translation),
-                rotation: Quat::from_xyzw(
-                    placement.rotation_xyzw[0],
-                    placement.rotation_xyzw[1],
-                    placement.rotation_xyzw[2],
-                    placement.rotation_xyzw[3],
+        let entity = commands
+            .spawn((
+                WorldAssetRoot(
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
                 ),
-                scale: Vec3::splat(placement.scale),
-            },
-        ));
+                interaction::PlacementRoot::new(placement.clone()),
+                Transform {
+                    translation: Vec3::from_array(placement.translation),
+                    rotation: Quat::from_xyzw(
+                        placement.rotation_xyzw[0],
+                        placement.rotation_xyzw[1],
+                        placement.rotation_xyzw[2],
+                        placement.rotation_xyzw[3],
+                    ),
+                    scale: Vec3::splat(placement.scale),
+                },
+            ))
+            .id();
+        references.register(
+            entity,
+            placement.reference_form_id,
+            placement.editor_id.as_deref(),
+        );
     }
 }
 

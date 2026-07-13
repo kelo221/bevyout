@@ -3,6 +3,74 @@ use bevy::mesh::MeshPlugin;
 use bevy::time::TimeUpdateStrategy;
 use std::time::Duration;
 
+fn camera_transition_world(physics_disabled: bool, collisions_ready: bool) -> World {
+    let mut world = World::new();
+    world.insert_resource(CameraModeState {
+        collision_build_complete: true,
+        collisions_ready,
+        ..default()
+    });
+    world.insert_resource(PhysicsDisabled(physics_disabled));
+    world.insert_resource(PlayerNoClip::default());
+    world.insert_resource(RefRegistry::default());
+    world.insert_resource(crate::console::ConsoleSessionStore::default());
+    world.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(2.0, 3.0, 4.0),
+        FlyCamera {
+            yaw: 0.0,
+            pitch: 0.0,
+            speed: 8.0,
+        },
+    ));
+    world
+}
+
+#[test]
+fn fps_transition_round_trips_hierarchy_and_player_reference() {
+    let mut world = camera_transition_world(false, true);
+    assert_eq!(
+        set_camera_mode(&mut world, CameraMode::Fps),
+        Ok(CameraMode::Fps)
+    );
+    let player = crate::console::resolve_reference(&world, "player").unwrap();
+    assert_eq!(world.resource::<CameraModeState>().player, Some(player));
+    assert!(!world.resource::<PlayerNoClip>().0);
+    let session = crate::console::ConsoleSessionId::new("ui");
+    world
+        .resource_mut::<crate::console::ConsoleSessionStore>()
+        .select(session.clone(), player);
+    let mut cameras = world.query_filtered::<&ChildOf, With<Camera3d>>();
+    assert_eq!(cameras.single(&world).unwrap().parent(), player);
+
+    assert_eq!(
+        set_camera_mode(&mut world, CameraMode::Free),
+        Ok(CameraMode::Free)
+    );
+    assert!(!world.entities().contains(player));
+    assert!(crate::console::resolve_reference(&world, "player").is_err());
+    assert_eq!(
+        world
+            .resource::<crate::console::ConsoleSessionStore>()
+            .selected(&session),
+        None
+    );
+    let mut cameras = world.query_filtered::<Entity, (With<Camera3d>, Without<ChildOf>)>();
+    assert!(cameras.single(&world).is_ok());
+}
+
+#[test]
+fn fps_transition_forces_no_clip_without_usable_physics() {
+    for (physics_disabled, collisions_ready) in [(true, false), (false, false)] {
+        let mut world = camera_transition_world(physics_disabled, collisions_ready);
+        assert_eq!(
+            set_camera_mode(&mut world, CameraMode::Fps),
+            Ok(CameraMode::Fps)
+        );
+        assert!(world.resource::<PlayerNoClip>().0);
+    }
+}
+
 #[test]
 fn camera_angle_round_trip_preserves_yaw_and_pitch() {
     let yaw = 0.73;
@@ -11,6 +79,55 @@ fn camera_angle_round_trip_preserves_yaw_and_pitch() {
     let (actual_yaw, actual_pitch) = camera_angles(rotation);
     assert!((actual_yaw - yaw).abs() < 0.0001);
     assert!((actual_pitch - pitch).abs() < 0.0001);
+}
+
+#[test]
+fn console_transform_adapter_synchronizes_fps_angles_and_clears_velocity() {
+    let mut world = World::new();
+    let position = Vec3::new(1.0, 2.0, 3.0);
+    let player_entity = world
+        .spawn((
+            FpsPlayer {
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            KccState {
+                velocity: Vec3::splat(5.0),
+                grounded: true,
+            },
+            FootstepState::default(),
+            PlayerRenderHistory::new(position),
+            Transform::from_translation(position),
+        ))
+        .id();
+    let camera_entity = world
+        .spawn((
+            Camera3d::default(),
+            Transform::default(),
+            FlyCamera {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 8.0,
+            },
+            ChildOf(player_entity),
+        ))
+        .id();
+
+    assert!(console_set_angles(
+        &mut world,
+        player_entity,
+        Vec3::new(30.0, 90.0, 0.0),
+    ));
+    let angles = console_get_angles(&world, player_entity).unwrap();
+    assert!((angles.x - 30.0).abs() < 0.001);
+    assert!((angles.y - 90.0).abs() < 0.001);
+    let player = world.get::<FpsPlayer>(player_entity).unwrap();
+    assert!((player.yaw.to_degrees() - 90.0).abs() < 0.001);
+    let camera = world.get::<FlyCamera>(camera_entity).unwrap();
+    assert!((camera.pitch.to_degrees() - 30.0).abs() < 0.001);
+    let kcc = world.get::<KccState>(player_entity).unwrap();
+    assert_eq!(kcc.velocity, Vec3::ZERO);
+    assert!(!kcc.grounded);
 }
 
 #[test]
@@ -84,16 +201,6 @@ fn camera_vertical_smoothing_resets_for_air_landings_and_discontinuities() {
 }
 
 #[test]
-fn camera_toggle_is_edge_triggered() {
-    let mut keys = ButtonInput::<KeyCode>::default();
-    assert!(!camera_toggle_pressed(&keys));
-    keys.press(KeyCode::KeyV);
-    assert!(camera_toggle_pressed(&keys));
-    keys.clear();
-    assert!(!camera_toggle_pressed(&keys));
-}
-
-#[test]
 fn havok_material_ids_map_to_footstep_families_across_variants() {
     assert_eq!(surface_family(Some(0)), "concrete");
     assert_eq!(surface_family(Some(34)), "dirt");
@@ -104,7 +211,7 @@ fn havok_material_ids_map_to_footstep_families_across_variants() {
 }
 
 #[test]
-fn f4_state_only_changes_native_debug_collection() {
+fn collision_geometry_toggle_only_changes_native_debug_collection() {
     let mut settings = BoxdddDebugDrawSettings::default();
     let collision_filter = WORLD_STATIC | WORLD_DYNAMIC;
     assert!(!settings.enabled);
@@ -136,7 +243,7 @@ fn prepared_shape_categories_expose_only_static_structural_step_support() {
 }
 
 #[test]
-fn f5_toggles_stair_rejection_logging() {
+fn stair_debug_toggle_changes_rejection_logging() {
     let mut settings = StepDebugSettings::default();
     assert!(!settings.enabled);
     flip_step_debug(&mut settings);

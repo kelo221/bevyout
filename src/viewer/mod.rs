@@ -4,14 +4,12 @@ use bevy::camera::Exposure;
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::light::{IrradianceVolume, LightProbe};
 use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::{DistanceFog, FogFalloff};
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
 };
@@ -43,7 +41,10 @@ mod interaction;
 mod openmw_player;
 mod player;
 
+mod agent_bridge;
 mod app;
+mod console;
+mod console_ui;
 mod controls;
 mod diagnostics;
 mod scene;
@@ -59,14 +60,20 @@ const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
 
 pub fn view(args: ViewArgs) -> Result<()> {
-    run_view(args.manifest, args.disable_physics, args.trace_seconds)
+    run_view(
+        args.manifest,
+        args.disable_physics,
+        args.trace_seconds,
+        args.agent_bridge.then_some(args.agent_port),
+    )
 }
 
 pub fn render(args: RenderArgs) -> Result<()> {
     let cache_dir = args
         .cache_dir
+        .clone()
         .unwrap_or_else(|| PathBuf::from(".bevyout/cache"));
-    let manifest_path = match find_cached_manifest(&cache_dir, &args.selector)? {
+    let mut manifest_path = match find_cached_manifest(&cache_dir, &args.selector)? {
         Some(path) => path,
         None => {
             let prompt = format!(
@@ -76,44 +83,55 @@ pub fn render(args: RenderArgs) -> Result<()> {
             if !confirm(&prompt)? {
                 return resolve_cached_manifest(&cache_dir, &args.selector).map(|_| ());
             }
-            prepare(PrepareArgs {
-                selector: Some(args.selector.clone()),
-                game_root: args.game_root.clone(),
-                plugin: args.plugin.clone(),
-                cell: None,
-                blender: args.blender.clone(),
-                cache_dir: Some(cache_dir.clone()),
-                force: false,
-                rebuild_assets: false,
-                strict: false,
-            })?;
-            resolve_cached_manifest(&cache_dir, &args.selector)?
+            prepare_for_render(&args, &cache_dir, false)?
         }
     };
-    let manifest = read_manifest(&manifest_path)?;
-    if needs_irradiance_bake(&manifest) {
+    let mut manifest = read_manifest(&manifest_path)?;
+    if next_render_cache_action(&manifest) == RenderCacheAction::Reprepare {
+        let compatibility_error = ensure_prepared_manifest_compatible(
+            &manifest,
+            NIF_CONVERTER_REVISION,
+            PHYSICS_ASSET_SCHEMA_VERSION,
+        )
+        .expect_err("reprepare action requires an incompatible prepared manifest");
         let prompt = format!(
-            "Prepared scene '{}' has no irradiance bake. Bake it now?",
+            "{compatibility_error}\nRefresh '{}' now using cached converted assets?",
             cell_label(&manifest.cell)
         );
+        if !confirm(&prompt)? {
+            return Err(compatibility_error);
+        }
+        manifest_path = prepare_for_render(&args, &cache_dir, true)?;
+        manifest = read_manifest(&manifest_path)?;
+        ensure_prepared_manifest_compatible(
+            &manifest,
+            NIF_CONVERTER_REVISION,
+            PHYSICS_ASSET_SCHEMA_VERSION,
+        )?;
+    }
+
+    if next_render_cache_action(&manifest) == RenderCacheAction::Rebake {
+        let bake_error = ensure_baked_scene_compatible(&manifest).err();
+        let prompt = if let Some(error) = bake_error.as_ref() {
+            format!("{error}\nRe-bake '{}' now?", cell_label(&manifest.cell))
+        } else {
+            format!(
+                "Prepared scene '{}' has no irradiance bake. Bake it now?",
+                cell_label(&manifest.cell)
+            )
+        };
         if confirm(&prompt)? {
-            bake(BakeArgs {
-                manifest: None,
-                selector: Some(args.selector.clone()),
-                cache_dir: Some(cache_dir.clone()),
-                quality: BakeQuality::Irradiance,
-                irradiance_spacing_meters: 8.0,
-                irradiance_samples: 64,
-                static_batch_chunk_meters: 64.0,
-                blender: args.blender.clone(),
-                irradiance_blender: args.irradiance_blender.clone(),
-                toktx: args.toktx.clone(),
-                force: false,
-                keep_intermediate: false,
-            })?;
+            bake_for_render(&args, &cache_dir)?;
+        } else if let Some(error) = bake_error {
+            return Err(error);
         }
     }
-    run_view(manifest_path, args.disable_physics, args.trace_seconds)
+    run_view(
+        manifest_path,
+        args.disable_physics,
+        args.trace_seconds,
+        args.agent_bridge.then_some(args.agent_port),
+    )
 }
 
 fn read_manifest(manifest_path: &Path) -> Result<PreparedSceneManifest> {
@@ -166,10 +184,12 @@ fn spawn_reticle(mut commands: Commands) {
         },
         BackgroundColor(Color::WHITE),
         ZIndex(100),
+        console::GameUi,
     ));
     commands.spawn((
         Text::new("FPS --"),
         FpsText,
+        console::DiagnosticUi,
         Node {
             position_type: PositionType::Absolute,
             top: px(8),
@@ -177,16 +197,61 @@ fn spawn_reticle(mut commands: Commands) {
             ..default()
         },
     ));
-    commands.spawn((
-        Text::new("Adjusting: Lighting scale\nPage Up/Down: select   F1/F2: change"),
-        AdjustmentHud,
-        Node {
-            position_type: PositionType::Absolute,
-            top: px(8),
-            left: px(10),
-            ..default()
-        },
-    ));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderCacheAction {
+    Reprepare,
+    Rebake,
+    Ready,
+}
+
+fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheAction {
+    if ensure_prepared_manifest_compatible(
+        manifest,
+        NIF_CONVERTER_REVISION,
+        PHYSICS_ASSET_SCHEMA_VERSION,
+    )
+    .is_err()
+    {
+        RenderCacheAction::Reprepare
+    } else if needs_irradiance_bake(manifest) || ensure_baked_scene_compatible(manifest).is_err() {
+        RenderCacheAction::Rebake
+    } else {
+        RenderCacheAction::Ready
+    }
+}
+
+fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Result<PathBuf> {
+    prepare(PrepareArgs {
+        selector: Some(args.selector.clone()),
+        game_root: args.game_root.clone(),
+        plugin: args.plugin.clone(),
+        cell: None,
+        blender: args.blender.clone(),
+        cache_dir: Some(cache_dir.to_path_buf()),
+        force,
+        rebuild_assets: false,
+        strict: false,
+    })?;
+    resolve_cached_manifest(cache_dir, &args.selector)
+}
+
+fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
+    bake(BakeArgs {
+        manifest: None,
+        selector: Some(args.selector.clone()),
+        cache_dir: Some(cache_dir.to_path_buf()),
+        quality: BakeQuality::Irradiance,
+        irradiance_spacing_meters: 8.0,
+        irradiance_samples: 64,
+        static_batch_chunk_meters: 64.0,
+        blender: args.blender.clone(),
+        irradiance_blender: args.irradiance_blender.clone(),
+        toktx: args.toktx.clone(),
+        force: false,
+        keep_intermediate: false,
+    })
 }
 
 #[derive(Component)]
@@ -207,21 +272,27 @@ pub(crate) struct FlyCamera {
     pub(crate) speed: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn free_fly_camera(
     keys: Res<ButtonInput<KeyCode>>,
     mut mouse: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
     cursor_options: Single<&CursorOptions>,
+    modal: Res<State<GameplayModal>>,
     mode: Res<player::CameraModeState>,
     mut query: Query<(&mut Transform, &mut FlyCamera), With<Camera3d>>,
     time: Res<Time>,
+    mut was_captured: Local<bool>,
 ) {
     let wheel_delta = wheel.read().map(|event| event.y).sum::<f32>();
     let captured = matches!(cursor_options.grab_mode, CursorGrabMode::Locked);
     let delta = mouse
         .read()
         .fold(Vec2::ZERO, |sum, event| sum + event.delta);
-    if mode.mode != player::CameraMode::Free || !captured {
+    let gameplay_active = modal.get() == &GameplayModal::None;
+    if !controls::mouse_look_is_safe(&mut was_captured, captured, gameplay_active)
+        || mode.mode != player::CameraMode::Free
+    {
         return;
     }
     let Ok((mut transform, mut camera)) = query.single_mut() else {

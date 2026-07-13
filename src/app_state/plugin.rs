@@ -21,6 +21,7 @@ pub(crate) enum GameplayModal {
     Paused,
     Dialogue,
     PipBoy,
+    Console,
 }
 
 /// Single entry point for requesting a state change (F35.3). Requests are
@@ -69,6 +70,8 @@ const LEGAL_MODAL_TRANSITIONS: &[(GameplayModal, GameplayModal)] = &[
     (GameplayModal::Dialogue, GameplayModal::None),
     (GameplayModal::None, GameplayModal::PipBoy),
     (GameplayModal::PipBoy, GameplayModal::None),
+    (GameplayModal::None, GameplayModal::Console),
+    (GameplayModal::Console, GameplayModal::None),
 ];
 
 fn is_legal_app_transition(from: AppState, to: AppState) -> bool {
@@ -182,6 +185,7 @@ fn toggle_paused_on_escape(
     let target = match *modal_state.get() {
         GameplayModal::None => GameplayModal::Paused,
         GameplayModal::Paused => GameplayModal::None,
+        GameplayModal::Console => GameplayModal::None,
         GameplayModal::Dialogue | GameplayModal::PipBoy => return,
     };
     requests.write(RequestStateTransition::Modal(target));
@@ -201,7 +205,25 @@ fn toggle_pipboy_on_tab(
     let target = match *modal_state.get() {
         GameplayModal::None => GameplayModal::PipBoy,
         GameplayModal::PipBoy => GameplayModal::None,
-        GameplayModal::Paused | GameplayModal::Dialogue => return,
+        GameplayModal::Paused | GameplayModal::Dialogue | GameplayModal::Console => return,
+    };
+    requests.write(RequestStateTransition::Modal(target));
+}
+
+/// Grave/backquote opens and closes the developer console while in game.
+fn toggle_console_on_backquote(
+    keys: Res<ButtonInput<KeyCode>>,
+    app_state: Res<State<AppState>>,
+    modal_state: Res<State<GameplayModal>>,
+    mut requests: MessageWriter<RequestStateTransition>,
+) {
+    if *app_state.get() != AppState::InGame || !keys.just_pressed(KeyCode::Backquote) {
+        return;
+    }
+    let target = match *modal_state.get() {
+        GameplayModal::None => GameplayModal::Console,
+        GameplayModal::Console => GameplayModal::None,
+        GameplayModal::Paused | GameplayModal::Dialogue | GameplayModal::PipBoy => return,
     };
     requests.write(RequestStateTransition::Modal(target));
 }
@@ -265,11 +287,14 @@ impl Plugin for AppStatePlugin {
                 (
                     toggle_paused_on_escape,
                     toggle_pipboy_on_tab,
+                    toggle_console_on_backquote,
                     log_state_transitions,
                 ),
             )
             .add_systems(PostUpdate, apply_state_transition_requests)
             .add_systems(OnEnter(GameplayModal::Paused), pause_virtual_time)
-            .add_systems(OnExit(GameplayModal::Paused), resume_virtual_time);
+            .add_systems(OnExit(GameplayModal::Paused), resume_virtual_time)
+            .add_systems(OnEnter(GameplayModal::Console), pause_virtual_time)
+            .add_systems(OnExit(GameplayModal::Console), resume_virtual_time);
     }
 }

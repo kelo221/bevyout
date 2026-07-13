@@ -82,6 +82,7 @@ fn every_legal_modal_transition_lands_in_expected_state() {
         GameplayModal::Paused,
         GameplayModal::Dialogue,
         GameplayModal::PipBoy,
+        GameplayModal::Console,
     ] {
         apply(&mut app, RequestStateTransition::Modal(modal));
         assert_eq!(current_modal(&app), modal);
@@ -163,6 +164,7 @@ fn modal_round_trip_gates_a_none_only_counter() {
         GameplayModal::Paused,
         GameplayModal::PipBoy,
         GameplayModal::Dialogue,
+        GameplayModal::Console,
     ] {
         apply(&mut app, RequestStateTransition::Modal(modal));
         let before = app.world().resource::<NoneOnlyTicks>().0;
@@ -212,6 +214,8 @@ fn probe_system_runs_exactly_once_per_frame_across_modal_round_trip() {
         RequestStateTransition::Modal(GameplayModal::None),
         RequestStateTransition::Modal(GameplayModal::Dialogue),
         RequestStateTransition::Modal(GameplayModal::None),
+        RequestStateTransition::Modal(GameplayModal::Console),
+        RequestStateTransition::Modal(GameplayModal::None),
     ];
     for request in sequence {
         send(&mut app, request);
@@ -239,6 +243,44 @@ fn paused_modal_pauses_and_resumes_virtual_time() {
     assert!(app.world().resource::<Time<Virtual>>().is_paused());
 
     apply(&mut app, RequestStateTransition::Modal(GameplayModal::None));
+    assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+}
+
+#[test]
+fn console_modal_pauses_and_resumes_virtual_time() {
+    let mut app = test_app();
+    apply(&mut app, RequestStateTransition::App(AppState::Loading));
+    apply(&mut app, RequestStateTransition::App(AppState::InGame));
+    apply(
+        &mut app,
+        RequestStateTransition::Modal(GameplayModal::Console),
+    );
+    assert!(app.world().resource::<Time<Virtual>>().is_paused());
+    apply(&mut app, RequestStateTransition::Modal(GameplayModal::None));
+    assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+}
+
+fn tap_key(app: &mut App, key: KeyCode) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(key);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.update();
+}
+
+#[test]
+fn backquote_opens_console_and_escape_closes_it() {
+    let mut app = test_app();
+    apply(&mut app, RequestStateTransition::App(AppState::Loading));
+    apply(&mut app, RequestStateTransition::App(AppState::InGame));
+    tap_key(&mut app, KeyCode::Backquote);
+    assert_eq!(current_modal(&app), GameplayModal::Console);
+    assert!(app.world().resource::<Time<Virtual>>().is_paused());
+    tap_key(&mut app, KeyCode::Escape);
+    assert_eq!(current_modal(&app), GameplayModal::None);
     assert!(!app.world().resource::<Time<Virtual>>().is_paused());
 }
 

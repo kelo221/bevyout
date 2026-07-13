@@ -107,3 +107,28 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         .is_err()
     );
 }
+
+#[test]
+fn script_run_contract_parses() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "script",
+        "run",
+        "tests/example.bscript",
+        "--headless",
+        "--transcript",
+        "out.jsonl",
+        "--keep-going",
+    ])
+    .unwrap();
+    let CommandLine::Script(args) = cli.command else {
+        panic!("expected script command");
+    };
+    let ScriptCommand::Run(args) = args.command;
+    assert!(args.headless);
+    assert!(args.keep_going);
+    assert_eq!(
+        args.transcript.as_deref(),
+        Some(std::path::Path::new("out.jsonl"))
+    );
+}
