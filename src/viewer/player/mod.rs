@@ -17,6 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::app_state::{AppState, GameplayModal};
 use crate::vsa::{
     PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
     PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
@@ -282,11 +283,16 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
             emit_landing_events.after(step_world),
             emit_footsteps.after(emit_landing_events),
             sync_dynamic_transforms.after(sync_boxddd_transforms_to_bevy),
-        ),
+        )
+            .run_if(in_state(AppState::InGame))
+            .run_if(in_state(GameplayModal::None)),
     )
     .add_systems(
         PostUpdate,
-        interpolate_fps_camera.after(TransformSystems::Propagate),
+        interpolate_fps_camera
+            .after(TransformSystems::Propagate)
+            .run_if(in_state(AppState::InGame))
+            .run_if(in_state(GameplayModal::None)),
     )
     .add_systems(
         Update,
@@ -396,7 +402,7 @@ pub(crate) fn toggle_camera_mode(
     mut cameras: Query<ToggleCameraQuery<'_>, (With<Camera3d>, Without<FpsPlayer>)>,
     players: Query<&Transform, With<FpsPlayer>>,
 ) {
-    if !tab_pressed(&keys) {
+    if !camera_toggle_pressed(&keys) {
         return;
     }
 
@@ -442,7 +448,7 @@ pub(crate) fn toggle_camera_mode(
             commands.entity(camera_entity).insert(ChildOf(player));
             state.mode = CameraMode::Fps;
             state.player = Some(player);
-            info!("camera mode: FPS player (Tab to return to free camera)");
+            info!("camera mode: FPS player (V to return to free camera)");
         }
         CameraMode::Fps => {
             let Some(player_entity) = state.player else {
@@ -473,7 +479,7 @@ pub(crate) fn toggle_camera_mode(
             commands.entity(player_entity).despawn();
             state.mode = CameraMode::Free;
             state.player = None;
-            info!("camera mode: free camera (Tab to enter FPS player)");
+            info!("camera mode: free camera (V to enter FPS player)");
         }
     }
 }

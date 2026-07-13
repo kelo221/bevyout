@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 11;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 12;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-native-havok-v2";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
 
@@ -43,6 +43,10 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) hard_landing_clips: Vec<String>,
     #[serde(default)]
     pub(crate) bake: Option<PreparedBake>,
+    /// QA counts of `PreparedRuntimeMutability` classifications across
+    /// `placements`, computed once at prepare time (F38.4).
+    #[serde(default)]
+    pub(crate) mutability_summary: PreparedMutabilitySummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -260,6 +264,16 @@ pub(crate) struct PreparedPlacement {
     pub(crate) physics_classification: PreparedPhysicsClassification,
     #[serde(default)]
     pub(crate) step_support: bool,
+    /// Conservative runtime mutability classification (F38.1). Manifests
+    /// prepared before this field existed round-trip as `Unknown`, never
+    /// `Immutable` (F38.3).
+    #[serde(default)]
+    pub(crate) mutability: PreparedRuntimeMutability,
+    /// Shared "visibility root" FormID for `EnableGroup` placements: the
+    /// top-most ancestor of this reference's enable-parent chain (F38.3,
+    /// F38.5). `None` for every other classification.
+    #[serde(default)]
+    pub(crate) mutability_root_form_id: Option<u32>,
     #[serde(default)]
     pub(crate) reference_kind: String,
     #[serde(default)]
@@ -296,6 +310,38 @@ pub(crate) enum PreparedPhysicsClassification {
     Static,
     Kinematic,
     Dynamic,
+}
+
+/// Conservative classification of how a prepared placement may change at
+/// runtime, used later to address content from `PersistentWorldState`.
+///
+/// Classification is deliberately conservative: anything uncertain lands in
+/// `Unknown`, never silently `Immutable` (see `classify_runtime_mutability`
+/// in `vsa::prepare::placements`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum PreparedRuntimeMutability {
+    /// Static scenery: no enable-parent chain, no known script reachability.
+    Immutable,
+    /// Part of an XESP enable-parent chain; toggled as a group. The chain's
+    /// root FormID is preserved on the placement (`mutability_root_form_id`).
+    EnableGroup,
+    /// A record kind commonly reachable/mutated by game scripts (doors,
+    /// activators, containers, furniture, actors, pickups).
+    ScriptAddressable,
+    /// Uncertain: an unrecognized record kind, a placement that failed to
+    /// resolve, or an enable-parent chain that could not be resolved.
+    #[default]
+    Unknown,
+}
+
+/// QA counts of `PreparedRuntimeMutability` classifications across a
+/// prepared scene's placements (F38.4).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedMutabilitySummary {
+    pub(crate) immutable: usize,
+    pub(crate) enable_group: usize,
+    pub(crate) script_addressable: usize,
+    pub(crate) unknown: usize,
 }
 
 fn default_count() -> i32 {

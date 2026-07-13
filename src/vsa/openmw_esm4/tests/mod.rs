@@ -264,6 +264,61 @@ fn parses_audio_cell_and_enable_parent_metadata() {
     );
 }
 
+// T38.2 support: multi-hop enable-parent chains resolve to one stable root,
+// and cycles/unresolved parents are reported rather than silently accepted.
+#[test]
+fn resolve_enable_root_walks_multi_hop_chains_to_a_stable_ancestor() {
+    fn reference(form_id: u32, parent: Option<u32>) -> ReferenceRecord {
+        ReferenceRecord {
+            form_id,
+            enable_parent: parent.map(|parent_reference_form_id| EnableParentRecord {
+                parent_reference_form_id,
+                flags: 0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    let mut references = HashMap::new();
+    references.insert(0x1, reference(0x1, None)); // root: no enable_parent
+    references.insert(0x2, reference(0x2, Some(0x1))); // mid: enabled by root
+    references.insert(0x3, reference(0x3, Some(0x2))); // leaf: enabled by mid
+
+    assert_eq!(resolve_enable_root(0x2, &references).unwrap(), 0x1);
+    assert_eq!(resolve_enable_root(0x3, &references).unwrap(), 0x1);
+    // A reference with no enable_parent is trivially its own root.
+    assert_eq!(resolve_enable_root(0x1, &references).unwrap(), 0x1);
+}
+
+#[test]
+fn resolve_enable_root_reports_cycles_and_unresolved_parents() {
+    fn reference(form_id: u32, parent: Option<u32>) -> ReferenceRecord {
+        ReferenceRecord {
+            form_id,
+            enable_parent: parent.map(|parent_reference_form_id| EnableParentRecord {
+                parent_reference_form_id,
+                flags: 0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    let mut cyclic = HashMap::new();
+    cyclic.insert(0x1, reference(0x1, Some(0x2)));
+    cyclic.insert(0x2, reference(0x2, Some(0x1)));
+    assert!(matches!(
+        resolve_enable_root(0x1, &cyclic),
+        Err(EnableResolutionError::Cycle(_))
+    ));
+
+    let mut dangling = HashMap::new();
+    dangling.insert(0x1, reference(0x1, Some(0x999)));
+    assert!(matches!(
+        resolve_enable_root(0x1, &dangling),
+        Err(EnableResolutionError::Unresolved(0x999))
+    ));
+}
+
 #[test]
 fn parses_actors_items_doors_and_navmesh() {
     let cell_id = 0x100;

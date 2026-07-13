@@ -26,6 +26,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::app_state::{
+    AppState, AppStatePlugin, GameplayModal, LoadingTarget, auto_advance_from_boot,
+    auto_advance_from_loading,
+};
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
     CellInfo, FO3_SCALE, ImageSpaceInfo, NIF_CONVERTER_REVISION, PHYSICS_ASSET_SCHEMA_VERSION,

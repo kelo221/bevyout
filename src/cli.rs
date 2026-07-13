@@ -28,6 +28,9 @@ pub enum CommandLine {
     /// Open a prepared scene manifest in the Bevy viewer.
     #[command(name = "view")]
     View(ViewArgs),
+    /// Generate a deterministic compatibility report for a plugin's records.
+    #[command(name = "report")]
+    Report(ReportArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -167,6 +170,20 @@ pub struct BakeArgs {
     /// Keep the generated Blender job, script, result, and Blender cache files.
     #[arg(long)]
     pub(crate) keep_intermediate: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ReportArgs {
+    /// Fallout 3 installation directory (normally supplied by config.toml).
+    #[arg(long)]
+    pub(crate) game_root: Option<PathBuf>,
+    /// Plugin filename under Data, or an absolute plugin path.
+    #[arg(long)]
+    pub(crate) plugin: Option<PathBuf>,
+    /// Directory to write the compatibility report and summary into.
+    /// Defaults to `.bevyout/reports` (gitignored).
+    #[arg(long)]
+    pub(crate) out_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

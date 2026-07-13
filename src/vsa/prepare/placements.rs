@@ -10,6 +10,9 @@ pub(crate) fn prepared_placement(
     base_records: &HashMap<u32, BaseRecord>,
 ) -> PreparedPlacement {
     let transform = placement_transform(reference);
+    let semantic = prepared_semantic(reference, base);
+    let (mutability, mutability_root_form_id) =
+        classify_runtime_mutability(reference, &semantic, error.is_some());
     PreparedPlacement {
         reference_form_id: reference.form_id,
         base_form_id: reference.base_form_id,
@@ -22,12 +25,14 @@ pub(crate) fn prepared_placement(
         physics_source: None,
         physics_classification: PreparedPhysicsClassification::Static,
         step_support: false,
+        mutability,
+        mutability_root_form_id,
         reference_kind: reference.kind.as_str().into(),
         base_kind: base.map_or_else(|| "MISSING".into(), |base| base.kind.clone()),
         editor_id: base.and_then(|base| base.editor_id.clone()),
         display_name: base.and_then(|base| base.name.clone()),
         count: reference.count,
-        semantic: prepared_semantic(reference, base),
+        semantic,
         initially_enabled: reference.initially_enabled,
         enable_parent: reference.enable_parent.map(|parent| PreparedEnableParent {
             reference_form_id: parent.parent_reference_form_id,
@@ -151,6 +156,68 @@ pub(crate) fn prepared_semantic(
         "STAT" | "MSTT" => PreparedSemantic::Static,
         _ => PreparedSemantic::Unsupported,
     }
+}
+
+/// Classifies a placement's `PreparedRuntimeMutability` (F38.1, F38.3).
+///
+/// Precedence, most to least certain:
+/// 1. `error` present (missing base/model/etc.) → `Unknown`; we don't know
+///    enough about the record to make any other claim.
+/// 2. The reference is part of an XESP enable-parent chain → `EnableGroup`,
+///    carrying the resolved chain root FormID. If the chain root could not
+///    be resolved (cycle/unresolved parent), classification stays
+///    `Unknown` rather than guessing a root.
+/// 3. A record kind known to be commonly reachable/mutated by scripts
+///    (doors, activators, containers, furniture, actors, pickups) →
+///    `ScriptAddressable`.
+/// 4. Plain static scenery (`PreparedSemantic::Static`) → `Immutable`.
+/// 5. Anything else, including unrecognized record kinds
+///    (`PreparedSemantic::Unsupported`) → `Unknown`.
+///
+/// This match is exhaustive over `PreparedSemantic` on purpose: a future
+/// semantic variant added without updating this function fails to compile
+/// instead of silently falling through to `Immutable`.
+pub(crate) fn classify_runtime_mutability(
+    reference: &ReferenceRecord,
+    semantic: &PreparedSemantic,
+    has_error: bool,
+) -> (PreparedRuntimeMutability, Option<u32>) {
+    if has_error {
+        return (PreparedRuntimeMutability::Unknown, None);
+    }
+    if reference.enable_parent.is_some() {
+        return match reference.enable_root_form_id {
+            Some(root) => (PreparedRuntimeMutability::EnableGroup, Some(root)),
+            None => (PreparedRuntimeMutability::Unknown, None),
+        };
+    }
+    let mutability = match semantic {
+        PreparedSemantic::Door(_)
+        | PreparedSemantic::Activator
+        | PreparedSemantic::Container
+        | PreparedSemantic::Furniture
+        | PreparedSemantic::Npc(_)
+        | PreparedSemantic::Creature(_)
+        | PreparedSemantic::Pickup(_) => PreparedRuntimeMutability::ScriptAddressable,
+        PreparedSemantic::Static => PreparedRuntimeMutability::Immutable,
+        PreparedSemantic::Unsupported => PreparedRuntimeMutability::Unknown,
+    };
+    (mutability, None)
+}
+
+/// Deterministic QA counts of `PreparedRuntimeMutability` across a prepared
+/// scene's placements (F38.4).
+pub(crate) fn summarize_mutability(placements: &[PreparedPlacement]) -> PreparedMutabilitySummary {
+    let mut summary = PreparedMutabilitySummary::default();
+    for placement in placements {
+        match placement.mutability {
+            PreparedRuntimeMutability::Immutable => summary.immutable += 1,
+            PreparedRuntimeMutability::EnableGroup => summary.enable_group += 1,
+            PreparedRuntimeMutability::ScriptAddressable => summary.script_addressable += 1,
+            PreparedRuntimeMutability::Unknown => summary.unknown += 1,
+        }
+    }
+    summary
 }
 
 pub(crate) fn is_structural_step_support(
