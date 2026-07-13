@@ -1,0 +1,431 @@
+//! Prepared and dynamic collision construction.
+
+use super::*;
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_prepared_colliders(
+    mut commands: Commands,
+    physics_disabled: Res<PhysicsDisabled>,
+    manifest: Res<PreparedSceneManifest>,
+    physics_assets: Res<PreparedPhysicsAssets>,
+    mut state: ResMut<CameraModeState>,
+    mut stats: ResMut<CollisionRuntimeStats>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    roots: Query<(Entity, &super::super::interaction::PlacementRoot)>,
+) {
+    if physics_disabled.0 {
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let started = Instant::now();
+    let static_body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    collision_world.static_body = Some(static_body);
+    stats.sidecar_bytes = physics_assets.payload_bytes;
+    for asset in physics_assets.assets.values() {
+        match asset.source {
+            PreparedPhysicsSource::AuthoredHavok => stats.authored_assets += 1,
+            PreparedPhysicsSource::GeneratedRender => stats.fallback_assets += 1,
+        }
+    }
+    let root_by_reference = roots
+        .iter()
+        .map(|(entity, root)| (root.placement().reference_form_id, entity))
+        .collect::<HashMap<_, _>>();
+    let mut unknown_layers = HashSet::new();
+    let mut static_marker_spawned = false;
+    for placement in manifest
+        .placements
+        .iter()
+        .filter(|placement| placement.initially_enabled)
+    {
+        let Some(path) = placement.physics_asset_path.as_ref() else {
+            continue;
+        };
+        let Some(asset) = physics_assets.assets.get(path) else {
+            warn!("missing preloaded physics sidecar {path}");
+            continue;
+        };
+        let dynamic_entity = (placement.physics_classification
+            == PreparedPhysicsClassification::Dynamic)
+            .then(|| root_by_reference.get(&placement.reference_form_id).copied())
+            .flatten();
+        for body in &asset.bodies {
+            if !body_blocks_player(body) {
+                stats.filtered_shapes += body.shapes.len();
+                continue;
+            }
+            if body.layer > 43 && unknown_layers.insert(body.layer) {
+                warn!(
+                    "unknown Fallout Havok layer {} remains solid (reference {:08x})",
+                    body.layer, placement.reference_form_id
+                );
+            }
+            let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
+                let body_id = create_dynamic_body(world, placement, body);
+                collision_world.dynamic_bodies.insert(entity, body_id);
+                commands.entity(entity).insert(PhysicsCollider);
+                stats.dynamic_bodies += 1;
+                (body_id, true)
+            } else {
+                if !static_marker_spawned {
+                    commands.spawn(PhysicsCollider);
+                    static_marker_spawned = true;
+                }
+                (static_body, false)
+            };
+            stats.bodies += 1;
+            for shape in &body.shapes {
+                let result = create_prepared_shape(world, body_id, body, shape, placement, dynamic);
+                let Some((shape_id, triangles)) = result else {
+                    stats.filtered_shapes += 1;
+                    warn!(
+                        "BoxDDD rejected {} Havok shape for reference {:08x} body {}",
+                        shape.kind(),
+                        placement.reference_form_id,
+                        body.group_id
+                    );
+                    continue;
+                };
+                collision_world.surfaces.insert(
+                    shape_id,
+                    CollisionSurface {
+                        material: body.material,
+                    },
+                );
+                stats.shapes += 1;
+                stats.packed_triangles += triangles;
+                *stats.shape_kinds.entry(shape.kind()).or_default() += 1;
+            }
+            if dynamic {
+                normalize_dynamic_mass(world, body_id, body, placement.scale.abs());
+            }
+        }
+    }
+    stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
+    state.collisions_ready = stats.shapes > 0;
+    info!(
+        "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
+        stats.authored_assets,
+        stats.fallback_assets,
+        stats.bodies,
+        stats.dynamic_bodies,
+        stats.shapes,
+        stats.packed_triangles,
+        stats.filtered_shapes,
+        stats.cooking_millis,
+        stats.sidecar_bytes,
+    );
+    if !state.collisions_ready {
+        warn!(
+            "prepared physics produced no active player-blocking shapes; FPS mode is unavailable"
+        );
+    }
+}
+
+pub(crate) fn create_dynamic_body(
+    world: &mut boxddd::World,
+    placement: &crate::vsa::PreparedPlacement,
+    body: &PreparedPhysicsBody,
+) -> BodyId {
+    let rotation = Quat::from_array(placement.rotation_xyzw).normalize();
+    let scale = placement.scale.abs();
+    let mut linear_velocity = rotation * (Vec3::from_array(body.linear_velocity) * scale);
+    let mut angular_velocity = rotation * Vec3::from_array(body.angular_velocity);
+    if body.max_linear_velocity > 0.0 {
+        linear_velocity = linear_velocity.clamp_length_max(body.max_linear_velocity * scale);
+    }
+    if body.max_angular_velocity > 0.0 {
+        angular_velocity = angular_velocity.clamp_length_max(body.max_angular_velocity);
+    }
+    let body_id = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Dynamic)
+            .position(to_box_vec3(Vec3::from_array(placement.translation)))
+            .rotation(to_box_quat(rotation))
+            .linear_velocity(to_box_vec3(linear_velocity))
+            .angular_velocity(to_box_vec3(angular_velocity))
+            .gravity_scale(body.gravity_factor)
+            .bullet(body.ccd_enabled)
+            .build(),
+    );
+    let _ = world.try_set_body_linear_damping(body_id, body.linear_damping.max(0.0));
+    let _ = world.try_set_body_angular_damping(body_id, body.angular_damping.max(0.0));
+    let _ = world.try_enable_body_sleep(body_id, body.sleep_enabled);
+    body_id
+}
+
+pub(crate) fn create_prepared_shape(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    body: &PreparedPhysicsBody,
+    shape: &PreparedPhysicsShape,
+    placement: &crate::vsa::PreparedPlacement,
+    dynamic: bool,
+) -> Option<(ShapeId, usize)> {
+    if dynamic && !shape.supports_dynamic() {
+        return None;
+    }
+    let scale = placement.scale.abs().max(0.0001);
+    let placement_rotation = Quat::from_array(placement.rotation_xyzw).normalize();
+    let placement_translation = Vec3::from_array(placement.translation);
+    let point = |value: [f32; 3]| {
+        let local = Vec3::from_array(value) * scale;
+        if dynamic {
+            local
+        } else {
+            placement_rotation * local + placement_translation
+        }
+    };
+    let rotation = |value: [f32; 4]| {
+        let local = Quat::from_array(value).normalize();
+        if dynamic {
+            local
+        } else {
+            placement_rotation * local
+        }
+    };
+    let category = if dynamic { WORLD_DYNAMIC } else { WORLD_STATIC };
+    let mask = if dynamic {
+        WORLD_STATIC | WORLD_DYNAMIC | PLAYER_PROXY | PLAYER_QUERY
+    } else {
+        WORLD_DYNAMIC | PLAYER_QUERY
+    };
+    let shape_def = ShapeDef::builder()
+        .density(if dynamic { 1.0 } else { 0.0 })
+        .friction(body.friction.max(0.0))
+        .restitution(body.restitution.max(0.0))
+        .filter(Filter {
+            category_bits: category,
+            mask_bits: mask,
+            group_index: 0,
+        })
+        .user_material_id(u64::from(body.material.unwrap_or(0)))
+        .build();
+    let shape_id = match shape {
+        PreparedPhysicsShape::Box {
+            center,
+            half_extents,
+            rotation_xyzw,
+        } => {
+            let center = point(*center);
+            let rotation = rotation(*rotation_xyzw);
+            let half = Vec3::from_array(*half_extents) * scale;
+            let hull = BoxHull::transformed(
+                half.x,
+                half.y,
+                half.z,
+                boxddd::Transform::new(to_box_vec3(center), to_box_quat(rotation)),
+            );
+            world
+                .try_create_hull_shape(body_id, &shape_def, &hull)
+                .ok()?
+        }
+        PreparedPhysicsShape::Sphere { center, radius } => world
+            .try_create_sphere_shape(
+                body_id,
+                &shape_def,
+                &boxddd::Sphere::new(to_box_vec3(point(*center)), radius * scale),
+            )
+            .ok()?,
+        PreparedPhysicsShape::Capsule {
+            point1,
+            point2,
+            radius,
+        } => world
+            .try_create_capsule_shape(
+                body_id,
+                &shape_def,
+                &boxddd::Capsule::new(
+                    to_box_vec3(point(*point1)),
+                    to_box_vec3(point(*point2)),
+                    radius * scale,
+                ),
+            )
+            .ok()?,
+        PreparedPhysicsShape::ConvexHull { points } => {
+            let points = points
+                .iter()
+                .map(|value| to_box_vec3(point(*value)))
+                .collect::<Vec<_>>();
+            let hull = Hull::from_points(&points, 64).ok()?;
+            world
+                .try_create_created_hull_shape(body_id, &shape_def, &hull)
+                .ok()?
+        }
+        PreparedPhysicsShape::TriangleMesh { vertices, indices } => {
+            let vertices = vertices
+                .iter()
+                .map(|value| to_box_vec3(point(*value)))
+                .collect::<Vec<_>>();
+            let indices = indices
+                .iter()
+                .map(|index| i32::try_from(*index).ok())
+                .collect::<Option<Vec<_>>>()?;
+            let mesh = boxddd::MeshData::builder(vertices, indices).build().ok()?;
+            world
+                .try_create_mesh_shape(body_id, &shape_def, mesh, boxddd::Vec3::new(1.0, 1.0, 1.0))
+                .ok()?
+        }
+    };
+    Some((shape_id, shape.triangle_count()))
+}
+
+pub(crate) fn normalize_dynamic_mass(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    body: &PreparedPhysicsBody,
+    scale: f32,
+) {
+    if !body.mass.is_finite() || body.mass <= 0.0 {
+        return;
+    }
+    if world.try_apply_mass_from_shapes(body_id).is_err() {
+        return;
+    }
+    let Ok(mut mass_data) = world.try_body_mass_data(body_id) else {
+        return;
+    };
+    let ratio = if mass_data.mass > f32::EPSILON {
+        body.mass / mass_data.mass
+    } else {
+        1.0
+    };
+    mass_data.mass = body.mass;
+    mass_data.center = to_box_vec3(Vec3::from_array(body.center_of_mass) * scale);
+    let authored_inertia_valid = body.inertia.iter().flatten().all(|value| value.is_finite())
+        && body.inertia[0][0] > 0.0
+        && body.inertia[1][1] > 0.0
+        && body.inertia[2][2] > 0.0;
+    if authored_inertia_valid {
+        let inertia_scale = scale * scale;
+        mass_data.inertia = boxddd::Matrix3 {
+            cx: boxddd::Vec3::new(
+                body.inertia[0][0] * inertia_scale,
+                body.inertia[1][0] * inertia_scale,
+                body.inertia[2][0] * inertia_scale,
+            ),
+            cy: boxddd::Vec3::new(
+                body.inertia[0][1] * inertia_scale,
+                body.inertia[1][1] * inertia_scale,
+                body.inertia[2][1] * inertia_scale,
+            ),
+            cz: boxddd::Vec3::new(
+                body.inertia[0][2] * inertia_scale,
+                body.inertia[1][2] * inertia_scale,
+                body.inertia[2][2] * inertia_scale,
+            ),
+        };
+    } else {
+        mass_data.inertia.cx = scale_box_vec3(mass_data.inertia.cx, ratio);
+        mass_data.inertia.cy = scale_box_vec3(mass_data.inertia.cy, ratio);
+        mass_data.inertia.cz = scale_box_vec3(mass_data.inertia.cz, ratio);
+    }
+    let _ = world.try_set_body_mass_data(body_id, mass_data);
+}
+
+pub(crate) fn cleanup_removed_dynamic_bodies(
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    roots: Query<Entity, With<super::super::interaction::PlacementRoot>>,
+) {
+    let live = roots.iter().collect::<HashSet<_>>();
+    let removed = collision_world
+        .dynamic_bodies
+        .keys()
+        .filter(|entity| !live.contains(entity))
+        .copied()
+        .collect::<Vec<_>>();
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    for entity in removed {
+        if let Some(body) = collision_world.dynamic_bodies.remove(&entity) {
+            let _ = world.try_destroy_body(body);
+        }
+    }
+}
+
+pub(crate) fn sync_dynamic_transforms(
+    collision_world: Res<PreparedCollisionWorld>,
+    context: NonSend<BoxdddPhysicsContext>,
+    mut roots: Query<&mut Transform, With<super::super::interaction::PlacementRoot>>,
+) {
+    let Some(world) = context.world() else {
+        return;
+    };
+    for (entity, body) in &collision_world.dynamic_bodies {
+        let (Ok(mut transform), Ok(physics_transform)) =
+            (roots.get_mut(*entity), world.try_body_transform(*body))
+        else {
+            continue;
+        };
+        transform.translation = Vec3::new(
+            physics_transform.p.x,
+            physics_transform.p.y,
+            physics_transform.p.z,
+        );
+        transform.rotation = from_box_quat(physics_transform.q);
+    }
+}
+
+pub(crate) fn sync_player_proxy(
+    physics_disabled: Res<PhysicsDisabled>,
+    state: Res<CameraModeState>,
+    time: Res<Time<Fixed>>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    players: Query<&Transform, With<FpsPlayer>>,
+) {
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let player_transform = (!physics_disabled.0 && state.mode == CameraMode::Fps)
+        .then(|| players.single().ok())
+        .flatten();
+    let Some(transform) = player_transform else {
+        if let Some(body) = collision_world.player_proxy.take() {
+            let _ = world.try_destroy_body(body);
+        }
+        return;
+    };
+    let target = boxddd::WorldTransform::new(
+        to_box_vec3(transform.translation).into(),
+        to_box_quat(transform.rotation),
+    );
+    if let Some(body) = collision_world.player_proxy {
+        let _ = world.try_set_body_target_transform(body, target, time.delta_secs(), true);
+        return;
+    }
+    let body = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Kinematic)
+            .position(to_box_vec3(transform.translation))
+            .rotation(to_box_quat(transform.rotation))
+            .build(),
+    );
+    let shape_def = ShapeDef::builder()
+        .density(0.0)
+        .friction(0.8)
+        .filter(Filter {
+            category_bits: PLAYER_PROXY,
+            mask_bits: WORLD_DYNAMIC,
+            group_index: 0,
+        })
+        .build();
+    let capsule = boxddd::Capsule::new(
+        [0.0, -(CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS), 0.0],
+        [0.0, CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS, 0.0],
+        CAPSULE_RADIUS,
+    );
+    if world
+        .try_create_capsule_shape(body, &shape_def, &capsule)
+        .is_ok()
+    {
+        collision_world.player_proxy = Some(body);
+    } else {
+        let _ = world.try_destroy_body(body);
+    }
+}

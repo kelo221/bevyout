@@ -12,7 +12,8 @@ mod prepare;
 mod scenes;
 
 pub(crate) use assets::NIF_CONVERTER_REVISION;
-pub(crate) use bake::{bake, is_bake_static};
+pub use bake::bake;
+pub(crate) use bake::is_bake_static;
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
     PreparedFootstepSet, PreparedInventoryEntry, PreparedPhysicsClassification, PreparedPlacement,
@@ -24,5 +25,5 @@ pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
-pub(crate) use prepare::prepare;
+pub use prepare::prepare;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

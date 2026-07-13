@@ -1,20 +1,15 @@
-mod cli;
-mod config;
-mod viewer;
-mod vsa;
-
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, CommandLine};
+use bevyout::{Cli, CommandLine, apply, bake, prepare, render, view};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
-    config::apply(&mut cli)?;
+    apply(&mut cli)?;
     match cli.command {
-        CommandLine::Prepare(args) => vsa::prepare(args),
-        CommandLine::Bake(args) => vsa::bake(args),
-        CommandLine::Render(args) => viewer::render(args),
-        CommandLine::View(args) => viewer::view(args),
+        CommandLine::Prepare(args) => prepare(args),
+        CommandLine::Bake(args) => bake(args),
+        CommandLine::Render(args) => render(args),
+        CommandLine::View(args) => view(args),
     }
 }

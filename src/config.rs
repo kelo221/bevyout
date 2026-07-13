@@ -35,7 +35,7 @@ struct OutputConfig {
     cache_dir: Option<PathBuf>,
 }
 
-pub(crate) fn apply(cli: &mut Cli) -> Result<()> {
+pub fn apply(cli: &mut Cli) -> Result<()> {
     let Some(path) = config_path(cli.config.as_deref()) else {
         return Ok(());
     };

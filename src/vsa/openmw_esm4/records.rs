@@ -1,0 +1,592 @@
+//! ESM4 record-specific decoding.
+
+use super::*;
+
+pub(crate) fn parse_base(
+    sig: &str,
+    subs: &[Subrecord],
+    resolver: &FormIdResolver,
+) -> Option<BaseRecord> {
+    if !is_supported_base(sig) {
+        return None;
+    }
+    let model_signature = if sig == "ARMO" { "MOD2" } else { "MODL" };
+    let model = sub(subs, model_signature)
+        .or_else(|| sub(subs, "MODL"))
+        .map(cstring)
+        .filter(|value| !value.is_empty());
+    let light = (sig == "LIGH").then(|| parse_light_data(subs)).flatten();
+    let (value, weight) = parse_value_weight(sig, subs);
+    let inventory = subs
+        .iter()
+        .filter(|subrecord| subrecord.signature == "CNTO")
+        .filter_map(|subrecord| parse_inventory_item(&subrecord.data, resolver))
+        .collect();
+    let audio = parse_base_audio(sig, subs, resolver);
+    Some(BaseRecord {
+        kind: sig.to_string(),
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        model,
+        value,
+        weight,
+        base_template_form_id: sub_form_id(subs, "TPLT", resolver),
+        light,
+        inventory,
+        audio,
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM",
+                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM",
+            ],
+        ),
+    })
+}
+
+pub(crate) fn parse_inventory_item(
+    data: &[u8],
+    resolver: &FormIdResolver,
+) -> Option<InventoryItemRecord> {
+    let item = data.get(..4)?;
+    let count = data.get(4..8)?;
+    Some(InventoryItemRecord {
+        item_form_id: resolver.adjust(u32::from_le_bytes(item.try_into().ok()?)),
+        count: u32::from_le_bytes(count.try_into().ok()?),
+    })
+}
+
+pub(crate) fn parse_base_audio(
+    sig: &str,
+    subs: &[Subrecord],
+    resolver: &FormIdResolver,
+) -> BaseAudioRecord {
+    let mut audio = BaseAudioRecord::default();
+    match sig {
+        "DOOR" => {
+            audio.open_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+            audio.close_sound_form_id = sub_form_id(subs, "ANAM", resolver);
+            audio.loop_sound_form_id = sub_form_id(subs, "BNAM", resolver);
+        }
+        "CONT" => {
+            audio.open_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+            audio.close_sound_form_id = sub_form_id(subs, "QNAM", resolver);
+        }
+        "ACTI" => {
+            audio.loop_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+            audio.activation_sound_form_id = sub_form_id(subs, "VNAM", resolver);
+        }
+        "MSTT" | "TACT" | "LIGH" => {
+            audio.loop_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+        }
+        "TERM" => {
+            audio.activation_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+        }
+        _ if is_pickup_base(sig) => {
+            audio.pickup_sound_form_id = sub_form_id(subs, "YNAM", resolver);
+            audio.drop_sound_form_id = sub_form_id(subs, "ZNAM", resolver);
+        }
+        _ => {}
+    }
+    audio
+}
+
+pub(crate) fn is_pickup_base(sig: &str) -> bool {
+    matches!(
+        sig,
+        "WEAP" | "AMMO" | "ARMO" | "ALCH" | "MISC" | "BOOK" | "NOTE" | "KEYM"
+    )
+}
+
+pub(crate) fn is_supported_base(sig: &str) -> bool {
+    matches!(
+        sig,
+        "STAT"
+            | "MSTT"
+            | "LIGH"
+            | "DOOR"
+            | "CONT"
+            | "ACTI"
+            | "TACT"
+            | "FURN"
+            | "TERM"
+            | "WEAP"
+            | "AMMO"
+            | "ARMO"
+            | "ALCH"
+            | "MISC"
+            | "BOOK"
+            | "NOTE"
+            | "KEYM"
+            | "NPC_"
+            | "CREA"
+            | "LVLI"
+            | "LVLN"
+            | "LVLC"
+    )
+}
+
+pub(crate) fn parse_value_weight(sig: &str, subs: &[Subrecord]) -> (Option<i32>, Option<f32>) {
+    let data = sub(subs, "DATA");
+    match sig {
+        "MISC" | "KEYM" => data
+            .filter(|data| data.len() >= 8)
+            .map(|data| (i32_at(data, 0), f32_at_option(data, 4)))
+            .unwrap_or((None, None)),
+        "WEAP" => match data.map(<[u8]>::len) {
+            Some(10) => (
+                data.and_then(|data| i32_at(data, 0)),
+                data.and_then(|data| f32_at_option(data, 4)),
+            ),
+            Some(15) => (
+                data.and_then(|data| i32_at(data, 0)),
+                data.and_then(|data| f32_at_option(data, 8)),
+            ),
+            Some(length) if length >= 30 => (
+                data.and_then(|data| i32_at(data, 16)),
+                data.and_then(|data| f32_at_option(data, 24)),
+            ),
+            _ => (None, None),
+        },
+        "AMMO" => data
+            .filter(|data| data.len() >= 12)
+            .map(|data| (i32_at(data, 8), None))
+            .unwrap_or((None, None)),
+        "ARMO" => data
+            .filter(|data| data.len() >= 12)
+            .map(|data| (i32_at(data, 0), f32_at_option(data, 8)))
+            .unwrap_or((None, None)),
+        "ALCH" => (
+            sub(subs, "ENIT").and_then(|data| i32_at(data, 0)),
+            data.and_then(|data| f32_at_option(data, 0)),
+        ),
+        "BOOK" => data
+            .filter(|data| data.len() >= 10)
+            .map(|data| (i32_at(data, 2), f32_at_option(data, 6)))
+            .unwrap_or((None, None)),
+        _ => (None, None),
+    }
+}
+
+pub(crate) fn parse_light_data(subs: &[Subrecord]) -> Option<LightData> {
+    let data = sub(subs, "DATA")?;
+    if data.len() < 12 {
+        return None;
+    }
+    Some(LightData {
+        radius: u32::from_le_bytes(data[4..8].try_into().ok()?) as f32,
+        color_rgba: [
+            data[8] as f32 / 255.0,
+            data[9] as f32 / 255.0,
+            data[10] as f32 / 255.0,
+            1.0,
+        ],
+    })
+}
+
+pub(crate) fn parse_music(subs: &[Subrecord], form_id: u32, record_flags: u32) -> MusicRecord {
+    MusicRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        file: sub(subs, "FNAM")
+            .or_else(|| sub(subs, "MNAM"))
+            .map(cstring)
+            .filter(|value| !value.is_empty()),
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "FNAM", "MNAM", "DATA"]),
+    }
+}
+
+pub(crate) fn parse_sound(subs: &[Subrecord], form_id: u32, record_flags: u32) -> SoundRecord {
+    let mut parameters = None;
+    let mut extra = None;
+    for subrecord in subs {
+        match subrecord.signature.as_str() {
+            "SNDX" => parameters = parse_sound_parameters(&subrecord.data),
+            "SNDD" => {
+                parameters = parse_sound_parameters(&subrecord.data);
+                extra = parse_sound_extra(&subrecord.data);
+            }
+            _ => {}
+        }
+    }
+    SoundRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        file: sub(subs, "FNAM")
+            .map(cstring)
+            .filter(|value| !value.is_empty()),
+        parameters,
+        extra,
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "FNAM", "SNDX", "SNDD", "OBND", "SDSC", "ANAM", "GNAM", "HNAM", "RNAM",
+                "REPT",
+            ],
+        ),
+    }
+}
+
+pub(crate) fn parse_sound_parameters(data: &[u8]) -> Option<SoundParameters> {
+    if data.len() < 8 {
+        return None;
+    }
+    Some(SoundParameters {
+        byte_len: data.len() as u32,
+        min_attenuation: data[0],
+        max_attenuation: data[1],
+        frequency_adjustment: data[2] as i8,
+        flags: u16::from_le_bytes(data[4..6].try_into().ok()?),
+        static_attenuation: data
+            .get(8..10)
+            .map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap())),
+        stop_time: data.get(10).copied(),
+        start_time: data.get(11).copied(),
+    })
+}
+
+pub(crate) fn parse_sound_extra(data: &[u8]) -> Option<SoundExtraData> {
+    let data = data.get(12..36)?;
+    Some(SoundExtraData {
+        attenuation_points: [
+            i16_at(data, 0)?,
+            i16_at(data, 2)?,
+            i16_at(data, 4)?,
+            i16_at(data, 6)?,
+            i16_at(data, 8)?,
+        ],
+        reverb_attenuation_control: i16_at(data, 10)?,
+        priority: i32_at(data, 12)?,
+        unknown_x: i32_at(data, 16)?,
+        unknown_y: i32_at(data, 20)?,
+    })
+}
+
+pub(crate) fn parse_sound_reference(
+    subs: &[Subrecord],
+    form_id: u32,
+    record_flags: u32,
+    resolver: &FormIdResolver,
+) -> SoundReferenceRecord {
+    let bnam = sub(subs, "BNAM");
+    SoundReferenceRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        sound_category_form_id: sub_form_id(subs, "GNAM", resolver),
+        sound_reference_form_id: sub_form_id(subs, "SNAM", resolver),
+        output_model_form_id: sub_form_id(subs, "ONAM", resolver),
+        base_descriptor_form_id: bnam
+            .filter(|data| data.len() == 4)
+            .map(|data| resolver.adjust(u32::from_le_bytes(data.try_into().unwrap())))
+            .filter(|form_id| *form_id != 0),
+        file: sub(subs, "ANAM")
+            .map(cstring)
+            .filter(|value| !value.is_empty()),
+        loop_info: sub(subs, "LNAM")
+            .filter(|data| data.len() >= 4)
+            .map(|data| SoundLoopInfo {
+                flags: u16::from_le_bytes(data[0..2].try_into().unwrap()),
+                unknown: data[2],
+                rumble: data[3],
+            }),
+        sound_info: bnam.filter(|data| data.len() == 6).map(|data| SoundInfo {
+            frequency_adjustment: data[0] as i8,
+            frequency_variance: data[1],
+            priority: data[2],
+            decibel_variance: data[3],
+            static_attenuation: u16::from_le_bytes(data[4..6].try_into().unwrap()),
+        }),
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "GNAM", "SNAM", "ONAM", "ANAM", "LNAM", "BNAM", "CTDA", "CIS1", "CIS2",
+                "CNAM", "DNAM", "FNAM", "INTV", "ITMC", "ITME", "ITMS", "NNAM",
+            ],
+        ),
+    }
+}
+
+pub(crate) fn parse_acoustic_space(
+    subs: &[Subrecord],
+    form_id: u32,
+    record_flags: u32,
+    resolver: &FormIdResolver,
+) -> AcousticSpaceRecord {
+    let mut is_interior = None;
+    for subrecord in subs {
+        match subrecord.signature.as_str() {
+            "INAM" if subrecord.data.len() >= 4 => {
+                is_interior =
+                    Some(u32::from_le_bytes(subrecord.data[0..4].try_into().unwrap()) != 0)
+            }
+            "XTRI" if !subrecord.data.is_empty() => is_interior = Some(subrecord.data[0] != 0),
+            _ => {}
+        }
+    }
+    AcousticSpaceRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        environment_type: sub(subs, "ANAM").and_then(|data| u32_at(data, 0)),
+        ambient_loop_sound_form_ids: subs
+            .iter()
+            .filter(|subrecord| subrecord.signature == "SNAM")
+            .filter_map(|subrecord| u32_at(&subrecord.data, 0))
+            .map(|form_id| resolver.adjust(form_id))
+            .filter(|form_id| *form_id != 0)
+            .collect(),
+        sound_region_form_id: sub_form_id(subs, "RDAT", resolver),
+        is_interior,
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "ANAM", "SNAM", "RDAT", "INAM", "XTRI", "WNAM", "BNAM", "OBND",
+            ],
+        ),
+    }
+}
+
+pub(crate) fn parse_lighting_template(
+    subs: &[Subrecord],
+    form_id: u32,
+    record_flags: u32,
+) -> LightingTemplateRecord {
+    LightingTemplateRecord {
+        form_id,
+        record_flags,
+        editor_id: sub(subs, "EDID").map(cstring),
+        lighting: sub(subs, "DATA").and_then(parse_lighting_data),
+        ignored_subrecords: ignored_signatures(subs, &["EDID", "DATA", "DALC"]),
+    }
+}
+
+pub(crate) fn parse_lighting_data(data: &[u8]) -> Option<LightingData> {
+    // OpenMW accepts the TES4 36-byte layout and the FO3/FNV 40-byte layout
+    // (and skips the tail of newer layouts).  Reject the otherwise ambiguous
+    // 37-39 byte range instead of partially applying malformed lighting.
+    if data.len() < 36 || (data.len() > 36 && data.len() < 40) {
+        return None;
+    }
+    Some(LightingData {
+        ambient_rgba: rgba8(&data[0..4]),
+        directional_rgba: rgba8(&data[4..8]),
+        fog_rgba: rgba8(&data[8..12]),
+        fog_near: f32_at_option(data, 12)?,
+        fog_far: f32_at_option(data, 16)?,
+        rotation_xy: i32_at(data, 20)?,
+        rotation_z: i32_at(data, 24)?,
+        fog_directional_fade: f32_at_option(data, 28)?,
+        fog_clip_distance: f32_at_option(data, 32)?,
+        fog_power: f32_at_option(data, 36).unwrap_or(1.0),
+    })
+}
+
+pub(crate) fn parse_cell(
+    subs: &[Subrecord],
+    form_id: u32,
+    resolver: &FormIdResolver,
+) -> Result<CellInfo> {
+    let interior = sub(subs, "DATA")
+        .and_then(|data| data.first())
+        .is_some_and(|flags| flags & 1 != 0);
+    let mut ambient = [0.18, 0.18, 0.18, 1.0];
+    let mut directional = [0.8, 0.8, 0.8, 1.0];
+    if let Some(lighting) = sub(subs, "XCLL").and_then(parse_lighting_data) {
+        ambient = lighting.ambient_rgba;
+        directional = lighting.directional_rgba;
+    }
+    Ok(CellInfo {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+        interior,
+        ambient_rgba: ambient,
+        directional_rgba: directional,
+        image_space_form_id: sub_form_id(subs, "XCIM", resolver),
+        image_space: None,
+        lighting_template_form_id: sub_form_id(subs, "LTMP", resolver),
+        lighting_template_flags: sub(subs, "LNAM")
+            .and_then(|data| u32_at(data, 0))
+            .unwrap_or_default(),
+        lighting_template: None,
+        raw_lighting: None,
+        effective_lighting: None,
+        water_form_id: sub_form_id(subs, "XCWT", resolver),
+        water_height: sub(subs, "XCLW").and_then(|data| f32_at_option(data, 0)),
+    })
+}
+
+pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver) -> CellMetadata {
+    CellMetadata {
+        acoustic_space_form_id: sub_form_id(subs, "XCAS", resolver),
+        music_form_id: sub_form_id(subs, "XCMO", resolver),
+        lighting_template_form_id: sub_form_id(subs, "LTMP", resolver),
+        lighting_template_flags: sub(subs, "LNAM")
+            .and_then(|data| u32_at(data, 0))
+            .unwrap_or_default(),
+        water_form_id: sub_form_id(subs, "XCWT", resolver),
+        water_height: sub(subs, "XCLW").and_then(|data| f32_at_option(data, 0)),
+        lighting: sub(subs, "XCLL").and_then(parse_lighting_data),
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "FULL", "DATA", "XCLL", "XCIM", "XCAS", "XCMO", "LTMP", "LNAM", "XCWT",
+                "XCLW",
+            ],
+        ),
+    }
+}
+
+pub(crate) fn parse_reference(
+    subs: &[Subrecord],
+    form_id: u32,
+    parent_cell_form_id: u32,
+    flags: u32,
+    kind: ReferenceKind,
+    resolver: &FormIdResolver,
+) -> Result<Option<ReferenceRecord>> {
+    let Some(base_form_id) = sub_form_id(subs, "NAME", resolver) else {
+        return Ok(None);
+    };
+    let Some(data) = sub(subs, "DATA").filter(|data| data.len() >= 24) else {
+        return Ok(None);
+    };
+    let teleport = sub(subs, "XTEL")
+        .filter(|data| data.len() >= 28)
+        .map(|data| TeleportRecord {
+            door_reference_form_id: resolver
+                .adjust(u32::from_le_bytes(data[0..4].try_into().unwrap())),
+            position: [
+                f32_at(data, 4).unwrap_or_default(),
+                f32_at(data, 8).unwrap_or_default(),
+                f32_at(data, 12).unwrap_or_default(),
+            ],
+            rotation: [
+                f32_at(data, 16).unwrap_or_default(),
+                f32_at(data, 20).unwrap_or_default(),
+                f32_at(data, 24).unwrap_or_default(),
+            ],
+        });
+    let lock = sub(subs, "XLOC").filter(|data| data.len() >= 8);
+    let door = (teleport.is_some() || lock.is_some()).then(|| DoorRecord {
+        lock_level: lock.map(|data| data[0] as i8),
+        key_form_id: lock
+            .map(|data| resolver.adjust(u32::from_le_bytes(data[4..8].try_into().unwrap())))
+            .filter(|id| *id != 0),
+        destination: None,
+        teleport,
+    });
+    Ok(Some(ReferenceRecord {
+        kind,
+        form_id,
+        parent_cell_form_id,
+        base_form_id,
+        position: [f32_at(data, 0)?, f32_at(data, 4)?, f32_at(data, 8)?],
+        rotation: [f32_at(data, 12)?, f32_at(data, 16)?, f32_at(data, 20)?],
+        scale: sub(subs, "XSCL")
+            .and_then(|data| f32_at_option(data, 0))
+            .unwrap_or(1.0),
+        count: sub(subs, "XCNT")
+            .and_then(|data| i32_at(data, 0))
+            .unwrap_or(1),
+        flags,
+        door,
+        owner_form_id: sub_form_id(subs, "XOWN", resolver),
+        owner_faction_rank: sub(subs, "XRNK").and_then(|data| i32_at(data, 0)),
+        enable_parent: sub(subs, "XESP")
+            .filter(|data| data.len() >= 8)
+            .map(|data| EnableParentRecord {
+                parent_reference_form_id: resolver
+                    .adjust(u32::from_le_bytes(data[0..4].try_into().unwrap())),
+                flags: u32::from_le_bytes(data[4..8].try_into().unwrap()),
+            }),
+        initially_enabled: flags & RECORD_DISABLED == 0,
+        ignored_subrecords: ignored_signatures(
+            subs,
+            &[
+                "EDID", "NAME", "DATA", "XSCL", "XCNT", "XTEL", "XLOC", "XOWN", "XRNK", "XESP",
+            ],
+        ),
+    }))
+}
+
+pub(crate) fn ignored_signatures(subs: &[Subrecord], supported: &[&str]) -> Vec<String> {
+    let mut signatures = subs
+        .iter()
+        .filter(|sub| !supported.contains(&sub.signature.as_str()))
+        .map(|sub| sub.signature.clone())
+        .collect::<Vec<_>>();
+    signatures.sort();
+    signatures.dedup();
+    signatures
+}
+
+pub(crate) fn parse_navmesh(
+    subs: &[Subrecord],
+    form_id: u32,
+    flags: u32,
+    payload: Vec<u8>,
+) -> NavMeshRecord {
+    NavMeshRecord {
+        form_id,
+        flags,
+        version: sub(subs, "NVER").and_then(|data| {
+            data.get(..4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        }),
+        chunks: subs
+            .iter()
+            .map(|sub| NavMeshChunk {
+                signature: sub.signature.clone(),
+                byte_len: sub.data.len() as u32,
+            })
+            .collect(),
+        payload,
+    }
+}
+
+pub(crate) fn parse_image_space(subs: &[Subrecord], form_id: u32) -> Option<ImageSpaceInfo> {
+    let data = sub(subs, "DNAM")?;
+    let mut image_space = ImageSpaceInfo {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        ..ImageSpaceInfo::default()
+    };
+    image_space.eye_adapt_speed = f32_or(data, 0, image_space.eye_adapt_speed);
+    image_space.hdr_blur_radius = f32_or(data, 4, image_space.hdr_blur_radius);
+    image_space.hdr_blur_passes = f32_or(data, 8, image_space.hdr_blur_passes);
+    image_space.hdr_emissive_multiplier = f32_or(data, 12, image_space.hdr_emissive_multiplier);
+    image_space.hdr_target_lum = f32_or(data, 16, image_space.hdr_target_lum);
+    image_space.hdr_upper_lum_clamp = f32_or(data, 20, image_space.hdr_upper_lum_clamp);
+    image_space.hdr_bright_scale = f32_or(data, 24, image_space.hdr_bright_scale);
+    image_space.hdr_bright_clamp = f32_or(data, 28, image_space.hdr_bright_clamp);
+    image_space.hdr_lum_ramp_no_tex = f32_or(data, 32, image_space.hdr_lum_ramp_no_tex);
+    image_space.hdr_lum_ramp_min = f32_or(data, 36, image_space.hdr_lum_ramp_min);
+    image_space.hdr_lum_ramp_max = f32_or(data, 40, image_space.hdr_lum_ramp_max);
+    image_space.hdr_sunlight_dimmer = f32_or(data, 44, image_space.hdr_sunlight_dimmer);
+    image_space.hdr_grass_dimmer = f32_or(data, 48, image_space.hdr_grass_dimmer);
+    image_space.hdr_tree_dimmer = f32_or(data, 52, image_space.hdr_tree_dimmer);
+    image_space.hdr_skin_dimmer = f32_or(data, 56, image_space.hdr_skin_dimmer);
+    image_space.bloom_blur_radius = f32_or(data, 60, image_space.bloom_blur_radius);
+    image_space.bloom_alpha_mult_interior = f32_or(data, 64, image_space.bloom_alpha_mult_interior);
+    image_space.bloom_alpha_mult_exterior = f32_or(data, 68, image_space.bloom_alpha_mult_exterior);
+    image_space.get_hit_blur_radius = f32_or(data, 72, image_space.get_hit_blur_radius);
+    image_space.get_hit_blur_damping_constant =
+        f32_or(data, 76, image_space.get_hit_blur_damping_constant);
+    image_space.get_hit_damping_constant = f32_or(data, 80, image_space.get_hit_damping_constant);
+    image_space.night_eye_tint_rgb = rgb_or(data, 84, image_space.night_eye_tint_rgb);
+    image_space.brightness = f32_or(data, 96, image_space.brightness);
+    image_space.cinematic_saturation = f32_or(data, 100, image_space.cinematic_saturation);
+    image_space.cinematic_contrast_avg_lum =
+        f32_or(data, 104, image_space.cinematic_contrast_avg_lum);
+    image_space.cinematic_contrast = f32_or(data, 108, image_space.cinematic_contrast);
+    image_space.cinematic_brightness_tint_rgb =
+        rgb_or(data, 112, image_space.cinematic_brightness_tint_rgb);
+    image_space.cinematic_brightness_tint_value =
+        f32_or(data, 124, image_space.cinematic_brightness_tint_value);
+    image_space.flags = data.get(144).copied().unwrap_or_default();
+    Some(image_space)
+}
