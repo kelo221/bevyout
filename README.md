@@ -30,6 +30,10 @@ locations; otherwise put them on `PATH` or set `[tools]` in
 `.bevyout/config.toml` (see `config.example.toml`). Auto-detection only checks
 Windows install paths, so macOS/Linux users must set `blender` and
 `irradiance_blender` explicitly even if the binaries are installed.
+Without a project-local `.bevyout/config.toml`, a user-level config is also
+read from `%APPDATA%\bevyout\config.toml` on Windows, or
+`$XDG_CONFIG_HOME/bevyout/config.toml` (falling back to
+`~/.config/bevyout/config.toml`) on macOS/Linux.
 
 ## Prepare and render a cell
 
