@@ -38,6 +38,10 @@ pub(crate) fn run_view(
         AutoExposurePlugin,
     ));
     app.insert_resource(physics_assets);
+    app.add_plugins(AppStatePlugin);
+    app.insert_resource(LoadingTarget::NewGame {
+        manifest: manifest_path.clone(),
+    });
     player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);
@@ -53,8 +57,12 @@ pub(crate) fn run_view(
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(AdjustmentTarget::default())
         .insert_resource(LightsDisabled(false))
+        // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
+        // InGame with no menu stop; MainMenu remains reachable in the state
+        // graph but the CLI never observes it (LoadingTarget is always set).
+        .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
-            Startup,
+            OnEnter(AppState::InGame),
             (capture_cursor, spawn_prepared_scene, spawn_reticle),
         )
         .add_systems(
@@ -83,7 +91,9 @@ pub(crate) fn run_view(
                 free_fly_camera,
                 player::fps_mouse_look,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::None)),
         );
     if let Some(seconds) = trace_seconds {
         if !seconds.is_finite() || seconds <= 0.0 {

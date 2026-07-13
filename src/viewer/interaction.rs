@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
+use crate::app_state::{AppState, GameplayModal};
 use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
 
 use super::audio::PlaySound;
@@ -84,7 +85,10 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
             Update,
-            (update_focused_placement, activate_focused_placement).chain(),
+            (update_focused_placement, activate_focused_placement)
+                .chain()
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::None)),
         )
         .add_systems(Update, update_interaction_notice);
 }

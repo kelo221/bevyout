@@ -17,6 +17,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::app_state::{AppState, GameplayModal};
 use crate::vsa::{
     PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
     PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
@@ -282,11 +283,16 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
             emit_landing_events.after(step_world),
             emit_footsteps.after(emit_landing_events),
             sync_dynamic_transforms.after(sync_boxddd_transforms_to_bevy),
-        ),
+        )
+            .run_if(in_state(AppState::InGame))
+            .run_if(in_state(GameplayModal::None)),
     )
     .add_systems(
         PostUpdate,
-        interpolate_fps_camera.after(TransformSystems::Propagate),
+        interpolate_fps_camera
+            .after(TransformSystems::Propagate)
+            .run_if(in_state(AppState::InGame))
+            .run_if(in_state(GameplayModal::None)),
     )
     .add_systems(
         Update,
