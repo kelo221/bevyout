@@ -84,6 +84,68 @@ fn camera_vertical_smoothing_resets_for_air_landings_and_discontinuities() {
 }
 
 #[test]
+fn fps_mode_auto_enters_once_collision_is_ready() {
+    let mut app = App::new();
+    app.add_systems(Update, auto_enter_fps);
+    app.insert_resource(CameraModeState {
+        collisions_ready: true,
+        ..default()
+    });
+    let camera = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Transform::from_xyz(1.0, 2.0, 3.0),
+            GlobalTransform::default(),
+            FlyCamera {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 1.0,
+            },
+        ))
+        .id();
+    app.update();
+    let state = app.world().resource::<CameraModeState>();
+    assert_eq!(state.mode, CameraMode::Fps);
+    assert!(state.player.is_some());
+    assert!(!state.auto_enter, "auto-entry must be one-shot");
+    assert!(
+        app.world().get::<ChildOf>(camera).is_some(),
+        "camera must be parented to the spawned player"
+    );
+
+    // A second frame must not spawn a second player.
+    app.update();
+    let players = app
+        .world_mut()
+        .query::<&FpsPlayer>()
+        .iter(app.world())
+        .count();
+    assert_eq!(players, 1);
+}
+
+#[test]
+fn fps_mode_is_not_auto_entered_before_collision_is_ready() {
+    let mut app = App::new();
+    app.add_systems(Update, auto_enter_fps);
+    app.insert_resource(CameraModeState::default());
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Transform::default(),
+        GlobalTransform::default(),
+        FlyCamera {
+            yaw: 0.0,
+            pitch: 0.0,
+            speed: 1.0,
+        },
+    ));
+    app.update();
+    let state = app.world().resource::<CameraModeState>();
+    assert_eq!(state.mode, CameraMode::Free);
+    assert!(state.auto_enter, "must keep waiting for collision cook");
+}
+
+#[test]
 fn camera_toggle_is_edge_triggered() {
     let mut keys = ButtonInput::<KeyCode>::default();
     assert!(!camera_toggle_pressed(&keys));

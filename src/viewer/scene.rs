@@ -179,7 +179,7 @@ pub(crate) fn spawn_prepared_scene(
         focus,
     );
     info!(
-        "controls: V toggles FPS player/free camera, Tab opens Pip-Boy, Esc pauses and releases cursor, left click captures cursor"
+        "controls: FPS player starts once collision is ready, V toggles free camera, Tab opens Pip-Boy, Esc pauses and releases cursor, left click captures cursor"
     );
 }
 
