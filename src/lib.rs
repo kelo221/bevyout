@@ -1,5 +1,6 @@
 pub mod cli;
 
+mod app_state;
 mod config;
 mod viewer;
 mod vsa;
