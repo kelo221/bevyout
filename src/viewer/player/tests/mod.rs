@@ -725,6 +725,96 @@ fn stair_support_samples_across_missing_half_of_authored_tread() {
 }
 
 #[test]
+fn arlington_last_landing_probe_reaches_past_authored_triangle_gap() {
+    let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+    let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    let mesh = boxddd::MeshData::builder(
+        vec![
+            // Current tread beneath the logged player position.
+            boxddd::Vec3::new(-12.114_286, 3.6572, 30.857_143),
+            boxddd::Vec3::new(-12.571_429, 3.6572, 30.857_143),
+            boxddd::Vec3::new(-12.114_286, 3.6572, 32.0),
+            // The final riser that blocks the capsule.
+            boxddd::Vec3::new(-12.571_429, 4.0, 32.0),
+            boxddd::Vec3::new(-12.571_429, 3.6572, 32.0),
+            boxddd::Vec3::new(-12.571_429, 4.0, 30.857_143),
+            boxddd::Vec3::new(-12.571_429, 3.6572, 32.0),
+            boxddd::Vec3::new(-12.571_429, 4.0, 30.857_143),
+            boxddd::Vec3::new(-12.571_429, 3.6572, 30.857_143),
+            // Only the upward-wound half of the authored top landing.
+            boxddd::Vec3::new(-13.714_286, 4.0, 32.0),
+            boxddd::Vec3::new(-12.571_429, 4.0, 32.0),
+            boxddd::Vec3::new(-13.714_286, 4.0, 30.857_143),
+        ],
+        (0..12).collect::<Vec<i32>>(),
+    )
+    .build()
+    .expect("Arlington final-landing triangle");
+    world
+        .try_create_mesh_shape(
+            body,
+            &fixture_shape_def(true),
+            mesh,
+            boxddd::Vec3::new(1.0, 1.0, 1.0),
+        )
+        .expect("Arlington final-landing shape");
+
+    let position = boxddd::Vec3::new(-12.2265, 4.5572, 31.0733);
+    let horizontal = boxddd::Vec3::new(-0.0653, 0.0, -0.0073);
+    let direction = scale_box_vec3(horizontal, 1.0 / box_vec_length_squared(horizontal).sqrt());
+    let elevated = add_box_vec3(
+        position,
+        add_box_vec3(horizontal, boxddd::Vec3::new(0.0, STEP_SWEEP_DISTANCE, 0.0)),
+    );
+    let current_ground_y = position.y - CAPSULE_HEIGHT * 0.5;
+    let origins = forward_step_probe_origins(elevated, direction, current_ground_y);
+    let down = boxddd::Vec3::new(0.0, -(STEP_SWEEP_DISTANCE + STEP_CLEARANCE), 0.0);
+    let min_support_y = current_ground_y + f32::EPSILON;
+    let max_support_y = current_ground_y + STEP_HEIGHT + STEP_VALIDATION_EPSILON;
+    let filter = stair_support_filter();
+
+    let (old_footprint_support, _, _) = probe_walkable_step_support(
+        &mut world,
+        &origins[..9],
+        down,
+        min_support_y,
+        max_support_y,
+        filter,
+    );
+    assert!(
+        old_footprint_support.is_none(),
+        "the original three probe rows must reproduce the logged final-step gap"
+    );
+
+    let (support, total_hits, ray_errors) = probe_walkable_step_support(
+        &mut world,
+        &origins,
+        down,
+        min_support_y,
+        max_support_y,
+        filter,
+    );
+    let (point, forward_offset, _) =
+        support.expect("the extended landing probe should reach the walkable triangle half");
+    assert_eq!(ray_errors, 0);
+    assert!(total_hits > 0);
+    assert_eq!(forward_offset, CAPSULE_RADIUS * 3.0);
+    assert!((point.y - 4.0).abs() < 0.0001);
+
+    let stepped = try_step_up(
+        &mut world,
+        position,
+        &fixture_capsule(),
+        horizontal,
+        player_collision_filter(),
+        filter,
+        false,
+    )
+    .expect("the Arlington-shaped controller fixture should accept the final step");
+    assert!((stepped.y - (position.y + 0.3428)).abs() < 0.0001);
+}
+
+#[test]
 fn step_solver_accepts_exact_limit_and_rejects_higher_risers() {
     let start = boxddd::Vec3::new(-0.70, CAPSULE_HEIGHT * 0.5, 0.0);
     let delta = boxddd::Vec3::new(PLAYER_SPEED / 60.0, 0.0, 0.0);

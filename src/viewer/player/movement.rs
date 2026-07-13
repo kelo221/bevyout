@@ -5,6 +5,8 @@ use super::*;
 const STEP_DEBUG_LOG_INTERVAL: f64 = 0.2;
 const STEP_SUPPORT_FORWARD_OFFSET: f32 = CAPSULE_RADIUS;
 const STEP_SUPPORT_MID_FORWARD_OFFSET: f32 = CAPSULE_RADIUS * 0.5;
+const STEP_SUPPORT_FAR_FORWARD_OFFSET: f32 = CAPSULE_RADIUS * 2.0;
+const STEP_SUPPORT_MAX_FORWARD_OFFSET: f32 = CAPSULE_RADIUS * 3.0;
 const STEP_SUPPORT_LATERAL_OFFSET: f32 = CAPSULE_RADIUS * 0.5;
 
 pub(crate) fn player_collision_filter() -> boxddd::QueryFilter {
@@ -573,67 +575,50 @@ pub(crate) fn forward_step_probe_origins(
     elevated: boxddd::Vec3,
     direction: boxddd::Vec3,
     current_ground_y: f32,
-) -> [(boxddd::Vec3, f32, f32); 9] {
+) -> [(boxddd::Vec3, f32, f32); 15] {
     let center = boxddd::Vec3::new(
         elevated.x + direction.x * (CAPSULE_RADIUS + STEP_CLEARANCE),
         current_ground_y + STEP_SWEEP_DISTANCE,
         elevated.z + direction.z * (CAPSULE_RADIUS + STEP_CLEARANCE),
     );
-    step_support_probe_origins(center, direction)
+    let near = step_support_probe_row(center, direction, 0.0);
+    let mid = step_support_probe_row(center, direction, STEP_SUPPORT_MID_FORWARD_OFFSET);
+    let forward = step_support_probe_row(center, direction, STEP_SUPPORT_FORWARD_OFFSET);
+    let far = step_support_probe_row(center, direction, STEP_SUPPORT_FAR_FORWARD_OFFSET);
+    let max = step_support_probe_row(center, direction, STEP_SUPPORT_MAX_FORWARD_OFFSET);
+    [
+        near[0], near[1], near[2], mid[0], mid[1], mid[2], forward[0], forward[1], forward[2],
+        far[0], far[1], far[2], max[0], max[1], max[2],
+    ]
 }
 
 pub(crate) fn step_support_probe_origins(
     center: boxddd::Vec3,
     direction: boxddd::Vec3,
 ) -> [(boxddd::Vec3, f32, f32); 9] {
-    let lateral = boxddd::Vec3::new(-direction.z, 0.0, direction.x);
-    let mid_forward_center = add_box_vec3(
-        center,
-        scale_box_vec3(direction, STEP_SUPPORT_MID_FORWARD_OFFSET),
-    );
-    let forward_center = add_box_vec3(
-        center,
-        scale_box_vec3(direction, STEP_SUPPORT_FORWARD_OFFSET),
-    );
+    let near = step_support_probe_row(center, direction, 0.0);
+    let mid = step_support_probe_row(center, direction, STEP_SUPPORT_MID_FORWARD_OFFSET);
+    let forward = step_support_probe_row(center, direction, STEP_SUPPORT_FORWARD_OFFSET);
     [
-        (center, 0.0, 0.0),
-        (
-            add_box_vec3(center, scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET)),
-            0.0,
-            STEP_SUPPORT_LATERAL_OFFSET,
-        ),
-        (
-            add_box_vec3(
-                center,
-                scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
-            ),
-            0.0,
-            -STEP_SUPPORT_LATERAL_OFFSET,
-        ),
-        (mid_forward_center, STEP_SUPPORT_MID_FORWARD_OFFSET, 0.0),
-        (
-            add_box_vec3(
-                mid_forward_center,
-                scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET),
-            ),
-            STEP_SUPPORT_MID_FORWARD_OFFSET,
-            STEP_SUPPORT_LATERAL_OFFSET,
-        ),
-        (
-            add_box_vec3(
-                mid_forward_center,
-                scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
-            ),
-            STEP_SUPPORT_MID_FORWARD_OFFSET,
-            -STEP_SUPPORT_LATERAL_OFFSET,
-        ),
-        (forward_center, STEP_SUPPORT_FORWARD_OFFSET, 0.0),
+        near[0], near[1], near[2], mid[0], mid[1], mid[2], forward[0], forward[1], forward[2],
+    ]
+}
+
+fn step_support_probe_row(
+    center: boxddd::Vec3,
+    direction: boxddd::Vec3,
+    forward_offset: f32,
+) -> [(boxddd::Vec3, f32, f32); 3] {
+    let lateral = boxddd::Vec3::new(-direction.z, 0.0, direction.x);
+    let forward_center = add_box_vec3(center, scale_box_vec3(direction, forward_offset));
+    [
+        (forward_center, forward_offset, 0.0),
         (
             add_box_vec3(
                 forward_center,
                 scale_box_vec3(lateral, STEP_SUPPORT_LATERAL_OFFSET),
             ),
-            STEP_SUPPORT_FORWARD_OFFSET,
+            forward_offset,
             STEP_SUPPORT_LATERAL_OFFSET,
         ),
         (
@@ -641,7 +626,7 @@ pub(crate) fn step_support_probe_origins(
                 forward_center,
                 scale_box_vec3(lateral, -STEP_SUPPORT_LATERAL_OFFSET),
             ),
-            STEP_SUPPORT_FORWARD_OFFSET,
+            forward_offset,
             -STEP_SUPPORT_LATERAL_OFFSET,
         ),
     ]
