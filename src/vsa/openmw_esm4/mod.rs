@@ -13,11 +13,13 @@ use super::paths::CellSelector;
 
 mod binary;
 mod enable;
+mod inventory;
 mod reader;
 mod records;
 
 pub(crate) use binary::*;
 pub(crate) use enable::*;
+pub(crate) use inventory::*;
 pub(crate) use reader::*;
 pub(crate) use records::*;
 

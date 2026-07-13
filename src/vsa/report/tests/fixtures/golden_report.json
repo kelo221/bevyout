@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "source_plugin": "Fixture.esm",
+  "source_fingerprint": "b8fb9d0d2fab2e9e67bec6f610983d83a3d544d4a5e3b464f55737e3572900c9",
+  "entries": [
+    {
+      "class": "record",
+      "key": "FAKE",
+      "status": "unknown",
+      "provenance": [
+        "Fixture.esm:00000400"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "record",
+      "key": "NPC_",
+      "status": "partial",
+      "provenance": [
+        "Fixture.esm:00000100"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "record",
+      "key": "QUST",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000200"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "record",
+      "key": "SCPT",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000300"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "record",
+      "key": "STAT",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000001",
+        "Fixture.esm:00000002"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "record",
+      "key": "TES4",
+      "status": "ignored_by_design",
+      "provenance": [
+        "Fixture.esm:00000000"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "FAKE.EDID",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000400"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "NPC_.EDID",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000100"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "NPC_.FULL",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000100"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "QUST.EDID",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000200"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "SCPT.EDID",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000300"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "STAT.EDID",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000001",
+        "Fixture.esm:00000002"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "STAT.FULL",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000001"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "subrecord",
+      "key": "STAT.UNKN",
+      "status": "unknown",
+      "provenance": [
+        "Fixture.esm:00000001"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "condition",
+      "key": "CTDA",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000200"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "script_function",
+      "key": "SCPT.SCTX",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000300"
+      ],
+      "save_affecting": true
+    },
+    {
+      "class": "asset_format",
+      "key": ".kf",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000002"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "asset_format",
+      "key": ".nif",
+      "status": "supported",
+      "provenance": [
+        "Fixture.esm:00000001"
+      ],
+      "save_affecting": false
+    },
+    {
+      "class": "quest",
+      "key": "00000200",
+      "status": "unsupported",
+      "provenance": [
+        "Fixture.esm:00000200"
+      ],
+      "save_affecting": true
+    }
+  ]
+}
