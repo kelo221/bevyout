@@ -35,9 +35,10 @@ use super::manifest::{
     CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, Diagnostic, PreparedActor,
     PreparedAudioClip, PreparedCellAudio, PreparedCellLighting, PreparedDoor,
     PreparedDoorDestination, PreparedEnableParent, PreparedInventoryEntry, PreparedLight,
-    PreparedLightingTemplate, PreparedNavMeshChunk, PreparedNavMeshSource,
-    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
-    PreparedPluginSource, PreparedSceneManifest, PreparedSemantic,
+    PreparedLightingTemplate, PreparedMutabilitySummary, PreparedNavMeshChunk,
+    PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup, PreparedPlacement,
+    PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest,
+    PreparedSemantic,
 };
 use super::openmw_esm4::LightingData;
 use super::paths::{

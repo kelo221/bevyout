@@ -258,6 +258,19 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
             message,
         });
     }
+    let mutability_summary = summarize_mutability(&placements);
+    let mutability_log = format!(
+        "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
+        mutability_summary.immutable,
+        mutability_summary.enable_group,
+        mutability_summary.script_addressable,
+        mutability_summary.unknown
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: mutability_log.clone(),
+    });
+    println!("{mutability_log}");
     let failures = placements.iter().filter(|p| p.error.is_some()).count();
     if args.strict && failures > 0 {
         bail!("strict preparation failed with {failures} unresolved placements")
@@ -287,6 +300,7 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
         audio_clips,
         footstep_sets,
         hard_landing_clips,
+        mutability_summary,
         bake: None,
     };
     let manifest_path = scene_dir.join("scene.ron");

@@ -123,6 +123,7 @@ pub(crate) fn camera_angles(rotation: Quat) -> (f32, f32) {
     (yaw, pitch.clamp(-1.5, 1.5))
 }
 
-pub(crate) fn tab_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.just_pressed(KeyCode::Tab)
+// V, not Tab: Tab belongs to the Pip-Boy modal (app_state slice).
+pub(crate) fn camera_toggle_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.just_pressed(KeyCode::KeyV)
 }
