@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy::transform::TransformSystems;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_boxddd::boxddd::{
     self, BodyDef, BodyId, BodyType, BoxHull, CollisionPlane, Filter, Hull, ShapeDef, ShapeId,
@@ -102,6 +103,15 @@ struct KccState {
     grounded: bool,
 }
 
+/// Previous fixed-step position used only to render an interpolated FPS camera.
+///
+/// The player's [`Transform`] remains authoritative for physics and gameplay;
+/// this component is deliberately just a small, allocation-free history sample.
+#[derive(Component, Clone, Copy, Debug)]
+struct PlayerRenderHistory {
+    previous_position: Vec3,
+}
+
 #[derive(Resource, Default, Debug, Clone)]
 pub(crate) struct CollisionRuntimeStats {
     pub(crate) authored_assets: usize,
@@ -164,7 +174,13 @@ pub(crate) fn load_prepared_physics_assets(
 pub(crate) struct PhysicsDisabled(pub(crate) bool);
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
-type ToggleCameraQuery<'w> = (Entity, &'w mut Transform, &'w mut FlyCamera, Has<ChildOf>);
+type ToggleCameraQuery<'w> = (
+    Entity,
+    &'w mut Transform,
+    &'w mut FlyCamera,
+    &'w GlobalTransform,
+    Has<ChildOf>,
+);
 pub(crate) fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -GRAVITY, 0.0),
@@ -181,12 +197,17 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
         FixedUpdate,
         (
             cleanup_removed_dynamic_bodies.before(step_world),
+            capture_player_render_history.before(apply_player_controls),
             apply_player_controls.before(sync_player_proxy),
             sync_player_proxy.before(step_world),
             emit_landing_events.after(step_world),
             emit_footsteps.after(emit_landing_events),
             sync_dynamic_transforms.after(sync_boxddd_transforms_to_bevy),
         ),
+    )
+    .add_systems(
+        PostUpdate,
+        interpolate_fps_camera.after(TransformSystems::Propagate),
     )
     .add_systems(Update, (toggle_collider_debug, update_collider_debug_hud))
     .add_systems(Update, draw_debug_gizmos);
@@ -248,7 +269,7 @@ pub(crate) fn toggle_camera_mode(
         return;
     }
 
-    let Ok((camera_entity, mut camera_transform, mut fly_camera, has_parent)) =
+    let Ok((camera_entity, mut camera_transform, mut fly_camera, camera_global, has_parent)) =
         cameras.single_mut()
     else {
         warn!("cannot toggle camera mode: expected one camera");
@@ -279,6 +300,9 @@ pub(crate) fn toggle_camera_mode(
                     LocomotionState::default(),
                     KccState::default(),
                     PhysicsCollider,
+                    PlayerRenderHistory {
+                        previous_position: player_center,
+                    },
                     Transform::from_translation(player_center)
                         .with_rotation(Quat::from_rotation_y(yaw)),
                 ))
@@ -297,7 +321,7 @@ pub(crate) fn toggle_camera_mode(
                 state.mode = CameraMode::Free;
                 return;
             };
-            let Ok(player_transform) = players.get(player_entity) else {
+            let Ok(_player_transform) = players.get(player_entity) else {
                 warn!("cannot leave FPS mode: player entity is not available yet");
                 return;
             };
@@ -306,8 +330,9 @@ pub(crate) fn toggle_camera_mode(
                 return;
             }
 
-            let world_camera =
-                GlobalTransform::from(*player_transform).mul_transform(*camera_transform);
+            // Use the last rendered camera pose so leaving FPS mode does not
+            // snap back to the latest unsmoothed fixed-step player position.
+            let world_camera = *camera_global;
             let (scale, rotation, translation) = world_camera.to_scale_rotation_translation();
             let (yaw, pitch) = camera_angles(rotation);
             fly_camera.yaw = yaw;
@@ -322,6 +347,59 @@ pub(crate) fn toggle_camera_mode(
             info!("camera mode: free camera (Tab to enter FPS player)");
         }
     }
+}
+
+fn capture_player_render_history(
+    mut players: Query<(&Transform, &mut PlayerRenderHistory), With<FpsPlayer>>,
+) {
+    let Ok((transform, mut history)) = players.single_mut() else {
+        return;
+    };
+    history.previous_position = transform.translation;
+}
+
+fn interpolate_fps_camera(
+    fixed_time: Res<Time<Fixed>>,
+    state: Res<CameraModeState>,
+    players: Query<(&Transform, &PlayerRenderHistory), With<FpsPlayer>>,
+    mut cameras: Query<(&Transform, &mut GlobalTransform), With<Camera3d>>,
+) {
+    if state.mode != CameraMode::Fps {
+        return;
+    }
+    let Some(player_entity) = state.player else {
+        return;
+    };
+    let Ok((player_transform, history)) = players.get(player_entity) else {
+        return;
+    };
+    let Ok((camera_transform, mut camera_global)) = cameras.single_mut() else {
+        return;
+    };
+
+    let interpolated_player_position = interpolate_render_position(
+        history.previous_position,
+        player_transform.translation,
+        fixed_time.overstep_fraction(),
+    );
+
+    // Rebuild the authoritative camera pose from local transforms instead of
+    // reading the previous render override. This prevents offsets accumulating
+    // when Bevy skips propagation for an unchanged hierarchy.
+    let authoritative_camera =
+        GlobalTransform::from(*player_transform).mul_transform(*camera_transform);
+    let (scale, rotation, translation) = authoritative_camera.to_scale_rotation_translation();
+    let render_translation =
+        translation + (interpolated_player_position - player_transform.translation);
+    *camera_global = GlobalTransform::from(Transform {
+        translation: render_translation,
+        rotation,
+        scale,
+    });
+}
+
+fn interpolate_render_position(previous: Vec3, current: Vec3, alpha: f32) -> Vec3 {
+    previous.lerp(current, alpha.clamp(0.0, 1.0))
 }
 
 pub(crate) fn fps_mouse_look(
@@ -1200,6 +1278,22 @@ mod tests {
     fn capsule_center_offset_places_eye_at_requested_height() {
         assert!((CAMERA_LOCAL_HEIGHT - 0.7).abs() < f32::EPSILON);
         assert!((CAPSULE_HEIGHT * 0.5 + CAMERA_LOCAL_HEIGHT - EYE_HEIGHT).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn render_position_interpolates_without_extrapolation() {
+        let previous = Vec3::new(1.0, 2.0, 3.0);
+        let current = Vec3::new(5.0, 6.0, 7.0);
+        assert_eq!(
+            interpolate_render_position(previous, current, 0.0),
+            previous
+        );
+        assert_eq!(
+            interpolate_render_position(previous, current, 0.5),
+            Vec3::new(3.0, 4.0, 5.0)
+        );
+        assert_eq!(interpolate_render_position(previous, current, 1.0), current);
+        assert_eq!(interpolate_render_position(previous, current, 2.0), current);
     }
 
     #[test]
