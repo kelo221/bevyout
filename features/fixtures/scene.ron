@@ -1,0 +1,157 @@
+// Golden fixture for the schema-7 `PreparedSceneManifest` (see
+// `src/vsa/manifest.rs`). Hand-written, not machine-generated, to stay
+// readable as a spec artifact: it is deliberately small but touches every
+// field category README.md promises schema 7 retains -- item/container
+// metadata, ownership + enable-parent gating, door locks/destinations, cell
+// acoustics, native footstep/landing banks, and NAVM payloads as metadata.
+//
+// Intended change path: this file pins today's schema. A deliberate schema
+// change (new/renamed/removed manifest field) should bump
+// `PreparedSceneManifest::schema_version` (or add a new golden fixture
+// alongside this one) and regenerate this fixture to match -- do not silently
+// edit it just to make a failing test pass; that defeats the point of an
+// executable spec.
+(
+    schema_version: 7,
+    asset_root: "cache/00017f37",
+    source_plugin: "Fallout3.esm",
+    source_fingerprint: "9f2b6e4d5c3a10ef",
+    source_plugins: [
+        (
+            name: "Fallout3.esm",
+            path: "Fallout3.esm",
+            fingerprint: "9f2b6e4d5c3a10ef",
+        ),
+    ],
+    cell: (
+        form_id: 0x00017f37,
+        editor_id: Some("SuperDuperMart"),
+        name: Some("Super-Duper Mart"),
+        interior: true,
+        ambient_rgba: (0.1, 0.1, 0.1, 1.0),
+        directional_rgba: (0.8, 0.8, 0.7, 1.0),
+    ),
+    placements: [
+        // Retained item/container metadata + ownership/enable-parent gating.
+        (
+            reference_form_id: 0x00020001,
+            base_form_id: 0x00020101,
+            asset_path: Some("assets/containers/cooler01.glb"),
+            translation: (1.0, 0.0, 2.0),
+            rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            error: None,
+            reference_kind: "REFR",
+            base_kind: "CONT",
+            editor_id: Some("SuperMartCooler01"),
+            display_name: Some("Cooler"),
+            count: 1,
+            semantic: Container,
+            initially_enabled: true,
+            enable_parent: Some((
+                reference_form_id: 0x00020201,
+                inverted: false,
+                pop_in: true,
+            )),
+            owner_form_id: Some(0x00020301),
+            owner_faction_rank: Some(-1),
+            inventory: [
+                (
+                    base_form_id: 0x00020401,
+                    count: 3,
+                    record_kind: "ALCH",
+                    editor_id: Some("PurifiedWater"),
+                    display_name: Some("Purified Water"),
+                    leveled: false,
+                ),
+            ],
+            audio: (
+                loop_sound_form_id: None,
+                activate_sound_form_id: None,
+                open_sound_form_id: None,
+                close_sound_form_id: None,
+                pickup_sound_form_id: None,
+                drop_sound_form_id: None,
+            ),
+            ao_mode: "ao-quick-v1",
+        ),
+        // Door lock level + key + destination cell/transform.
+        (
+            reference_form_id: 0x00020501,
+            base_form_id: 0x00020601,
+            asset_path: Some("assets/doors/metaldoor01.glb"),
+            translation: (3.0, 0.0, 4.0),
+            rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            error: None,
+            reference_kind: "REFR",
+            base_kind: "DOOR",
+            editor_id: Some("SuperMartFrontDoor"),
+            display_name: Some("Super-Duper Mart"),
+            count: 1,
+            semantic: Door((
+                lock_level: Some(50),
+                key_form_id: Some(0x00020701),
+                destination: Some((
+                    door_reference_form_id: 0x00020801,
+                    cell_form_id: 0x00020901,
+                    translation: (10.0, 0.0, 20.0),
+                    rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+                )),
+            )),
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory: [],
+            audio: (
+                loop_sound_form_id: None,
+                activate_sound_form_id: None,
+                open_sound_form_id: None,
+                close_sound_form_id: None,
+                pickup_sound_form_id: None,
+                drop_sound_form_id: None,
+            ),
+            ao_mode: "ao-none",
+        ),
+    ],
+    lights: [],
+    diagnostics: [],
+    // Source NAVM payloads: retained as metadata (signature + byte length per
+    // chunk), not runtime navigation -- see README's "current slice" section.
+    navmeshes: [
+        (
+            form_id: 0x00020a01,
+            record_flags: 0,
+            version: Some(12),
+            asset_path: "navmesh/00017f37.navm",
+            chunks: [
+                (
+                    signature: "NVNM",
+                    byte_len: 128,
+                ),
+            ],
+        ),
+    ],
+    // Cell acoustic/music metadata.
+    cell_audio: (
+        acoustic_space_form_id: Some(0x00020b01),
+        acoustic_environment_type: Some(2),
+        ambient_loop_sound_form_ids: [0x00020c01],
+        sound_region_form_id: None,
+        music_form_id: None,
+        music_path: None,
+    ),
+    audio_clips: [],
+    // Native footstep and landing sound banks.
+    footstep_sets: [
+        (
+            surface: "concrete",
+            left: ["sound/fx/npc/footstep/concrete/left01.wav"],
+            right: ["sound/fx/npc/footstep/concrete/right01.wav"],
+            land: ["sound/fx/npc/footstep/concrete/land01.wav"],
+        ),
+    ],
+    hard_landing_clips: ["sound/fx/npc/land/hard01.wav"],
+    bake: None,
+)

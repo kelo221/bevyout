@@ -22,6 +22,17 @@ serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
 
+[dev-dependencies]
+# Executable-spec seed (WP6): Gherkin feature files run against real code via
+# #[path]-included modules (see tests/features.rs for why, given this crate has
+# no lib target).
+cucumber = "0.23"
+futures = "0.3"
+
+[[test]]
+name = "features"
+harness = false
+
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
