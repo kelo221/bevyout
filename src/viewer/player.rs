@@ -183,13 +183,13 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
             cleanup_removed_dynamic_bodies.before(step_world),
             apply_player_controls.before(sync_player_proxy),
             sync_player_proxy.before(step_world),
+            emit_landing_events.after(step_world),
+            emit_footsteps.after(emit_landing_events),
             sync_dynamic_transforms.after(sync_boxddd_transforms_to_bevy),
         ),
     )
     .add_systems(Update, (toggle_collider_debug, update_collider_debug_hud))
-    .add_systems(Update, draw_debug_gizmos)
-    .add_systems(Update, emit_landing_events)
-    .add_systems(Update, emit_footsteps.after(emit_landing_events));
+    .add_systems(Update, draw_debug_gizmos);
 }
 
 #[derive(Component)]

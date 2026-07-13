@@ -29,9 +29,9 @@ use std::path::{Path, PathBuf};
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
     CellInfo, FO3_SCALE, ImageSpaceInfo, NIF_CONVERTER_REVISION, PHYSICS_ASSET_SCHEMA_VERSION,
-    PreparedCellLighting, PreparedSceneManifest, bake, cell_label, ensure_baked_scene_compatible,
-    ensure_prepared_manifest_compatible, find_cached_manifest, is_bake_static, prepare,
-    resolve_cached_manifest,
+    PreparedCellLighting, PreparedSceneManifest, PreparedSemantic, bake, cell_label,
+    ensure_baked_scene_compatible, ensure_prepared_manifest_compatible, find_cached_manifest,
+    is_bake_static, prepare, resolve_cached_manifest,
 };
 
 mod audio;
@@ -573,6 +573,11 @@ fn spawn_prepared_scene(
     fog_strength: Res<FogStrength>,
 ) {
     let focus = scene_focus(&manifest);
+    let initial_camera_position =
+        transition_camera_position(&manifest).unwrap_or_else(|| focus + Vec3::new(0.0, 4.0, 12.0));
+    let initial_camera_transform =
+        Transform::from_translation(initial_camera_position).looking_at(focus, Vec3::Y);
+    let (initial_yaw, initial_pitch, _) = initial_camera_transform.rotation.to_euler(EulerRot::YXZ);
     let cell_lighting = effective_lighting(&manifest.cell);
     let (color_grading, auto_exposure) =
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
@@ -584,10 +589,10 @@ fn spawn_prepared_scene(
         Tonemapping::TonyMcMapface,
         Exposure { ev100: 12.0 },
         color_grading,
-        Transform::from_translation(focus + Vec3::new(0.0, 4.0, 12.0)).looking_at(focus, Vec3::Y),
+        initial_camera_transform,
         FlyCamera {
-            yaw: 0.0,
-            pitch: -0.15,
+            yaw: initial_yaw,
+            pitch: initial_pitch,
             speed: 8.0,
         },
     ));
@@ -989,6 +994,20 @@ fn scene_focus(manifest: &PreparedSceneManifest) -> Vec3 {
     } else {
         Vec3::ZERO
     }
+}
+
+fn transition_camera_position(manifest: &PreparedSceneManifest) -> Option<Vec3> {
+    manifest
+        .placements
+        .iter()
+        .filter(|placement| placement.initially_enabled)
+        .find_map(|placement| {
+            matches!(
+                &placement.semantic,
+                PreparedSemantic::Door(door) if door.destination.is_some()
+            )
+            .then_some(Vec3::from_array(placement.translation) + Vec3::Y * player::EYE_HEIGHT)
+        })
 }
 
 fn capture_cursor(mut cursor_options: Single<&mut CursorOptions>) {
