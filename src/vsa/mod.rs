@@ -2,6 +2,7 @@ mod assets;
 mod audio_assets;
 mod bake;
 mod bsa;
+mod content_index;
 mod irradiance;
 mod manifest;
 mod openmw_esm4;
