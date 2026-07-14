@@ -90,6 +90,12 @@ mod swap_policy;
 #[allow(dead_code, unused_imports)]
 mod reveal_policy;
 
+// `animation::policy` (issue #57) is likewise dependency-free (std only, no
+// Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/animation/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod animation_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -206,6 +212,12 @@ struct BevyoutWorld {
     reveal_candidates: Vec<reveal_policy::RevealCandidate>,
     reveal_budget: usize,
     reveal_chunks: Vec<Vec<usize>>,
+
+    // -- door_animation.feature (issue #57) --
+    animation_clip_names: Vec<String>,
+    animation_selected_clip: Option<Option<String>>,
+    animation_open_clip_seconds: Option<f32>,
+    animation_open_lead: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -1572,6 +1584,87 @@ async fn then_first_chunk_contains_candidate_at_distance(world: &mut BevyoutWorl
         first_chunk.contains(&candidate.index),
         "expected first chunk {first_chunk:?} to contain candidate index {}",
         candidate.index
+    );
+}
+
+// ---------------------------------------------------------------------
+// door_animation.feature (issue #57)
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^a placement with clips "([^"]*)"$"#)]
+async fn given_animation_clips(world: &mut BevyoutWorld, clips: String) {
+    world.animation_clip_names = clips
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+}
+
+#[given("a placement with no clips")]
+async fn given_animation_no_clips(world: &mut BevyoutWorld) {
+    world.animation_clip_names = Vec::new();
+}
+
+#[when("the placement is opened")]
+async fn when_animation_opened(world: &mut BevyoutWorld) {
+    world.animation_selected_clip = Some(animation_policy::select_clip(
+        animation_policy::ClipTransition::Opening,
+        &world.animation_clip_names,
+    ));
+}
+
+#[when("the placement is closed")]
+async fn when_animation_closed(world: &mut BevyoutWorld) {
+    world.animation_selected_clip = Some(animation_policy::select_clip(
+        animation_policy::ClipTransition::Closing,
+        &world.animation_clip_names,
+    ));
+}
+
+#[then(regex = r#"^the selected clip is "([^"]*)"$"#)]
+async fn then_animation_selected_clip_is(world: &mut BevyoutWorld, expected: String) {
+    let selected = world
+        .animation_selected_clip
+        .clone()
+        .expect("clip selection not computed yet");
+    assert_eq!(selected, Some(expected));
+}
+
+#[then("no clip is selected")]
+async fn then_animation_no_clip_selected(world: &mut BevyoutWorld) {
+    let selected = world
+        .animation_selected_clip
+        .clone()
+        .expect("clip selection not computed yet");
+    assert_eq!(selected, None);
+}
+
+#[given(regex = r"^a travel door with an Open clip lasting ([\d.]+) seconds$")]
+async fn given_animation_open_clip_seconds(world: &mut BevyoutWorld, seconds: f32) {
+    world.animation_open_clip_seconds = Some(seconds);
+}
+
+#[given("a travel door with no Open clip")]
+async fn given_animation_no_open_clip(world: &mut BevyoutWorld) {
+    world.animation_open_clip_seconds = None;
+}
+
+#[when("the open lead is computed")]
+async fn when_animation_open_lead_computed(world: &mut BevyoutWorld) {
+    world.animation_open_lead = Some(animation_policy::open_lead_seconds(
+        world.animation_open_clip_seconds,
+        animation_policy::OPEN_LEAD_CAP_SECONDS,
+    ));
+}
+
+#[then(regex = r"^the open lead is ([\d.]+) seconds$")]
+async fn then_animation_open_lead_is(world: &mut BevyoutWorld, expected: f32) {
+    let lead = world
+        .animation_open_lead
+        .expect("open lead not computed yet");
+    assert!(
+        (lead - expected).abs() < 1e-4,
+        "open lead {lead} != expected {expected}"
     );
 }
 
