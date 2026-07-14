@@ -979,4 +979,101 @@ mod tests {
             Some(&Visibility::Hidden)
         );
     }
+
+    // -- activate (scripted door travel, M2 wave 2) -----------------------
+
+    /// Registers a placement built from minimal RON (avoids widening the
+    /// `vsa` re-export surface just for test constructors) under FormID
+    /// 0x10 / EditorID "TestRef".
+    fn register_placement(app: &mut App, semantic_ron: &str) {
+        let ron = format!(
+            "(
+                reference_form_id: 16,
+                base_form_id: 1,
+                asset_path: None,
+                translation: (0.0, 0.0, 0.0),
+                rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+                scale: 1.0,
+                error: None,
+                semantic: {semantic_ron},
+            )"
+        );
+        let placement: crate::vsa::PreparedPlacement = ron::de::from_str(&ron).unwrap();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                interaction::PlacementRoot::new(placement),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::console::RefRegistry>()
+            .register(entity, 0x10, Some("TestRef"));
+    }
+
+    const DOOR_WITH_DESTINATION: &str = "Door((
+        lock_level: None,
+        key_form_id: None,
+        destination: Some((
+            door_reference_form_id: 32,
+            cell_form_id: 148753,
+            translation: (1.0, 2.0, 3.0),
+            rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+        )),
+    ))";
+
+    fn error_code(output: &crate::console::ConsoleOutput) -> String {
+        output
+            .error
+            .as_ref()
+            .expect("expected an error")
+            .code
+            .clone()
+    }
+
+    #[test]
+    fn activate_requires_exactly_one_reference() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "activate")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "activate a b")), "bad_arity");
+    }
+
+    #[test]
+    fn activate_rejects_non_door_and_destination_less_references() {
+        let mut app = test_app();
+        register_placement(&mut app, "Static");
+        assert_eq!(
+            error_code(&exec(&mut app, "activate 00000010")),
+            "not_a_door"
+        );
+
+        let mut app = test_app();
+        register_placement(
+            &mut app,
+            "Door((lock_level: None, key_form_id: None, destination: None))",
+        );
+        assert_eq!(
+            error_code(&exec(&mut app, "activate TestRef")),
+            "no_destination"
+        );
+    }
+
+    #[test]
+    fn activate_door_with_destination_writes_a_travel_request() {
+        let mut app = test_app();
+        app.add_message::<interaction::DoorTravelRequested>();
+        register_placement(&mut app, DOOR_WITH_DESTINATION);
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["destination_cell_form_id"], 148753);
+        let requests = app
+            .world()
+            .resource::<Messages<interaction::DoorTravelRequested>>();
+        let request = requests
+            .iter_current_update_messages()
+            .next()
+            .expect("expected a DoorTravelRequested message");
+        assert_eq!(request.destination_cell_form_id, 148753);
+        assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
+    }
 }

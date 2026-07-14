@@ -1165,3 +1165,30 @@ fn airborne_motion_clears_partial_stride_and_missing_surface_defaults_to_concret
     assert_eq!(footstep_surface_or_default(None), "concrete");
     assert_eq!(footstep_surface_or_default(Some("wood")), "wood");
 }
+
+// The startup controls message always advertised a V camera toggle, but no
+// key was bound until M2 wave 2 caught it live — pin the binding's logic.
+#[test]
+fn v_key_toggles_between_free_and_fps_camera() {
+    let mut world = camera_transition_world(false, true);
+    world.init_resource::<ButtonInput<KeyCode>>();
+
+    toggle_camera_mode_on_key(&mut world);
+    assert_eq!(world.resource::<CameraModeState>().mode, CameraMode::Free);
+
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyV);
+    toggle_camera_mode_on_key(&mut world);
+    assert_eq!(world.resource::<CameraModeState>().mode, CameraMode::Fps);
+
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear_just_pressed(KeyCode::KeyV);
+    toggle_camera_mode_on_key(&mut world);
+    assert_eq!(
+        world.resource::<CameraModeState>().mode,
+        CameraMode::Fps,
+        "a held (not just-pressed) V must not re-toggle"
+    );
+}
