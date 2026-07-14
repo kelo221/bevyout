@@ -17,3 +17,10 @@ ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"
 
 [output]
 cache_dir = ".bevyout/cache"
+
+[world]
+# Runtime cell map and predictive door-graph neighbor preloader (issue #51):
+# how many cells (the active cell plus preloaded door-graph neighbors) may be
+# resident at once before the farthest one by graph distance is evicted.
+# Optional: defaults to 4.
+resident_cell_limit = 4

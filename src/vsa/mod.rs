@@ -19,6 +19,9 @@ pub(crate) use assets::NIF_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
+// Issue #51's runtime preloader (`viewer::world`) reads the door-graph
+// connectivity `cells --map` (issue #45) emits at prepare time.
+pub(crate) use cell_map::CellMap;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,

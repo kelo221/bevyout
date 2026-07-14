@@ -72,6 +72,12 @@ mod assets;
 #[allow(dead_code, unused_imports)]
 mod cell_map;
 
+// `world::policy` (issue #51) is likewise dependency-free (std only, no
+// Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/world/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, so it is nested one module
 // deep here to make that path land on the `mod paths` include above.
@@ -122,6 +128,14 @@ struct BevyoutWorld {
     cells: Vec<CellSummary>,
     worldspace_names: Vec<(u32, String)>,
     selection_result: Option<Result<Vec<u32>, String>>,
+
+    // -- preload_policy.feature --
+    preload_doors: Vec<policy::DoorLink>,
+    preload_prepared: std::collections::HashSet<u32>,
+    preload_resident: Vec<u32>,
+    preload_active_cell: u32,
+    preload_budget: usize,
+    preload_plan: Option<policy::PreloadPlan>,
 }
 
 fn find_placement<'a>(
@@ -698,6 +712,131 @@ async fn then_selection_fails_naming_worldspace(world: &mut BevyoutWorld, name: 
     assert!(
         error.contains(&name),
         "error {error:?} does not mention worldspace {name:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// preload_policy.feature (issue #51)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a door edge from cell 0x([0-9a-fA-F]+) to cell 0x([0-9a-fA-F]+)$")]
+async fn given_preload_door_edge(world: &mut BevyoutWorld, source: String, destination: String) {
+    world.preload_doors.push(policy::DoorLink {
+        source_cell_form_id: parse_hex(&source),
+        destination_cell_form_id: parse_hex(&destination),
+    });
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+) is prepared$")]
+async fn given_preload_cell_prepared(world: &mut BevyoutWorld, hex: String) {
+    world.preload_prepared.insert(parse_hex(&hex));
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+) is resident$")]
+async fn given_preload_cell_resident(world: &mut BevyoutWorld, hex: String) {
+    world.preload_resident.push(parse_hex(&hex));
+}
+
+#[given(regex = r"^the active cell is 0x([0-9a-fA-F]+)$")]
+async fn given_preload_active_cell(world: &mut BevyoutWorld, hex: String) {
+    world.preload_active_cell = parse_hex(&hex);
+}
+
+#[given(regex = r"^the resident cell limit is (\d+)$")]
+async fn given_preload_resident_cell_limit(world: &mut BevyoutWorld, budget: usize) {
+    world.preload_budget = budget;
+}
+
+#[when("the preload plan is computed")]
+async fn when_preload_plan_computed(world: &mut BevyoutWorld) {
+    let graph = policy::CellGraph::build(&world.preload_doors);
+    world.preload_plan = Some(graph.plan(
+        world.preload_active_cell,
+        &world.preload_resident,
+        &world.preload_prepared,
+        world.preload_budget,
+    ));
+}
+
+#[then(regex = r"^the plan loads cell 0x([0-9a-fA-F]+)$")]
+async fn then_plan_loads_cell(world: &mut BevyoutWorld, hex: String) {
+    let form_id = parse_hex(&hex);
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        plan.load.contains(&form_id),
+        "expected plan to load {form_id:08x}, load = {:?}",
+        plan.load
+    );
+}
+
+#[then(regex = r"^the plan does not load cell 0x([0-9a-fA-F]+)$")]
+async fn then_plan_does_not_load_cell(world: &mut BevyoutWorld, hex: String) {
+    let form_id = parse_hex(&hex);
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        !plan.load.contains(&form_id),
+        "expected plan not to load {form_id:08x}, load = {:?}",
+        plan.load
+    );
+}
+
+#[then(regex = r"^the plan evicts cell 0x([0-9a-fA-F]+)$")]
+async fn then_plan_evicts_cell(world: &mut BevyoutWorld, hex: String) {
+    let form_id = parse_hex(&hex);
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        plan.evict.contains(&form_id),
+        "expected plan to evict {form_id:08x}, evict = {:?}",
+        plan.evict
+    );
+}
+
+#[then(regex = r"^the plan does not evict cell 0x([0-9a-fA-F]+)$")]
+async fn then_plan_does_not_evict_cell(world: &mut BevyoutWorld, hex: String) {
+    let form_id = parse_hex(&hex);
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        !plan.evict.contains(&form_id),
+        "expected plan not to evict {form_id:08x}, evict = {:?}",
+        plan.evict
+    );
+}
+
+#[then("the plan loads nothing")]
+async fn then_plan_loads_nothing(world: &mut BevyoutWorld) {
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        plan.load.is_empty(),
+        "expected no loads, got {:?}",
+        plan.load
+    );
+}
+
+#[then("the plan evicts nothing")]
+async fn then_plan_evicts_nothing(world: &mut BevyoutWorld) {
+    let plan = world
+        .preload_plan
+        .as_ref()
+        .expect("preload plan not computed yet");
+    assert!(
+        plan.evict.is_empty(),
+        "expected no evictions, got {:?}",
+        plan.evict
     );
 }
 

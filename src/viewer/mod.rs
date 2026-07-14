@@ -40,6 +40,7 @@ mod audio;
 mod interaction;
 mod openmw_player;
 mod player;
+mod world;
 
 mod agent_bridge;
 mod app;
