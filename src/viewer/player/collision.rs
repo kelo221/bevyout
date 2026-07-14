@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bevy::math::Affine3A;
+
 use super::*;
 
 /// Issue #52: a destination cell's colliders queued for staggered
@@ -227,6 +229,7 @@ fn build_colliders_for_placement(
         == PreparedPhysicsClassification::Dynamic)
         .then(|| root_by_reference.get(&placement.reference_form_id).copied())
         .flatten();
+    let placement_root = root_by_reference.get(&placement.reference_form_id).copied();
     for body in &asset.bodies {
         if !body_blocks_player(body) {
             stats.filtered_shapes += body.shapes.len();
@@ -238,23 +241,49 @@ fn build_colliders_for_placement(
                 body.layer, placement.reference_form_id
             );
         }
-        let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
+        let (body_id, dynamic, local_space) = if let Some(entity) = dynamic_entity {
             let body_id = create_dynamic_body(world, placement, body);
             collision_world.dynamic_bodies.insert(entity, body_id);
             collision_world.dynamic_entities.insert(body_id, entity);
             commands.entity(entity).insert(PhysicsCollider);
             stats.dynamic_bodies += 1;
-            (body_id, true)
+            (body_id, true, true)
+        } else if body.motion_type == "MO_SYS_KEYFRAMED"
+            && body.shapes.iter().all(|shape| shape.supports_dynamic())
+            && let Some(node) = body.node.as_ref()
+            && let Some(root) = placement_root
+        {
+            // Issue #64: a keyframed body gets its own kinematic boxddd
+            // body so `drive_keyframed_colliders` can move it with the
+            // door/activator animation instead of leaving a rest-pose
+            // collider across an open doorway.
+            let body_id = create_kinematic_body(world, placement);
+            collision_world
+                .keyframed_bodies
+                .entry(root)
+                .or_default()
+                .push(KeyframedColliderBinding {
+                    node: node.clone(),
+                    body: body_id,
+                    node_entity: None,
+                    rest_from_root: None,
+                });
+            if !*static_marker_spawned {
+                commands.spawn(PhysicsCollider);
+                *static_marker_spawned = true;
+            }
+            (body_id, false, true)
         } else {
             if !*static_marker_spawned {
                 commands.spawn(PhysicsCollider);
                 *static_marker_spawned = true;
             }
-            (static_body, false)
+            (static_body, false, false)
         };
         stats.bodies += 1;
         for shape in &body.shapes {
-            let result = create_prepared_shape(world, body_id, body, shape, placement, dynamic);
+            let result =
+                create_prepared_shape(world, body_id, body, shape, placement, dynamic, local_space);
             let Some((shape_id, triangles)) = result else {
                 stats.filtered_shapes += 1;
                 warn!(
@@ -277,6 +306,120 @@ fn build_colliders_for_placement(
         }
         if dynamic {
             normalize_dynamic_mass(world, body_id, body, placement.scale.abs());
+        }
+    }
+}
+
+/// Issue #64: a keyframed body's kinematic collider, bound to the animated
+/// scene node the converter recorded on the sidecar body (`node`).
+pub(crate) struct KeyframedColliderBinding {
+    node: String,
+    body: BodyId,
+    /// Resolved lazily: scene spawn is async, and a preloaded cell's scene
+    /// can respawn under the surviving root (see `animation.rs`'s
+    /// rediscovery), invalidating the entity.
+    node_entity: Option<Entity>,
+    /// Node pose relative to the root, captured when the node resolves
+    /// (the scene spawns at rest pose).
+    rest_from_root: Option<Affine3A>,
+}
+
+pub(crate) fn create_kinematic_body(
+    world: &mut boxddd::World,
+    placement: &crate::vsa::PreparedPlacement,
+) -> BodyId {
+    let rotation = Quat::from_array(placement.rotation_xyzw).normalize();
+    world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Kinematic)
+            .position(to_box_vec3(Vec3::from_array(placement.translation)))
+            .rotation(to_box_quat(rotation))
+            .build(),
+    )
+}
+
+/// Issue #64: world pose for a keyframed collider body — the node's rigid
+/// delta from its rest pose, re-applied on top of the placement root.
+pub(crate) fn keyframed_body_target(
+    root: &GlobalTransform,
+    rest_from_root: Affine3A,
+    node: &GlobalTransform,
+) -> Option<(Vec3, Quat)> {
+    let root_affine = root.affine();
+    let current_from_root = root_affine.inverse() * node.affine();
+    let delta = current_from_root * rest_from_root.inverse();
+    let (_, rotation, translation) = (root_affine * delta).to_scale_rotation_translation();
+    (translation.is_finite() && rotation.is_finite()).then_some((translation, rotation))
+}
+
+fn find_named_descendant(
+    root: Entity,
+    name: &str,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    let mut queue = vec![root];
+    while let Some(entity) = queue.pop() {
+        if names.get(entity).is_ok_and(|n| n.as_str() == name) {
+            return Some(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            queue.extend(child_list.iter());
+        }
+    }
+    None
+}
+
+/// Issue #64: every fixed step, steer each keyframed collider body toward
+/// its animated node's current pose (kinematic target transforms integrate
+/// velocities, so the player is pushed rather than tunneled). Idle doors
+/// cost one affine compare per body.
+pub(crate) fn drive_keyframed_colliders(
+    time: Res<Time>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    transforms: Query<&GlobalTransform>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+) {
+    if collision_world.keyframed_bodies.is_empty() {
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let time_step = time.delta_secs().max(1e-6);
+    let keyframed = &mut collision_world.keyframed_bodies;
+    for (root, bindings) in keyframed.iter_mut() {
+        let Ok(root_global) = transforms.get(*root) else {
+            continue;
+        };
+        for binding in bindings.iter_mut() {
+            if binding
+                .node_entity
+                .is_none_or(|entity| transforms.get(entity).is_err())
+            {
+                binding.node_entity =
+                    find_named_descendant(*root, &binding.node, &children, &names);
+                binding.rest_from_root = None;
+            }
+            let Some(node_entity) = binding.node_entity else {
+                continue;
+            };
+            let Ok(node_global) = transforms.get(node_entity) else {
+                continue;
+            };
+            let rest = *binding
+                .rest_from_root
+                .get_or_insert_with(|| root_global.affine().inverse() * node_global.affine());
+            let Some((translation, rotation)) =
+                keyframed_body_target(root_global, rest, node_global)
+            else {
+                continue;
+            };
+            let target =
+                boxddd::WorldTransform::new(to_box_vec3(translation).into(), to_box_quat(rotation));
+            let _ = world.try_set_body_target_transform(binding.body, target, time_step, true);
         }
     }
 }
@@ -320,6 +463,7 @@ pub(crate) fn create_prepared_shape(
     shape: &PreparedPhysicsShape,
     placement: &crate::vsa::PreparedPlacement,
     dynamic: bool,
+    local_space: bool,
 ) -> Option<(ShapeId, usize)> {
     if dynamic && !shape.supports_dynamic() {
         return None;
@@ -329,7 +473,7 @@ pub(crate) fn create_prepared_shape(
     let placement_translation = Vec3::from_array(placement.translation);
     let point = |value: [f32; 3]| {
         let local = Vec3::from_array(value) * scale;
-        if dynamic {
+        if local_space {
             local
         } else {
             placement_rotation * local + placement_translation
@@ -337,7 +481,7 @@ pub(crate) fn create_prepared_shape(
     };
     let rotation = |value: [f32; 4]| {
         let local = Quat::from_array(value).normalize();
-        if dynamic {
+        if local_space {
             local
         } else {
             placement_rotation * local
@@ -520,6 +664,19 @@ pub(crate) fn cleanup_removed_dynamic_bodies(
             collision_world.dynamic_entities.remove(&body);
             collision_world.sleeping_dynamic_bodies.remove(&entity);
             let _ = world.try_destroy_body(body);
+        }
+    }
+    let removed_keyframed = collision_world
+        .keyframed_bodies
+        .keys()
+        .filter(|entity| !live.contains(entity))
+        .copied()
+        .collect::<Vec<_>>();
+    for entity in removed_keyframed {
+        if let Some(bindings) = collision_world.keyframed_bodies.remove(&entity) {
+            for binding in bindings {
+                let _ = world.try_destroy_body(binding.body);
+            }
         }
     }
 }

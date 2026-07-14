@@ -283,3 +283,18 @@ human-watched run.
   gap-free. Follow-up filed: keyframed door colliders still don't *move*
   with the Open animation, so an opened non-travel door is an invisible
   wall — the exact inverse gap.
+- **A11 — door colliders follow the animation (#64)** (user: "colliders
+  need to move alongside the door"). The sidecar now records each authored
+  body's owning scene node (`node`, from the collision object's first
+  non-collision parent — converter `anim-v6`, corpus rebuilt). In the
+  viewer, a `MO_SYS_KEYFRAMED` body with a node binding becomes its own
+  kinematic boxddd body (shapes in local space, static-style filters)
+  instead of merging into the cooked static body, and
+  `drive_keyframed_colliders` (FixedUpdate, before `step_world`) steers it
+  every step toward the animated node's pose via
+  `try_set_body_target_transform` — the node's rigid delta from its rest
+  pose re-applied on top of the placement root. Node entities re-resolve
+  after preloaded-scene respawns (same hazard as A8); bindings are
+  destroyed with their root. Legacy sidecars (`node` absent) keep the old
+  static behavior. Regression tests pin the delta math
+  (`keyframed_body_target_*` in `player/tests`).

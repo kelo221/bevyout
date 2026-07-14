@@ -221,6 +221,10 @@ pub(crate) struct PreparedCollisionWorld {
     dynamic_bodies: HashMap<Entity, BodyId>,
     dynamic_entities: HashMap<BodyId, Entity>,
     sleeping_dynamic_bodies: HashSet<Entity>,
+    /// Issue #64: keyframed (door/activator) bodies as their own kinematic
+    /// boxddd bodies, keyed by placement root and driven every fixed step
+    /// from their animated scene node's pose.
+    keyframed_bodies: HashMap<Entity, Vec<collision::KeyframedColliderBinding>>,
     player_proxy: Option<BodyId>,
     surfaces: HashMap<ShapeId, CollisionSurface>,
 }
@@ -351,6 +355,7 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
         FixedUpdate,
         (
             cleanup_removed_dynamic_bodies.before(step_world),
+            drive_keyframed_colliders.before(step_world),
             capture_player_render_history.before(apply_player_controls),
             apply_player_controls.before(sync_player_proxy),
             sync_player_proxy.before(step_world),

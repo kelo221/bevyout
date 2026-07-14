@@ -1262,3 +1262,31 @@ fn airborne_motion_clears_partial_stride_and_missing_surface_defaults_to_concret
     assert_eq!(footstep_surface_or_default(None), "concrete");
     assert_eq!(footstep_surface_or_default(Some("wood")), "wood");
 }
+
+// Issue #64: keyframed door colliders follow their animated node — pin the
+// rigid-delta math that re-applies node motion on top of the placement root.
+#[test]
+fn keyframed_body_target_reapplies_the_node_delta_on_the_root() {
+    use bevy::math::Affine3A;
+    let root = GlobalTransform::from(Transform::from_xyz(10.0, 0.0, 0.0));
+    let rest = Affine3A::from_translation(Vec3::new(0.0, 1.0, 0.0));
+    // the node slid up by 2 in root space (a vault door half opening)
+    let node = GlobalTransform::from(Transform::from_xyz(10.0, 3.0, 0.0));
+    let (translation, rotation) = keyframed_body_target(&root, rest, &node).unwrap();
+    assert!((translation - Vec3::new(10.0, 2.0, 0.0)).length() < 1e-5);
+    assert!(rotation.angle_between(Quat::IDENTITY) < 1e-5);
+}
+
+#[test]
+fn keyframed_body_target_with_identity_rest_matches_the_node_pose() {
+    use bevy::math::Affine3A;
+    let root = GlobalTransform::from(
+        Transform::from_xyz(5.0, 0.0, 2.0).with_rotation(Quat::from_rotation_y(0.7)),
+    );
+    let node = GlobalTransform::from(
+        Transform::from_xyz(6.0, 1.0, 2.0).with_rotation(Quat::from_rotation_y(1.3)),
+    );
+    let (translation, rotation) = keyframed_body_target(&root, Affine3A::IDENTITY, &node).unwrap();
+    assert!((translation - Vec3::new(6.0, 1.0, 2.0)).length() < 1e-5);
+    assert!(rotation.angle_between(Quat::from_rotation_y(1.3)) < 1e-4);
+}

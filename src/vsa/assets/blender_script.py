@@ -277,6 +277,14 @@ def shape_from_collision_object(obj):
             indices.extend((int(vertices[0]), int(vertices[index]), int(vertices[index + 1])))
     return {'kind': 'TriangleMesh', 'vertices': points, 'indices': indices}
 
+def body_owner_node(obj):
+    parent = obj.parent
+    while parent is not None:
+        if not parent.get('bevyout_collision', False):
+            return parent.name
+        parent = parent.parent
+    return None
+
 def physics_body_from_objects(group_id, objects):
     first = objects[0]
     flat_inertia = list(first.get('bevyout_inertia', [0.0] * 9))
@@ -291,6 +299,7 @@ def physics_body_from_objects(group_id, objects):
         or shape['kind'] in {'Box', 'Sphere', 'Capsule'})]
     return {
         'group_id': int(group_id),
+        'node': body_owner_node(first),
         'motion_type': str(first.get('bevyout_motion_type', 'MO_SYS_FIXED')),
         'quality_type': str(first.get('bevyout_quality_type', 'MO_QUAL_FIXED')),
         'mass': float(first.get('bevyout_mass', 0.0)),
