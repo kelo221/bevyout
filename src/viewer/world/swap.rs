@@ -290,9 +290,12 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     if let Some(source_root) = source_root {
         world.entity_mut(source_root).insert(Visibility::Hidden);
     }
+    // Preloaded roots sit stashed at `PRELOAD_STASH_TRANSLATION` (visible,
+    // far below the world, so render prep happened during the preload);
+    // activation snaps the root into place.
     world
         .entity_mut(destination_root)
-        .insert(Visibility::Visible);
+        .insert((Transform::default(), Visibility::Visible));
 
     player::teleport_active_player(world, translation, rotation_xyzw);
 

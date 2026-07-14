@@ -5,12 +5,15 @@
 //! background-parses newly planned neighbor manifests and spawns their
 //! content under a hidden per-cell root, or despawns evicted ones.
 //!
-//! Preloaded cells are spawned via `scene::spawn_cell_content` with
-//! `references: None` and `Visibility::Hidden`: they never register in
-//! `crate::console::RefRegistry` and (since `player::build_prepared_colliders`
-//! only ever reads the single startup `PreparedSceneManifest` resource, not
-//! spawned entities) never get physics colliders either. Wiring a
-//! newly-active preloaded cell into both is left to issue #52.
+//! Preloaded cells are spawned via the chunked `scene` spawn helpers with
+//! `references: None`, stashed visible at `PRELOAD_STASH_TRANSLATION` (far
+//! below every real cell) so render preparation happens during the preload:
+//! they never register in `crate::console::RefRegistry` and (since
+//! `player::build_prepared_colliders` only ever reads the single startup
+//! `PreparedSceneManifest` resource, not spawned entities) never get physics
+//! colliders either. Wiring a newly-active preloaded cell into both is
+//! issue #52's `world::swap`, which moves the root to the identity
+//! transform on activation.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -35,6 +38,14 @@ use super::policy;
 /// 130 ms frame in acceptance testing; draining through this budget keeps
 /// preload spawning invisible next to the 33 ms transition budget.
 const PRELOAD_SPAWN_BUDGET_PER_FRAME: usize = 128;
+
+/// Preloaded cell roots are stashed here -- visible, far below every real
+/// cell -- instead of `Visibility::Hidden`. Hidden entities never reach the
+/// render world, so first-visibility costs (pipeline specialization, GPU
+/// prep) all landed on the swap frame (~36-40 ms measured); stashed-visible
+/// content pays them during the background preload instead, and activation
+/// just moves the root to the identity transform.
+pub(crate) const PRELOAD_STASH_TRANSLATION: Vec3 = Vec3::new(0.0, -10_000.0, 0.0);
 
 /// Parsed door-graph adjacency, or inert if `cellmap.ron` was absent or
 /// failed to parse (F51.1).
@@ -269,7 +280,10 @@ fn poll_preload_parse_tasks(
         match result {
             Ok(manifest) => {
                 let root = commands
-                    .spawn((Transform::default(), Visibility::Hidden))
+                    .spawn((
+                        Transform::from_translation(PRELOAD_STASH_TRANSLATION),
+                        Visibility::Visible,
+                    ))
                     .id();
                 spawn_cell_lights(&mut commands, &manifest, root, lighting.0);
                 resident_cells.0.insert(
