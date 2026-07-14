@@ -12,6 +12,7 @@ struct ConfigFile {
     fallout3: FalloutConfig,
     tools: ToolsConfig,
     output: OutputConfig,
+    world: WorldConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -34,6 +35,19 @@ struct ToolsConfig {
 struct OutputConfig {
     cache_dir: Option<PathBuf>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct WorldConfig {
+    /// Issue #51's predictive neighbor preloader: how many cells (active +
+    /// preloaded neighbors) may be resident at once before the farthest
+    /// (by door-graph distance) is evicted.
+    resident_cell_limit: Option<usize>,
+}
+
+/// Default for `[world] resident_cell_limit` when unset or no config file is
+/// found (F51.4).
+pub(crate) const DEFAULT_RESIDENT_CELL_LIMIT: usize = 4;
 
 pub fn apply(cli: &mut Cli) -> Result<()> {
     let Some(path) = config_path(cli.config.as_deref()) else {
@@ -114,6 +128,39 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Resolves `[world] resident_cell_limit` for the viewer (F51.4).
+///
+/// Unlike `apply`, this does not thread through `Cli`'s `--config` override:
+/// `ViewArgs`/`RenderArgs` have no config-plumbing seam today (`apply`'s
+/// `CommandLine::View(_) => {}` arm is a deliberate no-op, see the test
+/// `view_command_is_untouched_by_config` below), and wiring one up touches
+/// `src/cli.rs`, which is out of scope for this slice. This still finds the
+/// same project (`.bevyout/config.toml`) or user config file `apply` would,
+/// just without the explicit `--config` override; a missing file, unreadable
+/// file, invalid TOML, or unset key all fall back to
+/// `DEFAULT_RESIDENT_CELL_LIMIT` rather than erroring, since `apply` already
+/// validates the config file's TOML syntax up front for every command
+/// (including `view`) before this ever runs.
+pub(crate) fn resident_cell_limit() -> usize {
+    resident_cell_limit_from_path(config_path(None))
+}
+
+fn resident_cell_limit_from_path(path: Option<PathBuf>) -> usize {
+    let Some(path) = path else {
+        return DEFAULT_RESIDENT_CELL_LIMIT;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return DEFAULT_RESIDENT_CELL_LIMIT;
+    };
+    let Ok(config) = toml::from_str::<ConfigFile>(&text) else {
+        return DEFAULT_RESIDENT_CELL_LIMIT;
+    };
+    config
+        .world
+        .resident_cell_limit
+        .unwrap_or(DEFAULT_RESIDENT_CELL_LIMIT)
 }
 
 fn config_path(explicit: Option<&Path>) -> Option<PathBuf> {
@@ -351,6 +398,58 @@ mod tests {
         assert!(
             format!("{error:#}").contains("invalid TOML config file"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    // F51.4: `[world] resident_cell_limit`.
+
+    #[test]
+    fn resident_cell_limit_reads_the_configured_value() {
+        let config = TempConfigFile::new(
+            r#"
+            [world]
+            resident_cell_limit = 7
+            "#,
+        );
+        assert_eq!(
+            resident_cell_limit_from_path(Some(config.path().to_path_buf())),
+            7
+        );
+    }
+
+    #[test]
+    fn resident_cell_limit_defaults_when_no_config_file() {
+        assert_eq!(
+            resident_cell_limit_from_path(None),
+            DEFAULT_RESIDENT_CELL_LIMIT
+        );
+    }
+
+    #[test]
+    fn resident_cell_limit_defaults_when_config_file_has_no_world_section() {
+        let config = TempConfigFile::new(SAMPLE_CONFIG);
+        assert_eq!(
+            resident_cell_limit_from_path(Some(config.path().to_path_buf())),
+            DEFAULT_RESIDENT_CELL_LIMIT
+        );
+    }
+
+    #[test]
+    fn resident_cell_limit_defaults_when_config_file_is_invalid_toml() {
+        let config = TempConfigFile::new("this is not [valid toml");
+        assert_eq!(
+            resident_cell_limit_from_path(Some(config.path().to_path_buf())),
+            DEFAULT_RESIDENT_CELL_LIMIT
+        );
+    }
+
+    #[test]
+    fn resident_cell_limit_defaults_when_config_path_does_not_exist() {
+        let nonexistent = env::temp_dir().join("bevyout-config-test-resident-limit-missing.toml");
+        assert!(!nonexistent.exists());
+        assert_eq!(
+            resident_cell_limit_from_path(Some(nonexistent)),
+            DEFAULT_RESIDENT_CELL_LIMIT
         );
     }
 

@@ -27,6 +27,9 @@ pub(crate) struct PreparedPhysicsAsset {
 #[serde(default)]
 pub(crate) struct PreparedPhysicsBody {
     pub(crate) group_id: u32,
+    /// GLB scene node that owns this body's collision objects (anim-v6+);
+    /// keyframed bodies use it to follow their animated node at runtime.
+    pub(crate) node: Option<String>,
     pub(crate) motion_type: String,
     pub(crate) quality_type: String,
     pub(crate) mass: f32,
@@ -56,6 +59,7 @@ impl Default for PreparedPhysicsBody {
     fn default() -> Self {
         Self {
             group_id: 0,
+            node: None,
             motion_type: "MO_SYS_FIXED".into(),
             quality_type: "MO_QUAL_FIXED".into(),
             mass: 0.0,

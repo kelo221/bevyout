@@ -82,3 +82,93 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   stable manifest layers, and forward shading performs at most one dominant
   point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
   benchmark switch; there is no gameplay shadow budget.
+
+## Way of working (waves)
+
+Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
+
+- Every task gets a GitHub sub-issue under the epic (labels `area/*`,
+  `enhancement` or `bug`, priority, milestone, assignee), linked via the
+  sub-issue REST API (`POST /repos/{owner}/{repo}/issues/<epic>/sub_issues`
+  with the issue's database id). Amend the epic's checklist when scope is
+  added; tick items only when the gate criteria hold on real data.
+- Each wave has a kickoff `*_PROMPT.md` (what was requested) and a
+  `*_PLAN.md` (fixed feature lists → tests → implementation) in
+  `docs/plans/` — see `docs/plans/README.md` for the traceability
+  convention. Amend the plan (a "Shipped amendments" section) rather than
+  rewriting it when acceptance testing changes the design.
+- Parallel implementation uses one agent per issue in isolated git worktrees
+  with explicit file-ownership boundaries; the shared merge seam is
+  `tests/features.rs` (each issue appends World fields at the end of the
+  struct and a delimited step section at the end of the file). An
+  integration branch (`m<milestone>-wave<n>`) collects the merges; the
+  orchestrator resolves conflicts, runs gates, and does real-data
+  acceptance before opening one PR with `Closes #NN` per issue.
+- Measured results are commented on each issue; follow-ups discovered during
+  acceptance get their own issues rather than silently expanding the wave.
+- Model split (Claude sessions only — Codex can ignore this): the
+  orchestrating session runs on the large model and owns planning, GitHub
+  housekeeping, merges/conflict resolution, and real-data acceptance; the
+  per-issue implementation agents run on smaller models (Sonnet) inside
+  their worktrees, each with a tightly scoped, self-contained brief.
+
+## Testing (feature-first)
+
+Mandatory order inside every issue: fix the feature list → write the
+Cucumber feature (`features/*.feature`) and unit tests → implement until
+green. `tests/features.rs` runs cucumber with `fail_on_skipped()`, so every
+scenario line needs a step. The suite has no lib target: modules under test
+are included verbatim via `#[path]`, which means any module driven from
+cucumber must be std/serde-only (no Bevy imports) — see `src/vsa/cell_map.rs`
+and `src/viewer/world/policy.rs` for the pattern, and nest modules with
+relative `super::super::` imports the way `prepare/selectors.rs` is.
+
+Design for this: keep decision logic (planning, eligibility, caching,
+state machines) in pure modules and let thin Bevy systems consume them.
+Bevy-side behavior gets ordinary `#[cfg(test)]` unit tests against `World`
+or a minimal `App` (see `src/viewer/console.rs` tests for the console
+harness and `src/viewer/player/tests/` for bare-`World` helpers).
+
+## Logging
+
+- CLI commands (`prepare`, `cells`, `bake`, …): deterministic `println!`
+  lines — stable wording, no timestamps, suitable for asserting in tests
+  and issue comments (e.g. `batch cache: assets reused N, built M, ...`).
+- Viewer/runtime: `tracing` macros (`info!`/`warn!`), never `println!`.
+  Lifecycle events get grep-able stable prefixes: `preload start/ready/evict
+  <formid>`, `swap <src>-><dst> instant|fallback max_frame_ms=<x>`.
+
+## Verification over the agent bridge (BRP/MCP)
+
+Use the bevyout MCP server if registered; otherwise the agent bridge is
+plain BRP JSON-RPC over HTTP:
+
+```
+cargo run-dev -- view --manifest .bevyout/cache/scenes/<formid>/scene.ron \
+    --agent-bridge --agent-port 15702 [--trace-seconds N]
+curl -X POST http://127.0.0.1:15702/ -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"bevyout.session","params":{}}'
+```
+
+Methods: `bevyout.session` (active cell), `bevyout.scene_snapshot`
+(placements/entities), `bevyout.console.exec` (`{"line": "activate
+00028579"}` drives door travel; `setrender`, `tfc`, `getpos`, … also work),
+`bevyout.capture_viewport`. Known limits: `capture_viewport` returns black
+PNGs when the window is occluded (macOS) — use snapshots + logs as evidence;
+frame-time measurements are only comparable on a cool machine (the startup
+"BoxDDD prepared collision ... cook" line is the canary: ~10 ms cool,
+20 ms+ means thermally degraded numbers); a transient Metal `DeviceLost`
+can kill the viewer under load — retry.
+
+## Git cautions
+
+- Never `git add -A`/`git add .` from the repo root: `.claude/worktrees/*`
+  and scratch files get swept in. Stage explicitly by path.
+- **Never commit Bethesda-derived data.** `.gitignore` blocks `*.ron`
+  wholesale (exports like `cellmap.ron` and prepared `scene.ron` manifests
+  are derived from game data) with explicit re-allows only for hand-written
+  synthetic fixtures (`tests/goldens/`, `features/fixtures/`) and doc
+  examples. A new fixture must be synthetic and needs its own `!` rule —
+  never weaken the blanket ignore. The same rule extends to every other
+  asset format (GLB, DDS, WAV, NIF): converted game content lives only
+  under the untracked `.bevyout/` cache.

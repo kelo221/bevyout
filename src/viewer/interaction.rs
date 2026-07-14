@@ -7,6 +7,7 @@ use crate::app_state::{AppState, GameplayModal};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
 
+use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::player::{CameraMode, CameraModeState};
 
@@ -14,6 +15,110 @@ pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
 const NOTICE_SECONDS: f32 = 3.0;
 const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
 const MAX_PARENT_DEPTH: usize = 64;
+
+/// Issue #52: written when the player opens a door whose `destination` is
+/// `Some`, and consumed the same frame by `world::swap`'s eligibility system
+/// (ordered `.after(DoorActivationSet)`) to drive either an instant cell
+/// swap or a loading-screen fallback. Translation/rotation are already in
+/// Bevy coordinates (converted at prepare time), matching
+/// `PreparedDoorDestination`.
+///
+/// Issue #57: `activate_focused_placement` no longer always writes this
+/// directly. A door with an `Open` clip stages it in `PendingDoorTravel`
+/// instead, and `tick_pending_door_travel` (also `.in_set(DoorActivationSet)`,
+/// chained right after) writes it once the open-lead elapses -- possibly
+/// several frames later, but always from a system inside this set, so
+/// `world::swap`'s same-frame contract holds on the frame the lead expires.
+/// A door with no clip (zero lead) still writes it the same frame it
+/// activates, bit-for-bit wave-2's behavior.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct DoorTravelRequested {
+    pub(crate) destination_cell_form_id: u32,
+    pub(crate) translation: Vec3,
+    pub(crate) rotation_xyzw: [f32; 4],
+}
+
+/// Ordering handle for `world::swap`'s door-travel systems: message readers
+/// scheduled `.after(DoorActivationSet)` see `DoorTravelRequested` messages
+/// written this same frame (Bevy's message double-buffering swaps once per
+/// frame in `First`, not between systems), so the eligibility check and any
+/// instant swap complete in the same frame as the door activation itself.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DoorActivationSet;
+
+/// F57.3: a travel door's `DoorTravelRequested` write staged behind its
+/// `Open` clip's lead (`animation::open_lead_seconds`). Only one travel can
+/// be pending at a time -- same constraint `world::swap`'s
+/// `PendingInstantSwap`/`PendingFallbackSwap` already enforce for the
+/// message itself.
+#[derive(Resource, Default)]
+struct PendingDoorTravel(Option<PendingTravel>);
+
+struct PendingTravel {
+    entity: Entity,
+    remaining_seconds: f32,
+    request: DoorTravelRequested,
+}
+
+/// F57.3: counts a pending travel's open-lead down every frame this set
+/// runs (gated the same as door activation itself: `AppState::InGame` and
+/// `GameplayModal::None`, so a modal opening mid-lead pauses the countdown
+/// exactly like it pauses everything else in this chain) and writes
+/// `DoorTravelRequested` once it elapses.
+fn tick_pending_door_travel(
+    time: Res<Time>,
+    mut pending: ResMut<PendingDoorTravel>,
+    mut door_travel: MessageWriter<DoorTravelRequested>,
+) {
+    let Some(travel) = pending.0.as_mut() else {
+        return;
+    };
+    travel.remaining_seconds -= time.delta_secs();
+    if travel.remaining_seconds <= 0.0 {
+        let request = travel.request;
+        pending.0 = None;
+        door_travel.write(request);
+    }
+}
+
+/// Wave-3 shipped amendment: scripted (console/BRP) door activation follows
+/// the same Open-clip lead as the player's Enter activation — the door is
+/// marked open, its clip plays, and the travel request is staged behind the
+/// lead. Zero lead (no clip) writes the message this same frame, exactly the
+/// wave-2 `activate` behavior. Returns the lead in milliseconds so the
+/// console can report it.
+pub(crate) fn scripted_door_travel(
+    world: &mut World,
+    entity: Entity,
+    request: DoorTravelRequested,
+) -> f32 {
+    let open_clip_seconds = world
+        .get::<animation::AnimatedPlacement>(entity)
+        .and_then(|animated| animated.clip_seconds("Open"));
+    let lead_seconds =
+        animation::open_lead_seconds(open_clip_seconds, animation::OPEN_LEAD_CAP_SECONDS);
+    world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .insert(entity);
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition: ClipTransition::Opening,
+        lead_ms: lead_seconds * 1000.0,
+    });
+    if lead_seconds <= 0.0 {
+        world.write_message(request);
+    } else {
+        world
+            .get_resource_or_insert_with(PendingDoorTravel::default)
+            .0 = Some(PendingTravel {
+            entity,
+            remaining_seconds: lead_seconds,
+            request,
+        });
+    }
+    lead_seconds * 1000.0
+}
 
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
@@ -84,11 +189,18 @@ pub(crate) fn install(app: &mut App) {
     app.init_resource::<PlayerInventory>()
         .init_resource::<InteractionState>()
         .init_resource::<InteractionNotice>()
+        .init_resource::<PendingDoorTravel>()
+        .add_message::<DoorTravelRequested>()
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
             Update,
-            (update_focused_placement, activate_focused_placement)
+            (
+                update_focused_placement,
+                activate_focused_placement,
+                tick_pending_door_travel,
+            )
                 .chain()
+                .in_set(DoorActivationSet)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
@@ -280,10 +392,14 @@ fn activate_focused_placement(
     mode: Res<CameraModeState>,
     mut commands: Commands,
     roots: Query<(&PlacementRoot, &GlobalTransform)>,
+    animated: Query<&animation::AnimatedPlacement>,
     mut inventory: ResMut<PlayerInventory>,
     mut state: ResMut<InteractionState>,
     mut notice: ResMut<InteractionNotice>,
     mut sounds: MessageWriter<PlaySound>,
+    mut door_travel: MessageWriter<DoorTravelRequested>,
+    mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
+    mut pending_travel: ResMut<PendingDoorTravel>,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -318,18 +434,25 @@ fn activate_focused_placement(
         }
         PreparedSemantic::Container => {
             let opening = !state.open.contains(&entity);
-            if opening {
+            let transition = if opening {
                 state.open.insert(entity);
                 write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
                 notice.show(format!(
                     "{name}: {}",
                     inventory_summary(&placement.inventory)
                 ));
+                ClipTransition::Opening
             } else {
                 state.open.remove(&entity);
                 write_sound(&mut sounds, placement.audio.close_sound_form_id, position);
                 notice.show(format!("Closed {name}"));
-            }
+                ClipTransition::Closing
+            };
+            animation_playback.write(animation::PlayPlacementAnimation {
+                root: entity,
+                transition,
+                lead_ms: 0.0,
+            });
             info!(
                 "container {} ({:08x}) {} with {} fixed entries",
                 name,
@@ -348,13 +471,26 @@ fn activate_focused_placement(
                 return;
             }
             let opening = !state.open.contains(&entity);
-            if opening {
+            let transition = if opening {
                 state.open.insert(entity);
                 write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
+                ClipTransition::Opening
             } else {
                 state.open.remove(&entity);
                 write_sound(&mut sounds, placement.audio.close_sound_form_id, position);
-            }
+                // F57.4: closing before this door's own open-lead elapses
+                // cancels the still-pending travel rather than letting a
+                // stale swap fire after the player has already reversed
+                // course.
+                if pending_travel
+                    .0
+                    .as_ref()
+                    .is_some_and(|pending| pending.entity == entity)
+                {
+                    pending_travel.0 = None;
+                }
+                ClipTransition::Closing
+            };
             notice.show(format!(
                 "{} {name}",
                 if opening { "Opened" } else { "Closed" }
@@ -365,11 +501,50 @@ fn activate_focused_placement(
                 placement.reference_form_id,
                 if opening { "opened" } else { "closed" },
                 if door.destination.is_some() {
-                    "; travel is not enabled"
+                    "; travel requested"
                 } else {
                     ""
                 }
             );
+            // Issue #57: a travel door's Open clip gets a lead -- computed
+            // from `AnimatedPlacement`'s discovered "Open" clip duration, if
+            // any -- before `DoorTravelRequested` fires, so the door is
+            // visibly open before the (already instant) cell swap. No clip
+            // means zero lead: `world::swap` sees the message this same
+            // frame, exactly like wave 2.
+            let lead_seconds = if opening && door.destination.is_some() {
+                let open_clip_seconds = animated
+                    .get(entity)
+                    .ok()
+                    .and_then(|animated| animated.clip_seconds("Open"));
+                animation::open_lead_seconds(open_clip_seconds, animation::OPEN_LEAD_CAP_SECONDS)
+            } else {
+                0.0
+            };
+            animation_playback.write(animation::PlayPlacementAnimation {
+                root: entity,
+                transition,
+                lead_ms: lead_seconds * 1000.0,
+            });
+            // Issue #52: entering (opening) a door with a resolved
+            // destination requests a cell swap; `world::swap` decides
+            // instant vs. loading-screen fallback from cell residency.
+            if opening && let Some(destination) = &door.destination {
+                let request = DoorTravelRequested {
+                    destination_cell_form_id: destination.cell_form_id,
+                    translation: Vec3::from_array(destination.translation),
+                    rotation_xyzw: destination.rotation_xyzw,
+                };
+                if lead_seconds <= 0.0 {
+                    door_travel.write(request);
+                } else {
+                    pending_travel.0 = Some(PendingTravel {
+                        entity,
+                        remaining_seconds: lead_seconds,
+                        request,
+                    });
+                }
+            }
         }
         PreparedSemantic::Activator => {
             write_sound(
@@ -379,6 +554,11 @@ fn activate_focused_placement(
             );
             notice.show(format!("Activated {name}"));
             info!("activated {} ({:08x})", name, placement.reference_form_id);
+            animation_playback.write(animation::PlayPlacementAnimation {
+                root: entity,
+                transition: ClipTransition::Opening,
+                lead_ms: 0.0,
+            });
         }
         _ => {}
     }

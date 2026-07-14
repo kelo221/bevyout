@@ -47,8 +47,15 @@ pub(crate) fn run_view(
     bindings::install(&mut app);
     audio::install(&mut app);
     interaction::install(&mut app);
+    animation::install(&mut app);
     console::install(&mut app);
     console_ui::install(&mut app);
+    // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
+    // user config); `view`'s CLI args have no `--config` override plumbed
+    // through yet (see src/config.rs's `resident_cell_limit` doc comment),
+    // so this always uses the same project/user discovery `render`/`prepare`
+    // use, defaulting to 4 when no config file is found.
+    world::install(&mut app, crate::config::resident_cell_limit());
     app.insert_resource(manifest)
         .insert_resource(UnlitMode(false))
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))

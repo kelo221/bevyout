@@ -159,6 +159,70 @@ def patch_niftools_blender52():
     BhkCollision.import_bhkpackednitristrips_shape = mark_shape(BhkCollision.import_bhkpackednitristrips_shape, 'TriangleMesh')
     BhkCollision.import_bhk_nitristrips_shape = mark_shape(BhkCollision.import_bhk_nitristrips_shape, 'TriangleMesh')
     BhkCollision.import_nitristrips = mark_shape(BhkCollision.import_nitristrips, 'TriangleMesh')
+    # Issue #57: Blender 5.x's slotted actions removed Action.fcurves, which
+    # niftools' animation importer (Animation.create_action/create_fcurves)
+    # still assumes. These shims route curve creation through the
+    # layer/strip/channelbag API and restore a read-only Action.fcurves for
+    # the addon's two remaining read sites. Spiked on vdoorsliding01.nif with
+    # Blender 5.1.2 + niftools v0.1.1 (see M2_WAVE3_PLAN.md's spike decision).
+    from io_scene_niftools.modules.nif_import.animation import Animation
+    def action_channelbag(action, id_type='OBJECT'):
+        slot = action.slots[0] if len(action.slots) else action.slots.new(id_type=id_type, name='BevyOut')
+        layer = action.layers[0] if len(action.layers) else action.layers.new('BevyOut')
+        strip = layer.strips[0] if len(layer.strips) else layer.strips.new(type='KEYFRAME')
+        return strip.channelbag(slot, ensure=True), slot
+    original_create_action = Animation.create_action
+    def create_action_compat(self, b_obj, action_name):
+        b_action = original_create_action(self, b_obj, action_name)
+        # Morph controllers animate shape-key (KEY) datablocks, not objects;
+        # the slot type must match or the action_slot assignment raises.
+        _, slot = action_channelbag(b_action, getattr(b_obj, 'id_type', 'OBJECT'))
+        if b_obj.animation_data:
+            b_obj.animation_data.action_slot = slot
+        return b_action
+    def create_fcurves_compat(self, action, dtype, drange, flags, bone_name=None, key_name=None):
+        channelbag, _ = action_channelbag(action, 'KEY' if key_name else 'OBJECT')
+        if bone_name:
+            specs = [(f'pose.bones["{bone_name}"].{dtype}', i) for i in drange]
+        elif key_name:
+            specs = [(f'key_blocks["{key_name}"].{dtype}', 0)]
+        else:
+            specs = [(dtype, i) for i in drange]
+        fcurves = [channelbag.fcurves.new(data_path=path, index=index) for path, index in specs]
+        if flags:
+            self.set_extrapolation(self.get_extend_from_flags(flags), fcurves)
+        return fcurves
+    def action_fcurves_compat(self):
+        if not (len(self.slots) and len(self.layers) and len(self.layers[0].strips)):
+            return []
+        bag = self.layers[0].strips[0].channelbag(self.slots[0])
+        return bag.fcurves if bag else []
+    Animation.create_action = create_action_compat
+    Animation.create_fcurves = create_fcurves_compat
+    bpy.types.Action.fcurves = property(action_fcurves_compat)
+    # With animation=True the addon also imports material (UV/alpha ramp)
+    # controllers, and its get_controller_data crashes on NiBlendFloat
+    # interpolators (no `.data`). We only consume node transform sequences
+    # (Open/Close), so material animation import is disabled wholesale.
+    from io_scene_niftools.modules.nif_import.animation.material import MaterialAnimation
+    MaterialAnimation.import_material_controllers = lambda self, n_geom, b_mat: None
+    # Same `.data` assumption crashes on NiBlendBoolInterpolator visibility
+    # controllers; hide_viewport animation is never exported to the GLB, so
+    # skip it, and let every other caller see None instead of crashing (the
+    # transform importer isinstance-guards its NiKeyframeData use).
+    from io_scene_niftools.modules.nif_import.animation.object import ObjectAnimation
+    ObjectAnimation.import_visibility = lambda self, n_node, b_obj: None
+    # Morph (shape-key) controllers also assume interpolator `.data` and
+    # shape keys cannot ride this GLB export (export_apply=True flattens
+    # meshes), so skip them entirely.
+    from io_scene_niftools.modules.nif_import.animation.morph import MorphAnimation
+    MorphAnimation.import_morph_controller = lambda self, n_node, b_obj: None
+    original_get_controller_data = Animation.get_controller_data
+    def get_controller_data_compat(ctrl):
+        if hasattr(ctrl, 'interpolator') and ctrl.interpolator and not hasattr(ctrl.interpolator, 'data'):
+            return None
+        return original_get_controller_data(ctrl)
+    Animation.get_controller_data = staticmethod(get_controller_data_compat)
 
 def blender_point_to_bevy(point):
     return [float(point.x), float(point.z), float(-point.y)]
@@ -213,6 +277,14 @@ def shape_from_collision_object(obj):
             indices.extend((int(vertices[0]), int(vertices[index]), int(vertices[index + 1])))
     return {'kind': 'TriangleMesh', 'vertices': points, 'indices': indices}
 
+def body_owner_node(obj):
+    parent = obj.parent
+    while parent is not None:
+        if not parent.get('bevyout_collision', False):
+            return parent.name
+        parent = parent.parent
+    return None
+
 def physics_body_from_objects(group_id, objects):
     first = objects[0]
     flat_inertia = list(first.get('bevyout_inertia', [0.0] * 9))
@@ -227,6 +299,7 @@ def physics_body_from_objects(group_id, objects):
         or shape['kind'] in {'Box', 'Sphere', 'Capsule'})]
     return {
         'group_id': int(group_id),
+        'node': body_owner_node(first),
         'motion_type': str(first.get('bevyout_motion_type', 'MO_SYS_FIXED')),
         'quality_type': str(first.get('bevyout_quality_type', 'MO_QUAL_FIXED')),
         'mass': float(first.get('bevyout_mass', 0.0)),
@@ -558,44 +631,56 @@ for job in jobs:
     output_path = job['output']
     physics_output_path = job['physics_output']
     conversion = job.get('conversion', 'ao-none')
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
-    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
-        for datablock in list(datablocks):
-            if datablock.users == 0: datablocks.remove(datablock)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     os.makedirs(os.path.dirname(physics_output_path), exist_ok=True)
-    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
-    if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
-    record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
-    reset_roots = apply_record_zero_transform_policy(
-        list(bpy.context.scene.objects),
-        job.get('model', ''),
-        job.get('root_transform_policy', 'preserve_review_required'),
-        record_zero.name if record_zero else '',
-        isinstance(record_zero, NifClasses.NiNode),
-    )
-    if reset_roots:
-        print('[convert] discarded audited root transform(s): ' + ', '.join(reset_roots), flush=True)
-    spatial_corrections, collision_corrections = apply_verified_spatial_corrections(
-        list(bpy.context.scene.objects), job.get('model', '')
-    )
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
-    for obj in list(bpy.context.scene.objects):
-        if obj.get('bevyout_collision', False):
-            obj.hide_render = False
-            obj.hide_viewport = False
-        elif obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
-        elif obj.type == 'MESH' and not any(
-            material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
-            for material in obj.data.materials
-        ):
-            # NIF collision/helper meshes have no texture and should not be rendered.
-            bpy.data.objects.remove(obj, do_unlink=True)
-    physics_asset = build_physics_asset()
+    def import_nif_scene(with_animation):
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+        for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
+            for datablock in list(datablocks):
+                if datablock.users == 0: datablocks.remove(datablock)
+        result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=with_animation, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
+        if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+        record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
+        reset_roots = apply_record_zero_transform_policy(
+            list(bpy.context.scene.objects),
+            job.get('model', ''),
+            job.get('root_transform_policy', 'preserve_review_required'),
+            record_zero.name if record_zero else '',
+            isinstance(record_zero, NifClasses.NiNode),
+        )
+        if reset_roots:
+            print('[convert] discarded audited root transform(s): ' + ', '.join(reset_roots), flush=True)
+        corrections = apply_verified_spatial_corrections(
+            list(bpy.context.scene.objects), job.get('model', '')
+        )
+        for obj in list(bpy.context.scene.objects):
+            if obj.get('bevyout_collision', False):
+                obj.hide_render = False
+                obj.hide_viewport = False
+            elif obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
+            elif obj.type == 'MESH' and not any(
+                material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
+                for material in obj.data.materials
+            ):
+                # NIF collision/helper meshes have no texture and should not be rendered.
+                bpy.data.objects.remove(obj, do_unlink=True)
+        return corrections
+    spatial_corrections, collision_corrections = import_nif_scene(True)
+    if bpy.data.actions:
+        # Controller import bakes an animated pose into the collision
+        # objects' transforms (a door's colliders land in the Open position,
+        # leaving the doorway hole open), so physics must come from a
+        # rest-pose import; the animated scene is rebuilt after for the GLB.
+        import_nif_scene(False)
+        physics_asset = build_physics_asset()
+        spatial_corrections, collision_corrections = import_nif_scene(True)
+    else:
+        physics_asset = build_physics_asset()
     with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
         json.dump(physics_asset, physics_file, separators=(',', ':'))
     for obj in list(bpy.context.scene.objects):
@@ -763,5 +848,24 @@ for job in jobs:
         if mesh.color_attributes:
             mesh.color_attributes.active_color_index = 0
             mesh.color_attributes.render_color_index = 0
+    # Issue #57: niftools names each imported action `<Sequence>_<NodeName>`
+    # (e.g. `Open_VDoorBottom01`) and leaves it as the object's single active
+    # action. The glTF exporter only exports an object's active action, so
+    # regroup every sequence's actions onto an NLA track named by the
+    # sequence (stripping the `_<object name>` suffix) before exporting with
+    # NLA_TRACKS mode, which merges same-named tracks across objects into one
+    # glTF animation (spike-verified: `Open`/`Close`, each animating every
+    # door node).
+    for obj in bpy.context.scene.objects:
+        ad = obj.animation_data
+        if not ad:
+            continue
+        obj_actions = [a for a in bpy.data.actions if a.name.endswith('_' + obj.name)]
+        ad.action = None
+        for act in obj_actions:
+            sequence = act.name[: -(len(obj.name) + 1)]
+            track = ad.nla_tracks.new()
+            track.name = sequence
+            track.strips.new(act.name, 0, act)
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_extras=True)
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_extras=True, export_animations=True, export_animation_mode='NLA_TRACKS')

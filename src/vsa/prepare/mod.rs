@@ -4,26 +4,35 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 mod audio;
 mod audio_resolve;
+mod batch_cache;
 mod cache;
+mod fingerprints;
 mod image_space;
+mod jobs;
 mod navmesh;
 mod placements;
 mod plugins;
 mod selectors;
+mod session;
 mod static_shadows;
 mod visual;
 
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
+pub(crate) use batch_cache::*;
 pub(crate) use cache::*;
+pub(crate) use fingerprints::*;
 pub(crate) use image_space::*;
+pub(crate) use jobs::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
 pub(crate) use selectors::*;
+pub(crate) use session::*;
 pub(crate) use static_shadows::*;
 pub(crate) use visual::*;
 
@@ -54,8 +63,8 @@ use super::paths::{
     normalize_asset_path, parse_cell_selector, placement_transform, placement_transform_parts,
 };
 use super::physics::{
-    PHYSICS_ASSET_SCHEMA_VERSION, classify_placement, dynamic_rejection_reason,
-    physics_sidecar_name, read_physics_asset,
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, classify_placement,
+    dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{
     BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, ReferenceKind,

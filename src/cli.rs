@@ -90,8 +90,14 @@ pub struct PrepareArgs {
     pub(crate) worldspace: Option<String>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
     /// sorted) and exit before any extraction or Blender work.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check_fingerprints")]
     pub(crate) list_only: bool,
+    /// Report-only: validate each selected cell's recorded plugin/converter/
+    /// physics/prepare-pipeline fingerprints against the current toolchain
+    /// and print per-cell status, without preparing anything. Exits with a
+    /// nonzero status if any selected cell's fingerprints are stale.
+    #[arg(long)]
+    pub(crate) check_fingerprints: bool,
     /// Fallout 3 installation directory (normally supplied by config.toml).
     #[arg(long)]
     pub(crate) game_root: Option<PathBuf>,
@@ -125,6 +131,16 @@ pub struct PrepareArgs {
     /// Fail instead of recording recoverable asset diagnostics.
     #[arg(long)]
     pub(crate) strict: bool,
+    /// Number of cells to prepare concurrently in a batch run. Defaults to
+    /// the machine's available parallelism.
+    #[arg(long, value_name = "N")]
+    pub(crate) jobs: Option<usize>,
+    /// Retry only cells currently recorded `failed` in the resumable job
+    /// manifest, intersected with any other selector given. Alone (no
+    /// `--all`/`--all-interiors`/`--worldspace`/selectors), retries every
+    /// failed cell recorded in the manifest.
+    #[arg(long)]
+    pub(crate) retry_failed: bool,
 }
 
 fn parse_shadow_resolution(value: &str) -> Result<u32, String> {

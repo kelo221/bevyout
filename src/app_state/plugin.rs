@@ -22,6 +22,10 @@ pub(crate) enum GameplayModal {
     Dialogue,
     PipBoy,
     Console,
+    /// Issue #52's door-transition fallback: a destination cell that is not
+    /// resident-`Ready` shows a minimal loading overlay while its manifest
+    /// loads, rather than swapping the cell instantly.
+    Loading,
 }
 
 /// Single entry point for requesting a state change (F35.3). Requests are
@@ -72,6 +76,8 @@ const LEGAL_MODAL_TRANSITIONS: &[(GameplayModal, GameplayModal)] = &[
     (GameplayModal::PipBoy, GameplayModal::None),
     (GameplayModal::None, GameplayModal::Console),
     (GameplayModal::Console, GameplayModal::None),
+    (GameplayModal::None, GameplayModal::Loading),
+    (GameplayModal::Loading, GameplayModal::None),
 ];
 
 fn is_legal_app_transition(from: AppState, to: AppState) -> bool {
@@ -186,7 +192,7 @@ fn toggle_paused_on_escape(
         GameplayModal::None => GameplayModal::Paused,
         GameplayModal::Paused => GameplayModal::None,
         GameplayModal::Console => GameplayModal::None,
-        GameplayModal::Dialogue | GameplayModal::PipBoy => return,
+        GameplayModal::Dialogue | GameplayModal::PipBoy | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
 }
@@ -205,7 +211,10 @@ fn toggle_pipboy_on_tab(
     let target = match *modal_state.get() {
         GameplayModal::None => GameplayModal::PipBoy,
         GameplayModal::PipBoy => GameplayModal::None,
-        GameplayModal::Paused | GameplayModal::Dialogue | GameplayModal::Console => return,
+        GameplayModal::Paused
+        | GameplayModal::Dialogue
+        | GameplayModal::Console
+        | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
 }
@@ -223,7 +232,10 @@ fn toggle_console_on_backquote(
     let target = match *modal_state.get() {
         GameplayModal::None => GameplayModal::Console,
         GameplayModal::Console => GameplayModal::None,
-        GameplayModal::Paused | GameplayModal::Dialogue | GameplayModal::PipBoy => return,
+        GameplayModal::Paused
+        | GameplayModal::Dialogue
+        | GameplayModal::PipBoy
+        | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
 }
