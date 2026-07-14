@@ -47,8 +47,8 @@ on each iteration:
 cargo run-dev -- prepare SuperDuperMart
 cargo run-dev -- render SuperDuperMart
 
-# Optional static-shadow controls (256 is the default).
-cargo run-dev -- prepare SuperDuperMart --shadow-resolution 128
+# Optional static-shadow controls (512 is the high-quality default).
+cargo run-dev -- prepare SuperDuperMart --shadow-resolution 256
 cargo run-dev -- prepare SuperDuperMart --rebuild-shadows
 ```
 
@@ -162,8 +162,9 @@ contents and placement transforms, and light identity/position/range. Camera,
 light color, and intensity do not invalidate depth. Unchanged artifacts are
 reused before BVH construction or KTX-Software lookup; use
 `--rebuild-shadows` to force regeneration and `--shadow-resolution
-128|256|512` to change face resolution. Shadow preparation does not invoke
-Blender and a generation or `ktx validate` failure fails `prepare`.
+128|256|512` to change face resolution; 512 is the default. Shadow preparation
+does not invoke Blender and a generation or `ktx validate` failure fails
+`prepare`.
 
 The preparation pipeline converts Fallout's approximately 70 world units per
 metre to Bevy metres. Changing this conversion requires preparing the cell again

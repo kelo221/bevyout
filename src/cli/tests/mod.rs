@@ -214,12 +214,24 @@ fn script_run_contract_parses() {
 
 #[test]
 fn prepared_shadow_resolution_and_rebuild_contract_parse() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "MegatonPlayerHouse"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.shadow_resolution, 512);
+
+    let cli = Cli::try_parse_from(["bevyout", "render", "MegatonPlayerHouse"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.shadow_resolution, 512);
+
     let cli = Cli::try_parse_from([
         "bevyout",
         "prepare",
         "MegatonPlayerHouse",
         "--shadow-resolution",
-        "512",
+        "128",
         "--rebuild-shadows",
         "--toktx",
         "ktx.exe",
@@ -228,7 +240,7 @@ fn prepared_shadow_resolution_and_rebuild_contract_parse() {
     let CommandLine::Prepare(args) = cli.command else {
         panic!("expected prepare command");
     };
-    assert_eq!(args.shadow_resolution, 512);
+    assert_eq!(args.shadow_resolution, 128);
     assert!(args.rebuild_shadows);
     assert_eq!(args.toktx.as_deref(), Some(std::path::Path::new("ktx.exe")));
 

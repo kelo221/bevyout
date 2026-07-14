@@ -69,6 +69,8 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
   outside the fingerprint.
+- The default cubemap face resolution is the high-quality 512 setting. Keep
+  128 and 256 available only as explicit lower-quality overrides.
 - KTX-Software is resolved only on a cache miss or `--rebuild-shadows`.
   Viewers never regenerate artifacts; `shadowcache rebuild` must direct users
   back to `prepare --rebuild-shadows`.

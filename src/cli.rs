@@ -108,7 +108,7 @@ pub struct PrepareArgs {
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
     /// Cubemap face resolution for prepared static point shadows.
-    #[arg(long, default_value_t = 256, value_parser = parse_shadow_resolution)]
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
     pub(crate) shadow_resolution: u32,
     /// Rebuild prepared point-shadow cubemaps even when their fingerprint matches.
     #[arg(long)]
@@ -174,7 +174,7 @@ pub struct RenderArgs {
     #[arg(long, hide = true)]
     pub(crate) toktx: Option<PathBuf>,
     /// Cubemap face resolution used if render needs to prepare static point shadows.
-    #[arg(long, default_value_t = 256, value_parser = parse_shadow_resolution)]
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
     pub(crate) shadow_resolution: u32,
     /// Rebuild prepared point-shadow cubemaps if render refreshes the cell.
     #[arg(long)]
