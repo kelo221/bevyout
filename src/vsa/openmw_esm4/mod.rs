@@ -368,6 +368,184 @@ pub(crate) struct ParsedPlugin {
     pub(crate) diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ParsedContentSet {
+    state: ParsedState,
+}
+
+impl ParsedContentSet {
+    pub(crate) fn cells(&self) -> impl Iterator<Item = (&u32, &CellInfo)> {
+        self.state.cells.iter()
+    }
+
+    pub(crate) fn cell_winning_plugin(&self, form_id: u32) -> Option<&str> {
+        self.state
+            .cell_winning_plugins
+            .get(&form_id)
+            .map(String::as_str)
+    }
+
+    pub(crate) fn cell_provenance(&self, form_id: u32) -> &[String] {
+        self.state
+            .cell_provenance
+            .get(&form_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn select(self, selector: &CellSelector) -> Result<ParsedPlugin> {
+        let mut state = self.state;
+        let target_cell = match selector {
+            CellSelector::FormId(form_id) => *form_id,
+            CellSelector::EditorId(editor_id) => {
+                let matches = state
+                    .cells
+                    .values()
+                    .filter(|cell| {
+                        cell.editor_id
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(editor_id))
+                    })
+                    .map(|cell| cell.form_id)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [] => {
+                        bail!("GECK EditorID '{editor_id}' was not found in the loaded content set")
+                    }
+                    [form_id] => *form_id,
+                    _ => {
+                        let form_ids = matches
+                            .iter()
+                            .map(|form_id| format!("{form_id:08x}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        bail!(
+                            "GECK EditorID '{editor_id}' is ambiguous; matching cell FormIDs: {form_ids}"
+                        )
+                    }
+                }
+            }
+        };
+
+        let all_references = state.references;
+        let mut references = all_references
+            .values()
+            .filter(|reference| reference.parent_cell_form_id == target_cell)
+            .cloned()
+            .collect::<Vec<_>>();
+        for reference in &mut references {
+            let Some(door) = reference.door.as_mut() else {
+                continue;
+            };
+            let Some(teleport) = door.teleport.as_ref() else {
+                continue;
+            };
+            if let Some(destination) = all_references.get(&teleport.door_reference_form_id) {
+                door.destination = Some(DoorDestinationRecord {
+                    door_reference_form_id: teleport.door_reference_form_id,
+                    cell_form_id: destination.parent_cell_form_id,
+                    position: teleport.position,
+                    rotation: teleport.rotation,
+                });
+            }
+        }
+        for reference in &mut references {
+            match resolve_initially_enabled(reference.form_id, &all_references) {
+                Ok(enabled) => reference.initially_enabled = enabled,
+                Err(error) => {
+                    reference.initially_enabled = true;
+                    reference.ignored_subrecords.push(format!("XESP:{error}"));
+                }
+            }
+            if reference.enable_parent.is_some() {
+                match resolve_enable_root(reference.form_id, &all_references) {
+                    Ok(root) => reference.enable_root_form_id = Some(root),
+                    Err(error) => {
+                        reference
+                            .ignored_subrecords
+                            .push(format!("XESP-root:{error}"));
+                    }
+                }
+            }
+        }
+        references.sort_by_key(|reference| reference.form_id);
+
+        let mut ignored = HashMap::<(String, String), usize>::new();
+        for reference in &references {
+            for signature in &reference.ignored_subrecords {
+                if let Some(error) = signature.strip_prefix("XESP:") {
+                    *ignored
+                        .entry(("XESP resolution".into(), error.into()))
+                        .or_default() += 1;
+                } else if let Some(error) = signature.strip_prefix("XESP-root:") {
+                    *ignored
+                        .entry(("XESP root resolution".into(), error.into()))
+                        .or_default() += 1;
+                } else {
+                    *ignored
+                        .entry((reference.kind.as_str().into(), signature.clone()))
+                        .or_default() += 1;
+                }
+            }
+            if let Some(base) = state.bases.get(&reference.base_form_id) {
+                for signature in &base.ignored_subrecords {
+                    *ignored
+                        .entry((base.kind.clone(), signature.clone()))
+                        .or_default() += 1;
+                }
+            }
+        }
+        if let Some(cell) = state.cell_metadata.get(&target_cell) {
+            for signature in &cell.ignored_subrecords {
+                *ignored
+                    .entry(("CELL".into(), signature.clone()))
+                    .or_default() += 1;
+            }
+        }
+        let mut diagnostics = ignored
+            .into_iter()
+            .map(|((record, subrecord), count)| {
+                if record == "XESP resolution" {
+                    format!(
+                        "{subrecord} while resolving {count} target-cell placement(s); defaulted visible"
+                    )
+                } else if record == "XESP root resolution" {
+                    format!(
+                        "{subrecord} while resolving {count} enable-parent chain root(s); mutability left Unknown"
+                    )
+                } else {
+                    format!(
+                        "ignored unsupported {record}.{subrecord} subrecord while importing {count} target-cell record(s)"
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        diagnostics.sort();
+
+        let mut navmeshes = state
+            .navmeshes
+            .into_values()
+            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
+            .collect::<Vec<_>>();
+        navmeshes.sort_by_key(|navmesh| navmesh.form_id);
+
+        Ok(ParsedPlugin {
+            bases: state.bases,
+            image_spaces: state.image_spaces,
+            sounds: state.sounds,
+            sound_references: state.sound_references,
+            acoustic_spaces: state.acoustic_spaces,
+            music: state.music,
+            lighting_templates: state.lighting_templates,
+            references,
+            navmeshes,
+            cell: state.cells.remove(&target_cell),
+            cell_metadata: state.cell_metadata.remove(&target_cell),
+            diagnostics,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PluginSource<'a> {
     pub(crate) name: &'a str,
@@ -387,6 +565,8 @@ pub(crate) struct ParsedState {
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
     cells: HashMap<u32, CellInfo>,
     cell_metadata: HashMap<u32, CellMetadata>,
+    cell_winning_plugins: HashMap<u32, String>,
+    cell_provenance: HashMap<u32, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -418,6 +598,10 @@ pub(crate) fn parse_content_set(
     sources: &[PluginSource<'_>],
     selector: &CellSelector,
 ) -> Result<ParsedPlugin> {
+    parse_content_set_all(sources)?.select(selector)
+}
+
+pub(crate) fn parse_content_set_all(sources: &[PluginSource<'_>]) -> Result<ParsedContentSet> {
     if sources.len() > 256 {
         bail!("ESM4 content set exceeds the 256-file FormID limit")
     }
@@ -451,154 +635,12 @@ pub(crate) fn parse_content_set(
             None,
             &resolver,
             &mut state,
+            source.name,
         )
         .with_context(|| format!("parsing {}", source.name))?;
     }
 
-    let target_cell = match selector {
-        CellSelector::FormId(form_id) => *form_id,
-        CellSelector::EditorId(editor_id) => {
-            let matches = state
-                .cells
-                .values()
-                .filter(|cell| {
-                    cell.editor_id
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(editor_id))
-                })
-                .map(|cell| cell.form_id)
-                .collect::<Vec<_>>();
-            match matches.as_slice() {
-                [] => bail!("GECK EditorID '{editor_id}' was not found in the loaded content set"),
-                [form_id] => *form_id,
-                _ => {
-                    let form_ids = matches
-                        .iter()
-                        .map(|form_id| format!("{form_id:08x}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    bail!(
-                        "GECK EditorID '{editor_id}' is ambiguous; matching cell FormIDs: {form_ids}"
-                    )
-                }
-            }
-        }
-    };
-
-    let all_references = state.references;
-    let mut references = all_references
-        .values()
-        .filter(|reference| reference.parent_cell_form_id == target_cell)
-        .cloned()
-        .collect::<Vec<_>>();
-    for reference in &mut references {
-        let Some(door) = reference.door.as_mut() else {
-            continue;
-        };
-        let Some(teleport) = door.teleport.as_ref() else {
-            continue;
-        };
-        if let Some(destination) = all_references.get(&teleport.door_reference_form_id) {
-            door.destination = Some(DoorDestinationRecord {
-                door_reference_form_id: teleport.door_reference_form_id,
-                cell_form_id: destination.parent_cell_form_id,
-                position: teleport.position,
-                rotation: teleport.rotation,
-            });
-        }
-    }
-    for reference in &mut references {
-        match resolve_initially_enabled(reference.form_id, &all_references) {
-            Ok(enabled) => reference.initially_enabled = enabled,
-            Err(error) => {
-                reference.initially_enabled = true;
-                reference.ignored_subrecords.push(format!("XESP:{error}"));
-            }
-        }
-        if reference.enable_parent.is_some() {
-            match resolve_enable_root(reference.form_id, &all_references) {
-                Ok(root) => reference.enable_root_form_id = Some(root),
-                Err(error) => {
-                    reference
-                        .ignored_subrecords
-                        .push(format!("XESP-root:{error}"));
-                }
-            }
-        }
-    }
-    references.sort_by_key(|reference| reference.form_id);
-
-    let mut ignored = HashMap::<(String, String), usize>::new();
-    for reference in &references {
-        for signature in &reference.ignored_subrecords {
-            if let Some(error) = signature.strip_prefix("XESP:") {
-                *ignored
-                    .entry(("XESP resolution".into(), error.into()))
-                    .or_default() += 1;
-            } else if let Some(error) = signature.strip_prefix("XESP-root:") {
-                *ignored
-                    .entry(("XESP root resolution".into(), error.into()))
-                    .or_default() += 1;
-            } else {
-                *ignored
-                    .entry((reference.kind.as_str().into(), signature.clone()))
-                    .or_default() += 1;
-            }
-        }
-        if let Some(base) = state.bases.get(&reference.base_form_id) {
-            for signature in &base.ignored_subrecords {
-                *ignored
-                    .entry((base.kind.clone(), signature.clone()))
-                    .or_default() += 1;
-            }
-        }
-    }
-    if let Some(cell) = state.cell_metadata.get(&target_cell) {
-        for signature in &cell.ignored_subrecords {
-            *ignored
-                .entry(("CELL".into(), signature.clone()))
-                .or_default() += 1;
-        }
-    }
-    let mut diagnostics = ignored
-        .into_iter()
-        .map(|((record, subrecord), count)| {
-            if record == "XESP resolution" {
-                format!("{subrecord} while resolving {count} target-cell placement(s); defaulted visible")
-            } else if record == "XESP root resolution" {
-                format!(
-                    "{subrecord} while resolving {count} enable-parent chain root(s); mutability left Unknown"
-                )
-            } else {
-                format!(
-                    "ignored unsupported {record}.{subrecord} subrecord while importing {count} target-cell record(s)"
-                )
-            }
-        })
-        .collect::<Vec<_>>();
-    diagnostics.sort();
-
-    let mut navmeshes = state
-        .navmeshes
-        .into_values()
-        .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
-        .collect::<Vec<_>>();
-    navmeshes.sort_by_key(|navmesh| navmesh.form_id);
-
-    Ok(ParsedPlugin {
-        bases: state.bases,
-        image_spaces: state.image_spaces,
-        sounds: state.sounds,
-        sound_references: state.sound_references,
-        acoustic_spaces: state.acoustic_spaces,
-        music: state.music,
-        lighting_templates: state.lighting_templates,
-        references,
-        navmeshes,
-        cell: state.cells.remove(&target_cell),
-        cell_metadata: state.cell_metadata.remove(&target_cell),
-        diagnostics,
-    })
+    Ok(ParsedContentSet { state })
 }
 
 #[derive(Debug, Clone, Copy)]

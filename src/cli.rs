@@ -31,6 +31,9 @@ pub enum CommandLine {
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
+    /// List cells discovered in the resolved Fallout plugin load order.
+    #[command(name = "cells")]
+    Cells(CellsArgs),
     /// Run deterministic Gamebryo-style console scripts.
     #[command(name = "script")]
     Script(ScriptArgs),
@@ -216,6 +219,19 @@ pub struct ReportArgs {
     /// Defaults to `.bevyout/reports` (gitignored).
     #[arg(long)]
     pub(crate) out_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct CellsArgs {
+    /// Fallout 3 installation directory (normally supplied by config.toml).
+    #[arg(long)]
+    pub(crate) game_root: Option<PathBuf>,
+    /// Plugin filename under Data, or an absolute plugin path.
+    #[arg(long)]
+    pub(crate) plugin: Option<PathBuf>,
+    /// Only print interior cells.
+    #[arg(long)]
+    pub(crate) interiors_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

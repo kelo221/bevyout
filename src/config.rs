@@ -93,6 +93,14 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             }
         }
         CommandLine::View(_) | CommandLine::Script(_) => {}
+        CommandLine::Cells(args) => {
+            if args.game_root.is_none() {
+                args.game_root = config.fallout3.game_root.clone();
+            }
+            if args.plugin.is_none() {
+                args.plugin = config.fallout3.plugin.clone();
+            }
+        }
         CommandLine::Report(args) => {
             if args.game_root.is_none() {
                 args.game_root = config.fallout3.game_root.clone();

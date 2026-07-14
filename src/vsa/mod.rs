@@ -2,6 +2,7 @@ mod assets;
 mod audio_assets;
 mod bake;
 mod bsa;
+mod catalog;
 mod content_index;
 mod irradiance;
 mod manifest;
@@ -16,6 +17,7 @@ mod scenes;
 pub(crate) use assets::NIF_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
+pub use catalog::cells;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,

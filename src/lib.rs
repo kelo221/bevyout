@@ -10,4 +10,4 @@ pub use cli::{Cli, CommandLine};
 pub use config::apply;
 pub use console::script::dispatch as script;
 pub use viewer::{render, view};
-pub use vsa::{bake, prepare, report};
+pub use vsa::{bake, cells, prepare, report};
