@@ -245,6 +245,7 @@ pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Pat
 /// changes, computes the prepared-neighbor set from which `scenes/<id>/scene.ron`
 /// files exist on disk, runs the pure policy, and starts/stops background
 /// loads accordingly.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_preload_plan(
     mut commands: Commands,
     active_cell: Res<ActiveCell>,
@@ -252,6 +253,7 @@ fn evaluate_preload_plan(
     mut resident_cells: ResMut<ResidentCells>,
     resident_cell_limit: Res<ResidentCellLimit>,
     manifest: Res<PreparedSceneManifest>,
+    mut pending_reveal: ResMut<super::reveal::PendingReveal>,
     mut last_planned: Local<Option<u32>>,
 ) {
     if *last_planned == Some(active_cell.0) {
@@ -280,6 +282,11 @@ fn evaluate_preload_plan(
         if let Some(resident) = resident_cells.0.remove(&form_id) {
             commands.entity(resident.root).despawn();
         }
+        // Issue #55: the active cell is never evicted (see `policy::
+        // CellGraph::plan`'s doc comment), so a mid-reveal cell can't
+        // normally reach here -- defense-in-depth, see `PendingReveal::
+        // clear_if`'s doc comment.
+        pending_reveal.clear_if(form_id);
         let distance = distances
             .get(&form_id)
             .map_or_else(|| "unknown".to_string(), usize::to_string);

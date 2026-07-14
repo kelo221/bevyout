@@ -84,6 +84,12 @@ mod policy;
 #[allow(dead_code, unused_imports)]
 mod swap_policy;
 
+// `world::reveal_policy` (issue #55) is likewise dependency-free (std only,
+// no Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/world/reveal_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod reveal_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -195,6 +201,11 @@ struct BevyoutWorld {
     fingerprint_current: Option<fingerprints::CellFingerprints>,
     fingerprint_stale_components: Option<Vec<fingerprints::FingerprintComponent>>,
     fingerprint_resume_result: Option<(Vec<u32>, usize, fingerprints::StaleCells)>,
+
+    // -- first_reveal.feature (issue #55) --
+    reveal_candidates: Vec<reveal_policy::RevealCandidate>,
+    reveal_budget: usize,
+    reveal_chunks: Vec<Vec<usize>>,
 }
 
 fn find_placement<'a>(
@@ -1479,6 +1490,89 @@ async fn then_checked_cells_stale(world: &mut BevyoutWorld, count: usize) {
         .as_ref()
         .expect("cells were not resumed yet");
     assert_eq!(stale.len(), count);
+}
+
+// ---------------------------------------------------------------------
+// first_reveal.feature (issue #55)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^(\d+) reveal candidates evenly spaced from the arrival point$")]
+async fn given_reveal_candidates_evenly_spaced(world: &mut BevyoutWorld, count: usize) {
+    for i in 0..count {
+        world
+            .reveal_candidates
+            .push(reveal_policy::RevealCandidate {
+                index: world.reveal_candidates.len(),
+                position: [i as f32, 0.0, 0.0],
+            });
+    }
+}
+
+#[given(regex = r"^a reveal candidate at distance (\d+) from the arrival point$")]
+async fn given_reveal_candidate_at_distance(world: &mut BevyoutWorld, distance: f32) {
+    world
+        .reveal_candidates
+        .push(reveal_policy::RevealCandidate {
+            index: world.reveal_candidates.len(),
+            position: [distance, 0.0, 0.0],
+        });
+}
+
+#[given(regex = r"^the reveal budget is (\d+)$")]
+async fn given_reveal_budget(world: &mut BevyoutWorld, budget: usize) {
+    world.reveal_budget = budget;
+}
+
+#[when("the reveal chunks are planned")]
+async fn when_reveal_chunks_planned(world: &mut BevyoutWorld) {
+    world.reveal_chunks = reveal_policy::plan_reveal_chunks(
+        &world.reveal_candidates,
+        [0.0, 0.0, 0.0],
+        world.reveal_budget,
+    );
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) reveal chunks?$")]
+async fn then_reveal_chunk_count_is(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(
+        world.reveal_chunks.len(),
+        expected,
+        "expected {expected} reveal chunks, got {:?}",
+        world.reveal_chunks
+    );
+}
+
+#[then("every reveal candidate appears in exactly one chunk")]
+async fn then_every_reveal_candidate_appears_once(world: &mut BevyoutWorld) {
+    let mut seen: Vec<usize> = world
+        .reveal_chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect();
+    seen.sort_unstable();
+    let expected: Vec<usize> = (0..world.reveal_candidates.len()).collect();
+    assert_eq!(
+        seen, expected,
+        "reveal chunks did not partition every candidate exactly once"
+    );
+}
+
+#[then(regex = r"^the first reveal chunk contains the candidate at distance (\d+)$")]
+async fn then_first_chunk_contains_candidate_at_distance(world: &mut BevyoutWorld, distance: f32) {
+    let candidate = world
+        .reveal_candidates
+        .iter()
+        .find(|candidate| candidate.position[0] == distance)
+        .expect("no reveal candidate at that distance");
+    let first_chunk = world
+        .reveal_chunks
+        .first()
+        .expect("reveal chunks not planned yet");
+    assert!(
+        first_chunk.contains(&candidate.index),
+        "expected first chunk {first_chunk:?} to contain candidate index {}",
+        candidate.index
+    );
 }
 
 fn main() {
