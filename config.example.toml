@@ -13,6 +13,8 @@ blender = "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 # Irradiance baking is pinned to Blender 4.5 LTS; preparation continues to use
 # the general Blender path above.
 irradiance_blender = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+# Unified KTX-Software packages prepared D32 point-shadow arrays on a cache
+# miss and packages irradiance atlases during `bake`.
 ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"
 
 [output]

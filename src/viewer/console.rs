@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use bevy::pbr::PointLightShadowSamples;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -17,9 +18,13 @@ use crate::console::{
 use crate::vsa::PreparedSemantic;
 
 use super::controls::{
-    AmbientScale, AoStrength, FogStrength, IrradianceIntensity, LightingScale, LightsDisabled,
-    UnlitMode,
+    AmbientScale, AoStrength, FogStrength, HorizontalFov, IrradianceIntensity, LightingScale,
+    LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES, UnlitMode,
+    horizontal_to_vertical_fov,
 };
+#[cfg(test)]
+use super::lighting::PreparedPointShadowRuntime;
+use super::lighting::shadow_cache_status;
 use super::{diagnostics, interaction, player};
 
 #[derive(Component)]
@@ -77,6 +82,13 @@ pub(crate) fn install(app: &mut App) {
         .aliases(&["toggleflycam"])
         .mutating(),
         ConsoleCommand::new(
+            "fov",
+            "fov [10..170]",
+            "Get or set the horizontal camera field of view in degrees.",
+            field_of_view,
+        )
+        .mutating(),
+        ConsoleCommand::new(
             "tlights",
             "tlights",
             "Toggle all runtime scene lights.",
@@ -123,6 +135,13 @@ pub(crate) fn install(app: &mut App) {
             "renderreport",
             "Write the configured render timing and diagnostic reports immediately.",
             render_report,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "shadowcache",
+            "shadowcache <status|rebuild>",
+            "Inspect the prepared point-shadow artifact or show rebuild instructions.",
+            shadow_cache,
         )
         .mutating(),
         ConsoleCommand::new(
@@ -301,6 +320,93 @@ fn toggle_fly_camera(
     ))
 }
 
+fn field_of_view(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "fov accepts at most one value",
+        ));
+    }
+    let camera = {
+        let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<HorizontalFov>)>();
+        let mut cameras = query.iter(world);
+        let Some(camera) = cameras.next() else {
+            return Err(ConsoleError::new(
+                "camera_unavailable",
+                "the active 3D camera does not expose an FOV setting",
+            ));
+        };
+        if cameras.next().is_some() {
+            return Err(ConsoleError::new(
+                "camera_unavailable",
+                "expected exactly one active 3D camera",
+            ));
+        }
+        camera
+    };
+
+    let requested = invocation
+        .args
+        .first()
+        .map(|value| {
+            value
+                .parse::<f32>()
+                .map_err(|_| ConsoleError::new("bad_type", "fov must be a finite number"))
+        })
+        .transpose()?;
+    if let Some(requested) = requested {
+        if !requested.is_finite()
+            || !(MIN_HORIZONTAL_FOV_DEGREES..=MAX_HORIZONTAL_FOV_DEGREES).contains(&requested)
+        {
+            return Err(ConsoleError::new(
+                "out_of_range",
+                format!(
+                    "fov must be between {MIN_HORIZONTAL_FOV_DEGREES} and {MAX_HORIZONTAL_FOV_DEGREES} degrees"
+                ),
+            ));
+        }
+        let aspect_ratio = match world.get::<Projection>(camera) {
+            Some(Projection::Perspective(perspective)) => perspective.aspect_ratio,
+            _ => {
+                return Err(ConsoleError::new(
+                    "camera_unavailable",
+                    "the active 3D camera is not perspective",
+                ));
+            }
+        };
+        world
+            .get_mut::<HorizontalFov>(camera)
+            .expect("camera query required HorizontalFov")
+            .0 = requested;
+        let mut projection = world
+            .get_mut::<Projection>(camera)
+            .expect("Camera3d requires Projection");
+        let Projection::Perspective(perspective) = &mut *projection else {
+            unreachable!("perspective projection checked above");
+        };
+        perspective.fov = horizontal_to_vertical_fov(requested, aspect_ratio);
+    }
+
+    let degrees = world
+        .get::<HorizontalFov>(camera)
+        .expect("camera query required HorizontalFov")
+        .0;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "degrees": degrees,
+            "axis": "horizontal",
+        }),
+        vec![if requested.is_some() {
+            format!("Horizontal FOV set to {degrees} degrees.")
+        } else {
+            format!("Horizontal FOV is {degrees} degrees.")
+        }],
+    ))
+}
+
 fn toggle_lights(
     world: &mut World,
     invocation: &ConsoleInvocation,
@@ -465,7 +571,7 @@ fn sync_ui_visibility(
     }
 }
 
-const RENDER_SETTINGS: [&str; 8] = [
+const RENDER_SETTINGS: [&str; 9] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -474,6 +580,7 @@ const RENDER_SETTINGS: [&str; 8] = [
     "bloom_softness",
     "fog",
     "ao",
+    "shadow_samples",
 ];
 
 fn bloom_values(world: &mut World) -> Result<(f32, f32, f32), ConsoleError> {
@@ -516,6 +623,10 @@ fn render_values(world: &mut World) -> Result<Map<String, Value>, ConsoleError> 
     values.insert("bloom_softness".into(), json!(bloom_softness));
     values.insert("fog".into(), json!(world.resource::<FogStrength>().0));
     values.insert("ao".into(), json!(world.resource::<AoStrength>().0));
+    values.insert(
+        "shadow_samples".into(),
+        json!(world.resource::<PointLightShadowSamples>().0),
+    );
     Ok(values)
 }
 
@@ -540,6 +651,7 @@ fn render_setting_label(setting: &str) -> &'static str {
         "bloom_softness" => "Bloom softness",
         "fog" => "Fog",
         "ao" => "Ambient occlusion",
+        "shadow_samples" => "Point-shadow samples per pixel",
         _ => "Render setting",
     }
 }
@@ -603,6 +715,7 @@ fn set_render(
         "ambient" => (0.0001..=4096.0).contains(&value),
         "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
+        "shadow_samples" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
     if !valid {
@@ -618,6 +731,7 @@ fn set_render(
         "ambient" => world.resource_mut::<AmbientScale>().0 = value,
         "fog" => world.resource_mut::<FogStrength>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
+        "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
             let camera = {
                 let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<Bloom>)>();
@@ -656,6 +770,37 @@ fn set_render(
         }),
         vec![message],
     ))
+}
+
+fn shadow_cache(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "shadowcache accepts status or rebuild",
+        ));
+    }
+    match invocation
+        .args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("status")
+    {
+        "status" => Ok(ConsoleCommandResult::new(
+            shadow_cache_status(world),
+            vec!["Shadow cache status reported.".into()],
+        )),
+        "rebuild" => Err(ConsoleError::new(
+            "prepare_required",
+            "prepared shadows cannot be rebuilt in the viewer; run `prepare --rebuild-shadows` for this cell, then restart render",
+        )),
+        _ => Err(ConsoleError::new(
+            "bad_value",
+            "shadowcache expects status or rebuild",
+        )),
+    }
 }
 
 fn render_report(
@@ -765,6 +910,8 @@ mod tests {
             .insert_resource(AoStrength(1.0))
             .insert_resource(UnlitMode(false))
             .insert_resource(LightsDisabled(false))
+            .insert_resource(PreparedPointShadowRuntime::default())
+            .insert_resource(PointLightShadowSamples::default())
             .insert_resource(BoxdddDebugDrawSettings::default())
             .insert_resource(player::StepDebugSettings::default());
         app.init_state::<GameplayModal>();
@@ -776,6 +923,8 @@ mod tests {
         app.insert_resource(camera);
         app.world_mut().spawn((
             Camera3d::default(),
+            Projection::Perspective(super::super::default_perspective_projection()),
+            HorizontalFov::default(),
             Bloom::default(),
             Transform::from_xyz(0.0, 2.0, 0.0),
             super::super::FlyCamera {
@@ -827,6 +976,38 @@ mod tests {
     }
 
     #[test]
+    fn fov_reports_sets_and_validates_horizontal_degrees() {
+        let mut app = test_app();
+
+        let current = exec(&mut app, "fov");
+        assert_eq!(current.value["degrees"], 90.0);
+        assert_eq!(current.value["axis"], "horizontal");
+
+        let changed = exec(&mut app, "fov 110");
+        assert!(changed.ok);
+        assert_eq!(changed.value["degrees"], 110.0);
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&Projection, With<Camera3d>>();
+        let Projection::Perspective(perspective) = query.single(app.world()).unwrap() else {
+            panic!("expected a perspective camera");
+        };
+        let expected = horizontal_to_vertical_fov(110.0, perspective.aspect_ratio);
+        assert!((perspective.fov - expected).abs() < 1e-6);
+
+        assert_eq!(exec(&mut app, "fov 9").error.unwrap().code, "out_of_range");
+        assert_eq!(
+            exec(&mut app, "fov 171").error.unwrap().code,
+            "out_of_range"
+        );
+        assert_eq!(exec(&mut app, "fov nope").error.unwrap().code, "bad_type");
+        assert_eq!(
+            exec(&mut app, "fov 90 extra").error.unwrap().code,
+            "bad_arity"
+        );
+    }
+
+    #[test]
     fn screenshot_rejects_headless_and_unsafe_names() {
         let mut app = test_app();
         assert_eq!(
@@ -844,6 +1025,7 @@ mod tests {
         let mut app = test_app();
         assert!(exec(&mut app, "help toggleflycam").ok);
         assert!(exec(&mut app, "help togglecollisiongeometry").ok);
+        assert!(exec(&mut app, "help fov").ok);
         let free_camera = exec(&mut app, "toggleflycam");
         assert_eq!(free_camera.value["camera_mode"], "free");
         assert_eq!(free_camera.log, ["Free camera enabled."]);
@@ -880,6 +1062,10 @@ mod tests {
             assert!(exec(&mut app, &format!("setrender {setting} {low}")).ok);
             assert!(exec(&mut app, &format!("setrender {setting} {high}")).ok);
         }
+        assert!(exec(&mut app, "setrender shadow_samples 0").ok);
+        assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 0);
+        assert!(exec(&mut app, "setrender shadow_samples 1").ok);
+        assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 1);
         assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
         let before = app.world().resource::<LightingScale>().0;
         assert_eq!(
@@ -897,8 +1083,20 @@ mod tests {
             "unknown_setting"
         );
         assert_eq!(
+            exec(&mut app, "setrender shadow_samples 2")
+                .error
+                .unwrap()
+                .code,
+            "out_of_range"
+        );
+        assert!(exec(&mut app, "shadowcache status").ok);
+        assert_eq!(
+            exec(&mut app, "shadowcache rebuild").error.unwrap().code,
+            "prepare_required"
+        );
+        assert_eq!(
             exec(&mut app, "getrender").value.as_object().unwrap().len(),
-            8
+            9
         );
     }
 

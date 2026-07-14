@@ -6,10 +6,12 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::light::{IrradianceVolume, LightProbe};
+use bevy::light::{IrradianceVolume, LightProbe, ShadowFilteringMethod};
 use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{
+    BakedPointLightShadow, BakedPointShadowMap, DistanceFog, FogFalloff, PointLightShadowSamples,
+};
 use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
 };
@@ -48,17 +50,22 @@ mod console;
 mod console_ui;
 mod controls;
 mod diagnostics;
+mod lighting;
 mod scene;
 
 pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
+pub(crate) use lighting::*;
 pub(crate) use scene::*;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
+pub(crate) const DEFAULT_HORIZONTAL_FOV_DEGREES: f32 = 90.0;
+pub(crate) const DEFAULT_WINDOW_WIDTH: u32 = 1920;
+pub(crate) const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
 
 pub fn view(args: ViewArgs) -> Result<()> {
     run_view(
@@ -234,6 +241,9 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         plugin: args.plugin.clone(),
         cell: None,
         blender: args.blender.clone(),
+        toktx: args.toktx.clone(),
+        shadow_resolution: args.shadow_resolution,
+        rebuild_shadows: args.rebuild_shadows,
         cache_dir: Some(cache_dir.to_path_buf()),
         force,
         rebuild_assets: false,

@@ -111,7 +111,7 @@ impl BsaArchive {
             if bytes.starts_with(b"RIFF")
                 || bytes.starts_with(b"OggS")
                 || bytes.starts_with(b"ID3")
-                || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+                || looks_like_mp3_frame(&bytes)
             {
                 return Ok(Some(bytes));
             }
@@ -135,6 +135,24 @@ impl BsaArchive {
             Ok(Some(bytes))
         }
     }
+}
+
+/// Returns whether the bytes begin with a structurally valid MPEG audio frame
+/// header. A sync word alone is not enough: compressed NIF entries can begin
+/// with `FF F3 00 00`, which otherwise looks like an MP3 to a loose detector.
+fn looks_like_mp3_frame(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] & 0xe0 != 0xe0 {
+        return false;
+    }
+    let version = (bytes[1] >> 3) & 0b11;
+    let layer = (bytes[1] >> 1) & 0b11;
+    let bitrate_index = bytes[2] >> 4;
+    let sample_rate_index = (bytes[2] >> 2) & 0b11;
+    version != 0b01
+        && layer != 0
+        && bitrate_index != 0
+        && bitrate_index != 0b1111
+        && sample_rate_index != 0b11
 }
 
 fn read_cstring(file: &mut File) -> Result<String> {
@@ -399,6 +417,8 @@ mod tests {
             bytes.extend_from_slice(b"not really compressed ogg bytes");
             bytes
         };
+        let mut mp3 = vec![0xff, 0xfb, 0x90, 0x64];
+        mp3.resize(20, 0);
         let bytes = build_bsa(
             ARCHIVE_COMPRESSED,
             &[(
@@ -406,12 +426,30 @@ mod tests {
                 vec![
                     TestFile::new("clip.wav", riff.clone()),
                     TestFile::new("clip.ogg", ogg.clone()),
+                    TestFile::new("clip.mp3", mp3.clone()),
                 ],
             )],
         );
         let archive = open_bsa("media-passthrough", &bytes).unwrap();
         assert_eq!(archive.read("sound/clip.wav").unwrap().unwrap(), riff);
         assert_eq!(archive.read("sound/clip.ogg").unwrap().unwrap(), ogg);
+        assert_eq!(archive.read("sound/clip.mp3").unwrap().unwrap(), mp3);
+    }
+
+    #[test]
+    fn compressed_nif_prefix_is_decompressed_not_treated_as_mp3() {
+        let original = b"Gamebryo File Format, Version 20.2.0.7".to_vec();
+        let mut payload = vec![0xff, 0xf3, 0x00, 0x00];
+        payload.extend_from_slice(&zlib_compress(&original));
+        let bytes = build_bsa(
+            ARCHIVE_COMPRESSED,
+            &[("meshes", vec![TestFile::new("rcclothwall01.nif", payload)])],
+        );
+        let archive = open_bsa("nif-mp3-prefix", &bytes).unwrap();
+        assert_eq!(
+            archive.read("meshes/rcclothwall01.nif").unwrap().unwrap(),
+            original
+        );
     }
 
     #[test]

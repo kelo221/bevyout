@@ -22,12 +22,7 @@ pub(crate) fn run_view(
     app.add_plugins((
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
-                    resolution: (1280, 720).into(),
-                    focused: true,
-                    present_mode: PresentMode::AutoNoVsync,
-                    ..default()
-                }),
+                primary_window: Some(default_primary_window()),
                 ..default()
             })
             .set(AssetPlugin {
@@ -70,21 +65,30 @@ pub(crate) fn run_view(
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(LightsDisabled(false))
+        .insert_resource(PreparedPointShadowRuntime::default())
+        .insert_resource(PointLightShadowSamples::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
         // graph but the CLI never observes it (LoadingTarget is always set).
         .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
             OnEnter(AppState::InGame),
-            (capture_cursor, spawn_prepared_scene, spawn_reticle),
+            (
+                capture_cursor,
+                spawn_prepared_scene,
+                player::build_prepared_colliders,
+                spawn_reticle,
+            )
+                .chain(),
         )
+        .add_systems(Update, apply_lighting_scale)
         .add_systems(
             Update,
             (
-                apply_lighting_scale,
                 apply_fog_strength,
                 apply_ao_strength,
                 apply_irradiance_intensity,
+                apply_horizontal_fov,
                 update_fps_text,
                 apply_unlit_mode,
                 configure_glow_cards,
@@ -112,6 +116,15 @@ pub(crate) fn run_view(
     Ok(())
 }
 
+fn default_primary_window() -> Window {
+    Window {
+        resolution: (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT).into(),
+        focused: true,
+        present_mode: PresentMode::AutoNoVsync,
+        ..default()
+    }
+}
+
 #[derive(Resource)]
 struct TraceCaptureLimit {
     remaining: f32,
@@ -125,5 +138,17 @@ fn stop_trace_capture(
     limit.remaining -= time.delta_secs();
     if limit.remaining <= 0.0 {
         app_exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_window_defaults_to_1080p() {
+        let window = default_primary_window();
+        assert_eq!(window.resolution.width(), 1920.0);
+        assert_eq!(window.resolution.height(), 1080.0);
     }
 }

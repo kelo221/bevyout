@@ -104,6 +104,15 @@ pub struct PrepareArgs {
     /// Blender executable path.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
+    /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
+    #[arg(long)]
+    pub(crate) toktx: Option<PathBuf>,
+    /// Cubemap face resolution for prepared static point shadows.
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
+    pub(crate) shadow_resolution: u32,
+    /// Rebuild prepared point-shadow cubemaps even when their fingerprint matches.
+    #[arg(long)]
+    pub(crate) rebuild_shadows: bool,
     /// Output cache directory.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
@@ -126,6 +135,13 @@ pub struct PrepareArgs {
     /// failed cell recorded in the manifest.
     #[arg(long)]
     pub(crate) retry_failed: bool,
+}
+
+fn parse_shadow_resolution(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(value @ (128 | 256 | 512)) => Ok(value),
+        _ => Err("shadow resolution must be 128, 256, or 512".into()),
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -167,6 +183,12 @@ pub struct RenderArgs {
     /// KTX-Software executable used if render needs to bake irradiance.
     #[arg(long, hide = true)]
     pub(crate) toktx: Option<PathBuf>,
+    /// Cubemap face resolution used if render needs to prepare static point shadows.
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
+    pub(crate) shadow_resolution: u32,
+    /// Rebuild prepared point-shadow cubemaps if render refreshes the cell.
+    #[arg(long)]
+    pub(crate) rebuild_shadows: bool,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
