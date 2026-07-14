@@ -80,6 +80,45 @@ fn tick_pending_door_travel(
     }
 }
 
+/// Wave-3 shipped amendment: scripted (console/BRP) door activation follows
+/// the same Open-clip lead as the player's Enter activation — the door is
+/// marked open, its clip plays, and the travel request is staged behind the
+/// lead. Zero lead (no clip) writes the message this same frame, exactly the
+/// wave-2 `activate` behavior. Returns the lead in milliseconds so the
+/// console can report it.
+pub(crate) fn scripted_door_travel(
+    world: &mut World,
+    entity: Entity,
+    request: DoorTravelRequested,
+) -> f32 {
+    let open_clip_seconds = world
+        .get::<animation::AnimatedPlacement>(entity)
+        .and_then(|animated| animated.clip_seconds("Open"));
+    let lead_seconds =
+        animation::open_lead_seconds(open_clip_seconds, animation::OPEN_LEAD_CAP_SECONDS);
+    world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .insert(entity);
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition: ClipTransition::Opening,
+        lead_ms: lead_seconds * 1000.0,
+    });
+    if lead_seconds <= 0.0 {
+        world.write_message(request);
+    } else {
+        world
+            .get_resource_or_insert_with(PendingDoorTravel::default)
+            .0 = Some(PendingTravel {
+            entity,
+            remaining_seconds: lead_seconds,
+            request,
+        });
+    }
+    lead_seconds * 1000.0
+}
+
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
 #[derive(Component, Clone, Debug)]

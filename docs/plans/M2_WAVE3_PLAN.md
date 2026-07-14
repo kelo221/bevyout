@@ -212,3 +212,58 @@ No frame > 33 ms on any preloaded hop of the Vault101a→b→d→b→a chain,
 5. Comment measured results on #57/#49/#55, tick epic #5 checklist items,
    PR `m2-wave3` → master with `Closes` footers, update the
    `docs/plans/README.md` table row, then kick off wave 3b.
+
+## Shipped amendments (found during real-data acceptance)
+
+The feature lists above were implemented as specified; acceptance against the
+re-prepared corpus and the live viewer added the following:
+
+- **A6 — console `activate` goes through the open-lead** (`interaction.rs`
+  `scripted_door_travel`, `console.rs`): the BRP path used for acceptance
+  wrote `DoorTravelRequested` directly, bypassing #57's animation lead
+  entirely (flagged by the implementing agent). It now marks the door open,
+  plays the clip, and stages the same pending travel as the player's Enter
+  activation; the console response gained `open_lead_ms`. Regression test:
+  `activate_animated_door_defers_travel_by_the_open_lead`.
+- **A7 — three more niftools-on-Blender-5.x no-op patches**
+  (`blender_script.py`): the spike door never touched these importer paths,
+  but the full corpus does. Material (UV/alpha ramp) controllers, visibility
+  controllers, and morph controllers all crash on `NiBlend*` interpolators
+  (no `.data`) or, for morphs, on a shape-key (`KEY`) datablock getting an
+  `OBJECT` action slot. None of the three can ride our GLB export
+  (`export_apply=True` flattens shape keys; hide_viewport/material ramps are
+  not consumed), so all three are skipped, `get_controller_data` returns
+  `None` for data-less interpolators, and the `create_action` shim derives
+  the slot type from the target datablock. Corpus after fixes: 5/5 cells
+  prepared, 48 GLBs carry animations (24 door `Open`/`Close` pairs, plus
+  activator `Forward`/`Backward`/idle clips).
+- **A8 — animation rediscovery after scene respawn** (`animation.rs`): a
+  preloaded cell's scene respawns under a surviving placement root, so
+  `AnimatedPlacement.player` went stale and every door in a
+  preloaded-then-swapped cell silently skipped playback (caught because the
+  acceptance chain logged `door anim` only on the launch cell's door).
+  Discovery now rediscovers when the recorded player entity is dead; a
+  `warn!` guards the should-be-unreachable stale case.
+- **A9 — reveal budget kept at 256; smaller is worse** (`reveal.rs`): with
+  a warm asset cache, budget 256 measured Vault101d's first reveal at
+  35.6–38.8 ms (was 84 ms in wave 2); budget 128 measured **71.5 ms** —
+  the longer reveal window overlaps collider builds and neighbor preload,
+  and `visflip_ms` is ~0.1 ms throughout, so per-frame cost is not
+  visibility-count-bound. This is F55.4's stop condition: chunking +
+  instrumentation shipped and roughly halved the spike, but the ≤33 ms bar
+  is not consistently met on the largest cell's first reveal, and the
+  remaining cost is render preparation. #55 stays open with this data; the
+  next candidate is a pipeline/render pre-warm design. Note: first-ever run
+  over a freshly rebuilt corpus measures wildly higher (111–134 ms; cold
+  caches) — comparable numbers need a second run.
+
+Measured outcome (final run, cool machine, 11.1 ms cook canary, chain
+Vault101a→b→d→b→a over BRP): 4/4 instant swaps, 4/4 doors playing `Open`
+with `lead_ms=600` before the swap, swap-window max frames
+31.5 / 38.8 / 22.0 / 25.5 ms. Fingerprints verified on real data: converter
+revision bump invalidated all 5 cells (full rebuild), no-op rerun skips 5/5
+valid, hand-tampered physics fingerprint stales exactly one cell and the
+next batch run re-prepares only it; `--check-fingerprints` reports per-cell
+status without touching the cache. `capture_viewport` remains black under
+the occluded-window setup — visual confirmation of the door motion needs a
+human-watched run.

@@ -112,6 +112,7 @@ fn discover_animation_players(
     parents: Query<&ChildOf>,
     roots: Query<&interaction::PlacementRoot>,
     already_animated: Query<&AnimatedPlacement>,
+    live_players: Query<(), With<AnimationPlayer>>,
     asset_server: Res<AssetServer>,
     mut pending: ResMut<PendingAnimationDiscovery>,
 ) {
@@ -120,7 +121,13 @@ fn discover_animation_players(
         else {
             continue;
         };
-        if already_animated.contains(root_entity) {
+        // A preloaded cell's scene respawns under a surviving root (evict →
+        // re-preload, and the swap's scene rebuild): the recorded player is
+        // then a dead entity, so rediscover instead of skipping.
+        if already_animated
+            .get(root_entity)
+            .is_ok_and(|animated| live_players.contains(animated.player))
+        {
             continue;
         }
         let Some(path) = roots
@@ -219,6 +226,8 @@ fn play_placement_animations(
 ) {
     for event in events.read() {
         let Ok(mut animated) = animated.get_mut(event.root) else {
+            // Routine: placements whose GLB has no animations still get
+            // play requests from activation.
             continue;
         };
         let mut clip_names: Vec<String> = animated.clip_nodes.keys().cloned().collect();
@@ -235,6 +244,11 @@ fn play_placement_animations(
             .copied()
             .unwrap_or(0.0);
         let Ok(mut player) = players.get_mut(animated.player) else {
+            // Should be unreachable: discovery refreshes a dead player.
+            warn!(
+                "door anim: stale AnimationPlayer {:?} for root {:?}",
+                animated.player, event.root
+            );
             continue;
         };
 

@@ -43,15 +43,13 @@ use super::reveal_policy::{self, RevealCandidate};
 
 /// Per-frame reveal budget (F55.2): how many of a freshly-activated
 /// preloaded cell's placement entities flip from hidden to visible in a
-/// single frame. Sized from the measured first-reveal cost (Vault101d,
-/// 1,371 placements, 84 ms in one frame -- roughly 61 us/entity): a
-/// 256-entity chunk costs on that order ~15-16 ms, leaving headroom in the
-/// 33 ms swap budget for the rest of `activate_resident_cell`'s same-frame
-/// work (teleport, ref swap, save-state application, ambient audio,
-/// collider-build queuing). Tune against real `reveal ... visflip_ms=`/
-/// `frame_ms=` telemetry (F55.1) once measured on real data -- this is an
-/// extrapolation, not a measurement taken in this worktree (no game data
-/// available here).
+/// single frame. Tuned on real data (wave-3 acceptance, warm asset cache):
+/// 256 measured best (Vault101d first reveal 35.6 ms over 5 chunks; 128
+/// paradoxically measured worse at 71.5 ms because the longer reveal window
+/// overlaps more concurrent work — collider builds, neighbor preload). The
+/// per-frame cost is NOT visibility-flip-count-bound (visflip_ms ~0.1), so
+/// shrinking chunks buys nothing; see #55 for the remaining render-prep
+/// investigation. Tune against `reveal ... visflip_ms=/frame_ms=` telemetry.
 pub(crate) const REVEAL_BUDGET_PER_FRAME: usize = 256;
 
 struct PendingRevealState {

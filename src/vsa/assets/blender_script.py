@@ -174,7 +174,9 @@ def patch_niftools_blender52():
     original_create_action = Animation.create_action
     def create_action_compat(self, b_obj, action_name):
         b_action = original_create_action(self, b_obj, action_name)
-        _, slot = action_channelbag(b_action, 'OBJECT')
+        # Morph controllers animate shape-key (KEY) datablocks, not objects;
+        # the slot type must match or the action_slot assignment raises.
+        _, slot = action_channelbag(b_action, getattr(b_obj, 'id_type', 'OBJECT'))
         if b_obj.animation_data:
             b_obj.animation_data.action_slot = slot
         return b_action
@@ -198,6 +200,29 @@ def patch_niftools_blender52():
     Animation.create_action = create_action_compat
     Animation.create_fcurves = create_fcurves_compat
     bpy.types.Action.fcurves = property(action_fcurves_compat)
+    # With animation=True the addon also imports material (UV/alpha ramp)
+    # controllers, and its get_controller_data crashes on NiBlendFloat
+    # interpolators (no `.data`). We only consume node transform sequences
+    # (Open/Close), so material animation import is disabled wholesale.
+    from io_scene_niftools.modules.nif_import.animation.material import MaterialAnimation
+    MaterialAnimation.import_material_controllers = lambda self, n_geom, b_mat: None
+    # Same `.data` assumption crashes on NiBlendBoolInterpolator visibility
+    # controllers; hide_viewport animation is never exported to the GLB, so
+    # skip it, and let every other caller see None instead of crashing (the
+    # transform importer isinstance-guards its NiKeyframeData use).
+    from io_scene_niftools.modules.nif_import.animation.object import ObjectAnimation
+    ObjectAnimation.import_visibility = lambda self, n_node, b_obj: None
+    # Morph (shape-key) controllers also assume interpolator `.data` and
+    # shape keys cannot ride this GLB export (export_apply=True flattens
+    # meshes), so skip them entirely.
+    from io_scene_niftools.modules.nif_import.animation.morph import MorphAnimation
+    MorphAnimation.import_morph_controller = lambda self, n_node, b_obj: None
+    original_get_controller_data = Animation.get_controller_data
+    def get_controller_data_compat(ctrl):
+        if hasattr(ctrl, 'interpolator') and ctrl.interpolator and not hasattr(ctrl.interpolator, 'data'):
+            return None
+        return original_get_controller_data(ctrl)
+    Animation.get_controller_data = staticmethod(get_controller_data_compat)
 
 def blender_point_to_bevy(point):
     return [float(point.x), float(point.z), float(-point.y)]
