@@ -1,0 +1,37 @@
+(
+    content_fingerprint: "fingerprint",
+    worldspaces: [
+        (
+            form_id: 16,
+            editor_id: Some("Wasteland"),
+            name: Some("The Wasteland"),
+        ),
+    ],
+    cells: [
+        (
+            form_id: 256,
+            editor_id: Some("VaultInterior"),
+            interior: true,
+            worldspace_form_id: None,
+            grid: None,
+        ),
+        (
+            form_id: 512,
+            editor_id: Some("Wasteland01"),
+            interior: false,
+            worldspace_form_id: Some(16),
+            grid: Some((-2, 5)),
+        ),
+    ],
+    doors: [
+        (
+            source_cell_form_id: 256,
+            door_reference_form_id: 257,
+            destination_cell_form_id: 512,
+            destination_door_reference_form_id: 513,
+            position: (1.0, 2.0, 3.0),
+            rotation: (0.0, 0.0, 0.0),
+        ),
+    ],
+    unresolved_door_count: 1,
+)

@@ -232,6 +232,14 @@ pub struct CellsArgs {
     /// Only print interior cells.
     #[arg(long)]
     pub(crate) interiors_only: bool,
+    /// Emit the deterministic `CellMap` RON artifact (grid coordinates,
+    /// worldspace membership, content-set-wide door connectivity) instead of
+    /// the default cell catalogue.
+    #[arg(long)]
+    pub(crate) map: bool,
+    /// With `--map`, write the RON artifact to this path instead of stdout.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
