@@ -142,6 +142,8 @@ fn legacy_lighting_falls_back_to_cell_ambient_and_directional_colors_only() {
         effective_lighting: None,
         water_form_id: None,
         water_height: None,
+        grid: None,
+        worldspace_form_id: None,
     };
     let lighting = legacy_lighting(&cell);
     assert_eq!(lighting.ambient_rgba, cell.ambient_rgba);

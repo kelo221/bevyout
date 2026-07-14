@@ -649,6 +649,207 @@ fn editor_id_resolution_rejects_ambiguous_cells() {
     assert!(error.to_string().contains("00000200"));
 }
 
+// T45.1: XCLC bytes -> grid coords. OpenMW `components/esm4/loadcell.cpp`
+// (`case ESM4::SUB_XCLC`): two little-endian i32s, optionally followed by a
+// u32 "force hide land quad" flags word this catalogue does not need.
+#[test]
+fn xclc_parses_grid_coordinates_and_tolerates_short_or_legacy_payloads() {
+    let mut data = (-2_i32).to_le_bytes().to_vec();
+    data.extend_from_slice(&5_i32.to_le_bytes());
+    assert_eq!(parse_grid(&data), Some((-2, 5)));
+
+    // Trailing "force hide land quad" flags word is tolerated (ignored).
+    let mut with_flags = data.clone();
+    with_flags.extend_from_slice(&0x0f_u32.to_le_bytes());
+    assert_eq!(parse_grid(&with_flags), Some((-2, 5)));
+
+    // Short/legacy payloads are skipped gracefully rather than erroring.
+    assert_eq!(parse_grid(&data[..4]), None);
+    assert_eq!(parse_grid(&[]), None);
+
+    let cell = parse_cell(
+        &[Subrecord {
+            signature: "XCLC".into(),
+            data,
+        }],
+        0x200,
+        &FormIdResolver {
+            current_index: 0,
+            master_indices: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(cell.grid, Some((-2, 5)));
+    assert_eq!(cell.worldspace_form_id, None);
+}
+
+// T45.2: a cell discovered under a GRUP type-1 ("World Children") group
+// gets that WRLD's FormID as its worldspace, propagated through the nested
+// type-4/5 exterior block/sub-block groups a real plugin uses; a cell
+// outside any such group (interiors) gets `None`.
+#[test]
+fn cells_under_world_children_group_get_that_worldspace_interiors_get_none() {
+    let interior_cell_id = 0x100;
+    let exterior_cell_id = 0x200;
+    let worldspace_id = 0x10;
+
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        interior_cell_id,
+        &[
+            subrecord(b"EDID", b"VaultInterior\0"),
+            subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(record(
+        b"WRLD",
+        0,
+        worldspace_id,
+        &[
+            subrecord(b"EDID", b"Wasteland\0"),
+            subrecord(b"FULL", b"The Wasteland\0"),
+        ]
+        .concat(),
+    ));
+    let mut xclc = (-2_i32).to_le_bytes().to_vec();
+    xclc.extend_from_slice(&5_i32.to_le_bytes());
+    let exterior_cell = record(
+        b"CELL",
+        0,
+        exterior_cell_id,
+        &[
+            subrecord(b"EDID", b"Wasteland01\0"),
+            subrecord(b"DATA", &[0]),
+            subrecord(b"XCLC", &xclc),
+        ]
+        .concat(),
+    );
+    let sub_block = group(0, 5, &exterior_cell);
+    let block = group(0, 4, &sub_block);
+    plugin.extend(group(worldspace_id, 1, &block));
+
+    let parsed = parse_content_set_all(&[PluginSource {
+        name: "Fallout3.esm",
+        bytes: &plugin,
+    }])
+    .unwrap();
+    let cells: HashMap<_, _> = parsed.cells().map(|(id, cell)| (*id, cell)).collect();
+    assert_eq!(cells[&interior_cell_id].worldspace_form_id, None);
+    assert_eq!(cells[&interior_cell_id].grid, None);
+    assert_eq!(
+        cells[&exterior_cell_id].worldspace_form_id,
+        Some(worldspace_id)
+    );
+    assert_eq!(cells[&exterior_cell_id].grid, Some((-2, 5)));
+    assert_eq!(
+        parsed.worldspaces().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![worldspace_id]
+    );
+}
+
+// T45.3: two cells joined by opposing XTEL doors produce two directed
+// content-set-wide edges with the correct destination cell/door; a dangling
+// XTEL (destination reference not present) is counted as unresolved rather
+// than failing the pass.
+#[test]
+fn door_edges_cover_the_whole_content_set_and_count_unresolved_teleports() {
+    let cell_a = 0x100_u32;
+    let cell_b = 0x200_u32;
+    let door_a = 0x101_u32; // in cell_a, teleports to door_b in cell_b
+    let door_b = 0x201_u32; // in cell_b, teleports back to door_a in cell_a
+    let dangling_door = 0x102_u32; // in cell_a, teleports to a reference that does not exist
+    let door_base = 0x400_u32;
+
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_a,
+        &[subrecord(b"EDID", b"CellA\0"), subrecord(b"DATA", &[1])].concat(),
+    ));
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_b,
+        &[subrecord(b"EDID", b"CellB\0"), subrecord(b"DATA", &[1])].concat(),
+    ));
+    plugin.extend(record(
+        b"DOOR",
+        0,
+        door_base,
+        &subrecord(b"EDID", b"DoorBase\0"),
+    ));
+
+    let mut xtel_to_b = door_b.to_le_bytes().to_vec();
+    xtel_to_b.extend(transform());
+    let refr_a = record(
+        b"REFR",
+        0,
+        door_a,
+        &[
+            subrecord(b"NAME", &door_base.to_le_bytes()),
+            subrecord(b"XTEL", &xtel_to_b),
+            subrecord(b"DATA", &transform()),
+        ]
+        .concat(),
+    );
+
+    let mut xtel_to_a = door_a.to_le_bytes().to_vec();
+    xtel_to_a.extend(transform());
+    let refr_b = record(
+        b"REFR",
+        0,
+        door_b,
+        &[
+            subrecord(b"NAME", &door_base.to_le_bytes()),
+            subrecord(b"XTEL", &xtel_to_a),
+            subrecord(b"DATA", &transform()),
+        ]
+        .concat(),
+    );
+
+    let mut xtel_dangling = 0x999_u32.to_le_bytes().to_vec();
+    xtel_dangling.extend(transform());
+    let refr_dangling = record(
+        b"REFR",
+        0,
+        dangling_door,
+        &[
+            subrecord(b"NAME", &door_base.to_le_bytes()),
+            subrecord(b"XTEL", &xtel_dangling),
+            subrecord(b"DATA", &transform()),
+        ]
+        .concat(),
+    );
+
+    plugin.extend(group(cell_a, 6, &[refr_a, refr_dangling].concat()));
+    plugin.extend(group(cell_b, 6, &refr_b));
+
+    let parsed = parse_content_set_all(&[PluginSource {
+        name: "Fallout3.esm",
+        bytes: &plugin,
+    }])
+    .unwrap();
+    let (edges, unresolved) = parsed.door_edges();
+    assert_eq!(unresolved, 1);
+    assert_eq!(edges.len(), 2);
+    let a_to_b = edges
+        .iter()
+        .find(|edge| edge.source_cell_form_id == cell_a && edge.door_reference_form_id == door_a)
+        .unwrap();
+    assert_eq!(a_to_b.destination_cell_form_id, cell_b);
+    assert_eq!(a_to_b.destination_door_reference_form_id, door_b);
+    let b_to_a = edges
+        .iter()
+        .find(|edge| edge.source_cell_form_id == cell_b && edge.door_reference_form_id == door_b)
+        .unwrap();
+    assert_eq!(b_to_a.destination_cell_form_id, cell_a);
+    assert_eq!(b_to_a.destination_door_reference_form_id, door_a);
+}
+
 #[test]
 #[ignore = "requires BEVYOUT_FALLOUT3_ESM pointing to local Fallout3.esm"]
 fn fallout3_cell_smoke_baselines() {
