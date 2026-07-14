@@ -67,6 +67,7 @@ pub(crate) fn build_prepared_colliders(
             let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
                 let body_id = create_dynamic_body(world, placement, body);
                 collision_world.dynamic_bodies.insert(entity, body_id);
+                collision_world.dynamic_entities.insert(body_id, entity);
                 commands.entity(entity).insert(PhysicsCollider);
                 stats.dynamic_bodies += 1;
                 (body_id, true)
@@ -105,6 +106,9 @@ pub(crate) fn build_prepared_colliders(
             }
         }
     }
+    stats.awake_dynamic_bodies = stats.dynamic_bodies;
+    stats.sleeping_dynamic_bodies = 0;
+    stats.dynamic_transform_updates = 0;
     stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
     state.collision_build_complete = true;
     state.collisions_ready = stats.shapes > 0;
@@ -363,32 +367,59 @@ pub(crate) fn cleanup_removed_dynamic_bodies(
     };
     for entity in removed {
         if let Some(body) = collision_world.dynamic_bodies.remove(&entity) {
+            collision_world.dynamic_entities.remove(&body);
+            collision_world.sleeping_dynamic_bodies.remove(&entity);
             let _ = world.try_destroy_body(body);
         }
     }
 }
 
 pub(crate) fn sync_dynamic_transforms(
-    collision_world: Res<PreparedCollisionWorld>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
     context: NonSend<BoxdddPhysicsContext>,
-    mut roots: Query<&mut Transform, With<super::super::interaction::PlacementRoot>>,
+    mut stats: ResMut<CollisionRuntimeStats>,
+    mut roots: Query<&mut Transform, With<PhysicsCollider>>,
 ) {
+    stats.dynamic_transform_updates = 0;
     let Some(world) = context.world() else {
         return;
     };
-    for (entity, body) in &collision_world.dynamic_bodies {
-        let (Ok(mut transform), Ok(physics_transform)) =
-            (roots.get_mut(*entity), world.try_body_transform(*body))
-        else {
-            continue;
-        };
-        transform.translation = Vec3::new(
-            physics_transform.p.x,
-            physics_transform.p.y,
-            physics_transform.p.z,
-        );
-        transform.rotation = from_box_quat(physics_transform.q);
+    let mut updates = 0;
+    if world
+        .try_with_body_events_view(|events| {
+            for event in events {
+                let body = event.body_id();
+                let Some(entity) = collision_world.dynamic_entities.get(&body).copied() else {
+                    continue;
+                };
+                if event.fell_asleep() {
+                    collision_world.sleeping_dynamic_bodies.insert(entity);
+                } else {
+                    collision_world.sleeping_dynamic_bodies.remove(&entity);
+                }
+                let Ok(mut transform) = roots.get_mut(entity) else {
+                    continue;
+                };
+                let physics_transform = event.transform();
+                transform.translation = Vec3::new(
+                    physics_transform.p.x,
+                    physics_transform.p.y,
+                    physics_transform.p.z,
+                );
+                transform.rotation = from_box_quat(physics_transform.q);
+                updates += 1;
+            }
+        })
+        .is_err()
+    {
+        return;
     }
+    stats.dynamic_transform_updates = updates;
+    stats.sleeping_dynamic_bodies = collision_world.sleeping_dynamic_bodies.len();
+    stats.awake_dynamic_bodies = collision_world
+        .dynamic_bodies
+        .len()
+        .saturating_sub(stats.sleeping_dynamic_bodies);
 }
 
 pub(crate) fn sync_player_proxy(

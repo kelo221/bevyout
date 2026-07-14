@@ -7,18 +7,30 @@ edition = "2024"
 # WAV covers the ambient and interaction clips staged by the importer. MP3
 # metadata is retained in manifests, but Bevy's MP3 feature currently resolves
 # to an unavailable symphonia patch in this workspace's offline cache.
-bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "bevy_remote"] }
+bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "bevy_remote", "ktx2"] }
 blend = { path = "third_party/blend" }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
+bvh = "0.12"
 esplugin = "6.1.4"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1"
+gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
+nalgebra = "0.34"
+rayon = "1.10"
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[patch.crates-io]
+# The viewer binds prepared static point-shadow cubemaps through Bevy's existing
+# depth-comparison path and limits point-shadow shading to one lookup per pixel.
+bevy_pbr = { path = "third_party/bevy_pbr-0.19.0" }
 
 [dev-dependencies]
 # Executable-spec seed (WP6): Gherkin feature files run against real code via

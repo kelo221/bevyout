@@ -399,6 +399,19 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         )
     }
 
+    let static_point_shadows = prepare_static_point_shadows(
+        StaticShadowPrepareOptions {
+            asset_root: &cache_dir,
+            scene_dir: &scene_dir,
+            resolution: args.shadow_resolution,
+            rebuild: args.rebuild_shadows,
+            ktx: args.toktx,
+        },
+        &placements,
+        &lights,
+        &mut diagnostics,
+    )?;
+
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
@@ -419,6 +432,7 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         hard_landing_clips,
         mutability_summary,
         bake: None,
+        static_point_shadows,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(

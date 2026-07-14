@@ -56,3 +56,29 @@ are intentionally bundled and tested.
 
 Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 -- -D warnings`, `cargo test`, and a representative `cargo run-dev` command.
+
+## Prepared point shadows
+
+- Point-shadow depth is generated automatically during `prepare`, after GLB
+  conversion and physics classification. Do not add Blender shadow baking or
+  runtime cubemap rendering back into this path.
+- Static casters must be initially enabled, `PreparedSemantic::Static`, static
+  physics placements with resolved GLBs. Doors, containers, activators,
+  pickups, actors, and dynamic bodies are intentionally non-casters.
+- The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
+  revision, resolution/near plane, caster geometry/transforms, and light
+  identity/position/range. Color, intensity, and camera changes must remain
+  outside the fingerprint.
+- The default cubemap face resolution is the high-quality 512 setting. Keep
+  128 and 256 available only as explicit lower-quality overrides.
+- KTX-Software is resolved only on a cache miss or `--rebuild-shadows`.
+  Viewers never regenerate artifacts; `shadowcache rebuild` must direct users
+  back to `prepare --rebuild-shadows`.
+- WebGPU cannot copy CPU bytes directly into `Depth32Float`. The local
+  `bevy_pbr` patch stages the decoded data through `R32Float` and writes the
+  depth array once with a GPU render pass. This upload pass must not enqueue
+  scene meshes or become a per-frame shadow pass.
+- Keep point-light runtime shadow rendering disabled. GPU light metadata uses
+  stable manifest layers, and forward shading performs at most one dominant
+  point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
+  benchmark switch; there is no gameplay shadow budget.

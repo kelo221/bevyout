@@ -57,6 +57,9 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             if args.blender.is_none() {
                 args.blender = config.tools.blender;
             }
+            if args.toktx.is_none() {
+                args.toktx = config.tools.ktx;
+            }
         }
         CommandLine::Bake(args) => {
             if args.cache_dir.is_none() {

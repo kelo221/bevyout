@@ -356,6 +356,103 @@ fn dynamic_props_settle_collide_push_sync_and_cleanup() {
 }
 
 #[test]
+fn dynamic_transform_sync_uses_move_events_and_tracks_sleeping_bodies() {
+    use bevy_boxddd::boxddd::{Sphere, Vec3 as BoxVec3, World, WorldDef};
+
+    let mut native_world = World::new(
+        WorldDef::builder()
+            .gravity(BoxVec3::new(0.0, -GRAVITY, 0.0))
+            .build(),
+    )
+    .expect("BoxDDD world");
+    let floor = native_world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    native_world.create_hull_shape(
+        floor,
+        &ShapeDef::default(),
+        &BoxHull::transformed(
+            5.0,
+            0.25,
+            5.0,
+            boxddd::Transform::new(BoxVec3::new(0.0, -0.25, 0.0), boxddd::Quat::IDENTITY),
+        ),
+    );
+    let body = native_world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Dynamic)
+            .position([0.0, 1.5, 0.0])
+            .build(),
+    );
+    native_world.create_sphere_shape(
+        body,
+        &ShapeDef::builder().density(1.0).friction(0.8).build(),
+        &Sphere::new(BoxVec3::ZERO, 0.3),
+    );
+
+    let mut app = App::new();
+    let entity = app
+        .world_mut()
+        .spawn((PhysicsCollider, Transform::from_xyz(0.0, 1.5, 0.0)))
+        .id();
+    let untouched = app
+        .world_mut()
+        .spawn((PhysicsCollider, Transform::from_xyz(9.0, 9.0, 9.0)))
+        .id();
+    let mut collision_world = PreparedCollisionWorld::default();
+    collision_world.dynamic_bodies.insert(entity, body);
+    collision_world.dynamic_entities.insert(body, entity);
+    app.insert_resource(collision_world)
+        .insert_resource(CollisionRuntimeStats {
+            dynamic_bodies: 1,
+            awake_dynamic_bodies: 1,
+            ..default()
+        })
+        .insert_non_send(BoxdddPhysicsContext::from_world(native_world))
+        .add_systems(Update, sync_dynamic_transforms);
+
+    for _ in 0..240 {
+        app.world_mut()
+            .non_send_mut::<BoxdddPhysicsContext>()
+            .world_mut()
+            .expect("native world")
+            .step(1.0 / 60.0, 4);
+        app.world_mut().run_schedule(Update);
+    }
+
+    let settled = app.world().get::<Transform>(entity).unwrap().translation;
+    assert!((0.29..0.31).contains(&settled.y));
+    assert_eq!(
+        app.world().get::<Transform>(untouched).unwrap().translation,
+        Vec3::splat(9.0)
+    );
+    let stats = app.world().resource::<CollisionRuntimeStats>();
+    assert_eq!(stats.awake_dynamic_bodies, 0);
+    assert_eq!(stats.sleeping_dynamic_bodies, 1);
+    assert_eq!(stats.dynamic_transform_updates, 0);
+
+    app.world_mut()
+        .non_send_mut::<BoxdddPhysicsContext>()
+        .world_mut()
+        .expect("native world")
+        .try_apply_linear_impulse_to_center(body, [1.0, 0.0, 0.0], true)
+        .unwrap();
+    app.world_mut()
+        .non_send_mut::<BoxdddPhysicsContext>()
+        .world_mut()
+        .expect("native world")
+        .step(1.0 / 60.0, 4);
+    app.world_mut().run_schedule(Update);
+
+    let stats = app.world().resource::<CollisionRuntimeStats>();
+    assert_eq!(stats.awake_dynamic_bodies, 1);
+    assert_eq!(stats.sleeping_dynamic_bodies, 0);
+    assert_eq!(stats.dynamic_transform_updates, 1);
+    assert!(
+        app.world().get::<Transform>(entity).unwrap().translation.x > settled.x,
+        "a waking impulse must resume event-driven transform synchronization"
+    );
+}
+
+#[test]
 fn boxddd_plugin_initializes_native_context() {
     let mut app = App::new();
     app.add_plugins((

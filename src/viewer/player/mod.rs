@@ -202,6 +202,9 @@ pub(crate) struct CollisionRuntimeStats {
     pub(crate) filtered_shapes: usize,
     pub(crate) packed_triangles: usize,
     pub(crate) dynamic_bodies: usize,
+    pub(crate) awake_dynamic_bodies: usize,
+    pub(crate) sleeping_dynamic_bodies: usize,
+    pub(crate) dynamic_transform_updates: usize,
     pub(crate) sidecar_bytes: u64,
     pub(crate) cooking_millis: f64,
     pub(crate) shape_kinds: HashMap<&'static str, usize>,
@@ -216,6 +219,8 @@ pub(crate) struct CollisionSurface {
 pub(crate) struct PreparedCollisionWorld {
     static_body: Option<BodyId>,
     dynamic_bodies: HashMap<Entity, BodyId>,
+    dynamic_entities: HashMap<BodyId, Entity>,
+    sleeping_dynamic_bodies: HashSet<Entity>,
     player_proxy: Option<BodyId>,
     surfaces: HashMap<ShapeId, CollisionSurface>,
 }
@@ -274,7 +279,6 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(PlayerNoClip::default())
     .insert_resource(StepDebugSettings::default())
     .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
-    .add_systems(PostStartup, build_prepared_colliders)
     .add_systems(
         FixedUpdate,
         (
@@ -329,9 +333,17 @@ pub(crate) fn flip_collider_debug(settings: &mut BoxdddDebugDrawSettings) {
 
 fn update_collider_debug_hud(
     settings: Res<BoxdddDebugDrawSettings>,
+    stats: Res<CollisionRuntimeStats>,
     mut text: Single<&mut Text, With<ColliderDebugHud>>,
 ) {
-    text.0 = format!("Colliders: {}", if settings.enabled { "On" } else { "Off" });
+    text.0 = format!(
+        "Colliders: {} | Dynamic: {} ({} awake / {} sleeping) | Sync: {}",
+        if settings.enabled { "On" } else { "Off" },
+        stats.dynamic_bodies,
+        stats.awake_dynamic_bodies,
+        stats.sleeping_dynamic_bodies,
+        stats.dynamic_transform_updates,
+    );
 }
 
 #[derive(Component)]

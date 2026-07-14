@@ -2,6 +2,10 @@
 
 use super::controls::{AmbientScale, FogStrength, LightingScale};
 use super::*;
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+use bevy::render::render_resource::TextureFormat;
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_prepared_scene(
@@ -25,6 +29,9 @@ pub(crate) fn spawn_prepared_scene(
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
     let mut camera = commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(default_perspective_projection()),
+        HorizontalFov::default(),
+        ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
         OcclusionCulling,
         Bloom::NATURAL,
@@ -92,11 +99,93 @@ pub(crate) fn spawn_prepared_scene(
             Transform::from_rotation(Quat::from_array(cell_lighting.directional_rotation_xyzw())),
         ));
     }
+    let mut prepared_shadow_records = HashMap::new();
+    let prepared_shadow_runtime = if let Some(shadows) = manifest.static_point_shadows.as_ref() {
+        prepared_shadow_records.extend(
+            shadows
+                .lights
+                .iter()
+                .map(|light| (light.reference_form_id, light)),
+        );
+        let artifact_path = PathBuf::from(&manifest.asset_root).join(
+            shadows
+                .asset_path
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
+        let depth_data = (|| -> Result<Arc<[u8]>> {
+            let bytes = fs::read(&artifact_path).with_context(|| {
+                format!(
+                    "could not read prepared point-shadow artifact {}",
+                    artifact_path.display()
+                )
+            })?;
+            let image = Image::from_buffer(
+                &bytes,
+                ImageType::Extension("ktx2"),
+                CompressedImageFormats::NONE,
+                false,
+                ImageSampler::Default,
+                RenderAssetUsages::MAIN_WORLD,
+            )
+            .with_context(|| {
+                format!(
+                    "could not decode prepared point-shadow artifact {}",
+                    artifact_path.display()
+                )
+            })?;
+            let expected_layers = shadows.lights.len() as u32 * 6;
+            if image.texture_descriptor.format != TextureFormat::Depth32Float
+                || image.texture_descriptor.size.width != shadows.resolution
+                || image.texture_descriptor.size.height != shadows.resolution
+                || image.texture_descriptor.size.depth_or_array_layers != expected_layers
+            {
+                anyhow::bail!(
+                    "prepared point-shadow artifact {} does not match D32_SFLOAT {}x{} with {} array layers",
+                    artifact_path.display(),
+                    shadows.resolution,
+                    shadows.resolution,
+                    expected_layers,
+                );
+            }
+            image
+                .data
+                .map(Arc::from)
+                .context("prepared point-shadow artifact decoded without depth data")
+        })();
+        let (depth_data, load_error) = match depth_data {
+            Ok(data) => (Some(data), None),
+            Err(error) => {
+                error!("{error:#}");
+                (None, Some(format!("{error:#}")))
+            }
+        };
+        commands.insert_resource(BakedPointShadowMap {
+            data: depth_data.clone(),
+            fingerprint: Some(shadows.source_fingerprint.clone()),
+            resolution: shadows.resolution,
+            layers: shadows.lights.len() as u32,
+        });
+        PreparedPointShadowRuntime {
+            revision: Some(shadows.revision.clone()),
+            fingerprint: Some(shadows.source_fingerprint.clone()),
+            asset_path: Some(shadows.asset_path.clone()),
+            resolution: shadows.resolution,
+            near_z: shadows.near_z,
+            layers: shadows.lights.len() as u32,
+            attached_lights: 0,
+            cpu_loaded: depth_data.is_some(),
+            load_error,
+        }
+    } else {
+        commands.insert_resource(BakedPointShadowMap::default());
+        PreparedPointShadowRuntime::default()
+    };
+    let mut attached_shadow_lights = 0_u32;
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
         }
-        commands.spawn((
+        let mut light_entity = commands.spawn((
             PointLight {
                 intensity: light.radius * light.radius * 2.0 * lighting.0,
                 range: light.radius,
@@ -111,7 +200,23 @@ pub(crate) fn spawn_prepared_scene(
             },
             Transform::from_translation(Vec3::from_array(light.translation)),
         ));
+        if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
+            light_entity.insert(BakedPointLightShadow {
+                layer: shadow.layer,
+                baked_translation: Vec3::from_array(shadow.translation),
+                baked_range: shadow.range,
+                near_z: manifest
+                    .static_point_shadows
+                    .as_ref()
+                    .map_or(0.1, |artifact| artifact.near_z),
+            });
+            attached_shadow_lights += 1;
+        }
     }
+    commands.insert_resource(PreparedPointShadowRuntime {
+        attached_lights: attached_shadow_lights,
+        ..prepared_shadow_runtime
+    });
     if let Some(bake) = &manifest.bake {
         commands.spawn(WorldAssetRoot(
             asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
@@ -367,7 +472,7 @@ pub(crate) fn camera_post_processing(
         ]))
         .expect("flat auto-exposure compensation curve is valid"),
     );
-    let speed = image_space_eye_adaptation_speed(image_space.eye_adapt_speed);
+    let speed = image_space_eye_adaptation_speed(image_space.eye_adapt_speed) * 2.0;
     let auto_exposure = AutoExposure {
         speed_brighten: speed,
         speed_darken: speed,

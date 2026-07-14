@@ -172,6 +172,7 @@ mod tests {
             // See src/console/script.rs's identical golden test for why the
             // CRLF normalization is needed: Git may check text out with
             // CRLF on Windows even though the RON we emit is always LF.
+            let actual = actual.replace("\r\n", "\n");
             let expected = std::fs::read_to_string(&golden)
                 .unwrap_or_else(|error| panic!("reading golden {golden:?}: {error}"))
                 .replace("\r\n", "\n");

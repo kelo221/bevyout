@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 12;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-native-havok-v2";
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 13;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-static-point-shadows-v1";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
+pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v1";
 
 mod compatibility;
 
@@ -43,10 +44,30 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) hard_landing_clips: Vec<String>,
     #[serde(default)]
     pub(crate) bake: Option<PreparedBake>,
+    #[serde(default)]
+    pub(crate) static_point_shadows: Option<PreparedStaticPointShadows>,
     /// QA counts of `PreparedRuntimeMutability` classifications across
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
     pub(crate) mutability_summary: PreparedMutabilitySummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PreparedStaticPointShadows {
+    pub(crate) revision: String,
+    pub(crate) source_fingerprint: String,
+    pub(crate) asset_path: String,
+    pub(crate) resolution: u32,
+    pub(crate) near_z: f32,
+    pub(crate) lights: Vec<PreparedStaticPointShadowLight>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PreparedStaticPointShadowLight {
+    pub(crate) reference_form_id: u32,
+    pub(crate) layer: u32,
+    pub(crate) translation: [f32; 3],
+    pub(crate) range: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

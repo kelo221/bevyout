@@ -187,7 +187,7 @@ fn schema_five_lighting_round_trip_and_legacy_defaults() {
 // each interesting mutability class) and assert the current schema version
 // plus the new fields are present and survive an RON round trip.
 #[test]
-fn schema_twelve_mutability_fields_round_trip_through_ron() {
+fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
     fn placement(
         reference_form_id: u32,
         mutability: PreparedRuntimeMutability,
@@ -257,6 +257,19 @@ fn schema_twelve_mutability_fields_round_trip_through_ron() {
         footstep_sets: Vec::new(),
         hard_landing_clips: Vec::new(),
         bake: None,
+        static_point_shadows: Some(PreparedStaticPointShadows {
+            revision: STATIC_POINT_SHADOW_REVISION.into(),
+            source_fingerprint: "shadow-fingerprint".into(),
+            asset_path: "scenes/00000001/shadows/shadow-fingerprint.ktx2".into(),
+            resolution: 256,
+            near_z: 0.1,
+            lights: vec![PreparedStaticPointShadowLight {
+                reference_form_id: 0x1234,
+                layer: 0,
+                translation: [1.0, 2.0, 3.0],
+                range: 8.0,
+            }],
+        }),
         mutability_summary: PreparedMutabilitySummary {
             immutable: 1,
             enable_group: 1,
@@ -265,12 +278,13 @@ fn schema_twelve_mutability_fields_round_trip_through_ron() {
         },
     };
 
-    assert_eq!(manifest.schema_version, 12);
+    assert_eq!(manifest.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
 
     let encoded = ron::ser::to_string(&manifest).unwrap();
     assert!(encoded.contains("mutability"));
     assert!(encoded.contains("mutability_summary"));
     assert!(encoded.contains("EnableGroup"));
+    assert!(encoded.contains("static_point_shadows"));
 
     let decoded: PreparedSceneManifest = ron::de::from_str(&encoded).unwrap();
     assert_eq!(decoded.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
@@ -280,6 +294,7 @@ fn schema_twelve_mutability_fields_round_trip_through_ron() {
         PreparedRuntimeMutability::EnableGroup
     );
     assert_eq!(decoded.placements[1].mutability_root_form_id, Some(0x9));
+    assert_eq!(decoded.static_point_shadows, manifest.static_point_shadows);
 }
 
 // T38.5: an old-schema manifest fails compatibility with a precise

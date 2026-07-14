@@ -146,7 +146,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
         .join(";");
 
     let mut csv = String::from(
-        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_cooking_ms,physics_sidecar_bytes\n",
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_awake_dynamic_bodies,physics_sleeping_dynamic_bodies,physics_dynamic_transform_updates,physics_cooking_ms,physics_sidecar_bytes\n",
     );
     for sample in &samples {
         let fps = if sample.frame_time_ms > f64::EPSILON {
@@ -155,7 +155,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             0.0
         };
         csv.push_str(&format!(
-            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
             sample.sample,
             sample.frame_time_ms,
             fps,
@@ -188,6 +188,9 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             physics.packed_triangles,
             physics.filtered_shapes,
             physics.dynamic_bodies,
+            physics.awake_dynamic_bodies,
+            physics.sleeping_dynamic_bodies,
+            physics.dynamic_transform_updates,
             physics.cooking_millis,
             physics.sidecar_bytes,
         ));

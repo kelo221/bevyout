@@ -13,6 +13,7 @@ mod navmesh;
 mod placements;
 mod plugins;
 mod selectors;
+mod static_shadows;
 
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
@@ -22,6 +23,7 @@ pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
 pub(crate) use selectors::*;
+pub(crate) use static_shadows::*;
 
 mod orchestrator;
 
@@ -40,7 +42,8 @@ use super::manifest::{
     PreparedLightingTemplate, PreparedMutabilitySummary, PreparedNavMeshChunk,
     PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup, PreparedPlacement,
     PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest,
-    PreparedSemantic,
+    PreparedSemantic, PreparedStaticPointShadowLight, PreparedStaticPointShadows,
+    STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::LightingData;
 use super::paths::{

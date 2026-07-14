@@ -74,6 +74,50 @@ pub(crate) struct AoScanState {
 #[derive(Resource)]
 pub(crate) struct LightsDisabled(pub(crate) bool);
 
+pub(crate) const MIN_HORIZONTAL_FOV_DEGREES: f32 = 10.0;
+pub(crate) const MAX_HORIZONTAL_FOV_DEGREES: f32 = 170.0;
+
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct HorizontalFov(pub(crate) f32);
+
+impl Default for HorizontalFov {
+    fn default() -> Self {
+        Self(DEFAULT_HORIZONTAL_FOV_DEGREES)
+    }
+}
+
+pub(crate) fn horizontal_to_vertical_fov(horizontal_degrees: f32, aspect_ratio: f32) -> f32 {
+    let aspect_ratio = aspect_ratio.max(f32::EPSILON);
+    2.0 * ((horizontal_degrees.to_radians() * 0.5).tan() / aspect_ratio).atan()
+}
+
+pub(crate) fn default_perspective_projection() -> PerspectiveProjection {
+    let aspect_ratio = DEFAULT_WINDOW_WIDTH as f32 / DEFAULT_WINDOW_HEIGHT as f32;
+    PerspectiveProjection {
+        fov: horizontal_to_vertical_fov(DEFAULT_HORIZONTAL_FOV_DEGREES, aspect_ratio),
+        aspect_ratio,
+        ..default()
+    }
+}
+
+pub(crate) fn apply_horizontal_fov(
+    mut cameras: Query<(&HorizontalFov, &mut Projection), With<Camera3d>>,
+) {
+    for (horizontal, mut projection) in &mut cameras {
+        let Projection::Perspective(perspective) = &*projection else {
+            continue;
+        };
+        let target = horizontal_to_vertical_fov(horizontal.0, perspective.aspect_ratio);
+        if (perspective.fov - target).abs() <= f32::EPSILON {
+            continue;
+        }
+        let Projection::Perspective(perspective) = &mut *projection else {
+            unreachable!("projection variant was checked above");
+        };
+        perspective.fov = target;
+    }
+}
+
 pub(crate) fn apply_irradiance_intensity(
     intensity: Res<IrradianceIntensity>,
     mut volumes: Query<&mut IrradianceVolume>,
@@ -284,7 +328,13 @@ pub(crate) fn apply_unlit_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::mouse_look_is_safe;
+    use super::{horizontal_to_vertical_fov, mouse_look_is_safe};
+
+    #[test]
+    fn horizontal_fov_conversion_matches_a_16_by_9_camera() {
+        let vertical = horizontal_to_vertical_fov(90.0, 16.0 / 9.0);
+        assert!((vertical.to_degrees() - 58.715_508).abs() < 1e-5);
+    }
 
     #[test]
     fn mouse_look_discards_modal_motion_and_first_recaptured_frame() {
