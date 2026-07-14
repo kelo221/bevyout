@@ -13,14 +13,25 @@
 //! RON file, so it is pulled into `tests/features.rs` verbatim via
 //! `#[path]`. Unlike those two it has no relative `super::super::` imports,
 //! so it needs no special nesting to compile there.
+//!
+//! Issue #49 adds fingerprint validation on top of the F48 pending/done/
+//! failed status this module already tracks: a `fingerprints` map (keyed by
+//! the same FormID as `jobs`, `#[serde(default)]` so a manifest written
+//! before this issue loads with an empty map rather than a parse error --
+//! F49.4) records each `Done` cell's `fingerprints::CellFingerprints`, and
+//! `filter_resume_checked` extends `filter_resume` below with a fingerprint
+//! check: a `Done` cell whose recorded fingerprints no longer match the
+//! current toolchain is treated as needing to re-run, not skipped (F49.2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use super::fingerprints::{CellFingerprints, StaleCells, stale_components};
 
 /// One cell's status in the job manifest (F48.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +49,13 @@ pub(crate) enum JobStatus {
 pub(crate) struct JobManifest {
     pub(crate) content_fingerprint: String,
     pub(crate) jobs: BTreeMap<u32, JobStatus>,
+    /// F49.1/F49.4: each `Done` cell's recorded fingerprints, keyed by the
+    /// same FormID as `jobs`. `#[serde(default)]` so a manifest written by
+    /// the pre-#49 format (no `fingerprints` field at all) still parses --
+    /// every cell in it simply has no entry here, which `stale_components`
+    /// treats as stale in every component rather than a parse error.
+    #[serde(default)]
+    pub(crate) fingerprints: BTreeMap<u32, CellFingerprints>,
 }
 
 impl JobManifest {
@@ -45,6 +63,7 @@ impl JobManifest {
         Self {
             content_fingerprint: content_fingerprint.into(),
             jobs: BTreeMap::new(),
+            fingerprints: BTreeMap::new(),
         }
     }
 
@@ -87,6 +106,20 @@ impl JobManifest {
 
     pub(crate) fn status(&self, form_id: u32) -> Option<&JobStatus> {
         self.jobs.get(&form_id)
+    }
+
+    /// Records `fingerprints` for a `Done` cell (F49.1). Called once the
+    /// cell's status is set to `Done`; overwrites any previously recorded
+    /// fingerprints for the same FormID.
+    pub(crate) fn record_fingerprints(&mut self, form_id: u32, fingerprints: CellFingerprints) {
+        self.fingerprints.insert(form_id, fingerprints);
+    }
+
+    /// The fingerprints recorded for `form_id`, or `None` for a cell never
+    /// recorded under this issue -- either never prepared, or a legacy
+    /// entry from before F49.1 (F49.4).
+    pub(crate) fn fingerprints_for(&self, form_id: u32) -> Option<&CellFingerprints> {
+        self.fingerprints.get(&form_id)
     }
 
     /// Every cell currently recorded `failed`, FormID-sorted (F48.3; a
@@ -141,6 +174,51 @@ pub(crate) fn filter_resume(
         }
     }
     (to_run, skipped)
+}
+
+/// F49.2: extends `filter_resume` with fingerprint validation, built on top
+/// of it rather than duplicating its status logic: `filter_resume` first
+/// decides, by status alone, which cells would run/skip; every cell it
+/// already decided to run is kept as-is (never previously `Done`, so there
+/// is nothing recorded to validate). Only the cells it decided to *skip*
+/// (recorded `Done`) get a second look: skipped only when its recorded
+/// fingerprints (`manifest.fingerprints_for`) match `current` in every
+/// component; a `Done` cell with any stale component is moved back into
+/// `to_run` and reported in the returned stale list instead of being
+/// counted as skipped (T49.2, T49.3). A legacy `Done` cell with no
+/// recorded fingerprints at all is stale in every component (F49.4), via
+/// `stale_components(None, ...)`. `force` bypasses both checks exactly as
+/// `filter_resume` does (every selected cell reruns regardless, so nothing
+/// is "stale" -- the third element is empty).
+pub(crate) fn filter_resume_checked(
+    manifest: &JobManifest,
+    selection: &[u32],
+    force: bool,
+    current: &CellFingerprints,
+) -> (Vec<u32>, usize, StaleCells) {
+    let (status_to_run, _status_skipped) = filter_resume(manifest, selection, force);
+    if force {
+        return (status_to_run, 0, Vec::new());
+    }
+    let status_to_run: HashSet<u32> = status_to_run.into_iter().collect();
+
+    let mut to_run = Vec::with_capacity(selection.len());
+    let mut skipped = 0usize;
+    let mut stale = Vec::new();
+    for &form_id in selection {
+        if status_to_run.contains(&form_id) {
+            to_run.push(form_id);
+            continue;
+        }
+        let components = stale_components(manifest.fingerprints_for(form_id), current);
+        if components.is_empty() {
+            skipped += 1;
+        } else {
+            stale.push((form_id, components));
+            to_run.push(form_id);
+        }
+    }
+    (to_run, skipped, stale)
 }
 
 /// `<cache_dir>/prepare_jobs.ron` (F48.1).
@@ -269,6 +347,85 @@ mod tests {
         assert_eq!(reloaded.status(1), None);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    fn synthetic_fingerprints(tag: &str) -> CellFingerprints {
+        CellFingerprints {
+            plugin_content_set: format!("plugin-{tag}"),
+            converter: format!("converter-{tag}"),
+            physics: format!("physics-{tag}"),
+            prepare_pipeline: format!("prepare-{tag}"),
+        }
+    }
+
+    // T49.1: a completed cell's recorded fingerprints round-trip through an
+    // atomic write and reload exactly as written (all four components).
+    #[test]
+    fn completed_cell_fingerprints_round_trip_across_a_reload() {
+        let dir = temp_dir("fingerprints-round-trip");
+        fs::create_dir_all(&dir).unwrap();
+        let path = manifest_path(&dir);
+
+        let mut manifest = JobManifest::new("fp-1");
+        manifest.set_status(1, JobStatus::Done);
+        manifest.record_fingerprints(1, synthetic_fingerprints("a"));
+        manifest.write_atomic(&path).unwrap();
+
+        let reloaded = JobManifest::load_or_new(&path, "fp-1").unwrap();
+        assert_eq!(
+            reloaded.fingerprints_for(1),
+            Some(&synthetic_fingerprints("a"))
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // T49.3: a manifest mixing a valid Done cell, a stale Done cell, and a
+    // never-completed cell re-queues exactly the stale/incomplete subset;
+    // the skipped and stale counts match the actual split.
+    #[test]
+    fn mixed_manifest_requeues_exactly_the_stale_subset() {
+        let mut manifest = JobManifest::new("fp-1");
+        manifest.set_status(1, JobStatus::Done);
+        manifest.record_fingerprints(1, synthetic_fingerprints("current"));
+        manifest.set_status(2, JobStatus::Done);
+        manifest.record_fingerprints(2, synthetic_fingerprints("stale"));
+        manifest.set_status(3, JobStatus::Pending);
+
+        let current = synthetic_fingerprints("current");
+        let (to_run, skipped, stale) =
+            filter_resume_checked(&manifest, &[1, 2, 3], false, &current);
+
+        assert_eq!(to_run, vec![2, 3]);
+        assert_eq!(skipped, 1);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].0, 2);
+    }
+
+    // T49.4: a manifest written before issue #49 (no `fingerprints` field
+    // at all) parses without error -- `#[serde(default)]` fills an empty
+    // map -- and its `Done` cells count as stale in every component rather
+    // than skipping or erroring.
+    #[test]
+    fn legacy_manifest_without_fingerprints_field_parses_and_counts_as_stale() {
+        let legacy_ron = r#"(
+            content_fingerprint: "fp-1",
+            jobs: {
+                1: Done,
+                2: Pending,
+            },
+        )"#;
+        let manifest: JobManifest =
+            ron::de::from_str(legacy_ron).expect("legacy manifest without fingerprints must parse");
+        assert!(manifest.fingerprints.is_empty());
+
+        let current = synthetic_fingerprints("current");
+        let (to_run, skipped, stale) = filter_resume_checked(&manifest, &[1, 2], false, &current);
+        assert_eq!(to_run, vec![1, 2]);
+        assert_eq!(skipped, 0);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].0, 1);
+        assert_eq!(stale[0].1.len(), 4, "legacy entry stale in every component");
     }
 
     #[test]

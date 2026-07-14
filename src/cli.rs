@@ -90,8 +90,14 @@ pub struct PrepareArgs {
     pub(crate) worldspace: Option<String>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
     /// sorted) and exit before any extraction or Blender work.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check_fingerprints")]
     pub(crate) list_only: bool,
+    /// Report-only: validate each selected cell's recorded plugin/converter/
+    /// physics/prepare-pipeline fingerprints against the current toolchain
+    /// and print per-cell status, without preparing anything. Exits with a
+    /// nonzero status if any selected cell's fingerprints are stale.
+    #[arg(long)]
+    pub(crate) check_fingerprints: bool,
     /// Fallout 3 installation directory (normally supplied by config.toml).
     #[arg(long)]
     pub(crate) game_root: Option<PathBuf>,
