@@ -36,7 +36,13 @@ pub(crate) struct SelectionSpec {
 }
 
 impl SelectionSpec {
-    fn is_empty(&self) -> bool {
+    /// True when nothing was selected -- no `--all`/`--all-interiors`, no
+    /// `--worldspace`, and no explicit selectors. `prepare --retry-failed`
+    /// with no other selector is the one place this is a valid, meaningful
+    /// state rather than a CLI usage error (F48.3): it means "every failed
+    /// cell in the manifest", so the orchestrator checks this instead of
+    /// calling `resolve_selection` (which treats an empty spec as an error).
+    pub(crate) fn is_empty(&self) -> bool {
         !self.all && !self.all_interiors && self.worldspace.is_none() && self.explicit.is_empty()
     }
 }
