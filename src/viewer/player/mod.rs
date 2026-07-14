@@ -369,7 +369,30 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
         Update,
         initialize_default_fps.run_if(in_state(AppState::InGame)),
     )
+    .add_systems(
+        Update,
+        toggle_camera_mode_on_key
+            .run_if(in_state(AppState::InGame))
+            .run_if(in_state(GameplayModal::None)),
+    )
     .add_systems(Update, draw_debug_gizmos);
+}
+
+/// The startup controls message has always advertised "V toggles FPS
+/// player/free camera", but only the console `tfc` command was ever wired
+/// up; this binds the key itself (gameplay only -- the console and other
+/// modals swallow it via the `GameplayModal::None` gate).
+fn toggle_camera_mode_on_key(world: &mut World) {
+    if !world
+        .resource::<ButtonInput<KeyCode>>()
+        .just_pressed(KeyCode::KeyV)
+    {
+        return;
+    }
+    match toggle_camera_mode_now(world) {
+        Ok(mode) => info!("camera mode: {mode:?}"),
+        Err(error) => warn!("could not toggle camera mode: {error:?}"),
+    }
 }
 
 #[derive(Component)]
