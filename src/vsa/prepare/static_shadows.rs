@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,10 +21,13 @@ use super::{
     Diagnostic, PreparedLight, PreparedPhysicsClassification, PreparedPlacement, PreparedSemantic,
     PreparedStaticPointShadowLight, PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
 };
-use crate::vsa::bake::{find_unified_ktx_tool, relative_asset_path, tail};
+use crate::vsa::bake::{
+    find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
+};
 
 pub(crate) const STATIC_POINT_SHADOW_NEAR_Z: f32 = 0.1;
 const FACE_COUNT: usize = 6;
+static SHADOW_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug)]
 struct ShadowTriangle {
@@ -532,9 +536,15 @@ fn write_ktx2(
     }
     fs::create_dir_all(&temporary_dir)?;
     let temporary_output = temporary_dir.join("point-shadows.ktx2");
+    let raw_dir = std::env::temp_dir().join(format!(
+        "bo-s-{}-{}",
+        std::process::id(),
+        SHADOW_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&raw_dir)?;
     let mut raw_paths = Vec::with_capacity(faces.len());
     for (index, face) in faces.iter().enumerate() {
-        let path = temporary_dir.join(format!("face-{index:04}.raw"));
+        let path = raw_dir.join(format!("face-{index:04}.raw"));
         let mut bytes = Vec::with_capacity(face.len() * size_of::<f32>());
         for value in face {
             bytes.extend_from_slice(&value.to_le_bytes());
@@ -542,13 +552,33 @@ fn write_ktx2(
         fs::write(&path, bytes)?;
         raw_paths.push(path);
     }
+    let arguments = if ktx_supports_input_file_lists(ktx) {
+        let input_list = temporary_dir.join("raw-files.txt");
+        let mut listing = String::new();
+        for path in &raw_paths {
+            writeln!(
+                listing,
+                "{}",
+                path.to_str().context("KTX input path is not UTF-8")?
+            )?;
+        }
+        fs::write(&input_list, listing)?;
+        ktx_create_arguments_with_input(
+            resolution,
+            faces.len() / FACE_COUNT,
+            OsString::from(format!("@{}", input_list.display())),
+            &temporary_output,
+        )
+    } else {
+        ktx_create_arguments(
+            resolution,
+            faces.len() / FACE_COUNT,
+            &raw_paths,
+            &temporary_output,
+        )
+    };
     let mut command = Command::new(ktx);
-    command.args(ktx_create_arguments(
-        resolution,
-        faces.len() / FACE_COUNT,
-        &raw_paths,
-        &temporary_output,
-    ));
+    command.args(arguments);
     let output = command.output().context("failed to start KTX-Software")?;
     if !output.status.success() {
         bail!(
@@ -556,7 +586,7 @@ fn write_ktx2(
             output.status,
             tail(&output.stdout),
             tail(&output.stderr),
-            temporary_dir.display()
+            raw_dir.display()
         );
     }
     let validation = Command::new(ktx)
@@ -575,6 +605,7 @@ fn write_ktx2(
     }
     atomic_replace(&temporary_output, output_path)?;
     fs::remove_dir_all(&temporary_dir)?;
+    fs::remove_dir_all(&raw_dir)?;
     Ok(())
 }
 
@@ -584,7 +615,26 @@ fn ktx_create_arguments(
     raw_paths: &[PathBuf],
     output_path: &Path,
 ) -> Vec<OsString> {
-    let mut arguments = [
+    let mut arguments = ktx_create_arguments_prefix(resolution, layers);
+    arguments.extend(raw_paths.iter().map(|path| path.as_os_str().to_owned()));
+    arguments.push(output_path.as_os_str().to_owned());
+    arguments
+}
+
+fn ktx_create_arguments_with_input(
+    resolution: u32,
+    layers: usize,
+    input: OsString,
+    output_path: &Path,
+) -> Vec<OsString> {
+    let mut arguments = ktx_create_arguments_prefix(resolution, layers);
+    arguments.push(input);
+    arguments.push(output_path.as_os_str().to_owned());
+    arguments
+}
+
+fn ktx_create_arguments_prefix(resolution: u32, layers: usize) -> Vec<OsString> {
+    [
         "create".into(),
         "--raw".into(),
         "--format".into(),
@@ -604,10 +654,7 @@ fn ktx_create_arguments(
         "3".into(),
     ]
     .into_iter()
-    .collect::<Vec<OsString>>();
-    arguments.extend(raw_paths.iter().map(|path| path.as_os_str().to_owned()));
-    arguments.push(output_path.as_os_str().to_owned());
-    arguments
+    .collect()
 }
 
 #[cfg(windows)]
@@ -965,6 +1012,23 @@ mod tests {
         );
         assert_eq!(arguments.len(), 30);
         assert_eq!(arguments.last().unwrap(), "output.ktx2");
+    }
+
+    #[test]
+    fn ktx_input_list_arguments_keep_face_paths_off_the_command_line() {
+        let arguments = ktx_create_arguments_with_input(
+            256,
+            47,
+            OsString::from("@raw-files.txt"),
+            Path::new("output.ktx2"),
+        )
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert_eq!(arguments.len(), 19);
+        assert_eq!(arguments[17], "@raw-files.txt");
+        assert_eq!(arguments[18], "output.ktx2");
     }
 
     #[test]

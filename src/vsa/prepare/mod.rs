@@ -12,9 +12,8 @@ mod image_space;
 mod navmesh;
 mod placements;
 mod plugins;
-mod static_shadows;
 mod selectors;
-
+mod static_shadows;
 
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
@@ -23,8 +22,8 @@ pub(crate) use image_space::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
-pub(crate) use static_shadows::*;
 pub(crate) use selectors::*;
+pub(crate) use static_shadows::*;
 
 mod orchestrator;
 

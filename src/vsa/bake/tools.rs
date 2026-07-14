@@ -87,6 +87,20 @@ pub(crate) fn find_unified_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool
     Ok(tool)
 }
 
+/// KTX 5 added `@file` input lists, which avoid exceeding Windows' process
+/// command-line limit when a cubemap array has many faces.
+pub(crate) fn ktx_supports_input_file_lists(path: &Path) -> bool {
+    let Ok(output) = Command::new(path).arg("--version").output() else {
+        return false;
+    };
+    let version = String::from_utf8_lossy(&output.stdout);
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 5)
+}
+
 pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
     find_unified_ktx_tool(explicit)
 }
