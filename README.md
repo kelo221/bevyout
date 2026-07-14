@@ -97,10 +97,11 @@ It remains repository-local and is not copied into user-level skill directories.
 ### Gamebryo console and scripts
 
 The viewer starts in FPS mode. Press `~`/Backquote to open the transparent
-Fallout-style console; click a visible placement to select its FormID. The
-console pauses virtual time, releases the cursor, and keeps persistent history
-with draft restoration and Tab completion. Backquote or Escape closes it and
-recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
+Fallout-style console; click a visible individually spawned placement to select
+its FormID. Static-batched geometry is not yet addressable and reports
+`NOT_IMPLEMENTED`. The console pauses virtual time, releases the cursor, and
+keeps persistent history with draft restoration and Tab completion. Backquote or
+Escape closes it and recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
 `getpos`/`setpos`, `getangle`/`setangle`, `moveto`, `tfc`, `tcl`, `tcg`,
 `tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`, `renderreport`,
 `shadowcache status`, `shadowcache rebuild`,
@@ -167,8 +168,16 @@ does not invoke Blender and a generation or `ktx validate` failure fails
 `prepare`.
 
 The preparation pipeline converts Fallout's approximately 70 world units per
-metre to Bevy metres. Changing this conversion requires preparing the cell again
-so the cached GLBs and any baked irradiance volumes use the same scale.
+metre to Bevy metres. Initial Fallout object rotations use the validated ESM
+`EulerRot::XYZ` placement convention and are converted at the same manifest
+boundary as position. NIF record-0 transforms are preserved by default. The
+audited `dungeons/vault/room/vrmwallscreen01.nif` model discards its compensating
+record-0 transform so its placement rotation is not applied twice; this is a
+model-path compatibility rule, not a FormID override. The Blender bake
+conjugates each prepared placement once into Blender's Z-up space before
+composing it with the imported GLB hierarchy. Changing this conversion requires
+preparing and baking the cell again so cached manifests and baked scenes use the
+same transform convention.
 
 ## Bake lighting
 
@@ -215,14 +224,29 @@ conversion, starts near the prepared scene bounds, spawns the prepared GLB
 scenes and point lights, plays staged ambient/placement loops, and starts with
 the metric FPS capsule controller (WASD, Space/Ctrl, and mouse look). The
 primary window defaults to 1920x1080 with a 90-degree horizontal field of view;
-use `fov` to inspect it or `fov <10..170>` to change it at runtime. Aim at a
-pickup, container, door, or activator and press `Enter` for the initial
-interaction path; door travel and animation remain deferred. Native BoxDDD
+use `fov` to inspect it or `fov <10..170>` to change it at runtime. Press
+`Enter` to probe the center ray; dynamic references are printed to the terminal
+as `EditorID (FormID)`, while static-batched geometry reports
+`NOT_IMPLEMENTED`. In FPS mode, aim at a pickup, container, door, or activator
+and press `E` for the initial interaction path; door travel and animation remain
+deferred. Native BoxDDD
 capsule casts and plane solving handle movement, while the compatibility bridge cooks the current
 render-derived meshes into static BoxDDD triangle shapes. Distance-based native
 Fallout footsteps still use authored Havok collision-material extras as surface
 hints, and the controller keeps the OpenMW-derived directional launch,
 full-height jump arc, reduced air-control steering, and surface landing sounds.
+
+Current keyboard bindings are:
+
+* Movement: W/A/S/D move, Space jumps, E interacts in FPS mode, and E/Z move
+  vertically in free-camera mode.
+* Interaction and UI: Enter probes the center ray, Tab opens the Pip-Boy, Esc
+  opens pause, and ~ (Backquote) opens the developer console.
+* Placeholder bindings: Shift run/walk, Caps Lock always-run, X automatic
+  forward run, F third-person view, Tab-held Pip-Boy flashlight, LMB attack,
+  RMB aim/block, V V.A.T.S., R reload/hold-to-holster, and 1 through 8 item or
+  weapon hotkeys. These currently emit `NOT_IMPLEMENTED` diagnostics.
+
 Use `tfc` in the console to toggle free flight; Tab opens the Pip-Boy modal
 placeholder. `getrender` and `setrender` inspect or change lighting,
 irradiance, ambient, bloom, fog, and AO diagnostics. AO strength `0.00`

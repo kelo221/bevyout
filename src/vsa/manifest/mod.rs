@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use super::physics::PreparedPhysicsSource;
 
 pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 13;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-static-point-shadows-v1";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-static-point-shadows-rotation-xyz-v3";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-rotation-xyz-v3";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v1";
 
 mod compatibility;

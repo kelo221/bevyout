@@ -1,5 +1,5 @@
-import bpy, gzip, json, os, sys
-from mathutils import Vector
+import bpy, gzip, json, math, os, sys
+from mathutils import Matrix, Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
@@ -326,6 +326,112 @@ def build_physics_asset():
         return {'schema_version': 1, 'source': 'GeneratedRender', 'bodies': authored_bodies}
     return {'schema_version': 1, 'source': 'GeneratedRender',
             'bodies': authored_bodies + [fallback]}
+
+def matrix_identity_error(matrix):
+    return max(abs(float(matrix[row][column]) - (1.0 if row == column else 0.0))
+               for row in range(4) for column in range(4))
+
+DISCARD_RECORD_ZERO_MODELS = frozenset({
+    'dungeons/vault/room/vrmwallscreen01.nif',
+})
+
+def normalized_model_policy_path(model):
+    path = str(model).replace('\\', '/').lstrip('/').casefold()
+    return path[7:] if path.startswith('meshes/') else path
+
+def discards_record_zero_transform(model):
+    return normalized_model_policy_path(model) in DISCARD_RECORD_ZERO_MODELS
+
+def apply_record_zero_transform_policy(
+        objects, model, record_zero_name, record_zero_is_node):
+    """Apply verified model-specific compatibility rules to the NIF root.
+
+    NIFTools imports a record-0 NiNode branch as a top-level EMPTY or ARMATURE.
+    Fallout 3 models preserve that authored transform by default. The Vault wall
+    screen is the audited exception: its placement contains the compensating
+    transform, so retaining both rotations turns the screen upside down.
+    """
+    record_zero_name = str(record_zero_name)
+    if (not discards_record_zero_transform(model)
+            or not record_zero_is_node
+            or record_zero_name.casefold() == 'bip01'):
+        return []
+    changed = []
+    for obj in objects:
+        if obj.parent is not None or obj.type not in {'EMPTY', 'ARMATURE'}:
+            continue
+        niftools = getattr(obj, 'niftools', None)
+        imported_name = (niftools.longname if niftools and niftools.longname
+                         else obj.name)
+        if imported_name.casefold() != record_zero_name.casefold():
+            continue
+        if matrix_identity_error(obj.matrix_local) > 1e-5:
+            changed.append(obj.name)
+        obj.matrix_local = Matrix.Identity(4)
+        break
+    return changed
+
+def run_root_transform_self_test():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    root = bpy.data.objects.new('FixtureRoot', None)
+    child = bpy.data.objects.new('FixtureChild', None)
+    other_root = bpy.data.objects.new('OtherRoot', None)
+    bip01 = bpy.data.objects.new('Bip01', None)
+    mesh = bpy.data.objects.new('GeometryRoot', bpy.data.meshes.new('GeometryRoot'))
+    for obj in (root, child, other_root, bip01, mesh):
+        bpy.context.collection.objects.link(obj)
+    root.niftools.nodetype = 'NiNode'
+    other_root.niftools.nodetype = 'NiNode'
+    bip01.niftools.nodetype = 'NiNode'
+    root.rotation_euler = (math.pi, 0.0, 0.0)
+    child.parent = root
+    child.rotation_euler = (math.pi, 0.0, 0.0)
+    other_root.rotation_euler = (0.0, -0.5, 0.0)
+    bip01.rotation_euler = (0.0, 0.0, 0.5)
+    mesh.rotation_euler = (0.0, 0.25, 0.0)
+    bpy.context.view_layer.update()
+
+    assert not discards_record_zero_transform(
+        'dungeons/rivetcity/roomsmall/rcsmdoor01.nif'
+    )
+    assert discards_record_zero_transform(
+        r'MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF'
+    )
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/rivetcity/roomsmall/rcsmdoor01.nif',
+        'FixtureRoot',
+        True,
+    ) == []
+    assert matrix_identity_error(root.matrix_local) > 0.1
+
+    changed = apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vrmwallscreen01.nif',
+        'FixtureRoot',
+        True,
+    )
+    bpy.context.view_layer.update()
+    assert changed == ['FixtureRoot'], (changed, [
+        (obj.name, obj.type, obj.parent.name if obj.parent else None,
+         obj.niftools.nodetype, matrix_identity_error(obj.matrix_local))
+        for obj in bpy.context.scene.objects
+    ])
+    assert matrix_identity_error(root.matrix_local) < 1e-6
+    assert matrix_identity_error(child.matrix_local) > 0.1
+    assert matrix_identity_error(other_root.matrix_local) > 0.1
+    assert matrix_identity_error(bip01.matrix_local) > 0.1
+    assert matrix_identity_error(mesh.matrix_local) > 0.1
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vrmwallscreen01.nif',
+        'Bip01',
+        True,
+    ) == []
+    assert matrix_identity_error(bip01.matrix_local) > 0.1
+    print('[convert-test] model root transform policy passed', flush=True)
+
 def bake_quick_ao():
     objects = [obj for obj in bpy.context.scene.objects
         if obj.type == 'MESH' and len(obj.data.polygons)
@@ -363,6 +469,11 @@ def bake_quick_ao():
 
 bpy.ops.preferences.addon_enable(module='io_scene_niftools')
 patch_niftools_blender52()
+from io_scene_niftools.utils.singleton import NifData
+from nifgen.formats.nif import classes as NifClasses
+if sys.argv[-1] == '--self-test-root-policy':
+    run_root_transform_self_test()
+    raise SystemExit(0)
 bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
 with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
@@ -379,6 +490,15 @@ for job in jobs:
     os.makedirs(os.path.dirname(physics_output_path), exist_ok=True)
     result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+    record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
+    reset_roots = apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        job.get('model', ''),
+        record_zero.name if record_zero else '',
+        isinstance(record_zero, NifClasses.NiNode),
+    )
+    if reset_roots:
+        print('[convert] discarded audited root transform(s): ' + ', '.join(reset_roots), flush=True)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')

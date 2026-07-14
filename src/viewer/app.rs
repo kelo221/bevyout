@@ -44,6 +44,7 @@ pub(crate) fn run_view(
     });
 
     player::install(&mut app, disable_physics);
+    bindings::install(&mut app);
     audio::install(&mut app);
     interaction::install(&mut app);
     console::install(&mut app);

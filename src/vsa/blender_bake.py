@@ -27,6 +27,12 @@ STATIC_BATCH_SIZE_METERS = 64.0
 
 
 def bevy_transform_to_blender(translation, rotation_xyzw, scale=1.0):
+    """Conjugate one prepared Bevy transform into Blender's Z-up space.
+
+    Imported GLB objects already carry their asset-local hierarchy transforms.
+    Only the placement is conjugated here; the caller composes it once with the
+    imported template's world matrix before unlinking the template hierarchy.
+    """
     rotation = Quaternion((
         rotation_xyzw[3], rotation_xyzw[0], rotation_xyzw[1], rotation_xyzw[2]
     )).to_matrix().to_4x4()
@@ -388,6 +394,9 @@ def import_placements(job):
                 or (batchable_static and not template.get("bevyout_collision", False))
             ):
                 obj.data = template.data.copy()
+            # The imported template matrix is the asset-local GLB/NIF hierarchy.
+            # Apply the prepared placement exactly once, then detach so Blender
+            # does not apply the imported parent chain a second time on export.
             obj.parent = None
             obj.matrix_world = placement_matrix @ template.matrix_world
             bpy.context.collection.objects.link(obj)
@@ -808,8 +817,66 @@ def glb_mesh_attributes(path):
     }
 
 
+def matrix_max_error(actual, expected):
+    return max(
+        abs(float(actual[row][column]) - float(expected[row][column]))
+        for row in range(4)
+        for column in range(4)
+    )
+
+
+def run_transform_self_test():
+    translation = (12.5, -3.25, 8.75)
+    rotation = Quaternion((0.91, 0.17, -0.28, 0.22)).normalized()
+    rotation_xyzw = (rotation.x, rotation.y, rotation.z, rotation.w)
+    scale = 1.75
+    expected_bevy = (
+        Matrix.Translation(Vector(translation))
+        @ rotation.to_matrix().to_4x4()
+        @ Matrix.Diagonal((scale, scale, scale, 1.0))
+    )
+    blender = bevy_transform_to_blender(translation, rotation_xyzw, scale)
+    recovered_bevy = BLENDER_TO_BEVY @ blender @ BEVY_TO_BLENDER
+    assert matrix_max_error(recovered_bevy, expected_bevy) < 1e-5
+
+    template_bevy = (
+        Matrix.Translation(Vector((-2.0, 1.5, 0.75)))
+        @ Quaternion((0.97, -0.11, 0.08, 0.19)).normalized().to_matrix().to_4x4()
+    )
+    template = BEVY_TO_BLENDER @ template_bevy @ BLENDER_TO_BEVY
+    composed = blender @ template
+    recovered_composed = BLENDER_TO_BEVY @ composed @ BEVY_TO_BLENDER
+    expected_composed = expected_bevy @ template_bevy
+    assert matrix_max_error(recovered_composed, expected_composed) < 1e-5
+    assert matrix_max_error(composed, blender @ blender @ template) > 1e-4
+
+    clear_scene()
+    material = self_test_material("transform_material", (0.6, 0.7, 0.8, 1.0))
+    bpy.ops.mesh.primitive_cube_add(size=2.0)
+    cube = bpy.context.object
+    cube.data.materials.append(material)
+    cube.matrix_world = composed
+    minimum, maximum = world_bounds(cube)
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "transform_fixture.glb")
+        bpy.ops.export_scene.gltf(
+            filepath=output, export_format="GLB", export_materials="EXPORT",
+            export_image_format="AUTO", export_apply=True, export_extras=True,
+        )
+        assert os.path.isfile(output)
+        clear_scene()
+        bpy.ops.import_scene.gltf(filepath=output)
+        imported = next(obj for obj in bpy.context.scene.objects if obj.type == "MESH")
+        imported_minimum, imported_maximum = world_bounds(imported)
+        assert (imported_minimum - minimum).length < 1e-5
+        assert (imported_maximum - maximum).length < 1e-5
+    clear_scene()
+    print("[bake-test] transform conjugation/export fixtures passed", flush=True)
+
+
 def run_self_tests():
     clear_scene()
+    run_transform_self_test()
     assert static_chunk(Vector((63.999, 0.0, -0.001))) == (0, 0, -1)
     assert static_chunk(Vector((64.0, -64.0, 0.0))) == (1, -1, 0)
     assert fits_static_chunk(Vector((64.0, 1.0, 1.0)))

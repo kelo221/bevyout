@@ -59,3 +59,53 @@ fn container_summary_is_bounded() {
     assert!(summary.contains("+2 more"));
     assert!(!summary.contains("Item8"));
 }
+
+#[test]
+fn interaction_prompts_use_e_in_fps_mode() {
+    let placement = PreparedPlacement {
+        reference_form_id: 1,
+        base_form_id: 2,
+        asset_path: None,
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: Default::default(),
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "CONT".into(),
+        base_kind: "CONT".into(),
+        editor_id: Some("TestContainer".into()),
+        display_name: Some("Test Container".into()),
+        count: 1,
+        semantic: PreparedSemantic::Container,
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+
+    let prompt = interaction_prompt(&placement, false, &PlayerInventory::default())
+        .expect("containers should have an interaction prompt");
+    assert!(prompt.starts_with("[E]"));
+    assert!(!prompt.contains("Enter"));
+}
+
+#[test]
+fn probe_status_distinguishes_reference_static_and_no_target() {
+    assert_eq!(
+        probe_status_message(true, Some("VaultDoorRef (0007b240)")),
+        "probe: VaultDoorRef (0007b240)"
+    );
+    assert_eq!(
+        probe_status_message(true, None),
+        "probe: NOT_IMPLEMENTED (static-batched geometry)"
+    );
+    assert_eq!(probe_status_message(false, None), "probe: no target");
+}
