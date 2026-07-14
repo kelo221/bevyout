@@ -331,44 +331,49 @@ def matrix_identity_error(matrix):
     return max(abs(float(matrix[row][column]) - (1.0 if row == column else 0.0))
                for row in range(4) for column in range(4))
 
-DISCARD_RECORD_ZERO_MODELS = frozenset({
-    'dungeons/vault/room/vrmwallscreen01.nif',
-})
-
-def normalized_model_policy_path(model):
-    path = str(model).replace('\\', '/').lstrip('/').casefold()
-    return path[7:] if path.startswith('meshes/') else path
-
-def discards_record_zero_transform(model):
-    return normalized_model_policy_path(model) in DISCARD_RECORD_ZERO_MODELS
-
 def apply_record_zero_transform_policy(
-        objects, model, record_zero_name, record_zero_is_node):
-    """Apply verified model-specific compatibility rules to the NIF root.
+        objects, model, policy, record_zero_name, record_zero_is_node):
+    """Annotate the NIF root and apply the Rust-selected compatibility policy.
 
     NIFTools imports a record-0 NiNode branch as a top-level EMPTY or ARMATURE.
-    Fallout 3 models preserve that authored transform by default. The Vault wall
-    screen is the audited exception: its placement contains the compensating
-    transform, so retaining both rotations turns the screen upside down.
+    Rust owns the normalized-model policy registry. Blender records the original
+    transform for cache-hit audits and only resets roots explicitly marked as a
+    verified discard. Bip01 remains protected regardless of the supplied policy.
     """
     record_zero_name = str(record_zero_name)
-    if (not discards_record_zero_transform(model)
-            or not record_zero_is_node
-            or record_zero_name.casefold() == 'bip01'):
-        return []
+    if policy not in {'preserve_review_required', 'discard_verified'}:
+        raise RuntimeError('unknown root transform policy: ' + str(policy))
     changed = []
-    for obj in objects:
-        if obj.parent is not None or obj.type not in {'EMPTY', 'ARMATURE'}:
+    candidates = []
+    for obj in sorted(objects, key=lambda item: item.name):
+        if obj.parent is not None:
             continue
         niftools = getattr(obj, 'niftools', None)
         imported_name = (niftools.longname if niftools and niftools.longname
                          else obj.name)
-        if imported_name.casefold() != record_zero_name.casefold():
-            continue
-        if matrix_identity_error(obj.matrix_local) > 1e-5:
-            changed.append(obj.name)
-        obj.matrix_local = Matrix.Identity(4)
-        break
+        if imported_name.casefold() == record_zero_name.casefold():
+            candidates.insert(0, obj)
+        else:
+            candidates.append(obj)
+    if not candidates:
+        return changed
+    carrier = candidates[0]
+    original = carrier.matrix_local.copy()
+    non_identity = matrix_identity_error(original) > 1e-5
+    carrier['bevyout_source_model'] = str(model)
+    carrier['bevyout_root_transform_policy'] = str(policy)
+    carrier['bevyout_record_zero_non_identity'] = non_identity
+    carrier['bevyout_record_zero_transform'] = [
+        float(original[row][column])
+        for row in range(4) for column in range(4)
+    ]
+    if (policy == 'discard_verified'
+            and record_zero_is_node
+            and carrier.type in {'EMPTY', 'ARMATURE'}
+            and record_zero_name.casefold() != 'bip01'):
+        if non_identity:
+            changed.append(carrier.name)
+        carrier.matrix_local = Matrix.Identity(4)
     return changed
 
 def run_root_transform_self_test():
@@ -392,23 +397,23 @@ def run_root_transform_self_test():
     mesh.rotation_euler = (0.0, 0.25, 0.0)
     bpy.context.view_layer.update()
 
-    assert not discards_record_zero_transform(
-        'dungeons/rivetcity/roomsmall/rcsmdoor01.nif'
-    )
-    assert discards_record_zero_transform(
-        r'MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF'
-    )
     assert apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         'dungeons/rivetcity/roomsmall/rcsmdoor01.nif',
+        'preserve_review_required',
         'FixtureRoot',
         True,
     ) == []
     assert matrix_identity_error(root.matrix_local) > 0.1
+    assert root['bevyout_source_model'] == 'dungeons/rivetcity/roomsmall/rcsmdoor01.nif'
+    assert root['bevyout_root_transform_policy'] == 'preserve_review_required'
+    assert root['bevyout_record_zero_non_identity']
+    assert len(root['bevyout_record_zero_transform']) == 16
 
     changed = apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         'dungeons/vault/room/vrmwallscreen01.nif',
+        'discard_verified',
         'FixtureRoot',
         True,
     )
@@ -423,9 +428,32 @@ def run_root_transform_self_test():
     assert matrix_identity_error(other_root.matrix_local) > 0.1
     assert matrix_identity_error(bip01.matrix_local) > 0.1
     assert matrix_identity_error(mesh.matrix_local) > 0.1
+    root.rotation_euler = (0.0, math.pi, 0.0)
+    bpy.context.view_layer.update()
+    changed = apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vdnwallendcoroutr01.nif',
+        'discard_verified',
+        'FixtureRoot',
+        True,
+    )
+    bpy.context.view_layer.update()
+    assert changed == ['FixtureRoot']
+    assert matrix_identity_error(root.matrix_local) < 1e-6
+    assert root['bevyout_source_model'] == 'dungeons/vault/room/vdnwallendcoroutr01.nif'
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'architecture/geometryroot.nif',
+        'discard_verified',
+        'GeometryRoot',
+        False,
+    ) == []
+    assert mesh['bevyout_source_model'] == 'architecture/geometryroot.nif'
+    assert matrix_identity_error(mesh.matrix_local) > 0.1
     assert apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         'dungeons/vault/room/vrmwallscreen01.nif',
+        'discard_verified',
         'Bip01',
         True,
     ) == []
@@ -494,6 +522,7 @@ for job in jobs:
     reset_roots = apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         job.get('model', ''),
+        job.get('root_transform_policy', 'preserve_review_required'),
         record_zero.name if record_zero else '',
         isinstance(record_zero, NifClasses.NiNode),
     )

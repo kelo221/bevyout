@@ -292,6 +292,7 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
     let navmeshes = stage_navmeshes(&scene_dir, &mut diagnostics, &parsed.navmeshes)?;
     let PlacementStage {
         jobs,
+        visual_assets,
         mut placements,
         lights,
         cache_hits,
@@ -322,6 +323,24 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
             .context("headless Blender conversion failed")?;
     }
+    let visual_issues = audit_prepared_visuals(&cache_dir, &visual_assets, &placements)?;
+    for issue in &visual_issues {
+        eprintln!("{}", format_visual_issue(issue));
+    }
+    let invalid_visuals = visual_issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    let review_visuals = visual_issues.len() - invalid_visuals;
+    let visual_summary = format!(
+        "visual completeness: {} assets checked, {invalid_visuals} invalid, {review_visuals} review required",
+        visual_assets.len()
+    );
+    println!("{visual_summary}");
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: visual_summary,
+    });
     let mut physics_assets = HashMap::new();
     let mut authored_assets = 0_usize;
     let mut fallback_assets = 0_usize;
@@ -389,9 +408,7 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
     });
     println!("{mutability_log}");
     let failures = placements.iter().filter(|p| p.error.is_some()).count();
-    if args.strict && failures > 0 {
-        bail!("strict preparation failed with {failures} unresolved placements")
-    }
+    enforce_strict_visual_completeness(args.strict, failures, &visual_issues)?;
     if placements.iter().all(|p| p.asset_path.is_none()) && lights.is_empty() {
         bail!(
             "no renderable assets were found in {}",
@@ -425,6 +442,7 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         placements,
         lights,
         diagnostics,
+        visual_issues,
         navmeshes,
         cell_audio,
         audio_clips,
@@ -440,10 +458,11 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     println!(
-        "prepared {} ({} placements, {} unresolved) -> {}",
+        "prepared {} ({} placements, {} unresolved, {} visual issue(s)) -> {}",
         super::super::manifest::cell_label(&manifest.cell),
         manifest.placements.len(),
         failures,
+        manifest.visual_issues.len(),
         manifest_path.display()
     );
     Ok(())

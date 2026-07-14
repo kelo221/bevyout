@@ -14,6 +14,7 @@ mod placements;
 mod plugins;
 mod selectors;
 mod static_shadows;
+mod visual;
 
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
@@ -24,15 +25,17 @@ pub(crate) use placements::*;
 pub(crate) use plugins::*;
 pub(crate) use selectors::*;
 pub(crate) use static_shadows::*;
+pub(crate) use visual::*;
 
 mod orchestrator;
 
 pub use orchestrator::prepare;
 
 use super::assets::{
-    BlenderAssetJob, NIF_CONVERTER_REVISION, asset_conversion, content_addressed_glb_name,
-    convert_staged_textures, find_blender, load_archives, resolve_asset, run_blender_batch,
-    stage_textures, validate_asset_cache_pair,
+    BlenderAssetJob, NIF_CONVERTER_REVISION, RootTransformPolicy, asset_conversion,
+    audit_glb_visuals, content_addressed_glb_name, convert_staged_textures, find_blender,
+    load_archives, resolve_asset, root_transform_policy, run_blender_batch, stage_textures,
+    validate_asset_cache_pair,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{
@@ -43,7 +46,7 @@ use super::manifest::{
     PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup, PreparedPlacement,
     PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest,
     PreparedSemantic, PreparedStaticPointShadowLight, PreparedStaticPointShadows,
-    STATIC_POINT_SHADOW_REVISION,
+    PreparedVisualIssue, STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::LightingData;
 use super::paths::{

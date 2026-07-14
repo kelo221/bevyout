@@ -240,6 +240,7 @@ pub(crate) fn retain_static_step_support(
 #[derive(Debug)]
 pub(crate) struct PlacementStage {
     pub(crate) jobs: Vec<BlenderAssetJob>,
+    pub(crate) visual_assets: Vec<PreparedVisualAsset>,
     pub(crate) placements: Vec<PreparedPlacement>,
     pub(crate) lights: Vec<PreparedLight>,
     pub(crate) cache_hits: usize,
@@ -261,6 +262,7 @@ pub(crate) fn stage_placements(
 ) -> Result<PlacementStage> {
     let model_static_usage = model_static_usage(&references, bases);
     let mut jobs: Vec<BlenderAssetJob> = Vec::new();
+    let mut visual_assets = Vec::new();
     let mut placements = Vec::new();
     let mut lights = Vec::new();
     let mut seen_models = HashMap::<String, String>::new();
@@ -373,8 +375,12 @@ pub(crate) fn stage_placements(
             .copied()
             .unwrap_or(false);
         let conversion = asset_conversion(static_asset);
+        let root_transform_policy = root_transform_policy(&normalized_model);
         let conversion_profile = conversion.profile_tag().to_owned();
-        let converter_profile = format!("{NIF_CONVERTER_REVISION}-{conversion_profile}");
+        let converter_profile = format!(
+            "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
+            root_transform_policy.tag()
+        );
         let asset_name = content_addressed_glb_name(&converter_profile, &nif_bytes);
         let asset_path = format!("assets/{asset_name}");
         let physics_name = physics_sidecar_name(&asset_name);
@@ -402,6 +408,7 @@ pub(crate) fn stage_placements(
                         physics_output,
                         model: normalized_model.clone(),
                         conversion,
+                        root_transform_policy,
                     });
                 }
                 AssetCacheDecision::RebuildInvalid => {
@@ -419,6 +426,7 @@ pub(crate) fn stage_placements(
                         physics_output,
                         model: normalized_model.clone(),
                         conversion,
+                        root_transform_policy,
                     });
                 }
                 AssetCacheDecision::RebuildRequested => {
@@ -429,9 +437,15 @@ pub(crate) fn stage_placements(
                         physics_output,
                         model: normalized_model.clone(),
                         conversion,
+                        root_transform_policy,
                     });
                 }
             }
+            visual_assets.push(PreparedVisualAsset {
+                model_path: normalized_model.clone(),
+                asset_path: asset_path.clone(),
+                root_transform_policy,
+            });
             seen_models.insert(normalized_model.clone(), asset_path.clone());
         }
         let mut placement =
@@ -444,6 +458,7 @@ pub(crate) fn stage_placements(
 
     Ok(PlacementStage {
         jobs,
+        visual_assets,
         placements,
         lights,
         cache_hits,

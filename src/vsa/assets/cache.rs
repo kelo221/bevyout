@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
+fn read_glb_document(path: &Path) -> Result<(Vec<u8>, serde_json::Value, usize)> {
     let bytes = fs::read(path)?;
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
         bail!("invalid GLB header")
@@ -16,6 +16,11 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
         bail!("GLB JSON chunk extends beyond file")
     }
     let document: serde_json::Value = serde_json::from_slice(&bytes[json_start..json_end])?;
+    Ok((bytes, document, json_end))
+}
+
+pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
+    let (bytes, document, json_end) = read_glb_document(path)?;
     let views = document
         .get("bufferViews")
         .and_then(serde_json::Value::as_array)
@@ -69,6 +74,101 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GlbVisualAudit {
+    pub(crate) renderable_primitives: usize,
+    pub(crate) source_model: Option<String>,
+    pub(crate) root_transform_policy: Option<String>,
+    pub(crate) record_zero_non_identity: bool,
+}
+
+pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
+    let (_, document, _) = read_glb_document(path)?;
+    let accessors = document
+        .get("accessors")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let meshes = document
+        .get("meshes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut renderable_primitives = 0;
+    let mut source_model = None;
+    let mut root_transform_policy = None;
+    let mut record_zero_non_identity = false;
+
+    for node in document
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let extras = node.get("extras");
+        if source_model.is_none() {
+            source_model = extras
+                .and_then(|value| value.get("bevyout_source_model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
+        if root_transform_policy.is_none() {
+            root_transform_policy = extras
+                .and_then(|value| value.get("bevyout_root_transform_policy"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
+        record_zero_non_identity |= extras
+            .and_then(|value| value.get("bevyout_record_zero_non_identity"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if extras
+            .and_then(|value| value.get("bevyout_collision"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(mesh_index) = node.get("mesh").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(mesh) = meshes.get(mesh_index as usize) else {
+            continue;
+        };
+        for primitive in mesh
+            .get("primitives")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(position_index) = primitive
+                .get("attributes")
+                .and_then(|value| value.get("POSITION"))
+                .and_then(serde_json::Value::as_u64)
+            else {
+                continue;
+            };
+            if accessors
+                .get(position_index as usize)
+                .and_then(|accessor| accessor.get("count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0
+            {
+                renderable_primitives += 1;
+            }
+        }
+    }
+
+    Ok(GlbVisualAudit {
+        renderable_primitives,
+        source_model,
+        root_transform_policy,
+        record_zero_non_identity,
+    })
+}
+
 pub(crate) fn validate_asset_cache_pair(glb: &Path, physics: &Path) -> Result<()> {
     validate_glb_images(glb)
         .with_context(|| format!("cached GLB is invalid: {}", glb.display()))?;
@@ -87,6 +187,7 @@ pub(crate) fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
                     "physics_output": job.physics_output.to_string_lossy(),
                     "model": job.model,
                     "conversion": job.conversion.profile_tag(),
+                    "root_transform_policy": job.root_transform_policy.tag(),
                 })
             })
             .collect(),

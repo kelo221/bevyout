@@ -355,8 +355,24 @@ def neutralize_quick_vertex_ao(obj):
             item.color = (1.0, 1.0, 1.0, alpha)
 
 
+def require_renderable_visual_templates(placement, path, templates):
+    visual_templates = [
+        obj for obj in templates
+        if obj.type == "MESH" and bool(obj.data.polygons)
+        and not obj.get("bevyout_collision", False)
+        and not is_non_rendering_object(obj)
+    ]
+    if not visual_templates:
+        raise RuntimeError(
+            "placement %08X imported no renderable visual meshes from %s"
+            % (int(placement["reference_form_id"]), path)
+        )
+    return visual_templates
+
+
 def import_placements(job):
     objects = []
+    contributed_reference_form_ids = []
     template_cache = {}
     imported_templates = []
     excluded = 0
@@ -380,6 +396,7 @@ def import_placements(job):
             template_cache[path] = imported
             imported_templates.extend(imported_all)
         templates = template_cache[path]
+        require_renderable_visual_templates(placement, path, templates)
         placement_matrix = bevy_transform_to_blender(
             placement["translation"],
             placement["rotation_xyzw"],
@@ -405,10 +422,15 @@ def import_placements(job):
             obj["bevyout_batchable_static"] = batchable_static
             objects.append((obj, placement["reference_form_id"], local_index))
             local_index += 1
+        contributed_reference_form_ids.append(int(placement["reference_form_id"]))
     for template in imported_templates:
         bpy.data.objects.remove(template, do_unlink=True)
     print("[bake] excluded non-rendering meshes %d" % excluded, flush=True)
-    return objects
+    return objects, {
+        "expected_placements": len(job["placements"]),
+        "contributed_placements": len(contributed_reference_form_ids),
+        "reference_form_ids": contributed_reference_form_ids,
+    }
 
 
 def render_preview(job, objects):
@@ -877,6 +899,23 @@ def run_transform_self_test():
 def run_self_tests():
     clear_scene()
     run_transform_self_test()
+    material = self_test_material("contribution_material", (0.5, 0.5, 0.5, 1.0))
+    visual = self_test_cube("contribution_visual", (0.0, 0.0, 0.0), material)
+    assert visual.type == "MESH" and bool(visual.data.polygons)
+    visual["bevyout_collision"] = True
+    try:
+        require_renderable_visual_templates(
+            {"reference_form_id": 0x54426}, "collision-only.glb", [visual]
+        )
+        raise AssertionError("collision-only placement was accepted")
+    except RuntimeError as error:
+        assert "00054426" in str(error)
+        assert "collision-only.glb" in str(error)
+    visual["bevyout_collision"] = False
+    assert require_renderable_visual_templates(
+        {"reference_form_id": 0x54426}, "visual.glb", [visual]
+    ) == [visual]
+    clear_scene()
     assert static_chunk(Vector((63.999, 0.0, -0.001))) == (0, 0, -1)
     assert static_chunk(Vector((64.0, -64.0, 0.0))) == (1, -1, 0)
     assert fits_static_chunk(Vector((64.0, 1.0, 1.0)))
@@ -999,7 +1038,7 @@ def main(job_path):
         background.inputs["Color"].default_value = tuple(job["ambient_rgba"][:3]) + (1.0,)
         background.inputs["Strength"].default_value = 0.1
 
-    objects = import_placements(job)
+    objects, placement_contribution = import_placements(job)
     stage("import")
     add_lights(job)
     add_cell_directional_light(job)
@@ -1028,7 +1067,11 @@ def main(job_path):
                               export_apply=True, export_extras=True)
     stage("scene export")
     with open(job["result_json"], "w", encoding="utf8") as stream:
-        json.dump({"irradiance": irradiance, "batching": batching}, stream, indent=2)
+        json.dump({
+            "irradiance": irradiance,
+            "batching": batching,
+            "placement_contribution": placement_contribution,
+        }, stream, indent=2)
 
 
 if __name__ == "__main__":

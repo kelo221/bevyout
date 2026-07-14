@@ -197,6 +197,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
     let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let bake_result: BlenderBakeResult =
         serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
+    validate_placement_contribution(&job.placements, &bake_result.placement_contribution)?;
     let irradiance = bake_result
         .irradiance
         .as_ref()
@@ -316,6 +317,40 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         exported.resolution,
         ktx2_path.display()
     );
+    Ok(())
+}
+
+fn validate_placement_contribution(
+    expected: &[JobPlacement],
+    actual: &BlenderPlacementContribution,
+) -> Result<()> {
+    let mut expected_ids = expected
+        .iter()
+        .map(|placement| placement.reference_form_id)
+        .collect::<Vec<_>>();
+    let mut actual_ids = actual.reference_form_ids.clone();
+    expected_ids.sort_unstable();
+    actual_ids.sort_unstable();
+    if actual.expected_placements != expected.len()
+        || actual.contributed_placements != actual.reference_form_ids.len()
+        || actual_ids != expected_ids
+    {
+        let missing = expected_ids
+            .iter()
+            .filter(|form_id| actual_ids.binary_search(form_id).is_err())
+            .map(|form_id| format!("{form_id:08X}"))
+            .collect::<Vec<_>>();
+        bail!(
+            "Blender bake omitted placement contribution(s): expected {}, contributed {}; missing references: {}",
+            expected.len(),
+            actual.contributed_placements,
+            if missing.is_empty() {
+                "<count or identity mismatch>".into()
+            } else {
+                missing.join(", ")
+            }
+        )
+    }
     Ok(())
 }
 

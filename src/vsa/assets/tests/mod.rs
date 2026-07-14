@@ -86,10 +86,29 @@ fn blender_job_json_carries_quick_ao_profile() {
         physics_output: PathBuf::from("C:\\cache\\mesh.physics.json.gz"),
         model: "architecture/test.nif".into(),
         conversion: AssetConversion::QuickAo,
+        root_transform_policy: RootTransformPolicy::PreserveReviewRequired,
     }]);
     assert!(json.contains("\"conversion\":\"ao-quick-v1\""));
     assert!(json.contains("mesh.physics.json.gz"));
     assert!(json.contains("architecture/test.nif"));
+    assert!(json.contains("preserve_review_required"));
+}
+
+#[test]
+fn root_transform_policy_is_normalized_and_limited_to_verified_models() {
+    for model in [
+        r"MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF",
+        "/dungeons/vault/room/vdnwallendcoroutr01.nif",
+    ] {
+        assert_eq!(
+            root_transform_policy(model),
+            RootTransformPolicy::DiscardVerified
+        );
+    }
+    assert_eq!(
+        root_transform_policy("dungeons/rivetcity/roomsmall/rcsmdoor01.nif"),
+        RootTransformPolicy::PreserveReviewRequired
+    );
 }
 
 #[test]
@@ -167,6 +186,50 @@ fn glb_with_json(json: &str) -> Vec<u8> {
     bytes.extend_from_slice(b"JSON");
     bytes.extend_from_slice(json.as_bytes());
     bytes
+}
+
+#[test]
+fn visual_audit_counts_non_collision_primitives_and_reads_root_metadata() {
+    let json = r#"{
+        "accessors":[{"count":24}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+        "nodes":[
+            {"name":"root","extras":{
+                "bevyout_source_model":"architecture/test.nif",
+                "bevyout_root_transform_policy":"preserve_review_required",
+                "bevyout_record_zero_non_identity":true
+            }},
+            {"name":"visual","mesh":0}
+        ]
+    }"#;
+    let path =
+        std::env::temp_dir().join(format!("bevyout-visual-audit-{}.glb", std::process::id()));
+    fs::write(&path, glb_with_json(json)).unwrap();
+    let audit = audit_glb_visuals(&path).unwrap();
+    assert_eq!(audit.renderable_primitives, 1);
+    assert_eq!(audit.source_model.as_deref(), Some("architecture/test.nif"));
+    assert_eq!(
+        audit.root_transform_policy.as_deref(),
+        Some("preserve_review_required")
+    );
+    assert!(audit.record_zero_non_identity);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn visual_audit_rejects_collision_only_and_empty_position_accessors() {
+    let json = r#"{
+        "accessors":[{"count":0}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+        "nodes":[{"mesh":0,"extras":{"bevyout_collision":true}}]
+    }"#;
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-empty-visual-audit-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json(json)).unwrap();
+    assert_eq!(audit_glb_visuals(&path).unwrap().renderable_primitives, 0);
+    let _ = fs::remove_file(path);
 }
 
 #[test]

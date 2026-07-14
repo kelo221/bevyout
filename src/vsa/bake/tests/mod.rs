@@ -187,6 +187,43 @@ fn ktx_tool_kind_is_unified_only_for_ktx_named_executables() {
 }
 
 #[test]
+fn bake_contribution_requires_every_reference_exactly_once() {
+    fn job_placement(reference_form_id: u32) -> JobPlacement {
+        JobPlacement {
+            reference_form_id,
+            asset_path: "assets/test.glb".into(),
+            ao_mode: "ao-none".into(),
+            batchable_static: true,
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+        }
+    }
+    let expected = vec![job_placement(0x10), job_placement(0x20)];
+    validate_placement_contribution(
+        &expected,
+        &BlenderPlacementContribution {
+            expected_placements: 2,
+            contributed_placements: 2,
+            reference_form_ids: vec![0x20, 0x10],
+        },
+    )
+    .unwrap();
+
+    let error = validate_placement_contribution(
+        &expected,
+        &BlenderPlacementContribution {
+            expected_placements: 2,
+            contributed_placements: 1,
+            reference_form_ids: vec![0x10],
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("00000020"));
+}
+
+#[test]
 fn relative_asset_path_requires_the_path_to_be_inside_root() {
     let root = Path::new("/cache/assets");
     assert_eq!(

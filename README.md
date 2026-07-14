@@ -149,7 +149,15 @@ The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled.
 
-`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-13 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), and optional prepared point-shadow metadata. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-14 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), optional prepared point-shadow metadata, and grouped visual-completeness issues. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, root-transform policy, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+
+Every converted GLB is checked for non-collision mesh primitives with vertex
+positions, including cache hits. `prepare` groups visual warnings by normalized
+model path and prints the affected base and reference FormIDs. A non-identity
+NIF record-zero transform is preserved for compatibility unless its model path
+has a reviewed policy, but it is reported as `unreviewed_root_transform` until
+reviewed. Normal preparation completes with these warnings; `prepare --strict`
+fails when unresolved placements or visual-completeness issues remain.
 
 After GLB conversion and physics classification, `prepare` builds a CPU BVH
 from initially enabled placements whose semantic and physics classifications
@@ -171,9 +179,12 @@ The preparation pipeline converts Fallout's approximately 70 world units per
 metre to Bevy metres. Initial Fallout object rotations use the validated ESM
 `EulerRot::XYZ` placement convention and are converted at the same manifest
 boundary as position. NIF record-0 transforms are preserved by default. The
-audited `dungeons/vault/room/vrmwallscreen01.nif` model discards its compensating
-record-0 transform so its placement rotation is not applied twice; this is a
-model-path compatibility rule, not a FormID override. The Blender bake
+audited `dungeons/vault/room/vrmwallscreen01.nif` and
+`dungeons/vault/room/vdnwallendcoroutr01.nif` models discard their compensating
+record-0 transforms so their placement rotations are not applied twice; these
+are model-path compatibility rules, not FormID overrides. The original root
+matrix and selected policy are retained as GLB extras for preparation audits.
+The Blender bake
 conjugates each prepared placement once into Blender's Z-up space before
 composing it with the imported GLB hierarchy. Changing this conversion requires
 preparing and baking the cell again so cached manifests and baked scenes use the
@@ -194,6 +205,11 @@ cargo run-dev -- bake SuperDuperMart --quality preview
 
 cargo run-dev -- render SuperDuperMart
 ```
+
+The bake verifies that every eligible static placement imports at least one
+renderable visual mesh and records expected and contributed placement counts in
+its result. A missing placement contribution fails the bake with the reference
+FormID and asset path instead of producing a silently incomplete scene.
 
 The modes are intentionally different:
 
