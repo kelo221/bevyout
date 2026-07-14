@@ -3,6 +3,7 @@ mod audio_assets;
 mod bake;
 mod bsa;
 mod catalog;
+mod cell_map;
 mod content_index;
 mod irradiance;
 mod manifest;

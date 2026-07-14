@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::cell_map::{CellMap, CellMapEntry, DoorEdge, WorldspaceEntry};
 use super::openmw_esm4::{PluginSource, parse_content_set_all};
 use super::prepare::{content_set_fingerprint, load_plugin_chain};
 use crate::cli::CellsArgs;
@@ -94,9 +95,76 @@ pub fn cells(args: CellsArgs) -> Result<()> {
             bytes: &plugin.bytes,
         })
         .collect::<Vec<_>>();
+    if args.map {
+        let map = build_cell_map(&sources, fingerprint)?;
+        let ron_text = map.to_ron().context("serializing cell map to RON")?;
+        match &args.out {
+            Some(path) => fs::write(path, &ron_text)
+                .with_context(|| format!("writing cell map to {}", path.display()))?,
+            None => println!("{ron_text}"),
+        }
+        // Kept off stdout (which may be carrying the RON artifact itself)
+        // and matches `prepare`'s one-summary-line-per-run convention
+        // (F45.5).
+        eprintln!(
+            "cell map: {} cells ({} exterior with grid), {} worldspaces, {} door edges, {} unresolved doors",
+            map.cells.len(),
+            map.cells.iter().filter(|cell| cell.grid.is_some()).count(),
+            map.worldspaces.len(),
+            map.doors.len(),
+            map.unresolved_door_count,
+        );
+        return Ok(());
+    }
     let catalog = CellCatalog::build(&sources, fingerprint)?;
     println!("{}", catalog.output(args.interiors_only));
     Ok(())
+}
+
+/// Converts the parser's `ParsedContentSet` (openmw_esm4) into the plain
+/// inputs `cell_map::CellMap::build` accepts. This is the boundary that
+/// keeps OpenMW-derived types out of `cell_map.rs`'s public surface, the
+/// same way `CellCatalog::build` above converts at the boundary rather than
+/// letting `CellInfo`/parser types leak into the catalogue type.
+fn build_cell_map(sources: &[PluginSource<'_>], content_fingerprint: String) -> Result<CellMap> {
+    let parsed = parse_content_set_all(sources)?;
+    let cells = parsed
+        .cells()
+        .map(|(form_id, cell)| CellMapEntry {
+            form_id: *form_id,
+            editor_id: cell.editor_id.clone(),
+            interior: cell.interior,
+            worldspace_form_id: cell.worldspace_form_id,
+            grid: cell.grid,
+        })
+        .collect::<Vec<_>>();
+    let worldspaces = parsed
+        .worldspaces()
+        .map(|(_, worldspace)| WorldspaceEntry {
+            form_id: worldspace.form_id,
+            editor_id: worldspace.editor_id.clone(),
+            name: worldspace.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (edges, unresolved_door_count) = parsed.door_edges();
+    let doors = edges
+        .into_iter()
+        .map(|edge| DoorEdge {
+            source_cell_form_id: edge.source_cell_form_id,
+            door_reference_form_id: edge.door_reference_form_id,
+            destination_cell_form_id: edge.destination_cell_form_id,
+            destination_door_reference_form_id: edge.destination_door_reference_form_id,
+            position: edge.position,
+            rotation: edge.rotation,
+        })
+        .collect::<Vec<_>>();
+    Ok(CellMap::build(
+        content_fingerprint,
+        worldspaces,
+        cells,
+        doors,
+        unresolved_door_count,
+    ))
 }
 
 fn resolve_plugin_path(root: &Path, plugin: PathBuf) -> PathBuf {

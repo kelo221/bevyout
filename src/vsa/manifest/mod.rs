@@ -102,6 +102,14 @@ pub(crate) struct CellInfo {
     pub(crate) water_form_id: Option<u32>,
     #[serde(default)]
     pub(crate) water_height: Option<f32>,
+    /// Exterior `XCLC` grid coordinates (`None` for interiors, or exteriors
+    /// missing the subrecord). See `openmw_esm4::records::parse_grid`.
+    #[serde(default)]
+    pub(crate) grid: Option<(i32, i32)>,
+    /// FormID of the `WRLD` record this cell was discovered under (a
+    /// group-type-1 "world children" GRUP), `None` for interiors.
+    #[serde(default)]
+    pub(crate) worldspace_form_id: Option<u32>,
 }
 
 pub(crate) fn cell_label(cell: &CellInfo) -> String {
