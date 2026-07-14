@@ -84,11 +84,22 @@ pub(crate) struct ResidentCell {
 #[derive(Resource, Default)]
 pub(crate) struct ResidentCells(pub(crate) HashMap<u32, ResidentCell>);
 
+/// A physics sidecar read and parsed inside the background preload task, so
+/// the door swap's staggered collider build (issue #52) never does sidecar
+/// file I/O inside the transition window.
+pub(crate) struct PreloadedSidecar {
+    relative_path: String,
+    byte_len: u64,
+    asset: crate::vsa::PreparedPhysicsAsset,
+}
+
+type PreloadParseResult = Result<(PreparedSceneManifest, Vec<PreloadedSidecar>), String>;
+
 /// Tracks a neighbor manifest being parsed off the main thread.
 #[derive(Component)]
 struct PendingPreloadParse {
     form_id: u32,
-    task: Task<Result<PreparedSceneManifest, String>>,
+    task: Task<PreloadParseResult>,
 }
 
 /// Cells whose manifest has parsed but whose placements are still being
@@ -193,10 +204,39 @@ pub(crate) struct PreloadParseFailed {
 pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Path, form_id: u32) {
     info!("preload start {form_id:08x}");
     let path = scene_manifest_path(asset_root, form_id);
+    let asset_root = asset_root.to_path_buf();
     let pool = AsyncComputeTaskPool::get();
     let task = pool.spawn(async move {
         let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        ron::de::from_str::<PreparedSceneManifest>(&text).map_err(|error| error.to_string())
+        let manifest =
+            ron::de::from_str::<PreparedSceneManifest>(&text).map_err(|error| error.to_string())?;
+        // Read the cell's physics sidecars here too; failures are left for
+        // the collider build's lazy `ensure_sidecar_loaded` to warn about.
+        let mut seen = HashSet::new();
+        let mut sidecars = Vec::new();
+        for placement in &manifest.placements {
+            if !placement.initially_enabled {
+                continue;
+            }
+            let Some(relative_path) = placement.physics_asset_path.as_ref() else {
+                continue;
+            };
+            if !seen.insert(relative_path.clone()) {
+                continue;
+            }
+            let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let byte_len = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if let Ok(asset) = crate::vsa::read_physics_asset(&path) {
+                sidecars.push(PreloadedSidecar {
+                    relative_path: relative_path.clone(),
+                    byte_len,
+                    asset,
+                });
+            }
+        }
+        Ok((manifest, sidecars))
     });
     commands.spawn(PendingPreloadParse { form_id, task });
 }
@@ -258,6 +298,7 @@ fn poll_preload_parse_tasks(
     mut pending: Query<(Entity, &mut PendingPreloadParse)>,
     mut resident_cells: ResMut<ResidentCells>,
     mut pending_spawns: ResMut<PendingCellSpawns>,
+    mut physics_assets: ResMut<super::super::player::PreparedPhysicsAssets>,
     mut parse_failed: MessageWriter<PreloadParseFailed>,
 ) {
     for (entity, mut pending_parse) in &mut pending {
@@ -267,7 +308,14 @@ fn poll_preload_parse_tasks(
         let form_id = pending_parse.form_id;
         commands.entity(entity).despawn();
         match result {
-            Ok(manifest) => {
+            Ok((manifest, sidecars)) => {
+                for sidecar in sidecars {
+                    physics_assets.insert_preloaded(
+                        sidecar.relative_path,
+                        sidecar.byte_len,
+                        sidecar.asset,
+                    );
+                }
                 let root = commands
                     .spawn((Transform::default(), Visibility::Hidden))
                     .id();

@@ -267,6 +267,23 @@ impl PreparedPhysicsAssets {
         Ok(())
     }
 
+    /// Merges a sidecar the preloader already read and parsed off the main
+    /// thread (issue #51), so a later door swap's staggered collider build
+    /// finds it cached instead of doing the file I/O inside the transition
+    /// window. Paths already present are left untouched.
+    pub(crate) fn insert_preloaded(
+        &mut self,
+        relative_path: String,
+        byte_len: u64,
+        asset: PreparedPhysicsAsset,
+    ) {
+        if self.assets.contains_key(&relative_path) {
+            return;
+        }
+        self.payload_bytes = self.payload_bytes.saturating_add(byte_len);
+        self.assets.insert(relative_path, asset);
+    }
+
     /// Issue #52's runtime variant of the loop above: loads one sidecar by
     /// its manifest-relative path if it is not already present, warning
     /// (never erroring -- a swap must not crash the viewer) on read
