@@ -416,7 +416,21 @@ pub(crate) fn parse_cell(
         effective_lighting: None,
         water_form_id: sub_form_id(subs, "XCWT", resolver),
         water_height: sub(subs, "XCLW").and_then(|data| f32_at_option(data, 0)),
+        grid: sub(subs, "XCLC").and_then(parse_grid),
+        // Filled in by `walk_container` from the enclosing group-type-1
+        // ("world children") GRUP label, once traversal knows the context a
+        // record-local parse function like this one cannot see.
+        worldspace_form_id: None,
     })
+}
+
+/// `CELL.XCLC`: exterior grid (X, Y), OpenMW `components/esm4/loadcell.cpp`
+/// (`case ESM4::SUB_XCLC`). Two little-endian `i32`s, optionally followed by
+/// a `u32` "force hide land quad" flags word that this catalogue does not
+/// need. Interior cells never carry this subrecord; short/legacy payloads
+/// (fewer than 8 bytes) are skipped rather than treated as an error.
+pub(crate) fn parse_grid(data: &[u8]) -> Option<(i32, i32)> {
+    Some((i32_at(data, 0)?, i32_at(data, 4)?))
 }
 
 pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver) -> CellMetadata {
@@ -434,7 +448,7 @@ pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver)
             subs,
             &[
                 "EDID", "FULL", "DATA", "XCLL", "XCIM", "XCAS", "XCMO", "LTMP", "LNAM", "XCWT",
-                "XCLW",
+                "XCLW", "XCLC",
             ],
         ),
     }
@@ -590,4 +604,16 @@ pub(crate) fn parse_image_space(subs: &[Subrecord], form_id: u32) -> Option<Imag
         f32_or(data, 124, image_space.cinematic_brightness_tint_value);
     image_space.flags = data.get(144).copied().unwrap_or_default();
     Some(image_space)
+}
+
+/// `WRLD` worldspace record: FormID, `EDID`, `FULL`. OpenMW
+/// `components/esm4/loadwrld.hpp` (`struct World`). Only the fields the
+/// cell map artifact needs (issue #45) are decoded; the many worldspace
+/// gameplay flags/parent/climate fields are left unparsed.
+pub(crate) fn parse_worldspace(subs: &[Subrecord], form_id: u32) -> WorldspaceRecord {
+    WorldspaceRecord {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        name: sub(subs, "FULL").map(cstring),
+    }
 }

@@ -64,10 +64,30 @@ mod physics;
 #[allow(dead_code, unused_imports)]
 mod assets;
 
+// `cell_map` (issue #45) is deliberately dependency-free (serde + std only,
+// no Bevy, no openmw_esm4 types in its public surface -- see its module
+// doc comment), so unlike the modules above it needs no stand-ins to
+// include verbatim.
+#[path = "../src/vsa/cell_map.rs"]
+#[allow(dead_code, unused_imports)]
+mod cell_map;
+
+// `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
+// via a relative `super::super::paths` import, so it is nested one module
+// deep here to make that path land on the `mod paths` include above.
+#[path = "."]
+mod prepare {
+    #[path = "../src/vsa/prepare/selectors.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod selectors;
+}
+use prepare::selectors;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
+use selectors::{CellSummary, SelectionSpec, resolve_selection};
 
 #[derive(Debug, Default, cucumber::World)]
 struct BevyoutWorld {
@@ -88,6 +108,20 @@ struct BevyoutWorld {
     // -- asset_materials.feature --
     is_static: bool,
     conversion: Option<AssetConversion>,
+
+    // -- cell_map.feature --
+    cell_map_cells: Vec<cell_map::CellMapEntry>,
+    cell_map_worldspaces: Vec<cell_map::WorldspaceEntry>,
+    cell_map_doors: Vec<cell_map::DoorEdge>,
+    cell_map_unresolved: u32,
+    cell_map: Option<cell_map::CellMap>,
+    cell_map_ron_a: Option<String>,
+    cell_map_ron_b: Option<String>,
+
+    // -- prepare_selectors.feature --
+    cells: Vec<CellSummary>,
+    worldspace_names: Vec<(u32, String)>,
+    selection_result: Option<Result<Vec<u32>, String>>,
 }
 
 fn find_placement<'a>(
@@ -387,6 +421,284 @@ async fn then_profile_tag_is(world: &mut BevyoutWorld, expected: String) {
         .conversion
         .expect("conversion profile not selected yet");
     assert_eq!(conversion.profile_tag(), expected);
+}
+
+// ---------------------------------------------------------------------
+// cell_map.feature
+// ---------------------------------------------------------------------
+
+fn parse_hex(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16)
+        .unwrap_or_else(|error| panic!("invalid hex FormID {hex:?}: {error}"))
+}
+
+#[given(regex = r#"^a cell map with an interior cell "([^"]*)" 0x([0-9a-fA-F]+) and no grid$"#)]
+async fn given_interior_cell(world: &mut BevyoutWorld, editor_id: String, hex: String) {
+    world.cell_map_cells.push(cell_map::CellMapEntry {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        interior: true,
+        worldspace_form_id: None,
+        grid: None,
+    });
+}
+
+#[given(
+    regex = r#"^the cell map has an exterior cell "([^"]*)" 0x([0-9a-fA-F]+) with grid (-?\d+), (-?\d+) in worldspace 0x([0-9a-fA-F]+)$"#
+)]
+async fn given_exterior_cell(
+    world: &mut BevyoutWorld,
+    editor_id: String,
+    hex: String,
+    x: i32,
+    y: i32,
+    worldspace_hex: String,
+) {
+    let worldspace_form_id = parse_hex(&worldspace_hex);
+    world.cell_map_cells.push(cell_map::CellMapEntry {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        interior: false,
+        worldspace_form_id: Some(worldspace_form_id),
+        grid: Some((x, y)),
+    });
+    if !world
+        .cell_map_worldspaces
+        .iter()
+        .any(|worldspace| worldspace.form_id == worldspace_form_id)
+    {
+        world.cell_map_worldspaces.push(cell_map::WorldspaceEntry {
+            form_id: worldspace_form_id,
+            editor_id: None,
+            name: None,
+        });
+    }
+}
+
+#[given(
+    regex = r"^a door edge from cell 0x([0-9a-fA-F]+) door 0x([0-9a-fA-F]+) to cell 0x([0-9a-fA-F]+) door 0x([0-9a-fA-F]+)$"
+)]
+async fn given_door_edge(
+    world: &mut BevyoutWorld,
+    source_cell: String,
+    source_door: String,
+    destination_cell: String,
+    destination_door: String,
+) {
+    world.cell_map_doors.push(cell_map::DoorEdge {
+        source_cell_form_id: parse_hex(&source_cell),
+        door_reference_form_id: parse_hex(&source_door),
+        destination_cell_form_id: parse_hex(&destination_cell),
+        destination_door_reference_form_id: parse_hex(&destination_door),
+        position: [1.0, 2.0, 3.0],
+        rotation: [0.0, 0.0, 0.0],
+    });
+}
+
+#[given(regex = r"^(\d+) unresolved door teleports?$")]
+async fn given_unresolved_teleports(world: &mut BevyoutWorld, count: u32) {
+    world.cell_map_unresolved += count;
+}
+
+fn build_cell_map(world: &BevyoutWorld) -> cell_map::CellMap {
+    cell_map::CellMap::build(
+        "fingerprint".into(),
+        world.cell_map_worldspaces.clone(),
+        world.cell_map_cells.clone(),
+        world.cell_map_doors.clone(),
+        world.cell_map_unresolved,
+    )
+}
+
+#[when("the cell map is built")]
+async fn when_cell_map_built(world: &mut BevyoutWorld) {
+    world.cell_map = Some(build_cell_map(world));
+}
+
+#[when("the cell map is built twice from the same input")]
+async fn when_cell_map_built_twice(world: &mut BevyoutWorld) {
+    world.cell_map_ron_a = Some(build_cell_map(world).to_ron().unwrap());
+    world.cell_map_ron_b = Some(build_cell_map(world).to_ron().unwrap());
+}
+
+#[then(regex = r"^cell 0x([0-9a-fA-F]+) has no worldspace$")]
+async fn then_cell_has_no_worldspace(world: &mut BevyoutWorld, hex: String) {
+    let form_id = parse_hex(&hex);
+    let map = world.cell_map.as_ref().expect("cell map not built yet");
+    let cell = map
+        .cells
+        .iter()
+        .find(|cell| cell.form_id == form_id)
+        .unwrap_or_else(|| panic!("no cell {form_id:08x} in built map"));
+    assert_eq!(cell.worldspace_form_id, None);
+}
+
+#[then(
+    regex = r"^cell 0x([0-9a-fA-F]+) is in worldspace 0x([0-9a-fA-F]+) with grid (-?\d+), (-?\d+)$"
+)]
+async fn then_cell_in_worldspace(
+    world: &mut BevyoutWorld,
+    hex: String,
+    worldspace_hex: String,
+    x: i32,
+    y: i32,
+) {
+    let form_id = parse_hex(&hex);
+    let worldspace_form_id = parse_hex(&worldspace_hex);
+    let map = world.cell_map.as_ref().expect("cell map not built yet");
+    let cell = map
+        .cells
+        .iter()
+        .find(|cell| cell.form_id == form_id)
+        .unwrap_or_else(|| panic!("no cell {form_id:08x} in built map"));
+    assert_eq!(cell.worldspace_form_id, Some(worldspace_form_id));
+    assert_eq!(cell.grid, Some((x, y)));
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) door edges?$")]
+async fn then_door_edge_count(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(
+        world
+            .cell_map
+            .as_ref()
+            .expect("cell map not built yet")
+            .doors
+            .len(),
+        count
+    );
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) unresolved doors?$")]
+async fn then_unresolved_door_count(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(
+        world
+            .cell_map
+            .as_ref()
+            .expect("cell map not built yet")
+            .unresolved_door_count,
+        count
+    );
+}
+
+#[then("both RON outputs are byte-identical")]
+async fn then_ron_outputs_are_byte_identical(world: &mut BevyoutWorld) {
+    assert_eq!(world.cell_map_ron_a, world.cell_map_ron_b);
+}
+
+// ---------------------------------------------------------------------
+// prepare_selectors.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an interior cell$"#)]
+async fn given_selector_interior_cell(world: &mut BevyoutWorld, hex: String, editor_id: String) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: true,
+        worldspace_form_id: None,
+    });
+}
+
+#[given(regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell$"#)]
+async fn given_selector_exterior_cell(world: &mut BevyoutWorld, hex: String, editor_id: String) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: None,
+    });
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell in worldspace 0x([0-9a-fA-F]+)$"#
+)]
+async fn given_exterior_cell_in_worldspace(
+    world: &mut BevyoutWorld,
+    hex: String,
+    editor_id: String,
+    worldspace_hex: String,
+) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+    });
+}
+
+#[given(regex = r#"^worldspace 0x([0-9a-fA-F]+) is named "([^"]*)"$"#)]
+async fn given_worldspace_named(world: &mut BevyoutWorld, hex: String, name: String) {
+    world.worldspace_names.push((parse_hex(&hex), name));
+}
+
+#[when("cells are selected with --all-interiors")]
+async fn when_selected_all_interiors(world: &mut BevyoutWorld) {
+    let spec = SelectionSpec {
+        all_interiors: true,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with selectors "([^"]*)"$"#)]
+async fn when_selected_explicit(world: &mut BevyoutWorld, list: String) {
+    let explicit = list
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .collect();
+    let spec = SelectionSpec {
+        explicit,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with worldspace "([^"]*)"$"#)]
+async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
+    let spec = SelectionSpec {
+        worldspace: Some(name),
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[then(regex = r#"^the resolved cell selection is "([^"]*)"$"#)]
+async fn then_resolved_selection_is(world: &mut BevyoutWorld, list: String) {
+    let expected: Vec<u32> = list
+        .split(',')
+        .map(|entry| parse_hex(entry.trim()))
+        .collect();
+    let resolved = world
+        .selection_result
+        .take()
+        .expect("a selection was not resolved")
+        .expect("selection resolution failed");
+    assert_eq!(resolved, expected);
+}
+
+#[then(regex = r#"^the cell selection fails naming worldspace "([^"]*)"$"#)]
+async fn then_selection_fails_naming_worldspace(world: &mut BevyoutWorld, name: String) {
+    let error = world
+        .selection_result
+        .take()
+        .expect("a selection was not attempted")
+        .expect_err("expected selection resolution to fail");
+    assert!(
+        error.contains(&name),
+        "error {error:?} does not mention worldspace {name:?}"
+    );
 }
 
 fn main() {

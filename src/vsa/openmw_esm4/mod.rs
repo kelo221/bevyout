@@ -148,6 +148,46 @@ struct TeleportRecord {
     rotation: [f32; 3],
 }
 
+/// Resolves an `XTEL` teleport target against the content set's references,
+/// shared by the per-cell resolution in `ParsedContentSet::select` and the
+/// content-set-wide door graph in `ParsedContentSet::door_edges` so the
+/// "look up the destination reference's parent cell" logic exists once.
+fn resolve_teleport_destination(
+    teleport: &TeleportRecord,
+    all_references: &HashMap<u32, ReferenceRecord>,
+) -> Option<DoorDestinationRecord> {
+    all_references
+        .get(&teleport.door_reference_form_id)
+        .map(|destination| DoorDestinationRecord {
+            door_reference_form_id: teleport.door_reference_form_id,
+            cell_form_id: destination.parent_cell_form_id,
+            position: teleport.position,
+            rotation: teleport.rotation,
+        })
+}
+
+/// A `WRLD` worldspace record (FormID, EDID, FULL). See
+/// `records::parse_worldspace` for provenance.
+#[derive(Debug, Clone)]
+pub(crate) struct WorldspaceRecord {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+}
+
+/// A directed door edge in the content-set-wide connectivity graph produced
+/// by `ParsedContentSet::door_edges` (issue #45, F45.3): one per resolvable
+/// `XTEL` teleport, independent of which single cell is being prepared.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DoorEdgeRecord {
+    pub(crate) source_cell_form_id: u32,
+    pub(crate) door_reference_form_id: u32,
+    pub(crate) destination_cell_form_id: u32,
+    pub(crate) destination_door_reference_form_id: u32,
+    pub(crate) position: [f32; 3],
+    pub(crate) rotation: [f32; 3],
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct NavMeshRecord {
     pub(crate) form_id: u32,
@@ -393,6 +433,43 @@ impl ParsedContentSet {
             .unwrap_or_default()
     }
 
+    pub(crate) fn worldspaces(&self) -> impl Iterator<Item = (&u32, &WorldspaceRecord)> {
+        self.state.worldspaces.iter()
+    }
+
+    /// Content-set-wide door connectivity graph (issue #45, F45.3):
+    /// generalises the per-cell `XTEL` resolution in `select` below to walk
+    /// every reference with a door+teleport in the whole loaded content set,
+    /// not just the cell being prepared. Returns the resolved directed edges
+    /// (sorted by `(source_cell_form_id, door_reference_form_id)` for
+    /// deterministic output) plus a count of teleports whose destination
+    /// reference could not be found -- unresolved, not fatal.
+    pub(crate) fn door_edges(&self) -> (Vec<DoorEdgeRecord>, u32) {
+        let mut edges = Vec::new();
+        let mut unresolved = 0_u32;
+        for reference in self.state.references.values() {
+            let Some(door) = reference.door.as_ref() else {
+                continue;
+            };
+            let Some(teleport) = door.teleport.as_ref() else {
+                continue;
+            };
+            match resolve_teleport_destination(teleport, &self.state.references) {
+                Some(destination) => edges.push(DoorEdgeRecord {
+                    source_cell_form_id: reference.parent_cell_form_id,
+                    door_reference_form_id: reference.form_id,
+                    destination_cell_form_id: destination.cell_form_id,
+                    destination_door_reference_form_id: destination.door_reference_form_id,
+                    position: destination.position,
+                    rotation: destination.rotation,
+                }),
+                None => unresolved += 1,
+            }
+        }
+        edges.sort_by_key(|edge| (edge.source_cell_form_id, edge.door_reference_form_id));
+        (edges, unresolved)
+    }
+
     fn select(self, selector: &CellSelector) -> Result<ParsedPlugin> {
         let mut state = self.state;
         let target_cell = match selector {
@@ -440,14 +517,7 @@ impl ParsedContentSet {
             let Some(teleport) = door.teleport.as_ref() else {
                 continue;
             };
-            if let Some(destination) = all_references.get(&teleport.door_reference_form_id) {
-                door.destination = Some(DoorDestinationRecord {
-                    door_reference_form_id: teleport.door_reference_form_id,
-                    cell_form_id: destination.parent_cell_form_id,
-                    position: teleport.position,
-                    rotation: teleport.rotation,
-                });
-            }
+            door.destination = resolve_teleport_destination(teleport, &all_references);
         }
         for reference in &mut references {
             match resolve_initially_enabled(reference.form_id, &all_references) {
@@ -567,6 +637,7 @@ pub(crate) struct ParsedState {
     cell_metadata: HashMap<u32, CellMetadata>,
     cell_winning_plugins: HashMap<u32, String>,
     cell_provenance: HashMap<u32, Vec<String>>,
+    worldspaces: HashMap<u32, WorldspaceRecord>,
 }
 
 #[derive(Debug)]
@@ -632,7 +703,7 @@ pub(crate) fn parse_content_set_all(sources: &[PluginSource<'_>]) -> Result<Pars
             source.bytes,
             0,
             source.bytes.len(),
-            None,
+            GroupContext::default(),
             &resolver,
             &mut state,
             source.name,

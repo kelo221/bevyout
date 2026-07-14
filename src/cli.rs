@@ -68,11 +68,30 @@ pub struct ScriptRunArgs {
     pub(crate) keep_going: bool,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 pub struct PrepareArgs {
-    /// GECK EditorID, or an eight-digit hexadecimal FormID.
-    #[arg(value_name = "EDITOR_ID", conflicts_with = "cell")]
-    pub(crate) selector: Option<String>,
+    /// GECK EditorID, or an eight-digit hexadecimal FormID. May be repeated to
+    /// prepare several cells in one run.
+    #[arg(value_name = "EDITOR_ID", conflicts_with_all = ["cell", "all"])]
+    pub(crate) selectors: Vec<String>,
+    /// Prepare every cell in the resolved plugin chain.
+    #[arg(
+        long,
+        conflicts_with_all = ["all_interiors", "worldspace", "selectors", "cell"]
+    )]
+    pub(crate) all: bool,
+    /// Prepare every interior cell. Combinable with `--worldspace` and
+    /// explicit selectors.
+    #[arg(long)]
+    pub(crate) all_interiors: bool,
+    /// Prepare every cell belonging to this worldspace (EditorID or FormID).
+    /// Combinable with `--all-interiors` and explicit selectors.
+    #[arg(long, value_name = "WORLDSPACE")]
+    pub(crate) worldspace: Option<String>,
+    /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
+    /// sorted) and exit before any extraction or Blender work.
+    #[arg(long)]
+    pub(crate) list_only: bool,
     /// Fallout 3 installation directory (normally supplied by config.toml).
     #[arg(long)]
     pub(crate) game_root: Option<PathBuf>,
@@ -80,7 +99,7 @@ pub struct PrepareArgs {
     #[arg(long)]
     pub(crate) plugin: Option<PathBuf>,
     /// Legacy hexadecimal cell FormID input.
-    #[arg(long, hide = true, conflicts_with = "selector")]
+    #[arg(long, hide = true, conflicts_with = "selectors")]
     pub(crate) cell: Option<String>,
     /// Blender executable path.
     #[arg(long)]
@@ -232,6 +251,14 @@ pub struct CellsArgs {
     /// Only print interior cells.
     #[arg(long)]
     pub(crate) interiors_only: bool,
+    /// Emit the deterministic `CellMap` RON artifact (grid coordinates,
+    /// worldspace membership, content-set-wide door connectivity) instead of
+    /// the default cell catalogue.
+    #[arg(long)]
+    pub(crate) map: bool,
+    /// With `--map`, write the RON artifact to this path instead of stdout.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

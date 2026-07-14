@@ -2,11 +2,24 @@
 
 use super::*;
 
+/// Which cell/worldspace the current position in the byte stream is nested
+/// under, threaded through recursive `walk_container` calls. Bundled into
+/// one struct (rather than two more parameters) to keep `walk_container`
+/// under clippy's argument-count lint.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GroupContext {
+    /// FormID of the enclosing GRUP type-6 ("Cell Children") group, if any.
+    pub(crate) cell: Option<u32>,
+    /// FormID of the enclosing GRUP type-1 ("World Children") group's WRLD,
+    /// if any.
+    pub(crate) worldspace: Option<u32>,
+}
+
 pub(crate) fn walk_container(
     bytes: &[u8],
     mut offset: usize,
     end: usize,
-    current_cell: Option<u32>,
+    context: GroupContext,
     resolver: &FormIdResolver,
     state: &mut ParsedState,
     source_name: &str,
@@ -26,13 +39,26 @@ pub(crate) fn walk_container(
             let child_cell = if group_type == 6 {
                 Some(resolver.adjust(label))
             } else {
-                current_cell
+                context.cell
+            };
+            // GRUP type 1 ("World Children") labels its FormID with the
+            // owning WRLD record; every CELL found underneath (through the
+            // nested type 4/5 exterior block/sub-block groups) belongs to
+            // that worldspace. Types 0 (top), 2/3 (interior block/sub-block)
+            // and 6 (cell children) leave the current worldspace unchanged.
+            let child_worldspace = if group_type == 1 {
+                Some(resolver.adjust(label))
+            } else {
+                context.worldspace
             };
             walk_container(
                 bytes,
                 offset + 24,
                 offset + size,
-                child_cell,
+                GroupContext {
+                    cell: child_cell,
+                    worldspace: child_worldspace,
+                },
                 resolver,
                 state,
                 source_name,
@@ -64,9 +90,9 @@ pub(crate) fn walk_container(
                     state.cell_winning_plugins.remove(&form_id);
                     state.cell_provenance.remove(&form_id);
                 } else {
-                    state
-                        .cells
-                        .insert(form_id, parse_cell(&subs, form_id, resolver)?);
+                    let mut cell = parse_cell(&subs, form_id, resolver)?;
+                    cell.worldspace_form_id = context.worldspace;
+                    state.cells.insert(form_id, cell);
                     state
                         .cell_metadata
                         .insert(form_id, parse_cell_metadata(&subs, resolver));
@@ -78,6 +104,15 @@ pub(crate) fn walk_container(
                         .entry(form_id)
                         .or_default()
                         .push(source_name.to_string());
+                }
+            }
+            "WRLD" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.worldspaces.remove(&form_id);
+                } else {
+                    state
+                        .worldspaces
+                        .insert(form_id, parse_worldspace(&subs, form_id));
                 }
             }
             "IMGS" => {
@@ -134,13 +169,13 @@ pub(crate) fn walk_container(
                         .insert(form_id, parse_lighting_template(&subs, form_id, flags));
                 }
             }
-            "REFR" | "ACHR" | "ACRE" if current_cell.is_some() => {
+            "REFR" | "ACHR" | "ACRE" if context.cell.is_some() => {
                 if flags & RECORD_DELETED != 0 {
                     state.references.remove(&form_id);
                 } else if let Some(reference) = parse_reference(
                     &subs,
                     form_id,
-                    current_cell.unwrap_or_default(),
+                    context.cell.unwrap_or_default(),
                     flags,
                     match sig.as_str() {
                         "ACHR" => ReferenceKind::Npc,
@@ -152,14 +187,14 @@ pub(crate) fn walk_container(
                     state.references.insert(form_id, reference);
                 }
             }
-            "NAVM" if current_cell.is_some() => {
+            "NAVM" if context.cell.is_some() => {
                 if flags & RECORD_DELETED != 0 {
                     state.navmeshes.remove(&form_id);
                 } else {
                     state.navmeshes.insert(
                         form_id,
                         (
-                            current_cell.unwrap_or_default(),
+                            context.cell.unwrap_or_default(),
                             parse_navmesh(&subs, form_id, flags, data),
                         ),
                     );
