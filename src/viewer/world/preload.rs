@@ -24,9 +24,17 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use crate::app_state::AppState;
 use crate::vsa::{CellMap, PreparedSceneManifest};
 
+use std::collections::VecDeque;
+
 use super::super::LightingScale;
-use super::super::scene::spawn_cell_content;
+use super::super::scene::{spawn_cell_lights, spawn_cell_placements_chunk};
 use super::policy;
+
+/// Raw `manifest.placements` entries a background preload spawns per frame.
+/// One-shot spawning of a large cell (Vault101d is 1,371 placements) cost a
+/// 130 ms frame in acceptance testing; draining through this budget keeps
+/// preload spawning invisible next to the 33 ms transition budget.
+const PRELOAD_SPAWN_BUDGET_PER_FRAME: usize = 128;
 
 /// Parsed door-graph adjacency, or inert if `cellmap.ron` was absent or
 /// failed to parse (F51.1).
@@ -83,9 +91,27 @@ struct PendingPreloadParse {
     task: Task<Result<PreparedSceneManifest, String>>,
 }
 
+/// Cells whose manifest has parsed but whose placements are still being
+/// spawned, a bounded chunk per frame (front of the queue first).
+#[derive(Resource, Default)]
+pub(crate) struct PendingCellSpawns(VecDeque<PendingCellSpawn>);
+
+impl PendingCellSpawns {
+    pub(crate) fn contains(&self, form_id: u32) -> bool {
+        self.0.iter().any(|pending| pending.form_id == form_id)
+    }
+}
+
+struct PendingCellSpawn {
+    form_id: u32,
+    root: Entity,
+    next_index: usize,
+}
+
 pub(crate) fn install(app: &mut App, resident_cell_limit: usize) {
     app.insert_resource(ResidentCellLimit(resident_cell_limit))
         .init_resource::<ResidentCells>()
+        .init_resource::<PendingCellSpawns>()
         .add_message::<PreloadParseFailed>()
         .add_systems(Startup, seed_world_state)
         .add_systems(
@@ -93,6 +119,7 @@ pub(crate) fn install(app: &mut App, resident_cell_limit: usize) {
             (
                 evaluate_preload_plan.run_if(in_state(AppState::InGame)),
                 poll_preload_parse_tasks,
+                advance_pending_cell_spawns,
                 check_preload_ready,
             ),
         );
@@ -221,15 +248,16 @@ fn evaluate_preload_plan(
 }
 
 /// F51.3: polls background manifest parses; on success, spawns the cell's
-/// placements and point lights under a new hidden per-cell root (not yet
-/// registered as `Ready` until every scene handle finishes loading, see
-/// `check_preload_ready`).
+/// hidden root and point lights immediately, then queues the placements for
+/// `advance_pending_cell_spawns` to drain a bounded chunk per frame (not
+/// registered as `Ready` until fully spawned and every scene handle finishes
+/// loading, see `check_preload_ready`).
 fn poll_preload_parse_tasks(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     lighting: Res<LightingScale>,
     mut pending: Query<(Entity, &mut PendingPreloadParse)>,
     mut resident_cells: ResMut<ResidentCells>,
+    mut pending_spawns: ResMut<PendingCellSpawns>,
     mut parse_failed: MessageWriter<PreloadParseFailed>,
 ) {
     for (entity, mut pending_parse) in &mut pending {
@@ -243,24 +271,22 @@ fn poll_preload_parse_tasks(
                 let root = commands
                     .spawn((Transform::default(), Visibility::Hidden))
                     .id();
-                let content = spawn_cell_content(
-                    &mut commands,
-                    &asset_server,
-                    &manifest,
-                    root,
-                    lighting.0,
-                    None,
-                );
+                spawn_cell_lights(&mut commands, &manifest, root, lighting.0);
                 resident_cells.0.insert(
                     form_id,
                     ResidentCell {
                         root,
                         state: ResidentState::Loading,
                         manifest: Arc::new(manifest),
-                        scene_handles: content.scene_handles,
-                        placement_count: content.placement_count,
+                        scene_handles: Vec::new(),
+                        placement_count: 0,
                     },
                 );
+                pending_spawns.0.push_back(PendingCellSpawn {
+                    form_id,
+                    root,
+                    next_index: 0,
+                });
             }
             Err(error) => {
                 warn!("preload parse failed for {form_id:08x}: {error}");
@@ -270,11 +296,54 @@ fn poll_preload_parse_tasks(
     }
 }
 
-/// F51.3: promotes `Loading` resident cells to `Ready` once every spawned
-/// scene handle has finished loading, logging `preload ready` exactly once.
-fn check_preload_ready(asset_server: Res<AssetServer>, mut resident_cells: ResMut<ResidentCells>) {
+/// Drains the front of the pending-spawn queue at
+/// `PRELOAD_SPAWN_BUDGET_PER_FRAME` raw placement entries per frame. Cells
+/// evicted (or whose root was replaced) while still queued are dropped.
+fn advance_pending_cell_spawns(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut resident_cells: ResMut<ResidentCells>,
+    mut pending_spawns: ResMut<PendingCellSpawns>,
+) {
+    let Some(pending) = pending_spawns.0.front_mut() else {
+        return;
+    };
+    let Some(resident) = resident_cells
+        .0
+        .get_mut(&pending.form_id)
+        .filter(|resident| resident.root == pending.root)
+    else {
+        pending_spawns.0.pop_front();
+        return;
+    };
+    let manifest = Arc::clone(&resident.manifest);
+    let (content, next_index) = spawn_cell_placements_chunk(
+        &mut commands,
+        &asset_server,
+        &manifest,
+        pending.root,
+        None,
+        pending.next_index,
+        PRELOAD_SPAWN_BUDGET_PER_FRAME,
+    );
+    resident.scene_handles.extend(content.scene_handles);
+    resident.placement_count += content.placement_count;
+    pending.next_index = next_index;
+    if next_index >= manifest.placements.len() {
+        pending_spawns.0.pop_front();
+    }
+}
+
+/// F51.3: promotes `Loading` resident cells to `Ready` once fully spawned
+/// and every spawned scene handle has finished loading, logging
+/// `preload ready` exactly once.
+fn check_preload_ready(
+    asset_server: Res<AssetServer>,
+    mut resident_cells: ResMut<ResidentCells>,
+    pending_spawns: Res<PendingCellSpawns>,
+) {
     for (form_id, resident) in resident_cells.0.iter_mut() {
-        if resident.state != ResidentState::Loading {
+        if resident.state != ResidentState::Loading || pending_spawns.contains(*form_id) {
             continue;
         }
         let all_loaded = resident

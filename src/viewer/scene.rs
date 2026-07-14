@@ -193,8 +193,28 @@ pub(crate) fn spawn_cell_content(
     manifest: &PreparedSceneManifest,
     root: Entity,
     lighting_scale: f32,
-    mut references: Option<&mut crate::console::RefRegistry>,
+    references: Option<&mut crate::console::RefRegistry>,
 ) -> SpawnedCellContent {
+    spawn_cell_lights(commands, manifest, root, lighting_scale);
+    let (content, _next) = spawn_cell_placements_chunk(
+        commands,
+        asset_server,
+        manifest,
+        root,
+        references,
+        0,
+        usize::MAX,
+    );
+    content
+}
+
+/// Spawns the cell's initially-enabled point lights under `root`.
+pub(crate) fn spawn_cell_lights(
+    commands: &mut Commands,
+    manifest: &PreparedSceneManifest,
+    root: Entity,
+    lighting_scale: f32,
+) {
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
@@ -216,7 +236,23 @@ pub(crate) fn spawn_cell_content(
             ChildOf(root),
         ));
     }
+}
 
+/// Spawns up to `max_entries` raw `manifest.placements` entries starting at
+/// index `start`, returning what was spawned and the next raw index (equal
+/// to `manifest.placements.len()` once the cell is fully spawned). The
+/// preloader drains large cells through this a bounded chunk per frame so a
+/// background preload never spawns a thousand entities in one frame spike;
+/// callers wanting everything at once pass `usize::MAX`.
+pub(crate) fn spawn_cell_placements_chunk(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    manifest: &PreparedSceneManifest,
+    root: Entity,
+    mut references: Option<&mut crate::console::RefRegistry>,
+    start: usize,
+    max_entries: usize,
+) -> (SpawnedCellContent, usize) {
     // Baked cells still spawn placements individually (for interaction),
     // just excluding whichever placements the bake already folded into the
     // combined static mesh (`is_bake_static`); non-baked cells spawn every
@@ -224,8 +260,10 @@ pub(crate) fn spawn_cell_content(
     let exclude_bake_static = manifest.bake.is_some();
     let mut scene_handles = Vec::new();
     let mut placement_count = 0;
-    for placement in manifest
-        .placements
+    let end = start
+        .saturating_add(max_entries)
+        .min(manifest.placements.len());
+    for placement in manifest.placements[start..end]
         .iter()
         .filter(|placement| placement.initially_enabled)
         .filter(|placement| !exclude_bake_static || !is_bake_static(placement))
@@ -262,10 +300,13 @@ pub(crate) fn spawn_cell_content(
         placement_count += 1;
     }
 
-    SpawnedCellContent {
-        scene_handles,
-        placement_count,
-    }
+    (
+        SpawnedCellContent {
+            scene_handles,
+            placement_count,
+        },
+        end,
+    )
 }
 
 pub(crate) fn effective_lighting(cell: &CellInfo) -> PreparedCellLighting {
