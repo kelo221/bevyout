@@ -67,7 +67,13 @@ pub(crate) fn run_view(
         .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
             OnEnter(AppState::InGame),
-            (capture_cursor, spawn_prepared_scene, spawn_reticle),
+            (
+                capture_cursor,
+                spawn_prepared_scene,
+                player::build_prepared_colliders,
+                spawn_reticle,
+            )
+                .chain(),
         )
         .add_systems(Update, apply_lighting_scale)
         .add_systems(
