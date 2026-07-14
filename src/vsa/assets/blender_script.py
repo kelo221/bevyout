@@ -434,31 +434,42 @@ for job in jobs:
     output_path = job['output']
     physics_output_path = job['physics_output']
     conversion = job.get('conversion', 'ao-none')
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
-    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
-        for datablock in list(datablocks):
-            if datablock.users == 0: datablocks.remove(datablock)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     os.makedirs(os.path.dirname(physics_output_path), exist_ok=True)
-    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=True, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
-    if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
-    for obj in list(bpy.context.scene.objects):
-        if obj.get('bevyout_collision', False):
-            obj.hide_render = False
-            obj.hide_viewport = False
-        elif obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
-        elif obj.type == 'MESH' and not any(
-            material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
-            for material in obj.data.materials
-        ):
-            # NIF collision/helper meshes have no texture and should not be rendered.
-            bpy.data.objects.remove(obj, do_unlink=True)
-    physics_asset = build_physics_asset()
+    def import_nif_scene(with_animation):
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+        for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
+            for datablock in list(datablocks):
+                if datablock.users == 0: datablocks.remove(datablock)
+        result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=with_animation, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
+        if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+        for obj in list(bpy.context.scene.objects):
+            if obj.get('bevyout_collision', False):
+                obj.hide_render = False
+                obj.hide_viewport = False
+            elif obj.display_type == 'BOUNDS' or is_non_rendering_object(obj): bpy.data.objects.remove(obj, do_unlink=True)
+            elif obj.type == 'MESH' and not any(
+                material and any(node.bl_idname == 'ShaderNodeTexImage' and node.image for node in material.node_tree.nodes)
+                for material in obj.data.materials
+            ):
+                # NIF collision/helper meshes have no texture and should not be rendered.
+                bpy.data.objects.remove(obj, do_unlink=True)
+    import_nif_scene(True)
+    if bpy.data.actions:
+        # Controller import bakes an animated pose into the collision
+        # objects' transforms (a door's colliders land in the Open position,
+        # leaving the doorway hole open), so physics must come from a
+        # rest-pose import; the animated scene is rebuilt after for the GLB.
+        import_nif_scene(False)
+        physics_asset = build_physics_asset()
+        import_nif_scene(True)
+    else:
+        physics_asset = build_physics_asset()
     with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
         json.dump(physics_asset, physics_file, separators=(',', ':'))
     for obj in list(bpy.context.scene.objects):

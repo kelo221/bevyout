@@ -267,3 +267,19 @@ next batch run re-prepares only it; `--check-fingerprints` reports per-cell
 status without touching the cache. `capture_viewport` remains black under
 the occluded-window setup — visual confirmation of the door motion needs a
 human-watched run.
+- **A10 — door colliders were exported in the Open pose** (user-caught after
+  merge-ready: walking through closed doors). With `animation=True`,
+  niftools bakes an animated pose into the *collision* objects' transforms
+  at import (render nodes are unaffected — doors looked closed), so the
+  sidecar hulls for the door halves sat in the wall/floor pockets, leaving
+  the doorway collider-free. Verified by diffing `animation=False` vs
+  `animation=True` exports of vdoorsliding01: the two keyframed hulls were
+  displaced by the full Open offsets. Fix in `blender_script.py`: when an
+  import produces actions, the scene is rebuilt once with `animation=False`
+  and physics is exported from that rest-pose import, then rebuilt again
+  with animations for the GLB (extra imports only for the ~48 animated
+  assets). `NIF_CONVERTER_REVISION` → `…-anim-v5`, corpus rebuilt (5/5, the
+  #49 staleness path drove it), all fresh two-hull door sidecars verified
+  gap-free. Follow-up filed: keyframed door colliders still don't *move*
+  with the Open animation, so an opened non-travel door is an invisible
+  wall — the exact inverse gap.
