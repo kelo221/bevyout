@@ -238,6 +238,8 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         force,
         rebuild_assets: false,
         strict: false,
+        jobs: None,
+        retry_failed: false,
     })?;
     resolve_cached_manifest(cache_dir, &args.selector)
 }

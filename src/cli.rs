@@ -116,6 +116,16 @@ pub struct PrepareArgs {
     /// Fail instead of recording recoverable asset diagnostics.
     #[arg(long)]
     pub(crate) strict: bool,
+    /// Number of cells to prepare concurrently in a batch run. Defaults to
+    /// the machine's available parallelism.
+    #[arg(long, value_name = "N")]
+    pub(crate) jobs: Option<usize>,
+    /// Retry only cells currently recorded `failed` in the resumable job
+    /// manifest, intersected with any other selector given. Alone (no
+    /// `--all`/`--all-interiors`/`--worldspace`/selectors), retries every
+    /// failed cell recorded in the manifest.
+    #[arg(long)]
+    pub(crate) retry_failed: bool,
 }
 
 #[derive(Parser, Debug)]

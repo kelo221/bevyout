@@ -92,8 +92,16 @@ mod prepare {
     #[path = "../src/vsa/prepare/batch_cache.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod batch_cache;
+
+    // `vsa::prepare::jobs` (issue #48) has no relative `super::super::`
+    // imports of its own -- it is std/serde/ron only -- but lives here too
+    // for consistency with its sibling pure `prepare` seams above.
+    #[path = "../src/vsa/prepare/jobs.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod jobs;
 }
 use prepare::batch_cache;
+use prepare::jobs;
 use prepare::selectors;
 
 use assets::AssetConversion;
@@ -150,6 +158,11 @@ struct BevyoutWorld {
     preload_active_cell: u32,
     preload_budget: usize,
     preload_plan: Option<policy::PreloadPlan>,
+
+    // -- resumable_prepare.feature (issue #48) --
+    job_manifest: Option<jobs::JobManifest>,
+    job_manifest_path: Option<std::path::PathBuf>,
+    job_resume_result: Option<(Vec<u32>, usize)>,
 }
 
 fn find_placement<'a>(
@@ -949,6 +962,187 @@ async fn then_plan_evicts_nothing(world: &mut BevyoutWorld) {
         "expected no evictions, got {:?}",
         plan.evict
     );
+}
+
+// ---------------------------------------------------------------------
+// resumable_prepare.feature (issue #48)
+// ---------------------------------------------------------------------
+
+fn job_manifest_temp_path() -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!(
+            "bevyout-cucumber-jobs-{}-{unique}",
+            std::process::id()
+        ))
+        .join("prepare_jobs.ron")
+}
+
+fn parse_hex_list(list: &str) -> Vec<u32> {
+    list.split(',')
+        .map(|entry| parse_hex(entry.trim()))
+        .collect()
+}
+
+#[given(regex = r#"^a fresh job manifest with fingerprint "([^"]*)"$"#)]
+async fn given_fresh_job_manifest(world: &mut BevyoutWorld, fingerprint: String) {
+    world.job_manifest = Some(jobs::JobManifest::new(fingerprint));
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+) is marked done$")]
+async fn given_job_cell_done(world: &mut BevyoutWorld, hex: String) {
+    world
+        .job_manifest
+        .as_mut()
+        .expect("job manifest not created yet")
+        .set_status(parse_hex(&hex), jobs::JobStatus::Done);
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+) is marked pending$")]
+async fn given_job_cell_pending(world: &mut BevyoutWorld, hex: String) {
+    world
+        .job_manifest
+        .as_mut()
+        .expect("job manifest not created yet")
+        .set_status(parse_hex(&hex), jobs::JobStatus::Pending);
+}
+
+#[given(regex = r#"^cell 0x([0-9a-fA-F]+) is marked failed with reason "([^"]*)"$"#)]
+async fn given_job_cell_failed(world: &mut BevyoutWorld, hex: String, reason: String) {
+    world
+        .job_manifest
+        .as_mut()
+        .expect("job manifest not created yet")
+        .set_status(parse_hex(&hex), jobs::JobStatus::Failed(reason));
+}
+
+#[given("the manifest is written and reloaded")]
+async fn given_job_manifest_written_and_reloaded(world: &mut BevyoutWorld) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let path = job_manifest_temp_path();
+    manifest
+        .write_atomic(&path)
+        .expect("writing the job manifest must succeed");
+    let reloaded = jobs::JobManifest::load_or_new(&path, &manifest.content_fingerprint)
+        .expect("reloading the job manifest must succeed");
+    world.job_manifest_path = Some(path);
+    world.job_manifest = Some(reloaded);
+}
+
+#[given("the manifest is written to disk")]
+async fn given_job_manifest_written_to_disk(world: &mut BevyoutWorld) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let path = job_manifest_temp_path();
+    manifest
+        .write_atomic(&path)
+        .expect("writing the job manifest must succeed");
+    world.job_manifest_path = Some(path);
+}
+
+#[when(regex = r#"^the manifest is reloaded with fingerprint "([^"]*)"$"#)]
+async fn when_job_manifest_reloaded_with_fingerprint(
+    world: &mut BevyoutWorld,
+    fingerprint: String,
+) {
+    let path = world
+        .job_manifest_path
+        .as_ref()
+        .expect("job manifest was not written yet");
+    world.job_manifest = Some(
+        jobs::JobManifest::load_or_new(path, &fingerprint)
+            .expect("reloading the job manifest must succeed"),
+    );
+}
+
+#[when(regex = r#"^cells "([^"]*)" are resumed without force$"#)]
+async fn when_job_cells_resumed_without_force(world: &mut BevyoutWorld, list: String) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let selection = parse_hex_list(&list);
+    world.job_resume_result = Some(jobs::filter_resume(manifest, &selection, false));
+}
+
+#[when(regex = r#"^cells "([^"]*)" are resumed with force$"#)]
+async fn when_job_cells_resumed_with_force(world: &mut BevyoutWorld, list: String) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let selection = parse_hex_list(&list);
+    world.job_resume_result = Some(jobs::filter_resume(manifest, &selection, true));
+}
+
+#[then(regex = r"^cell 0x([0-9a-fA-F]+) has status done$")]
+async fn then_job_cell_status_done(world: &mut BevyoutWorld, hex: String) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    assert_eq!(
+        manifest.status(parse_hex(&hex)),
+        Some(&jobs::JobStatus::Done)
+    );
+}
+
+#[then(regex = r#"^cell 0x([0-9a-fA-F]+) has status failed with reason "([^"]*)"$"#)]
+async fn then_job_cell_status_failed(world: &mut BevyoutWorld, hex: String, reason: String) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    assert_eq!(
+        manifest.status(parse_hex(&hex)),
+        Some(&jobs::JobStatus::Failed(reason))
+    );
+}
+
+#[then(regex = r#"^the cells to run are "([^"]*)"$"#)]
+async fn then_job_cells_to_run_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let (to_run, _) = world
+        .job_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(to_run, &expected);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were skipped$")]
+async fn then_job_cells_skipped(world: &mut BevyoutWorld, count: usize) {
+    let (_, skipped) = world
+        .job_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(*skipped, count);
+}
+
+#[then(regex = r#"^the failed cells are "([^"]*)"$"#)]
+async fn then_job_failed_cells_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    assert_eq!(manifest.failed_form_ids(), expected);
+}
+
+#[then("the manifest has no recorded cells")]
+async fn then_job_manifest_has_no_recorded_cells(world: &mut BevyoutWorld) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    assert!(manifest.jobs.is_empty());
 }
 
 fn main() {

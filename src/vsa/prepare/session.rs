@@ -13,11 +13,21 @@
 //! `BatchSession::new` does each of those exactly once. Its constructor
 //! takes the already-loaded plugin chain (`Vec<LoadedPlugin>`) rather than a
 //! path to load one from, so `prepare_cell` in `orchestrator.rs` -- which
-//! only ever receives `&mut BatchSession`, never a plugin path -- cannot
+//! only ever receives `&BatchSession`, never a plugin path -- cannot
 //! reload the chain even by accident. That is a type-level guarantee, not
 //! just a convention (T47.2). The single-cell CLI path builds a one-cell
 //! `BatchSession` too, so its plugin/BSA/audio/footstep loading and output
 //! are unchanged from before this issue (F47.1).
+//!
+//! Issue #48 adds a bounded worker pool that runs several cells'
+//! `prepare_cell` concurrently against one shared `&BatchSession` (no
+//! longer `&mut`, so several worker threads can hold it at once). The
+//! session's only fields any cell ever mutates -- `physics_cache` and
+//! `asset_totals` -- are wrapped in `Mutex` so that still compiles and
+//! stays correct under concurrent access; `blender_lock` is a new field
+//! with no counterpart before #48, guarding the one part of `prepare_cell`
+//! that is not provably safe to run for two cells at once (see its use in
+//! `orchestrator.rs`).
 
 use super::*;
 
@@ -38,9 +48,18 @@ pub(crate) struct BatchSession {
     pub(crate) footstep_diagnostics: Vec<Diagnostic>,
     /// Session-level physics sidecar cache (F47.3): a sidecar read once for
     /// one cell is reused, as a hit, by every later cell in the batch that
-    /// references the same content-addressed physics asset.
-    pub(crate) physics_cache: KeyedBatchCache<PreparedPhysicsAsset>,
-    pub(crate) asset_totals: BatchAssetTotals,
+    /// references the same content-addressed physics asset. `Mutex`-wrapped
+    /// (#48) so concurrent workers share one cache instead of racing on it.
+    pub(crate) physics_cache: Mutex<KeyedBatchCache<PreparedPhysicsAsset>>,
+    pub(crate) asset_totals: Mutex<BatchAssetTotals>,
+    /// Serializes the one part of `prepare_cell` this issue did not judge
+    /// provably safe to run concurrently: staging/converting textures and
+    /// running Blender both touch the whole shared `staging_dir` (a fixed
+    /// `blender_jobs.ron` filename, and `convert_staged_textures` walking
+    /// every `.dds` under the directory rather than just the current
+    /// cell's). See the long comment at that call site in `orchestrator.rs`
+    /// for the full argument (F48.4).
+    pub(crate) blender_lock: Mutex<()>,
 }
 
 impl BatchSession {
@@ -101,8 +120,9 @@ impl BatchSession {
             footstep_sets,
             hard_landing_clips,
             footstep_diagnostics,
-            physics_cache: KeyedBatchCache::default(),
-            asset_totals: BatchAssetTotals::default(),
+            physics_cache: Mutex::new(KeyedBatchCache::default()),
+            asset_totals: Mutex::new(BatchAssetTotals::default()),
+            blender_lock: Mutex::new(()),
         })
     }
 
@@ -174,8 +194,11 @@ mod tests {
         assert_eq!(session.fingerprint, fingerprint);
         assert!(session.archives.is_empty(), "no BSAs in the temp Data dir");
         assert!(session.audio_archives.is_empty());
-        assert_eq!(session.physics_cache.accesses(), 0);
-        assert_eq!(session.asset_totals, BatchAssetTotals::default());
+        assert_eq!(session.physics_cache.lock().unwrap().accesses(), 0);
+        assert_eq!(
+            *session.asset_totals.lock().unwrap(),
+            BatchAssetTotals::default()
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
