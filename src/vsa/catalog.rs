@@ -21,12 +21,15 @@ pub(crate) struct CellCatalogEntry {
     pub(crate) interior: bool,
     pub(crate) winning_plugin: String,
     pub(crate) provenance: Vec<String>,
+    pub(crate) worldspace_form_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CellCatalog {
     pub(crate) content_fingerprint: String,
     pub(crate) entries: Vec<CellCatalogEntry>,
+    /// `(form_id, display name)` per worldspace, preferring EditorID over FULL.
+    pub(crate) worldspaces: Vec<(u32, String)>,
 }
 
 impl CellCatalog {
@@ -44,12 +47,26 @@ impl CellCatalog {
                     .unwrap_or("<unknown>")
                     .to_string(),
                 provenance: parsed.cell_provenance(*form_id).to_vec(),
+                worldspace_form_id: cell.worldspace_form_id,
             })
             .collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.form_id);
+        let mut worldspaces = parsed
+            .worldspaces()
+            .map(|(form_id, worldspace)| {
+                let display = worldspace
+                    .editor_id
+                    .clone()
+                    .or_else(|| worldspace.name.clone())
+                    .unwrap_or_else(|| format!("{form_id:08x}"));
+                (*form_id, display)
+            })
+            .collect::<Vec<_>>();
+        worldspaces.sort_by_key(|(form_id, _)| *form_id);
         Ok(Self {
             content_fingerprint,
             entries,
+            worldspaces,
         })
     }
 
@@ -202,6 +219,7 @@ mod tests {
                     interior: false,
                     winning_plugin: "Patch.esp".into(),
                     provenance: vec!["Fallout3.esm".into(), "Patch.esp".into()],
+                    worldspace_form_id: Some(60),
                 },
                 CellCatalogEntry {
                     form_id: 1,
@@ -210,8 +228,10 @@ mod tests {
                     interior: true,
                     winning_plugin: "Fallout3.esm".into(),
                     provenance: vec!["Fallout3.esm".into()],
+                    worldspace_form_id: None,
                 },
             ],
+            worldspaces: vec![(60, "Wasteland".into())],
         };
         assert!(
             catalog

@@ -69,12 +69,10 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
             editor_id: entry.editor_id.clone(),
             name: entry.name.clone(),
             interior: entry.interior,
-            worldspace_form_id: None, // wired after #45 merge
+            worldspace_form_id: entry.worldspace_form_id,
         })
         .collect();
-    // No worldspace table exists yet; wired after #45 merge lands WRLD
-    // parsing. Until then `--worldspace` reports "no worldspaces available".
-    let worldspace_names: Vec<(u32, String)> = Vec::new();
+    let worldspace_names = catalog.worldspaces.clone();
 
     let resolved = resolve_selection(&cells, &worldspace_names, &spec)?;
 

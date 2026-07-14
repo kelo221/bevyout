@@ -672,7 +672,10 @@ async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
 
 #[then(regex = r#"^the resolved cell selection is "([^"]*)"$"#)]
 async fn then_resolved_selection_is(world: &mut BevyoutWorld, list: String) {
-    let expected: Vec<u32> = list.split(',').map(|entry| parse_hex(entry.trim())).collect();
+    let expected: Vec<u32> = list
+        .split(',')
+        .map(|entry| parse_hex(entry.trim()))
+        .collect();
     let resolved = world
         .selection_result
         .take()
