@@ -345,6 +345,66 @@ pub(crate) fn apply_fog_strength(
     }
 }
 
+/// Issue #52: re-derives ambient light, camera fog, and the directional
+/// light from whatever `PreparedSceneManifest` is currently the active
+/// resource (already repointed to the destination cell by the caller),
+/// applying them directly to the existing camera/light entities and the
+/// `GlobalAmbientLight` resource rather than spawning new ones.
+/// `apply_fog_strength` only reacts to `FogStrength` changing, so a cell
+/// swap needs its own explicit refresh to pick up the new cell's lighting.
+/// Camera post-processing (color grading/auto-exposure/bloom, which follow
+/// the cell's `ImageSpace`) are deliberately left as-is; see this issue's
+/// final report.
+pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
+    let cell = world.resource::<PreparedSceneManifest>().cell.clone();
+    let lighting_scale = world.resource::<LightingScale>().0;
+    let ambient_scale = world.resource::<AmbientScale>().0;
+    let fog_strength = world.resource::<FogStrength>().0;
+    let cell_lighting = effective_lighting(&cell);
+
+    world.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(
+            cell_lighting.ambient_rgba[0],
+            cell_lighting.ambient_rgba[1],
+            cell_lighting.ambient_rgba[2],
+        ),
+        brightness: 25.0 * lighting_scale * ambient_scale,
+        affects_lightmapped_meshes: true,
+    });
+
+    if let Some(fog) = distance_fog(&cell_lighting, fog_strength) {
+        let mut cameras = world.query_filtered::<&mut DistanceFog, With<Camera3d>>();
+        for mut camera_fog in cameras.iter_mut(world) {
+            *camera_fog = fog.clone();
+        }
+    }
+
+    let directional_luminance = cell_lighting.directional_rgba[0]
+        + cell_lighting.directional_rgba[1]
+        + cell_lighting.directional_rgba[2];
+    let disabled = directional_luminance <= f32::EPSILON
+        || !cell_lighting.directional_rgba[..3]
+            .iter()
+            .all(|channel| channel.is_finite());
+    let base_illuminance = CELL_DIRECTIONAL_ILLUMINANCE;
+    let mut directional_lights = world.query::<(
+        &mut DirectionalLight,
+        &mut CellDirectionalLight,
+        &mut Transform,
+    )>();
+    for (mut light, mut cell_light, mut transform) in directional_lights.iter_mut(world) {
+        light.color = Color::srgb(
+            cell_lighting.directional_rgba[0],
+            cell_lighting.directional_rgba[1],
+            cell_lighting.directional_rgba[2],
+        );
+        light.illuminance =
+            scaled_directional_illuminance(base_illuminance, lighting_scale, disabled);
+        cell_light.base_illuminance = base_illuminance;
+        transform.rotation = Quat::from_array(cell_lighting.directional_rotation_xyzw());
+    }
+}
+
 pub(crate) fn scaled_directional_illuminance(
     base_illuminance: f32,
     lighting_scale: f32,

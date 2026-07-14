@@ -86,6 +86,7 @@ struct PendingPreloadParse {
 pub(crate) fn install(app: &mut App, resident_cell_limit: usize) {
     app.insert_resource(ResidentCellLimit(resident_cell_limit))
         .init_resource::<ResidentCells>()
+        .add_message::<PreloadParseFailed>()
         .add_systems(Startup, seed_world_state)
         .add_systems(
             Update,
@@ -140,11 +141,37 @@ fn build_cell_map_index(asset_root: &str) -> CellMapIndex {
     }
 }
 
-fn scene_manifest_path(asset_root: &Path, form_id: u32) -> PathBuf {
+pub(crate) fn scene_manifest_path(asset_root: &Path, form_id: u32) -> PathBuf {
     asset_root
         .join("scenes")
         .join(format!("{form_id:08x}"))
         .join("scene.ron")
+}
+
+/// Issue #52: emitted by `poll_preload_parse_tasks` whenever a background
+/// manifest parse fails, so `world::swap`'s fallback-swap driver can tell a
+/// door-travel fallback load apart from an ambient #51 neighbor-preload
+/// failure (both log a `warn!` here either way) and trigger
+/// `SwapDecision`'s `ReturnToSource` outcome.
+#[derive(Message, Clone, Debug)]
+pub(crate) struct PreloadParseFailed {
+    pub(crate) form_id: u32,
+}
+
+/// Issue #52: starts a background manifest parse for `form_id` exactly like
+/// `evaluate_preload_plan`'s `plan.load` loop does, for use by the
+/// fallback-swap driver to load a door's destination cell on demand even
+/// when it is not a door-graph neighbor of the currently active cell (so it
+/// would never be reached by the predictive preloader's own planning).
+pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Path, form_id: u32) {
+    info!("preload start {form_id:08x}");
+    let path = scene_manifest_path(asset_root, form_id);
+    let pool = AsyncComputeTaskPool::get();
+    let task = pool.spawn(async move {
+        let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        ron::de::from_str::<PreparedSceneManifest>(&text).map_err(|error| error.to_string())
+    });
+    commands.spawn(PendingPreloadParse { form_id, task });
 }
 
 /// F51.2/F51.5 glue: runs once at startup and again whenever `ActiveCell`
@@ -179,14 +206,7 @@ fn evaluate_preload_plan(
     let plan = graph.plan(active_cell.0, &resident, &prepared, resident_cell_limit.0);
 
     for form_id in plan.load {
-        info!("preload start {form_id:08x}");
-        let path = scene_manifest_path(asset_root, form_id);
-        let pool = AsyncComputeTaskPool::get();
-        let task = pool.spawn(async move {
-            let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            ron::de::from_str::<PreparedSceneManifest>(&text).map_err(|error| error.to_string())
-        });
-        commands.spawn(PendingPreloadParse { form_id, task });
+        spawn_preload_parse_task(&mut commands, asset_root, form_id);
     }
 
     for form_id in plan.evict {
@@ -210,6 +230,7 @@ fn poll_preload_parse_tasks(
     lighting: Res<LightingScale>,
     mut pending: Query<(Entity, &mut PendingPreloadParse)>,
     mut resident_cells: ResMut<ResidentCells>,
+    mut parse_failed: MessageWriter<PreloadParseFailed>,
 ) {
     for (entity, mut pending_parse) in &mut pending {
         let Some(result) = check_ready(&mut pending_parse.task) else {
@@ -243,6 +264,7 @@ fn poll_preload_parse_tasks(
             }
             Err(error) => {
                 warn!("preload parse failed for {form_id:08x}: {error}");
+                parse_failed.write(PreloadParseFailed { form_id });
             }
         }
     }

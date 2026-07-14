@@ -78,6 +78,12 @@ mod cell_map;
 #[allow(dead_code, unused_imports)]
 mod policy;
 
+// `world::swap_policy` (issue #52) is likewise dependency-free (std only, no
+// Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/world/swap_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod swap_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -163,6 +169,16 @@ struct BevyoutWorld {
     job_manifest: Option<jobs::JobManifest>,
     job_manifest_path: Option<std::path::PathBuf>,
     job_resume_result: Option<(Vec<u32>, usize)>,
+
+    // -- instant_swap.feature --
+    swap_residency: Option<swap_policy::Residency>,
+    swap_manifest_exists: bool,
+    swap_decision: Option<swap_policy::SwapDecision>,
+    swap_fallback_load_ok: bool,
+    swap_fallback_outcome: Option<swap_policy::FallbackOutcome>,
+    swap_placements: Vec<swap_policy::PlacementRef>,
+    swap_deltas: std::collections::HashMap<u32, swap_policy::ReferenceDelta>,
+    swap_applications: Vec<swap_policy::PlacementApplication>,
 }
 
 fn find_placement<'a>(
@@ -1143,6 +1159,172 @@ async fn then_job_manifest_has_no_recorded_cells(world: &mut BevyoutWorld) {
         .as_ref()
         .expect("job manifest not created yet");
     assert!(manifest.jobs.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// instant_swap.feature (issue #52)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^the destination cell residency is (Ready|Loading|Absent)$")]
+async fn given_swap_residency(world: &mut BevyoutWorld, residency: String) {
+    world.swap_residency = Some(match residency.as_str() {
+        "Ready" => swap_policy::Residency::Ready,
+        "Loading" => swap_policy::Residency::Loading,
+        _ => swap_policy::Residency::Absent,
+    });
+}
+
+#[given("the destination manifest exists on disk")]
+async fn given_swap_manifest_exists(world: &mut BevyoutWorld) {
+    world.swap_manifest_exists = true;
+}
+
+#[given("the destination manifest does not exist on disk")]
+async fn given_swap_manifest_does_not_exist(world: &mut BevyoutWorld) {
+    world.swap_manifest_exists = false;
+}
+
+#[when("the swap decision is computed")]
+async fn when_swap_decision_computed(world: &mut BevyoutWorld) {
+    let residency = world
+        .swap_residency
+        .expect("destination cell residency not given");
+    world.swap_decision = Some(swap_policy::swap_decision(
+        world.swap_manifest_exists,
+        residency,
+    ));
+}
+
+#[then(regex = r"^the swap decision is (Instant|Fallback)$")]
+async fn then_swap_decision_is(world: &mut BevyoutWorld, expected: String) {
+    let decision = world.swap_decision.expect("swap decision not computed yet");
+    let expected = match expected.as_str() {
+        "Instant" => swap_policy::SwapDecision::Instant,
+        _ => swap_policy::SwapDecision::Fallback,
+    };
+    assert_eq!(decision, expected);
+}
+
+#[given("a fallback load that succeeds")]
+async fn given_fallback_load_succeeds(world: &mut BevyoutWorld) {
+    world.swap_fallback_load_ok = true;
+}
+
+#[given("a fallback load that fails")]
+async fn given_fallback_load_fails(world: &mut BevyoutWorld) {
+    world.swap_fallback_load_ok = false;
+}
+
+#[when("the fallback outcome is computed")]
+async fn when_fallback_outcome_computed(world: &mut BevyoutWorld) {
+    world.swap_fallback_outcome = Some(swap_policy::fallback_outcome(world.swap_fallback_load_ok));
+}
+
+#[then(regex = r"^the fallback outcome is (Proceed|ReturnToSource)$")]
+async fn then_fallback_outcome_is(world: &mut BevyoutWorld, expected: String) {
+    let outcome = world
+        .swap_fallback_outcome
+        .expect("fallback outcome not computed yet");
+    let expected = match expected.as_str() {
+        "Proceed" => swap_policy::FallbackOutcome::Proceed,
+        _ => swap_policy::FallbackOutcome::ReturnToSource,
+    };
+    assert_eq!(outcome, expected);
+}
+
+#[given(regex = r"^placement reference 0x([0-9a-fA-F]+) is spawned in the destination cell$")]
+async fn given_swap_placement_spawned(world: &mut BevyoutWorld, hex: String) {
+    world.swap_placements.push(swap_policy::PlacementRef {
+        reference_form_id: parse_hex(&hex),
+    });
+}
+
+#[given(regex = r"^the saved state disables reference 0x([0-9a-fA-F]+)$")]
+async fn given_swap_state_disables(world: &mut BevyoutWorld, hex: String) {
+    world.swap_deltas.insert(
+        parse_hex(&hex),
+        swap_policy::ReferenceDelta {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+}
+
+#[given(regex = r"^the saved state deletes reference 0x([0-9a-fA-F]+)$")]
+async fn given_swap_state_deletes(world: &mut BevyoutWorld, hex: String) {
+    world.swap_deltas.insert(
+        parse_hex(&hex),
+        swap_policy::ReferenceDelta {
+            deleted: true,
+            ..Default::default()
+        },
+    );
+}
+
+#[given(
+    regex = r"^the saved state moves reference 0x([0-9a-fA-F]+) to \[(-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\]$"
+)]
+async fn given_swap_state_moves(world: &mut BevyoutWorld, hex: String, x: f32, y: f32, z: f32) {
+    world.swap_deltas.insert(
+        parse_hex(&hex),
+        swap_policy::ReferenceDelta {
+            transform: Some(swap_policy::TransformDelta {
+                translation: [x, y, z],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            }),
+            ..Default::default()
+        },
+    );
+}
+
+#[when("the persistent cell state is applied")]
+async fn when_persistent_cell_state_applied(world: &mut BevyoutWorld) {
+    world.swap_applications =
+        swap_policy::apply_persistent_cell_state(&world.swap_deltas, &world.swap_placements);
+}
+
+fn find_swap_application(world: &BevyoutWorld, form_id: u32) -> &swap_policy::PlacementApplication {
+    world
+        .swap_applications
+        .iter()
+        .find(|application| application.reference_form_id == form_id)
+        .expect("persistent cell state not applied yet, or reference not spawned")
+}
+
+#[then(regex = r"^placement reference 0x([0-9a-fA-F]+) is hidden$")]
+async fn then_swap_placement_is_hidden(world: &mut BevyoutWorld, hex: String) {
+    let application = find_swap_application(world, parse_hex(&hex));
+    assert_eq!(
+        application.visibility,
+        swap_policy::VisibilityDecision::Hidden
+    );
+}
+
+#[then(regex = r"^placement reference 0x([0-9a-fA-F]+) is visible$")]
+async fn then_swap_placement_is_visible(world: &mut BevyoutWorld, hex: String) {
+    let application = find_swap_application(world, parse_hex(&hex));
+    assert_eq!(
+        application.visibility,
+        swap_policy::VisibilityDecision::Visible
+    );
+}
+
+#[then(
+    regex = r"^placement reference 0x([0-9a-fA-F]+) has translation \[(-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\]$"
+)]
+async fn then_swap_placement_has_translation(
+    world: &mut BevyoutWorld,
+    hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let application = find_swap_application(world, parse_hex(&hex));
+    let transform = application
+        .transform
+        .expect("expected a transform delta on this application");
+    assert_eq!(transform.translation, [x, y, z]);
 }
 
 fn main() {

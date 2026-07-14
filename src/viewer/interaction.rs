@@ -14,6 +14,27 @@ const NOTICE_SECONDS: f32 = 3.0;
 const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
 const MAX_PARENT_DEPTH: usize = 64;
 
+/// Issue #52: written by `activate_focused_placement` when the player opens
+/// a door whose `destination` is `Some`, and consumed the same frame by
+/// `world::swap`'s eligibility system (ordered `.after(DoorActivationSet)`)
+/// to drive either an instant cell swap or a loading-screen fallback.
+/// Translation/rotation are already in Bevy coordinates (converted at
+/// prepare time), matching `PreparedDoorDestination`.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct DoorTravelRequested {
+    pub(crate) destination_cell_form_id: u32,
+    pub(crate) translation: Vec3,
+    pub(crate) rotation_xyzw: [f32; 4],
+}
+
+/// Ordering handle for `world::swap`'s door-travel systems: message readers
+/// scheduled `.after(DoorActivationSet)` see `DoorTravelRequested` messages
+/// written this same frame (Bevy's message double-buffering swaps once per
+/// frame in `First`, not between systems), so the eligibility check and any
+/// instant swap complete in the same frame as the door activation itself.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DoorActivationSet;
+
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
 #[derive(Component, Clone, Debug)]
@@ -83,11 +104,13 @@ pub(crate) fn install(app: &mut App) {
     app.init_resource::<PlayerInventory>()
         .init_resource::<InteractionState>()
         .init_resource::<InteractionNotice>()
+        .add_message::<DoorTravelRequested>()
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
             Update,
             (update_focused_placement, activate_focused_placement)
                 .chain()
+                .in_set(DoorActivationSet)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
@@ -222,6 +245,7 @@ fn activate_focused_placement(
     mut state: ResMut<InteractionState>,
     mut notice: ResMut<InteractionNotice>,
     mut sounds: MessageWriter<PlaySound>,
+    mut door_travel: MessageWriter<DoorTravelRequested>,
 ) {
     if !keys.just_pressed(KeyCode::Enter) {
         return;
@@ -303,11 +327,21 @@ fn activate_focused_placement(
                 placement.reference_form_id,
                 if opening { "opened" } else { "closed" },
                 if door.destination.is_some() {
-                    "; travel is not enabled"
+                    "; travel requested"
                 } else {
                     ""
                 }
             );
+            // Issue #52: entering (opening) a door with a resolved
+            // destination requests a cell swap; `world::swap` decides
+            // instant vs. loading-screen fallback from cell residency.
+            if opening && let Some(destination) = &door.destination {
+                door_travel.write(DoorTravelRequested {
+                    destination_cell_form_id: destination.cell_form_id,
+                    translation: Vec3::from_array(destination.translation),
+                    rotation_xyzw: destination.rotation_xyzw,
+                });
+            }
         }
         PreparedSemantic::Activator => {
             write_sound(
