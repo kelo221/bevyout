@@ -41,7 +41,7 @@ pub(crate) fn find_ktx_tool(explicit: Option<PathBuf>) -> Result<Option<KtxTool>
     Ok(None)
 }
 
-pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
+pub(crate) fn find_unified_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
     if let Some(path) = explicit {
         let tool = KtxTool {
             kind: ktx_tool_kind(&path),
@@ -49,7 +49,7 @@ pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxT
         };
         if !matches!(tool.kind, KtxToolKind::UnifiedKtx) {
             bail!(
-                "irradiance volume export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
+                "prepared texture export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
             );
         }
         if !tool.path.exists() {
@@ -81,10 +81,14 @@ pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxT
     };
     if !matches!(tool.kind, KtxToolKind::UnifiedKtx) {
         bail!(
-            "irradiance volume export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
+            "prepared texture export requires the unified KTX executable (ktx.exe), not legacy toktx.exe"
         );
     }
     Ok(tool)
+}
+
+pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxTool> {
+    find_unified_ktx_tool(explicit)
 }
 
 pub(crate) fn find_irradiance_blender(

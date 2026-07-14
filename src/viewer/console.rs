@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use bevy::pbr::PointLightShadowSamples;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -19,6 +20,9 @@ use super::controls::{
     AmbientScale, AoStrength, FogStrength, IrradianceIntensity, LightingScale, LightsDisabled,
     UnlitMode,
 };
+#[cfg(test)]
+use super::lighting::PreparedPointShadowRuntime;
+use super::lighting::shadow_cache_status;
 use super::{diagnostics, player};
 
 #[derive(Component)]
@@ -122,6 +126,13 @@ pub(crate) fn install(app: &mut App) {
             "renderreport",
             "Write the configured render timing and diagnostic reports immediately.",
             render_report,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "shadowcache",
+            "shadowcache <status|rebuild>",
+            "Inspect the prepared point-shadow artifact or show rebuild instructions.",
+            shadow_cache,
         )
         .mutating(),
         ConsoleCommand::new(
@@ -408,7 +419,7 @@ fn sync_ui_visibility(
     }
 }
 
-const RENDER_SETTINGS: [&str; 8] = [
+const RENDER_SETTINGS: [&str; 9] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -417,6 +428,7 @@ const RENDER_SETTINGS: [&str; 8] = [
     "bloom_softness",
     "fog",
     "ao",
+    "shadow_samples",
 ];
 
 fn bloom_values(world: &mut World) -> Result<(f32, f32, f32), ConsoleError> {
@@ -459,6 +471,10 @@ fn render_values(world: &mut World) -> Result<Map<String, Value>, ConsoleError> 
     values.insert("bloom_softness".into(), json!(bloom_softness));
     values.insert("fog".into(), json!(world.resource::<FogStrength>().0));
     values.insert("ao".into(), json!(world.resource::<AoStrength>().0));
+    values.insert(
+        "shadow_samples".into(),
+        json!(world.resource::<PointLightShadowSamples>().0),
+    );
     Ok(values)
 }
 
@@ -483,6 +499,7 @@ fn render_setting_label(setting: &str) -> &'static str {
         "bloom_softness" => "Bloom softness",
         "fog" => "Fog",
         "ao" => "Ambient occlusion",
+        "shadow_samples" => "Point-shadow samples per pixel",
         _ => "Render setting",
     }
 }
@@ -546,6 +563,7 @@ fn set_render(
         "ambient" => (0.0001..=4096.0).contains(&value),
         "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
+        "shadow_samples" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
     if !valid {
@@ -561,6 +579,7 @@ fn set_render(
         "ambient" => world.resource_mut::<AmbientScale>().0 = value,
         "fog" => world.resource_mut::<FogStrength>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
+        "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
             let camera = {
                 let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<Bloom>)>();
@@ -599,6 +618,37 @@ fn set_render(
         }),
         vec![message],
     ))
+}
+
+fn shadow_cache(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "shadowcache accepts status or rebuild",
+        ));
+    }
+    match invocation
+        .args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("status")
+    {
+        "status" => Ok(ConsoleCommandResult::new(
+            shadow_cache_status(world),
+            vec!["Shadow cache status reported.".into()],
+        )),
+        "rebuild" => Err(ConsoleError::new(
+            "prepare_required",
+            "prepared shadows cannot be rebuilt in the viewer; run `prepare --rebuild-shadows` for this cell, then restart render",
+        )),
+        _ => Err(ConsoleError::new(
+            "bad_value",
+            "shadowcache expects status or rebuild",
+        )),
+    }
 }
 
 fn render_report(
@@ -708,6 +758,8 @@ mod tests {
             .insert_resource(AoStrength(1.0))
             .insert_resource(UnlitMode(false))
             .insert_resource(LightsDisabled(false))
+            .insert_resource(PreparedPointShadowRuntime::default())
+            .insert_resource(PointLightShadowSamples::default())
             .insert_resource(BoxdddDebugDrawSettings::default())
             .insert_resource(player::StepDebugSettings::default());
         app.init_state::<GameplayModal>();
@@ -823,6 +875,10 @@ mod tests {
             assert!(exec(&mut app, &format!("setrender {setting} {low}")).ok);
             assert!(exec(&mut app, &format!("setrender {setting} {high}")).ok);
         }
+        assert!(exec(&mut app, "setrender shadow_samples 0").ok);
+        assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 0);
+        assert!(exec(&mut app, "setrender shadow_samples 1").ok);
+        assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 1);
         assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
         let before = app.world().resource::<LightingScale>().0;
         assert_eq!(
@@ -840,8 +896,20 @@ mod tests {
             "unknown_setting"
         );
         assert_eq!(
+            exec(&mut app, "setrender shadow_samples 2")
+                .error
+                .unwrap()
+                .code,
+            "out_of_range"
+        );
+        assert!(exec(&mut app, "shadowcache status").ok);
+        assert_eq!(
+            exec(&mut app, "shadowcache rebuild").error.unwrap().code,
+            "prepare_required"
+        );
+        assert_eq!(
             exec(&mut app, "getrender").value.as_object().unwrap().len(),
-            8
+            9
         );
     }
 

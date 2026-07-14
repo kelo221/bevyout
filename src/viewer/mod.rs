@@ -6,10 +6,12 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::light::{IrradianceVolume, LightProbe};
+use bevy::light::{IrradianceVolume, LightProbe, ShadowFilteringMethod};
 use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{
+    BakedPointLightShadow, BakedPointShadowMap, DistanceFog, FogFalloff, PointLightShadowSamples,
+};
 use bevy::post_process::auto_exposure::{
     AutoExposure, AutoExposureCompensationCurve, AutoExposurePlugin,
 };
@@ -47,11 +49,13 @@ mod console;
 mod console_ui;
 mod controls;
 mod diagnostics;
+mod lighting;
 mod scene;
 
 pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
+pub(crate) use lighting::*;
 pub(crate) use scene::*;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
@@ -229,6 +233,9 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         plugin: args.plugin.clone(),
         cell: None,
         blender: args.blender.clone(),
+        toktx: args.toktx.clone(),
+        shadow_resolution: args.shadow_resolution,
+        rebuild_shadows: args.rebuild_shadows,
         cache_dir: Some(cache_dir.to_path_buf()),
         force,
         rebuild_assets: false,

@@ -64,6 +64,8 @@ pub(crate) fn run_view(
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(LightsDisabled(false))
+        .insert_resource(PreparedPointShadowRuntime::default())
+        .insert_resource(PointLightShadowSamples::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
         // graph but the CLI never observes it (LoadingTarget is always set).
@@ -72,10 +74,10 @@ pub(crate) fn run_view(
             OnEnter(AppState::InGame),
             (capture_cursor, spawn_prepared_scene, spawn_reticle),
         )
+        .add_systems(Update, apply_lighting_scale)
         .add_systems(
             Update,
             (
-                apply_lighting_scale,
                 apply_fog_strength,
                 apply_ao_strength,
                 apply_irradiance_intensity,

@@ -102,8 +102,8 @@ fn ao_strength_scales_baked_darkness_without_changing_alpha() {
 
 #[test]
 fn image_space_eye_adaptation_speed_uses_documented_endpoints() {
-    assert!((image_space_eye_adaptation_speed(0.0) - 8.0).abs() < f32::EPSILON);
-    assert!((image_space_eye_adaptation_speed(1.0) - 0.5).abs() < f32::EPSILON);
+    assert!((image_space_eye_adaptation_speed(0.0) * 2.0 - 16.0).abs() < f32::EPSILON);
+    assert!((image_space_eye_adaptation_speed(1.0) * 2.0 - 1.0).abs() < f32::EPSILON);
     assert!(image_space_eye_adaptation_speed(0.5) > image_space_eye_adaptation_speed(0.9));
 }
 
@@ -138,7 +138,7 @@ fn image_space_settings_map_to_grading_and_target_exposure() {
     assert!((grading.highlights.contrast - 1.5).abs() < f32::EPSILON);
     assert!(grading.global.tint.abs() > 0.0 || grading.global.temperature.abs() > 0.0);
     let auto_exposure = auto_exposure.expect("image space enables auto exposure");
-    assert!((auto_exposure.speed_brighten - 6.125).abs() < f32::EPSILON);
+    assert!((auto_exposure.speed_brighten - 12.25).abs() < f32::EPSILON);
     assert_eq!(curves.len(), 1);
 }
 

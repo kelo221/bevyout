@@ -22,8 +22,10 @@ No GECK or original engine runtime is involved at any point.
   textures are left unconverted.
 - **[KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases)**,
   unified `ktx` binary (`ktx` or legacy `toktx` on `PATH`) — required for
-  `bake`'s default irradiance mode. Not needed for `prepare`, `view`/`render`,
-  or `bake --quality preview`.
+  a static point-shadow cache miss during `prepare` and for `bake`'s default
+  irradiance mode. It is not resolved when `prepare` reuses an unchanged
+  shadow artifact, and is not needed by `view`/`render` or
+  `bake --quality preview`.
 
 On Windows the tools above are auto-detected at their default install
 locations; otherwise put them on `PATH` or set `[tools]` in
@@ -44,6 +46,10 @@ on each iteration:
 ```powershell
 cargo run-dev -- prepare SuperDuperMart
 cargo run-dev -- render SuperDuperMart
+
+# Optional static-shadow controls (256 is the default).
+cargo run-dev -- prepare SuperDuperMart --shadow-resolution 128
+cargo run-dev -- prepare SuperDuperMart --rebuild-shadows
 ```
 
 ### Agent bridge
@@ -97,6 +103,7 @@ with draft restoration and Tab completion. Backquote or Escape closes it and
 recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
 `getpos`/`setpos`, `getangle`/`setangle`, `moveto`, `tfc`, `tcl`, `tcg`,
 `tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`, `renderreport`,
+`shadowcache status`, `shadowcache rebuild`,
 `tm`, `tdt`, `sgtm`, and `screenshot`. Positions use Bevy metres and angles use
 degrees. `tcl` is a dedicated FPS no-clip mode with WASD plus Space/Ctrl
 vertical movement; scenes without available physics start in forced no-clip.
@@ -132,7 +139,22 @@ The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled.
 
-`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-7 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, and source NAVM payloads (NAVM is retained metadata, not runtime navigation). Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-13 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), and optional prepared point-shadow metadata. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+
+After GLB conversion and physics classification, `prepare` builds a CPU BVH
+from initially enabled placements whose semantic and physics classifications
+are both static. It ray-casts every eligible point light into a deterministic
+`D32_SFLOAT` KTX2 cubemap array under
+`scenes/<cell>/shadows/<fingerprint>.ktx2`. Doors, containers, activators,
+pickups, actors, dynamic bodies, and other script-addressable placements do
+not cast these prepared shadows, but their meshes can receive them. The
+fingerprint includes generator revision, resolution, near plane, caster GLB
+contents and placement transforms, and light identity/position/range. Camera,
+light color, and intensity do not invalidate depth. Unchanged artifacts are
+reused before BVH construction or KTX-Software lookup; use
+`--rebuild-shadows` to force regeneration and `--shadow-resolution
+128|256|512` to change face resolution. Shadow preparation does not invoke
+Blender and a generation or `ktx validate` failure fails `prepare`.
 
 The preparation pipeline converts Fallout's approximately 70 world units per
 metre to Bevy metres. Changing this conversion requires preparing the cell again
@@ -193,6 +215,28 @@ Use `tfc` in the console to toggle free flight; Tab opens the Pip-Boy modal
 placeholder. `getrender` and `setrender` inspect or change lighting,
 irradiance, ambient, bloom, fog, and AO diagnostics. AO strength `0.00`
 disables the generated AO contribution and `1.00` uses the full baked value.
+Point-light shadows load the prepared KTX2 artifact and never create Bevy
+point-shadow views or render scene geometry into shadow maps. Because WebGPU
+forbids direct buffer copies into `Depth32Float`, the viewer decodes KTX2 on
+the CPU and performs one GPU upload conversion from a copyable `R32Float`
+array into the hardware-filterable depth cubemap array; this is texture
+initialization, not scene shadow rendering. Every clustered point light still
+illuminates the material. Per pixel, only the strongest shadow-capable
+unshadowed BRDF contribution performs one hardware 2x2 cubemap comparison;
+secondary point lights remain unshadowed, and transmission/contact paths reuse
+that result. Stable manifest layers are never inferred from camera-visible
+light ordering. A light that moves or changes range is rendered unshadowed
+until it matches its prepared metadata again.
+
+Use `setrender shadow_samples 0|1` for a same-run comparison without reloading
+the artifact. There is no gameplay shadow budget. `shadowcache status` reports
+the revision, fingerprint, resolution, layers, attached lights, CPU/GPU load
+state, hardware capacity, memory estimate, and samples per pixel.
+`shadowcache rebuild` deliberately returns an instruction to rerun `prepare
+--rebuild-shadows`; the viewer never regenerates a missing or corrupt artifact
+and never falls back to runtime point-shadow rendering. Camera movement cannot
+invalidate or regenerate the cache. Blender irradiance baking is independent
+and is not required for prepared point shadows.
 The mouse is captured on startup; press
 `Esc` to pause/release it and click the window to capture it again. NIF alpha
 flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials.

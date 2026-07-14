@@ -158,3 +158,37 @@ fn script_run_contract_parses() {
         Some(std::path::Path::new("out.jsonl"))
     );
 }
+
+#[test]
+fn prepared_shadow_resolution_and_rebuild_contract_parse() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "MegatonPlayerHouse",
+        "--shadow-resolution",
+        "512",
+        "--rebuild-shadows",
+        "--toktx",
+        "ktx.exe",
+    ])
+    .unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.shadow_resolution, 512);
+    assert!(args.rebuild_shadows);
+    assert_eq!(args.toktx.as_deref(), Some(std::path::Path::new("ktx.exe")));
+
+    for invalid in ["64", "129", "1024"] {
+        assert!(
+            Cli::try_parse_from([
+                "bevyout",
+                "render",
+                "MegatonPlayerHouse",
+                "--shadow-resolution",
+                invalid,
+            ])
+            .is_err()
+        );
+    }
+}
