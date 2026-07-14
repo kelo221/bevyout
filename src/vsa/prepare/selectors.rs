@@ -1,10 +1,11 @@
 //! Pure batch cell selection for `prepare --all` / `--all-interiors` /
 //! `--worldspace` / multiple positional selectors (issue #46).
 //!
-//! Deliberately depends only on `std`/`anyhow` so this file can be pulled in
-//! verbatim (via `#[path]`, see `tests/features.rs`) without dragging in
-//! `bevy`, `serde`, or the ESM4 parser -- mirroring how `vsa::paths` is
-//! included in that suite today.
+//! Depends only on `std`/`anyhow` plus `vsa::paths` for the shared
+//! EditorID/FormID selector grammar (`parse_cell_selector`), reached through
+//! a relative `super::super::` import so this file can be pulled in verbatim
+//! (via `#[path]`, see `tests/features.rs`, which nests it one module deep so
+//! the relative path lands on its included copy of `paths`).
 
 use std::collections::BTreeSet;
 
@@ -40,35 +41,7 @@ impl SelectionSpec {
     }
 }
 
-enum ParsedSelector {
-    FormId(u32),
-    EditorId(String),
-}
-
-/// Parses a selector the same way `vsa::paths::parse_cell_selector` does:
-/// an (optionally `0x`-prefixed) string of up to eight hex digits is a
-/// FormID, anything else is an EditorID. Duplicated rather than imported
-/// because `paths.rs` pulls in `bevy` and this module must not.
-fn parse_selector(value: &str) -> Result<ParsedSelector> {
-    let value = value.trim();
-    if value.is_empty() {
-        bail!("cell selector must be a GECK EditorID or hexadecimal FormID");
-    }
-    let form_id_digits = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"));
-    let looks_like_form_id = form_id_digits.is_some_and(|digits| {
-        !digits.is_empty() && digits.len() <= 8 && digits.chars().all(|c| c.is_ascii_hexdigit())
-    }) || (value.len() <= 8
-        && value.chars().all(|c| c.is_ascii_hexdigit()));
-    if looks_like_form_id {
-        let digits = form_id_digits.unwrap_or(value);
-        let form_id = u32::from_str_radix(digits, 16)
-            .map_err(|error| anyhow::anyhow!("cell must be a hexadecimal FormID: {error}"))?;
-        return Ok(ParsedSelector::FormId(form_id));
-    }
-    Ok(ParsedSelector::EditorId(value.to_owned()))
-}
+use super::super::paths::{CellSelector, parse_cell_selector};
 
 /// Resolves a [`SelectionSpec`] against a cell catalogue into a FormID-sorted,
 /// deduplicated list of cell FormIDs. Pure: no I/O, no game data.
@@ -120,13 +93,13 @@ pub(crate) fn resolve_selection(
 }
 
 fn resolve_worldspace(worldspace: &str, worldspace_names: &[(u32, String)]) -> Result<u32> {
-    let parsed = parse_selector(worldspace)?;
+    let parsed = parse_cell_selector(worldspace)?;
     let matched = match parsed {
-        ParsedSelector::FormId(form_id) => worldspace_names
+        CellSelector::FormId(form_id) => worldspace_names
             .iter()
             .find(|(candidate, _)| *candidate == form_id)
             .map(|(form_id, _)| *form_id),
-        ParsedSelector::EditorId(name) => worldspace_names
+        CellSelector::EditorId(name) => worldspace_names
             .iter()
             .find(|(_, candidate)| candidate.eq_ignore_ascii_case(&name))
             .map(|(form_id, _)| *form_id),
@@ -151,10 +124,10 @@ fn resolve_worldspace(worldspace: &str, worldspace_names: &[(u32, String)]) -> R
 }
 
 fn resolve_explicit_cell(raw_selector: &str, cells: &[CellSummary]) -> Result<u32> {
-    let parsed = parse_selector(raw_selector)?;
+    let parsed = parse_cell_selector(raw_selector)?;
     let found = match parsed {
-        ParsedSelector::FormId(form_id) => cells.iter().find(|cell| cell.form_id == form_id),
-        ParsedSelector::EditorId(name) => cells.iter().find(|cell| {
+        CellSelector::FormId(form_id) => cells.iter().find(|cell| cell.form_id == form_id),
+        CellSelector::EditorId(name) => cells.iter().find(|cell| {
             cell.editor_id
                 .as_deref()
                 .is_some_and(|editor_id| editor_id.eq_ignore_ascii_case(&name))

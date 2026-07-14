@@ -72,12 +72,16 @@ mod assets;
 #[allow(dead_code, unused_imports)]
 mod cell_map;
 
-// `vsa::prepare::selectors` depends only on `std`/`anyhow` by design (see its
-// own module doc comment), so it is included verbatim with no stand-ins
-// needed, same as `paths` above.
-#[path = "../src/vsa/prepare/selectors.rs"]
-#[allow(dead_code, unused_imports)]
-mod selectors;
+// `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
+// via a relative `super::super::paths` import, so it is nested one module
+// deep here to make that path land on the `mod paths` include above.
+#[path = "."]
+mod prepare {
+    #[path = "../src/vsa/prepare/selectors.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod selectors;
+}
+use prepare::selectors;
 
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
