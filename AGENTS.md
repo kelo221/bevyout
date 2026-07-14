@@ -133,4 +133,11 @@ can kill the viewer under load — retry.
 
 - Never `git add -A`/`git add .` from the repo root: `.claude/worktrees/*`
   and scratch files get swept in. Stage explicitly by path.
-- Real-data artifacts (`.bevyout/`, `cellmap.ron` exports) stay untracked.
+- **Never commit Bethesda-derived data.** `.gitignore` blocks `*.ron`
+  wholesale (exports like `cellmap.ron` and prepared `scene.ron` manifests
+  are derived from game data) with explicit re-allows only for hand-written
+  synthetic fixtures (`tests/goldens/`, `features/fixtures/`) and doc
+  examples. A new fixture must be synthetic and needs its own `!` rule —
+  never weaken the blanket ignore. The same rule extends to every other
+  asset format (GLB, DDS, WAV, NIF): converted game content lives only
+  under the untracked `.bevyout/` cache.
