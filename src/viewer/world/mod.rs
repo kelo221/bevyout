@@ -1,0 +1,34 @@
+//! Runtime cell map, predictive door-graph neighbor preloader (issue #51),
+//! and instant door-transition cell swap (issue #52).
+//!
+//! `policy.rs` is a pure, std-only planner (mirrors `vsa::cell_map`'s
+//! dependency-free design so `tests/features.rs` can include it verbatim);
+//! `preload.rs` is the Bevy-side glue that reads `<asset_root>/cellmap.ron`
+//! into `policy::CellGraph`, tracks `ActiveCell`/`ResidentCells`, and drives
+//! background manifest parsing plus hidden per-cell root spawning for
+//! planned loads.
+//!
+//! `swap_policy.rs` is likewise a pure, std-only seam (issue #52): the
+//! eligibility decision (instant vs. fallback), the fallback load outcome,
+//! save-state application to a cell's placements, and the collider-build
+//! stagger queue. `swap.rs` is the Bevy-side glue that turns a door
+//! activation into either an instant same-frame cell swap or a
+//! loading-screen fallback that reuses `preload.rs`'s background manifest
+//! parse, then performs the same activation steps either way.
+
+mod policy;
+mod preload;
+mod swap;
+mod swap_policy;
+
+pub(crate) use preload::{ResidentCell, ResidentCells, ResidentState};
+// The live-save seam (F52.3): nothing inserts it yet; a future save-load
+// flow will (see `swap::ActiveSaveState`'s doc comment).
+#[allow(unused_imports)]
+pub(crate) use swap::ActiveSaveState;
+pub(crate) use swap_policy::{COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildQueue};
+
+pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
+    preload::install(app, resident_cell_limit);
+    swap::install(app);
+}

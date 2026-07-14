@@ -7,3 +7,13 @@ render_timings.csv
 cpu_trace_small.json
 .DS_Store
 tools/bevyout-mcp/node_modules/**
+/.claude/
+
+# RON files are ignored wholesale: exported artifacts (cellmap.ron, prepared
+# scene.ron manifests, job manifests) are derived from Bethesda game data and
+# MUST NEVER be committed or shipped. Only hand-written synthetic test
+# fixtures and doc examples are re-allowed below — anything else stays out.
+*.ron
+!tests/goldens/*.ron
+!features/fixtures/*.ron
+!BevyCheatSheet/**/*.ron

@@ -1,6 +1,124 @@
 //! Prepared and dynamic collision construction.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use super::*;
+
+/// Issue #52: a destination cell's colliders queued for staggered
+/// construction across subsequent frames (`advance_pending_collider_builds`)
+/// rather than all at once, so activating a large cell never spikes a
+/// single frame. `None` when no swap-triggered collider build is in
+/// progress.
+#[derive(Resource, Default)]
+pub(crate) struct PendingColliderBuild(Option<PendingColliderBuildState>);
+
+struct PendingColliderBuildState {
+    manifest: Arc<PreparedSceneManifest>,
+    queue: super::super::world::ColliderBuildQueue<usize>,
+    root_by_reference: HashMap<u32, Entity>,
+    unknown_layers: HashSet<u8>,
+    static_marker_spawned: bool,
+}
+
+/// Issue #52: queues collider construction for every enabled,
+/// physics-bearing placement in `manifest`, to be drained at
+/// `world::COLLIDER_BUILD_BUDGET_PER_FRAME` per frame by
+/// `advance_pending_collider_builds`. `root_by_reference` must map each
+/// queued placement's `reference_form_id` to its already-spawned entity
+/// (see `scene::spawn_cell_content`) so dynamic bodies attach to the right
+/// entity. A no-op while physics is disabled.
+pub(crate) fn queue_collider_build(
+    world: &mut World,
+    manifest: Arc<PreparedSceneManifest>,
+    root_by_reference: HashMap<u32, Entity>,
+) {
+    if world.resource::<PhysicsDisabled>().0 {
+        return;
+    }
+    let indices: Vec<usize> = manifest
+        .placements
+        .iter()
+        .enumerate()
+        .filter(|(_, placement)| {
+            placement.initially_enabled && placement.physics_asset_path.is_some()
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if indices.is_empty() {
+        return;
+    }
+    let form_id = manifest.cell.form_id;
+    let queue = super::super::world::ColliderBuildQueue::new(indices);
+    let queued = queue.len();
+    world.resource_mut::<PendingColliderBuild>().0 = Some(PendingColliderBuildState {
+        manifest,
+        queue,
+        root_by_reference,
+        unknown_layers: HashSet::new(),
+        static_marker_spawned: false,
+    });
+    info!("swap colliders queued for {form_id:08x} ({queued} placements)");
+}
+
+/// Issue #52: drains up to `world::COLLIDER_BUILD_BUDGET_PER_FRAME`
+/// queued placements per frame from `PendingColliderBuild`, building each
+/// one's colliders exactly like the startup `build_prepared_colliders`
+/// pass does (same shared `build_colliders_for_placement`), attaching them
+/// to the single shared static body. Sidecars the startup load never saw
+/// (a swapped-in cell's) are read lazily here, so their file I/O rides the
+/// same per-frame budget. A no-op when nothing is queued.
+pub(crate) fn advance_pending_collider_builds(
+    mut commands: Commands,
+    mut pending: ResMut<PendingColliderBuild>,
+    mut physics_assets: ResMut<PreparedPhysicsAssets>,
+    mut stats: ResMut<CollisionRuntimeStats>,
+    mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+) {
+    if pending.0.is_none() {
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let Some(static_body) = collision_world.static_body else {
+        return;
+    };
+    let state = pending.0.as_mut().expect("checked is_none above");
+    let asset_root = PathBuf::from(&state.manifest.asset_root);
+    let batch = state
+        .queue
+        .drain_budget(super::super::world::COLLIDER_BUILD_BUDGET_PER_FRAME);
+    for index in &batch {
+        let Some(placement) = state.manifest.placements.get(*index).cloned() else {
+            continue;
+        };
+        if let Some(path) = placement.physics_asset_path.as_ref()
+            && !physics_assets.ensure_sidecar_loaded(path, &asset_root)
+        {
+            continue;
+        }
+        build_colliders_for_placement(
+            world,
+            &mut commands,
+            &placement,
+            &physics_assets,
+            static_body,
+            &state.root_by_reference,
+            &mut collision_world,
+            &mut stats,
+            &mut state.unknown_layers,
+            &mut state.static_marker_spawned,
+        );
+    }
+    let queue_empty = state.queue.is_empty();
+    let form_id = state.manifest.cell.form_id;
+    if queue_empty {
+        pending.0 = None;
+        info!("swap colliders complete for {form_id:08x}");
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_prepared_colliders(
@@ -42,69 +160,18 @@ pub(crate) fn build_prepared_colliders(
         .iter()
         .filter(|placement| placement.initially_enabled)
     {
-        let Some(path) = placement.physics_asset_path.as_ref() else {
-            continue;
-        };
-        let Some(asset) = physics_assets.assets.get(path) else {
-            warn!("missing preloaded physics sidecar {path}");
-            continue;
-        };
-        let dynamic_entity = (placement.physics_classification
-            == PreparedPhysicsClassification::Dynamic)
-            .then(|| root_by_reference.get(&placement.reference_form_id).copied())
-            .flatten();
-        for body in &asset.bodies {
-            if !body_blocks_player(body) {
-                stats.filtered_shapes += body.shapes.len();
-                continue;
-            }
-            if body.layer > 43 && unknown_layers.insert(body.layer) {
-                warn!(
-                    "unknown Fallout Havok layer {} remains solid (reference {:08x})",
-                    body.layer, placement.reference_form_id
-                );
-            }
-            let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
-                let body_id = create_dynamic_body(world, placement, body);
-                collision_world.dynamic_bodies.insert(entity, body_id);
-                collision_world.dynamic_entities.insert(body_id, entity);
-                commands.entity(entity).insert(PhysicsCollider);
-                stats.dynamic_bodies += 1;
-                (body_id, true)
-            } else {
-                if !static_marker_spawned {
-                    commands.spawn(PhysicsCollider);
-                    static_marker_spawned = true;
-                }
-                (static_body, false)
-            };
-            stats.bodies += 1;
-            for shape in &body.shapes {
-                let result = create_prepared_shape(world, body_id, body, shape, placement, dynamic);
-                let Some((shape_id, triangles)) = result else {
-                    stats.filtered_shapes += 1;
-                    warn!(
-                        "BoxDDD rejected {} Havok shape for reference {:08x} body {}",
-                        shape.kind(),
-                        placement.reference_form_id,
-                        body.group_id
-                    );
-                    continue;
-                };
-                collision_world.surfaces.insert(
-                    shape_id,
-                    CollisionSurface {
-                        material: body.material,
-                    },
-                );
-                stats.shapes += 1;
-                stats.packed_triangles += triangles;
-                *stats.shape_kinds.entry(shape.kind()).or_default() += 1;
-            }
-            if dynamic {
-                normalize_dynamic_mass(world, body_id, body, placement.scale.abs());
-            }
-        }
+        build_colliders_for_placement(
+            world,
+            &mut commands,
+            placement,
+            &physics_assets,
+            static_body,
+            &root_by_reference,
+            &mut collision_world,
+            &mut stats,
+            &mut unknown_layers,
+            &mut static_marker_spawned,
+        );
     }
     stats.awake_dynamic_bodies = stats.dynamic_bodies;
     stats.sleeping_dynamic_bodies = 0;
@@ -128,6 +195,89 @@ pub(crate) fn build_prepared_colliders(
         warn!(
             "prepared physics produced no active player-blocking shapes; FPS will use forced no-clip"
         );
+    }
+}
+
+/// Builds every BoxDDD body/shape for one placement (shared by the startup
+/// `build_prepared_colliders` pass and issue #52's staggered
+/// `advance_pending_collider_builds`), attaching static shapes to the
+/// single shared `static_body` and dynamic ones to a per-entity body looked
+/// up in `root_by_reference`.
+#[allow(clippy::too_many_arguments)]
+fn build_colliders_for_placement(
+    world: &mut boxddd::World,
+    commands: &mut Commands,
+    placement: &crate::vsa::PreparedPlacement,
+    physics_assets: &PreparedPhysicsAssets,
+    static_body: BodyId,
+    root_by_reference: &HashMap<u32, Entity>,
+    collision_world: &mut PreparedCollisionWorld,
+    stats: &mut CollisionRuntimeStats,
+    unknown_layers: &mut HashSet<u8>,
+    static_marker_spawned: &mut bool,
+) {
+    let Some(path) = placement.physics_asset_path.as_ref() else {
+        return;
+    };
+    let Some(asset) = physics_assets.assets.get(path) else {
+        warn!("missing preloaded physics sidecar {path}");
+        return;
+    };
+    let dynamic_entity = (placement.physics_classification
+        == PreparedPhysicsClassification::Dynamic)
+        .then(|| root_by_reference.get(&placement.reference_form_id).copied())
+        .flatten();
+    for body in &asset.bodies {
+        if !body_blocks_player(body) {
+            stats.filtered_shapes += body.shapes.len();
+            continue;
+        }
+        if body.layer > 43 && unknown_layers.insert(body.layer) {
+            warn!(
+                "unknown Fallout Havok layer {} remains solid (reference {:08x})",
+                body.layer, placement.reference_form_id
+            );
+        }
+        let (body_id, dynamic) = if let Some(entity) = dynamic_entity {
+            let body_id = create_dynamic_body(world, placement, body);
+            collision_world.dynamic_bodies.insert(entity, body_id);
+            collision_world.dynamic_entities.insert(body_id, entity);
+            commands.entity(entity).insert(PhysicsCollider);
+            stats.dynamic_bodies += 1;
+            (body_id, true)
+        } else {
+            if !*static_marker_spawned {
+                commands.spawn(PhysicsCollider);
+                *static_marker_spawned = true;
+            }
+            (static_body, false)
+        };
+        stats.bodies += 1;
+        for shape in &body.shapes {
+            let result = create_prepared_shape(world, body_id, body, shape, placement, dynamic);
+            let Some((shape_id, triangles)) = result else {
+                stats.filtered_shapes += 1;
+                warn!(
+                    "BoxDDD rejected {} Havok shape for reference {:08x} body {}",
+                    shape.kind(),
+                    placement.reference_form_id,
+                    body.group_id
+                );
+                continue;
+            };
+            collision_world.surfaces.insert(
+                shape_id,
+                CollisionSurface {
+                    material: body.material,
+                },
+            );
+            stats.shapes += 1;
+            stats.packed_triangles += triangles;
+            *stats.shape_kinds.entry(shape.kind()).or_default() += 1;
+        }
+        if dynamic {
+            normalize_dynamic_mass(world, body_id, body, placement.scale.abs());
+        }
     }
 }
 

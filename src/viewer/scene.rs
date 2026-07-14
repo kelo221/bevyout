@@ -1,11 +1,13 @@
 //! Prepared-scene spawning and lighting presentation.
 
+use std::sync::Arc;
+
 use super::controls::{AmbientScale, FogStrength, LightingScale};
+use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::render::render_resource::TextureFormat;
-use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_prepared_scene(
@@ -17,6 +19,7 @@ pub(crate) fn spawn_prepared_scene(
     ambient_scale: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
     mut references: ResMut<crate::console::RefRegistry>,
+    mut resident_cells: ResMut<ResidentCells>,
 ) {
     let focus = scene_focus(&manifest);
     let initial_camera_position =
@@ -181,42 +184,6 @@ pub(crate) fn spawn_prepared_scene(
         PreparedPointShadowRuntime::default()
     };
     let mut attached_shadow_lights = 0_u32;
-    for light in &manifest.lights {
-        if !light.initially_enabled {
-            continue;
-        }
-        let mut light_entity = commands.spawn((
-            PointLight {
-                intensity: light.radius * light.radius * 2.0 * lighting.0,
-                range: light.radius,
-                color: Color::srgb(
-                    light.color_rgba[0],
-                    light.color_rgba[1],
-                    light.color_rgba[2],
-                ),
-                affects_lightmapped_mesh_diffuse: true,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(Vec3::from_array(light.translation)),
-        ));
-        if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
-            light_entity.insert(BakedPointLightShadow {
-                layer: shadow.layer,
-                baked_translation: Vec3::from_array(shadow.translation),
-                baked_range: shadow.range,
-                near_z: manifest
-                    .static_point_shadows
-                    .as_ref()
-                    .map_or(0.1, |artifact| artifact.near_z),
-            });
-            attached_shadow_lights += 1;
-        }
-    }
-    commands.insert_resource(PreparedPointShadowRuntime {
-        attached_lights: attached_shadow_lights,
-        ..prepared_shadow_runtime
-    });
     if let Some(bake) = &manifest.bake {
         commands.spawn(WorldAssetRoot(
             asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
@@ -251,40 +218,76 @@ pub(crate) fn spawn_prepared_scene(
                 cell_label(&manifest.cell)
             );
         }
-        spawn_interactive_placements(&mut commands, &asset_server, &manifest, &mut references);
-    } else {
-        for placement in &manifest.placements {
-            if !placement.initially_enabled {
-                continue;
-            }
-            let Some(path) = placement.asset_path.as_ref() else {
-                continue;
-            };
-            let entity = commands
-                .spawn((
-                    WorldAssetRoot(
-                        asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
-                    ),
-                    interaction::PlacementRoot::new(placement.clone()),
-                    Transform {
-                        translation: Vec3::from_array(placement.translation),
-                        rotation: Quat::from_xyzw(
-                            placement.rotation_xyzw[0],
-                            placement.rotation_xyzw[1],
-                            placement.rotation_xyzw[2],
-                            placement.rotation_xyzw[3],
-                        ),
-                        scale: Vec3::splat(placement.scale),
-                    },
-                ))
-                .id();
-            references.register(
-                entity,
-                placement.reference_form_id,
-                placement.editor_id.as_deref(),
-            );
+    }
+
+    // Issue #51: the startup cell's placements and per-cell point lights are
+    // parented under a per-cell root entity, visible and refs-registered,
+    // and recorded as an already-`Ready` resident so the predictive
+    // neighbor preloader's bookkeeping covers it too. The startup cell's
+    // lights are spawned here rather than through `spawn_cell_lights` so
+    // prepared static point shadows (#53) can attach their baked slots;
+    // preloaded neighbor cells keep plain lights — the baked shadow map is
+    // a single global resource holding only this manifest's artifact.
+    let root = commands
+        .spawn((Transform::default(), Visibility::Visible))
+        .id();
+    for light in &manifest.lights {
+        if !light.initially_enabled {
+            continue;
+        }
+        let mut light_entity = commands.spawn((
+            PointLight {
+                intensity: light.radius * light.radius * 2.0 * lighting.0,
+                range: light.radius,
+                color: Color::srgb(
+                    light.color_rgba[0],
+                    light.color_rgba[1],
+                    light.color_rgba[2],
+                ),
+                affects_lightmapped_mesh_diffuse: true,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::from_translation(Vec3::from_array(light.translation)),
+            ChildOf(root),
+        ));
+        if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
+            light_entity.insert(BakedPointLightShadow {
+                layer: shadow.layer,
+                baked_translation: Vec3::from_array(shadow.translation),
+                baked_range: shadow.range,
+                near_z: manifest
+                    .static_point_shadows
+                    .as_ref()
+                    .map_or(0.1, |artifact| artifact.near_z),
+            });
+            attached_shadow_lights += 1;
         }
     }
+    commands.insert_resource(PreparedPointShadowRuntime {
+        attached_lights: attached_shadow_lights,
+        ..prepared_shadow_runtime
+    });
+    let (content, _next) = spawn_cell_placements_chunk(
+        &mut commands,
+        &asset_server,
+        &manifest,
+        root,
+        Some(&mut references),
+        0,
+        usize::MAX,
+    );
+    resident_cells.0.insert(
+        manifest.cell.form_id,
+        ResidentCell {
+            root,
+            state: ResidentState::Ready,
+            manifest: Arc::new((*manifest).clone()),
+            scene_handles: content.scene_handles,
+            placement_count: content.placement_count,
+        },
+    );
+
     info!(
         "loaded {} with {} placements, {} diagnostics; camera focus {:?}",
         cell_label(&manifest.cell),
@@ -293,8 +296,125 @@ pub(crate) fn spawn_prepared_scene(
         focus,
     );
     info!(
-        "controls: V toggles FPS player/free camera, Tab opens Pip-Boy, Esc pauses and releases cursor, left click captures cursor"
+        "controls: V toggles FPS player/free camera, Tab opens Pip-Boy, ` (backquote) opens the console, Esc pauses and releases cursor, left click captures cursor"
     );
+}
+
+/// Content spawned for one cell by `spawn_cell_content`: the scene handles
+/// to watch for load completion, and how many placements were spawned.
+///
+/// `Handle<WorldAsset>`, not `Handle<Scene>` -- `bevy_gltf`'s scene loader
+/// targets `bevy_world_serialization`'s `WorldAsset` in this Bevy version
+/// (`Scene` itself is now a trait), matching `WorldAssetRoot`'s own
+/// `Handle<WorldAsset>` field.
+pub(crate) struct SpawnedCellContent {
+    pub(crate) scene_handles: Vec<Handle<WorldAsset>>,
+    pub(crate) placement_count: usize,
+}
+
+/// Spawns a cell's initially-enabled point lights under `root` (issue #51's
+/// per-cell root). Used for preloaded neighbor cells only — the startup
+/// cell's lights are spawned inline in `spawn_prepared_scene` so prepared
+/// static point shadows (#53) can attach; the global baked shadow map only
+/// covers the startup manifest.
+pub(crate) fn spawn_cell_lights(
+    commands: &mut Commands,
+    manifest: &PreparedSceneManifest,
+    root: Entity,
+    lighting_scale: f32,
+) {
+    for light in &manifest.lights {
+        if !light.initially_enabled {
+            continue;
+        }
+        commands.spawn((
+            PointLight {
+                intensity: light.radius * light.radius * 2.0 * lighting_scale,
+                range: light.radius,
+                color: Color::srgb(
+                    light.color_rgba[0],
+                    light.color_rgba[1],
+                    light.color_rgba[2],
+                ),
+                affects_lightmapped_mesh_diffuse: true,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::from_translation(Vec3::from_array(light.translation)),
+            ChildOf(root),
+        ));
+    }
+}
+
+/// Spawns up to `max_entries` raw `manifest.placements` entries starting at
+/// index `start`, returning what was spawned and the next raw index (equal
+/// to `manifest.placements.len()` once the cell is fully spawned). The
+/// preloader drains large cells through this a bounded chunk per frame so a
+/// background preload never spawns a thousand entities in one frame spike;
+/// callers wanting everything at once pass `usize::MAX`.
+pub(crate) fn spawn_cell_placements_chunk(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    manifest: &PreparedSceneManifest,
+    root: Entity,
+    mut references: Option<&mut crate::console::RefRegistry>,
+    start: usize,
+    max_entries: usize,
+) -> (SpawnedCellContent, usize) {
+    // Baked cells still spawn placements individually (for interaction),
+    // just excluding whichever placements the bake already folded into the
+    // combined static mesh (`is_bake_static`); non-baked cells spawn every
+    // enabled placement.
+    let exclude_bake_static = manifest.bake.is_some();
+    let mut scene_handles = Vec::new();
+    let mut placement_count = 0;
+    let end = start
+        .saturating_add(max_entries)
+        .min(manifest.placements.len());
+    for placement in manifest.placements[start..end]
+        .iter()
+        .filter(|placement| placement.initially_enabled)
+        .filter(|placement| !exclude_bake_static || !is_bake_static(placement))
+    {
+        let Some(path) = placement.asset_path.as_ref() else {
+            continue;
+        };
+        let handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+        let entity = commands
+            .spawn((
+                WorldAssetRoot(handle.clone()),
+                interaction::PlacementRoot::new(placement.clone()),
+                Transform {
+                    translation: Vec3::from_array(placement.translation),
+                    rotation: Quat::from_xyzw(
+                        placement.rotation_xyzw[0],
+                        placement.rotation_xyzw[1],
+                        placement.rotation_xyzw[2],
+                        placement.rotation_xyzw[3],
+                    ),
+                    scale: Vec3::splat(placement.scale),
+                },
+                ChildOf(root),
+            ))
+            .id();
+        if let Some(references) = references.as_deref_mut() {
+            references.register(
+                entity,
+                placement.reference_form_id,
+                placement.editor_id.as_deref(),
+            );
+        }
+        scene_handles.push(handle);
+        placement_count += 1;
+    }
+
+    (
+        SpawnedCellContent {
+            scene_handles,
+            placement_count,
+        },
+        end,
+    )
 }
 
 pub(crate) fn effective_lighting(cell: &CellInfo) -> PreparedCellLighting {
@@ -374,6 +494,66 @@ pub(crate) fn apply_fog_strength(
     }
 }
 
+/// Issue #52: re-derives ambient light, camera fog, and the directional
+/// light from whatever `PreparedSceneManifest` is currently the active
+/// resource (already repointed to the destination cell by the caller),
+/// applying them directly to the existing camera/light entities and the
+/// `GlobalAmbientLight` resource rather than spawning new ones.
+/// `apply_fog_strength` only reacts to `FogStrength` changing, so a cell
+/// swap needs its own explicit refresh to pick up the new cell's lighting.
+/// Camera post-processing (color grading/auto-exposure/bloom, which follow
+/// the cell's `ImageSpace`) are deliberately left as-is; see this issue's
+/// final report.
+pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
+    let cell = world.resource::<PreparedSceneManifest>().cell.clone();
+    let lighting_scale = world.resource::<LightingScale>().0;
+    let ambient_scale = world.resource::<AmbientScale>().0;
+    let fog_strength = world.resource::<FogStrength>().0;
+    let cell_lighting = effective_lighting(&cell);
+
+    world.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(
+            cell_lighting.ambient_rgba[0],
+            cell_lighting.ambient_rgba[1],
+            cell_lighting.ambient_rgba[2],
+        ),
+        brightness: 25.0 * lighting_scale * ambient_scale,
+        affects_lightmapped_meshes: true,
+    });
+
+    if let Some(fog) = distance_fog(&cell_lighting, fog_strength) {
+        let mut cameras = world.query_filtered::<&mut DistanceFog, With<Camera3d>>();
+        for mut camera_fog in cameras.iter_mut(world) {
+            *camera_fog = fog.clone();
+        }
+    }
+
+    let directional_luminance = cell_lighting.directional_rgba[0]
+        + cell_lighting.directional_rgba[1]
+        + cell_lighting.directional_rgba[2];
+    let disabled = directional_luminance <= f32::EPSILON
+        || !cell_lighting.directional_rgba[..3]
+            .iter()
+            .all(|channel| channel.is_finite());
+    let base_illuminance = CELL_DIRECTIONAL_ILLUMINANCE;
+    let mut directional_lights = world.query::<(
+        &mut DirectionalLight,
+        &mut CellDirectionalLight,
+        &mut Transform,
+    )>();
+    for (mut light, mut cell_light, mut transform) in directional_lights.iter_mut(world) {
+        light.color = Color::srgb(
+            cell_lighting.directional_rgba[0],
+            cell_lighting.directional_rgba[1],
+            cell_lighting.directional_rgba[2],
+        );
+        light.illuminance =
+            scaled_directional_illuminance(base_illuminance, lighting_scale, disabled);
+        cell_light.base_illuminance = base_illuminance;
+        transform.rotation = Quat::from_array(cell_lighting.directional_rotation_xyzw());
+    }
+}
+
 pub(crate) fn scaled_directional_illuminance(
     base_illuminance: f32,
     lighting_scale: f32,
@@ -389,46 +569,6 @@ pub(crate) fn scaled_directional_illuminance(
 #[derive(Component)]
 pub(crate) struct CellDirectionalLight {
     pub(crate) base_illuminance: f32,
-}
-
-pub(crate) fn spawn_interactive_placements(
-    commands: &mut Commands,
-    asset_server: &AssetServer,
-    manifest: &PreparedSceneManifest,
-    references: &mut crate::console::RefRegistry,
-) {
-    for placement in manifest
-        .placements
-        .iter()
-        .filter(|placement| placement.initially_enabled && !is_bake_static(placement))
-    {
-        let Some(path) = placement.asset_path.as_ref() else {
-            continue;
-        };
-        let entity = commands
-            .spawn((
-                WorldAssetRoot(
-                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone())),
-                ),
-                interaction::PlacementRoot::new(placement.clone()),
-                Transform {
-                    translation: Vec3::from_array(placement.translation),
-                    rotation: Quat::from_xyzw(
-                        placement.rotation_xyzw[0],
-                        placement.rotation_xyzw[1],
-                        placement.rotation_xyzw[2],
-                        placement.rotation_xyzw[3],
-                    ),
-                    scale: Vec3::splat(placement.scale),
-                },
-            ))
-            .id();
-        references.register(
-            entity,
-            placement.reference_form_id,
-            placement.editor_id.as_deref(),
-        );
-    }
 }
 
 pub(crate) fn camera_post_processing(
