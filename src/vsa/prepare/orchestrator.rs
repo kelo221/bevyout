@@ -1,11 +1,130 @@
 use super::*;
+use crate::vsa::catalog::CellCatalog;
 
+/// Dispatches `prepare`: a single legacy selector goes straight through the
+/// unchanged single-cell path below; `--all`/`--all-interiors`/`--worldspace`,
+/// `--list-only`, or more than one positional selector build a lightweight
+/// cell catalogue and resolve the batch through `resolve_selection` (#46).
 pub fn prepare(args: PrepareArgs) -> Result<()> {
-    let selector_input = args
-        .selector
+    let mut explicit = args.selectors.clone();
+    explicit.extend(args.cell.clone());
+
+    let is_batch = args.list_only
+        || args.all
+        || args.all_interiors
+        || args.worldspace.is_some()
+        || explicit.len() > 1;
+
+    if !is_batch {
+        let selector_input = explicit
+            .into_iter()
+            .next()
+            .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--worldspace")?;
+        return prepare_one(args, selector_input);
+    }
+
+    prepare_batch(args, explicit)
+}
+
+fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
+    let spec = SelectionSpec {
+        all: args.all,
+        all_interiors: args.all_interiors,
+        worldspace: args.worldspace.clone(),
+        explicit,
+    };
+
+    let game_root = args
+        .game_root
         .clone()
-        .or(args.cell.clone())
-        .context("provide a GECK EditorID/FormID selector or legacy --cell")?;
+        .context("Fallout 3 is not configured; pass --game-root or create .bevyout/config.toml")?;
+    let root = fs::canonicalize(&game_root).context("game root does not exist")?;
+    let plugin = args
+        .plugin
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("Fallout3.esm"));
+    let plugin_path = if plugin.is_absolute() {
+        plugin
+    } else {
+        root.join("Data").join(&plugin)
+    };
+    let plugin_path = fs::canonicalize(&plugin_path).context("plugin does not exist")?;
+    let data_root = root.join("Data");
+
+    let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
+    let fingerprint = content_set_fingerprint(&loaded_plugins);
+    let sources = loaded_plugins
+        .iter()
+        .map(|plugin| PluginSource {
+            name: &plugin.name,
+            bytes: &plugin.bytes,
+        })
+        .collect::<Vec<_>>();
+    let catalog = CellCatalog::build(&sources, fingerprint)?;
+    let cells: Vec<CellSummary> = catalog
+        .entries
+        .iter()
+        .map(|entry| CellSummary {
+            form_id: entry.form_id,
+            editor_id: entry.editor_id.clone(),
+            name: entry.name.clone(),
+            interior: entry.interior,
+            worldspace_form_id: None, // wired after #45 merge
+        })
+        .collect();
+    // No worldspace table exists yet; wired after #45 merge lands WRLD
+    // parsing. Until then `--worldspace` reports "no worldspaces available".
+    let worldspace_names: Vec<(u32, String)> = Vec::new();
+
+    let resolved = resolve_selection(&cells, &worldspace_names, &spec)?;
+
+    if args.list_only {
+        let editor_ids: HashMap<u32, Option<String>> = cells
+            .into_iter()
+            .map(|cell| (cell.form_id, cell.editor_id))
+            .collect();
+        for form_id in &resolved {
+            let editor_id = editor_ids
+                .get(form_id)
+                .and_then(|editor_id| editor_id.clone())
+                .unwrap_or_default();
+            println!("{form_id:08x}\t{editor_id}");
+        }
+        return Ok(());
+    }
+
+    let total = resolved.len();
+    let mut failed = Vec::new();
+    for form_id in resolved {
+        let selector_input = format!("{form_id:08x}");
+        let mut cell_args = args.clone();
+        cell_args.selectors = vec![selector_input.clone()];
+        cell_args.cell = None;
+        cell_args.all = false;
+        cell_args.all_interiors = false;
+        cell_args.worldspace = None;
+        cell_args.list_only = false;
+        if let Err(error) = prepare_one(cell_args, selector_input.clone()) {
+            eprintln!("cell {selector_input} failed: {error:#}");
+            failed.push(selector_input);
+        }
+    }
+
+    if failed.is_empty() {
+        println!("prepared {total} cells, 0 failed");
+    } else {
+        println!(
+            "prepared {} cells, {} failed: {}",
+            total - failed.len(),
+            failed.len(),
+            failed.join(", ")
+        );
+        bail!("{} of {total} cell(s) failed to prepare", failed.len());
+    }
+    Ok(())
+}
+
+fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
     let selector = parse_cell_selector(&selector_input)?;
     let game_root = args
         .game_root

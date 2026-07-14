@@ -128,6 +128,15 @@ continue to use their hexadecimal FormID directory internally; for example,
 `view --manifest`, and `bake --manifest` forms remain available for scripts and
 low-level debugging.
 
+`prepare` also accepts multiple selectors and batch flags: `--all` (every
+cell), `--all-interiors`, and `--worldspace <EditorID|FormID>` (combinable
+with `--all-interiors` and explicit selectors, but not with `--all`). Add
+`--list-only` to print the resolved `formid<TAB>editor_id` set, sorted and
+deduplicated by FormID, and exit before any extraction or Blender work --
+useful for checking a batch selection cheaply. Without `--list-only`, a
+multi-cell selection is prepared sequentially; failures are collected and
+reported in a summary at the end instead of aborting the run.
+
 The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled.

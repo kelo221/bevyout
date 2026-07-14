@@ -72,10 +72,18 @@ mod assets;
 #[allow(dead_code, unused_imports)]
 mod cell_map;
 
+// `vsa::prepare::selectors` depends only on `std`/`anyhow` by design (see its
+// own module doc comment), so it is included verbatim with no stand-ins
+// needed, same as `paths` above.
+#[path = "../src/vsa/prepare/selectors.rs"]
+#[allow(dead_code, unused_imports)]
+mod selectors;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
+use selectors::{CellSummary, SelectionSpec, resolve_selection};
 
 #[derive(Debug, Default, cucumber::World)]
 struct BevyoutWorld {
@@ -105,6 +113,11 @@ struct BevyoutWorld {
     cell_map: Option<cell_map::CellMap>,
     cell_map_ron_a: Option<String>,
     cell_map_ron_b: Option<String>,
+
+    // -- prepare_selectors.feature --
+    cells: Vec<CellSummary>,
+    worldspace_names: Vec<(u32, String)>,
+    selection_result: Option<Result<Vec<u32>, String>>,
 }
 
 fn find_placement<'a>(
@@ -566,6 +579,119 @@ async fn then_unresolved_door_count(world: &mut BevyoutWorld, count: u32) {
 #[then("both RON outputs are byte-identical")]
 async fn then_ron_outputs_are_byte_identical(world: &mut BevyoutWorld) {
     assert_eq!(world.cell_map_ron_a, world.cell_map_ron_b);
+}
+
+// ---------------------------------------------------------------------
+// prepare_selectors.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an interior cell$"#)]
+async fn given_selector_interior_cell(world: &mut BevyoutWorld, hex: String, editor_id: String) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: true,
+        worldspace_form_id: None,
+    });
+}
+
+#[given(regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell$"#)]
+async fn given_selector_exterior_cell(world: &mut BevyoutWorld, hex: String, editor_id: String) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: None,
+    });
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an exterior cell in worldspace 0x([0-9a-fA-F]+)$"#
+)]
+async fn given_exterior_cell_in_worldspace(
+    world: &mut BevyoutWorld,
+    hex: String,
+    editor_id: String,
+    worldspace_hex: String,
+) {
+    world.cells.push(CellSummary {
+        form_id: parse_hex(&hex),
+        editor_id: Some(editor_id),
+        name: None,
+        interior: false,
+        worldspace_form_id: Some(parse_hex(&worldspace_hex)),
+    });
+}
+
+#[given(regex = r#"^worldspace 0x([0-9a-fA-F]+) is named "([^"]*)"$"#)]
+async fn given_worldspace_named(world: &mut BevyoutWorld, hex: String, name: String) {
+    world.worldspace_names.push((parse_hex(&hex), name));
+}
+
+#[when("cells are selected with --all-interiors")]
+async fn when_selected_all_interiors(world: &mut BevyoutWorld) {
+    let spec = SelectionSpec {
+        all_interiors: true,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with selectors "([^"]*)"$"#)]
+async fn when_selected_explicit(world: &mut BevyoutWorld, list: String) {
+    let explicit = list
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .collect();
+    let spec = SelectionSpec {
+        explicit,
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[when(regex = r#"^cells are selected with worldspace "([^"]*)"$"#)]
+async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
+    let spec = SelectionSpec {
+        worldspace: Some(name),
+        ..Default::default()
+    };
+    world.selection_result = Some(
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[then(regex = r#"^the resolved cell selection is "([^"]*)"$"#)]
+async fn then_resolved_selection_is(world: &mut BevyoutWorld, list: String) {
+    let expected: Vec<u32> = list.split(',').map(|entry| parse_hex(entry.trim())).collect();
+    let resolved = world
+        .selection_result
+        .take()
+        .expect("a selection was not resolved")
+        .expect("selection resolution failed");
+    assert_eq!(resolved, expected);
+}
+
+#[then(regex = r#"^the cell selection fails naming worldspace "([^"]*)"$"#)]
+async fn then_selection_fails_naming_worldspace(world: &mut BevyoutWorld, name: String) {
+    let error = world
+        .selection_result
+        .take()
+        .expect("a selection was not attempted")
+        .expect_err("expected selection resolution to fail");
+    assert!(
+        error.contains(&name),
+        "error {error:?} does not mention worldspace {name:?}"
+    );
 }
 
 fn main() {
