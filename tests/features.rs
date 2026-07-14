@@ -105,8 +105,19 @@ mod prepare {
     #[path = "../src/vsa/prepare/jobs.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod jobs;
+
+    // `vsa::prepare::fingerprints` (issue #49) reuses `vsa::assets` (for
+    // `NIF_CONVERTER_REVISION`) via a relative `super::super::assets`
+    // import, so it is nested here too -- same pattern as `selectors`/
+    // `batch_cache` above -- to land that path on the `mod assets` include
+    // near the top of this file. `jobs` depends on it (`use
+    // super::fingerprints::...`), so both must live in this same block.
+    #[path = "../src/vsa/prepare/fingerprints.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod fingerprints;
 }
 use prepare::batch_cache;
+use prepare::fingerprints;
 use prepare::jobs;
 use prepare::selectors;
 
@@ -179,6 +190,11 @@ struct BevyoutWorld {
     swap_placements: Vec<swap_policy::PlacementRef>,
     swap_deltas: std::collections::HashMap<u32, swap_policy::ReferenceDelta>,
     swap_applications: Vec<swap_policy::PlacementApplication>,
+
+    // -- fingerprints.feature (issue #49) --
+    fingerprint_current: Option<fingerprints::CellFingerprints>,
+    fingerprint_stale_components: Option<Vec<fingerprints::FingerprintComponent>>,
+    fingerprint_resume_result: Option<(Vec<u32>, usize, fingerprints::StaleCells)>,
 }
 
 fn find_placement<'a>(
@@ -1325,6 +1341,144 @@ async fn then_swap_placement_has_translation(
         .transform
         .expect("expected a transform delta on this application");
     assert_eq!(transform.translation, [x, y, z]);
+}
+
+// ---------------------------------------------------------------------
+// fingerprints.feature (issue #49) -- appended section, do not interleave
+// with steps above; new steps for this issue belong below this marker.
+// ---------------------------------------------------------------------
+
+fn parse_fingerprints(
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) -> fingerprints::CellFingerprints {
+    fingerprints::CellFingerprints {
+        plugin_content_set: plugin,
+        converter,
+        physics,
+        prepare_pipeline,
+    }
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) has recorded fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn given_cell_recorded_fingerprints(
+    world: &mut BevyoutWorld,
+    hex: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    world
+        .job_manifest
+        .as_mut()
+        .expect("job manifest not created yet")
+        .record_fingerprints(
+            parse_hex(&hex),
+            parse_fingerprints(plugin, converter, physics, prepare_pipeline),
+        );
+}
+
+#[when(
+    regex = r#"^cell 0x([0-9a-fA-F]+) is checked against current fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn when_cell_checked_against_current(
+    world: &mut BevyoutWorld,
+    hex: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    let current = parse_fingerprints(plugin, converter, physics, prepare_pipeline);
+    let recorded = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet")
+        .fingerprints_for(parse_hex(&hex))
+        .cloned();
+    world.fingerprint_stale_components =
+        Some(fingerprints::stale_components(recorded.as_ref(), &current));
+    world.fingerprint_current = Some(current);
+}
+
+#[then("the cell is valid")]
+async fn then_cell_is_valid(world: &mut BevyoutWorld) {
+    let stale = world
+        .fingerprint_stale_components
+        .as_ref()
+        .expect("cell was not checked yet");
+    assert!(
+        stale.is_empty(),
+        "expected no stale components, got {stale:?}"
+    );
+}
+
+#[then(regex = r#"^the cell is stale in component "([^"]*)"$"#)]
+async fn then_cell_is_stale_in_component(world: &mut BevyoutWorld, component: String) {
+    let stale = world
+        .fingerprint_stale_components
+        .as_ref()
+        .expect("cell was not checked yet");
+    let labels: Vec<&str> = stale.iter().map(|c| c.label()).collect();
+    assert!(
+        labels.contains(&component.as_str()),
+        "expected {component:?} among stale components, got {labels:?}"
+    );
+}
+
+#[when(
+    regex = r#"^cells "([^"]*)" are resumed without force against current fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn when_cells_resumed_checked(
+    world: &mut BevyoutWorld,
+    list: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    let current = parse_fingerprints(plugin, converter, physics, prepare_pipeline);
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let selection = parse_hex_list(&list);
+    world.fingerprint_resume_result = Some(jobs::filter_resume_checked(
+        manifest, &selection, false, &current,
+    ));
+}
+
+#[then(regex = r#"^the checked cells to run are "([^"]*)"$"#)]
+async fn then_checked_cells_to_run_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let (to_run, _, _) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(to_run, &expected);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were checked as skipped$")]
+async fn then_checked_cells_skipped(world: &mut BevyoutWorld, count: usize) {
+    let (_, skipped, _) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(*skipped, count);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were stale$")]
+async fn then_checked_cells_stale(world: &mut BevyoutWorld, count: usize) {
+    let (_, _, stale) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(stale.len(), count);
 }
 
 fn main() {

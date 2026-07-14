@@ -175,6 +175,15 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
+    // F49.3: report-only fingerprint check -- lists every selected,
+    // previously-`Done` cell's fingerprint status against the current
+    // toolchain and exits nonzero on any staleness. Performs no
+    // preparation: it returns before the cell map is written or the job
+    // manifest's `pending` entries and on-disk copy are touched.
+    if args.check_fingerprints {
+        return report_fingerprints(&manifest, &resolved, &fingerprint);
+    }
+
     // F47.4: write the deterministic cell map into the cache dir root,
     // reusing the same `ParsedContentSet` -> `CellMap` builder `cells --map`
     // uses, from the content set this run already parsed above.
@@ -194,8 +203,20 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // selected". `--force` reruns everything selected regardless of a
     // recorded `done` status; otherwise cells already `done` under this
     // fingerprint are skipped and reported once.
+    //
+    // F49.2: `filter_resume_checked` additionally validates each `Done`
+    // cell's recorded plugin/converter/physics/prepare-pipeline
+    // fingerprints against `current_fingerprints` -- fresh runs, resumes,
+    // and `--retry-failed` all go through this same call, so any stale
+    // component re-prepares exactly that cell instead of being skipped.
     manifest.ensure_pending(&resolved);
-    let (to_run, skipped) = filter_resume(&manifest, &resolved, args.force);
+    let current_fingerprints = CellFingerprints::current(fingerprint.clone());
+    let (to_run, skipped, stale_cells) =
+        filter_resume_checked(&manifest, &resolved, args.force, &current_fingerprints);
+    for (form_id, components) in &stale_cells {
+        println!("{}", stale_cell_line(*form_id, components));
+    }
+    println!("{}", summary_line(skipped, stale_cells.len()));
     if skipped > 0 {
         println!("resuming: skipping {skipped} completed cell(s)");
     }
@@ -245,6 +266,7 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
                     cell_args.worldspace = None;
                     cell_args.list_only = false;
                     cell_args.retry_failed = false;
+                    cell_args.check_fingerprints = false;
 
                     let mut output = Vec::new();
                     let result =
@@ -267,6 +289,13 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
 
                     {
                         let mut manifest = manifest_mutex.lock().unwrap();
+                        // F49.1: a cell that finished `Done` records the
+                        // fingerprints it was prepared under, so a later
+                        // run can validate them via `filter_resume_checked`
+                        // instead of trusting `Done` alone.
+                        if let JobStatus::Done = status {
+                            manifest.record_fingerprints(form_id, current_fingerprints.clone());
+                        }
                         manifest.set_status(form_id, status);
                         // F48.4: rewrite the manifest through after EVERY
                         // cell completion (atomically, see
@@ -321,6 +350,50 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
             failed_entries.len(),
             to_run.len()
         );
+    }
+    Ok(())
+}
+
+/// `prepare --check-fingerprints` (F49.3): report-only. Lists every
+/// selected cell that has previously completed (`JobStatus::Done`) with its
+/// fingerprint status (`valid` or `stale (<components>)`) against the
+/// current toolchain, then the same deterministic summary line F49.2 prints
+/// during a real batch run. Performs no I/O beyond the read-only manifest
+/// already loaded by the caller -- no cell map write, no `ensure_pending`,
+/// no `BatchSession`, no Blender. Cells never completed are not part of
+/// this report (there is nothing recorded to validate); returns an error
+/// (nonzero process exit) when any reported cell is stale.
+fn report_fingerprints(
+    manifest: &JobManifest,
+    resolved: &[u32],
+    plugin_content_set_fingerprint: &str,
+) -> Result<()> {
+    let current = CellFingerprints::current(plugin_content_set_fingerprint);
+    let mut valid_count = 0usize;
+    let mut stale_count = 0usize;
+    for &form_id in resolved {
+        match manifest.status(form_id) {
+            Some(JobStatus::Done) => {
+                let components = stale_components(manifest.fingerprints_for(form_id), &current);
+                if components.is_empty() {
+                    println!("fingerprint: cell {form_id:08x} valid");
+                    valid_count += 1;
+                } else {
+                    println!("{}", stale_cell_line(form_id, &components));
+                    stale_count += 1;
+                }
+            }
+            // Never-completed cells have nothing recorded to validate;
+            // report their status without counting them valid or stale so
+            // the summary line matches F49.2's semantics exactly.
+            Some(JobStatus::Pending) => println!("fingerprint: cell {form_id:08x} pending"),
+            Some(JobStatus::Failed(_)) => println!("fingerprint: cell {form_id:08x} failed"),
+            None => println!("fingerprint: cell {form_id:08x} not prepared"),
+        }
+    }
+    println!("{}", summary_line(valid_count, stale_count));
+    if stale_count > 0 {
+        bail!("{stale_count} cell(s) have stale fingerprints");
     }
     Ok(())
 }
