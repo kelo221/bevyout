@@ -22,11 +22,12 @@ use super::physics::read_physics_asset;
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-v7";
+pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-v8";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootTransformPolicy {
     PreserveReviewRequired,
+    PreserveVerified,
     DiscardVerified,
 }
 
@@ -34,6 +35,7 @@ impl RootTransformPolicy {
     pub(crate) fn tag(self) -> &'static str {
         match self {
             Self::PreserveReviewRequired => "preserve_review_required",
+            Self::PreserveVerified => "preserve_verified",
             Self::DiscardVerified => "discard_verified",
         }
     }
@@ -53,8 +55,8 @@ pub(crate) fn normalized_model_policy_path(model: &str) -> String {
 
 pub(crate) fn root_transform_policy(model: &str) -> RootTransformPolicy {
     match normalized_model_policy_path(model).as_str() {
-        "dungeons/vault/room/vrmwallscreen01.nif"
-        | "dungeons/vault/room/vdnwallendcoroutr01.nif" => RootTransformPolicy::DiscardVerified,
+        "dungeons/vault/room/vrmwallscreen01.nif" => RootTransformPolicy::DiscardVerified,
+        "dungeons/vault/room/vdnwallendcoroutr01.nif" => RootTransformPolicy::PreserveVerified,
         _ => RootTransformPolicy::PreserveReviewRequired,
     }
 }

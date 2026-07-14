@@ -33,6 +33,39 @@ pub(crate) fn audit_prepared_visuals(
                 asset.model_path
             );
         }
+        let source_meshes = audit.source_render_meshes.with_context(|| {
+            format!("converted GLB {} has no source mesh count", path.display())
+        })?;
+        let source_vertices = audit.source_render_vertices.with_context(|| {
+            format!(
+                "converted GLB {} has no source vertex count",
+                path.display()
+            )
+        })?;
+        let source_triangles = audit.source_render_triangles.with_context(|| {
+            format!(
+                "converted GLB {} has no source triangle count",
+                path.display()
+            )
+        })?;
+        // glTF may split or deduplicate vertices at attribute seams, so vertex
+        // totals are diagnostic only. Triangle totals remain stable across the
+        // NIF -> Blender -> glTF conversion and detect dropped geometry.
+        if audit.renderable_triangles != source_triangles {
+            issues.push(issue_for_asset(
+                "visual_topology_mismatch",
+                "error",
+                asset,
+                placements,
+                format!(
+                    "{} retained {source_meshes} source mesh(es), {source_vertices} vertices, and {source_triangles} triangles but exported {} primitive(s), {} vertices, and {} triangles",
+                    asset.model_path,
+                    audit.renderable_primitives,
+                    audit.renderable_vertices,
+                    audit.renderable_triangles,
+                ),
+            ));
+        }
 
         if audit.renderable_primitives == 0 {
             issues.push(issue_for_asset(

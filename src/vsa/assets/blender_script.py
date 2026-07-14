@@ -341,7 +341,7 @@ def apply_record_zero_transform_policy(
     verified discard. Bip01 remains protected regardless of the supplied policy.
     """
     record_zero_name = str(record_zero_name)
-    if policy not in {'preserve_review_required', 'discard_verified'}:
+    if policy not in {'preserve_review_required', 'preserve_verified', 'discard_verified'}:
         raise RuntimeError('unknown root transform policy: ' + str(policy))
     changed = []
     candidates = []
@@ -433,14 +433,15 @@ def run_root_transform_self_test():
     changed = apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         'dungeons/vault/room/vdnwallendcoroutr01.nif',
-        'discard_verified',
+        'preserve_verified',
         'FixtureRoot',
         True,
     )
     bpy.context.view_layer.update()
-    assert changed == ['FixtureRoot']
-    assert matrix_identity_error(root.matrix_local) < 1e-6
+    assert changed == []
+    assert matrix_identity_error(root.matrix_local) > 0.1
     assert root['bevyout_source_model'] == 'dungeons/vault/room/vdnwallendcoroutr01.nif'
+    assert root['bevyout_root_transform_policy'] == 'preserve_verified'
     assert apply_record_zero_transform_policy(
         list(bpy.context.scene.objects),
         'architecture/geometryroot.nif',
@@ -580,6 +581,32 @@ for job in jobs:
         # The card is only an authored halo hint. The physical bulb below is
         # rendered with its own diffuse texture and emission instead.
         bpy.data.objects.remove(glow_card, do_unlink=True)
+    render_meshes = [obj for obj in bpy.context.scene.objects
+                     if obj.type == 'MESH' and not obj.get('bevyout_collision', False)]
+    retained_names = {
+        (obj.niftools.longname if obj.niftools.longname else obj.name)
+        for obj in render_meshes
+    }
+    source_render_geometries = [
+        block for block in NifData.data.blocks
+        if str(getattr(block, 'name', '')) in retained_names
+        and getattr(block, 'data', None) is not None
+        and callable(getattr(block, 'get_triangles', None))
+    ]
+    metadata_carrier = next(
+        (obj for obj in bpy.context.scene.objects
+         if obj.get('bevyout_source_model') == job.get('model', '')),
+        None,
+    )
+    if metadata_carrier is None:
+        raise RuntimeError('converted scene lost source metadata carrier: ' + nif_path)
+    metadata_carrier['bevyout_source_render_meshes'] = len(source_render_geometries)
+    metadata_carrier['bevyout_source_render_vertices'] = sum(
+        int(geometry.data.num_vertices) for geometry in source_render_geometries
+    )
+    metadata_carrier['bevyout_source_render_triangles'] = sum(
+        len(geometry.get_triangles()) for geometry in source_render_geometries
+    )
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:

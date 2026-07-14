@@ -96,15 +96,14 @@ fn blender_job_json_carries_quick_ao_profile() {
 
 #[test]
 fn root_transform_policy_is_normalized_and_limited_to_verified_models() {
-    for model in [
-        r"MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF",
-        "/dungeons/vault/room/vdnwallendcoroutr01.nif",
-    ] {
-        assert_eq!(
-            root_transform_policy(model),
-            RootTransformPolicy::DiscardVerified
-        );
-    }
+    assert_eq!(
+        root_transform_policy(r"MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF"),
+        RootTransformPolicy::DiscardVerified
+    );
+    assert_eq!(
+        root_transform_policy("/dungeons/vault/room/vdnwallendcoroutr01.nif"),
+        RootTransformPolicy::PreserveVerified
+    );
     assert_eq!(
         root_transform_policy("dungeons/rivetcity/roomsmall/rcsmdoor01.nif"),
         RootTransformPolicy::PreserveReviewRequired
@@ -191,13 +190,16 @@ fn glb_with_json(json: &str) -> Vec<u8> {
 #[test]
 fn visual_audit_counts_non_collision_primitives_and_reads_root_metadata() {
     let json = r#"{
-        "accessors":[{"count":24}],
-        "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+        "accessors":[{"count":24},{"count":24}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
         "nodes":[
             {"name":"root","extras":{
                 "bevyout_source_model":"architecture/test.nif",
                 "bevyout_root_transform_policy":"preserve_review_required",
-                "bevyout_record_zero_non_identity":true
+                "bevyout_record_zero_non_identity":true,
+                "bevyout_source_render_meshes":1,
+                "bevyout_source_render_vertices":16,
+                "bevyout_source_render_triangles":8
             }},
             {"name":"visual","mesh":0}
         ]
@@ -207,6 +209,11 @@ fn visual_audit_counts_non_collision_primitives_and_reads_root_metadata() {
     fs::write(&path, glb_with_json(json)).unwrap();
     let audit = audit_glb_visuals(&path).unwrap();
     assert_eq!(audit.renderable_primitives, 1);
+    assert_eq!(audit.renderable_vertices, 24);
+    assert_eq!(audit.renderable_triangles, 8);
+    assert_eq!(audit.source_render_meshes, Some(1));
+    assert_eq!(audit.source_render_vertices, Some(16));
+    assert_eq!(audit.source_render_triangles, Some(8));
     assert_eq!(audit.source_model.as_deref(), Some("architecture/test.nif"));
     assert_eq!(
         audit.root_transform_policy.as_deref(),

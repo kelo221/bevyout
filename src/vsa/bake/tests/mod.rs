@@ -16,7 +16,7 @@ fn bake_job_emits_resolved_cell_directional_light() {
 }
 
 #[test]
-fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
+fn only_static_semantics_are_batchable() {
     fn placement(semantic: PreparedSemantic) -> PreparedPlacement {
         PreparedPlacement {
             reference_form_id: 1,
@@ -56,21 +56,6 @@ fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
     dynamic_placement.physics_classification = PreparedPhysicsClassification::Dynamic;
     assert!(!is_bake_static(&dynamic_placement));
     assert!(!is_batchable_static(&dynamic_placement));
-
-    for semantic in [
-        PreparedSemantic::Furniture,
-        PreparedSemantic::Npc(super::super::manifest::PreparedActor {
-            base_template_form_id: None,
-        }),
-        PreparedSemantic::Creature(super::super::manifest::PreparedActor {
-            base_template_form_id: None,
-        }),
-        PreparedSemantic::Unsupported,
-    ] {
-        let placement = placement(semantic);
-        assert!(is_bake_static(&placement));
-        assert!(!is_batchable_static(&placement));
-    }
 }
 
 #[test]
@@ -108,7 +93,7 @@ fn cell_directional_illuminance_clamps_non_finite_and_negative_luminance() {
 }
 
 #[test]
-fn pickup_container_door_and_activator_are_excluded_from_the_bake() {
+fn non_static_semantics_are_excluded_from_the_bake() {
     fn placement(semantic: PreparedSemantic) -> PreparedPlacement {
         PreparedPlacement {
             reference_form_id: 1,
@@ -152,6 +137,14 @@ fn pickup_container_door_and_activator_are_excluded_from_the_bake() {
             destination: None,
         }),
         PreparedSemantic::Activator,
+        PreparedSemantic::Furniture,
+        PreparedSemantic::Npc(super::super::manifest::PreparedActor {
+            base_template_form_id: None,
+        }),
+        PreparedSemantic::Creature(super::super::manifest::PreparedActor {
+            base_template_form_id: None,
+        }),
+        PreparedSemantic::Unsupported,
     ] {
         let placement = placement(semantic);
         assert!(!is_bake_static(&placement));

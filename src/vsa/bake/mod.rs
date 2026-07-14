@@ -355,16 +355,8 @@ fn validate_placement_contribution(
 }
 
 pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
-    if placement.physics_classification == PreparedPhysicsClassification::Dynamic {
-        return false;
-    }
-    !matches!(
-        placement.semantic,
-        PreparedSemantic::Pickup(_)
-            | PreparedSemantic::Container
-            | PreparedSemantic::Door(_)
-            | PreparedSemantic::Activator
-    )
+    placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        && matches!(placement.semantic, PreparedSemantic::Static)
 }
 
 fn is_batchable_static(placement: &PreparedPlacement) -> bool {

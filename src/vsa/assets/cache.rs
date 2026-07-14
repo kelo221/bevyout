@@ -77,6 +77,11 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GlbVisualAudit {
     pub(crate) renderable_primitives: usize,
+    pub(crate) renderable_vertices: usize,
+    pub(crate) renderable_triangles: usize,
+    pub(crate) source_render_meshes: Option<usize>,
+    pub(crate) source_render_vertices: Option<usize>,
+    pub(crate) source_render_triangles: Option<usize>,
     pub(crate) source_model: Option<String>,
     pub(crate) root_transform_policy: Option<String>,
     pub(crate) record_zero_non_identity: bool,
@@ -95,6 +100,11 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
         .cloned()
         .unwrap_or_default();
     let mut renderable_primitives = 0;
+    let mut renderable_vertices = 0;
+    let mut renderable_triangles = 0;
+    let mut source_render_meshes = None;
+    let mut source_render_vertices = None;
+    let mut source_render_triangles = None;
     let mut source_model = None;
     let mut root_transform_policy = None;
     let mut record_zero_non_identity = false;
@@ -117,6 +127,20 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
                 .and_then(|value| value.get("bevyout_root_transform_policy"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+        }
+        if source_render_meshes.is_none() {
+            source_render_meshes = extras
+                .and_then(|value| value.get("bevyout_source_render_meshes"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            source_render_vertices = extras
+                .and_then(|value| value.get("bevyout_source_render_vertices"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            source_render_triangles = extras
+                .and_then(|value| value.get("bevyout_source_render_triangles"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
         }
         record_zero_non_identity |= extras
             .and_then(|value| value.get("bevyout_record_zero_non_identity"))
@@ -149,20 +173,42 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
             else {
                 continue;
             };
-            if accessors
+            let vertex_count = accessors
                 .get(position_index as usize)
                 .and_then(|accessor| accessor.get("count"))
                 .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                > 0
-            {
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(0);
+            if vertex_count > 0 {
                 renderable_primitives += 1;
+                renderable_vertices += vertex_count;
+                let element_count = primitive
+                    .get("indices")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|index| accessors.get(index as usize))
+                    .and_then(|accessor| accessor.get("count"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(vertex_count);
+                if primitive
+                    .get("mode")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(4)
+                    == 4
+                {
+                    renderable_triangles += element_count / 3;
+                }
             }
         }
     }
 
     Ok(GlbVisualAudit {
         renderable_primitives,
+        renderable_vertices,
+        renderable_triangles,
+        source_render_meshes,
+        source_render_vertices,
+        source_render_triangles,
         source_model,
         root_transform_policy,
         record_zero_non_identity,
