@@ -82,6 +82,11 @@ pub(crate) struct GlbVisualAudit {
     pub(crate) source_render_meshes: Option<usize>,
     pub(crate) source_render_vertices: Option<usize>,
     pub(crate) source_render_triangles: Option<usize>,
+    pub(crate) spatial_audit_version: Option<usize>,
+    pub(crate) expected_spatial_corrections: Option<usize>,
+    pub(crate) verified_spatial_corrections: Option<usize>,
+    pub(crate) expected_collision_corrections: Option<usize>,
+    pub(crate) verified_collision_corrections: Option<usize>,
     pub(crate) source_model: Option<String>,
     pub(crate) root_transform_policy: Option<String>,
     pub(crate) record_zero_non_identity: bool,
@@ -105,6 +110,11 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
     let mut source_render_meshes = None;
     let mut source_render_vertices = None;
     let mut source_render_triangles = None;
+    let mut spatial_audit_version = None;
+    let mut expected_spatial_corrections = None;
+    let mut verified_spatial_corrections = None;
+    let mut expected_collision_corrections = None;
+    let mut verified_collision_corrections = None;
     let mut source_model = None;
     let mut root_transform_policy = None;
     let mut record_zero_non_identity = false;
@@ -139,6 +149,26 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
                 .and_then(|value| usize::try_from(value).ok());
             source_render_triangles = extras
                 .and_then(|value| value.get("bevyout_source_render_triangles"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            spatial_audit_version = extras
+                .and_then(|value| value.get("bevyout_spatial_audit_version"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            expected_spatial_corrections = extras
+                .and_then(|value| value.get("bevyout_expected_spatial_corrections"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            verified_spatial_corrections = extras
+                .and_then(|value| value.get("bevyout_verified_spatial_corrections"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            expected_collision_corrections = extras
+                .and_then(|value| value.get("bevyout_expected_collision_corrections"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            verified_collision_corrections = extras
+                .and_then(|value| value.get("bevyout_verified_collision_corrections"))
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
         }
@@ -209,6 +239,11 @@ pub(crate) fn audit_glb_visuals(path: &Path) -> Result<GlbVisualAudit> {
         source_render_meshes,
         source_render_vertices,
         source_render_triangles,
+        spatial_audit_version,
+        expected_spatial_corrections,
+        verified_spatial_corrections,
+        expected_collision_corrections,
+        verified_collision_corrections,
         source_model,
         root_transform_policy,
         record_zero_non_identity,

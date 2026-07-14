@@ -331,6 +331,52 @@ def matrix_identity_error(matrix):
     return max(abs(float(matrix[row][column]) - (1.0 if row == column else 0.0))
                for row in range(4) for column in range(4))
 
+def matrix_max_error(left, right):
+    return max(abs(float(left[row][column]) - float(right[row][column]))
+               for row in range(4) for column in range(4))
+
+def apply_verified_spatial_corrections(objects, model):
+    corrections = {
+        'dungeons/vault/room/vdnwallendcorinr01.nif': (':32', ':41'),
+        'dungeons/vault/room/vdnwallendcoroutr01.nif': (':32',),
+    }.get(str(model).casefold(), ())
+    verified = []
+    verified_collision = 0
+    correction = Matrix.Rotation(-math.pi, 4, 'Z')
+    for obj in objects:
+        if obj.type != 'MESH':
+            continue
+        if obj.get('bevyout_collision', False):
+            if corrections:
+                expected = obj.matrix_local @ correction
+                obj.matrix_local = expected
+                bpy.context.view_layer.update()
+                if matrix_max_error(obj.matrix_local, expected) > 1e-5:
+                    raise RuntimeError('collision spatial correction failed for ' + obj.name)
+                obj['bevyout_spatial_policy'] = 'verified_local_z_180'
+                obj['bevyout_spatial_verified'] = True
+                verified_collision += 1
+            continue
+        niftools = getattr(obj, 'niftools', None)
+        name = str(niftools.longname if niftools and niftools.longname else obj.name)
+        if not name.endswith(corrections):
+            continue
+        before = obj.matrix_local.copy()
+        expected = before @ correction
+        obj.matrix_local = expected
+        bpy.context.view_layer.update()
+        if matrix_max_error(obj.matrix_local, expected) > 1e-5:
+            raise RuntimeError('spatial correction failed for ' + name)
+        obj['bevyout_spatial_policy'] = 'verified_local_z_180'
+        obj['bevyout_spatial_verified'] = True
+        verified.append(name)
+    if len(verified) != len(corrections):
+        raise RuntimeError(
+            'spatial correction coverage mismatch for %s: expected %d, verified %d'
+            % (model, len(corrections), len(verified))
+        )
+    return sorted(verified), verified_collision
+
 def apply_record_zero_transform_policy(
         objects, model, policy, record_zero_name, record_zero_is_node):
     """Annotate the NIF root and apply the Rust-selected compatibility policy.
@@ -531,6 +577,9 @@ for job in jobs:
     )
     if reset_roots:
         print('[convert] discarded audited root transform(s): ' + ', '.join(reset_roots), flush=True)
+    spatial_corrections, collision_corrections = apply_verified_spatial_corrections(
+        list(bpy.context.scene.objects), job.get('model', '')
+    )
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
@@ -609,6 +658,13 @@ for job in jobs:
     metadata_carrier['bevyout_source_render_triangles'] = sum(
         len(geometry.get_triangles()) for geometry in source_render_geometries
     )
+    metadata_carrier['bevyout_spatial_audit_version'] = 1
+    metadata_carrier['bevyout_expected_spatial_corrections'] = len(spatial_corrections)
+    metadata_carrier['bevyout_verified_spatial_corrections'] = sum(
+        1 for obj in render_meshes if obj.get('bevyout_spatial_verified', False)
+    )
+    metadata_carrier['bevyout_expected_collision_corrections'] = collision_corrections
+    metadata_carrier['bevyout_verified_collision_corrections'] = collision_corrections
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:

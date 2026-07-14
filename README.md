@@ -185,7 +185,14 @@ The `dungeons/vault/room/vdnwallendcorinr01.nif` and
 `dungeons/vault/room/vdnwallendcoroutr01.nif` corner pieces preserve their
 verified authored root transforms. These are model-path compatibility rules,
 not FormID overrides. The original root matrix and selected policy are retained
-as GLB extras for preparation audits.
+as GLB extras for preparation audits. Their verified `:32` geometry blocks, and
+the inward corner's `:41` floor block, receive a local 180-degree correction
+during conversion. Converter metadata records the expected and applied
+per-block correction counts; incomplete coverage emits
+`visual_spatial_mismatch`. NIF ancestry alone cannot infer this correction
+because the source and NIFTools parent-chain matrices agree. Authored Havok
+shapes for these models receive the same correction before physics sidecar
+serialization, and their correction coverage is audited with the visual blocks.
 The Blender bake
 conjugates each prepared placement once into Blender's Z-up space before
 composing it with the imported GLB hierarchy. Changing this conversion requires

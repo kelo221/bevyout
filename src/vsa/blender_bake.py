@@ -405,18 +405,6 @@ def placement_geometry(reference_form_id, objects):
     }
 
 
-def placement_fragment_adjustment(reference_form_id, template_name):
-    adjusted_fragments = {
-        0x0002943E: (":32",),
-        0x00029522: (":32", ":41"),
-        0x000AB2FD: (":32", ":41"),
-        0x000AB30D: (":32",),
-    }
-    if template_name.endswith(adjusted_fragments.get(int(reference_form_id), ())):
-        return Matrix.Rotation(-math.pi, 4, "Z")
-    return Matrix.Identity(4)
-
-
 def import_placements(job):
     objects = []
     contributed_reference_form_ids = []
@@ -463,13 +451,7 @@ def import_placements(job):
             # Apply the prepared placement exactly once, then detach so Blender
             # does not apply the imported parent chain a second time on export.
             obj.parent = None
-            obj.matrix_world = (
-                placement_matrix
-                @ template.matrix_world
-                @ placement_fragment_adjustment(
-                    placement["reference_form_id"], template.name
-                )
-            )
+            obj.matrix_world = placement_matrix @ template.matrix_world
             bpy.context.collection.objects.link(obj)
             obj["bevyout_reference_form_id"] = placement["reference_form_id"]
             obj["bevyout_ao_mode"] = placement.get("ao_mode", "ao-none")
@@ -1016,18 +998,6 @@ def run_transform_self_test():
 def run_self_tests():
     clear_scene()
     run_transform_self_test()
-    adjusted = placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:32")
-    assert matrix_max_error(adjusted, Matrix.Rotation(-math.pi, 4, "Z")) < 1e-6
-    adjusted_floor = placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:41")
-    assert matrix_max_error(adjusted_floor, Matrix.Rotation(-math.pi, 4, "Z")) < 1e-6
-    assert matrix_max_error(
-        placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:13"),
-        Matrix.Identity(4),
-    ) < 1e-6
-    assert matrix_max_error(
-        placement_fragment_adjustment(0x0002943E, "VDnWallEndCorOutR01:32"),
-        Matrix.Rotation(-math.pi, 4, "Z"),
-    ) < 1e-6
     material = self_test_material("contribution_material", (0.5, 0.5, 0.5, 1.0))
     visual = self_test_cube("contribution_visual", (0.0, 0.0, 0.0), material)
     assert visual.type == "MESH" and bool(visual.data.polygons)

@@ -203,7 +203,12 @@ fn visual_audit_counts_non_collision_primitives_and_reads_root_metadata() {
                 "bevyout_record_zero_non_identity":true,
                 "bevyout_source_render_meshes":1,
                 "bevyout_source_render_vertices":16,
-                "bevyout_source_render_triangles":8
+                "bevyout_source_render_triangles":8,
+                "bevyout_spatial_audit_version":1,
+                "bevyout_expected_spatial_corrections":0,
+                "bevyout_verified_spatial_corrections":0
+                ,"bevyout_expected_collision_corrections":0
+                ,"bevyout_verified_collision_corrections":0
             }},
             {"name":"visual","mesh":0}
         ]
@@ -218,6 +223,11 @@ fn visual_audit_counts_non_collision_primitives_and_reads_root_metadata() {
     assert_eq!(audit.source_render_meshes, Some(1));
     assert_eq!(audit.source_render_vertices, Some(16));
     assert_eq!(audit.source_render_triangles, Some(8));
+    assert_eq!(audit.spatial_audit_version, Some(1));
+    assert_eq!(audit.expected_spatial_corrections, Some(0));
+    assert_eq!(audit.verified_spatial_corrections, Some(0));
+    assert_eq!(audit.expected_collision_corrections, Some(0));
+    assert_eq!(audit.verified_collision_corrections, Some(0));
     assert_eq!(audit.source_model.as_deref(), Some("architecture/test.nif"));
     assert_eq!(
         audit.root_transform_policy.as_deref(),

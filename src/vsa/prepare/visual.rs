@@ -48,6 +48,55 @@ pub(crate) fn audit_prepared_visuals(
                 path.display()
             )
         })?;
+        let spatial_audit_version = audit.spatial_audit_version.with_context(|| {
+            format!(
+                "converted GLB {} has no spatial audit version",
+                path.display()
+            )
+        })?;
+        let expected_spatial_corrections =
+            audit.expected_spatial_corrections.with_context(|| {
+                format!(
+                    "converted GLB {} has no expected spatial correction count",
+                    path.display()
+                )
+            })?;
+        let verified_spatial_corrections =
+            audit.verified_spatial_corrections.with_context(|| {
+                format!(
+                    "converted GLB {} has no verified spatial correction count",
+                    path.display()
+                )
+            })?;
+        let expected_collision_corrections =
+            audit.expected_collision_corrections.with_context(|| {
+                format!(
+                    "converted GLB {} has no expected collision correction count",
+                    path.display()
+                )
+            })?;
+        let verified_collision_corrections =
+            audit.verified_collision_corrections.with_context(|| {
+                format!(
+                    "converted GLB {} has no verified collision correction count",
+                    path.display()
+                )
+            })?;
+        if spatial_audit_version != 1
+            || verified_spatial_corrections != expected_spatial_corrections
+            || verified_collision_corrections != expected_collision_corrections
+        {
+            issues.push(issue_for_asset(
+                "visual_spatial_mismatch",
+                "error",
+                asset,
+                placements,
+                format!(
+                    "{} spatial audit version {spatial_audit_version} verified {verified_spatial_corrections} of {expected_spatial_corrections} visual and {verified_collision_corrections} of {expected_collision_corrections} collision correction(s)",
+                    asset.model_path
+                ),
+            ));
+        }
         // glTF may split or deduplicate vertices at attribute seams, so vertex
         // totals are diagnostic only. Triangle totals remain stable across the
         // NIF -> Blender -> glTF conversion and detect dropped geometry.
