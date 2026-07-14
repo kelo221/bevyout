@@ -291,20 +291,24 @@ fn collect_world_triangles(
     asset_root: &Path,
     casters: &[&PreparedPlacement],
 ) -> Result<Vec<ShadowTriangle>> {
-    let mut assets = HashMap::<String, Vec<[Vec3; 3]>>::new();
+    let mut assets = HashMap::<(String, u32), Vec<[Vec3; 3]>>::new();
     let mut triangles = Vec::new();
     for placement in casters {
         let asset_path = placement.asset_path.as_deref().expect("caster has asset");
-        if !assets.contains_key(asset_path) {
+        let asset_key = (asset_path.to_owned(), placement.reference_form_id);
+        if !assets.contains_key(&asset_key) {
             let path = resolve_asset_path(asset_root, asset_path);
-            assets.insert(asset_path.into(), load_glb_triangles(&path)?);
+            assets.insert(
+                asset_key.clone(),
+                load_glb_triangles(&path, placement.reference_form_id)?,
+            );
         }
         let placement_transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(placement.scale),
             Quat::from_array(placement.rotation_xyzw),
             Vec3::from_array(placement.translation),
         );
-        for local in assets.get(asset_path).expect("asset was loaded") {
+        for local in assets.get(&asset_key).expect("asset was loaded") {
             let world = local.map(|vertex| placement_transform.transform_point3(vertex));
             if triangle_is_valid(world) {
                 triangles.push(ShadowTriangle {
@@ -321,7 +325,7 @@ fn resolve_asset_path(asset_root: &Path, relative: &str) -> PathBuf {
     asset_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
-fn load_glb_triangles(path: &Path) -> Result<Vec<[Vec3; 3]>> {
+fn load_glb_triangles(path: &Path, reference_form_id: u32) -> Result<Vec<[Vec3; 3]>> {
     let gltf = gltf::Gltf::open(path)
         .with_context(|| format!("could not parse shadow caster GLB {}", path.display()))?;
     let mut buffers = Vec::new();
@@ -351,7 +355,13 @@ fn load_glb_triangles(path: &Path) -> Result<Vec<[Vec3; 3]>> {
         .collect::<Vec<_>>();
     for scene in scenes {
         for node in scene.nodes() {
-            collect_node_triangles(node, Mat4::IDENTITY, &buffers, &mut triangles)?;
+            collect_node_triangles(
+                node,
+                Mat4::IDENTITY,
+                &buffers,
+                reference_form_id,
+                &mut triangles,
+            )?;
         }
     }
     Ok(triangles)
@@ -361,9 +371,12 @@ fn collect_node_triangles(
     node: gltf::Node<'_>,
     parent_transform: Mat4,
     buffers: &[Vec<u8>],
+    reference_form_id: u32,
     triangles: &mut Vec<[Vec3; 3]>,
 ) -> Result<()> {
-    let transform = parent_transform * Mat4::from_cols_array_2d(&node.transform().matrix());
+    let transform = parent_transform
+        * Mat4::from_cols_array_2d(&node.transform().matrix())
+        * shadow_fragment_adjustment(reference_form_id, node.name());
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -407,9 +420,24 @@ fn collect_node_triangles(
         }
     }
     for child in node.children() {
-        collect_node_triangles(child, transform, buffers, triangles)?;
+        collect_node_triangles(child, transform, buffers, reference_form_id, triangles)?;
     }
     Ok(())
+}
+
+fn shadow_fragment_adjustment(reference_form_id: u32, node_name: Option<&str>) -> Mat4 {
+    let adjusted = match reference_form_id {
+        0x0002_943E => &[":32"][..],
+        0x0002_9522 => &[":32", ":41"][..],
+        0x000A_B2FD => &[":32", ":41"][..],
+        0x000A_B30D => &[":32"][..],
+        _ => &[],
+    };
+    if node_name.is_some_and(|name| adjusted.iter().any(|suffix| name.ends_with(suffix))) {
+        Mat4::from_rotation_y(std::f32::consts::PI)
+    } else {
+        Mat4::IDENTITY
+    }
 }
 
 fn triangle_is_valid(vertices: [Vec3; 3]) -> bool {
@@ -800,6 +828,25 @@ mod tests {
     }
 
     #[test]
+    fn tuned_corner_shadow_fragments_match_bake_adjustments() {
+        let adjusted = shadow_fragment_adjustment(0x000A_B2FD, Some("VDnWallEndCorInR01:41"));
+        assert!(
+            adjusted
+                .transform_vector3(Vec3::X)
+                .abs_diff_eq(Vec3::NEG_X, 1e-5)
+        );
+        assert_eq!(
+            shadow_fragment_adjustment(0x000A_B2FD, Some("VDnWallEndCorInR01:13")),
+            Mat4::IDENTITY
+        );
+        assert!(
+            shadow_fragment_adjustment(0x0002_943E, Some("VDnWallEndCorOutR01:32"))
+                .transform_vector3(Vec3::X)
+                .abs_diff_eq(Vec3::NEG_X, 1e-5)
+        );
+    }
+
+    #[test]
     fn triangle_intersection_is_two_sided() {
         let origin = Point3::origin();
         let direction = Vec3::NEG_Z;
@@ -971,7 +1018,7 @@ mod tests {
         let path = root.join("triangles.glb");
         write_test_glb(&path);
 
-        let triangles = load_glb_triangles(&path).unwrap();
+        let triangles = load_glb_triangles(&path, 0).unwrap();
         assert_eq!(triangles.len(), 2);
         assert!(triangles[0][0].abs_diff_eq(Vec3::new(1.0, 2.0, 0.0), 1e-6));
         assert!(triangles[0][2].abs_diff_eq(Vec3::new(1.0, 3.0, 0.0), 1e-6));

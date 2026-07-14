@@ -331,9 +331,33 @@ fn validate_placement_contribution(
     let mut actual_ids = actual.reference_form_ids.clone();
     expected_ids.sort_unstable();
     actual_ids.sort_unstable();
+    let mut geometry_ids = actual
+        .placements
+        .iter()
+        .map(|placement| placement.reference_form_id)
+        .collect::<Vec<_>>();
+    geometry_ids.sort_unstable();
+    let invalid_geometry = actual.placements.iter().any(|placement| {
+        placement.visual_meshes == 0
+            || placement.vertices == 0
+            || placement.triangles == 0
+            || placement
+                .world_bounds_min
+                .iter()
+                .chain(placement.world_bounds_max.iter())
+                .any(|value| !value.is_finite())
+            || placement
+                .world_bounds_min
+                .iter()
+                .zip(placement.world_bounds_max.iter())
+                .any(|(minimum, maximum)| minimum > maximum)
+    });
     if actual.expected_placements != expected.len()
         || actual.contributed_placements != actual.reference_form_ids.len()
         || actual_ids != expected_ids
+        || geometry_ids != expected_ids
+        || !actual.post_batch_verified
+        || invalid_geometry
     {
         let missing = expected_ids
             .iter()
@@ -341,9 +365,10 @@ fn validate_placement_contribution(
             .map(|form_id| format!("{form_id:08X}"))
             .collect::<Vec<_>>();
         bail!(
-            "Blender bake omitted placement contribution(s): expected {}, contributed {}; missing references: {}",
+            "Blender bake omitted or invalidated placement contribution(s): expected {}, contributed {}, post-batch verified {}; missing references: {}",
             expected.len(),
             actual.contributed_placements,
+            actual.post_batch_verified,
             if missing.is_empty() {
                 "<count or identity mismatch>".into()
             } else {
@@ -360,8 +385,7 @@ pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
 }
 
 fn is_batchable_static(placement: &PreparedPlacement) -> bool {
-    placement.physics_classification != PreparedPhysicsClassification::Dynamic
-        && matches!(placement.semantic, PreparedSemantic::Static)
+    is_bake_static(placement)
 }
 
 #[cfg(test)]

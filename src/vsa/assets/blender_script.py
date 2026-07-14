@@ -341,7 +341,9 @@ def apply_record_zero_transform_policy(
     verified discard. Bip01 remains protected regardless of the supplied policy.
     """
     record_zero_name = str(record_zero_name)
-    if policy not in {'preserve_review_required', 'preserve_verified', 'discard_verified'}:
+    if policy not in {
+            'preserve_review_required', 'preserve_verified',
+            'preserve_verified', 'discard_verified'}:
         raise RuntimeError('unknown root transform policy: ' + str(policy))
     changed = []
     candidates = []

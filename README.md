@@ -179,11 +179,13 @@ The preparation pipeline converts Fallout's approximately 70 world units per
 metre to Bevy metres. Initial Fallout object rotations use the validated ESM
 `EulerRot::XYZ` placement convention and are converted at the same manifest
 boundary as position. NIF record-0 transforms are preserved by default. The
-audited `dungeons/vault/room/vrmwallscreen01.nif` and
-`dungeons/vault/room/vdnwallendcoroutr01.nif` models discard their compensating
-record-0 transforms so their placement rotations are not applied twice; these
-are model-path compatibility rules, not FormID overrides. The original root
-matrix and selected policy are retained as GLB extras for preparation audits.
+audited `dungeons/vault/room/vrmwallscreen01.nif` model discards its compensating
+record-0 transform so its placement rotation is not applied twice.
+The `dungeons/vault/room/vdnwallendcorinr01.nif` and
+`dungeons/vault/room/vdnwallendcoroutr01.nif` corner pieces preserve their
+verified authored root transforms. These are model-path compatibility rules,
+not FormID overrides. The original root matrix and selected policy are retained
+as GLB extras for preparation audits.
 The Blender bake
 conjugates each prepared placement once into Blender's Z-up space before
 composing it with the imported GLB hierarchy. Changing this conversion requires

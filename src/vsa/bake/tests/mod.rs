@@ -199,6 +199,8 @@ fn bake_contribution_requires_every_reference_exactly_once() {
             expected_placements: 2,
             contributed_placements: 2,
             reference_form_ids: vec![0x20, 0x10],
+            post_batch_verified: true,
+            placements: vec![placement_geometry(0x20), placement_geometry(0x10)],
         },
     )
     .unwrap();
@@ -209,11 +211,24 @@ fn bake_contribution_requires_every_reference_exactly_once() {
             expected_placements: 2,
             contributed_placements: 1,
             reference_form_ids: vec![0x10],
+            post_batch_verified: false,
+            placements: vec![placement_geometry(0x10)],
         },
     )
     .unwrap_err()
     .to_string();
     assert!(error.contains("00000020"));
+}
+
+fn placement_geometry(reference_form_id: u32) -> BlenderPlacementGeometry {
+    BlenderPlacementGeometry {
+        reference_form_id,
+        visual_meshes: 1,
+        vertices: 3,
+        triangles: 1,
+        world_bounds_min: [0.0; 3],
+        world_bounds_max: [1.0; 3],
+    }
 }
 
 #[test]

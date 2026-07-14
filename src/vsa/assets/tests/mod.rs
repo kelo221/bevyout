@@ -105,6 +105,10 @@ fn root_transform_policy_is_normalized_and_limited_to_verified_models() {
         RootTransformPolicy::PreserveVerified
     );
     assert_eq!(
+        root_transform_policy("dungeons/vault/room/vdnwallendcorinr01.nif"),
+        RootTransformPolicy::PreserveVerified
+    );
+    assert_eq!(
         root_transform_policy("dungeons/rivetcity/roomsmall/rcsmdoor01.nif"),
         RootTransformPolicy::PreserveReviewRequired
     );

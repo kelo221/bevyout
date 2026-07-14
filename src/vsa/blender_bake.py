@@ -370,12 +370,60 @@ def require_renderable_visual_templates(placement, path, templates):
     return visual_templates
 
 
+def stamp_placement_provenance(obj, reference_form_id):
+    vertex_attribute = obj.data.attributes.new(
+        "bevyout_reference_vertex_id", type="INT", domain="POINT"
+    )
+    for item in vertex_attribute.data:
+        item.value = int(reference_form_id)
+    face_attribute = obj.data.attributes.new(
+        "bevyout_reference_face_id", type="INT", domain="FACE"
+    )
+    for item in face_attribute.data:
+        item.value = int(reference_form_id)
+
+
+def placement_geometry(reference_form_id, objects):
+    minimum = Vector((float("inf"),) * 3)
+    maximum = Vector((float("-inf"),) * 3)
+    for obj in objects:
+        for vertex in obj.data.vertices:
+            world_vertex = obj.matrix_world @ vertex.co
+            minimum = Vector(tuple(
+                min(minimum[i], world_vertex[i]) for i in range(3)
+            ))
+            maximum = Vector(tuple(
+                max(maximum[i], world_vertex[i]) for i in range(3)
+            ))
+    return {
+        "reference_form_id": int(reference_form_id),
+        "visual_meshes": len(objects),
+        "vertices": sum(len(obj.data.vertices) for obj in objects),
+        "triangles": sum(len(obj.data.loop_triangles) for obj in objects),
+        "world_bounds_min": list(minimum),
+        "world_bounds_max": list(maximum),
+    }
+
+
+def placement_fragment_adjustment(reference_form_id, template_name):
+    adjusted_fragments = {
+        0x0002943E: (":32",),
+        0x00029522: (":32", ":41"),
+        0x000AB2FD: (":32", ":41"),
+        0x000AB30D: (":32",),
+    }
+    if template_name.endswith(adjusted_fragments.get(int(reference_form_id), ())):
+        return Matrix.Rotation(-math.pi, 4, "Z")
+    return Matrix.Identity(4)
+
+
 def import_placements(job):
     objects = []
     contributed_reference_form_ids = []
     template_cache = {}
     imported_templates = []
     excluded = 0
+    placement_objects = defaultdict(list)
     for placement in job["placements"]:
         path = placement["asset_path"]
         if not os.path.isabs(path):
@@ -415,22 +463,91 @@ def import_placements(job):
             # Apply the prepared placement exactly once, then detach so Blender
             # does not apply the imported parent chain a second time on export.
             obj.parent = None
-            obj.matrix_world = placement_matrix @ template.matrix_world
+            obj.matrix_world = (
+                placement_matrix
+                @ template.matrix_world
+                @ placement_fragment_adjustment(
+                    placement["reference_form_id"], template.name
+                )
+            )
             bpy.context.collection.objects.link(obj)
             obj["bevyout_reference_form_id"] = placement["reference_form_id"]
             obj["bevyout_ao_mode"] = placement.get("ao_mode", "ao-none")
             obj["bevyout_batchable_static"] = batchable_static
             objects.append((obj, placement["reference_form_id"], local_index))
+            if not obj.get("bevyout_collision", False) and not is_non_rendering_object(obj):
+                obj.data.calc_loop_triangles()
+                stamp_placement_provenance(obj, placement["reference_form_id"])
+                placement_objects[int(placement["reference_form_id"])].append(obj)
             local_index += 1
         contributed_reference_form_ids.append(int(placement["reference_form_id"]))
     for template in imported_templates:
         bpy.data.objects.remove(template, do_unlink=True)
     print("[bake] excluded non-rendering meshes %d" % excluded, flush=True)
+    geometry = [
+        placement_geometry(reference_form_id, placement_objects[reference_form_id])
+        for reference_form_id in contributed_reference_form_ids
+    ]
     return objects, {
         "expected_placements": len(job["placements"]),
         "contributed_placements": len(contributed_reference_form_ids),
         "reference_form_ids": contributed_reference_form_ids,
+        "post_batch_verified": False,
+        "placements": geometry,
     }
+
+
+def verify_post_batch_placement_geometry(expected_geometry):
+    actual = defaultdict(lambda: {
+        "vertices": 0,
+        "triangles": 0,
+        "minimum": Vector((float("inf"),) * 3),
+        "maximum": Vector((float("-inf"),) * 3),
+    })
+    for obj in visual_mesh_objects():
+        vertex_ids = obj.data.attributes.get("bevyout_reference_vertex_id")
+        face_ids = obj.data.attributes.get("bevyout_reference_face_id")
+        if vertex_ids is None or face_ids is None:
+            raise RuntimeError("static batching dropped placement provenance attributes")
+        for vertex, item in zip(obj.data.vertices, vertex_ids.data):
+            record = actual[int(item.value)]
+            world_vertex = obj.matrix_world @ vertex.co
+            record["vertices"] += 1
+            record["minimum"] = Vector(tuple(
+                min(record["minimum"][axis], world_vertex[axis]) for axis in range(3)
+            ))
+            record["maximum"] = Vector(tuple(
+                max(record["maximum"][axis], world_vertex[axis]) for axis in range(3)
+            ))
+        for polygon, item in zip(obj.data.polygons, face_ids.data):
+            actual[int(item.value)]["triangles"] += max(0, polygon.loop_total - 2)
+
+    tolerance = 0.001
+    for expected in expected_geometry:
+        reference_form_id = int(expected["reference_form_id"])
+        record = actual.get(reference_form_id)
+        expected_minimum = Vector(expected["world_bounds_min"])
+        expected_maximum = Vector(expected["world_bounds_max"])
+        if record is None or (
+            record["vertices"] < int(expected["vertices"])
+            or record["triangles"] != int(expected["triangles"])
+            or (record["minimum"] - expected_minimum).length > tolerance
+            or (record["maximum"] - expected_maximum).length > tolerance
+        ):
+            raise RuntimeError(
+                "static batching changed geometry for placement %08X: expected vertices >= %d, triangles %d, bounds %s..%s; got vertices %s, triangles %s, bounds %s..%s"
+                % (
+                    reference_form_id,
+                    int(expected["vertices"]),
+                    int(expected["triangles"]),
+                    tuple(expected_minimum),
+                    tuple(expected_maximum),
+                    None if record is None else record["vertices"],
+                    None if record is None else record["triangles"],
+                    None if record is None else tuple(record["minimum"]),
+                    None if record is None else tuple(record["maximum"]),
+                )
+            )
 
 
 def render_preview(job, objects):
@@ -899,6 +1016,18 @@ def run_transform_self_test():
 def run_self_tests():
     clear_scene()
     run_transform_self_test()
+    adjusted = placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:32")
+    assert matrix_max_error(adjusted, Matrix.Rotation(-math.pi, 4, "Z")) < 1e-6
+    adjusted_floor = placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:41")
+    assert matrix_max_error(adjusted_floor, Matrix.Rotation(-math.pi, 4, "Z")) < 1e-6
+    assert matrix_max_error(
+        placement_fragment_adjustment(0x000AB2FD, "VDnWallEndCorInR01:13"),
+        Matrix.Identity(4),
+    ) < 1e-6
+    assert matrix_max_error(
+        placement_fragment_adjustment(0x0002943E, "VDnWallEndCorOutR01:32"),
+        Matrix.Rotation(-math.pi, 4, "Z"),
+    ) < 1e-6
     material = self_test_material("contribution_material", (0.5, 0.5, 0.5, 1.0))
     visual = self_test_cube("contribution_visual", (0.0, 0.0, 0.0), material)
     assert visual.type == "MESH" and bool(visual.data.polygons)
@@ -946,7 +1075,14 @@ def run_self_tests():
     collision["bevyout_collision"] = True
     collision["bevyout_havok_material"] = 17
 
+    fixture_geometry = []
+    for index, obj in enumerate(visual_mesh_objects()):
+        reference_form_id = 0x54426 + index
+        obj.data.calc_loop_triangles()
+        stamp_placement_provenance(obj, reference_form_id)
+        fixture_geometry.append(placement_geometry(reference_form_id, [obj]))
     stats = batch_static_meshes()
+    verify_post_batch_placement_geometry(fixture_geometry)
     assert stats["chunk_size_meters"] == 64.0
     assert stats["batches_created"] >= 2
     assert stats["largest_batch"] >= 2
@@ -1055,6 +1191,8 @@ def main(job_path):
     batching = batch_static_meshes(float(job.get(
         "static_batch_chunk_meters", STATIC_BATCH_SIZE_METERS
     )))
+    verify_post_batch_placement_geometry(placement_contribution["placements"])
+    placement_contribution["post_batch_verified"] = True
     stage("static batch")
 
     # Keep the source UV set active for ordinary material textures in the
