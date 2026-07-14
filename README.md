@@ -213,7 +213,9 @@ The current slice handles interior cells and static geometry plus the first
 semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate
 conversion, starts near the prepared scene bounds, spawns the prepared GLB
 scenes and point lights, plays staged ambient/placement loops, and starts with
-the metric FPS capsule controller (WASD, Space/Ctrl, and mouse look). Aim at a
+the metric FPS capsule controller (WASD, Space/Ctrl, and mouse look). The
+primary window defaults to 1920x1080 with a 90-degree horizontal field of view;
+use `fov` to inspect it or `fov <10..170>` to change it at runtime. Aim at a
 pickup, container, door, or activator and press `Enter` for the initial
 interaction path; door travel and animation remain deferred. Native BoxDDD
 capsule casts and plane solving handle movement, while the compatibility bridge cooks the current

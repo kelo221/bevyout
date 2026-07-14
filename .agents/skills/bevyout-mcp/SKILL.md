@@ -24,7 +24,7 @@ collision, FPS starts in forced no-clip so WASD and Space/Ctrl still work.
 2. Use `world_query` for reflected components and filters.
 3. Call `console_help`, then use `console_exec` for Gamebryo-style commands.
    Useful commands include `prid`, `dump`, `getpos`, `setpos`, `tfc`, `tcl`,
-   `tcg`, `tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`,
+   `tcg`, `tlights`, `stairdebug`, `tunlit`, `fov`, `getrender`, `setrender`,
    `renderreport`, `tm`, `tdt`, `sgtm`, and `screenshot`.
 4. Use `brp_call` for reflected BRP mutations not covered by the console, and
    `brp_watch` for methods ending in `+watch`.

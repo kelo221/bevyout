@@ -62,6 +62,9 @@ const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
+pub(crate) const DEFAULT_HORIZONTAL_FOV_DEGREES: f32 = 90.0;
+pub(crate) const DEFAULT_WINDOW_WIDTH: u32 = 1920;
+pub(crate) const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
 
 pub fn view(args: ViewArgs) -> Result<()> {
     run_view(

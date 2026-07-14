@@ -29,6 +29,8 @@ pub(crate) fn spawn_prepared_scene(
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
     let mut camera = commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(default_perspective_projection()),
+        HorizontalFov::default(),
         ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
         OcclusionCulling,

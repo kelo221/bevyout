@@ -17,8 +17,9 @@ use crate::console::{
 };
 
 use super::controls::{
-    AmbientScale, AoStrength, FogStrength, IrradianceIntensity, LightingScale, LightsDisabled,
-    UnlitMode,
+    AmbientScale, AoStrength, FogStrength, HorizontalFov, IrradianceIntensity, LightingScale,
+    LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES, UnlitMode,
+    horizontal_to_vertical_fov,
 };
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
@@ -78,6 +79,13 @@ pub(crate) fn install(app: &mut App) {
             toggle_fly_camera,
         )
         .aliases(&["toggleflycam"])
+        .mutating(),
+        ConsoleCommand::new(
+            "fov",
+            "fov [10..170]",
+            "Get or set the horizontal camera field of view in degrees.",
+            field_of_view,
+        )
         .mutating(),
         ConsoleCommand::new(
             "tlights",
@@ -252,6 +260,93 @@ fn toggle_fly_camera(
         json!({ "camera_mode": mode }),
         "Free camera",
         mode == "free",
+    ))
+}
+
+fn field_of_view(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "fov accepts at most one value",
+        ));
+    }
+    let camera = {
+        let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<HorizontalFov>)>();
+        let mut cameras = query.iter(world);
+        let Some(camera) = cameras.next() else {
+            return Err(ConsoleError::new(
+                "camera_unavailable",
+                "the active 3D camera does not expose an FOV setting",
+            ));
+        };
+        if cameras.next().is_some() {
+            return Err(ConsoleError::new(
+                "camera_unavailable",
+                "expected exactly one active 3D camera",
+            ));
+        }
+        camera
+    };
+
+    let requested = invocation
+        .args
+        .first()
+        .map(|value| {
+            value
+                .parse::<f32>()
+                .map_err(|_| ConsoleError::new("bad_type", "fov must be a finite number"))
+        })
+        .transpose()?;
+    if let Some(requested) = requested {
+        if !requested.is_finite()
+            || !(MIN_HORIZONTAL_FOV_DEGREES..=MAX_HORIZONTAL_FOV_DEGREES).contains(&requested)
+        {
+            return Err(ConsoleError::new(
+                "out_of_range",
+                format!(
+                    "fov must be between {MIN_HORIZONTAL_FOV_DEGREES} and {MAX_HORIZONTAL_FOV_DEGREES} degrees"
+                ),
+            ));
+        }
+        let aspect_ratio = match world.get::<Projection>(camera) {
+            Some(Projection::Perspective(perspective)) => perspective.aspect_ratio,
+            _ => {
+                return Err(ConsoleError::new(
+                    "camera_unavailable",
+                    "the active 3D camera is not perspective",
+                ));
+            }
+        };
+        world
+            .get_mut::<HorizontalFov>(camera)
+            .expect("camera query required HorizontalFov")
+            .0 = requested;
+        let mut projection = world
+            .get_mut::<Projection>(camera)
+            .expect("Camera3d requires Projection");
+        let Projection::Perspective(perspective) = &mut *projection else {
+            unreachable!("perspective projection checked above");
+        };
+        perspective.fov = horizontal_to_vertical_fov(requested, aspect_ratio);
+    }
+
+    let degrees = world
+        .get::<HorizontalFov>(camera)
+        .expect("camera query required HorizontalFov")
+        .0;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "degrees": degrees,
+            "axis": "horizontal",
+        }),
+        vec![if requested.is_some() {
+            format!("Horizontal FOV set to {degrees} degrees.")
+        } else {
+            format!("Horizontal FOV is {degrees} degrees.")
+        }],
     ))
 }
 
@@ -771,6 +866,8 @@ mod tests {
         app.insert_resource(camera);
         app.world_mut().spawn((
             Camera3d::default(),
+            Projection::Perspective(super::super::default_perspective_projection()),
+            HorizontalFov::default(),
             Bloom::default(),
             Transform::from_xyz(0.0, 2.0, 0.0),
             super::super::FlyCamera {
@@ -822,6 +919,38 @@ mod tests {
     }
 
     #[test]
+    fn fov_reports_sets_and_validates_horizontal_degrees() {
+        let mut app = test_app();
+
+        let current = exec(&mut app, "fov");
+        assert_eq!(current.value["degrees"], 90.0);
+        assert_eq!(current.value["axis"], "horizontal");
+
+        let changed = exec(&mut app, "fov 110");
+        assert!(changed.ok);
+        assert_eq!(changed.value["degrees"], 110.0);
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&Projection, With<Camera3d>>();
+        let Projection::Perspective(perspective) = query.single(app.world()).unwrap() else {
+            panic!("expected a perspective camera");
+        };
+        let expected = horizontal_to_vertical_fov(110.0, perspective.aspect_ratio);
+        assert!((perspective.fov - expected).abs() < 1e-6);
+
+        assert_eq!(exec(&mut app, "fov 9").error.unwrap().code, "out_of_range");
+        assert_eq!(
+            exec(&mut app, "fov 171").error.unwrap().code,
+            "out_of_range"
+        );
+        assert_eq!(exec(&mut app, "fov nope").error.unwrap().code, "bad_type");
+        assert_eq!(
+            exec(&mut app, "fov 90 extra").error.unwrap().code,
+            "bad_arity"
+        );
+    }
+
+    #[test]
     fn screenshot_rejects_headless_and_unsafe_names() {
         let mut app = test_app();
         assert_eq!(
@@ -839,6 +968,7 @@ mod tests {
         let mut app = test_app();
         assert!(exec(&mut app, "help toggleflycam").ok);
         assert!(exec(&mut app, "help togglecollisiongeometry").ok);
+        assert!(exec(&mut app, "help fov").ok);
         let free_camera = exec(&mut app, "toggleflycam");
         assert_eq!(free_camera.value["camera_mode"], "free");
         assert_eq!(free_camera.log, ["Free camera enabled."]);

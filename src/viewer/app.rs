@@ -22,12 +22,7 @@ pub(crate) fn run_view(
     app.add_plugins((
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
-                    resolution: (1280, 720).into(),
-                    focused: true,
-                    present_mode: PresentMode::AutoNoVsync,
-                    ..default()
-                }),
+                primary_window: Some(default_primary_window()),
                 ..default()
             })
             .set(AssetPlugin {
@@ -81,6 +76,7 @@ pub(crate) fn run_view(
                 apply_fog_strength,
                 apply_ao_strength,
                 apply_irradiance_intensity,
+                apply_horizontal_fov,
                 update_fps_text,
                 apply_unlit_mode,
                 configure_glow_cards,
@@ -108,6 +104,15 @@ pub(crate) fn run_view(
     Ok(())
 }
 
+fn default_primary_window() -> Window {
+    Window {
+        resolution: (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT).into(),
+        focused: true,
+        present_mode: PresentMode::AutoNoVsync,
+        ..default()
+    }
+}
+
 #[derive(Resource)]
 struct TraceCaptureLimit {
     remaining: f32,
@@ -121,5 +126,17 @@ fn stop_trace_capture(
     limit.remaining -= time.delta_secs();
     if limit.remaining <= 0.0 {
         app_exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_window_defaults_to_1080p() {
+        let window = default_primary_window();
+        assert_eq!(window.resolution.width(), 1920.0);
+        assert_eq!(window.resolution.height(), 1080.0);
     }
 }
