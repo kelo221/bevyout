@@ -38,6 +38,7 @@ use crate::vsa::{
     is_bake_static, prepare, resolve_cached_manifest,
 };
 
+mod animation;
 mod audio;
 mod interaction;
 mod openmw_player;

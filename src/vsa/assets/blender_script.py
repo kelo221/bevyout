@@ -159,6 +159,45 @@ def patch_niftools_blender52():
     BhkCollision.import_bhkpackednitristrips_shape = mark_shape(BhkCollision.import_bhkpackednitristrips_shape, 'TriangleMesh')
     BhkCollision.import_bhk_nitristrips_shape = mark_shape(BhkCollision.import_bhk_nitristrips_shape, 'TriangleMesh')
     BhkCollision.import_nitristrips = mark_shape(BhkCollision.import_nitristrips, 'TriangleMesh')
+    # Issue #57: Blender 5.x's slotted actions removed Action.fcurves, which
+    # niftools' animation importer (Animation.create_action/create_fcurves)
+    # still assumes. These shims route curve creation through the
+    # layer/strip/channelbag API and restore a read-only Action.fcurves for
+    # the addon's two remaining read sites. Spiked on vdoorsliding01.nif with
+    # Blender 5.1.2 + niftools v0.1.1 (see M2_WAVE3_PLAN.md's spike decision).
+    from io_scene_niftools.modules.nif_import.animation import Animation
+    def action_channelbag(action, id_type='OBJECT'):
+        slot = action.slots[0] if len(action.slots) else action.slots.new(id_type=id_type, name='BevyOut')
+        layer = action.layers[0] if len(action.layers) else action.layers.new('BevyOut')
+        strip = layer.strips[0] if len(layer.strips) else layer.strips.new(type='KEYFRAME')
+        return strip.channelbag(slot, ensure=True), slot
+    original_create_action = Animation.create_action
+    def create_action_compat(self, b_obj, action_name):
+        b_action = original_create_action(self, b_obj, action_name)
+        _, slot = action_channelbag(b_action, 'OBJECT')
+        if b_obj.animation_data:
+            b_obj.animation_data.action_slot = slot
+        return b_action
+    def create_fcurves_compat(self, action, dtype, drange, flags, bone_name=None, key_name=None):
+        channelbag, _ = action_channelbag(action, 'KEY' if key_name else 'OBJECT')
+        if bone_name:
+            specs = [(f'pose.bones["{bone_name}"].{dtype}', i) for i in drange]
+        elif key_name:
+            specs = [(f'key_blocks["{key_name}"].{dtype}', 0)]
+        else:
+            specs = [(dtype, i) for i in drange]
+        fcurves = [channelbag.fcurves.new(data_path=path, index=index) for path, index in specs]
+        if flags:
+            self.set_extrapolation(self.get_extend_from_flags(flags), fcurves)
+        return fcurves
+    def action_fcurves_compat(self):
+        if not (len(self.slots) and len(self.layers) and len(self.layers[0].strips)):
+            return []
+        bag = self.layers[0].strips[0].channelbag(self.slots[0])
+        return bag.fcurves if bag else []
+    Animation.create_action = create_action_compat
+    Animation.create_fcurves = create_fcurves_compat
+    bpy.types.Action.fcurves = property(action_fcurves_compat)
 
 def blender_point_to_bevy(point):
     return [float(point.x), float(point.z), float(-point.y)]
@@ -372,12 +411,12 @@ for job in jobs:
     conversion = job.get('conversion', 'ao-none')
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
-    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
+    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
         for datablock in list(datablocks):
             if datablock.users == 0: datablocks.remove(datablock)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     os.makedirs(os.path.dirname(physics_output_path), exist_ok=True)
-    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=False, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
+    result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=True, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
     if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
     non_rendering_prefixes=('shadefade','fx','editormarker','marker','collision')
     def is_non_rendering_object(obj):
@@ -529,5 +568,24 @@ for job in jobs:
         if mesh.color_attributes:
             mesh.color_attributes.active_color_index = 0
             mesh.color_attributes.render_color_index = 0
+    # Issue #57: niftools names each imported action `<Sequence>_<NodeName>`
+    # (e.g. `Open_VDoorBottom01`) and leaves it as the object's single active
+    # action. The glTF exporter only exports an object's active action, so
+    # regroup every sequence's actions onto an NLA track named by the
+    # sequence (stripping the `_<object name>` suffix) before exporting with
+    # NLA_TRACKS mode, which merges same-named tracks across objects into one
+    # glTF animation (spike-verified: `Open`/`Close`, each animating every
+    # door node).
+    for obj in bpy.context.scene.objects:
+        ad = obj.animation_data
+        if not ad:
+            continue
+        obj_actions = [a for a in bpy.data.actions if a.name.endswith('_' + obj.name)]
+        ad.action = None
+        for act in obj_actions:
+            sequence = act.name[: -(len(obj.name) + 1)]
+            track = ad.nla_tracks.new()
+            track.name = sequence
+            track.strips.new(act.name, 0, act)
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_extras=True)
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format='GLB', export_materials='EXPORT', export_image_format='AUTO', export_apply=True, export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_extras=True, export_animations=True, export_animation_mode='NLA_TRACKS')

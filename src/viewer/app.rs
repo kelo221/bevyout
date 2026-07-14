@@ -46,6 +46,7 @@ pub(crate) fn run_view(
     player::install(&mut app, disable_physics);
     audio::install(&mut app);
     interaction::install(&mut app);
+    animation::install(&mut app);
     console::install(&mut app);
     console_ui::install(&mut app);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
