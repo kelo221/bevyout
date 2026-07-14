@@ -9,8 +9,11 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
     let mut explicit = args.selectors.clone();
     explicit.extend(args.cell.clone());
 
-    let is_batch =
-        args.list_only || args.all || args.all_interiors || args.worldspace.is_some() || explicit.len() > 1;
+    let is_batch = args.list_only
+        || args.all
+        || args.all_interiors
+        || args.worldspace.is_some()
+        || explicit.len() > 1;
 
     if !is_batch {
         let selector_input = explicit

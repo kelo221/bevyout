@@ -54,10 +54,13 @@ fn parse_selector(value: &str) -> Result<ParsedSelector> {
     if value.is_empty() {
         bail!("cell selector must be a GECK EditorID or hexadecimal FormID");
     }
-    let form_id_digits = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"));
+    let form_id_digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"));
     let looks_like_form_id = form_id_digits.is_some_and(|digits| {
         !digits.is_empty() && digits.len() <= 8 && digits.chars().all(|c| c.is_ascii_hexdigit())
-    }) || (value.len() <= 8 && value.chars().all(|c| c.is_ascii_hexdigit()));
+    }) || (value.len() <= 8
+        && value.chars().all(|c| c.is_ascii_hexdigit()));
     if looks_like_form_id {
         let digits = form_id_digits.unwrap_or(value);
         let form_id = u32::from_str_radix(digits, 16)
@@ -91,7 +94,12 @@ pub(crate) fn resolve_selection(
     let mut selected = BTreeSet::new();
 
     if spec.all_interiors {
-        selected.extend(cells.iter().filter(|cell| cell.interior).map(|cell| cell.form_id));
+        selected.extend(
+            cells
+                .iter()
+                .filter(|cell| cell.interior)
+                .map(|cell| cell.form_id),
+        );
     }
 
     if let Some(worldspace) = &spec.worldspace {

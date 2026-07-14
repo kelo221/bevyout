@@ -110,7 +110,8 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
 
 #[test]
 fn prepare_batch_selectors_parse_and_combine() {
-    let cli = Cli::try_parse_from(["bevyout", "prepare", "--all-interiors", "--list-only"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["bevyout", "prepare", "--all-interiors", "--list-only"]).unwrap();
     let CommandLine::Prepare(args) = cli.command else {
         panic!("expected prepare command");
     };

@@ -407,7 +407,8 @@ async fn then_profile_tag_is(world: &mut BevyoutWorld, expected: String) {
 // ---------------------------------------------------------------------
 
 fn form_id(hex: &str) -> u32 {
-    u32::from_str_radix(hex, 16).unwrap_or_else(|error| panic!("invalid hex FormID {hex:?}: {error}"))
+    u32::from_str_radix(hex, 16)
+        .unwrap_or_else(|error| panic!("invalid hex FormID {hex:?}: {error}"))
 }
 
 #[given(regex = r#"^cell 0x([0-9a-fA-F]+) "([^"]*)" is an interior cell$"#)]
@@ -462,19 +463,24 @@ async fn when_selected_all_interiors(world: &mut BevyoutWorld) {
         ..Default::default()
     };
     world.selection_result = Some(
-        resolve_selection(&world.cells, &world.worldspace_names, &spec).map_err(|error| error.to_string()),
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
     );
 }
 
 #[when(regex = r#"^cells are selected with selectors "([^"]*)"$"#)]
 async fn when_selected_explicit(world: &mut BevyoutWorld, list: String) {
-    let explicit = list.split(',').map(|entry| entry.trim().to_string()).collect();
+    let explicit = list
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .collect();
     let spec = SelectionSpec {
         explicit,
         ..Default::default()
     };
     world.selection_result = Some(
-        resolve_selection(&world.cells, &world.worldspace_names, &spec).map_err(|error| error.to_string()),
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
     );
 }
 
@@ -485,16 +491,14 @@ async fn when_selected_worldspace(world: &mut BevyoutWorld, name: String) {
         ..Default::default()
     };
     world.selection_result = Some(
-        resolve_selection(&world.cells, &world.worldspace_names, &spec).map_err(|error| error.to_string()),
+        resolve_selection(&world.cells, &world.worldspace_names, &spec)
+            .map_err(|error| error.to_string()),
     );
 }
 
 #[then(regex = r#"^the resolved cell selection is "([^"]*)"$"#)]
 async fn then_resolved_selection_is(world: &mut BevyoutWorld, list: String) {
-    let expected: Vec<u32> = list
-        .split(',')
-        .map(|entry| form_id(entry.trim()))
-        .collect();
+    let expected: Vec<u32> = list.split(',').map(|entry| form_id(entry.trim())).collect();
     let resolved = world
         .selection_result
         .take()
