@@ -18,4 +18,5 @@ and as comments on the issues; the PR closes the issues.
 | Console + agent bridge | (predates this convention) | [CONSOLE_PLAN.md](CONSOLE_PLAN.md) | PR #42 |
 | M2 wave 1 — import (cell map, batch selectors) | (predates this convention) | [M2_PLAN.md](M2_PLAN.md) | PR #50 (#45, #46) |
 | M2 wave 2 — instant cell transitions | [M2_WAVE2_PROMPT.md](M2_WAVE2_PROMPT.md) | [M2_WAVE2_PLAN.md](M2_WAVE2_PLAN.md) — see "Shipped amendments" for what acceptance changed (A1–A5, bug #56, rejected experiment A4) | PR #54 (#47, #48, #51, #52, #56); follow-up #55 |
-| M2 wave 3 — animations, fingerprints, polish | [M2_WAVE3_PROMPT.md](M2_WAVE3_PROMPT.md) | (written by the wave-3 session) | — |
+| M2 wave 3 — animations, fingerprints, reveal amortization | [M2_WAVE3_PROMPT.md](M2_WAVE3_PROMPT.md) | [M2_WAVE3_PLAN.md](M2_WAVE3_PLAN.md) — see "Shipped amendments" (A6–A9) | PR #58 (#57, #49; #55 partial, stays open) |
+| M2 wave 4 — gate #6 remainder: fades/failure recovery, state persistence, reveal pre-warm | [M2_WAVE4_PROMPT.md](M2_WAVE4_PROMPT.md) | (written by the wave-4 session) | — |

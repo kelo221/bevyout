@@ -25,7 +25,7 @@ pub(crate) use cell_map::CellMap;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,
-    PreparedIrradianceVolume,
+    PreparedDoorDestination, PreparedIrradianceVolume,
 };
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,

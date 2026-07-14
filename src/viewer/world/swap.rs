@@ -31,6 +31,7 @@ use super::preload::{
     ActiveCell, PreloadParseFailed, ResidentCells, ResidentState, scene_manifest_path,
     spawn_preload_parse_task,
 };
+use super::reveal;
 use super::swap_policy;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +108,17 @@ pub(crate) fn install(app: &mut App) {
                 check_fallback_progress.after(evaluate_door_travel_requests),
                 apply_fallback_resolution.after(check_fallback_progress),
                 measure_swap_frame_times
+                    .after(apply_pending_instant_swap)
+                    .after(apply_fallback_resolution),
+                // Issue #55: drains one bounded reveal chunk per frame and
+                // logs the `reveal ...` telemetry line once its window
+                // elapses. Ordered after both activation systems so the
+                // very first sample in `measure_reveal_frame_time`'s window
+                // is the activation frame itself.
+                reveal::advance_pending_reveal
+                    .after(apply_pending_instant_swap)
+                    .after(apply_fallback_resolution),
+                reveal::measure_reveal_frame_time
                     .after(apply_pending_instant_swap)
                     .after(apply_fallback_resolution),
             )
@@ -290,9 +302,6 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     if let Some(source_root) = source_root {
         world.entity_mut(source_root).insert(Visibility::Hidden);
     }
-    world
-        .entity_mut(destination_root)
-        .insert(Visibility::Visible);
 
     player::teleport_active_player(world, translation, rotation_xyzw);
 
@@ -303,6 +312,20 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     swap_refs(world, source_root, destination_root);
     apply_save_state_to_cell(world, destination_cell, destination_root);
     audio::rebuild_ambient_for_active_cell(world);
+
+    // Issue #55: reveals the destination in bounded, nearest-arrival-first
+    // chunks instead of flipping every placement visible in this one frame
+    // -- must run after `apply_save_state_to_cell` so it only ever touches
+    // entities that function already decided should be visible (deleted/
+    // disabled references stay `Hidden`, untouched). This is also what
+    // makes `destination_root` visible.
+    reveal::begin_chunked_reveal(
+        world,
+        destination_cell,
+        destination_root,
+        translation,
+        reveal::REVEAL_BUDGET_PER_FRAME,
+    );
 
     let root_by_reference = collect_root_by_reference(world, destination_root);
     player::queue_collider_build(world, destination_manifest, root_by_reference);

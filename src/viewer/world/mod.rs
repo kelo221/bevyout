@@ -15,9 +15,18 @@
 //! activation into either an instant same-frame cell swap or a
 //! loading-screen fallback that reuses `preload.rs`'s background manifest
 //! parse, then performs the same activation steps either way.
+//!
+//! `reveal_policy.rs` is a fourth pure, std-only seam (issue #55): bounded
+//! reveal-chunk planning, ordered nearest-to-arrival first, for a
+//! preloaded cell's placement entities. `reveal.rs` is the Bevy-side glue
+//! `swap.rs` calls into during `activate_resident_cell` to flip visibility
+//! in bounded chunks across a few frames instead of all at once -- see that
+//! module's doc comment for the measured spike this amortizes.
 
 mod policy;
 mod preload;
+mod reveal;
+mod reveal_policy;
 mod swap;
 mod swap_policy;
 
@@ -30,5 +39,6 @@ pub(crate) use swap_policy::{COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildQueue
 
 pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
     preload::install(app, resident_cell_limit);
+    reveal::install(app);
     swap::install(app);
 }

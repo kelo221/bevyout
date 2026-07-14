@@ -38,6 +38,7 @@ use crate::vsa::{
     is_bake_static, prepare, resolve_cached_manifest,
 };
 
+mod animation;
 mod audio;
 mod interaction;
 mod openmw_player;
@@ -237,6 +238,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         all_interiors: false,
         worldspace: None,
         list_only: false,
+        check_fingerprints: false,
         game_root: args.game_root.clone(),
         plugin: args.plugin.clone(),
         cell: None,

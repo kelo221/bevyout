@@ -84,6 +84,18 @@ mod policy;
 #[allow(dead_code, unused_imports)]
 mod swap_policy;
 
+// `world::reveal_policy` (issue #55) is likewise dependency-free (std only,
+// no Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/world/reveal_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod reveal_policy;
+
+// `animation::policy` (issue #57) is likewise dependency-free (std only, no
+// Bevy) -- see its module doc comment -- so it is included verbatim too.
+#[path = "../src/viewer/animation/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod animation_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -105,8 +117,19 @@ mod prepare {
     #[path = "../src/vsa/prepare/jobs.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod jobs;
+
+    // `vsa::prepare::fingerprints` (issue #49) reuses `vsa::assets` (for
+    // `NIF_CONVERTER_REVISION`) via a relative `super::super::assets`
+    // import, so it is nested here too -- same pattern as `selectors`/
+    // `batch_cache` above -- to land that path on the `mod assets` include
+    // near the top of this file. `jobs` depends on it (`use
+    // super::fingerprints::...`), so both must live in this same block.
+    #[path = "../src/vsa/prepare/fingerprints.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod fingerprints;
 }
 use prepare::batch_cache;
+use prepare::fingerprints;
 use prepare::jobs;
 use prepare::selectors;
 
@@ -179,6 +202,22 @@ struct BevyoutWorld {
     swap_placements: Vec<swap_policy::PlacementRef>,
     swap_deltas: std::collections::HashMap<u32, swap_policy::ReferenceDelta>,
     swap_applications: Vec<swap_policy::PlacementApplication>,
+
+    // -- fingerprints.feature (issue #49) --
+    fingerprint_current: Option<fingerprints::CellFingerprints>,
+    fingerprint_stale_components: Option<Vec<fingerprints::FingerprintComponent>>,
+    fingerprint_resume_result: Option<(Vec<u32>, usize, fingerprints::StaleCells)>,
+
+    // -- first_reveal.feature (issue #55) --
+    reveal_candidates: Vec<reveal_policy::RevealCandidate>,
+    reveal_budget: usize,
+    reveal_chunks: Vec<Vec<usize>>,
+
+    // -- door_animation.feature (issue #57) --
+    animation_clip_names: Vec<String>,
+    animation_selected_clip: Option<Option<String>>,
+    animation_open_clip_seconds: Option<f32>,
+    animation_open_lead: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -1325,6 +1364,308 @@ async fn then_swap_placement_has_translation(
         .transform
         .expect("expected a transform delta on this application");
     assert_eq!(transform.translation, [x, y, z]);
+}
+
+// ---------------------------------------------------------------------
+// fingerprints.feature (issue #49) -- appended section, do not interleave
+// with steps above; new steps for this issue belong below this marker.
+// ---------------------------------------------------------------------
+
+fn parse_fingerprints(
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) -> fingerprints::CellFingerprints {
+    fingerprints::CellFingerprints {
+        plugin_content_set: plugin,
+        converter,
+        physics,
+        prepare_pipeline,
+    }
+}
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) has recorded fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn given_cell_recorded_fingerprints(
+    world: &mut BevyoutWorld,
+    hex: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    world
+        .job_manifest
+        .as_mut()
+        .expect("job manifest not created yet")
+        .record_fingerprints(
+            parse_hex(&hex),
+            parse_fingerprints(plugin, converter, physics, prepare_pipeline),
+        );
+}
+
+#[when(
+    regex = r#"^cell 0x([0-9a-fA-F]+) is checked against current fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn when_cell_checked_against_current(
+    world: &mut BevyoutWorld,
+    hex: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    let current = parse_fingerprints(plugin, converter, physics, prepare_pipeline);
+    let recorded = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet")
+        .fingerprints_for(parse_hex(&hex))
+        .cloned();
+    world.fingerprint_stale_components =
+        Some(fingerprints::stale_components(recorded.as_ref(), &current));
+    world.fingerprint_current = Some(current);
+}
+
+#[then("the cell is valid")]
+async fn then_cell_is_valid(world: &mut BevyoutWorld) {
+    let stale = world
+        .fingerprint_stale_components
+        .as_ref()
+        .expect("cell was not checked yet");
+    assert!(
+        stale.is_empty(),
+        "expected no stale components, got {stale:?}"
+    );
+}
+
+#[then(regex = r#"^the cell is stale in component "([^"]*)"$"#)]
+async fn then_cell_is_stale_in_component(world: &mut BevyoutWorld, component: String) {
+    let stale = world
+        .fingerprint_stale_components
+        .as_ref()
+        .expect("cell was not checked yet");
+    let labels: Vec<&str> = stale.iter().map(|c| c.label()).collect();
+    assert!(
+        labels.contains(&component.as_str()),
+        "expected {component:?} among stale components, got {labels:?}"
+    );
+}
+
+#[when(
+    regex = r#"^cells "([^"]*)" are resumed without force against current fingerprints plugin "([^"]*)" converter "([^"]*)" physics "([^"]*)" prepare_pipeline "([^"]*)"$"#
+)]
+async fn when_cells_resumed_checked(
+    world: &mut BevyoutWorld,
+    list: String,
+    plugin: String,
+    converter: String,
+    physics: String,
+    prepare_pipeline: String,
+) {
+    let current = parse_fingerprints(plugin, converter, physics, prepare_pipeline);
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let selection = parse_hex_list(&list);
+    world.fingerprint_resume_result = Some(jobs::filter_resume_checked(
+        manifest, &selection, false, &current,
+    ));
+}
+
+#[then(regex = r#"^the checked cells to run are "([^"]*)"$"#)]
+async fn then_checked_cells_to_run_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let (to_run, _, _) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(to_run, &expected);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were checked as skipped$")]
+async fn then_checked_cells_skipped(world: &mut BevyoutWorld, count: usize) {
+    let (_, skipped, _) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(*skipped, count);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were stale$")]
+async fn then_checked_cells_stale(world: &mut BevyoutWorld, count: usize) {
+    let (_, _, stale) = world
+        .fingerprint_resume_result
+        .as_ref()
+        .expect("cells were not resumed yet");
+    assert_eq!(stale.len(), count);
+}
+
+// ---------------------------------------------------------------------
+// first_reveal.feature (issue #55)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^(\d+) reveal candidates evenly spaced from the arrival point$")]
+async fn given_reveal_candidates_evenly_spaced(world: &mut BevyoutWorld, count: usize) {
+    for i in 0..count {
+        world
+            .reveal_candidates
+            .push(reveal_policy::RevealCandidate {
+                index: world.reveal_candidates.len(),
+                position: [i as f32, 0.0, 0.0],
+            });
+    }
+}
+
+#[given(regex = r"^a reveal candidate at distance (\d+) from the arrival point$")]
+async fn given_reveal_candidate_at_distance(world: &mut BevyoutWorld, distance: f32) {
+    world
+        .reveal_candidates
+        .push(reveal_policy::RevealCandidate {
+            index: world.reveal_candidates.len(),
+            position: [distance, 0.0, 0.0],
+        });
+}
+
+#[given(regex = r"^the reveal budget is (\d+)$")]
+async fn given_reveal_budget(world: &mut BevyoutWorld, budget: usize) {
+    world.reveal_budget = budget;
+}
+
+#[when("the reveal chunks are planned")]
+async fn when_reveal_chunks_planned(world: &mut BevyoutWorld) {
+    world.reveal_chunks = reveal_policy::plan_reveal_chunks(
+        &world.reveal_candidates,
+        [0.0, 0.0, 0.0],
+        world.reveal_budget,
+    );
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) reveal chunks?$")]
+async fn then_reveal_chunk_count_is(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(
+        world.reveal_chunks.len(),
+        expected,
+        "expected {expected} reveal chunks, got {:?}",
+        world.reveal_chunks
+    );
+}
+
+#[then("every reveal candidate appears in exactly one chunk")]
+async fn then_every_reveal_candidate_appears_once(world: &mut BevyoutWorld) {
+    let mut seen: Vec<usize> = world
+        .reveal_chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect();
+    seen.sort_unstable();
+    let expected: Vec<usize> = (0..world.reveal_candidates.len()).collect();
+    assert_eq!(
+        seen, expected,
+        "reveal chunks did not partition every candidate exactly once"
+    );
+}
+
+#[then(regex = r"^the first reveal chunk contains the candidate at distance (\d+)$")]
+async fn then_first_chunk_contains_candidate_at_distance(world: &mut BevyoutWorld, distance: f32) {
+    let candidate = world
+        .reveal_candidates
+        .iter()
+        .find(|candidate| candidate.position[0] == distance)
+        .expect("no reveal candidate at that distance");
+    let first_chunk = world
+        .reveal_chunks
+        .first()
+        .expect("reveal chunks not planned yet");
+    assert!(
+        first_chunk.contains(&candidate.index),
+        "expected first chunk {first_chunk:?} to contain candidate index {}",
+        candidate.index
+    );
+}
+
+// ---------------------------------------------------------------------
+// door_animation.feature (issue #57)
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^a placement with clips "([^"]*)"$"#)]
+async fn given_animation_clips(world: &mut BevyoutWorld, clips: String) {
+    world.animation_clip_names = clips
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+}
+
+#[given("a placement with no clips")]
+async fn given_animation_no_clips(world: &mut BevyoutWorld) {
+    world.animation_clip_names = Vec::new();
+}
+
+#[when("the placement is opened")]
+async fn when_animation_opened(world: &mut BevyoutWorld) {
+    world.animation_selected_clip = Some(animation_policy::select_clip(
+        animation_policy::ClipTransition::Opening,
+        &world.animation_clip_names,
+    ));
+}
+
+#[when("the placement is closed")]
+async fn when_animation_closed(world: &mut BevyoutWorld) {
+    world.animation_selected_clip = Some(animation_policy::select_clip(
+        animation_policy::ClipTransition::Closing,
+        &world.animation_clip_names,
+    ));
+}
+
+#[then(regex = r#"^the selected clip is "([^"]*)"$"#)]
+async fn then_animation_selected_clip_is(world: &mut BevyoutWorld, expected: String) {
+    let selected = world
+        .animation_selected_clip
+        .clone()
+        .expect("clip selection not computed yet");
+    assert_eq!(selected, Some(expected));
+}
+
+#[then("no clip is selected")]
+async fn then_animation_no_clip_selected(world: &mut BevyoutWorld) {
+    let selected = world
+        .animation_selected_clip
+        .clone()
+        .expect("clip selection not computed yet");
+    assert_eq!(selected, None);
+}
+
+#[given(regex = r"^a travel door with an Open clip lasting ([\d.]+) seconds$")]
+async fn given_animation_open_clip_seconds(world: &mut BevyoutWorld, seconds: f32) {
+    world.animation_open_clip_seconds = Some(seconds);
+}
+
+#[given("a travel door with no Open clip")]
+async fn given_animation_no_open_clip(world: &mut BevyoutWorld) {
+    world.animation_open_clip_seconds = None;
+}
+
+#[when("the open lead is computed")]
+async fn when_animation_open_lead_computed(world: &mut BevyoutWorld) {
+    world.animation_open_lead = Some(animation_policy::open_lead_seconds(
+        world.animation_open_clip_seconds,
+        animation_policy::OPEN_LEAD_CAP_SECONDS,
+    ));
+}
+
+#[then(regex = r"^the open lead is ([\d.]+) seconds$")]
+async fn then_animation_open_lead_is(world: &mut BevyoutWorld, expected: f32) {
+    let lead = world
+        .animation_open_lead
+        .expect("open lead not computed yet");
+    assert!(
+        (lead - expected).abs() < 1e-4,
+        "open lead {lead} != expected {expected}"
+    );
 }
 
 fn main() {

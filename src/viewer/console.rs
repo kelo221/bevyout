@@ -218,18 +218,25 @@ fn activate_reference(
             "door has no travel destination",
         ));
     };
-    world.write_message(interaction::DoorTravelRequested {
-        destination_cell_form_id: destination.cell_form_id,
-        translation: Vec3::from_array(destination.translation),
-        rotation_xyzw: destination.rotation_xyzw,
-    });
+    // Wave-3 amendment: route through the same Open-clip lead as player
+    // activation so BRP-driven travel animates instead of teleporting.
+    let open_lead_ms = interaction::scripted_door_travel(
+        world,
+        entity,
+        interaction::DoorTravelRequested {
+            destination_cell_form_id: destination.cell_form_id,
+            translation: Vec3::from_array(destination.translation),
+            rotation_xyzw: destination.rotation_xyzw,
+        },
+    );
     Ok(ConsoleCommandResult::new(
         json!({
             "reference_form_id": placement.reference_form_id,
             "destination_cell_form_id": destination.cell_form_id,
+            "open_lead_ms": open_lead_ms,
         }),
         vec![format!(
-            "travel requested to cell {:08x}",
+            "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
         )],
     ))
@@ -1273,5 +1280,36 @@ mod tests {
             .expect("expected a DoorTravelRequested message");
         assert_eq!(request.destination_cell_form_id, 148753);
         assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    /// Wave-3 amendment: a door with a discovered Open clip stages its travel
+    /// behind the open lead instead of firing it the same frame, matching the
+    /// player's Enter activation.
+    #[test]
+    fn activate_animated_door_defers_travel_by_the_open_lead() {
+        let mut app = test_app();
+        app.add_message::<interaction::DoorTravelRequested>();
+        register_placement(&mut app, DOOR_WITH_DESTINATION);
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+            .single(app.world())
+            .unwrap();
+        let player = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(root).insert(
+            super::super::animation::AnimatedPlacement::for_test(player, &[("Open", 1.33)]),
+        );
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        let lead = output.value["open_lead_ms"].as_f64().unwrap();
+        assert!(lead > 0.0, "expected a nonzero open lead, got {lead}");
+        let requests = app
+            .world()
+            .resource::<Messages<interaction::DoorTravelRequested>>();
+        assert_eq!(
+            requests.iter_current_update_messages().count(),
+            0,
+            "travel must be staged behind the open lead, not fired same-frame"
+        );
     }
 }
