@@ -364,6 +364,84 @@ fn playback_settings(
     }
 }
 
+/// Issue #52: switches the cell ambient loop(s) over to whatever
+/// `PreparedSceneManifest` is currently the active resource (already
+/// repointed to the destination cell by the caller). A plain despawn of the
+/// previous loop(s) followed by spawning the destination's -- no
+/// crossfade -- matching F52.2's "plain stop/start is acceptable". Also
+/// rebuilds the audio clip and footstep catalogs from the new manifest,
+/// since each prepared manifest carries only the clips its own cell needs.
+/// Per-placement loop sounds (e.g. idle machinery) are not started here;
+/// see this issue's final report for why that is deliberately deferred.
+pub(crate) fn rebuild_ambient_for_active_cell(world: &mut World) {
+    let (ambient_form_ids, audio_clips, footstep_sets, hard_landing_clips) = {
+        let manifest = world.resource::<PreparedSceneManifest>();
+        (
+            manifest.cell_audio.ambient_loop_sound_form_ids.clone(),
+            manifest.audio_clips.clone(),
+            manifest.footstep_sets.clone(),
+            manifest.hard_landing_clips.clone(),
+        )
+    };
+
+    let mut previous = world.query_filtered::<Entity, With<CellAmbientLoop>>();
+    let previous_entities: Vec<Entity> = previous.iter(world).collect();
+    for entity in previous_entities {
+        world.despawn(entity);
+    }
+
+    {
+        let mut catalog = world.resource_mut::<AudioClipCatalog>();
+        catalog.clips.clear();
+        for clip in audio_clips {
+            let form_id = clip.form_id;
+            if catalog.clips.insert(form_id, clip).is_some() {
+                warn!(
+                    "audio FormID {form_id:08x} appears more than once; using the last prepared clip"
+                );
+            }
+        }
+    }
+    {
+        let mut footstep_catalog = world.resource_mut::<FootstepCatalog>();
+        footstep_catalog.sets = footstep_sets
+            .into_iter()
+            .map(|set| (set.surface.clone(), set))
+            .collect();
+        footstep_catalog.hard_landing_clips = hard_landing_clips;
+    }
+
+    let asset_server = world.resource::<AssetServer>().clone();
+    for form_id in ambient_form_ids {
+        let clip = world
+            .resource::<AudioClipCatalog>()
+            .clips
+            .get(&form_id)
+            .cloned();
+        let Some(clip) = clip else {
+            let mut reported = world.resource_mut::<ReportedMissingClips>();
+            report_missing_once(
+                &mut reported,
+                form_id,
+                "is absent from the prepared catalog",
+            );
+            continue;
+        };
+        let Some(asset_path) = clip.asset_path.clone() else {
+            let mut reported = world.resource_mut::<ReportedMissingClips>();
+            report_missing_once(&mut reported, form_id, "has no staged asset");
+            continue;
+        };
+        let settings = playback_settings(&clip, PlaybackMode::Loop, false, true);
+        world.spawn((
+            AudioPlayer::new(asset_server.load(asset_path)),
+            settings,
+            Transform::default(),
+            CellAmbientLoop,
+        ));
+    }
+}
+
 #[cfg(test)]
 #[path = "audio/tests/mod.rs"]
 mod tests;

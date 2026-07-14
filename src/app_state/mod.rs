@@ -9,8 +9,8 @@
 mod plugin;
 
 pub(crate) use plugin::{
-    AppState, AppStatePlugin, GameplayModal, LoadingTarget, auto_advance_from_boot,
-    auto_advance_from_loading,
+    AppState, AppStatePlugin, GameplayModal, LoadingTarget, RequestStateTransition,
+    auto_advance_from_boot, auto_advance_from_loading,
 };
 
 #[cfg(test)]

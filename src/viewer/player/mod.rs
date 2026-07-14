@@ -231,24 +231,70 @@ pub(crate) fn load_prepared_physics_assets(
     asset_root: &Path,
 ) -> Result<PreparedPhysicsAssets> {
     let mut loaded = PreparedPhysicsAssets::default();
-    for placement in &manifest.placements {
-        let Some(relative_path) = placement.physics_asset_path.as_ref() else {
-            continue;
-        };
-        if loaded.assets.contains_key(relative_path) {
-            continue;
+    loaded.ensure_loaded_for(manifest, asset_root)?;
+    Ok(loaded)
+}
+
+impl PreparedPhysicsAssets {
+    /// Issue #52: loads and merges in whichever of `manifest`'s physics
+    /// sidecars are not already present, for use when a door swap activates
+    /// a cell whose physics was never loaded at startup (unlike the startup
+    /// cell, which `load_prepared_physics_assets` covers up front).
+    /// Sidecars already present (by relative path) are left untouched, so
+    /// this is safe to call again for a cell that was already loaded.
+    pub(crate) fn ensure_loaded_for(
+        &mut self,
+        manifest: &PreparedSceneManifest,
+        asset_root: &Path,
+    ) -> Result<()> {
+        for placement in &manifest.placements {
+            let Some(relative_path) = placement.physics_asset_path.as_ref() else {
+                continue;
+            };
+            if self.assets.contains_key(relative_path) {
+                continue;
+            }
+            let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            self.payload_bytes = self.payload_bytes.saturating_add(
+                fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0),
+            );
+            let asset = read_physics_asset(&path)
+                .with_context(|| format!("loading prepared physics for {relative_path}"))?;
+            self.assets.insert(relative_path.clone(), asset);
+        }
+        Ok(())
+    }
+
+    /// Issue #52's runtime variant of the loop above: loads one sidecar by
+    /// its manifest-relative path if it is not already present, warning
+    /// (never erroring -- a swap must not crash the viewer) on read
+    /// failure. Returns whether the sidecar is now available. Called from
+    /// the staggered collider build (`advance_pending_collider_builds`),
+    /// so a destination cell's sidecar file I/O is spread across frames on
+    /// the same per-frame budget as the collider construction itself.
+    pub(crate) fn ensure_sidecar_loaded(&mut self, relative_path: &str, asset_root: &Path) -> bool {
+        if self.assets.contains_key(relative_path) {
+            return true;
         }
         let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        loaded.payload_bytes = loaded.payload_bytes.saturating_add(
+        self.payload_bytes = self.payload_bytes.saturating_add(
             fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         );
-        let asset = read_physics_asset(&path)
-            .with_context(|| format!("loading prepared physics for {relative_path}"))?;
-        loaded.assets.insert(relative_path.clone(), asset);
+        match read_physics_asset(&path) {
+            Ok(asset) => {
+                self.assets.insert(relative_path.to_owned(), asset);
+                true
+            }
+            Err(error) => {
+                warn!("could not load physics sidecar {relative_path}: {error}");
+                false
+            }
+        }
     }
-    Ok(loaded)
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default)]
@@ -273,8 +319,13 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(PhysicsDisabled(disable_physics))
     .insert_resource(PlayerNoClip::default())
     .insert_resource(StepDebugSettings::default())
+    .insert_resource(PendingColliderBuild::default())
     .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
     .add_systems(PostStartup, build_prepared_colliders)
+    .add_systems(
+        Update,
+        advance_pending_collider_builds.run_if(in_state(AppState::InGame)),
+    )
     .add_systems(
         FixedUpdate,
         (
@@ -565,6 +616,85 @@ pub(crate) fn console_set_angles(world: &mut World, entity: Entity, angles: Vec3
     }
     console_transform_mutated(world, entity);
     true
+}
+
+/// Issue #52: teleports whichever camera representation is currently
+/// active (the FPS player body, or the free camera) to a door
+/// destination's ground-level `translation`/`rotation_xyzw` (already in
+/// Bevy coordinates, matching `PreparedDoorDestination`). Mirrors how
+/// `scene::transition_camera_position` places the free camera at startup
+/// (`translation + EYE_HEIGHT`), and resets the FPS body's physics,
+/// footstep, and render-interpolation history exactly like a console
+/// `setpos`/`setangle` would, via `console_transform_mutated`.
+pub(crate) fn teleport_active_player(
+    world: &mut World,
+    translation: Vec3,
+    rotation_xyzw: [f32; 4],
+) {
+    let rotation = Quat::from_xyzw(
+        rotation_xyzw[0],
+        rotation_xyzw[1],
+        rotation_xyzw[2],
+        rotation_xyzw[3],
+    )
+    .normalize();
+    let (yaw, pitch) = camera_angles(rotation);
+    let mode = world.resource::<CameraModeState>().mode;
+    match mode {
+        CameraMode::Fps => {
+            let Some(player) = world.resource::<CameraModeState>().player else {
+                return;
+            };
+            // The FPS body's `Transform` is the capsule *center*; the door
+            // destination is ground-level. Eye = ground + EYE_HEIGHT, and
+            // center = eye - CAMERA_LOCAL_HEIGHT (see `set_camera_mode`),
+            // so center = ground + CAPSULE_HEIGHT * 0.5.
+            let player_center = translation + Vec3::Y * (CAPSULE_HEIGHT * 0.5);
+            if let Some(mut transform) = world.get_mut::<Transform>(player) {
+                transform.translation = player_center;
+                transform.rotation = Quat::from_rotation_y(yaw);
+            }
+            if let Some(mut fps_player) = world.get_mut::<FpsPlayer>(player) {
+                fps_player.yaw = yaw;
+                fps_player.pitch = pitch;
+            }
+            let camera_entity = {
+                let mut cameras = world.query_filtered::<(Entity, &ChildOf), With<Camera3d>>();
+                cameras
+                    .iter(world)
+                    .find_map(|(camera, parent)| (parent.parent() == player).then_some(camera))
+            };
+            if let Some(camera_entity) = camera_entity {
+                if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+                    transform.rotation = Quat::from_rotation_x(pitch);
+                }
+                if let Some(mut fly) = world.get_mut::<FlyCamera>(camera_entity) {
+                    fly.yaw = yaw;
+                    fly.pitch = pitch;
+                }
+            }
+            console_transform_mutated(world, player);
+        }
+        CameraMode::Free => {
+            let camera_entity = {
+                let mut cameras =
+                    world.query_filtered::<Entity, (With<Camera3d>, Without<ChildOf>)>();
+                cameras.iter(world).next()
+            };
+            let Some(camera_entity) = camera_entity else {
+                return;
+            };
+            let eye_position = translation + Vec3::Y * EYE_HEIGHT;
+            if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+                transform.translation = eye_position;
+                transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+            }
+            if let Some(mut fly) = world.get_mut::<FlyCamera>(camera_entity) {
+                fly.yaw = yaw;
+                fly.pitch = pitch;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
