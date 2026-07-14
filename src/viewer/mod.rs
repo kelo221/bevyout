@@ -224,7 +224,11 @@ fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheActi
 
 fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Result<PathBuf> {
     prepare(PrepareArgs {
-        selector: Some(args.selector.clone()),
+        selectors: vec![args.selector.clone()],
+        all: false,
+        all_interiors: false,
+        worldspace: None,
+        list_only: false,
         game_root: args.game_root.clone(),
         plugin: args.plugin.clone(),
         cell: None,

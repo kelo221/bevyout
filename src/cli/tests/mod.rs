@@ -68,7 +68,7 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
     let CommandLine::Prepare(args) = cli.command else {
         panic!("expected prepare command");
     };
-    assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
+    assert_eq!(args.selectors, vec!["SuperDuperMart".to_string()]);
 
     let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart"]).unwrap();
     let CommandLine::Bake(args) = cli.command else {
@@ -106,6 +106,58 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn prepare_batch_selectors_parse_and_combine() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "--all-interiors", "--list-only"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert!(args.all_interiors);
+    assert!(args.list_only);
+    assert!(!args.all);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "--worldspace",
+        "WastelandNV",
+        "--all-interiors",
+        "SuperDuperMart",
+        "MegatonExt",
+    ])
+    .unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.worldspace.as_deref(), Some("WastelandNV"));
+    assert!(args.all_interiors);
+    assert_eq!(
+        args.selectors,
+        vec!["SuperDuperMart".to_string(), "MegatonExt".to_string()]
+    );
+
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "--all"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert!(args.all);
+}
+
+#[test]
+fn prepare_all_conflicts_with_other_selection_flags() {
+    for arguments in [
+        vec!["bevyout", "prepare", "--all", "--all-interiors"],
+        vec!["bevyout", "prepare", "--all", "--worldspace", "Wasteland"],
+        vec!["bevyout", "prepare", "--all", "SuperDuperMart"],
+        vec!["bevyout", "prepare", "--all", "--cell", "00017f37"],
+    ] {
+        assert!(
+            Cli::try_parse_from(arguments.clone()).is_err(),
+            "expected {arguments:?} to be rejected"
+        );
+    }
 }
 
 #[test]
