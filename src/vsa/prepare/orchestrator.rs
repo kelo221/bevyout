@@ -1,8 +1,8 @@
 use super::*;
-use crate::vsa::catalog::CellCatalog;
+use crate::vsa::catalog::{CellCatalog, build_cell_map};
 
-/// Dispatches `prepare`: a single legacy selector goes straight through the
-/// unchanged single-cell path below; `--all`/`--all-interiors`/`--worldspace`,
+/// Dispatches `prepare`: a single legacy selector goes straight through
+/// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`,
 /// `--list-only`, or more than one positional selector build a lightweight
 /// cell catalogue and resolve the batch through `resolve_selection` (#46).
 pub fn prepare(args: PrepareArgs) -> Result<()> {
@@ -20,10 +20,50 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
             .into_iter()
             .next()
             .context("provide a GECK EditorID/FormID selector or legacy --cell, or pass --all/--all-interiors/--worldspace")?;
-        return prepare_one(args, selector_input);
+        return prepare_single(args, selector_input);
     }
 
     prepare_batch(args, explicit)
+}
+
+/// The single-cell CLI path. Builds a one-cell `BatchSession` (issue #47)
+/// rather than duplicating the plugin-chain/BSA/audio/footstep loading
+/// `prepare_cell` needs, so its output is identical to what the previous
+/// `prepare_one` produced for a single cell (F47.1).
+fn prepare_single(args: PrepareArgs, selector_input: String) -> Result<()> {
+    let game_root = args
+        .game_root
+        .clone()
+        .context("Fallout 3 is not configured; pass --game-root or create .bevyout/config.toml")?;
+    let root = fs::canonicalize(&game_root).context("game root does not exist")?;
+    let plugin = args
+        .plugin
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("Fallout3.esm"));
+    let plugin_path = if plugin.is_absolute() {
+        plugin
+    } else {
+        root.join("Data").join(&plugin)
+    };
+    let plugin_path = fs::canonicalize(&plugin_path).context("plugin does not exist")?;
+    let data_root = root.join("Data");
+    let cache_dir = absolutize(
+        &args
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".bevyout/cache")),
+    )?;
+
+    let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
+    let fingerprint = content_set_fingerprint(&loaded_plugins);
+    let mut session = BatchSession::new(
+        &plugin_path,
+        &data_root,
+        &cache_dir,
+        loaded_plugins,
+        fingerprint,
+    )?;
+    prepare_cell(&mut session, args, selector_input)
 }
 
 fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
@@ -51,6 +91,12 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     let plugin_path = fs::canonicalize(&plugin_path).context("plugin does not exist")?;
     let data_root = root.join("Data");
 
+    // Read the plugin chain exactly once for the whole batch (F47.2): the
+    // catalogue used for `resolve_selection`, the `cellmap.ron` artifact
+    // (F47.4), and every cell's `BatchSession` (F47.1) all share this same
+    // `loaded_plugins`/`fingerprint`, instead of each cell in the batch
+    // re-reading and re-fingerprinting the chain the way `prepare_one` did
+    // before this issue.
     let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
     let fingerprint = content_set_fingerprint(&loaded_plugins);
     let sources = loaded_plugins
@@ -60,7 +106,7 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
             bytes: &plugin.bytes,
         })
         .collect::<Vec<_>>();
-    let catalog = CellCatalog::build(&sources, fingerprint)?;
+    let catalog = CellCatalog::build(&sources, fingerprint.clone())?;
     let cells: Vec<CellSummary> = catalog
         .entries
         .iter()
@@ -91,6 +137,33 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
+    let cache_dir = absolutize(
+        &args
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".bevyout/cache")),
+    )?;
+
+    // F47.4: write the deterministic cell map into the cache dir root,
+    // reusing the same `ParsedContentSet` -> `CellMap` builder `cells --map`
+    // uses, from the content set this run already parsed above.
+    let cell_map = build_cell_map(&sources, fingerprint.clone())?;
+    let cell_map_path = write_cell_map(&cache_dir, &cell_map)?;
+    println!(
+        "wrote cell map: {} ({} cells, {} door edges)",
+        cell_map_path.display(),
+        cell_map.cells.len(),
+        cell_map.doors.len()
+    );
+
+    let mut session = BatchSession::new(
+        &plugin_path,
+        &data_root,
+        &cache_dir,
+        loaded_plugins,
+        fingerprint,
+    )?;
+
     let total = resolved.len();
     let mut failed = Vec::new();
     for form_id in resolved {
@@ -102,11 +175,23 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
         cell_args.all_interiors = false;
         cell_args.worldspace = None;
         cell_args.list_only = false;
-        if let Err(error) = prepare_one(cell_args, selector_input.clone()) {
+        if let Err(error) = prepare_cell(&mut session, cell_args, selector_input.clone()) {
             eprintln!("cell {selector_input} failed: {error:#}");
             failed.push(selector_input);
         }
     }
+
+    // F47.3: one deterministic end-of-batch cache summary line, aggregating
+    // every cell's asset cache counts plus the session-level physics
+    // sidecar cache's hit/miss totals.
+    println!(
+        "{}",
+        batch_cache_summary_line(
+            session.asset_totals,
+            session.physics_cache.accesses(),
+            session.physics_cache.hits,
+        )
+    );
 
     if failed.is_empty() {
         println!("prepared {total} cells, 0 failed");
@@ -122,7 +207,18 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
+/// Prepares one cell using a session's already-loaded plugin chain, BSA/audio
+/// archive indexes, and staged footstep set (issue #47): the batch loop in
+/// `prepare_batch` calls this once per selected cell against one shared
+/// `&mut BatchSession`, and `prepare_single` calls it once against a
+/// one-cell session. `session` never exposes a way to reload the chain (see
+/// `session.rs`), so this function structurally cannot repeat that I/O no
+/// matter how many cells a batch prepares (F47.1, F47.2).
+fn prepare_cell(
+    session: &mut BatchSession,
+    args: PrepareArgs,
+    selector_input: String,
+) -> Result<()> {
     let selector = parse_cell_selector(&selector_input)?;
     let game_root = args
         .game_root
@@ -146,9 +242,11 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
     fs::create_dir_all(&staging_dir)?;
     fs::create_dir_all(&assets_dir)?;
 
-    let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
-    let source_fingerprint = content_set_fingerprint(&loaded_plugins);
-    let source_plugins = loaded_plugins
+    // Plugin chain, esplugin validation: read/computed once in
+    // `BatchSession::new`, not per cell (F47.2).
+    let source_fingerprint = session.fingerprint.clone();
+    let source_plugins = session
+        .loaded_plugins
         .iter()
         .map(|plugin| PreparedPluginSource {
             name: plugin.name.clone(),
@@ -157,20 +255,8 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         })
         .collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
-    let mut validator = esplugin::Plugin::new(esplugin::GameId::Fallout3, &plugin_path);
-    if let Err(error) = validator.parse_file(esplugin::ParseOptions::header_only()) {
-        diagnostics.push(Diagnostic {
-            severity: "warning".into(),
-            message: format!("esplugin validation failed: {error}"),
-        });
-    }
-    let plugin_sources = loaded_plugins
-        .iter()
-        .map(|plugin| PluginSource {
-            name: &plugin.name,
-            bytes: &plugin.bytes,
-        })
-        .collect::<Vec<_>>();
+    diagnostics.extend(session.plugin_diagnostics.iter().cloned());
+    let plugin_sources = session.plugin_sources();
     let mut parsed = parse_content_set(&plugin_sources, &selector)
         .context("failed to parse Fallout content set")?;
     diagnostics.extend(parsed.diagnostics.drain(..).map(|message| Diagnostic {
@@ -206,35 +292,23 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         )
     }
 
-    let archives = load_archives(&data_root, &mut diagnostics)?;
-    let audio_plugin_names = loaded_plugins
-        .iter()
-        .rev()
-        .map(|plugin| plugin.name.clone())
-        .collect::<Vec<_>>();
-    let audio_archive_load = load_audio_archives(&data_root, &audio_plugin_names);
-    diagnostics.extend(
-        audio_archive_load
-            .diagnostics
-            .into_iter()
-            .map(|message| Diagnostic {
-                severity: "info".into(),
-                message,
-            }),
-    );
+    // BSA archive indexes: indexed once in `BatchSession::new`, not per cell
+    // (F47.2).
+    diagnostics.extend(session.archive_diagnostics.iter().cloned());
+    // Audio archive indexes: same -- indexed once in `BatchSession::new`.
+    diagnostics.extend(session.audio_diagnostics.iter().cloned());
     let (cell_audio, audio_clips) = stage_audio(
         &data_root,
-        &audio_archive_load.archives,
+        &session.audio_archives,
         &parsed,
         &mut diagnostics,
         &cache_dir.join("audio"),
     )?;
-    let (footstep_sets, hard_landing_clips) = stage_footsteps(
-        &data_root,
-        &audio_archive_load.archives,
-        &mut diagnostics,
-        &cache_dir.join("audio"),
-    )?;
+    // Footstep clip set: cell-independent (fixed surface families), staged
+    // once in `BatchSession::new` and shared verbatim by every cell (F47.2).
+    diagnostics.extend(session.footstep_diagnostics.iter().cloned());
+    let footstep_sets = session.footstep_sets.clone();
+    let hard_landing_clips = session.hard_landing_clips.clone();
     if let Some(metadata) = parsed.cell_metadata.as_ref() {
         cell.lighting_template_form_id = metadata.lighting_template_form_id;
         cell.lighting_template_flags = metadata.lighting_template_flags;
@@ -290,6 +364,23 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
     }
     let blender = find_blender(args.blender)?;
     let navmeshes = stage_navmeshes(&scene_dir, &mut diagnostics, &parsed.navmeshes)?;
+    let stage = stage_placements(
+        std::mem::take(&mut parsed.references),
+        &parsed.bases,
+        &data_root,
+        &session.archives,
+        &staging_dir,
+        &assets_dir,
+        &mut diagnostics,
+        args.rebuild_assets,
+    )?;
+    // F47.3: fold this cell's asset cache counts into the batch total.
+    session.asset_totals.add(
+        stage.cache_hits,
+        stage.cache_missing,
+        stage.cache_invalid,
+        stage.cache_explicit_rebuilds,
+    );
     let PlacementStage {
         jobs,
         mut placements,
@@ -298,16 +389,7 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         cache_missing,
         cache_invalid,
         cache_explicit_rebuilds,
-    } = stage_placements(
-        std::mem::take(&mut parsed.references),
-        &parsed.bases,
-        &data_root,
-        &archives,
-        &staging_dir,
-        &assets_dir,
-        &mut diagnostics,
-        args.rebuild_assets,
-    )?;
+    } = stage;
     convert_staged_textures(&staging_dir, &mut diagnostics)?;
     let cache_summary = format!(
         "asset cache: reused {cache_hits}, missing {cache_missing}, invalid {cache_invalid}, explicitly rebuilt {cache_explicit_rebuilds}; scheduled {} NIF-to-GLB conversion(s)",
@@ -322,6 +404,9 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
         run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
             .context("headless Blender conversion failed")?;
     }
+    // F47.3: this cell's unique physics assets, sourced through the
+    // session-level cache so a sidecar already read for an earlier cell in
+    // the batch is reused (a hit) instead of re-read from disk.
     let mut physics_assets = HashMap::new();
     let mut authored_assets = 0_usize;
     let mut fallback_assets = 0_usize;
@@ -332,8 +417,14 @@ fn prepare_one(args: PrepareArgs, selector_input: String) -> Result<()> {
             continue;
         };
         if !physics_assets.contains_key(relative_path) {
-            let path = cache_dir.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-            physics_assets.insert(relative_path.clone(), read_physics_asset(&path)?);
+            let asset = session
+                .physics_cache
+                .get_or_insert_with(relative_path, || {
+                    let path =
+                        cache_dir.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    read_physics_asset(&path)
+                })?;
+            physics_assets.insert(relative_path.clone(), asset);
         }
         let asset = physics_assets
             .get(relative_path)

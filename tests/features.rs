@@ -73,14 +73,21 @@ mod assets;
 mod cell_map;
 
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
-// via a relative `super::super::paths` import, so it is nested one module
-// deep here to make that path land on the `mod paths` include above.
+// via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
+// (issue #47) similarly reuses `vsa::cell_map` via a relative
+// `super::super::cell_map` import, so both are nested one module deep here to
+// make those paths land on the `mod paths`/`mod cell_map` includes above.
 #[path = "."]
 mod prepare {
     #[path = "../src/vsa/prepare/selectors.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod selectors;
+
+    #[path = "../src/vsa/prepare/batch_cache.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod batch_cache;
 }
+use prepare::batch_cache;
 use prepare::selectors;
 
 use assets::AssetConversion;
@@ -122,6 +129,13 @@ struct BevyoutWorld {
     cells: Vec<CellSummary>,
     worldspace_names: Vec<(u32, String)>,
     selection_result: Option<Result<Vec<u32>, String>>,
+
+    // -- batch_session.feature --
+    batch_physics_cache: batch_cache::KeyedBatchCache<()>,
+    batch_asset_totals: batch_cache::BatchAssetTotals,
+    batch_cache_dir: Option<std::path::PathBuf>,
+    written_cell_map_path: Option<std::path::PathBuf>,
+    written_cell_map: Option<cell_map::CellMap>,
 }
 
 fn find_placement<'a>(
@@ -699,6 +713,103 @@ async fn then_selection_fails_naming_worldspace(world: &mut BevyoutWorld, name: 
         error.contains(&name),
         "error {error:?} does not mention worldspace {name:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// batch_session.feature
+// ---------------------------------------------------------------------
+
+#[given("a fresh batch cache")]
+async fn given_fresh_batch_cache(world: &mut BevyoutWorld) {
+    world.batch_physics_cache = batch_cache::KeyedBatchCache::default();
+    world.batch_asset_totals = batch_cache::BatchAssetTotals::default();
+}
+
+#[when(regex = r#"^cell "[^"]*" reads physics key "([^"]*)"$"#)]
+async fn when_cell_reads_physics_key(world: &mut BevyoutWorld, key: String) {
+    world
+        .batch_physics_cache
+        .get_or_insert_with(&key, || Ok(()))
+        .expect("synthetic build never fails");
+}
+
+#[when(
+    regex = r#"^cell "[^"]*" reports asset cache reused (\d+), built (\d+), invalid (\d+), explicit (\d+)$"#
+)]
+async fn when_cell_reports_asset_cache(
+    world: &mut BevyoutWorld,
+    reused: usize,
+    built: usize,
+    invalid: usize,
+    explicit: usize,
+) {
+    world
+        .batch_asset_totals
+        .add(reused, built, invalid, explicit);
+}
+
+#[then(regex = r"^physics reads is (\d+)$")]
+async fn then_physics_reads_is(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(world.batch_physics_cache.accesses(), count);
+}
+
+#[then(regex = r"^physics hits is (\d+)$")]
+async fn then_physics_hits_is(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(world.batch_physics_cache.hits, count);
+}
+
+#[then(regex = r#"^the batch cache summary line is "([^"]*)"$"#)]
+async fn then_batch_cache_summary_line_is(world: &mut BevyoutWorld, expected: String) {
+    let line = batch_cache::batch_cache_summary_line(
+        world.batch_asset_totals,
+        world.batch_physics_cache.accesses(),
+        world.batch_physics_cache.hits,
+    );
+    assert_eq!(line, expected);
+}
+
+#[when("the cell map is written to the batch cache dir")]
+async fn when_cell_map_written_to_batch_cache_dir(world: &mut BevyoutWorld) {
+    let map = build_cell_map(world);
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bevyout-cucumber-batch-cache-{}-{unique}",
+        std::process::id()
+    ));
+    let path = batch_cache::write_cell_map(&dir, &map).expect("writing the cell map must succeed");
+    world.batch_cache_dir = Some(dir);
+    world.written_cell_map_path = Some(path);
+    // Reuses `cell_map.feature`'s own `Then there are N door edges` step,
+    // which reads from `world.cell_map`.
+    world.cell_map = Some(map.clone());
+    world.written_cell_map = Some(map);
+}
+
+#[then(regex = r#"^the written cell map file exists at "([^"]*)" under the batch cache dir$"#)]
+async fn then_written_cell_map_file_exists(world: &mut BevyoutWorld, file_name: String) {
+    let path = world
+        .written_cell_map_path
+        .as_ref()
+        .expect("cell map was not written yet");
+    let dir = world
+        .batch_cache_dir
+        .as_ref()
+        .expect("cell map was not written yet");
+    assert_eq!(path, &dir.join(&file_name));
+    assert!(path.is_file(), "{path:?} was not written");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[then(regex = r"^the written cell map has (\d+) cells$")]
+async fn then_written_cell_map_has_cells(world: &mut BevyoutWorld, count: usize) {
+    let map = world
+        .written_cell_map
+        .as_ref()
+        .expect("cell map was not written yet");
+    assert_eq!(map.cells.len(), count);
 }
 
 fn main() {

@@ -143,7 +143,15 @@ pub fn cells(args: CellsArgs) -> Result<()> {
 /// keeps OpenMW-derived types out of `cell_map.rs`'s public surface, the
 /// same way `CellCatalog::build` above converts at the boundary rather than
 /// letting `CellInfo`/parser types leak into the catalogue type.
-fn build_cell_map(sources: &[PluginSource<'_>], content_fingerprint: String) -> Result<CellMap> {
+///
+/// `pub(crate)` (rather than private) so a batch `prepare` run (issue #47)
+/// can reuse this exact builder to write `cellmap.ron` into the cache dir
+/// from the content set it already parsed, instead of re-implementing the
+/// `ParsedContentSet` -> `CellMap` conversion a second time.
+pub(crate) fn build_cell_map(
+    sources: &[PluginSource<'_>],
+    content_fingerprint: String,
+) -> Result<CellMap> {
     let parsed = parse_content_set_all(sources)?;
     let cells = parsed
         .cells()
