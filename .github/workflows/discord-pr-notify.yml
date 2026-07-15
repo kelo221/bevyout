@@ -1,0 +1,50 @@
+name: Discord PR notify
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Fallout-flavored notification
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          # Forks don't get secrets; nothing to do.
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK not set, skipping."
+            exit 0
+          fi
+
+          if [ "$ACTION" = "opened" ]; then
+            lines=(
+              "📟 *Please Stand By…* Vault-Tec has detected a new pull request. Remember: patrolling the review queue almost makes you wish for a nuclear winter."
+              "📟 A new PR crawls out of Vault 101, blinking in the sunlight. War never changes — but this code might."
+              "📟 Vault-Tec calling! A wild pull request appeared. It's not a settlement, but it still needs your help."
+            )
+          elif [ "$MERGED" = "true" ]; then
+            lines=(
+              "☢️ PR merged. +25 XP. Your S.P.E.C.I.A.L. stats remain questionable, but master grows stronger."
+              "☢️ Merge complete. The Brotherhood of Steel approves this addition to the codex. Ad victoriam!"
+              "☢️ Another PR enters master. G.O.A.T. result: certified Vault Loader, first class."
+            )
+          else
+            lines=(
+              "💀 PR closed, unmerged. It is now but dust and radroaches. War never changes."
+              "💀 PR terminated without merge. Sent to wander the wasteland. It gets 0 caps."
+              "💀 PR closed. Even a deathclaw shows more mercy than this review process."
+            )
+          fi
+
+          FLAVOR="${lines[RANDOM % ${#lines[@]}]}" \
+          jq -n '{
+            content: (env.FLAVOR + "\n**#" + env.PR_NUMBER + " " + env.PR_TITLE + "** by `" + env.PR_AUTHOR + "`\n" + env.PR_URL)
+          }' | curl -sf -H "Content-Type: application/json" -d @- "$WEBHOOK_URL"
