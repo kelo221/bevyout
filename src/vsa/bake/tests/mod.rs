@@ -180,58 +180,6 @@ fn ktx_tool_kind_is_unified_only_for_ktx_named_executables() {
 }
 
 #[test]
-fn bake_contribution_requires_every_reference_exactly_once() {
-    fn job_placement(reference_form_id: u32) -> JobPlacement {
-        JobPlacement {
-            reference_form_id,
-            asset_path: "assets/test.glb".into(),
-            ao_mode: "ao-none".into(),
-            batchable_static: true,
-            translation: [0.0; 3],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            scale: 1.0,
-        }
-    }
-    let expected = vec![job_placement(0x10), job_placement(0x20)];
-    validate_placement_contribution(
-        &expected,
-        &BlenderPlacementContribution {
-            expected_placements: 2,
-            contributed_placements: 2,
-            reference_form_ids: vec![0x20, 0x10],
-            post_batch_verified: true,
-            placements: vec![placement_geometry(0x20), placement_geometry(0x10)],
-        },
-    )
-    .unwrap();
-
-    let error = validate_placement_contribution(
-        &expected,
-        &BlenderPlacementContribution {
-            expected_placements: 2,
-            contributed_placements: 1,
-            reference_form_ids: vec![0x10],
-            post_batch_verified: false,
-            placements: vec![placement_geometry(0x10)],
-        },
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("00000020"));
-}
-
-fn placement_geometry(reference_form_id: u32) -> BlenderPlacementGeometry {
-    BlenderPlacementGeometry {
-        reference_form_id,
-        visual_meshes: 1,
-        vertices: 3,
-        triangles: 1,
-        world_bounds_min: [0.0; 3],
-        world_bounds_max: [1.0; 3],
-    }
-}
-
-#[test]
 fn relative_asset_path_requires_the_path_to_be_inside_root() {
     let root = Path::new("/cache/assets");
     assert_eq!(
@@ -307,25 +255,5 @@ fn find_irradiance_ktx_tool_errors_when_unified_path_is_missing() {
         .join(format!("bevyout-missing-ktx-dir-{}", std::process::id()))
         .join("ktx.exe");
     let error = find_irradiance_ktx_tool(Some(named_ktx)).unwrap_err();
-    assert!(error.to_string().contains("does not exist"));
-}
-
-#[test]
-fn find_irradiance_blender_errors_on_a_nonexistent_explicit_path() {
-    let missing = std::env::temp_dir().join(format!(
-        "bevyout-missing-blender-{}-does-not-exist",
-        std::process::id()
-    ));
-    let error = find_irradiance_blender(Some(&missing), None).unwrap_err();
-    assert!(error.to_string().contains("does not exist"));
-}
-
-#[test]
-fn validate_blender_45_errors_on_a_nonexistent_path() {
-    let missing = std::env::temp_dir().join(format!(
-        "bevyout-missing-blender45-{}-does-not-exist",
-        std::process::id()
-    ));
-    let error = validate_blender_45(&missing).unwrap_err();
     assert!(error.to_string().contains("does not exist"));
 }

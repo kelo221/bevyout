@@ -1,12 +1,16 @@
 use anyhow::{Context, Result, bail};
 use ron::ser::{PrettyConfig, to_string_pretty};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 mod job;
+mod policy;
+mod rust_irradiance;
+mod rust_scene;
 mod tools;
 
 pub(crate) use job::*;
@@ -15,7 +19,6 @@ pub(crate) use tools::*;
 use crate::cli::{BakeArgs, BakeQuality};
 
 use super::assets::{NIF_CONVERTER_REVISION, find_blender};
-use super::irradiance::export_rgb9e5_atlas;
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
@@ -56,10 +59,10 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         bail!("scene manifest contains no renderable placements");
     }
 
-    let blender = if matches!(args.quality, BakeQuality::Irradiance) {
-        find_irradiance_blender(args.irradiance_blender.as_deref(), args.blender.as_deref())?
+    let blender = if matches!(args.quality, BakeQuality::Preview) {
+        Some(find_blender(args.blender.clone())?)
     } else {
-        find_blender(args.blender.clone())?
+        None
     };
     let ktx_tool = if matches!(args.quality, BakeQuality::Irradiance) {
         Some(find_irradiance_ktx_tool(args.toktx)?)
@@ -80,8 +83,6 @@ pub fn bake(args: BakeArgs) -> Result<()> {
 
     let output_scene = output_dir.join("scene.glb");
     let preview_output = output_dir.join("preview.png");
-    let result_json = output_dir.join("result.json");
-    let irradiance_blend = output_dir.join("irradiance.blend");
     let irradiance_raw = output_dir.join("irradiance.raw");
     let job_file = output_dir.join("job.json");
     let cell_lighting =
@@ -98,8 +99,8 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         asset_root: blender_path(&asset_root),
         output_scene: blender_path(&output_scene),
         preview_output: blender_path(&preview_output),
-        result_json: blender_path(&result_json),
-        irradiance_blend: blender_path(&irradiance_blend),
+        result_json: blender_path(&output_dir.join("result.json")),
+        irradiance_blend: blender_path(&output_dir.join("irradiance.blend")),
         irradiance_spacing_meters: args.irradiance_spacing_meters,
         irradiance_samples: args.irradiance_samples,
         preview_only: matches!(args.quality, BakeQuality::Preview),
@@ -149,31 +150,24 @@ pub fn bake(args: BakeArgs) -> Result<()> {
             })
             .collect(),
     };
-    fs::write(&job_file, serde_json::to_vec_pretty(&job)?)?;
-
-    let script_file = output_dir.join("blender_bake.py");
-    fs::write(&script_file, include_str!("../blender_bake.py"))?;
     if matches!(args.quality, BakeQuality::Preview) {
+        fs::write(&job_file, serde_json::to_vec_pretty(&job)?)?;
+        let script_file = output_dir.join("blender_bake.py");
+        fs::write(&script_file, include_str!("../blender_bake.py"))?;
         let _ = fs::remove_file(&preview_output);
-    } else {
-        for path in [&output_scene, &irradiance_blend, &result_json] {
-            let _ = fs::remove_file(path);
+        let blender_status = Command::new(blender.expect("preview resolves Blender"))
+            .arg("--background")
+            .arg("--factory-startup")
+            .arg("--python")
+            .arg(&script_file)
+            .arg("--")
+            .arg(&job_file)
+            .current_dir(&asset_root)
+            .status()
+            .context("failed to start Blender")?;
+        if !blender_status.success() {
+            bail!("Blender preview failed with {blender_status}");
         }
-    }
-    let blender_status = Command::new(&blender)
-        .arg("--background")
-        .arg("--factory-startup")
-        .arg("--python")
-        .arg(&script_file)
-        .arg("--")
-        .arg(&job_file)
-        .current_dir(&asset_root)
-        .status()
-        .context("failed to start Blender")?;
-    if !blender_status.success() {
-        bail!("Blender bake failed with {blender_status}");
-    }
-    if matches!(args.quality, BakeQuality::Preview) {
         if !preview_output.exists() {
             bail!(
                 "Blender reported success but did not create the preview image {}",
@@ -187,27 +181,40 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         println!("Eevee preview rendered -> {}", preview_output.display());
         return Ok(());
     }
-    if !output_scene.exists() || !irradiance_blend.exists() || !result_json.exists() {
-        bail!(
-            "Blender reported success but did not create the expected bake outputs in {}",
-            output_dir.display()
-        );
-    }
 
-    let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
-    let bake_result: BlenderBakeResult =
-        serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
-    validate_placement_contribution(&job.placements, &bake_result.placement_contribution)?;
-    let irradiance = bake_result
-        .irradiance
-        .as_ref()
-        .context("Blender produced no irradiance volume metadata")?;
-    let exported = export_rgb9e5_atlas(
-        Path::new(&irradiance.blend_path),
-        &irradiance_raw,
-        irradiance.resolution,
-    )?;
+    let started = Instant::now();
+    let temporary_scene = output_dir.join("scene.rust.tmp.glb");
     let ktx2_path = output_dir.join("irradiance.ktx2");
+    let temporary_ktx = output_dir.join("irradiance.rust.tmp.ktx2");
+    for path in [&temporary_scene, &temporary_ktx] {
+        let _ = fs::remove_file(path);
+    }
+    println!(
+        "Rust bake: composing {} static placements",
+        job.placements.len()
+    );
+    let mut rust_scene =
+        rust_scene::compose_scene(&asset_root, &job.placements, args.static_batch_chunk_meters)?;
+    let composed_elapsed = started.elapsed();
+    println!(
+        "Rust bake: composed {} primitives in {:.2}s",
+        rust_scene.primitives.len(),
+        composed_elapsed.as_secs_f64()
+    );
+    rust_scene.write_glb(&temporary_scene)?;
+    let irradiance = rust_irradiance::bake_irradiance(
+        &rust_scene,
+        &job.lights,
+        &rust_irradiance::DirectionalBakeLight {
+            color_rgba: job.cell_directional_rgba,
+            rotation_xyzw: job.cell_directional_rotation_xyzw,
+            illuminance: job.cell_directional_illuminance,
+        },
+        args.irradiance_spacing_meters,
+        args.irradiance_samples,
+        &irradiance_raw,
+    )?;
+    let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let mut ktx_command = Command::new(&ktx_tool.path);
     match ktx_tool.kind {
         KtxToolKind::LegacyToktx => {
@@ -222,11 +229,11 @@ pub fn bake(args: BakeArgs) -> Result<()> {
                 .arg("--format")
                 .arg("E5B9G9R9_UFLOAT_PACK32")
                 .arg("--width")
-                .arg(exported.resolution[0].to_string())
+                .arg(irradiance.resolution[0].to_string())
                 .arg("--height")
-                .arg((2 * exported.resolution[1]).to_string())
+                .arg((2 * irradiance.resolution[1]).to_string())
                 .arg("--depth")
-                .arg((3 * exported.resolution[2]).to_string())
+                .arg((3 * irradiance.resolution[2]).to_string())
                 .arg("--assign-tf")
                 .arg("linear")
                 .arg("--assign-texcoord-origin")
@@ -235,11 +242,11 @@ pub fn bake(args: BakeArgs) -> Result<()> {
                 .arg("3");
         }
     }
-    for raw_slice in &exported.raw_slices {
+    for raw_slice in &irradiance.raw_slices {
         ktx_command.arg(raw_slice);
     }
     let ktx_output = ktx_command
-        .arg(&ktx2_path)
+        .arg(&temporary_ktx)
         .output()
         .context("failed to start KTX-Software")?;
     if !ktx_output.status.success() {
@@ -261,9 +268,21 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         );
     }
 
-    let batching = &bake_result.batching;
+    let ktx_validation = Command::new(&ktx_tool.path)
+        .arg("info")
+        .arg(&temporary_ktx)
+        .output()
+        .context("failed to validate Rust irradiance KTX2")?;
+    if !ktx_validation.status.success() {
+        bail!(
+            "KTX validation failed with {}:\n{}",
+            ktx_validation.status,
+            tail(&ktx_validation.stderr)
+        );
+    }
+    let batching = &rust_scene.batching;
     println!(
-        "static batching ({:.1} m chunks): objects {} -> {}, primitives {} -> {}, materials {} -> {}; {} batches (largest {}), excluded {} collision / {} large / {} non-static",
+        "static batching ({:.1} m chunks): objects {} -> {}, primitives {} -> {}, materials {} -> {}; {} batches (largest {}), excluded {} large",
         batching.chunk_size_meters,
         batching.visual_objects_before,
         batching.visual_objects_after,
@@ -273,10 +292,10 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         batching.materials_after,
         batching.batches_created,
         batching.largest_batch,
-        batching.excluded_collision,
         batching.excluded_large,
-        batching.excluded_non_static,
     );
+    replace_output(&temporary_scene, &output_scene)?;
+    replace_output(&temporary_ktx, &ktx2_path)?;
     let scene_path = relative_asset_path(&asset_root, &output_scene)?;
     let irradiance_path = relative_asset_path(&asset_root, &ktx2_path)?;
     let mut fingerprint = Sha256::new();
@@ -293,7 +312,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
             translation: irradiance.translation,
             rotation_xyzw: irradiance.rotation_xyzw,
             scale: irradiance.scale,
-            resolution: exported.resolution,
+            resolution: irradiance.resolution,
             intensity: 1.0,
         }),
     });
@@ -302,81 +321,42 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     if !args.keep_intermediate {
-        let _ = fs::remove_file(&job_file);
-        let _ = fs::remove_file(&script_file);
-        let _ = fs::remove_file(&result_json);
-        for raw_slice in &exported.raw_slices {
+        for raw_slice in &irradiance.raw_slices {
             let _ = fs::remove_file(raw_slice);
         }
         let _ = fs::remove_file(&irradiance_raw);
-        let _ = fs::remove_file(&irradiance_blend);
     }
     println!(
-        "baked {}: irradiance volume {:?} -> {}",
+        "baked {} in {:.2}s: Rust irradiance {:?}, {} nonzero face voxels, max {:.3}, {} primary rays -> {}",
         cell_label(&manifest.cell),
-        exported.resolution,
+        started.elapsed().as_secs_f64(),
+        irradiance.resolution,
+        irradiance.nonzero_voxels,
+        irradiance.maximum,
+        irradiance.primary_rays,
         ktx2_path.display()
     );
     Ok(())
 }
 
-fn validate_placement_contribution(
-    expected: &[JobPlacement],
-    actual: &BlenderPlacementContribution,
-) -> Result<()> {
-    let mut expected_ids = expected
-        .iter()
-        .map(|placement| placement.reference_form_id)
-        .collect::<Vec<_>>();
-    let mut actual_ids = actual.reference_form_ids.clone();
-    expected_ids.sort_unstable();
-    actual_ids.sort_unstable();
-    let mut geometry_ids = actual
-        .placements
-        .iter()
-        .map(|placement| placement.reference_form_id)
-        .collect::<Vec<_>>();
-    geometry_ids.sort_unstable();
-    let invalid_geometry = actual.placements.iter().any(|placement| {
-        placement.visual_meshes == 0
-            || placement.vertices == 0
-            || placement.triangles == 0
-            || placement
-                .world_bounds_min
-                .iter()
-                .chain(placement.world_bounds_max.iter())
-                .any(|value| !value.is_finite())
-            || placement
-                .world_bounds_min
-                .iter()
-                .zip(placement.world_bounds_max.iter())
-                .any(|(minimum, maximum)| minimum > maximum)
-    });
-    if actual.expected_placements != expected.len()
-        || actual.contributed_placements != actual.reference_form_ids.len()
-        || actual_ids != expected_ids
-        || geometry_ids != expected_ids
-        || !actual.post_batch_verified
-        || invalid_geometry
-    {
-        let missing = expected_ids
-            .iter()
-            .filter(|form_id| actual_ids.binary_search(form_id).is_err())
-            .map(|form_id| format!("{form_id:08X}"))
-            .collect::<Vec<_>>();
+fn replace_output(temporary: &Path, final_path: &Path) -> Result<()> {
+    if !temporary.is_file() {
         bail!(
-            "Blender bake omitted or invalidated placement contribution(s): expected {}, contributed {}, post-batch verified {}; missing references: {}",
-            expected.len(),
-            actual.contributed_placements,
-            actual.post_batch_verified,
-            if missing.is_empty() {
-                "<count or identity mismatch>".into()
-            } else {
-                missing.join(", ")
-            }
-        )
+            "expected bake output was not created: {}",
+            temporary.display()
+        );
     }
-    Ok(())
+    if final_path.exists() {
+        fs::remove_file(final_path)
+            .with_context(|| format!("could not replace {}", final_path.display()))?;
+    }
+    fs::rename(temporary, final_path).with_context(|| {
+        format!(
+            "could not publish {} as {}",
+            temporary.display(),
+            final_path.display()
+        )
+    })
 }
 
 pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {

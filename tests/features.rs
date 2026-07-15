@@ -96,6 +96,10 @@ mod reveal_policy;
 #[allow(dead_code, unused_imports)]
 mod animation_policy;
 
+#[path = "../src/vsa/bake/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod bake_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -220,6 +224,14 @@ struct BevyoutWorld {
     animation_selected_clip: Option<Option<String>>,
     animation_open_clip_seconds: Option<f32>,
     animation_open_lead: Option<f32>,
+
+    // -- rust_irradiance.feature --
+    bake_volume_scale: [f32; 3],
+    bake_probe_spacing: f32,
+    bake_resolution: [u32; 3],
+    bake_atlas_dimensions: [u32; 3],
+    bake_samples: u32,
+    bake_primary_rays: usize,
 }
 
 fn find_placement<'a>(
@@ -1738,6 +1750,62 @@ async fn then_animation_open_lead_is(world: &mut BevyoutWorld, expected: f32) {
         (lead - expected).abs() < 1e-4,
         "open lead {lead} != expected {expected}"
     );
+}
+
+// ---------------------------------------------------------------------
+// rust_irradiance.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a Rust bake volume scale of ([\d.]+), ([\d.]+), ([\d.]+) metres$")]
+async fn given_bake_volume_scale(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.bake_volume_scale = [x, y, z];
+}
+
+#[given(regex = r"^irradiance probe spacing is ([\d.]+) metres$")]
+async fn given_bake_probe_spacing(world: &mut BevyoutWorld, spacing: f32) {
+    world.bake_probe_spacing = spacing;
+}
+
+#[given(regex = r"^a probe resolution of (\d+), (\d+), (\d+)$")]
+async fn given_bake_resolution(world: &mut BevyoutWorld, x: u32, y: u32, z: u32) {
+    world.bake_resolution = [x, y, z];
+}
+
+#[given(regex = r"^irradiance sample count is (\d+)$")]
+async fn given_bake_sample_count(world: &mut BevyoutWorld, samples: u32) {
+    world.bake_samples = samples;
+}
+
+#[when("the Rust irradiance layout is planned")]
+async fn when_bake_layout_planned(world: &mut BevyoutWorld) {
+    world.bake_resolution =
+        bake_policy::volume_resolution(world.bake_volume_scale, world.bake_probe_spacing);
+}
+
+#[when("the Rust irradiance atlas is planned")]
+async fn when_bake_atlas_planned(world: &mut BevyoutWorld) {
+    world.bake_atlas_dimensions = bake_policy::atlas_dimensions(world.bake_resolution);
+}
+
+#[when("the Rust irradiance ray count is planned")]
+async fn when_bake_ray_count_planned(world: &mut BevyoutWorld) {
+    world.bake_primary_rays =
+        bake_policy::primary_ray_count(world.bake_resolution, world.bake_samples);
+}
+
+#[then(regex = r"^the probe resolution is (\d+), (\d+), (\d+)$")]
+async fn then_bake_resolution_is(world: &mut BevyoutWorld, x: u32, y: u32, z: u32) {
+    assert_eq!(world.bake_resolution, [x, y, z]);
+}
+
+#[then(regex = r"^the atlas dimensions are (\d+), (\d+), (\d+)$")]
+async fn then_bake_atlas_dimensions_are(world: &mut BevyoutWorld, x: u32, y: u32, z: u32) {
+    assert_eq!(world.bake_atlas_dimensions, [x, y, z]);
+}
+
+#[then(regex = r"^the primary ray count is (\d+)$")]
+async fn then_bake_primary_ray_count_is(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(world.bake_primary_rays, expected);
 }
 
 fn main() {

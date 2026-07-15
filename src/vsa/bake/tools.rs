@@ -105,69 +105,6 @@ pub(crate) fn find_irradiance_ktx_tool(explicit: Option<PathBuf>) -> Result<KtxT
     find_unified_ktx_tool(explicit)
 }
 
-pub(crate) fn find_irradiance_blender(
-    irradiance_explicit: Option<&Path>,
-    general_explicit: Option<&Path>,
-) -> Result<PathBuf> {
-    if let Some(path) = irradiance_explicit {
-        validate_blender_45(path)?;
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = general_explicit {
-        if !path.exists() {
-            bail!("Blender executable does not exist: {}", path.display());
-        }
-        if validate_blender_45(path).is_ok() {
-            return Ok(path.to_path_buf());
-        }
-        let preferred =
-            PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe");
-        if preferred.exists() {
-            validate_blender_45(&preferred)?;
-            println!(
-                "configured Blender {} is not 4.5 LTS; using {} for irradiance baking",
-                path.display(),
-                preferred.display()
-            );
-            return Ok(preferred);
-        }
-        validate_blender_45(path)?;
-        unreachable!("validated Blender path must return above")
-    }
-    let preferred = PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe");
-    if preferred.exists() {
-        validate_blender_45(&preferred)?;
-        return Ok(preferred);
-    }
-    let blender = find_blender(None)?;
-    validate_blender_45(&blender)?;
-    Ok(blender)
-}
-
-pub(crate) fn validate_blender_45(path: &Path) -> Result<()> {
-    if !path.exists() {
-        bail!("Blender executable does not exist: {}", path.display());
-    }
-    let output = Command::new(path)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("could not run Blender at {}", path.display()))?;
-    let version = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success()
-        || !version
-            .lines()
-            .next()
-            .is_some_and(|line| line.contains("4.5"))
-    {
-        bail!(
-            "irradiance-volume baking requires Blender 4.5 LTS; {} reported {}",
-            path.display(),
-            version.lines().next().unwrap_or("an unknown version")
-        );
-    }
-    Ok(())
-}
-
 pub(crate) fn ktx_tool_kind(path: &Path) -> KtxToolKind {
     if path
         .file_stem()

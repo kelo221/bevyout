@@ -5,7 +5,6 @@ mod bsa;
 mod catalog;
 mod cell_map;
 mod content_index;
-mod irradiance;
 mod manifest;
 mod openmw_esm4;
 mod paths;
