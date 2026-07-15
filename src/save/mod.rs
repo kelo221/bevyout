@@ -23,7 +23,19 @@ pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 pub struct SaveGame {
     pub header: SaveGameHeader,
     pub world: PersistentWorldState,
+    /// Optional player record (issue #60, F60.4): `None` round-trips as an
+    /// absent PLYR record, so saves written before this record existed --
+    /// and readers older than it (unknown records are skipped, see the
+    /// forward-compatibility test) -- stay compatible in both directions.
+    pub player: Option<PlayerState>,
     pub rng_state: u64,
+}
+
+/// Persistent player state (issue #60, F60.4). Currently just the
+/// inventory, so picked-up keys still open locked doors after a restart.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlayerState {
+    pub inventory: Vec<ItemStack>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +126,9 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
     validate_save(save)?;
     let mut bytes = Vec::new();
     write_record(&mut bytes, tag("SAVE"), &encode_header(&save.header)?)?;
+    if let Some(player) = &save.player {
+        write_record(&mut bytes, tag("PLYR"), &encode_player(player)?)?;
+    }
     for (cell_form_id, cell) in &save.world.cells {
         let mut payload = Vec::new();
         write_subrecord(&mut payload, tag("FORM"), &cell_form_id.to_le_bytes())?;
@@ -163,6 +178,12 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                     }
                     save.header = decode_header(&record.payload)?;
                     saw_header = true;
+                }
+                record_tag if *record_tag == tag("PLYR") => {
+                    if save.player.is_some() {
+                        bail!("save contains duplicate PLYR records");
+                    }
+                    save.player = Some(decode_player(&record.payload)?);
                 }
                 record_tag if *record_tag == tag("CSTA") => {
                     let cell_form_id = decode_cell_state(&record.payload)?;
@@ -414,6 +435,41 @@ fn decode_header(payload: &[u8]) -> Result<SaveGameHeader> {
     Ok(header)
 }
 
+fn encode_player(player: &PlayerState) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    write_subrecord(
+        &mut payload,
+        tag("INVT"),
+        &encode_inventory_bytes(&player.inventory),
+    )?;
+    Ok(payload)
+}
+
+fn decode_player(payload: &[u8]) -> Result<PlayerState> {
+    let mut player = PlayerState::default();
+    let mut saw_inventory = false;
+    for subrecord in read_subrecords(payload)? {
+        if subrecord.tag == tag("INVT") {
+            ensure_once(&mut saw_inventory, "PLYR.INVT")?;
+            player.inventory = decode_inventory(&subrecord.payload)?;
+        }
+    }
+    if !saw_inventory {
+        bail!("PLYR record is missing its INVT subrecord");
+    }
+    Ok(player)
+}
+
+fn encode_inventory_bytes(inventory: &[ItemStack]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + inventory.len() * 8);
+    bytes.extend_from_slice(&(inventory.len() as u32).to_le_bytes());
+    for item in inventory {
+        bytes.extend_from_slice(&item.base_form_id.to_le_bytes());
+        bytes.extend_from_slice(&item.count.to_le_bytes());
+    }
+    bytes
+}
+
 fn encode_reference(
     cell_form_id: u32,
     reference_form_id: u32,
@@ -464,13 +520,7 @@ fn encode_reference(
         write_subrecord(&mut payload, tag("XFRM"), &bytes)?;
     }
     if let Some(inventory) = &delta.inventory {
-        let mut bytes = Vec::with_capacity(4 + inventory.len() * 8);
-        bytes.extend_from_slice(&(inventory.len() as u32).to_le_bytes());
-        for item in inventory {
-            bytes.extend_from_slice(&item.base_form_id.to_le_bytes());
-            bytes.extend_from_slice(&item.count.to_le_bytes());
-        }
-        write_subrecord(&mut payload, tag("INVT"), &bytes)?;
+        write_subrecord(&mut payload, tag("INVT"), &encode_inventory_bytes(inventory))?;
     }
     if let Some(body) = delta.body {
         let mut bytes = Vec::with_capacity(25);
@@ -642,6 +692,9 @@ fn validate_save(save: &SaveGame) -> Result<()> {
             bail!("save contains duplicate plugin {}", plugin.name);
         }
         plugin_names.push(key);
+    }
+    if let Some(player) = &save.player {
+        validate_inventory(&player.inventory)?;
     }
     for cell in save.world.cells.values() {
         for delta in cell.references.values() {
@@ -890,6 +943,18 @@ mod tests {
                 description: "test save".into(),
             },
             world: PersistentWorldState { cells },
+            player: Some(PlayerState {
+                inventory: vec![
+                    ItemStack {
+                        base_form_id: 0x0000_0011,
+                        count: 1,
+                    },
+                    ItemStack {
+                        base_form_id: 0x0000_0042,
+                        count: 3,
+                    },
+                ],
+            }),
             rng_state: 0x0123_4567_89ab_cdef,
         }
     }
@@ -912,6 +977,46 @@ mod tests {
         let checksum: [u8; 32] = Sha256::digest(&bytes).into();
         write_record(&mut bytes, tag("CHKS"), &checksum).unwrap();
         assert_eq!(decode_save(&bytes).unwrap(), sample_save());
+    }
+
+    // F60.4: a save with no player record round-trips as `None`, so
+    // pre-player saves stay loadable.
+    #[test]
+    fn a_save_without_a_player_record_round_trips_as_none() {
+        let mut save = sample_save();
+        save.player = None;
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        assert_eq!(decoded.player, None);
+        assert_eq!(decoded, save);
+    }
+
+    // F60.4: the player inventory rides the same validation as reference
+    // inventories -- zero counts and unsorted stacks are rejected before
+    // encoding.
+    #[test]
+    fn an_invalid_player_inventory_is_rejected() {
+        let mut save = sample_save();
+        save.player = Some(PlayerState {
+            inventory: vec![ItemStack {
+                base_form_id: 0x1,
+                count: 0,
+            }],
+        });
+        assert!(encode_save(&save).is_err());
+        save.player = Some(PlayerState {
+            inventory: vec![
+                ItemStack {
+                    base_form_id: 0x2,
+                    count: 1,
+                },
+                ItemStack {
+                    base_form_id: 0x1,
+                    count: 1,
+                },
+            ],
+        });
+        assert!(encode_save(&save).is_err());
     }
 
     #[test]
