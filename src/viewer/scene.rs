@@ -38,7 +38,7 @@ pub(crate) fn spawn_prepared_scene(
         DepthPrepass,
         OcclusionCulling,
         Bloom::NATURAL,
-        Tonemapping::TonyMcMapface,
+        Tonemapping::AcesFitted,
         Exposure { ev100: 12.0 },
         color_grading,
         initial_camera_transform,
