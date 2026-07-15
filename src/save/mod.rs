@@ -86,6 +86,15 @@ pub struct PersistentReferenceDelta {
     pub enable_root_form_id: Option<u32>,
     pub transform: Option<SavedTransform>,
     pub inventory: Option<Vec<ItemStack>>,
+    /// Issue #76 (F76.1): marks that this container reference's first-open
+    /// leveled-list roll already happened, so an emptied container (`Some`
+    /// `inventory` with no stacks, or no `inventory` override at all when the
+    /// roll produced nothing) is distinguishable from one that was never
+    /// opened -- which still rolls on first activation. Rides alongside
+    /// `inventory` as an independent optional subrecord (`OBJE.LVLR`); a v1
+    /// save that predates this field simply never wrote it, so it decodes as
+    /// `None` exactly like `body`/`transform` do for older saves.
+    pub leveled_resolved: Option<bool>,
     pub body: Option<SavedBodyState>,
 }
 
@@ -526,6 +535,9 @@ fn encode_reference(
             &encode_inventory_bytes(inventory),
         )?;
     }
+    if let Some(value) = delta.leveled_resolved {
+        write_subrecord(&mut payload, tag("LVLR"), &[value as u8])?;
+    }
     if let Some(body) = delta.body {
         let mut bytes = Vec::with_capacity(25);
         for value in body
@@ -577,6 +589,9 @@ fn decode_reference(payload: &[u8]) -> Result<(u32, u32, PersistentReferenceDelt
             }
             record_tag if *record_tag == tag("INVT") => {
                 delta.inventory = Some(decode_inventory(&subrecord.payload)?)
+            }
+            record_tag if *record_tag == tag("LVLR") => {
+                delta.leveled_resolved = Some(read_bool(&subrecord.payload, "OBJE.LVLR")?)
             }
             record_tag if *record_tag == tag("BODY") => {
                 delta.body = Some(decode_body(&subrecord.payload)?)
@@ -925,6 +940,7 @@ mod tests {
                     base_form_id: 0x0000_0042,
                     count: 3,
                 }]),
+                leveled_resolved: Some(true),
                 body: Some(SavedBodyState {
                     linear_velocity: [0.1, 0.2, 0.3],
                     angular_velocity: [0.4, 0.5, 0.6],
@@ -1021,6 +1037,73 @@ mod tests {
             ],
         });
         assert!(encode_save(&save).is_err());
+    }
+
+    // Issue #76 (T76.1): a delta carrying container stacks plus the
+    // leveled-resolved marker survives encode/decode and re-encodes
+    // byte-identically (the general `round_trip_is_deterministic` test above
+    // already exercises this combination via `sample_save`; this test pins
+    // it narrowly so the LVLR-only case -- no other delta field set -- is
+    // covered too, matching capture's "resolved-only" delta shape).
+    #[test]
+    fn a_leveled_resolved_only_delta_round_trips_byte_identically() {
+        let mut save = sample_save();
+        let mut references = BTreeMap::new();
+        references.insert(
+            0x0200_0000,
+            PersistentReferenceDelta {
+                leveled_resolved: Some(true),
+                ..Default::default()
+            },
+        );
+        save.world
+            .cells
+            .insert(0x0002_0000, PersistentCellState { references });
+
+        let first = encode_save(&save).unwrap();
+        let second = encode_save(&save).unwrap();
+        assert_eq!(first, second);
+        let decoded = decode_save(&first).unwrap();
+        assert_eq!(decoded, save);
+        assert_eq!(
+            decoded.world.cells[&0x0002_0000].references[&0x0200_0000].leveled_resolved,
+            Some(true)
+        );
+    }
+
+    // Issue #76 (T76.3): a save encoded before this field existed never
+    // wrote an LVLR subrecord; decoding a delta that omits it must produce
+    // `None`, not a default `Some(false)`, so pre-#76 saves keep loading
+    // unchanged.
+    #[test]
+    fn a_delta_without_leveled_resolved_decodes_as_none() {
+        let mut save = sample_save();
+        for cell in save.world.cells.values_mut() {
+            for delta in cell.references.values_mut() {
+                delta.leveled_resolved = None;
+            }
+        }
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        assert_eq!(decoded, save);
+        assert!(
+            decoded.world.cells[&0x0001_51e3].references[&0x0100_0020]
+                .leveled_resolved
+                .is_none()
+        );
+    }
+
+    // Issue #76 (T76.3): a truncated OBJE.INVT payload (claims one item but
+    // carries only the four-byte count header) fails through the existing
+    // error path rather than silently producing a corrupt inventory.
+    #[test]
+    fn a_truncated_container_inventory_payload_is_rejected() {
+        let mut payload = Vec::new();
+        write_subrecord(&mut payload, tag("CELL"), &1u32.to_le_bytes()).unwrap();
+        write_subrecord(&mut payload, tag("REFR"), &2u32.to_le_bytes()).unwrap();
+        write_subrecord(&mut payload, tag("FLAG"), &0u32.to_le_bytes()).unwrap();
+        write_subrecord(&mut payload, tag("INVT"), &1u32.to_le_bytes()).unwrap();
+        assert!(decode_reference(&payload).is_err());
     }
 
     #[test]

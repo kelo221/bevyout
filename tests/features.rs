@@ -320,6 +320,13 @@ struct BevyoutWorld {
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
     performance_summary: Option<performance_policy::FrameProbeSummary>,
+
+    // -- container_persistence.feature (issue #76) --
+    container_baselines: std::collections::HashMap<u32, persist_policy::ContainerBaseline>,
+    container_snapshots: std::collections::HashMap<u32, persist_policy::ContainerSnapshot>,
+    container_captured: Option<std::collections::HashMap<u32, persist_policy::ContainerDelta>>,
+    container_deltas: std::collections::HashMap<u32, persist_policy::ContainerDelta>,
+    container_seeded: Option<std::collections::HashMap<u32, persist_policy::ContainerSnapshot>>,
 }
 
 fn find_placement<'a>(
@@ -2687,6 +2694,201 @@ async fn then_frame_probe_p95_and_max(world: &mut BevyoutWorld, p95: f64, max: f
 #[then(regex = r"^(\d+) frames? exceed(?:s)? the probe budget$")]
 async fn then_frames_exceed_budget(world: &mut BevyoutWorld, count: usize) {
     assert_eq!(performance_summary(world).over_budget_count, count);
+}
+
+// ---------------------------------------------------------------------
+// container_persistence.feature (issue #76) -- appended section, do not
+// interleave; new steps for this issue belong below this marker.
+// ---------------------------------------------------------------------
+
+/// Parses `0x<hex> x <count>` (e.g. "0x00000010 x 3") into a single-entry
+/// stack list, matching the `Vec<(u32, i32)>` shape `persist_policy`'s
+/// container types use.
+fn parse_single_stack(hex: &str, count: i32) -> Vec<(u32, i32)> {
+    vec![(parse_hex(hex), count)]
+}
+
+#[given(regex = r"^a container baseline 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn given_container_baseline(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_baselines.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerBaseline {
+            stacks: parse_single_stack(&item_hex, count),
+        },
+    );
+}
+
+#[given(regex = r"^a container snapshot 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn given_container_snapshot(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_snapshots.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerSnapshot {
+            stacks: parse_single_stack(&item_hex, count),
+            resolved: false,
+        },
+    );
+}
+
+#[given(
+    regex = r"^a resolved container snapshot 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$"
+)]
+async fn given_resolved_container_snapshot(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_snapshots.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerSnapshot {
+            stacks: parse_single_stack(&item_hex, count),
+            resolved: true,
+        },
+    );
+}
+
+#[when("container state is captured")]
+async fn when_container_state_captured(world: &mut BevyoutWorld) {
+    world.container_captured = Some(persist_policy::diff_capture_containers(
+        &world.container_baselines,
+        &world.container_snapshots,
+    ));
+}
+
+fn captured_container_delta(world: &BevyoutWorld, form_id: u32) -> persist_policy::ContainerDelta {
+    world
+        .container_captured
+        .as_ref()
+        .expect("container state not captured yet")
+        .get(&form_id)
+        .cloned()
+        .expect("no container delta captured for reference")
+}
+
+#[then(regex = r"^no container delta is captured for 0x([0-9a-fA-F]+)$")]
+async fn then_no_container_delta(world: &mut BevyoutWorld, hex: String) {
+    let captured = world
+        .container_captured
+        .as_ref()
+        .expect("container state not captured yet");
+    assert!(!captured.contains_key(&parse_hex(&hex)));
+}
+
+#[then(
+    regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has stack 0x([0-9a-fA-F]+) x (-?\d+)$"
+)]
+async fn then_captured_container_delta_has_stack(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let delta = captured_container_delta(world, parse_hex(&container_hex));
+    assert_eq!(delta.inventory, Some(parse_single_stack(&item_hex, count)));
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has no resolved marker$")]
+async fn then_captured_container_delta_has_no_resolved_marker(
+    world: &mut BevyoutWorld,
+    hex: String,
+) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.leveled_resolved, None);
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has no inventory override$")]
+async fn then_captured_container_delta_has_no_inventory(world: &mut BevyoutWorld, hex: String) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.inventory, None);
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) is resolved$")]
+async fn then_captured_container_delta_is_resolved(world: &mut BevyoutWorld, hex: String) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.leveled_resolved, Some(true));
+}
+
+#[given(
+    regex = r"^a container delta 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+) and resolved$"
+)]
+async fn given_container_delta(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_deltas.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerDelta {
+            inventory: Some(parse_single_stack(&item_hex, count)),
+            leveled_resolved: Some(true),
+        },
+    );
+}
+
+#[given(regex = r"^a resolved-only container delta 0x([0-9a-fA-F]+)$")]
+async fn given_resolved_only_container_delta(world: &mut BevyoutWorld, hex: String) {
+    world.container_deltas.insert(
+        parse_hex(&hex),
+        persist_policy::ContainerDelta {
+            inventory: None,
+            leveled_resolved: Some(true),
+        },
+    );
+}
+
+#[when("the container state is applied")]
+async fn when_container_state_applied(world: &mut BevyoutWorld) {
+    world.container_seeded = Some(persist_policy::plan_apply_containers(
+        &world.container_baselines,
+        &world.container_deltas,
+    ));
+}
+
+#[then(regex = r"^no container is seeded for 0x([0-9a-fA-F]+)$")]
+async fn then_no_container_seeded(world: &mut BevyoutWorld, hex: String) {
+    let seeded = world
+        .container_seeded
+        .as_ref()
+        .expect("container state not applied yet");
+    assert!(!seeded.contains_key(&parse_hex(&hex)));
+}
+
+fn seeded_container(world: &BevyoutWorld, form_id: u32) -> persist_policy::ContainerSnapshot {
+    world
+        .container_seeded
+        .as_ref()
+        .expect("container state not applied yet")
+        .get(&form_id)
+        .cloned()
+        .expect("no container seeded for reference")
+}
+
+#[then(regex = r"^the seeded container 0x([0-9a-fA-F]+) has stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn then_seeded_container_has_stack(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let snapshot = seeded_container(world, parse_hex(&container_hex));
+    assert_eq!(snapshot.stacks, parse_single_stack(&item_hex, count));
+}
+
+#[then(regex = r"^the seeded container 0x([0-9a-fA-F]+) is resolved$")]
+async fn then_seeded_container_is_resolved(world: &mut BevyoutWorld, hex: String) {
+    let snapshot = seeded_container(world, parse_hex(&hex));
+    assert!(snapshot.resolved);
 }
 
 fn main() {

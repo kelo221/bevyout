@@ -31,7 +31,9 @@ use crate::save::{
     ItemStack, PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader, SavePlugin,
     SaveStore, SavedBodyState, SavedTransform,
 };
-use crate::vsa::{PreparedPlacement, PreparedSceneManifest, is_bake_static};
+#[cfg(test)]
+use crate::vsa::PreparedInventoryEntry;
+use crate::vsa::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic, is_bake_static};
 
 use super::super::{animation, interaction, player};
 use super::persist_policy;
@@ -88,11 +90,30 @@ pub(crate) struct EvictionCapture {
 #[derive(Resource, Default)]
 pub(crate) struct PendingEvictionCaptures(pub(crate) Vec<EvictionCapture>);
 
+/// Issue #76's one adapter point (fixed seam per the wave-2 plan): mirrors
+/// agent B's runtime `interaction::ContainerStates` resource
+/// (`HashMap<u32 /* reference form id */, ContainerState { stacks: Vec<(u32,
+/// i32)>, resolved: bool }>`), which does not exist in this worktree --
+/// issue #75 builds it in a parallel worktree. Capture reads it to observe
+/// which containers were touched this session; apply seeds it from save
+/// deltas before first activation. Since the shapes match field-for-field,
+/// the orchestrator's integration step is deleting this resource/type and
+/// repointing the two call sites below at `interaction::ContainerStates`.
+#[derive(Resource, Default)]
+pub(crate) struct ContainerStatesStub(pub(crate) HashMap<u32, ContainerSnapshotStub>);
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ContainerSnapshotStub {
+    pub(crate) stacks: Vec<(u32, i32)>,
+    pub(crate) resolved: bool,
+}
+
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<ActiveSaveState>()
         .init_resource::<SaveDirectory>()
         .init_resource::<PersistRestores>()
         .init_resource::<PendingEvictionCaptures>()
+        .init_resource::<ContainerStatesStub>()
         .add_systems(Update, drain_eviction_captures);
 }
 
@@ -258,7 +279,79 @@ fn capture_cell_placements(
         .collect();
     let delta_count = captured.len();
     merge_captured_deltas(world, cell, &observed, &captured);
-    info!("save capture {cell:08x} deltas={delta_count}");
+
+    // Issue #76 (F76.2): container stacks/resolved-marker capture, mirroring
+    // the placement capture above but scoped to `PreparedSemantic::Container`
+    // references observed in `ContainerStatesStub`.
+    let container_baselines = container_baselines(placements);
+    let container_snapshots = container_snapshots(world, placements);
+    let captured_containers =
+        persist_policy::diff_capture_containers(&container_baselines, &container_snapshots);
+    let container_observed: Vec<u32> = container_snapshots.keys().copied().collect();
+    let container_delta_count = captured_containers.len();
+    merge_captured_container_deltas(world, cell, &container_observed, &captured_containers);
+
+    info!("save capture {cell:08x} deltas={delta_count} container_deltas={container_delta_count}");
+}
+
+/// F76.2: every container placement's manifest baseline -- its fixed,
+/// non-leveled inventory entries as normalized stacks. Built for every
+/// container regardless of whether it was ever opened, so
+/// `diff_capture_containers` has a baseline to diff against the moment one
+/// is.
+fn container_baselines(
+    placements: &[PreparedPlacement],
+) -> HashMap<u32, persist_policy::ContainerBaseline> {
+    placements
+        .iter()
+        .filter_map(|placement| {
+            container_baseline(placement).map(|baseline| (placement.reference_form_id, baseline))
+        })
+        .collect()
+}
+
+fn container_baseline(placement: &PreparedPlacement) -> Option<persist_policy::ContainerBaseline> {
+    if placement.semantic != PreparedSemantic::Container {
+        return None;
+    }
+    let stacks: Vec<(u32, i32)> = placement
+        .inventory
+        .iter()
+        .filter(|entry| !entry.leveled)
+        .map(|entry| (entry.base_form_id, entry.count))
+        .collect();
+    Some(persist_policy::ContainerBaseline {
+        stacks: persist_policy::normalize_stacks(&stacks),
+    })
+}
+
+/// F76.2: every container reference's live state, read from
+/// `ContainerStatesStub` (issue #75's runtime resource is not present in
+/// this worktree -- see that resource's doc comment). A container absent
+/// from the stub was never opened this session and is excluded, so capture
+/// never clobbers a previously loaded delta it cannot currently observe.
+fn container_snapshots(
+    world: &World,
+    placements: &[PreparedPlacement],
+) -> HashMap<u32, persist_policy::ContainerSnapshot> {
+    let Some(states) = world.get_resource::<ContainerStatesStub>() else {
+        return HashMap::new();
+    };
+    placements
+        .iter()
+        .filter(|placement| placement.semantic == PreparedSemantic::Container)
+        .filter_map(|placement| {
+            states.0.get(&placement.reference_form_id).map(|state| {
+                (
+                    placement.reference_form_id,
+                    persist_policy::ContainerSnapshot {
+                        stacks: state.stacks.clone(),
+                        resolved: state.resolved,
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// Reads one placement entity's live dynamic-body velocities, if it has a
@@ -283,8 +376,11 @@ fn dynamic_body_snapshot(world: &World, entity: Entity) -> Option<persist_policy
 /// Folds a fresh capture into `ActiveSaveState`, overwriting only the
 /// capture-observable fields (deleted/activated/transform/body) of each
 /// observed reference and preserving fields capture cannot see (enabled
-/// overrides, enable roots, locks, container inventories) from any
-/// previously loaded save delta. All-default deltas are dropped.
+/// overrides, enable roots, locks) from any previously loaded save delta.
+/// All-default deltas are dropped. Container `inventory`/`leveled_resolved`
+/// are folded in separately by `merge_captured_container_deltas` below
+/// (issue #76) since they are observed through a different resource scoped
+/// to a different reference subset (containers only).
 fn merge_captured_deltas(
     world: &mut World,
     cell: u32,
@@ -309,6 +405,63 @@ fn merge_captured_deltas(
     if cell_state.references.is_empty() {
         state.0.cells.remove(&cell);
     }
+}
+
+/// F76.2's counterpart to `merge_captured_deltas`, scoped to
+/// `inventory`/`leveled_resolved`: overwrites those two fields for every
+/// observed container reference (clearing them when the fresh capture has no
+/// delta for it, e.g. it reverted exactly to baseline) and leaves every
+/// other reference's delta untouched. All-default deltas are dropped.
+fn merge_captured_container_deltas(
+    world: &mut World,
+    cell: u32,
+    observed: &[u32],
+    captured: &HashMap<u32, persist_policy::ContainerDelta>,
+) {
+    if observed.is_empty() {
+        return;
+    }
+    let mut state = world.get_resource_or_insert_with(ActiveSaveState::default);
+    let cell_state = state.0.cells.entry(cell).or_default();
+    for &form_id in observed {
+        let new = captured.get(&form_id);
+        let existing = cell_state.references.entry(form_id).or_default();
+        existing.inventory = new
+            .and_then(|delta| delta.inventory.clone())
+            .map(|stacks| to_item_stacks(&stacks));
+        existing.leveled_resolved = new.and_then(|delta| delta.leveled_resolved);
+        if *existing == PersistentReferenceDelta::default() {
+            cell_state.references.remove(&form_id);
+        }
+    }
+    if cell_state.references.is_empty() {
+        state.0.cells.remove(&cell);
+    }
+}
+
+fn to_item_stacks(stacks: &[(u32, i32)]) -> Vec<ItemStack> {
+    stacks
+        .iter()
+        .map(|&(base_form_id, count)| ItemStack {
+            base_form_id,
+            count,
+        })
+        .collect()
+}
+
+fn to_container_delta(delta: &PersistentReferenceDelta) -> Option<persist_policy::ContainerDelta> {
+    if delta.inventory.is_none() && delta.leveled_resolved.is_none() {
+        return None;
+    }
+    Some(persist_policy::ContainerDelta {
+        inventory: delta.inventory.as_ref().map(|stacks| {
+            stacks
+                .iter()
+                .map(|item| (item.base_form_id, item.count))
+                .collect()
+        }),
+        leveled_resolved: delta.leveled_resolved,
+    })
 }
 
 fn apply_cell_placements(
@@ -424,7 +577,41 @@ fn apply_cell_placements(
             }
         }
     }
-    info!("save apply {cell:08x} deltas={delta_count}");
+
+    // Issue #76 (F76.3): rebuild every delta-carrying container's runtime
+    // state before first activation. A container with no delta is left
+    // absent from `ContainerStatesStub`, so it still rolls on first open.
+    let container_baselines = container_baselines(placements);
+    let container_deltas: HashMap<u32, persist_policy::ContainerDelta> = world
+        .get_resource::<ActiveSaveState>()
+        .and_then(|state| state.0.cells.get(&cell))
+        .map(|cell_state| {
+            cell_state
+                .references
+                .iter()
+                .filter_map(|(form_id, delta)| {
+                    to_container_delta(delta).map(|container_delta| (*form_id, container_delta))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let container_seed =
+        persist_policy::plan_apply_containers(&container_baselines, &container_deltas);
+    let container_seed_count = container_seed.len();
+    if !container_seed.is_empty() {
+        let mut states = world.resource_mut::<ContainerStatesStub>();
+        for (form_id, snapshot) in container_seed {
+            states.0.insert(
+                form_id,
+                ContainerSnapshotStub {
+                    stacks: snapshot.stacks,
+                    resolved: snapshot.resolved,
+                },
+            );
+        }
+    }
+
+    info!("save apply {cell:08x} deltas={delta_count} container_seeded={container_seed_count}");
 }
 
 /// Applies a restore to an already-live dynamic body (a cell that stayed
@@ -593,7 +780,30 @@ mod tests {
         world.init_resource::<PersistRestores>();
         world.init_resource::<interaction::InteractionState>();
         world.init_resource::<bevy::ecs::message::Messages<animation::PlayPlacementAnimation>>();
+        world.init_resource::<ContainerStatesStub>();
         world
+    }
+
+    fn container_placement(
+        reference_form_id: u32,
+        entries: Vec<PreparedInventoryEntry>,
+    ) -> PreparedPlacement {
+        PreparedPlacement {
+            semantic: PreparedSemantic::Container,
+            inventory: entries,
+            ..placement(reference_form_id, [0.0, 0.0, 0.0])
+        }
+    }
+
+    fn inventory_entry(base_form_id: u32, count: i32, leveled: bool) -> PreparedInventoryEntry {
+        PreparedInventoryEntry {
+            base_form_id,
+            count,
+            record_kind: "MISC".into(),
+            editor_id: None,
+            display_name: None,
+            leveled,
+        }
     }
 
     fn spawn_cell(world: &mut World, placements: &[PreparedPlacement]) -> (Entity, Vec<Entity>) {
@@ -884,5 +1094,90 @@ mod tests {
             }]
         );
         let _ = std::fs::remove_dir_all(save_dir);
+    }
+
+    // Issue #76 (F76.2/F76.3): a looted, leveled-resolved container survives
+    // capture -> despawn/evict -> respawn -> apply, seeding
+    // `ContainerStatesStub` with the exact stacks and resolved marker it had
+    // when the cell was left, the same swap-away-and-back shape
+    // `capture_and_apply_restore_a_moved_placement_transform` exercises for
+    // transforms.
+    #[test]
+    fn capture_and_apply_restore_looted_container_state() {
+        let mut world = test_world();
+        let placements = [container_placement(
+            0x900,
+            vec![inventory_entry(0x10, 3, false)],
+        )];
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        world.resource_mut::<ContainerStatesStub>().0.insert(
+            0x900,
+            ContainerSnapshotStub {
+                stacks: vec![(0x10, 1)],
+                resolved: true,
+            },
+        );
+
+        capture_cell_placements(&mut world, 0xC0DE, root, &placements, false);
+        let saved = &world.resource::<ActiveSaveState>().0.cells[&0xC0DE].references[&0x900];
+        assert_eq!(
+            saved.inventory,
+            Some(vec![ItemStack {
+                base_form_id: 0x10,
+                count: 1,
+            }])
+        );
+        assert_eq!(saved.leveled_resolved, Some(true));
+
+        // Simulate eviction + fresh respawn with a cleared runtime state.
+        world.entity_mut(root).despawn();
+        world.resource_mut::<ContainerStatesStub>().0.clear();
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        apply_cell_placements(&mut world, 0xC0DE, root, &placements);
+
+        let restored = &world.resource::<ContainerStatesStub>().0[&0x900];
+        assert_eq!(restored.stacks, vec![(0x10, 1)]);
+        assert!(restored.resolved);
+    }
+
+    // F76.2: a container whose stacks and resolved marker never diverge from
+    // the manifest baseline produces no delta and no seed on the next apply
+    // (it still rolls on first open, per F76.3).
+    #[test]
+    fn an_untouched_container_captures_and_seeds_nothing() {
+        let mut world = test_world();
+        let placements = [container_placement(
+            0x901,
+            vec![inventory_entry(0x10, 3, false)],
+        )];
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        world.resource_mut::<ContainerStatesStub>().0.insert(
+            0x901,
+            ContainerSnapshotStub {
+                stacks: vec![(0x10, 3)],
+                resolved: false,
+            },
+        );
+
+        capture_cell_placements(&mut world, 0xC0DE, root, &placements, false);
+        assert!(
+            !world
+                .resource::<ActiveSaveState>()
+                .0
+                .cells
+                .get(&0xC0DE)
+                .is_some_and(|cell| cell.references.contains_key(&0x901))
+        );
+
+        world.entity_mut(root).despawn();
+        world.resource_mut::<ContainerStatesStub>().0.clear();
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        apply_cell_placements(&mut world, 0xC0DE, root, &placements);
+        assert!(
+            !world
+                .resource::<ContainerStatesStub>()
+                .0
+                .contains_key(&0x901)
+        );
     }
 }
