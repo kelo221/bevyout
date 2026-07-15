@@ -294,6 +294,12 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         batching.largest_batch,
         batching.excluded_large,
     );
+    println!(
+        "seam stitch: matched {} boundary edges, adjusted {} vertices, max correction {:.3} mm",
+        batching.seam_edges_matched,
+        batching.seam_vertices_adjusted,
+        batching.seam_max_correction_meters * 1000.0,
+    );
     replace_output(&temporary_scene, &output_scene)?;
     replace_output(&temporary_ktx, &ktx2_path)?;
     let scene_path = relative_asset_path(&asset_root, &output_scene)?;

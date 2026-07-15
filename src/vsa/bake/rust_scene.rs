@@ -5,7 +5,7 @@ use gltf::mesh::util::{ReadColors, ReadTexCoords};
 use image::RgbaImage;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -141,6 +141,9 @@ pub(crate) struct BatchingStats {
     pub(crate) batches_created: usize,
     pub(crate) largest_batch: usize,
     pub(crate) excluded_large: usize,
+    pub(crate) seam_edges_matched: usize,
+    pub(crate) seam_vertices_adjusted: usize,
+    pub(crate) seam_max_correction_meters: f32,
 }
 
 pub(crate) struct RustBakeScene {
@@ -267,6 +270,7 @@ pub(crate) fn compose_scene(
             missing.join(", ")
         );
     }
+    let seam_stitch = stitch_static_seams(&mut fragments);
     let visual_objects_before = fragments.len();
     let render_primitives_before = fragments.len();
     let materials_before = source_material_count;
@@ -275,6 +279,9 @@ pub(crate) fn compose_scene(
     batching.render_primitives_before = render_primitives_before;
     batching.materials_before = materials_before;
     batching.materials_after = resources.materials.len();
+    batching.seam_edges_matched = seam_stitch.edges_matched;
+    batching.seam_vertices_adjusted = seam_stitch.vertices_adjusted;
+    batching.seam_max_correction_meters = seam_stitch.max_correction_meters;
     let bounds = scene_bounds(&primitives)?;
     Ok(RustBakeScene {
         primitives,
@@ -1004,6 +1011,489 @@ fn remap_material_textures(
     visit(value, None, &mut import)
 }
 
+const SEAM_STITCH_TOLERANCE_METERS: f32 = 0.0001;
+const SEAM_EDGE_DOT_MIN: f32 = 0.9999;
+const SEAM_NORMAL_DOT_MIN: f32 = 0.9999;
+const SEAM_T_JUNCTION_GRID_METERS: f32 = 0.1;
+
+#[derive(Clone, Copy, Debug)]
+struct BoundaryEdge {
+    fragment_index: usize,
+    placement: u32,
+    start: usize,
+    end: usize,
+    midpoint: Vec3,
+    direction: Vec3,
+    normal: Vec3,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BoundaryPoint {
+    fragment_index: usize,
+    placement: u32,
+    global_index: usize,
+    normal: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SeamStitchStats {
+    edges_matched: usize,
+    vertices_adjusted: usize,
+    max_correction_meters: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PositionKey([u32; 3]);
+
+impl PositionKey {
+    fn from_position(position: Vec3) -> Self {
+        Self(position.to_array().map(f32::to_bits))
+    }
+}
+
+struct DisjointSet {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl DisjointSet {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+            rank: vec![0; size],
+        }
+    }
+
+    fn find(&mut self, value: usize) -> usize {
+        if self.parent[value] != value {
+            let root = self.find(self.parent[value]);
+            self.parent[value] = root;
+        }
+        self.parent[value]
+    }
+
+    fn union(&mut self, left: usize, right: usize) {
+        let mut left = self.find(left);
+        let mut right = self.find(right);
+        if left == right {
+            return;
+        }
+        if self.rank[left] < self.rank[right] {
+            std::mem::swap(&mut left, &mut right);
+        }
+        self.parent[right] = left;
+        if self.rank[left] == self.rank[right] {
+            self.rank[left] += 1;
+        }
+    }
+}
+
+fn collect_boundary_edges(
+    fragment_index: usize,
+    fragment: &ComposedPrimitive,
+    vertex_offset: usize,
+    boundaries: &mut Vec<BoundaryEdge>,
+) {
+    let Some(placement) = fragment.reference_form_ids.first().copied() else {
+        return;
+    };
+    let mut edge_occurrences = HashMap::<(u32, u32), Option<(u32, u32, Vec3)>>::new();
+    for triangle in fragment.indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        let [a_index, b_index, c_index] = [a as usize, b as usize, c as usize];
+        if a_index >= fragment.positions.len()
+            || b_index >= fragment.positions.len()
+            || c_index >= fragment.positions.len()
+        {
+            continue;
+        }
+        let normal = (fragment.positions[b_index] - fragment.positions[a_index])
+            .cross(fragment.positions[c_index] - fragment.positions[a_index])
+            .normalize_or_zero();
+        if normal.length_squared() <= f32::EPSILON {
+            continue;
+        }
+        for (start, end) in [(a, b), (b, c), (c, a)] {
+            if start == end {
+                continue;
+            }
+            let key = if start < end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            if let Some(occurrence) = edge_occurrences.get_mut(&key) {
+                *occurrence = None;
+            } else {
+                edge_occurrences.insert(key, Some((start, end, normal)));
+            }
+        }
+    }
+
+    for (start, end, normal) in edge_occurrences.into_values().flatten() {
+        let start_position = fragment.positions[start as usize];
+        let end_position = fragment.positions[end as usize];
+        let edge = end_position - start_position;
+        let length = edge.length();
+        if length <= SEAM_STITCH_TOLERANCE_METERS {
+            continue;
+        }
+        boundaries.push(BoundaryEdge {
+            fragment_index,
+            placement,
+            start: vertex_offset + start as usize,
+            end: vertex_offset + end as usize,
+            midpoint: (start_position + end_position) * 0.5,
+            direction: edge / length,
+            normal,
+        });
+    }
+}
+
+fn seam_grid_key(value: Vec3) -> (i64, i64, i64) {
+    let scale = 1.0 / SEAM_STITCH_TOLERANCE_METERS;
+    (
+        (value.x * scale).floor() as i64,
+        (value.y * scale).floor() as i64,
+        (value.z * scale).floor() as i64,
+    )
+}
+
+fn stitch_static_seams(fragments: &mut [ComposedPrimitive]) -> SeamStitchStats {
+    let mut old_positions = Vec::new();
+    let mut vertex_offsets = Vec::with_capacity(fragments.len());
+    for fragment in fragments.iter() {
+        vertex_offsets.push(old_positions.len());
+        old_positions.extend_from_slice(&fragment.positions);
+    }
+    if old_positions.is_empty() {
+        return SeamStitchStats::default();
+    }
+
+    let mut disjoint = DisjointSet::new(old_positions.len());
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        let mut first_by_position = HashMap::<PositionKey, usize>::new();
+        for (local_index, position) in fragment.positions.iter().copied().enumerate() {
+            let global_index = vertex_offsets[fragment_index] + local_index;
+            if let Some(previous) =
+                first_by_position.insert(PositionKey::from_position(position), global_index)
+            {
+                disjoint.union(previous, global_index);
+            }
+        }
+    }
+
+    let mut boundaries = Vec::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        collect_boundary_edges(
+            fragment_index,
+            fragment,
+            vertex_offsets[fragment_index],
+            &mut boundaries,
+        );
+    }
+    boundaries.sort_by_key(|edge| (edge.placement, edge.fragment_index, edge.start, edge.end));
+    if boundaries.len() < 2 {
+        return stitch_t_junctions(fragments);
+    }
+
+    let mut spatial = HashMap::<(i64, i64, i64), Vec<usize>>::new();
+    let mut matched = vec![false; boundaries.len()];
+    let mut matched_pairs = Vec::new();
+    let tolerance = SEAM_STITCH_TOLERANCE_METERS;
+
+    for current_index in 0..boundaries.len() {
+        let current = boundaries[current_index];
+        let current_key = seam_grid_key(current.midpoint);
+        let mut best = None::<(f32, usize, bool)>;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let key = (current_key.0 + dx, current_key.1 + dy, current_key.2 + dz);
+                    let Some(candidates) = spatial.get(&key) else {
+                        continue;
+                    };
+                    for &other_index in candidates {
+                        if matched[other_index]
+                            || boundaries[other_index].placement == current.placement
+                        {
+                            continue;
+                        }
+                        let other = boundaries[other_index];
+                        if current.direction.dot(other.direction).abs() < SEAM_EDGE_DOT_MIN
+                            || current.normal.dot(other.normal) < SEAM_NORMAL_DOT_MIN
+                        {
+                            continue;
+                        }
+                        let same_score = old_positions[current.start]
+                            .distance(old_positions[other.start])
+                            + old_positions[current.end].distance(old_positions[other.end]);
+                        let reverse_score = old_positions[current.start]
+                            .distance(old_positions[other.end])
+                            + old_positions[current.end].distance(old_positions[other.start]);
+                        let (score, reverse) = if same_score <= reverse_score {
+                            (same_score, false)
+                        } else {
+                            (reverse_score, true)
+                        };
+                        if score > 2.0 * tolerance {
+                            continue;
+                        }
+                        if best.is_none_or(|(best_score, best_index, _)| {
+                            score < best_score || (score == best_score && other_index < best_index)
+                        }) {
+                            best = Some((score, other_index, reverse));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, other_index, reverse)) = best {
+            matched[current_index] = true;
+            matched[other_index] = true;
+            let other = boundaries[other_index];
+            let (other_start, other_end) = if reverse {
+                (other.end, other.start)
+            } else {
+                (other.start, other.end)
+            };
+            matched_pairs.push(((current.start, other_start), (current.end, other_end)));
+        }
+        spatial.entry(current_key).or_default().push(current_index);
+    }
+
+    if matched_pairs.is_empty() {
+        return stitch_t_junctions(fragments);
+    }
+    for &((left_start, right_start), (left_end, right_end)) in &matched_pairs {
+        disjoint.union(left_start, right_start);
+        disjoint.union(left_end, right_end);
+    }
+
+    let mut matched_roots = HashSet::new();
+    for &((left_start, _), (left_end, _)) in &matched_pairs {
+        matched_roots.insert(disjoint.find(left_start));
+        matched_roots.insert(disjoint.find(left_end));
+    }
+
+    let mut sums = HashMap::<usize, ([f64; 3], usize)>::new();
+    for (global_index, position) in old_positions.iter().copied().enumerate() {
+        let root = disjoint.find(global_index);
+        if !matched_roots.contains(&root) {
+            continue;
+        }
+        let entry = sums.entry(root).or_insert(([0.0; 3], 0));
+        entry.0[0] += f64::from(position.x);
+        entry.0[1] += f64::from(position.y);
+        entry.0[2] += f64::from(position.z);
+        entry.1 += 1;
+    }
+    let canonical = sums
+        .into_iter()
+        .map(|(root, (sum, count))| {
+            (
+                root,
+                Vec3::new(
+                    (sum[0] / count as f64) as f32,
+                    (sum[1] / count as f64) as f32,
+                    (sum[2] / count as f64) as f32,
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut stats = SeamStitchStats {
+        edges_matched: matched_pairs.len(),
+        ..Default::default()
+    };
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        for (local_index, position) in fragment.positions.iter_mut().enumerate() {
+            let root = disjoint.find(vertex_offsets[fragment_index] + local_index);
+            let Some(&replacement) = canonical.get(&root) else {
+                continue;
+            };
+            let correction = position.distance(replacement);
+            if correction > 0.0 {
+                *position = replacement;
+                stats.vertices_adjusted += 1;
+                stats.max_correction_meters = stats.max_correction_meters.max(correction);
+            }
+        }
+    }
+    let t_junction_stats = stitch_t_junctions(fragments);
+    stats.vertices_adjusted += t_junction_stats.vertices_adjusted;
+    stats.max_correction_meters = stats
+        .max_correction_meters
+        .max(t_junction_stats.max_correction_meters);
+    stats
+}
+
+fn t_junction_grid_key(value: Vec3) -> (i64, i64, i64) {
+    let scale = 1.0 / SEAM_T_JUNCTION_GRID_METERS;
+    (
+        (value.x * scale).floor() as i64,
+        (value.y * scale).floor() as i64,
+        (value.z * scale).floor() as i64,
+    )
+}
+
+fn stitch_t_junctions(fragments: &mut [ComposedPrimitive]) -> SeamStitchStats {
+    let mut old_positions = Vec::new();
+    let mut vertex_offsets = Vec::with_capacity(fragments.len());
+    for fragment in fragments.iter() {
+        vertex_offsets.push(old_positions.len());
+        old_positions.extend_from_slice(&fragment.positions);
+    }
+    if old_positions.is_empty() {
+        return SeamStitchStats::default();
+    }
+
+    let mut boundaries = Vec::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        collect_boundary_edges(
+            fragment_index,
+            fragment,
+            vertex_offsets[fragment_index],
+            &mut boundaries,
+        );
+    }
+    if boundaries.is_empty() {
+        return SeamStitchStats::default();
+    }
+
+    let mut points = Vec::new();
+    let mut seen_points = HashSet::new();
+    for edge in &boundaries {
+        for global_index in [edge.start, edge.end] {
+            let point_key = (
+                global_index,
+                edge.placement,
+                PositionKey::from_position(edge.normal),
+            );
+            if seen_points.insert(point_key) {
+                points.push(BoundaryPoint {
+                    fragment_index: edge.fragment_index,
+                    placement: edge.placement,
+                    global_index,
+                    normal: edge.normal,
+                });
+            }
+        }
+    }
+
+    let mut edge_grid = HashMap::<(i64, i64, i64), Vec<usize>>::new();
+    for (edge_index, edge) in boundaries.iter().enumerate() {
+        let start = old_positions[edge.start];
+        let end = old_positions[edge.end];
+        let minimum = start.min(end);
+        let maximum = start.max(end);
+        let minimum_key = t_junction_grid_key(minimum);
+        let maximum_key = t_junction_grid_key(maximum);
+        let cell_count = (maximum_key.0 - minimum_key.0 + 3)
+            .saturating_mul(maximum_key.1 - minimum_key.1 + 3)
+            .saturating_mul(maximum_key.2 - minimum_key.2 + 3);
+        if cell_count <= 4096 {
+            for x in (minimum_key.0 - 1)..=(maximum_key.0 + 1) {
+                for y in (minimum_key.1 - 1)..=(maximum_key.1 + 1) {
+                    for z in (minimum_key.2 - 1)..=(maximum_key.2 + 1) {
+                        edge_grid.entry((x, y, z)).or_default().push(edge_index);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut replacements = HashMap::<(usize, PositionKey), (f32, Vec3)>::new();
+    for point in points {
+        let position = old_positions[point.global_index];
+        let point_key = (point.fragment_index, PositionKey::from_position(position));
+        let grid_key = t_junction_grid_key(position);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let key = (grid_key.0 + dx, grid_key.1 + dy, grid_key.2 + dz);
+                    let Some(edge_indices) = edge_grid.get(&key) else {
+                        continue;
+                    };
+                    for &edge_index in edge_indices {
+                        let edge = boundaries[edge_index];
+                        if edge.placement == point.placement
+                            || point.normal.dot(edge.normal) < SEAM_NORMAL_DOT_MIN
+                        {
+                            continue;
+                        }
+                        let start = old_positions[edge.start];
+                        let segment = old_positions[edge.end] - start;
+                        let start64 = [f64::from(start.x), f64::from(start.y), f64::from(start.z)];
+                        let segment64 = [
+                            f64::from(segment.x),
+                            f64::from(segment.y),
+                            f64::from(segment.z),
+                        ];
+                        let point64 = [
+                            f64::from(position.x),
+                            f64::from(position.y),
+                            f64::from(position.z),
+                        ];
+                        let segment_length_squared = segment64
+                            .iter()
+                            .map(|component| component * component)
+                            .sum::<f64>();
+                        if segment_length_squared <= f64::EPSILON {
+                            continue;
+                        }
+                        let projection_factor = point64
+                            .iter()
+                            .zip(start64.iter())
+                            .zip(segment64.iter())
+                            .map(|((point, start), segment)| (point - start) * segment)
+                            .sum::<f64>()
+                            / segment_length_squared;
+                        if !(0.05..=0.95).contains(&projection_factor)
+                            || projection_factor == 0.05
+                            || projection_factor == 0.95
+                        {
+                            continue;
+                        }
+                        let projection = Vec3::new(
+                            (start64[0] + segment64[0] * projection_factor) as f32,
+                            (start64[1] + segment64[1] * projection_factor) as f32,
+                            (start64[2] + segment64[2] * projection_factor) as f32,
+                        );
+                        let correction = position.distance(projection);
+                        if correction > SEAM_STITCH_TOLERANCE_METERS {
+                            continue;
+                        }
+                        let replace = replacements
+                            .get(&point_key)
+                            .is_none_or(|(best_correction, _)| correction < *best_correction);
+                        if replace {
+                            replacements.insert(point_key, (correction, projection));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut stats = SeamStitchStats::default();
+    for (fragment_index, fragment) in fragments.iter_mut().enumerate() {
+        for (local_index, position) in fragment.positions.iter_mut().enumerate() {
+            let original = old_positions[vertex_offsets[fragment_index] + local_index];
+            let key = (fragment_index, PositionKey::from_position(original));
+            let Some((correction, replacement)) = replacements.get(&key).copied() else {
+                continue;
+            };
+            if correction > 0.0 {
+                *position = replacement;
+                stats.vertices_adjusted += 1;
+                stats.max_correction_meters = stats.max_correction_meters.max(correction);
+            }
+        }
+    }
+    stats
+}
+
 fn batch_fragments(
     fragments: Vec<ComposedPrimitive>,
     chunk_size: f32,
@@ -1320,5 +1810,145 @@ mod tests {
 
         assert_eq!(flattened_positions, vec![Vec3::new(1.0, 3.5, 0.0)]);
         assert_eq!(flattened_normals, vec![Vec3::Y]);
+    }
+
+    fn floor_quad(
+        name: &str,
+        reference_form_id: u32,
+        minimum_x: f32,
+        maximum_x: f32,
+        reverse_winding: bool,
+    ) -> ComposedPrimitive {
+        let positions = vec![
+            Vec3::new(minimum_x, 0.0, 0.0),
+            Vec3::new(maximum_x, 0.0, 0.0),
+            Vec3::new(maximum_x, 0.0, 1.0),
+            Vec3::new(minimum_x, 0.0, 1.0),
+        ];
+        let indices = if reverse_winding {
+            vec![0, 1, 2, 0, 2, 3]
+        } else {
+            vec![0, 2, 1, 0, 3, 2]
+        };
+        ComposedPrimitive {
+            name: name.into(),
+            reference_form_ids: vec![reference_form_id],
+            material: 0,
+            positions,
+            normals: vec![Vec3::Y; 4],
+            uvs: vec![Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
+            colors: vec![Vec4::new(1.0, 0.5, 0.25, 1.0); 4],
+            transport_colors: vec![Vec4::ONE; 4],
+            indices,
+        }
+    }
+
+    fn triangle_fragment(
+        name: &str,
+        reference_form_id: u32,
+        positions: [Vec3; 3],
+    ) -> ComposedPrimitive {
+        ComposedPrimitive {
+            name: name.into(),
+            reference_form_ids: vec![reference_form_id],
+            material: 0,
+            positions: positions.into(),
+            normals: vec![Vec3::Y; 3],
+            uvs: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+            colors: vec![Vec4::ONE; 3],
+            transport_colors: vec![Vec4::ONE; 3],
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn seam_stitch_moves_only_positions_across_coplanar_placement_boundary() {
+        let delta = 0.00003;
+        let left = floor_quad("left", 1, 0.0, 1.0, false);
+        let right = floor_quad("right", 2, 1.0 + delta, 2.0, false);
+        let original_left = left.clone();
+        let original_right = right.clone();
+        let mut fragments = vec![left, right];
+
+        let stats = stitch_static_seams(&mut fragments);
+
+        assert_eq!(stats.edges_matched, 1);
+        assert_eq!(stats.vertices_adjusted, 4);
+        assert!(stats.max_correction_meters > 0.0);
+        assert_eq!(fragments[0].positions[1], fragments[1].positions[0]);
+        assert_eq!(fragments[0].positions[2], fragments[1].positions[3]);
+        assert_eq!(fragments[0].positions[0], original_left.positions[0]);
+        assert_eq!(fragments[1].positions[1], original_right.positions[1]);
+        assert_eq!(fragments[0].normals, original_left.normals);
+        assert_eq!(fragments[1].normals, original_right.normals);
+        assert_eq!(fragments[0].uvs, original_left.uvs);
+        assert_eq!(fragments[1].uvs, original_right.uvs);
+        assert_eq!(fragments[0].colors, original_left.colors);
+        assert_eq!(fragments[1].colors, original_right.colors);
+        assert_eq!(fragments[0].indices, original_left.indices);
+        assert_eq!(fragments[1].indices, original_right.indices);
+    }
+
+    #[test]
+    fn seam_stitch_rejects_opposite_winding_far_and_same_placement_edges() {
+        let delta = 0.00003;
+        let mut opposite = vec![
+            floor_quad("left", 1, 0.0, 1.0, false),
+            floor_quad("right", 2, 1.0 + delta, 2.0, true),
+        ];
+        let opposite_original = opposite.clone();
+        assert_eq!(stitch_static_seams(&mut opposite).edges_matched, 0);
+        assert_eq!(opposite[0].positions, opposite_original[0].positions);
+        assert_eq!(opposite[1].positions, opposite_original[1].positions);
+
+        let mut far = vec![
+            floor_quad("left", 1, 0.0, 1.0, false),
+            floor_quad(
+                "right",
+                2,
+                1.0 + SEAM_STITCH_TOLERANCE_METERS * 2.0,
+                2.0,
+                false,
+            ),
+        ];
+        assert_eq!(stitch_static_seams(&mut far).edges_matched, 0);
+
+        let mut same_placement = vec![
+            floor_quad("left", 1, 0.0, 1.0, false),
+            floor_quad("right", 1, 1.0 + delta, 2.0, false),
+        ];
+        assert_eq!(stitch_static_seams(&mut same_placement).edges_matched, 0);
+    }
+
+    #[test]
+    fn seam_stitch_closes_a_coplanar_t_junction_without_merging_vertices() {
+        let delta = 0.00003;
+        let point_fragment = triangle_fragment(
+            "point",
+            1,
+            [
+                Vec3::new(1.0, 0.0, delta),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(2.0, 0.0, 1.0),
+            ],
+        );
+        let edge_fragment = triangle_fragment(
+            "edge",
+            2,
+            [
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
+        );
+        let mut fragments = vec![point_fragment, edge_fragment];
+
+        let stats = stitch_static_seams(&mut fragments);
+
+        assert_eq!(stats.edges_matched, 0);
+        assert_eq!(stats.vertices_adjusted, 1);
+        assert_eq!(fragments[0].positions[0], Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(fragments[1].positions[0], Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(fragments[1].positions[2], Vec3::new(2.0, 0.0, 0.0));
     }
 }
