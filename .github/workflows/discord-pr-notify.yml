@@ -76,7 +76,7 @@ jobs:
           flavor="$fallback_line"
           gemini_payload=$(jq -n --arg prompt "$prompt" '{
             contents: [{parts: [{text: $prompt}]}],
-            generationConfig: {thinkingConfig: {thinkingLevel: "low"}}
+            generationConfig: {thinkingConfig: {thinkingLevel: "minimal"}}
           }')
 
           if gemini_response=$(curl --silent --show-error --fail \
