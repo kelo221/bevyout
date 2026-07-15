@@ -218,6 +218,13 @@ struct BevyoutWorld {
     animation_selected_clip: Option<Option<String>>,
     animation_open_clip_seconds: Option<f32>,
     animation_open_lead: Option<f32>,
+
+    // -- loading_fallback.feature (issue #59) --
+    fallback_state: Option<swap_policy::FallbackState>,
+    fallback_lifecycle_outcome: Option<swap_policy::FallbackLifecycleOutcome>,
+    overlay_fade_duration: f32,
+    overlay_fade_max_alpha: f32,
+    overlay_alpha: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -1665,6 +1672,116 @@ async fn then_animation_open_lead_is(world: &mut BevyoutWorld, expected: f32) {
     assert!(
         (lead - expected).abs() < 1e-4,
         "open lead {lead} != expected {expected}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// loading_fallback.feature (issue #59)
+// ---------------------------------------------------------------------
+
+#[given("no fallback is in flight")]
+async fn given_no_fallback_in_flight(world: &mut BevyoutWorld) {
+    world.fallback_state = Some(swap_policy::FallbackState::Idle);
+}
+
+#[given("a fallback is in flight")]
+async fn given_fallback_in_flight(world: &mut BevyoutWorld) {
+    world.fallback_state = Some(swap_policy::FallbackState::InFlight);
+}
+
+#[when("the destination becomes ready")]
+async fn when_destination_becomes_ready(world: &mut BevyoutWorld) {
+    world.fallback_lifecycle_outcome = Some(swap_policy::fallback_lifecycle_outcome(
+        world.fallback_state.expect("fallback state not given"),
+        swap_policy::FallbackEvent::DestinationReady,
+    ));
+}
+
+#[when("the fallback parse fails")]
+async fn when_fallback_parse_fails(world: &mut BevyoutWorld) {
+    world.fallback_lifecycle_outcome = Some(swap_policy::fallback_lifecycle_outcome(
+        world.fallback_state.expect("fallback state not given"),
+        swap_policy::FallbackEvent::ParseFailed,
+    ));
+}
+
+#[when("the player cancels the fallback")]
+async fn when_player_cancels_fallback(world: &mut BevyoutWorld) {
+    world.fallback_lifecycle_outcome = Some(swap_policy::fallback_lifecycle_outcome(
+        world.fallback_state.expect("fallback state not given"),
+        swap_policy::FallbackEvent::PlayerCancelled,
+    ));
+}
+
+#[when("a superseding travel request arrives")]
+async fn when_superseding_travel_request_arrives(world: &mut BevyoutWorld) {
+    world.fallback_lifecycle_outcome = Some(swap_policy::fallback_lifecycle_outcome(
+        world.fallback_state.expect("fallback state not given"),
+        swap_policy::FallbackEvent::SupersedingRequest,
+    ));
+}
+
+#[then(
+    regex = r"^the fallback lifecycle outcome is (Ignore|Proceed|ReturnToSource|Cancel|Supersede)$"
+)]
+async fn then_fallback_lifecycle_outcome_is(world: &mut BevyoutWorld, expected: String) {
+    let outcome = world
+        .fallback_lifecycle_outcome
+        .expect("fallback lifecycle outcome not computed yet");
+    let expected = match expected.as_str() {
+        "Ignore" => swap_policy::FallbackLifecycleOutcome::Ignore,
+        "Proceed" => swap_policy::FallbackLifecycleOutcome::Proceed,
+        "ReturnToSource" => swap_policy::FallbackLifecycleOutcome::ReturnToSource,
+        "Cancel" => swap_policy::FallbackLifecycleOutcome::Cancel,
+        _ => swap_policy::FallbackLifecycleOutcome::Supersede,
+    };
+    assert_eq!(outcome, expected);
+}
+
+#[given(regex = r"^an overlay fade duration of ([\d.]+) seconds and max alpha ([\d.]+)$")]
+async fn given_overlay_fade_duration(world: &mut BevyoutWorld, duration: f32, max_alpha: f32) {
+    world.overlay_fade_duration = duration;
+    world.overlay_fade_max_alpha = max_alpha;
+}
+
+#[when(regex = r"^the overlay has been fading in for ([\d.]+) seconds$")]
+async fn when_overlay_fading_in(world: &mut BevyoutWorld, elapsed: f32) {
+    world.overlay_alpha = Some(swap_policy::fade_in_alpha(
+        elapsed,
+        world.overlay_fade_duration,
+        world.overlay_fade_max_alpha,
+    ));
+}
+
+#[when(regex = r"^the overlay has been fading out for ([\d.]+) seconds$")]
+async fn when_overlay_fading_out(world: &mut BevyoutWorld, elapsed: f32) {
+    world.overlay_alpha = Some(swap_policy::fade_out_alpha(
+        elapsed,
+        world.overlay_fade_duration,
+        world.overlay_fade_max_alpha,
+    ));
+}
+
+#[then(regex = r"^the overlay alpha is ([\d.]+)$")]
+async fn then_overlay_alpha_is(world: &mut BevyoutWorld, expected: f32) {
+    let alpha = world.overlay_alpha.expect("overlay alpha not computed yet");
+    assert!(
+        (alpha - expected).abs() < 1e-4,
+        "alpha {alpha} != expected {expected}"
+    );
+}
+
+#[then(regex = r"^the overlay alpha matches fading in for ([\d.]+) seconds$")]
+async fn then_overlay_alpha_matches_fading_in(world: &mut BevyoutWorld, elapsed: f32) {
+    let alpha = world.overlay_alpha.expect("overlay alpha not computed yet");
+    let expected = swap_policy::fade_in_alpha(
+        elapsed,
+        world.overlay_fade_duration,
+        world.overlay_fade_max_alpha,
+    );
+    assert!(
+        (alpha - expected).abs() < 1e-4,
+        "alpha {alpha} != expected {expected}"
     );
 }
 

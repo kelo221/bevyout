@@ -165,16 +165,26 @@ struct InteractionState {
     open: HashSet<Entity>,
 }
 
+/// Issue #59's notice seam: `world::swap`'s fallback-cancellation and
+/// failure-recovery systems reach this same HUD line (`show`, made
+/// `pub(crate)` for that) rather than inventing a second notice surface.
 #[derive(Resource, Default)]
-struct InteractionNotice {
+pub(crate) struct InteractionNotice {
     text: String,
     remaining_seconds: f32,
 }
 
 impl InteractionNotice {
-    fn show(&mut self, text: impl Into<String>) {
+    pub(crate) fn show(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.remaining_seconds = NOTICE_SECONDS;
+    }
+
+    /// Read-only view of the currently displayed notice text (issue #59's
+    /// swap tests assert on it; nothing outside tests should).
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
     }
 }
 
