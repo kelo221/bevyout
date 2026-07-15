@@ -7,13 +7,13 @@ branch; orchestrator reviews and evaluates per AGENTS.md model routing.
 
 ## Fixed feature list
 
-- **F83.1 `additem`.** `player.additem <FormID> [count]` (default 1) adds
+- **F84.1 `additem`.** `player.additem <FormID> [count]` (default 1) adds
   to the authoritative `PlayerInventory` via `add_stack`, seeding
   condition from the catalog's `max_condition` exactly like the E-key
   pickup path; uncataloged ids add with condition `None`. Deterministic
   result line `additem <formid> x<count>; inventory now has <total>`,
   standard console errors for arity and non-positive counts.
-- **F83.2 `activate` on pickups.** New `interaction::scripted_pickup`
+- **F84.2 `activate` on pickups.** New `interaction::scripted_pickup`
   seam mirroring `activate_focused_placement`'s Pickup arm minus
   raycast/distance checks: inventory add with catalog condition,
   runtime-item save-state handling, pickup sound, notice, #81 steal
