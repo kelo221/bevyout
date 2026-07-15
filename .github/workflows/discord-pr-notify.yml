@@ -2,7 +2,13 @@ name: Discord PR notify
 
 on:
   pull_request:
-    types: [opened, closed]
+    types: [opened, closed, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to notify
+        required: true
+        type: number
 
 permissions:
   contents: read
@@ -16,13 +22,14 @@ jobs:
           # Keep compatibility with the secret name used by the original snippet.
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_MODEL: gemini-3.1-flash-lite
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          ACTION: ${{ github.event.action }}
+          ACTION: ${{ github.event.action || 'opened' }}
           MERGED: ${{ github.event.pull_request.merged }}
         shell: bash
         run: |
@@ -34,12 +41,39 @@ jobs:
             exit 0
           fi
 
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+              echo "pr_number must be a positive integer."
+              exit 1
+            fi
+
+            pr_json=$(curl --silent --show-error --fail --max-time 15 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+            PR_NUMBER=$(jq -r '.number | tostring' <<<"$pr_json")
+            PR_TITLE=$(jq -r '.title // ""' <<<"$pr_json")
+            PR_BODY=$(jq -r '.body // ""' <<<"$pr_json")
+            PR_URL=$(jq -r '.html_url // ""' <<<"$pr_json")
+            PR_AUTHOR=$(jq -r '.user.login // ""' <<<"$pr_json")
+            ACTION="opened"
+            MERGED="false"
+          fi
+
           if [[ "$ACTION" == "opened" ]]; then
             status_label="opened"
             fallback_lines=(
               "📟 Please Stand By… Vault-Tec detected a new pull request. Patrolling the review queue almost makes you wish for a nuclear winter."
               "📟 A new PR crawled out of Vault 101. War never changes — but this code might."
               "📟 Vault-Tec calling: a wild pull request appeared. It is not a settlement, but it still needs your help."
+            )
+          elif [[ "$ACTION" == "synchronize" ]]; then
+            status_label="updated"
+            fallback_lines=(
+              "📡 Vault-Tec reports a fresh shipment of code. The PR has been restocked; please inspect before the radstorm hits."
+              "📡 New commits detected in the wasteland. The review queue has been updated, and the terminal is blinking ominously."
+              "📡 The Brotherhood detected movement in the PR. New code has entered the bunker; begin your inspection."
             )
           elif [[ "$MERGED" == "true" ]]; then
             status_label="merged"
