@@ -483,7 +483,7 @@ fn merge_captured_container_deltas(
             cell_state.references.remove(&form_id);
         }
     }
-    if cell_state.references.is_empty() {
+    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
         state.0.cells.remove(&cell);
     }
 }
