@@ -186,6 +186,14 @@ mod vsa_bake {
 }
 use vsa_bake::bake::plan as bake_plan;
 
+// `viewer::interaction::leveled` (issue #74) is dependency-free (std only,
+// no Bevy, no `vsa::manifest` import -- see its module doc comment for why
+// it mirrors `PreparedLeveledList`/`PreparedLeveledEntry` with local plain
+// types), so unlike the modules above it needs no nesting or stand-ins to
+// include verbatim.
+#[path = "../src/viewer/interaction/leveled.rs"]
+mod leveled;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
@@ -320,6 +328,11 @@ struct BevyoutWorld {
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
     performance_summary: Option<performance_policy::FrameProbeSummary>,
+
+    // -- leveled_lists.feature (issue #74) --
+    leveled_lists: std::collections::BTreeMap<u32, leveled::PreparedLeveledList>,
+    leveled_seeds: std::collections::HashMap<String, leveled::LeveledSeed>,
+    leveled_last_resolution: Option<Vec<(u32, i32)>>,
 }
 
 fn find_placement<'a>(
@@ -2687,6 +2700,143 @@ async fn then_frame_probe_p95_and_max(world: &mut BevyoutWorld, p95: f64, max: f
 #[then(regex = r"^(\d+) frames? exceed(?:s)? the probe budget$")]
 async fn then_frames_exceed_budget(world: &mut BevyoutWorld, count: usize) {
     assert_eq!(performance_summary(world).over_budget_count, count);
+}
+
+// ---------------------------------------------------------------------
+// leveled_lists.feature (issue #74)
+// ---------------------------------------------------------------------
+
+/// Parses "level:base_form_id:count" entries, comma-separated; an empty
+/// string yields no entries.
+fn parse_leveled_entries(text: &str) -> Vec<leveled::PreparedLeveledEntry> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let fields: Vec<&str> = part.split(':').collect();
+            let [level, base_form_id, count] = fields.as_slice() else {
+                panic!("leveled entry must be \"level:base_form_id:count\", got {part:?}");
+            };
+            leveled::PreparedLeveledEntry {
+                level: level.parse().expect("entry level must be a u16"),
+                base_form_id: base_form_id.parse().expect("entry form id must be a u32"),
+                count: count.parse().expect("entry count must be an i32"),
+            }
+        })
+        .collect()
+}
+
+/// Parses "base_form_id x count" stacks, comma-separated; an empty string
+/// yields no stacks.
+fn parse_resolved_stacks(text: &str) -> Vec<(u32, i32)> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (form_id, count) = part
+                .split_once('x')
+                .expect("resolved stack must be \"base_form_id x count\"");
+            (
+                form_id.trim().parse().expect("stack form id must be a u32"),
+                count.trim().parse().expect("stack count must be an i32"),
+            )
+        })
+        .collect()
+}
+
+fn parse_leveled_flags(token: &str) -> u8 {
+    match token {
+        "use-all" => leveled::LEVELED_USE_ALL,
+        "calculate-for-each-item" => leveled::LEVELED_CALCULATE_FOR_EACH_ITEM,
+        numeric => numeric
+            .parse()
+            .expect("flags must be numeric or a known name"),
+    }
+}
+
+#[given(
+    regex = r#"^leveled list (\d+) with chance-none (\d+) and flags (\S+) and entries "([^"]*)"$"#
+)]
+async fn given_leveled_list(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+    chance_none: u8,
+    flags: String,
+    entries: String,
+) {
+    world.leveled_lists.insert(
+        form_id,
+        leveled::PreparedLeveledList {
+            chance_none,
+            flags: parse_leveled_flags(&flags),
+            entries: parse_leveled_entries(&entries),
+        },
+    );
+}
+
+#[given(
+    regex = r#"^a leveled seed from playthrough (\d+), cell (\d+), reference (\d+) named "([^"]+)"$"#
+)]
+async fn given_leveled_seed(
+    world: &mut BevyoutWorld,
+    playthrough_seed: u64,
+    cell_form_id: u32,
+    reference_form_id: u32,
+    name: String,
+) {
+    world.leveled_seeds.insert(
+        name,
+        leveled::LeveledSeed::derive(playthrough_seed, cell_form_id, reference_form_id),
+    );
+}
+
+#[when(regex = r#"^list (\d+) is resolved for player level (\d+) using seed "([^"]+)"$"#)]
+async fn when_leveled_list_resolved(
+    world: &mut BevyoutWorld,
+    list_form_id: u32,
+    player_level: u16,
+    seed_name: String,
+) {
+    let seed = *world
+        .leveled_seeds
+        .get(&seed_name)
+        .unwrap_or_else(|| panic!("no leveled seed named {seed_name:?}"));
+    world.leveled_last_resolution = Some(leveled::resolve_leveled(
+        list_form_id,
+        &world.leveled_lists,
+        seed,
+        player_level,
+    ));
+}
+
+#[then("the resolved stacks are empty")]
+async fn then_resolved_stacks_are_empty(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .leveled_last_resolution
+            .as_ref()
+            .expect("no leveled resolution computed yet")
+            .is_empty()
+    );
+}
+
+#[then(regex = r#"^the resolved stacks are "([^"]*)"$"#)]
+async fn then_resolved_stacks_are(world: &mut BevyoutWorld, expected: String) {
+    let resolved = world
+        .leveled_last_resolution
+        .as_ref()
+        .expect("no leveled resolution computed yet");
+    assert_eq!(*resolved, parse_resolved_stacks(&expected));
+}
+
+#[then(regex = r#"^seeds "([^"]+)" and "([^"]+)" are identical$"#)]
+async fn then_leveled_seeds_are_identical(world: &mut BevyoutWorld, a: String, b: String) {
+    assert_eq!(world.leveled_seeds[&a], world.leveled_seeds[&b]);
+}
+
+#[then(regex = r#"^seeds "([^"]+)" and "([^"]+)" are different$"#)]
+async fn then_leveled_seeds_are_different(world: &mut BevyoutWorld, a: String, b: String) {
+    assert_ne!(world.leveled_seeds[&a], world.leveled_seeds[&b]);
 }
 
 fn main() {

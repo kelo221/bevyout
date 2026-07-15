@@ -597,6 +597,7 @@ fn prepare_cell(
         cache_missing,
         cache_invalid,
         cache_explicit_rebuilds,
+        leveled_lists,
     } = stage;
     // F48.4 serialization point: `convert_staged_textures` walks every
     // `.dds` under the *whole* `staging_dir` (not just this cell's), and
@@ -783,6 +784,7 @@ fn prepare_cell(
         mutability_summary,
         bake: None,
         static_point_shadows,
+        leveled_lists,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(

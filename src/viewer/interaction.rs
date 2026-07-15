@@ -11,6 +11,11 @@ use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::player::{CameraMode, CameraModeState};
 
+// Pure leveled-list resolver (issue #74). Std/serde-only, no Bevy imports,
+// so `tests/features.rs` can pull it in verbatim via `#[path]`; see its
+// module doc comment for the pattern.
+pub(crate) mod leveled;
+
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
 const NOTICE_SECONDS: f32 = 3.0;
 const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
