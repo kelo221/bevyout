@@ -75,6 +75,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
         args.disable_physics,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        args.save_slot,
     )
 }
 
@@ -169,6 +170,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
         args.disable_physics,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        None,
     )
 }
 
@@ -289,6 +291,8 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
     bake(BakeArgs {
         manifest: None,
         selector: Some(args.selector.clone()),
+        all_interiors: false,
+        retry_failed: false,
         cache_dir: Some(cache_dir.to_path_buf()),
         quality: BakeQuality::Irradiance,
         irradiance_spacing_meters: 8.0,

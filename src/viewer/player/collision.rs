@@ -99,6 +99,7 @@ pub(crate) fn advance_pending_collider_builds(
     mut cell_physics: ResMut<CellPhysicsReadiness>,
     mut camera_state: ResMut<CameraModeState>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
+    mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
     if pending.0.is_none() {
         return;
@@ -158,6 +159,7 @@ pub(crate) fn advance_pending_collider_builds(
         build_colliders_for_placement(
             world,
             &mut commands,
+            state.manifest.cell.form_id,
             &placement,
             &physics_assets,
             static_body,
@@ -167,6 +169,7 @@ pub(crate) fn advance_pending_collider_builds(
             &mut state.unknown_layers,
             &mut state.static_marker_spawned,
             dynamic_phase,
+            &mut restores,
         );
     }
     if !state.static_ready && state.static_queue.is_empty() {
@@ -234,6 +237,7 @@ pub(crate) fn build_prepared_colliders(
     mut cell_physics: ResMut<CellPhysicsReadiness>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     roots: Query<(Entity, &super::super::interaction::PlacementRoot)>,
+    mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
     if physics_disabled.0 {
         state.collision_build_complete = true;
@@ -282,6 +286,7 @@ pub(crate) fn build_prepared_colliders(
         build_colliders_for_placement(
             world,
             &mut commands,
+            manifest.cell.form_id,
             placement,
             &physics_assets,
             static_body,
@@ -291,6 +296,7 @@ pub(crate) fn build_prepared_colliders(
             &mut unknown_layers,
             &mut static_marker_spawned,
             false,
+            &mut restores,
         );
     }
     // BoxDDD rebuilds its static broad phase during a world step. Startup has
@@ -360,6 +366,7 @@ pub(crate) fn build_prepared_colliders(
 fn build_colliders_for_placement(
     world: &mut boxddd::World,
     commands: &mut Commands,
+    cell_form_id: u32,
     placement: &crate::vsa::PreparedPlacement,
     physics_assets: &PreparedPhysicsAssets,
     static_body: BodyId,
@@ -369,7 +376,13 @@ fn build_colliders_for_placement(
     unknown_layers: &mut HashSet<u8>,
     static_marker_spawned: &mut bool,
     allow_dynamic_bodies: bool,
+    restores: &mut super::super::world::PersistRestores,
 ) {
+    // Issues #60/#61: a reference the save layer deleted (taken pickup)
+    // must never get colliders rebuilt for it.
+    if restores.suppressed.contains(&placement.reference_form_id) {
+        return;
+    }
     let Some(path) = placement.physics_asset_path.as_ref() else {
         return;
     };
@@ -381,6 +394,15 @@ fn build_colliders_for_placement(
         && placement.physics_classification == PreparedPhysicsClassification::Dynamic)
         .then(|| root_by_reference.get(&placement.reference_form_id).copied())
         .flatten();
+    // Issues #60/#61: re-activating a cell that stayed resident re-queues
+    // its collider build; this placement's dynamic body is still alive with
+    // its live pose/velocity, and building a second one would snap the
+    // entity back to its manifest rest pose. Keep the live body.
+    if let Some(entity) = dynamic_entity
+        && collision_world.dynamic_bodies.contains_key(&entity)
+    {
+        return;
+    }
     let placement_root = root_by_reference.get(&placement.reference_form_id).copied();
     for body in &asset.bodies {
         if !body_blocks_player(body) {
@@ -395,8 +417,22 @@ fn build_colliders_for_placement(
         }
         let (body_id, dynamic, local_space) = if let Some(entity) = dynamic_entity {
             let body_id = create_dynamic_body(world, placement, body);
+            // Issue #60 (F60.2): a saved pose/velocity for this reference is
+            // re-applied the moment its body exists, so the staggered build
+            // itself performs the restoration instead of a later system
+            // fighting it.
+            if let Some(restore) = restores.bodies.remove(&placement.reference_form_id) {
+                apply_dynamic_body_restore(world, body_id, &restore);
+                info!(
+                    "save restore body {:08x} sleeping={}",
+                    placement.reference_form_id, restore.sleeping
+                );
+            }
             collision_world.dynamic_bodies.insert(entity, body_id);
             collision_world.dynamic_entities.insert(body_id, entity);
+            collision_world
+                .ledger
+                .record_dynamic_body(cell_form_id, body_id);
             commands.entity(entity).insert(PhysicsCollider);
             stats.dynamic_bodies += 1;
             (body_id, true, true)
@@ -410,6 +446,9 @@ fn build_colliders_for_placement(
             // door/activator animation instead of leaving a rest-pose
             // collider across an open doorway.
             let body_id = create_kinematic_body(world, placement);
+            collision_world
+                .ledger
+                .record_keyframed_body(cell_form_id, body_id);
             collision_world
                 .keyframed_bodies
                 .entry(root)
@@ -452,6 +491,15 @@ fn build_colliders_for_placement(
                     material: body.material,
                 },
             );
+            if body_id == static_body {
+                collision_world
+                    .ledger
+                    .record_static_shape(cell_form_id, shape_id);
+            } else {
+                collision_world
+                    .ledger
+                    .record_body_shape(cell_form_id, shape_id);
+            }
             stats.shapes += 1;
             stats.packed_triangles += triangles;
             *stats.shape_kinds.entry(shape.kind()).or_default() += 1;
@@ -606,6 +654,25 @@ pub(crate) fn create_dynamic_body(
     let _ = world.try_set_body_angular_damping(body_id, body.angular_damping.max(0.0));
     let _ = world.try_enable_body_sleep(body_id, body.sleep_enabled);
     body_id
+}
+
+/// Issue #60 (F60.2): re-applies a saved dynamic-body pose/velocity/sleep
+/// state. Shared by the collider-build hook above (fresh bodies) and
+/// `world::persist`'s immediate path (bodies that survived as live
+/// residents).
+pub(crate) fn apply_dynamic_body_restore(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    restore: &super::super::world::DynamicBodyRestore,
+) {
+    let _ = world.try_set_body_transform(
+        body_id,
+        to_box_vec3(restore.translation),
+        to_box_quat(restore.rotation),
+    );
+    let _ = world.try_set_body_linear_velocity(body_id, to_box_vec3(restore.linear_velocity));
+    let _ = world.try_set_body_angular_velocity(body_id, to_box_vec3(restore.angular_velocity));
+    let _ = world.try_set_body_awake(body_id, !restore.sleeping);
 }
 
 pub(crate) fn create_prepared_shape(
@@ -813,6 +880,65 @@ pub(crate) fn normalize_dynamic_mass(
         mass_data.inertia.cz = scale_box_vec3(mass_data.inertia.cz, ratio);
     }
     let _ = world.try_set_body_mass_data(body_id, mass_data);
+}
+
+/// Issue #63: destroys everything `cell`'s collider build registered in the
+/// per-cell ledger — its shapes on the shared static body, its keyframed
+/// door/activator bodies, and its dynamic bodies — and cancels a
+/// still-draining build for the cell. Called on swap-away (after
+/// `world::persist`'s capture, which snapshots the dynamic poses this
+/// destroys) and on eviction. Before this existed, every swap re-queued the
+/// destination's full placement list with no teardown, so revisits
+/// duplicated static shapes and keyframed bindings, and a departed cell's
+/// colliders persisted for the rest of the session.
+pub(crate) fn teardown_cell_colliders(world: &mut World, cell: u32) {
+    {
+        let mut pending = world.resource_mut::<PendingColliderBuild>();
+        if pending
+            .0
+            .as_ref()
+            .is_some_and(|state| state.manifest.cell.form_id == cell)
+        {
+            pending.0 = None;
+            info!("swap colliders cancelled for {cell:08x} (cell torn down mid-build)");
+        }
+    }
+    world.resource_scope(|world, mut collision_world: Mut<PreparedCollisionWorld>| {
+        let mut context = world.non_send_mut::<BoxdddPhysicsContext>();
+        let Some(boxddd_world) = context.world_mut() else {
+            return;
+        };
+        let Some(owned) = collision_world.ledger.release(cell) else {
+            return;
+        };
+        let static_shapes = owned.shape_count();
+        let bodies = owned.body_count();
+        for body in owned.dynamic_bodies {
+            if let Some(entity) = collision_world.dynamic_entities.remove(&body) {
+                collision_world.dynamic_bodies.remove(&entity);
+                collision_world.sleeping_dynamic_bodies.remove(&entity);
+            }
+            let _ = boxddd_world.try_destroy_body(body);
+        }
+        let keyframed: HashSet<BodyId> = owned.keyframed_bodies.iter().copied().collect();
+        for body in owned.keyframed_bodies {
+            let _ = boxddd_world.try_destroy_body(body);
+        }
+        collision_world.keyframed_bodies.retain(|_, bindings| {
+            bindings.retain(|binding| !keyframed.contains(&binding.body));
+            !bindings.is_empty()
+        });
+        for shape in owned.static_shapes {
+            let _ = boxddd_world.try_destroy_shape(shape, false);
+            collision_world.surfaces.remove(&shape);
+        }
+        // Shapes on the destroyed bodies died with them; only their
+        // surface-material bookkeeping needs cleaning.
+        for shape in owned.body_shapes {
+            collision_world.surfaces.remove(&shape);
+        }
+        info!("colliders teardown {cell:08x} static_shapes={static_shapes} bodies={bodies}");
+    });
 }
 
 pub(crate) fn cleanup_removed_dynamic_bodies(

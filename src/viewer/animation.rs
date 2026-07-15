@@ -58,6 +58,17 @@ pub(crate) struct AnimatedPlacement {
     clip_nodes: HashMap<String, AnimationNodeIndex>,
     clip_durations: HashMap<String, f32>,
     current_clip: Option<String>,
+    /// Keeps the root `Gltf` asset alive for this placement's lifetime.
+    /// Never read: without a resident holder, the root is freed once
+    /// discovery resolves, and the next rediscovery's `load::<Gltf>`
+    /// re-runs the whole glTF loader — which fires `Modified` for every
+    /// subasset, respawns every scene instance of the asset (re-`Added`
+    /// `AnimationPlayer`s ⇒ more discoveries), and re-uploads its
+    /// meshes/images to the GPU, in a self-sustaining loop (measured at
+    /// 16k reloads/10 s in the #55 profile; the A8 "scene respawns" and
+    /// A9 "smaller chunks are worse" mysteries were both this).
+    #[allow(dead_code)]
+    gltf: Option<Handle<Gltf>>,
 }
 
 impl AnimatedPlacement {
@@ -88,6 +99,7 @@ impl AnimatedPlacement {
             clip_nodes,
             clip_durations,
             current_clip: None,
+            gltf: None,
         }
     }
 }
@@ -206,6 +218,7 @@ fn resolve_pending_animation_discovery(
             clip_nodes,
             clip_durations,
             current_clip: None,
+            gltf: Some(entry.gltf),
         });
     }
     pending.0 = still_pending;

@@ -187,6 +187,13 @@ pub(crate) fn install(app: &mut App) {
             activate_reference,
         )
         .mutating(),
+        ConsoleCommand::new(
+            "save",
+            "save <slot>",
+            "Capture the active cell state and write it to a named save slot.",
+            save_slot,
+        )
+        .mutating(),
     ] {
         registry
             .register(command)
@@ -214,10 +221,27 @@ fn activate_reference(
         .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
         .placement()
         .clone();
+    // Wave-4 amendment: containers toggle through the same open-state and
+    // clip path as player activation, so the #60/#61 persistence gate can
+    // be driven over the agent bridge.
+    if matches!(placement.semantic, PreparedSemantic::Container) {
+        let opened = interaction::scripted_container_toggle(world, entity);
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "opened": opened,
+            }),
+            vec![format!(
+                "container {:08x} {}",
+                placement.reference_form_id,
+                if opened { "opened" } else { "closed" }
+            )],
+        ));
+    }
     let PreparedSemantic::Door(door) = &placement.semantic else {
         return Err(ConsoleError::new(
             "not_a_door",
-            "activate currently supports only door references",
+            "activate supports only door and container references",
         ));
     };
     let Some(destination) = &door.destination else {
@@ -247,6 +271,27 @@ fn activate_reference(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
         )],
+    ))
+}
+
+/// Issue #60 (F60.3): captures the active cell into `ActiveSaveState` and
+/// writes the named slot through `SaveStore`, responding deterministically
+/// with the written path.
+fn save_slot(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [slot] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "save requires exactly one slot name",
+        ));
+    };
+    let path = super::world::write_save_slot(world, slot)
+        .map_err(|error| ConsoleError::new("save_failed", format!("{error:#}")))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "slot": slot, "path": path }),
+        vec![format!("Save written to {}.", path.display())],
     ))
 }
 
@@ -1489,6 +1534,22 @@ mod tests {
         );
     }
 
+    // Wave-4 amendment: containers toggle their open state through the
+    // console, so the persistence gate can be driven over the agent bridge.
+    #[test]
+    fn activate_toggles_a_container_open_and_closed() {
+        let mut app = test_app();
+        app.add_message::<super::super::audio::PlaySound>();
+        app.add_message::<super::super::animation::PlayPlacementAnimation>();
+        register_placement(&mut app, "Container");
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["opened"], true);
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["opened"], false);
+    }
+
     #[test]
     fn activate_door_with_destination_writes_a_travel_request() {
         let mut app = test_app();
@@ -1506,6 +1567,18 @@ mod tests {
             .expect("expected a DoorTravelRequested message");
         assert_eq!(request.destination_cell_form_id, 148753);
         assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    // -- save (issue #60, F60.3) ------------------------------------------
+
+    #[test]
+    fn save_validates_arity_and_fails_deterministically_without_a_world() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "save")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "save a b")), "bad_arity");
+        // The console harness has no active cell, so the failure is a
+        // structured error rather than a panic.
+        assert_eq!(error_code(&exec(&mut app, "save slot1")), "save_failed");
     }
 
     /// Wave-3 amendment: a door with a discovered Open clip stages its travel

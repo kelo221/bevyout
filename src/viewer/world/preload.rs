@@ -34,7 +34,13 @@ use super::policy;
 /// One-shot spawning of a large cell (Vault101d is 1,371 placements) cost a
 /// 130 ms frame in acceptance testing; draining through this budget keeps
 /// preload spawning invisible next to the 33 ms transition budget.
-const PRELOAD_SPAWN_BUDGET_PER_FRAME: usize = 128;
+/// Wave 4 (#55, A15): 128 -> 64. Each spawn chunk kicks off its GLB loads,
+/// whose completions cluster into GPU-upload bursts a few frames later; at
+/// 128 those bursts measured a 35.7 ms frame inside the post-swap telemetry
+/// window while the next cell preloaded. 64 halves the burst size for the
+/// same total work (a global upload throttle was tried instead and reverted
+/// -- see `app.rs`).
+const PRELOAD_SPAWN_BUDGET_PER_FRAME: usize = 64;
 
 /// Parsed door-graph adjacency, or inert if `cellmap.ron` was absent or
 /// failed to parse (F51.1).
@@ -254,6 +260,7 @@ fn evaluate_preload_plan(
     resident_cell_limit: Res<ResidentCellLimit>,
     manifest: Res<PreparedSceneManifest>,
     mut pending_reveal: ResMut<super::reveal::PendingReveal>,
+    mut pending_captures: ResMut<super::persist::PendingEvictionCaptures>,
     mut last_planned: Local<Option<u32>>,
 ) {
     if *last_planned == Some(active_cell.0) {
@@ -280,7 +287,15 @@ fn evaluate_preload_plan(
 
     for form_id in plan.evict {
         if let Some(resident) = resident_cells.0.remove(&form_id) {
-            commands.entity(resident.root).despawn();
+            // Issue #61 (F61.1): stage the departing cell for capture;
+            // `persist::drain_eviction_captures` snapshots its dynamic/
+            // open/taken state into `ActiveSaveState` and only then
+            // despawns this root.
+            pending_captures.0.push(super::persist::EvictionCapture {
+                form_id,
+                root: resident.root,
+                manifest: Arc::clone(&resident.manifest),
+            });
         }
         // Issue #55: the active cell is never evicted (see `policy::
         // CellGraph::plan`'s doc comment), so a mid-reveal cell can't
