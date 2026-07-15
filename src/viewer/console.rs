@@ -213,10 +213,27 @@ fn activate_reference(
         .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
         .placement()
         .clone();
+    // Wave-4 amendment: containers toggle through the same open-state and
+    // clip path as player activation, so the #60/#61 persistence gate can
+    // be driven over the agent bridge.
+    if matches!(placement.semantic, PreparedSemantic::Container) {
+        let opened = interaction::scripted_container_toggle(world, entity);
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "opened": opened,
+            }),
+            vec![format!(
+                "container {:08x} {}",
+                placement.reference_form_id,
+                if opened { "opened" } else { "closed" }
+            )],
+        ));
+    }
     let PreparedSemantic::Door(door) = &placement.semantic else {
         return Err(ConsoleError::new(
             "not_a_door",
-            "activate currently supports only door references",
+            "activate supports only door and container references",
         ));
     };
     let Some(destination) = &door.destination else {
@@ -1289,6 +1306,22 @@ mod tests {
             error_code(&exec(&mut app, "activate TestRef")),
             "no_destination"
         );
+    }
+
+    // Wave-4 amendment: containers toggle their open state through the
+    // console, so the persistence gate can be driven over the agent bridge.
+    #[test]
+    fn activate_toggles_a_container_open_and_closed() {
+        let mut app = test_app();
+        app.add_message::<super::super::audio::PlaySound>();
+        app.add_message::<super::super::animation::PlayPlacementAnimation>();
+        register_placement(&mut app, "Container");
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["opened"], true);
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["opened"], false);
     }
 
     #[test]

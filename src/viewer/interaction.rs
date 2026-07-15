@@ -119,6 +119,61 @@ pub(crate) fn scripted_door_travel(
     lead_seconds * 1000.0
 }
 
+/// Wave-4 acceptance seam: scripted (console/BRP) container activation,
+/// mirroring `activate_focused_placement`'s container branch (open-set
+/// toggle, clip, sound, notice) minus the raycast focus/distance checks.
+/// Returns the new open state. Used to drive the #60/#61 gate walk-through
+/// ("open a container, revisit, restart") over the agent bridge.
+pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bool {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let name = placement
+        .display_name
+        .clone()
+        .or_else(|| placement.editor_id.clone())
+        .unwrap_or_else(|| format!("{:08x}", placement.reference_form_id));
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .unwrap_or_default();
+    let mut state = world.get_resource_or_insert_with(InteractionState::default);
+    let opening = !state.open.contains(&entity);
+    let (sound, transition) = if opening {
+        state.open.insert(entity);
+        (placement.audio.open_sound_form_id, ClipTransition::Opening)
+    } else {
+        state.open.remove(&entity);
+        (placement.audio.close_sound_form_id, ClipTransition::Closing)
+    };
+    if let Some(form_id) = sound {
+        world.write_message(PlaySound::at(form_id, position));
+    }
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition,
+        lead_ms: 0.0,
+    });
+    let notice_text = if opening {
+        format!("{name}: {}", inventory_summary(&placement.inventory))
+    } else {
+        format!("Closed {name}")
+    };
+    world
+        .get_resource_or_insert_with(InteractionNotice::default)
+        .show(notice_text);
+    info!(
+        "container {} ({:08x}) {} with {} fixed entries",
+        name,
+        placement.reference_form_id,
+        if opening { "opened" } else { "closed" },
+        placement.inventory.len()
+    );
+    opening
+}
+
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
 #[derive(Component, Clone, Debug)]
