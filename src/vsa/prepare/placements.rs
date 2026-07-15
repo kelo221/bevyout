@@ -2,6 +2,10 @@
 
 use super::*;
 
+use std::collections::{BTreeMap, VecDeque};
+
+use crate::vsa::manifest::{PreparedLeveledEntry, PreparedLeveledList};
+
 pub(crate) fn prepared_placement(
     reference: &ReferenceRecord,
     base: Option<&BaseRecord>,
@@ -77,6 +81,63 @@ pub(crate) fn prepared_inventory_entry(
         leveled: item_base
             .is_some_and(|base| matches!(base.kind.as_str(), "LVLI" | "LVLN" | "LVLC")),
     }
+}
+
+/// Collects every leveled list transitively reachable from prepared
+/// container inventory entries flagged `leveled: true` (issue #74, F74.2):
+/// starts a breadth-first walk from those top-level entries' base FormIDs
+/// and, for each list found, follows any of its own `LVLO` entries that
+/// themselves name another leveled list base. A FormID missing from `bases`
+/// (unresolved override, bad content) is simply absent from the result --
+/// the resolver treats an unknown list FormID as empty rather than erroring.
+pub(crate) fn collect_leveled_lists(
+    placements: &[PreparedPlacement],
+    bases: &HashMap<u32, BaseRecord>,
+) -> BTreeMap<u32, PreparedLeveledList> {
+    let mut lists = BTreeMap::new();
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    for placement in placements {
+        for entry in &placement.inventory {
+            if entry.leveled && visited.insert(entry.base_form_id) {
+                queue.push_back(entry.base_form_id);
+            }
+        }
+    }
+    while let Some(form_id) = queue.pop_front() {
+        let Some(base) = bases.get(&form_id) else {
+            continue;
+        };
+        let Some(data) = base.leveled.as_ref() else {
+            continue;
+        };
+        let entries = data
+            .entries
+            .iter()
+            .map(|entry| PreparedLeveledEntry {
+                level: entry.level,
+                base_form_id: entry.item_form_id,
+                count: entry.count,
+            })
+            .collect::<Vec<_>>();
+        for entry in &entries {
+            let is_nested_list = bases
+                .get(&entry.base_form_id)
+                .is_some_and(|base| base.leveled.is_some());
+            if is_nested_list && visited.insert(entry.base_form_id) {
+                queue.push_back(entry.base_form_id);
+            }
+        }
+        lists.insert(
+            form_id,
+            PreparedLeveledList {
+                chance_none: data.chance_none,
+                flags: data.flags,
+                entries,
+            },
+        );
+    }
+    lists
 }
 
 pub(crate) fn model_static_usage(
@@ -247,6 +308,10 @@ pub(crate) struct PlacementStage {
     pub(crate) cache_missing: usize,
     pub(crate) cache_invalid: usize,
     pub(crate) cache_explicit_rebuilds: usize,
+    /// Every leveled list transitively reachable from this cell's prepared
+    /// container inventory entries (issue #74, F74.2). See
+    /// `collect_leveled_lists`.
+    pub(crate) leveled_lists: BTreeMap<u32, PreparedLeveledList>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -456,6 +521,8 @@ pub(crate) fn stage_placements(
         placements.push(placement);
     }
 
+    let leveled_lists = collect_leveled_lists(&placements, bases);
+
     Ok(PlacementStage {
         jobs,
         visual_assets,
@@ -465,5 +532,6 @@ pub(crate) fn stage_placements(
         cache_missing,
         cache_invalid,
         cache_explicit_rebuilds,
+        leveled_lists,
     })
 }

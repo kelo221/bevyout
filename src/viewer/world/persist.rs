@@ -829,6 +829,7 @@ mod tests {
             bake: None,
             static_point_shadows: None,
             mutability_summary: Default::default(),
+            leveled_lists: Default::default(),
         }
     }
 
