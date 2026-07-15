@@ -17,6 +17,7 @@ pub(crate) fn parse_base(
         .filter(|value| !value.is_empty());
     let light = (sig == "LIGH").then(|| parse_light_data(subs)).flatten();
     let (value, weight) = parse_value_weight(sig, subs);
+    let item_stats = parse_item_stats(sig, subs, resolver);
     let inventory = subs
         .iter()
         .filter(|subrecord| subrecord.signature == "CNTO")
@@ -28,8 +29,15 @@ pub(crate) fn parse_base(
         editor_id: sub(subs, "EDID").map(cstring),
         name: sub(subs, "FULL").map(cstring),
         model,
+        icon: sub(subs, "ICON")
+            .map(cstring)
+            .filter(|value| !value.is_empty()),
+        mini_icon: sub(subs, "MICO")
+            .map(cstring)
+            .filter(|value| !value.is_empty()),
         value,
         weight,
+        item_stats,
         base_template_form_id: sub_form_id(subs, "TPLT", resolver),
         light,
         inventory,
@@ -38,10 +46,98 @@ pub(crate) fn parse_base(
             subs,
             &[
                 "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM",
-                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM",
+                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "ICON", "MICO", "ICO2", "MIC2", "DESC",
+                "EFID", "EFIT", "SCIT", "DNAM",
             ],
         ),
     })
+}
+
+pub(crate) fn parse_item_stats(
+    sig: &str,
+    subs: &[Subrecord],
+    resolver: &FormIdResolver,
+) -> OpenMwItemStats {
+    let data = sub(subs, "DATA");
+    match sig {
+        "WEAP" => {
+            let (damage, max_condition, clip_size, speed, reach) = match data {
+                Some(data) if data.len() == 15 => (
+                    u16_at(data, 12),
+                    u32_at_option(data, 4),
+                    data.get(14).copied(),
+                    None,
+                    None,
+                ),
+                Some(data) if data.len() >= 30 => (
+                    u16_at(data, 28),
+                    u32_at_option(data, 20),
+                    None,
+                    f32_at_option(data, 4),
+                    f32_at_option(data, 8),
+                ),
+                Some(data) if data.len() == 10 => (u16_at(data, 8), None, None, None, None),
+                _ => (None, None, None, None, None),
+            };
+            OpenMwItemStats::Weapon {
+                damage,
+                max_condition,
+                clip_size,
+                speed,
+                reach,
+            }
+        }
+        "ARMO" => OpenMwItemStats::Apparel {
+            // OpenMW retains FO3 ARMO.DNAM without decoding it. Fallout 3
+            // writes the displayed DR as a 16-bit integer; retain unknown
+            // layouts instead of borrowing another game's interpretation.
+            armor_rating: sub(subs, "DNAM")
+                .filter(|data| data.len() == 2)
+                .and_then(|data| u16_at(data, 0))
+                .map(f32::from),
+            max_condition: data.and_then(|data| u32_at_option(data, 4)),
+        },
+        "AMMO" => OpenMwItemStats::Ammo {
+            damage: sub(subs, "DNAM")
+                .filter(|data| data.len() >= 12)
+                .and_then(|data| f32_at_option(data, 8))
+                .or_else(|| {
+                    data.filter(|data| data.len() >= 18)
+                        .and_then(|data| u16_at(data, 16))
+                        .map(f32::from)
+                }),
+            speed: data.and_then(|data| f32_at_option(data, 0)),
+        },
+        "ALCH" => OpenMwItemStats::Aid {
+            effect_form_ids: subs
+                .iter()
+                .filter(|subrecord| subrecord.signature == "EFID")
+                .filter_map(|subrecord| u32_at_option(&subrecord.data, 0))
+                .map(|form_id| resolver.adjust(form_id))
+                .collect(),
+        },
+        "BOOK" => OpenMwItemStats::Book {
+            flags: data.and_then(|data| data.first().copied()),
+            text: sub(subs, "DESC").map(cstring),
+        },
+        "NOTE" => OpenMwItemStats::Note {
+            text: sub(subs, "DESC").map(cstring),
+        },
+        "KEYM" => OpenMwItemStats::Key,
+        _ => OpenMwItemStats::Misc,
+    }
+}
+
+fn u16_at(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn u32_at_option(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 pub(crate) fn parse_inventory_item(

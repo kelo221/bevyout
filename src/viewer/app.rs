@@ -16,6 +16,34 @@ pub(crate) fn run_view(
         PHYSICS_ASSET_SCHEMA_VERSION,
     )?;
     ensure_baked_scene_compatible(&manifest)?;
+    let item_catalog = manifest
+        .item_catalog_path
+        .as_deref()
+        .map(|relative| -> Result<PreparedItemCatalog> {
+            let path = PathBuf::from(&manifest.asset_root)
+                .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("reading item catalog {}", path.display()))?;
+            let hash = fingerprint(text.as_bytes());
+            if manifest.item_catalog_hash.as_deref() != Some(hash.as_str()) {
+                anyhow::bail!("item catalog hash does not match scene manifest");
+            }
+            let catalog: PreparedItemCatalog =
+                from_str(&text).context("invalid prepared item catalog")?;
+            if manifest.item_catalog_revision.as_deref() != Some(catalog.revision.as_str()) {
+                anyhow::bail!("item catalog revision does not match scene manifest");
+            }
+            if catalog.source_fingerprint != manifest.source_fingerprint {
+                anyhow::bail!(
+                    "item catalog fingerprint {} does not match scene {}",
+                    catalog.source_fingerprint,
+                    manifest.source_fingerprint
+                );
+            }
+            Ok(catalog)
+        })
+        .transpose()?
+        .unwrap_or_default();
     // Issue #60 (F60.3): load and compatibility-check the save slot before
     // any window exists, so a mismatched save fails fast with a plain error.
     let loaded_save = save_slot
@@ -69,6 +97,7 @@ pub(crate) fn run_view(
     // revealed cell's meshes/images were still queued behind the budget.
     // Don't reintroduce it without re-measuring the full chain.
     app.insert_resource(physics_assets);
+    app.insert_resource(item_catalog.clone());
     if let Some(port) = agent_port {
         agent_bridge::install(&mut app, port);
     }
@@ -81,6 +110,7 @@ pub(crate) fn run_view(
     bindings::install(&mut app);
     audio::install(&mut app);
     interaction::install(&mut app);
+    pipboy::install(&mut app);
     animation::install(&mut app);
     console::install(&mut app);
     console_ui::install(&mut app);
@@ -90,6 +120,7 @@ pub(crate) fn run_view(
     // so this always uses the same project/user discovery `render`/`prepare`
     // use, defaulting to 4 when no config file is found.
     world::install(&mut app, crate::config::resident_cell_limit());
+    world_items::install(&mut app);
     if let Some(save) = loaded_save {
         info!(
             "save slot loaded: cell {:08x}, {} cell states",
@@ -97,13 +128,30 @@ pub(crate) fn run_view(
             save.world.cells.len()
         );
         if let Some(player_state) = &save.player {
-            app.insert_resource(interaction::PlayerInventory::from_stacks(
+            app.insert_resource(interaction::PlayerInventory::from_stack_states(
                 player_state
                     .inventory
                     .iter()
-                    .map(|stack| (stack.base_form_id, stack.count)),
+                    .map(|stack| inventory::InventoryStack {
+                        base_form_id: stack.base_form_id,
+                        count: stack.count,
+                        condition: stack.condition.or_else(|| {
+                            item_catalog
+                                .items
+                                .iter()
+                                .find(|item| item.base_form_id == stack.base_form_id)
+                                .and_then(|item| match &item.stats {
+                                    PreparedItemStats::Weapon { max_condition, .. }
+                                    | PreparedItemStats::Apparel { max_condition, .. } => {
+                                        *max_condition
+                                    }
+                                    _ => None,
+                                })
+                        }),
+                    }),
             ));
         }
+        app.insert_resource(world_items::NextRuntimeItemId(save.next_runtime_item_id));
         app.insert_resource(world::ActiveSaveState(save.world));
     }
     app.insert_resource(manifest)

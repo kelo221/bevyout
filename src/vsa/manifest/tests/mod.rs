@@ -231,6 +231,9 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
         asset_root: "cache".into(),
         source_plugin: "Fallout3.esm".into(),
         source_fingerprint: "fingerprint".into(),
+        item_catalog_path: None,
+        item_catalog_revision: None,
+        item_catalog_hash: None,
         source_plugins: Vec::new(),
         cell: ron::de::from_str(
             r#"(

@@ -307,6 +307,8 @@ impl Plugin for AppStatePlugin {
             .add_systems(OnEnter(GameplayModal::Paused), pause_virtual_time)
             .add_systems(OnExit(GameplayModal::Paused), resume_virtual_time)
             .add_systems(OnEnter(GameplayModal::Console), pause_virtual_time)
-            .add_systems(OnExit(GameplayModal::Console), resume_virtual_time);
+            .add_systems(OnExit(GameplayModal::Console), resume_virtual_time)
+            .add_systems(OnEnter(GameplayModal::PipBoy), pause_virtual_time)
+            .add_systems(OnExit(GameplayModal::PipBoy), resume_virtual_time);
     }
 }

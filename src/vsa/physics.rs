@@ -170,6 +170,67 @@ impl PreparedPhysicsShape {
     }
 }
 
+/// Conservative axis-aligned proxy enclosing every prepared collision shape.
+/// Rotated boxes use their circumscribed radius so the result never clips the
+/// authored shape. Runtime drops use this when a concave/static sidecar cannot
+/// safely become a dynamic body.
+pub(crate) fn dynamic_proxy_bounds(asset: &PreparedPhysicsAsset) -> Option<([f32; 3], [f32; 3])> {
+    let mut minimum = [f32::INFINITY; 3];
+    let mut maximum = [f32::NEG_INFINITY; 3];
+    let mut include = |point: [f32; 3]| {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(point[axis]);
+            maximum[axis] = maximum[axis].max(point[axis]);
+        }
+    };
+    for shape in asset.bodies.iter().flat_map(|body| &body.shapes) {
+        match shape {
+            PreparedPhysicsShape::Box {
+                center,
+                half_extents,
+                ..
+            } => {
+                let radius = half_extents
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    .sqrt();
+                include([center[0] - radius, center[1] - radius, center[2] - radius]);
+                include([center[0] + radius, center[1] + radius, center[2] + radius]);
+            }
+            PreparedPhysicsShape::Sphere { center, radius } => {
+                include([center[0] - radius, center[1] - radius, center[2] - radius]);
+                include([center[0] + radius, center[1] + radius, center[2] + radius]);
+            }
+            PreparedPhysicsShape::Capsule {
+                point1,
+                point2,
+                radius,
+            } => {
+                for point in [point1, point2] {
+                    include([point[0] - radius, point[1] - radius, point[2] - radius]);
+                    include([point[0] + radius, point[1] + radius, point[2] + radius]);
+                }
+            }
+            PreparedPhysicsShape::ConvexHull { points }
+            | PreparedPhysicsShape::TriangleMesh {
+                vertices: points, ..
+            } => points.iter().copied().for_each(&mut include),
+        }
+    }
+    if minimum
+        .iter()
+        .chain(maximum.iter())
+        .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let center = std::array::from_fn(|axis| (minimum[axis] + maximum[axis]) * 0.5);
+    let half_extents =
+        std::array::from_fn(|axis| ((maximum[axis] - minimum[axis]) * 0.5).max(0.05));
+    Some((center, half_extents))
+}
+
 fn finite3(values: [f32; 3]) -> bool {
     values.iter().all(|value| value.is_finite())
 }

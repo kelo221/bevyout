@@ -42,6 +42,28 @@ Revisit this whole section once the team grows past four people.
 See `AGENTS.md` for the Vertical Slice Architecture rules (what owns what,
 where new features go). Read it before adding a new module or command.
 
+## Documentation
+
+Keep the documentation surfaces separated by purpose:
+
+- `README.md` owns installation and the first-run command path.
+- The [project wiki](https://github.com/kelo221/bevyout/wiki) owns durable
+  explanations, workflows, compatibility summaries, and troubleshooting.
+- `AGENTS.md` owns agent and repository workflow constraints.
+- `docs/plans/` owns milestone and wave records; live status remains in GitHub
+  issues and milestones.
+
+The repository's checked-in `codegraph.json` maps Markdown files to CodeGraph's
+file-level tracker. Re-index documentation with:
+
+```powershell
+codegraph index .
+codegraph files --path . --pattern '*.md' --format flat
+```
+
+This is file-level visibility only. Use `rg` or another normal file-search tool
+for Markdown headings and prose.
+
 ## Executable spec / feature files
 
 Plain-language `Given/When/Then` feature files (via the `cucumber` crate) live

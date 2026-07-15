@@ -1,358 +1,128 @@
 # bevyout
 
-An offline, modernized recreation of Fallout 3 built on Bevy: it reads the
-original GECK-authored `Fallout3.esm`, its masters, and the Fallout mesh/
-texture/sound BSAs directly, converts interior cells into Bevy-native scenes,
-and renders them with a from-scratch renderer, audio, and interaction layer.
-No GECK or original engine runtime is involved at any point.
+An offline, modernized recreation of Fallout 3 built on Bevy. `bevyout` reads
+the original GECK-authored `Fallout3.esm`, its masters, and the Fallout
+mesh/texture/sound BSAs directly, converts interior cells into Bevy-native
+scenes, and renders them with a from-scratch renderer, audio, and interaction
+layer. No GECK or original engine runtime is involved.
+
+## Legal and trademark disclaimer
+
+This project is an unofficial, community driven fan tool. It is not affiliated
+with, endorsed by, or approved by Bethesda Softworks, ZeniMax, or The Wand
+Company. All related trademarks, including "Pip-Boy", "Vault-Tec", "Vault
+Boy", "Fallout", and other references remain the property of Bethesda
+Softworks.
 
 ## Requirements
 
 - **Rust**, edition 2024 (rustc 1.85+). Install via [rustup](https://rustup.rs).
-- **A licensed copy of Fallout 3 GOTY**, for `Fallout3.esm` and its BSAs. Not
-  redistributed here; point `game_root` at your install in
-  `.bevyout/config.toml`.
-- **[Blender](https://www.blender.org/download/)** 5.2 (for `prepare` and the
-  optional `bake --quality preview` path), with the
+- **A licensed copy of Fallout 3 GOTY**, for `Fallout3.esm` and its BSAs. The
+  game data is not redistributed here; point `game_root` at your installation
+  in `.bevyout/config.toml`.
+- **[Blender](https://www.blender.org/download/)** 5.2 with the
   **[Blender Niftools Addon](https://github.com/niftools/blender_niftools_addon)**
-  installed and enabled (`io_scene_niftools`).
+  installed and enabled (`io_scene_niftools`). Blender is used by `prepare`
+  and by the optional `bake --quality preview` path.
 - **[ImageMagick](https://imagemagick.org/script/download.php)** (`magick` on
-  `PATH`, or the default Windows install path) — converts staged DDS textures
-  to PNG during `prepare`. Optional: `prepare` still runs without it, but
-  textures are left unconverted.
+  `PATH`, or the default Windows install path). It converts staged DDS
+  textures to PNG during `prepare`; preparation can continue without it, but
+  textures remain unconverted.
 - **[KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases)**,
-  unified `ktx` binary (`ktx` on `PATH`; legacy `toktx` is not sufficient) — required for
-  a static point-shadow cache miss during `prepare` and for `bake`'s default
-  irradiance mode. It is not resolved when `prepare` reuses an unchanged
-  shadow artifact, and is not needed by `view`/`render` or
-  `bake --quality preview`.
+  using the unified `ktx` binary. It is required for a static point-shadow
+  cache miss during `prepare` and for the default irradiance bake. It is not
+  needed by `render` or `bake --quality preview` when their cached artifacts
+  are already available.
 
-On Windows the tools above are auto-detected at their default install
-locations; otherwise put them on `PATH` or set `[tools]` in
-`.bevyout/config.toml` (see `config.example.toml`). Auto-detection only checks
-Windows install paths, so macOS/Linux users must set `blender` explicitly even
-if the binary is installed. The legacy `irradiance_blender` option is accepted
-for config and CLI compatibility but is ignored by the Rust irradiance baker.
+On Windows, these tools are auto-detected at their default install locations.
+Otherwise put them on `PATH` or set `[tools]` in
+[`config.example.toml`](config.example.toml). macOS and Linux users should set
+the Blender path explicitly. The legacy `irradiance_blender` option is accepted
+for configuration and CLI compatibility but is ignored by the Rust irradiance
+baker.
+
 Without a project-local `.bevyout/config.toml`, a user-level config is also
 read from `%APPDATA%\bevyout\config.toml` on Windows, or
 `$XDG_CONFIG_HOME/bevyout/config.toml` (falling back to
 `~/.config/bevyout/config.toml`) on macOS/Linux.
 
-## Prepare and render a cell
+## First run
 
-From this directory, use the Fallout GECK EditorID. During development, prefer
-the dynamic-linking alias so Bevy itself does not need to be statically relinked
-on each iteration:
+From the repository directory, use a Fallout GECK EditorID. During development,
+prefer the dynamic-linking aliases so Bevy itself does not need to be
+statically relinked on each iteration:
 
 ```powershell
 cargo run-dev -- prepare SuperDuperMart
+cargo run-dev -- bake SuperDuperMart
 cargo run-dev -- render SuperDuperMart
-
-# Optional static-shadow controls (512 is the high-quality default).
-cargo run-dev -- prepare SuperDuperMart --shadow-resolution 256
-cargo run-dev -- prepare SuperDuperMart --rebuild-shadows
 ```
 
-### Agent bridge
-
-The viewer can expose its live ECS to local agents through Bevy Remote
-Protocol. The bridge is opt-in and listens only on loopback:
+For a fast Blender preview that leaves the prepared manifest unchanged:
 
 ```powershell
-cargo run-dev -- render SuperDuperMart --agent-bridge
+cargo run-dev -- bake SuperDuperMart --quality preview
 ```
-
-The repository includes a Bun/FastMCP stdio adapter in
-`tools/bevyout-mcp`. It is registered as `bevyout` in the local Codex MCP
-configuration and can also be started directly:
-
-```powershell
-bun run tools/bevyout-mcp/src/server.ts
-```
-
-The adapter can attach to an existing viewer or launch one, inspect compact
-scene snapshots and reflected ECS data, execute the shared Gamebryo-style
-console, call raw Bevy Remote Protocol methods for entity/resource mutation,
-watch events, and return a primary-window screenshot as MCP image content.
-Changes are runtime-only and are not written back to prepared manifests or
-source assets.
-
-Install the MCP entry for Codex, Claude Desktop, and Claude Code with:
-
-```powershell
-bun run tools/bevyout-mcp/src/install.ts --all
-```
-
-Use `--codex`, `--claude-desktop`, or `--claude-code` to install one target,
-and add `--dry-run` to preview changes. The installer updates only the
-`bevyout` entry, preserves unrelated settings and servers, and creates a
-timestamped `.bevyout` backup before changing an existing configuration file.
-Codex uses `$CODEX_HOME/config.toml` (or `~/.codex/config.toml`), Claude
-Desktop uses its platform-specific `claude_desktop_config.json`, and Claude
-Code uses the repository-root `.mcp.json`.
-
-The repository-native agent skill is
-[`.agents/skills/bevyout-mcp/SKILL.md`](.agents/skills/bevyout-mcp/SKILL.md).
-It remains repository-local and is not copied into user-level skill directories.
-
-### Gamebryo console and scripts
-
-The viewer starts in FPS mode. Press `~`/Backquote to open the transparent
-Fallout-style console; click a visible individually spawned placement to select
-its FormID. Static-batched geometry is not yet addressable and reports
-`NOT_IMPLEMENTED`. The console pauses virtual time, releases the cursor, and
-keeps persistent history with draft restoration and Tab completion. Backquote or
-Escape closes it and recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
-`getpos`/`setpos`, `getangle`/`setangle`, `moveto`, `tfc`, `tcl`, `tcg`,
-`tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`, `renderreport`,
-`tonemap`,
-`shadowcache status`, `shadowcache rebuild`,
-`tm`, `tdt`, `sgtm`, and `screenshot`. Positions use Bevy metres and angles use
-degrees. `tcl` is a dedicated FPS no-clip mode with WASD plus Space/Ctrl
-vertical movement; scenes without available physics start in forced no-clip.
-
-The same command core is exposed to agents as `console_exec` and
-`console_help`. Repros can be committed as line-oriented scripts and stable
-JSONL transcripts:
-
-```powershell
-cargo run-dev -- script run tests/console_scripts/basic.bscript --headless
-cargo run-dev -- script run .bevyout/scripts/repro.bscript --headless --transcript .bevyout/scripts/repro.jsonl --keep-going
-```
-
-Script-only commands are `seed`, `advance`, and
-`expect (<command>) <op> <literal> [tol <value>]`. The headless harness uses a
-fixed 1/60-second step and synthetic fixtures; Fallout-data scripts belong in
-ignored `.bevyout/scripts/`.
-
-`render` is also the interactive entry point for a new cell. If the prepared
-scene is missing, it asks whether to import it (the same operation as
-`prepare SuperDuperMart`). If the scene has no irradiance bake, it asks whether
-to run the default `bake SuperDuperMart`; answering `n` continues with the
-prepared, unbaked scene. In a non-interactive terminal, these prompts default
-to `n`, so explicit `prepare` and `bake` commands remain available for scripts.
-Agent-bridge launches never answer these prompts: they fail fast and report the
-required `prepare` or `bake` command.
-
-The selector also accepts an eight-digit hexadecimal FormID. Prepared scenes
-continue to use their hexadecimal FormID directory internally; for example,
-`SuperDuperMart` resolves to `00017f37`. The legacy `prepare --cell`,
-`view --manifest`, and `bake --manifest` forms remain available for scripts and
-low-level debugging.
-
-`prepare` also accepts multiple selectors and batch flags: `--all` (every
-cell), `--all-interiors`, and `--worldspace <EditorID|FormID>` (combinable
-with `--all-interiors` and explicit selectors, but not with `--all`). Add
-`--list-only` to print the resolved `formid<TAB>editor_id` set, sorted and
-deduplicated by FormID, and exit before any extraction or Blender work --
-useful for checking a batch selection cheaply. Without `--list-only`, a
-multi-cell selection is prepared sequentially; failures are collected and
-reported in a summary at the end instead of aborting the run.
 
 The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
-This remains a development-only feature; do not enable it for release builds
-unless the Bevy runtime DLLs are deliberately bundled.
+Dynamic linking is development-only; do not enable it for release builds
+unless the Bevy runtime DLLs are deliberately bundled and tested.
 
-`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-14 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), optional prepared point-shadow metadata, and grouped visual-completeness issues. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, root-transform policy, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+`render` can offer to prepare or bake a missing cell. The explicit
+`prepare`/`bake` commands remain the reproducible path for scripts and
+debugging. The selector also accepts an eight-digit hexadecimal FormID; for
+example, `SuperDuperMart` resolves internally to `00017f37`.
 
-Every converted GLB is checked for non-collision mesh primitives with vertex
-positions, including cache hits. `prepare` groups visual warnings by normalized
-model path and prints the affected base and reference FormIDs. A non-identity
-NIF record-zero transform is preserved for compatibility unless its model path
-has a reviewed policy, but it is reported as `unreviewed_root_transform` until
-reviewed. Normal preparation completes with these warnings; `prepare --strict`
-fails when unresolved placements or visual-completeness issues remain.
+## Current scope
 
-After GLB conversion and physics classification, `prepare` builds a CPU BVH
-from initially enabled placements whose semantic and physics classifications
-are both static. It ray-casts every eligible point light into a deterministic
-`D32_SFLOAT` KTX2 cubemap array under
-`scenes/<cell>/shadows/<fingerprint>.ktx2`. Doors, containers, activators,
-pickups, actors, dynamic bodies, and other script-addressable placements do
-not cast these prepared shadows, but their meshes can receive them. The
-fingerprint includes generator revision, resolution, near plane, caster GLB
-contents and placement transforms, and light identity/position/range. Camera,
-light color, and intensity do not invalidate depth. Unchanged artifacts are
-reused before BVH construction or KTX-Software lookup; use
-`--rebuild-shadows` to force regeneration and `--shadow-resolution
-128|256|512` to change face resolution; 512 is the default. Shadow preparation
-does not invoke Blender and a generation or `ktx validate` failure fails
-`prepare`.
+The current slice supports interior-cell preparation and rendering, cached
+NIF-to-GLB conversion, deterministic Rust irradiance baking, prepared static
+point shadows, first-person movement and physics, staged audio, and an initial
+pickup/container/door/activator interaction path.
 
-The preparation pipeline converts Fallout's approximately 70 world units per
-metre to Bevy metres. Initial Fallout object rotations use the validated ESM
-`EulerRot::XYZ` placement convention and are converted at the same manifest
-boundary as position. NIF record-0 transforms are preserved by default. The
-audited `dungeons/vault/room/vrmwallscreen01.nif` model discards its compensating
-record-0 transform so its placement rotation is not applied twice.
-The `dungeons/vault/room/vdnwallendcorinr01.nif` and
-`dungeons/vault/room/vdnwallendcoroutr01.nif` corner pieces preserve their
-verified authored root transforms. These are model-path compatibility rules,
-not FormID overrides. The original root matrix and selected policy are retained
-as GLB extras for preparation audits. Their verified `:32` geometry blocks, and
-the inward corner's `:41` floor block, receive a local 180-degree correction
-during conversion. Converter metadata records the expected and applied
-per-block correction counts; incomplete coverage emits
-`visual_spatial_mismatch`. NIF ancestry alone cannot infer this correction
-because the source and NIFTools parent-chain matrices agree. Authored Havok
-shapes for these models receive the same correction before physics sidecar
-serialization, and their correction coverage is audited with the visual blocks.
-The Rust bake composes each prepared placement directly in Bevy's Y-up space,
-including transforms already present in the imported GLB hierarchy. Changing
-this conversion requires preparing and baking the cell again so cached
-manifests and baked scenes use the same transform convention.
+Exterior LAND and worldspace streaming, NPC assembly and AI, runtime NAVM
+pathfinding, compressed music and voice, dialogue, quests, scripts, complete
+inventory/RPG systems, and persistent Fallout save games remain roadmap work.
+See the [compatibility status](https://github.com/kelo221/bevyout/wiki/Compatibility-Status)
+for the current capability boundaries and player-facing completion gates.
 
-## Bake lighting
+## Documentation
 
-Irradiance baking is a separate step after `prepare`. The normal path composes
-and batches the prepared GLBs in Rust, builds a CPU BVH, traces deterministic
-one-bounce diffuse lighting, writes a 3D RGB9E5 KTX2 atlas, and updates the same
-manifest:
+The root README owns installation and the first-run path. Detailed, durable
+documentation lives in the project wiki:
 
-```powershell
-# Rust CPU irradiance volume plus 64 m static batching.
-cargo run-dev -- bake SuperDuperMart
+- [Getting Started](https://github.com/kelo221/bevyout/wiki/Getting-Started)
+- [Asset Pipeline](https://github.com/kelo221/bevyout/wiki/Asset-Pipeline)
+- [Console and Agent Bridge](https://github.com/kelo221/bevyout/wiki/Console-and-Agent-Bridge)
+- [Compatibility Status](https://github.com/kelo221/bevyout/wiki/Compatibility-Status)
+- [Architecture](https://github.com/kelo221/bevyout/wiki/Architecture)
+- [Testing and Troubleshooting](https://github.com/kelo221/bevyout/wiki/Testing-and-Troubleshooting)
 
-# Fast Eevee preview; writes preview.png and leaves the manifest unchanged.
-cargo run-dev -- bake SuperDuperMart --quality preview
-
-cargo run-dev -- render SuperDuperMart
-```
-
-The bake verifies that every eligible static placement imports at least one
-renderable visual mesh. A missing placement contribution fails the bake with
-the reference FormID instead of producing a silently incomplete scene.
-
-The modes are intentionally different:
-
-| Mode | Renderer and settings | Result |
-| --- | --- | --- |
-| `preview` | Eevee screen-space ray tracing and Fast GI | A quick `preview.png`; no KTX2 or manifest bake metadata |
-| `irradiance` | Rust CPU BVH, deterministic one-bounce diffuse GI, 8 m probe spacing, 64 samples per face by default | 3D RGB9E5 KTX2 irradiance atlas plus static-batched GLB |
-
-`irradiance` is the default bake mode and does not invoke Blender. Scene
-composition, material-aware ray traversal, direct-light evaluation, one-bounce
-diffuse transport, and RGB9E5 encoding run on the CPU in Rust using parallel
-probe tracing. KTX-Software remains the only external step in this path and
-packages the validated raw atlas as KTX2. Use
-`--irradiance-spacing-meters` from 2 through 32 to trade probe detail for bake
-time, and `--irradiance-samples` from 1 through 512. Static render geometry is
-grouped by equivalent material within 64 metre world-space chunks by default;
-use `--static-batch-chunk-meters` from 8 through 256 metres to evaluate the
-culling/draw-call tradeoff. Calling `bake` again replaces the existing bake
-artifacts; the hidden `--force` flag remains accepted as a legacy compatibility
-alias.
-`--keep-intermediate` keeps raw KTX slices for the Rust irradiance path, or the
-generated Blender job and script for preview. KTX-Software's unified `ktx.exe`
-is required for irradiance export.
-
-The current slice handles interior cells and static geometry plus the first
-semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate
-conversion, starts near the prepared scene bounds, spawns the prepared GLB
-scenes and point lights, plays staged ambient/placement loops, and starts with
-the metric FPS capsule controller (WASD, Space/Ctrl, and mouse look). The
-primary window defaults to 1920x1080 with a 90-degree horizontal field of view;
-use `fov` to inspect it or `fov <10..170>` to change it at runtime. Press
-`Enter` to probe the center ray; dynamic references are printed to the terminal
-as `EditorID (FormID)`, while static-batched geometry reports
-`NOT_IMPLEMENTED`. In FPS mode, aim at a pickup, container, door, or activator
-and press `E` for the initial interaction path; door travel and animation remain
-deferred. Native BoxDDD
-capsule casts and plane solving handle movement, while the compatibility bridge cooks the current
-render-derived meshes into static BoxDDD triangle shapes. Distance-based native
-Fallout footsteps still use authored Havok collision-material extras as surface
-hints, and the controller keeps the OpenMW-derived directional launch,
-full-height jump arc, reduced air-control steering, and surface landing sounds.
-
-Current keyboard bindings are:
-
-* Movement: W/A/S/D move, Space jumps, E interacts in FPS mode, and E/Z move
-  vertically in free-camera mode.
-* Interaction and UI: Enter probes the center ray, Tab opens the Pip-Boy, Esc
-  opens pause, and ~ (Backquote) opens the developer console.
-* Placeholder bindings: Shift run/walk, Caps Lock always-run, X automatic
-  forward run, F third-person view, Tab-held Pip-Boy flashlight, LMB attack,
-  RMB aim/block, V V.A.T.S., R reload/hold-to-holster, and 1 through 8 item or
-  weapon hotkeys. These currently emit `NOT_IMPLEMENTED` diagnostics.
-
-Use `tfc` in the console to toggle free flight; Tab opens the Pip-Boy modal
-placeholder. `getrender` and `setrender` inspect or change lighting,
-irradiance, ambient, bloom, fog, and AO diagnostics. `tonemap` reports or
-changes the active camera tonemapper using the supported Bevy mode names;
-the viewer defaults to `aces_fitted`. AO strength defaults to `1.00`;
-`0.00` disables the generated AO contribution and `1.00` uses the full baked
-value.
-Point-light shadows load the prepared KTX2 artifact and never create Bevy
-point-shadow views or render scene geometry into shadow maps. Because WebGPU
-forbids direct buffer copies into `Depth32Float`, the viewer decodes KTX2 on
-the CPU and performs one GPU upload conversion from a copyable `R32Float`
-array into the hardware-filterable depth cubemap array; this is texture
-initialization, not scene shadow rendering. Every clustered point light still
-illuminates the material. Per pixel, only the strongest shadow-capable
-unshadowed BRDF contribution performs one hardware 2x2 cubemap comparison;
-secondary point lights remain unshadowed, and transmission/contact paths reuse
-that result. Stable manifest layers are never inferred from camera-visible
-light ordering. A light that moves or changes range is rendered unshadowed
-until it matches its prepared metadata again.
-
-Use `setrender shadow_samples 0|1` for a same-run comparison without reloading
-the artifact. There is no gameplay shadow budget. `shadowcache status` reports
-the revision, fingerprint, resolution, layers, attached lights, CPU/GPU load
-state, hardware capacity, memory estimate, and samples per pixel.
-`shadowcache rebuild` deliberately returns an instruction to rerun `prepare
---rebuild-shadows`; the viewer never regenerates a missing or corrupt artifact
-and never falls back to runtime point-shadow rendering. Camera movement cannot
-invalidate or regenerate the cache. Rust irradiance baking is independent and
-is not required for prepared point shadows.
-The mouse is captured on startup; press
-`Esc` to pause/release it and click the window to capture it again. NIF alpha
-flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials.
-Fallout normal-map RGB is used for tangent-space normals and its alpha is
-exported as `KHR_materials_specular` specular strength; non-rendering editor
-markers are omitted. Exterior LAND, music/voice playback, MP3 decoding, NPC
-assembly, and runtime NAVM pathfinding remain outside this slice.
+Contributor and agent-specific guidance lives in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md). The history
+of milestone plans and wave acceptance work is recorded in
+[`docs/plans/README.md`](docs/plans/README.md). Live status, dependencies, and
+acceptance gates remain in [GitHub issues and milestones](https://github.com/kelo221/bevyout/issues).
 
 ## Checks
+
+Before pushing, run:
 
 ```powershell
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo run-dev -- render SuperDuperMart
 ```
 
-Generated extracted game data and GLBs live under `.bevyout/`, which is ignored by git.
+Generated extracted game data and GLBs live under `.bevyout/`, which is ignored
+by Git. Bethesda-derived assets must not be committed, published, or attached
+to issues.
 
-## CodeGraph documentation indexing
+## Provenance
 
-The checked-in `codegraph.json` maps `.md` and `.markdown` files to CodeGraph's
-file-level YAML tracker. This keeps Markdown out of the Rust symbol graph while
-making documentation visible in CodeGraph's indexed file tree:
-
-```powershell
-codegraph index .
-codegraph files --path . --pattern '*.md' --format flat
-```
-
-The mapping is intentionally file-level: Markdown headings and prose are not
-treated as Rust/YAML symbols, and CodeGraph deliberately does not print
-configuration/data-file values. Use the normal file search tools for full-text
-search or reading inside a document.
-
-## VSA boundaries
-
-The project follows Vertical Slice Architecture (VSA):
-
-- `src/cli.rs` owns command-line configuration.
-- The Fallout cell slice owns offline Fallout parsing, BSA access, asset staging, Blender conversion, and the prepared scene manifest. Its current implementation is in `src/vsa/`, with submodules for manifest types, plugin/BSA parsing, asset conversion, path/transform helpers, and orchestration.
-- `src/viewer.rs` owns the slice's Bevy presentation: app setup, scene spawning, lighting, and camera input.
-- `src/viewer/audio.rs` and `src/viewer/interaction.rs` own the first runtime audio and semantic-interaction systems.
-- `src/main.rs` only dispatches between the preparation and viewer entry points.
-
-The attributed OpenMW parser is isolated in `src/vsa/openmw_esm4/`; its
-`README.md` and `NOTICE.md` identify the supplied OpenMW snapshot, source
-files, hashes, licenses, and adaptations. Project-native audio staging,
-manifest preparation, and viewer systems remain outside that provenance folder.
-
-The prepared scene manifest is the hand-off contract between the offline and
-real-time parts of the Fallout cell slice. Future features should add their own
-vertical slice instead of expanding a shared global `main.rs`.
+Code adapted or ported from OpenMW is isolated in attributed provenance
+folders such as [`src/vsa/openmw_esm4/`](src/vsa/openmw_esm4/). Each such folder
+contains its own `README.md` and `NOTICE.md` identifying the source snapshot,
+files, hashes, licenses, and adaptations. Project-native parsing, preparation,
+audio, and viewer systems remain outside those folders.

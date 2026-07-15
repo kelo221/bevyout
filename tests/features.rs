@@ -113,6 +113,12 @@ mod persist_policy;
 #[allow(dead_code, unused_imports)]
 mod ownership_policy;
 
+// M3 wave 1 inventory policy is intentionally std-only so the executable
+// feature suite can drive the same stack and quantity decisions as Bevy.
+#[path = "../src/viewer/inventory.rs"]
+#[allow(dead_code, unused_imports)]
+mod inventory_policy;
+
 // `viewer::performance_policy` is the std-only frame selection/statistics
 // seam consumed by the BRP performance probe.
 #[path = "../src/viewer/performance_policy.rs"]
@@ -316,6 +322,12 @@ struct BevyoutWorld {
     container_audio_resolved_close: Option<u32>,
     container_audio_prepared_open: Option<u32>,
     container_audio_prepared_close: Option<u32>,
+
+    // -- inventory.feature (M3 wave 1, issues #71/#72) --
+    player_inventory: inventory_policy::Inventory,
+    inventory_weights: std::collections::HashMap<u32, f32>,
+    inventory_drop_action: Option<inventory_policy::DropAction>,
+    inventory_transfer: Option<inventory_policy::TransferResult>,
 
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
@@ -2611,6 +2623,112 @@ async fn then_prepared_close_sound_absent(world: &mut BevyoutWorld) {
 }
 
 // ---------------------------------------------------------------------
+// inventory.feature (M3 wave 1, issues #71/#72) -- appended section.
+// ---------------------------------------------------------------------
+
+#[given("an empty player inventory")]
+async fn given_empty_player_inventory(world: &mut BevyoutWorld) {
+    world.player_inventory = inventory_policy::Inventory::default();
+}
+
+#[given(regex = r"^an inventory stack of (\d+) items$")]
+async fn given_inventory_stack(world: &mut BevyoutWorld, count: i32) {
+    world.player_inventory =
+        inventory_policy::Inventory::from_stacks([inventory_policy::InventoryStack {
+            base_form_id: 0x10,
+            count,
+            condition: None,
+        }]);
+}
+
+#[when(regex = r"^(\d+) items? 0x([0-9a-fA-F]+) at condition (\d+) (?:is|are) added$")]
+async fn when_condition_items_added(
+    world: &mut BevyoutWorld,
+    count: i32,
+    form_id: String,
+    condition: u32,
+) {
+    world
+        .player_inventory
+        .add(inventory_policy::InventoryStack {
+            base_form_id: parse_hex(&form_id),
+            count,
+            condition: Some(condition),
+        });
+}
+
+#[when(regex = r"^(\d+) items? 0x([0-9a-fA-F]+) without condition (?:is|are) added$")]
+async fn when_conditionless_items_added(world: &mut BevyoutWorld, count: i32, form_id: String) {
+    world
+        .player_inventory
+        .add(inventory_policy::InventoryStack {
+            base_form_id: parse_hex(&form_id),
+            count,
+            condition: None,
+        });
+}
+
+#[when(regex = r"^item 0x([0-9a-fA-F]+) weighs ([\d.]+)$")]
+async fn when_item_weight(world: &mut BevyoutWorld, form_id: String, weight: f32) {
+    world.inventory_weights.insert(parse_hex(&form_id), weight);
+}
+
+#[when("its right-click drop policy is evaluated")]
+async fn when_drop_policy_evaluated(world: &mut BevyoutWorld) {
+    let count = world.player_inventory.stacks()[0].count;
+    world.inventory_drop_action = inventory_policy::drop_action(count);
+}
+
+#[when(regex = r"^removing (\d+) items is attempted$")]
+async fn when_removing_items_attempted(world: &mut BevyoutWorld, count: i32) {
+    world.inventory_transfer = Some(world.player_inventory.remove(
+        inventory_policy::StackKey {
+            base_form_id: 0x10,
+            condition: None,
+        },
+        count,
+    ));
+}
+
+#[then(regex = r"^the inventory has (\d+) stacks? and (\d+) total items$")]
+async fn then_inventory_shape(world: &mut BevyoutWorld, stacks: usize, total: i32) {
+    assert_eq!(world.player_inventory.stacks().len(), stacks);
+    assert_eq!(world.player_inventory.count(0x10), total);
+}
+
+#[then(regex = r"^carried weight is ([\d.]+)$")]
+async fn then_carried_weight(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .player_inventory
+        .total_weight(|form_id| world.inventory_weights.get(&form_id).copied());
+    assert!((actual - expected).abs() < f32::EPSILON);
+}
+
+#[then("one item is selected for dropping")]
+async fn then_drop_one(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.inventory_drop_action,
+        Some(inventory_policy::DropAction::DropOne)
+    );
+}
+
+#[then(regex = r"^a quantity from (\d+) through (\d+) is requested with default (\d+)$")]
+async fn then_quantity_requested(world: &mut BevyoutWorld, min: i32, max: i32, default: i32) {
+    assert_eq!(
+        world.inventory_drop_action,
+        Some(inventory_policy::DropAction::ChooseQuantity { min, max, default })
+    );
+}
+
+#[then(regex = r"^the transfer is rejected and (\d+) items remain$")]
+async fn then_transfer_rejected(world: &mut BevyoutWorld, remaining: i32) {
+    assert_eq!(
+        world.inventory_transfer,
+        Some(inventory_policy::TransferResult::InsufficientItems)
+    );
+    assert_eq!(world.player_inventory.count(0x10), remaining);
+}
+
 // performance_probe.feature -- appended section, do not interleave;
 // new steps for this feature belong below this marker.
 // ---------------------------------------------------------------------

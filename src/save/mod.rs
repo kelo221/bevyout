@@ -16,10 +16,10 @@ mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 2;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SaveGame {
     pub header: SaveGameHeader,
     pub world: PersistentWorldState,
@@ -28,7 +28,20 @@ pub struct SaveGame {
     /// and readers older than it (unknown records are skipped, see the
     /// forward-compatibility test) -- stay compatible in both directions.
     pub player: Option<PlayerState>,
+    pub next_runtime_item_id: u64,
     pub rng_state: u64,
+}
+
+impl Default for SaveGame {
+    fn default() -> Self {
+        Self {
+            header: SaveGameHeader::default(),
+            world: PersistentWorldState::default(),
+            player: None,
+            next_runtime_item_id: 1,
+            rng_state: 0,
+        }
+    }
 }
 
 /// Persistent player state (issue #60, F60.4). Currently just the
@@ -75,6 +88,15 @@ pub struct PersistentWorldState {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PersistentCellState {
     pub references: BTreeMap<u32, PersistentReferenceDelta>,
+    pub dropped_items: BTreeMap<u64, DroppedItemState>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedItemState {
+    pub runtime_id: u64,
+    pub stack: ItemStack,
+    pub transform: SavedTransform,
+    pub body: SavedBodyState,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -107,6 +129,7 @@ pub struct SavedBodyState {
 pub struct ItemStack {
     pub base_form_id: u32,
     pub count: i32,
+    pub condition: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +150,18 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_record(&mut bytes, tag("SAVE"), &encode_header(&save.header)?)?;
     if let Some(player) = &save.player {
-        write_record(&mut bytes, tag("PLYR"), &encode_player(player)?)?;
+        write_record(
+            &mut bytes,
+            tag("PLYR"),
+            &encode_player(player, save.header.format_version)?,
+        )?;
+    }
+    if save.header.format_version >= 2 {
+        write_record(
+            &mut bytes,
+            tag("NITM"),
+            &save.next_runtime_item_id.to_le_bytes(),
+        )?;
     }
     for (cell_form_id, cell) in &save.world.cells {
         let mut payload = Vec::new();
@@ -137,8 +171,22 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
             write_record(
                 &mut bytes,
                 tag("OBJE"),
-                &encode_reference(*cell_form_id, *reference_form_id, delta)?,
+                &encode_reference(
+                    *cell_form_id,
+                    *reference_form_id,
+                    delta,
+                    save.header.format_version,
+                )?,
             )?;
+        }
+        if save.header.format_version >= 2 {
+            for dropped in cell.dropped_items.values() {
+                write_record(
+                    &mut bytes,
+                    tag("DROP"),
+                    &encode_dropped(*cell_form_id, dropped)?,
+                )?;
+            }
         }
     }
     write_record(&mut bytes, tag("RAND"), &save.rng_state.to_le_bytes())?;
@@ -152,6 +200,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut save = SaveGame::default();
     let mut saw_header = false;
     let mut saw_rng = false;
+    let mut saw_next_runtime_item = false;
     let mut checksum = None;
     let mut checksum_offset = None;
     let mut offset = 0usize;
@@ -183,7 +232,22 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                     if save.player.is_some() {
                         bail!("save contains duplicate PLYR records");
                     }
-                    save.player = Some(decode_player(&record.payload)?);
+                    if !saw_header {
+                        bail!("PLYR appears before the SAVE header");
+                    }
+                    save.player = Some(decode_player(&record.payload, save.header.format_version)?);
+                }
+                record_tag if *record_tag == tag("NITM") => {
+                    if saw_next_runtime_item {
+                        bail!("save contains duplicate NITM records");
+                    }
+                    if record.payload.len() != 8 {
+                        bail!("NITM must contain eight bytes");
+                    }
+                    save.next_runtime_item_id = u64::from_le_bytes(
+                        record.payload.as_slice().try_into().expect("checked NITM"),
+                    );
+                    saw_next_runtime_item = true;
                 }
                 record_tag if *record_tag == tag("CSTA") => {
                     let cell_form_id = decode_cell_state(&record.payload)?;
@@ -198,13 +262,27 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                 }
                 record_tag if *record_tag == tag("OBJE") => {
                     let (cell_form_id, reference_form_id, delta) =
-                        decode_reference(&record.payload)?;
+                        decode_reference(&record.payload, save.header.format_version)?;
                     save.world
                         .cells
                         .entry(cell_form_id)
                         .or_default()
                         .references
                         .insert_checked(reference_form_id, delta)?;
+                }
+                record_tag if *record_tag == tag("DROP") => {
+                    let (cell_form_id, dropped) = decode_dropped(&record.payload)?;
+                    if save
+                        .world
+                        .cells
+                        .entry(cell_form_id)
+                        .or_default()
+                        .dropped_items
+                        .insert(dropped.runtime_id, dropped)
+                        .is_some()
+                    {
+                        bail!("save contains duplicate dropped runtime item id");
+                    }
                 }
                 record_tag if *record_tag == tag("RAND") => {
                     if saw_rng || record.payload.len() != 8 {
@@ -239,6 +317,9 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     }
     if !saw_rng {
         bail!("save is missing its RAND state");
+    }
+    if save.header.format_version >= 2 && !saw_next_runtime_item {
+        bail!("save format v2 is missing NITM");
     }
     validate_save(&save)?;
     Ok(save)
@@ -435,23 +516,23 @@ fn decode_header(payload: &[u8]) -> Result<SaveGameHeader> {
     Ok(header)
 }
 
-fn encode_player(player: &PlayerState) -> Result<Vec<u8>> {
+fn encode_player(player: &PlayerState, format_version: u32) -> Result<Vec<u8>> {
     let mut payload = Vec::new();
     write_subrecord(
         &mut payload,
         tag("INVT"),
-        &encode_inventory_bytes(&player.inventory),
+        &encode_inventory_bytes(&player.inventory, format_version)?,
     )?;
     Ok(payload)
 }
 
-fn decode_player(payload: &[u8]) -> Result<PlayerState> {
+fn decode_player(payload: &[u8], format_version: u32) -> Result<PlayerState> {
     let mut player = PlayerState::default();
     let mut saw_inventory = false;
     for subrecord in read_subrecords(payload)? {
         if subrecord.tag == tag("INVT") {
             ensure_once(&mut saw_inventory, "PLYR.INVT")?;
-            player.inventory = decode_inventory(&subrecord.payload)?;
+            player.inventory = decode_inventory(&subrecord.payload, format_version)?;
         }
     }
     if !saw_inventory {
@@ -460,20 +541,28 @@ fn decode_player(payload: &[u8]) -> Result<PlayerState> {
     Ok(player)
 }
 
-fn encode_inventory_bytes(inventory: &[ItemStack]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(4 + inventory.len() * 8);
+fn encode_inventory_bytes(inventory: &[ItemStack], format_version: u32) -> Result<Vec<u8>> {
+    let item_bytes = if format_version >= 2 { 13 } else { 8 };
+    let mut bytes = Vec::with_capacity(4 + inventory.len() * item_bytes);
     bytes.extend_from_slice(&(inventory.len() as u32).to_le_bytes());
     for item in inventory {
         bytes.extend_from_slice(&item.base_form_id.to_le_bytes());
         bytes.extend_from_slice(&item.count.to_le_bytes());
+        if format_version >= 2 {
+            bytes.push(item.condition.is_some() as u8);
+            bytes.extend_from_slice(&item.condition.unwrap_or_default().to_le_bytes());
+        } else if item.condition.is_some() {
+            bail!("save format v1 cannot encode item condition");
+        }
     }
-    bytes
+    Ok(bytes)
 }
 
 fn encode_reference(
     cell_form_id: u32,
     reference_form_id: u32,
     delta: &PersistentReferenceDelta,
+    format_version: u32,
 ) -> Result<Vec<u8>> {
     let mut payload = Vec::new();
     write_subrecord(&mut payload, tag("CELL"), &cell_form_id.to_le_bytes())?;
@@ -523,7 +612,7 @@ fn encode_reference(
         write_subrecord(
             &mut payload,
             tag("INVT"),
-            &encode_inventory_bytes(inventory),
+            &encode_inventory_bytes(inventory, format_version)?,
         )?;
     }
     if let Some(body) = delta.body {
@@ -541,7 +630,10 @@ fn encode_reference(
     Ok(payload)
 }
 
-fn decode_reference(payload: &[u8]) -> Result<(u32, u32, PersistentReferenceDelta)> {
+fn decode_reference(
+    payload: &[u8],
+    format_version: u32,
+) -> Result<(u32, u32, PersistentReferenceDelta)> {
     let mut cell_form_id = None;
     let mut reference_form_id = None;
     let mut flags = None;
@@ -576,7 +668,7 @@ fn decode_reference(payload: &[u8]) -> Result<(u32, u32, PersistentReferenceDelt
                 delta.transform = Some(decode_transform(&subrecord.payload)?)
             }
             record_tag if *record_tag == tag("INVT") => {
-                delta.inventory = Some(decode_inventory(&subrecord.payload)?)
+                delta.inventory = Some(decode_inventory(&subrecord.payload, format_version)?)
             }
             record_tag if *record_tag == tag("BODY") => {
                 delta.body = Some(decode_body(&subrecord.payload)?)
@@ -595,6 +687,130 @@ fn decode_reference(payload: &[u8]) -> Result<(u32, u32, PersistentReferenceDelt
         reference_form_id.context("OBJE is missing REFR")?,
         delta,
     ))
+}
+
+fn encode_dropped(cell_form_id: u32, dropped: &DroppedItemState) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("CELL"), &cell_form_id.to_le_bytes())?;
+    write_subrecord(&mut payload, tag("RID0"), &dropped.runtime_id.to_le_bytes())?;
+    write_subrecord(
+        &mut payload,
+        tag("BASE"),
+        &dropped.stack.base_form_id.to_le_bytes(),
+    )?;
+    write_subrecord(
+        &mut payload,
+        tag("CNT0"),
+        &dropped.stack.count.to_le_bytes(),
+    )?;
+    if let Some(condition) = dropped.stack.condition {
+        write_subrecord(&mut payload, tag("COND"), &condition.to_le_bytes())?;
+    }
+    let mut transform = Vec::with_capacity(40);
+    for value in dropped
+        .transform
+        .translation
+        .into_iter()
+        .chain(dropped.transform.rotation_xyzw)
+        .chain(dropped.transform.scale)
+    {
+        transform.extend_from_slice(&value.to_le_bytes());
+    }
+    write_subrecord(&mut payload, tag("XFRM"), &transform)?;
+    let mut body = Vec::with_capacity(25);
+    for value in dropped
+        .body
+        .linear_velocity
+        .into_iter()
+        .chain(dropped.body.angular_velocity)
+    {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    body.push(dropped.body.sleeping as u8);
+    write_subrecord(&mut payload, tag("BODY"), &body)?;
+    Ok(payload)
+}
+
+fn decode_dropped(payload: &[u8]) -> Result<(u32, DroppedItemState)> {
+    let mut cell = None;
+    let mut runtime_id = None;
+    let mut base_form_id = None;
+    let mut count = None;
+    let mut condition = None;
+    let mut transform = None;
+    let mut body = None;
+    for subrecord in read_subrecords(payload)? {
+        match &subrecord.tag {
+            value if *value == tag("CELL") => {
+                ensure_none(&cell, "DROP.CELL")?;
+                cell = Some(read_u32(&subrecord.payload, "DROP.CELL")?);
+            }
+            value if *value == tag("RID0") => {
+                ensure_none(&runtime_id, "DROP.RID0")?;
+                if subrecord.payload.len() != 8 {
+                    bail!("DROP.RID0 must contain eight bytes");
+                }
+                runtime_id = Some(u64::from_le_bytes(
+                    subrecord
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .expect("checked DROP.RID0"),
+                ));
+            }
+            value if *value == tag("BASE") => {
+                ensure_none(&base_form_id, "DROP.BASE")?;
+                base_form_id = Some(read_u32(&subrecord.payload, "DROP.BASE")?);
+            }
+            value if *value == tag("CNT0") => {
+                ensure_none(&count, "DROP.CNT0")?;
+                if subrecord.payload.len() != 4 {
+                    bail!("DROP.CNT0 must contain four bytes");
+                }
+                count = Some(i32::from_le_bytes(
+                    subrecord
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .expect("checked count"),
+                ));
+            }
+            value if *value == tag("COND") => {
+                ensure_none(&condition, "DROP.COND")?;
+                condition = Some(read_u32(&subrecord.payload, "DROP.COND")?);
+            }
+            value if *value == tag("XFRM") => {
+                ensure_none(&transform, "DROP.XFRM")?;
+                transform = Some(decode_transform(&subrecord.payload)?);
+            }
+            value if *value == tag("BODY") => {
+                ensure_none(&body, "DROP.BODY")?;
+                body = Some(decode_body(&subrecord.payload)?);
+            }
+            _ => {}
+        }
+    }
+    let runtime_id = runtime_id.context("DROP is missing RID0")?;
+    Ok((
+        cell.context("DROP is missing CELL")?,
+        DroppedItemState {
+            runtime_id,
+            stack: ItemStack {
+                base_form_id: base_form_id.context("DROP is missing BASE")?,
+                count: count.context("DROP is missing CNT0")?,
+                condition,
+            },
+            transform: transform.context("DROP is missing XFRM")?,
+            body: body.context("DROP is missing BODY")?,
+        },
+    ))
+}
+
+fn ensure_none<T>(value: &Option<T>, label: &str) -> Result<()> {
+    if value.is_some() {
+        bail!("{label} appears more than once");
+    }
+    Ok(())
 }
 
 fn decode_cell_state(payload: &[u8]) -> Result<u32> {
@@ -624,14 +840,19 @@ fn decode_transform(bytes: &[u8]) -> Result<SavedTransform> {
     Ok(transform)
 }
 
-fn decode_inventory(bytes: &[u8]) -> Result<Vec<ItemStack>> {
+fn decode_inventory(bytes: &[u8], format_version: u32) -> Result<Vec<ItemStack>> {
     if bytes.len() < 4 {
         bail!("OBJE.INVT is truncated");
     }
     let count =
         u32::from_le_bytes(bytes[..4].try_into().expect("checked inventory header")) as usize;
+    let item_bytes = if format_version >= 2 { 13 } else { 8 };
     let expected = 4usize
-        .checked_add(count.checked_mul(8).context("inventory count overflow")?)
+        .checked_add(
+            count
+                .checked_mul(item_bytes)
+                .context("inventory count overflow")?,
+        )
         .context("inventory length overflow")?;
     if bytes.len() != expected {
         bail!("OBJE.INVT length does not match its item count");
@@ -650,8 +871,21 @@ fn decode_inventory(bytes: &[u8]) -> Result<Vec<ItemStack>> {
                     .try_into()
                     .expect("checked item count"),
             ),
+            condition: if format_version >= 2 {
+                match bytes[offset + 8] {
+                    0 => None,
+                    1 => Some(u32::from_le_bytes(
+                        bytes[offset + 9..offset + 13]
+                            .try_into()
+                            .expect("checked item condition"),
+                    )),
+                    _ => bail!("inventory condition flag must be 0 or 1"),
+                }
+            } else {
+                None
+            },
         });
-        offset += 8;
+        offset += item_bytes;
     }
     validate_inventory(&inventory)?;
     Ok(inventory)
@@ -686,6 +920,9 @@ fn validate_save(save: &SaveGame) -> Result<()> {
     if !save.header.play_time_seconds.is_finite() || save.header.play_time_seconds < 0.0 {
         bail!("save play time must be finite and non-negative");
     }
+    if save.next_runtime_item_id == 0 {
+        bail!("next runtime item id must be non-zero");
+    }
     let mut plugin_names = Vec::new();
     for plugin in &save.header.plugins {
         if plugin.name.is_empty() || plugin.fingerprint.is_empty() {
@@ -712,6 +949,19 @@ fn validate_save(save: &SaveGame) -> Result<()> {
                 validate_body(&body)?;
             }
         }
+        for (runtime_id, dropped) in &cell.dropped_items {
+            if *runtime_id == 0 || dropped.runtime_id != *runtime_id {
+                bail!("dropped item runtime id must be non-zero and match its map key");
+            }
+            if dropped.stack.count <= 0 {
+                bail!("dropped item count must be positive");
+            }
+            validate_transform(&dropped.transform)?;
+            validate_body(&dropped.body)?;
+            if *runtime_id >= save.next_runtime_item_id {
+                bail!("next runtime item id must exceed every dropped item id");
+            }
+        }
     }
     Ok(())
 }
@@ -722,10 +972,11 @@ fn validate_inventory(inventory: &[ItemStack]) -> Result<()> {
         if item.count == 0 {
             bail!("save inventory stacks may not have a zero count");
         }
-        if previous.is_some_and(|form_id| form_id >= item.base_form_id) {
-            bail!("save inventory stacks must be strictly sorted by FormID");
+        let key = (item.base_form_id, item.condition);
+        if previous.is_some_and(|previous| previous >= key) {
+            bail!("save inventory stacks must be strictly sorted by FormID and condition");
         }
-        previous = Some(item.base_form_id);
+        previous = Some(key);
     }
     Ok(())
 }
@@ -924,6 +1175,7 @@ mod tests {
                 inventory: Some(vec![ItemStack {
                     base_form_id: 0x0000_0042,
                     count: 3,
+                    condition: None,
                 }]),
                 body: Some(SavedBodyState {
                     linear_velocity: [0.1, 0.2, 0.3],
@@ -933,7 +1185,35 @@ mod tests {
             },
         );
         let mut cells = BTreeMap::new();
-        cells.insert(0x0001_51e3, PersistentCellState { references });
+        let mut dropped_items = BTreeMap::new();
+        dropped_items.insert(
+            5,
+            DroppedItemState {
+                runtime_id: 5,
+                stack: ItemStack {
+                    base_form_id: 0x0000_0011,
+                    count: 4,
+                    condition: Some(80),
+                },
+                transform: SavedTransform {
+                    translation: [4.0, 5.0, 6.0],
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                },
+                body: SavedBodyState {
+                    linear_velocity: [0.1, 0.0, 0.0],
+                    angular_velocity: [0.0, 0.2, 0.0],
+                    sleeping: false,
+                },
+            },
+        );
+        cells.insert(
+            0x0001_51e3,
+            PersistentCellState {
+                references,
+                dropped_items,
+            },
+        );
         SaveGame {
             header: SaveGameHeader {
                 format_version: CURRENT_SAVE_FORMAT_VERSION,
@@ -952,13 +1232,16 @@ mod tests {
                     ItemStack {
                         base_form_id: 0x0000_0011,
                         count: 1,
+                        condition: Some(100),
                     },
                     ItemStack {
                         base_form_id: 0x0000_0042,
                         count: 3,
+                        condition: None,
                     },
                 ],
             }),
+            next_runtime_item_id: 6,
             rng_state: 0x0123_4567_89ab_cdef,
         }
     }
@@ -970,6 +1253,37 @@ mod tests {
         let second = encode_save(&save).unwrap();
         assert_eq!(first, second);
         assert_eq!(decode_save(&first).unwrap(), save);
+    }
+
+    #[test]
+    fn version_one_inventory_loads_without_condition_or_runtime_drops() {
+        let mut save = sample_save();
+        save.header.format_version = 1;
+        save.next_runtime_item_id = 1;
+        save.world
+            .cells
+            .values_mut()
+            .for_each(|cell| cell.dropped_items.clear());
+        for stack in save
+            .player
+            .as_mut()
+            .expect("sample player")
+            .inventory
+            .iter_mut()
+        {
+            stack.condition = None;
+        }
+        if let Some(inventory) = save.world.cells.values_mut().find_map(|cell| {
+            cell.references
+                .values_mut()
+                .find_map(|delta| delta.inventory.as_mut())
+        }) {
+            for stack in inventory {
+                stack.condition = None;
+            }
+        }
+        let bytes = encode_save(&save).unwrap();
+        assert_eq!(decode_save(&bytes).unwrap(), save);
     }
 
     #[test]
@@ -1005,6 +1319,7 @@ mod tests {
             inventory: vec![ItemStack {
                 base_form_id: 0x1,
                 count: 0,
+                condition: None,
             }],
         });
         assert!(encode_save(&save).is_err());
@@ -1013,14 +1328,77 @@ mod tests {
                 ItemStack {
                     base_form_id: 0x2,
                     count: 1,
+                    condition: None,
                 },
                 ItemStack {
                     base_form_id: 0x1,
                     count: 1,
+                    condition: None,
                 },
             ],
         });
         assert!(encode_save(&save).is_err());
+    }
+
+    #[test]
+    fn malformed_dropped_items_are_rejected() {
+        let mut save = sample_save();
+        let dropped = save
+            .world
+            .cells
+            .get_mut(&0x0001_51e3)
+            .unwrap()
+            .dropped_items
+            .get_mut(&5)
+            .unwrap();
+        dropped.stack.count = 0;
+        assert!(encode_save(&save).is_err());
+
+        let mut save = sample_save();
+        save.world
+            .cells
+            .get_mut(&0x0001_51e3)
+            .unwrap()
+            .dropped_items
+            .get_mut(&5)
+            .unwrap()
+            .transform
+            .translation[0] = f32::NAN;
+        assert!(encode_save(&save).is_err());
+
+        let mut save = sample_save();
+        save.world
+            .cells
+            .get_mut(&0x0001_51e3)
+            .unwrap()
+            .dropped_items
+            .get_mut(&5)
+            .unwrap()
+            .body
+            .linear_velocity[1] = f32::INFINITY;
+        assert!(encode_save(&save).is_err());
+
+        let mut save = sample_save();
+        save.next_runtime_item_id = 5;
+        assert!(encode_save(&save).is_err());
+    }
+
+    #[test]
+    fn duplicate_dropped_runtime_ids_are_rejected_on_decode() {
+        let save = sample_save();
+        let encoded = encode_save(&save).unwrap();
+        let checksum_start = encoded.len() - 40;
+        let mut bytes = encoded[..checksum_start].to_vec();
+        let dropped = save.world.cells[&0x0001_51e3].dropped_items[&5].clone();
+        write_record(
+            &mut bytes,
+            tag("DROP"),
+            &encode_dropped(0x0001_51e3, &dropped).unwrap(),
+        )
+        .unwrap();
+        let checksum: [u8; 32] = Sha256::digest(&bytes).into();
+        write_record(&mut bytes, tag("CHKS"), &checksum).unwrap();
+        assert!(decode_save(&bytes).is_err());
     }
 
     #[test]
