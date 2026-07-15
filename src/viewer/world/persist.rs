@@ -798,6 +798,7 @@ mod tests {
             // and widening that surface for a test is not worth it; an
             // empty plugin list exercises the same identity plumbing.
             source_plugins: Vec::new(),
+            visual_issues: Vec::new(),
             cell: crate::vsa::CellInfo {
                 form_id: cell_form_id,
                 editor_id: None,

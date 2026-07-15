@@ -288,7 +288,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
 
     let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let bake_result: BlenderBakeResult =
-        serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
+        serde_json::from_slice(&fs::read(result_json)?).context("invalid Blender bake result")?;
     validate_placement_contribution(&job.placements, &bake_result.placement_contribution)?;
     let irradiance = bake_result
         .irradiance
