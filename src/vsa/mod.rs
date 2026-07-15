@@ -28,9 +28,9 @@ pub(crate) use manifest::{
 };
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
-    PreparedFootstepSet, PreparedInventoryEntry, PreparedPhysicsClassification, PreparedPlacement,
-    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
-    ensure_prepared_manifest_compatible,
+    PreparedFootstepSet, PreparedInventoryEntry, PreparedLeveledList,
+    PreparedPhysicsClassification, PreparedPlacement, PreparedSceneManifest, PreparedSemantic,
+    cell_label, ensure_baked_scene_compatible, ensure_prepared_manifest_compatible,
 };
 pub(crate) use paths::FO3_SCALE;
 pub(crate) use physics::{

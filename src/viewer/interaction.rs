@@ -1,24 +1,30 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
 use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
-use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
+use crate::vsa::{
+    PreparedDoor, PreparedInventoryEntry, PreparedLeveledList, PreparedPlacement, PreparedSemantic,
+};
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::player::{CameraMode, CameraModeState};
+use super::world::{ActiveCell, PlaythroughSeed, ResidentCells};
 
-// Pure leveled-list resolver (issue #74). Std/serde-only, no Bevy imports,
-// so `tests/features.rs` can pull it in verbatim via `#[path]`; see its
-// module doc comment for the pattern.
-pub(crate) mod leveled;
+// Pure std/serde-only modules (no Bevy imports), so `tests/features.rs` can
+// pull them in verbatim via `#[path]`; see their module doc comments for
+// the pattern (issue #74 resolver, issue #75 transfer policy).
 pub(crate) mod container_policy;
+pub(crate) mod leveled;
 mod transfer_ui;
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
+/// No leveling system exists yet (later M3+ scope): leveled lists resolve
+/// against a fixed player level until one does.
+const PLAYER_LEVEL: u16 = 1;
 const NOTICE_SECONDS: f32 = 3.0;
 const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
 const MAX_PARENT_DEPTH: usize = 64;
@@ -568,6 +574,49 @@ fn probe_status_message(hit: bool, label: Option<&str>) -> String {
     }
 }
 
+/// The #74 resolver's inputs, bundled so `activate_focused_placement` stays
+/// under Bevy's 16-parameter system limit: which cell the roll happens in,
+/// that cell's manifest (for the leveled-list bodies), and the playthrough
+/// seed the roll derives from. All `Option` because they belong to the
+/// `world`/`persist` slices — bare-App interaction tests run without them,
+/// and a missing resource just resolves against defaults (cell 0, no list
+/// bodies, seed 0).
+#[derive(bevy::ecs::system::SystemParam)]
+struct LeveledResolveContext<'w> {
+    active_cell: Option<Res<'w, ActiveCell>>,
+    resident_cells: Option<Res<'w, ResidentCells>>,
+    playthrough_seed: Option<Res<'w, PlaythroughSeed>>,
+}
+
+/// Converts the manifest's leveled-list bodies into `leveled`'s std-only
+/// mirror types (the same mirror pattern `persist_policy` uses toward
+/// `save`; see `leveled`'s module doc).
+fn leveled_lists_from_manifest(
+    lists: &BTreeMap<u32, PreparedLeveledList>,
+) -> BTreeMap<u32, leveled::PreparedLeveledList> {
+    lists
+        .iter()
+        .map(|(form_id, list)| {
+            (
+                *form_id,
+                leveled::PreparedLeveledList {
+                    chance_none: list.chance_none,
+                    flags: list.flags,
+                    entries: list
+                        .entries
+                        .iter()
+                        .map(|entry| leveled::PreparedLeveledEntry {
+                            level: entry.level,
+                            base_form_id: entry.base_form_id,
+                            count: entry.count,
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
@@ -585,6 +634,7 @@ fn activate_focused_placement(
     mut container_states: ResMut<ContainerStates>,
     mut active_container: ResMut<ActiveContainerTarget>,
     mut modal_requests: MessageWriter<RequestStateTransition>,
+    resolve_context: LeveledResolveContext,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -638,15 +688,40 @@ fn activate_focused_placement(
                     leveled: entry.leveled,
                 })
                 .collect();
-            // #74 seam: `leveled::resolve_leveled` does not exist in this
-            // worktree (agent A, parallel worktree) -- every leveled entry
-            // resolves to no items until the orchestrator wires the real
-            // resolver in at integration.
-            let resolved = container_states.open(
+            // #74: leveled entries roll exactly once, on first open, seeded
+            // from playthrough seed + active cell + this reference — two
+            // runs of one playthrough resolve identically, and distinct
+            // containers roll independently. The manifest's list bodies are
+            // converted to `leveled`'s std-only mirror types lazily, only
+            // when this container actually carries a leveled entry.
+            let active_cell = resolve_context
+                .active_cell
+                .as_ref()
+                .map(|cell| cell.0)
+                .unwrap_or_default();
+            let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+                resolve_context
+                    .resident_cells
+                    .as_ref()
+                    .and_then(|cells| cells.0.get(&active_cell))
+                    .map(|resident| leveled_lists_from_manifest(&resident.manifest.leveled_lists))
+                    .unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            };
+            let seed = leveled::LeveledSeed::derive(
+                resolve_context
+                    .playthrough_seed
+                    .as_ref()
+                    .map(|seed| seed.0)
+                    .unwrap_or_default(),
+                active_cell,
                 placement.reference_form_id,
-                &seed_entries,
-                |_list_form_id| Vec::new(),
             );
+            let resolved =
+                container_states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
+                    leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
+                });
             let stack_count = resolved.stacks.len();
             state.open.insert(entity);
             active_container.0 = Some(ActiveContainer {

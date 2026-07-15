@@ -90,30 +90,20 @@ pub(crate) struct EvictionCapture {
 #[derive(Resource, Default)]
 pub(crate) struct PendingEvictionCaptures(pub(crate) Vec<EvictionCapture>);
 
-/// Issue #76's one adapter point (fixed seam per the wave-2 plan): mirrors
-/// agent B's runtime `interaction::ContainerStates` resource
-/// (`HashMap<u32 /* reference form id */, ContainerState { stacks: Vec<(u32,
-/// i32)>, resolved: bool }>`), which does not exist in this worktree --
-/// issue #75 builds it in a parallel worktree. Capture reads it to observe
-/// which containers were touched this session; apply seeds it from save
-/// deltas before first activation. Since the shapes match field-for-field,
-/// the orchestrator's integration step is deleting this resource/type and
-/// repointing the two call sites below at `interaction::ContainerStates`.
-#[derive(Resource, Default)]
-pub(crate) struct ContainerStatesStub(pub(crate) HashMap<u32, ContainerSnapshotStub>);
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ContainerSnapshotStub {
-    pub(crate) stacks: Vec<(u32, i32)>,
-    pub(crate) resolved: bool,
-}
+/// Playthrough-stable RNG seed for deterministic leveled-list resolution
+/// (#74): saved as `SaveGame.rng_state`, restored on `--save-slot` load. A
+/// fresh playthrough currently always starts at 0; a new-game flow that
+/// randomizes it slots in here without touching the resolver.
+#[derive(Resource, Clone, Copy, Default)]
+pub(crate) struct PlaythroughSeed(pub(crate) u64);
 
 pub(crate) fn install(app: &mut App) {
-    app.init_resource::<ActiveSaveState>()
+    app.init_resource::<PlaythroughSeed>()
+        .init_resource::<ActiveSaveState>()
         .init_resource::<SaveDirectory>()
         .init_resource::<PersistRestores>()
         .init_resource::<PendingEvictionCaptures>()
-        .init_resource::<ContainerStatesStub>()
+        .init_resource::<interaction::ContainerStates>()
         .add_systems(Update, drain_eviction_captures);
 }
 
@@ -282,7 +272,7 @@ fn capture_cell_placements(
 
     // Issue #76 (F76.2): container stacks/resolved-marker capture, mirroring
     // the placement capture above but scoped to `PreparedSemantic::Container`
-    // references observed in `ContainerStatesStub`.
+    // references observed in `interaction::ContainerStates`.
     let container_baselines = container_baselines(placements);
     let container_snapshots = container_snapshots(world, placements);
     let captured_containers =
@@ -326,7 +316,7 @@ fn container_baseline(placement: &PreparedPlacement) -> Option<persist_policy::C
 }
 
 /// F76.2: every container reference's live state, read from
-/// `ContainerStatesStub` (issue #75's runtime resource is not present in
+/// `interaction::ContainerStates` (issue #75's runtime resource is not present in
 /// this worktree -- see that resource's doc comment). A container absent
 /// from the stub was never opened this session and is excluded, so capture
 /// never clobbers a previously loaded delta it cannot currently observe.
@@ -334,7 +324,7 @@ fn container_snapshots(
     world: &World,
     placements: &[PreparedPlacement],
 ) -> HashMap<u32, persist_policy::ContainerSnapshot> {
-    let Some(states) = world.get_resource::<ContainerStatesStub>() else {
+    let Some(states) = world.get_resource::<interaction::ContainerStates>() else {
         return HashMap::new();
     };
     placements
@@ -580,7 +570,7 @@ fn apply_cell_placements(
 
     // Issue #76 (F76.3): rebuild every delta-carrying container's runtime
     // state before first activation. A container with no delta is left
-    // absent from `ContainerStatesStub`, so it still rolls on first open.
+    // absent from `interaction::ContainerStates`, so it still rolls on first open.
     let container_baselines = container_baselines(placements);
     let container_deltas: HashMap<u32, persist_policy::ContainerDelta> = world
         .get_resource::<ActiveSaveState>()
@@ -599,11 +589,11 @@ fn apply_cell_placements(
         persist_policy::plan_apply_containers(&container_baselines, &container_deltas);
     let container_seed_count = container_seed.len();
     if !container_seed.is_empty() {
-        let mut states = world.resource_mut::<ContainerStatesStub>();
+        let mut states = world.resource_mut::<interaction::ContainerStates>();
         for (form_id, snapshot) in container_seed {
             states.0.insert(
                 form_id,
-                ContainerSnapshotStub {
+                interaction::container_policy::ContainerState {
                     stacks: snapshot.stacks,
                     resolved: snapshot.resolved,
                 },
@@ -725,7 +715,10 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
             .map(|state| state.0.clone())
             .unwrap_or_default(),
         player: Some(player),
-        rng_state: 0,
+        rng_state: world
+            .get_resource::<PlaythroughSeed>()
+            .map(|seed| seed.0)
+            .unwrap_or_default(),
     };
     let save_dir = world
         .get_resource::<SaveDirectory>()
@@ -780,7 +773,7 @@ mod tests {
         world.init_resource::<PersistRestores>();
         world.init_resource::<interaction::InteractionState>();
         world.init_resource::<bevy::ecs::message::Messages<animation::PlayPlacementAnimation>>();
-        world.init_resource::<ContainerStatesStub>();
+        world.init_resource::<interaction::ContainerStates>();
         world
     }
 
@@ -1099,7 +1092,7 @@ mod tests {
 
     // Issue #76 (F76.2/F76.3): a looted, leveled-resolved container survives
     // capture -> despawn/evict -> respawn -> apply, seeding
-    // `ContainerStatesStub` with the exact stacks and resolved marker it had
+    // `interaction::ContainerStates` with the exact stacks and resolved marker it had
     // when the cell was left, the same swap-away-and-back shape
     // `capture_and_apply_restore_a_moved_placement_transform` exercises for
     // transforms.
@@ -1111,13 +1104,16 @@ mod tests {
             vec![inventory_entry(0x10, 3, false)],
         )];
         let (root, _children) = spawn_cell(&mut world, &placements);
-        world.resource_mut::<ContainerStatesStub>().0.insert(
-            0x900,
-            ContainerSnapshotStub {
-                stacks: vec![(0x10, 1)],
-                resolved: true,
-            },
-        );
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .insert(
+                0x900,
+                interaction::container_policy::ContainerState {
+                    stacks: vec![(0x10, 1)],
+                    resolved: true,
+                },
+            );
 
         capture_cell_placements(&mut world, 0xC0DE, root, &placements, false);
         let saved = &world.resource::<ActiveSaveState>().0.cells[&0xC0DE].references[&0x900];
@@ -1132,11 +1128,14 @@ mod tests {
 
         // Simulate eviction + fresh respawn with a cleared runtime state.
         world.entity_mut(root).despawn();
-        world.resource_mut::<ContainerStatesStub>().0.clear();
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .clear();
         let (root, _children) = spawn_cell(&mut world, &placements);
         apply_cell_placements(&mut world, 0xC0DE, root, &placements);
 
-        let restored = &world.resource::<ContainerStatesStub>().0[&0x900];
+        let restored = &world.resource::<interaction::ContainerStates>().0[&0x900];
         assert_eq!(restored.stacks, vec![(0x10, 1)]);
         assert!(restored.resolved);
     }
@@ -1152,13 +1151,16 @@ mod tests {
             vec![inventory_entry(0x10, 3, false)],
         )];
         let (root, _children) = spawn_cell(&mut world, &placements);
-        world.resource_mut::<ContainerStatesStub>().0.insert(
-            0x901,
-            ContainerSnapshotStub {
-                stacks: vec![(0x10, 3)],
-                resolved: false,
-            },
-        );
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .insert(
+                0x901,
+                interaction::container_policy::ContainerState {
+                    stacks: vec![(0x10, 3)],
+                    resolved: false,
+                },
+            );
 
         capture_cell_placements(&mut world, 0xC0DE, root, &placements, false);
         assert!(
@@ -1171,12 +1173,15 @@ mod tests {
         );
 
         world.entity_mut(root).despawn();
-        world.resource_mut::<ContainerStatesStub>().0.clear();
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .clear();
         let (root, _children) = spawn_cell(&mut world, &placements);
         apply_cell_placements(&mut world, 0xC0DE, root, &placements);
         assert!(
             !world
-                .resource::<ContainerStatesStub>()
+                .resource::<interaction::ContainerStates>()
                 .0
                 .contains_key(&0x901)
         );

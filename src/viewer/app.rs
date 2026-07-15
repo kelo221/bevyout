@@ -105,6 +105,7 @@ pub(crate) fn run_view(
             ));
         }
         app.insert_resource(world::ActiveSaveState(save.world));
+        app.insert_resource(world::PlaythroughSeed(save.rng_state));
     }
     app.insert_resource(manifest)
         .insert_resource(UnlitMode(false))
