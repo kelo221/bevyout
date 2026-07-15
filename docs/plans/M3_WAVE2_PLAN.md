@@ -193,4 +193,47 @@ closes all three.
 
 ## Shipped amendments
 
-(amended during acceptance, not rewritten)
+- **A1** Scripted (console/BRP) container activation now routes through the
+  same seed-once `ContainerStates` store as the player path and logs the
+  resolved stacks — needed to drive acceptance over the agent bridge, and it
+  removes a behavioral divergence between `activate <ref>` and the player's
+  `E`.
+- **A2** The resolver's inputs reach `activate_focused_placement` as one
+  `LeveledResolveContext` SystemParam (Bevy's 16-parameter system limit)
+  with `Option`-al resources: bare-App interaction tests run without the
+  `world`/`persist` slices and resolve against defaults.
+- **A3** (#74) `leveled.rs` uses local mirror types instead of importing
+  `vsa::manifest` — the codebase's established pure-module pattern
+  (`persist_policy` mirrors `save` the same way); the integration wiring
+  converts once per first-open.
+- **A4** (#76) Container deltas ride parallel non-`Copy` pure types
+  (`ContainerBaseline`/`ContainerSnapshot`/`ContainerDelta`) rather than
+  widening the existing `Copy` `ReferenceDelta`, whose derive is load-bearing
+  for pre-existing `tests/features.rs` step code.
+- **A5** (#75) The transfer modal reuses the existing, otherwise-unused
+  `GameplayModal::Dialogue` state — a dedicated `Container` variant belongs
+  to `app_state`, outside the wave's ownership; one-line migration when it
+  gains one.
+- **A6** (#75) "Take/store stack" moves a fixed 10-unit chunk (clamped);
+  a quantity picker is #71's territory.
+- **Save version**: #72 (v2) had not landed at integration time, so the
+  LVLR subrecord shipped additively on v1 with no version bump — the single
+  bump happens with whichever PR lands second, per the coexistence plan.
+
+## Measured acceptance (real data, MegatonPlayerHouse 000151e3)
+
+- `prepare` emits 32 leveled-list bodies transitively reachable from 12
+  leveled container entries; e.g. desk 0007b295 carries ClutterOffice15,
+  CapsChange10, LootAmmoBullets10, CapsChangeFortuneFinder (chance-none 100
+  → correctly resolves to nothing).
+- Two independent fresh runs resolved identical stacks for all probed
+  containers (refrigerator 0007b241 → `[(574814, 2)]`; desk 0007b295 →
+  `[(15, 12), (16961, 25), (213079, 1)]`; filing cabinet 0007b297 → empty).
+  In-session reopen never re-rolls.
+- `save` → restart `--save-slot` → `save apply 000151e3 deltas=17
+  container_seeded=3`; the save file carries 3 `INVT` container-stack
+  records and 3 `LVLR` resolved markers; reopen after reload reproduces the
+  saved stacks.
+- Gates: `cargo fmt --check`, `clippy --all-targets -D warnings`, and
+  `cargo test` (478 unit tests; 131 cucumber scenarios / 595 steps) all
+  green on the integration branch.
