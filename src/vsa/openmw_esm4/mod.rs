@@ -60,6 +60,9 @@ pub(crate) struct BaseRecord {
     pub(crate) light: Option<LightData>,
     pub(crate) inventory: Vec<InventoryItemRecord>,
     pub(crate) audio: BaseAudioRecord,
+    /// Present only for `LVLI`/`LVLN`/`LVLC` base records (issue #74). See
+    /// `records::LeveledListData` for the parsed `LVLD`/`LVLF`/`LVLO` body.
+    pub(crate) leveled: Option<LeveledListData>,
     ignored_subrecords: Vec<String>,
 }
 

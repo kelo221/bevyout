@@ -1,21 +1,32 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
-use crate::app_state::{AppState, GameplayModal};
+use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
     PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemStats,
-    PreparedPlacement, PreparedSemantic,
+    PreparedLeveledList, PreparedPlacement, PreparedSemantic,
 };
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::inventory::{Inventory, InventoryStack, StackKey, TransferResult};
 use super::player::{CameraMode, CameraModeState};
+use super::world::{ActiveCell, PlaythroughSeed, ResidentCells};
+
+// Pure std/serde-only modules (no Bevy imports), so `tests/features.rs` can
+// pull them in verbatim via `#[path]`; see their module doc comments for
+// the pattern (issue #74 resolver, issue #75 transfer policy).
+pub(crate) mod container_policy;
+pub(crate) mod leveled;
+mod transfer_ui;
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
+/// No leveling system exists yet (later M3+ scope): leveled lists resolve
+/// against a fixed player level until one does.
+const PLAYER_LEVEL: u16 = 1;
 const NOTICE_SECONDS: f32 = 3.0;
 const FOCUS_RAYCAST_INTERVAL_SECONDS: f32 = 0.1;
 const MAX_PARENT_DEPTH: usize = 64;
@@ -169,13 +180,60 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
     world
         .get_resource_or_insert_with(InteractionNotice::default)
         .show(notice_text);
-    info!(
-        "container {} ({:08x}) {} with {} fixed entries",
-        name,
-        placement.reference_form_id,
-        if opening { "opened" } else { "closed" },
-        placement.inventory.len()
-    );
+    // Wave-2 seam: scripted opens go through the same seed-once container
+    // store as the player path, so console/BRP `activate` observes (and
+    // triggers) exactly the state the transfer modal and #76's capture see —
+    // including the deterministic first-open leveled roll. Stacks are logged
+    // for gate evidence (determinism across runs, no re-roll after reload).
+    if opening {
+        let seed_entries: Vec<container_policy::SeedEntry> = placement
+            .inventory
+            .iter()
+            .map(|entry| container_policy::SeedEntry {
+                base_form_id: entry.base_form_id,
+                count: entry.count,
+                leveled: entry.leveled,
+            })
+            .collect();
+        let active_cell = world
+            .get_resource::<ActiveCell>()
+            .map(|cell| cell.0)
+            .unwrap_or_default();
+        let playthrough_seed = world
+            .get_resource::<PlaythroughSeed>()
+            .map(|seed| seed.0)
+            .unwrap_or_default();
+        let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+            world
+                .get_resource::<ResidentCells>()
+                .and_then(|cells| cells.0.get(&active_cell))
+                .map(|resident| leveled_lists_from_manifest(&resident.manifest.leveled_lists))
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        let seed = leveled::LeveledSeed::derive(
+            playthrough_seed,
+            active_cell,
+            placement.reference_form_id,
+        );
+        let mut states = world.get_resource_or_insert_with(ContainerStates::default);
+        let resolved = states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
+            leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
+        });
+        info!(
+            "container {} ({:08x}) opened with {} stacks: {:?}",
+            name,
+            placement.reference_form_id,
+            resolved.stacks.len(),
+            resolved.stacks
+        );
+    } else {
+        info!(
+            "container {} ({:08x}) closed",
+            name, placement.reference_form_id
+        );
+    }
     opening
 }
 
@@ -210,15 +268,6 @@ impl PlayerInventory {
 
     pub(crate) fn contains(&self, form_id: u32) -> bool {
         self.0.contains(form_id)
-    }
-
-    #[cfg(test)]
-    fn add(&mut self, form_id: u32, count: i32) {
-        let _ = self.add_stack(InventoryStack {
-            base_form_id: form_id,
-            count: count.max(1),
-            condition: None,
-        });
     }
 
     pub(crate) fn add_stack(&mut self, stack: InventoryStack) -> TransferResult {
@@ -287,6 +336,55 @@ impl InteractionNotice {
     }
 }
 
+/// Fixed seam (issue #75, wired at wave-2 integration into #76's persistence
+/// capture/apply): a container's runtime inventory, keyed by
+/// `reference_form_id` -- the same identity the manifest and console/BRP
+/// paths already use for containers. `pub(crate)` (and the tuple field with
+/// it) so `world::persist` can capture/apply it without this module growing
+/// a second, parallel accessor API.
+#[derive(Resource, Default)]
+pub(crate) struct ContainerStates(pub(crate) HashMap<u32, container_policy::ContainerState>);
+
+impl ContainerStates {
+    /// F75.2/T75.2: opens (or reopens) a container's state. `resolve_leveled`
+    /// is the #74 resolver seam -- called only when this reference has never
+    /// resolved before; a `resolved` state short-circuits straight back
+    /// without touching it (never re-rolls).
+    fn open(
+        &mut self,
+        reference_form_id: u32,
+        entries: &[container_policy::SeedEntry],
+        resolve_leveled: impl FnMut(u32) -> Vec<(u32, i32)>,
+    ) -> &container_policy::ContainerState {
+        let existing = self.0.remove(&reference_form_id);
+        let state = container_policy::open_container(existing, entries, resolve_leveled);
+        self.0.entry(reference_form_id).or_insert(state)
+    }
+
+    pub(crate) fn get(&self, reference_form_id: u32) -> Option<&container_policy::ContainerState> {
+        self.0.get(&reference_form_id)
+    }
+
+    fn get_mut(&mut self, reference_form_id: u32) -> Option<&mut container_policy::ContainerState> {
+        self.0.get_mut(&reference_form_id)
+    }
+}
+
+/// F75.2: which container the transfer modal is currently showing, and the
+/// best-effort item names collected from its prepared inventory at open
+/// time (resolved-leveled or player-only items with no known name fall
+/// back to their hex form id -- name/count is all this issue promises, see
+/// the plan's non-goals).
+struct ActiveContainer {
+    entity: Entity,
+    reference_form_id: u32,
+    name: String,
+    item_names: HashMap<u32, String>,
+}
+
+#[derive(Resource, Default)]
+struct ActiveContainerTarget(Option<ActiveContainer>);
+
 #[derive(Component)]
 struct InteractionPromptText;
 
@@ -298,7 +396,17 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<InteractionState>()
         .init_resource::<InteractionNotice>()
         .init_resource::<PendingDoorTravel>()
+        .init_resource::<ContainerStates>()
+        .init_resource::<ActiveContainerTarget>()
         .add_message::<DoorTravelRequested>()
+        // F75.2: `activate_focused_placement` now also writes
+        // `RequestStateTransition` to open the transfer modal.
+        // `AppStatePlugin` registers this message too (`add_message` is
+        // idempotent -- see `bevy_app::SubApp::add_message` -- so real apps
+        // that already install `AppStatePlugin` are unaffected); this keeps
+        // `interaction::install` self-sufficient for callers/tests (e.g.
+        // `door_travel_animation`'s bare-`App` harness) that don't.
+        .add_message::<RequestStateTransition>()
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
             Update,
@@ -322,6 +430,7 @@ pub(crate) fn install(app: &mut App) {
             Update,
             (update_interaction_notice, cleanup_removed_placements),
         );
+    transfer_ui::install(app);
 }
 
 fn spawn_interaction_ui(mut commands: Commands) {
@@ -494,6 +603,69 @@ fn probe_status_message(hit: bool, label: Option<&str>) -> String {
     }
 }
 
+/// The #74 resolver's inputs, bundled so `activate_focused_placement` stays
+/// under Bevy's 16-parameter system limit: which cell the roll happens in,
+/// that cell's manifest (for the leveled-list bodies), and the playthrough
+/// seed the roll derives from. All `Option` because they belong to the
+/// `world`/`persist` slices — bare-App interaction tests run without them,
+/// and a missing resource just resolves against defaults (cell 0, no list
+/// bodies, seed 0).
+#[derive(bevy::ecs::system::SystemParam)]
+struct LeveledResolveContext<'w> {
+    active_cell: Option<Res<'w, ActiveCell>>,
+    resident_cells: Option<Res<'w, ResidentCells>>,
+    playthrough_seed: Option<Res<'w, PlaythroughSeed>>,
+}
+
+/// Bundles the container-open resources so `activate_focused_placement`
+/// stays under Bevy's 16-parameter system limit alongside wave-1's dropped
+/// item / catalog params (see `PickupContext` and `LeveledResolveContext`
+/// above for the same reasoning).
+#[derive(bevy::ecs::system::SystemParam)]
+struct ContainerActivation<'w> {
+    states: ResMut<'w, ContainerStates>,
+    active: ResMut<'w, ActiveContainerTarget>,
+    modal_requests: MessageWriter<'w, RequestStateTransition>,
+}
+
+/// Bundles wave-1's dropped-item retrieval resources (save-state removal,
+/// catalog condition lookup) for the same 16-parameter reason as
+/// `ContainerActivation`.
+#[derive(bevy::ecs::system::SystemParam)]
+struct PickupContext<'w> {
+    save_state: Option<ResMut<'w, super::world::ActiveSaveState>>,
+    catalog: Option<Res<'w, PreparedItemCatalog>>,
+}
+
+/// Converts the manifest's leveled-list bodies into `leveled`'s std-only
+/// mirror types (the same mirror pattern `persist_policy` uses toward
+/// `save`; see `leveled`'s module doc).
+fn leveled_lists_from_manifest(
+    lists: &BTreeMap<u32, PreparedLeveledList>,
+) -> BTreeMap<u32, leveled::PreparedLeveledList> {
+    lists
+        .iter()
+        .map(|(form_id, list)| {
+            (
+                *form_id,
+                leveled::PreparedLeveledList {
+                    chance_none: list.chance_none,
+                    flags: list.flags,
+                    entries: list
+                        .entries
+                        .iter()
+                        .map(|entry| leveled::PreparedLeveledEntry {
+                            level: entry.level,
+                            base_form_id: entry.base_form_id,
+                            count: entry.count,
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
@@ -512,8 +684,9 @@ fn activate_focused_placement(
     mut door_travel: MessageWriter<DoorTravelRequested>,
     mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
     mut pending_travel: ResMut<PendingDoorTravel>,
-    mut save_state: Option<ResMut<super::world::ActiveSaveState>>,
-    catalog: Option<Res<PreparedItemCatalog>>,
+    mut container_activation: ContainerActivation,
+    resolve_context: LeveledResolveContext,
+    mut pickup_context: PickupContext,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -533,7 +706,7 @@ fn activate_focused_placement(
         PreparedSemantic::Pickup(_) => {
             let count = placement.count.max(1);
             if let Some(runtime_item) = runtime_item {
-                let Some(save_state) = save_state.as_mut() else {
+                let Some(save_state) = pickup_context.save_state.as_mut() else {
                     notice.show("Dropped-item persistence is not ready");
                     return;
                 };
@@ -549,7 +722,8 @@ fn activate_focused_placement(
                     runtime_item.runtime_id, runtime_item.cell_form_id
                 );
             } else {
-                let condition = catalog
+                let condition = pickup_context
+                    .catalog
                     .as_deref()
                     .into_iter()
                     .flat_map(|catalog| &catalog.items)
@@ -579,32 +753,83 @@ fn activate_focused_placement(
             commands.entity(entity).despawn();
         }
         PreparedSemantic::Container => {
-            let opening = !state.open.contains(&entity);
-            let transition = if opening {
-                state.open.insert(entity);
-                write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
-                notice.show(format!(
-                    "{name}: {}",
-                    inventory_summary(&placement.inventory)
-                ));
-                ClipTransition::Opening
+            // Issue #75 (F75.2): activation now opens the paused transfer
+            // modal rather than toggling a notice in place. `E` on an
+            // already-open container is unreachable in practice --
+            // `activate_focused_placement` only runs in `GameplayModal::None`
+            // (see `install`), and opening a container leaves that state --
+            // but a leftover `open` marker (e.g. restored by a future
+            // persistence apply before the modal system observes it) is
+            // guarded against rather than trusted.
+            if state.open.contains(&entity) {
+                return;
+            }
+            let seed_entries: Vec<container_policy::SeedEntry> = placement
+                .inventory
+                .iter()
+                .map(|entry| container_policy::SeedEntry {
+                    base_form_id: entry.base_form_id,
+                    count: entry.count,
+                    leveled: entry.leveled,
+                })
+                .collect();
+            // #74: leveled entries roll exactly once, on first open, seeded
+            // from playthrough seed + active cell + this reference — two
+            // runs of one playthrough resolve identically, and distinct
+            // containers roll independently. The manifest's list bodies are
+            // converted to `leveled`'s std-only mirror types lazily, only
+            // when this container actually carries a leveled entry.
+            let active_cell = resolve_context
+                .active_cell
+                .as_ref()
+                .map(|cell| cell.0)
+                .unwrap_or_default();
+            let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+                resolve_context
+                    .resident_cells
+                    .as_ref()
+                    .and_then(|cells| cells.0.get(&active_cell))
+                    .map(|resident| leveled_lists_from_manifest(&resident.manifest.leveled_lists))
+                    .unwrap_or_default()
             } else {
-                state.open.remove(&entity);
-                write_sound(&mut sounds, placement.audio.close_sound_form_id, position);
-                notice.show(format!("Closed {name}"));
-                ClipTransition::Closing
+                BTreeMap::new()
             };
+            let seed = leveled::LeveledSeed::derive(
+                resolve_context
+                    .playthrough_seed
+                    .as_ref()
+                    .map(|seed| seed.0)
+                    .unwrap_or_default(),
+                active_cell,
+                placement.reference_form_id,
+            );
+            let resolved = container_activation.states.open(
+                placement.reference_form_id,
+                &seed_entries,
+                |list_form_id| {
+                    leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
+                },
+            );
+            let stack_count = resolved.stacks.len();
+            state.open.insert(entity);
+            container_activation.active.0 = Some(ActiveContainer {
+                entity,
+                reference_form_id: placement.reference_form_id,
+                name: name.clone(),
+                item_names: container_item_names(&placement.inventory),
+            });
+            write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {
                 root: entity,
-                transition,
+                transition: ClipTransition::Opening,
                 lead_ms: 0.0,
             });
+            container_activation
+                .modal_requests
+                .write(RequestStateTransition::Modal(GameplayModal::Container));
             info!(
-                "container {} ({:08x}) {} with {} fixed entries",
-                name,
-                placement.reference_form_id,
-                if opening { "opened" } else { "closed" },
-                placement.inventory.len()
+                "container {} ({:08x}) opened with {} stacks",
+                name, placement.reference_form_id, stack_count
             );
         }
         PreparedSemantic::Door(door) => {
@@ -783,6 +1008,15 @@ fn door_is_locked(door: &PreparedDoor, inventory: &PlayerInventory) -> bool {
         .is_none_or(|key_form_id| !inventory.contains(key_form_id))
 }
 
+fn entry_display_name(entry: &PreparedInventoryEntry) -> String {
+    entry
+        .display_name
+        .as_deref()
+        .or(entry.editor_id.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{:08x}", entry.base_form_id))
+}
+
 fn inventory_summary(entries: &[PreparedInventoryEntry]) -> String {
     if entries.is_empty() {
         return "empty".into();
@@ -791,21 +1025,26 @@ fn inventory_summary(entries: &[PreparedInventoryEntry]) -> String {
     let mut summary = entries
         .iter()
         .take(DISPLAY_LIMIT)
-        .map(|entry| {
-            let name = entry
-                .display_name
-                .as_deref()
-                .or(entry.editor_id.as_deref())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{:08x}", entry.base_form_id));
-            format!("{name} x{}", entry.count)
-        })
+        .map(|entry| format!("{} x{}", entry_display_name(entry), entry.count))
         .collect::<Vec<_>>()
         .join(", ");
     if entries.len() > DISPLAY_LIMIT {
         summary.push_str(&format!(", +{} more", entries.len() - DISPLAY_LIMIT));
     }
     summary
+}
+
+/// F75.2: best-effort `base_form_id -> name` lookup for the transfer modal,
+/// built from a container's fixed (non-leveled) prepared inventory entries
+/// at open time. Leveled-resolved items and anything already in the
+/// player's inventory from elsewhere have no name source here -- the
+/// transfer UI falls back to the hex form id for those, matching this
+/// issue's "name + count is enough" scope.
+fn container_item_names(entries: &[PreparedInventoryEntry]) -> HashMap<u32, String> {
+    entries
+        .iter()
+        .map(|entry| (entry.base_form_id, entry_display_name(entry)))
+        .collect()
 }
 
 #[cfg(test)]

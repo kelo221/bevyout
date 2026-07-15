@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// `LVLI`/`LVLN`/`LVLC` leveled-list body (issue #74): `LVLD` (chance-none
+/// percentage), `LVLF` (flags byte), and zero or more `LVLO` entries. OpenMW
+/// `components/esm4/loadlvli.cpp` (`ESM4::LevelledItem::load`),
+/// `loadlvlc.cpp` (`ESM4::LevelledCreature::load`), and `loadlvln.cpp`
+/// (`ESM4::LevelledNpc::load`) all read the same three subrecords for their
+/// respective record kinds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LeveledListData {
+    pub(crate) chance_none: u8,
+    pub(crate) flags: u8,
+    pub(crate) entries: Vec<LeveledListEntry>,
+}
+
+/// One `LVLO` entry. OpenMW's `struct LVLO` (`components/esm4/inventory.hpp`)
+/// is `{ i16 level; u16 unknown; FormId32 item; i16 count; u16 unknown2; }`
+/// (12 bytes); FO3 content also carries an 8-byte legacy layout dropping
+/// both `unknown` fields (`level`, `item`, `count` only), which OpenMW's
+/// three leveled-list loaders special-case identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LeveledListEntry {
+    pub(crate) level: u16,
+    pub(crate) item_form_id: u32,
+    pub(crate) count: i32,
+}
+
+pub(crate) fn is_leveled_list(sig: &str) -> bool {
+    matches!(sig, "LVLI" | "LVLN" | "LVLC")
+}
+
 pub(crate) fn parse_base(
     sig: &str,
     subs: &[Subrecord],
@@ -24,6 +53,7 @@ pub(crate) fn parse_base(
         .filter_map(|subrecord| parse_inventory_item(&subrecord.data, resolver))
         .collect();
     let audio = parse_base_audio(sig, subs, resolver);
+    let leveled = is_leveled_list(sig).then(|| parse_leveled_list(subs, resolver));
     Some(BaseRecord {
         kind: sig.to_string(),
         editor_id: sub(subs, "EDID").map(cstring),
@@ -42,14 +72,55 @@ pub(crate) fn parse_base(
         light,
         inventory,
         audio,
+        leveled,
         ignored_subrecords: ignored_signatures(
             subs,
             &[
                 "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM",
-                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "ICON", "MICO", "ICO2", "MIC2", "DESC",
-                "EFID", "EFIT", "SCIT", "DNAM",
+                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO",
+                "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM",
             ],
         ),
+    })
+}
+
+pub(crate) fn parse_leveled_list(subs: &[Subrecord], resolver: &FormIdResolver) -> LeveledListData {
+    LeveledListData {
+        chance_none: sub(subs, "LVLD")
+            .and_then(|data| data.first().copied())
+            .unwrap_or(0),
+        flags: sub(subs, "LVLF")
+            .and_then(|data| data.first().copied())
+            .unwrap_or(0),
+        entries: subs
+            .iter()
+            .filter(|subrecord| subrecord.signature == "LVLO")
+            .filter_map(|subrecord| parse_leveled_entry(&subrecord.data, resolver))
+            .collect(),
+    }
+}
+
+pub(crate) fn parse_leveled_entry(
+    data: &[u8],
+    resolver: &FormIdResolver,
+) -> Option<LeveledListEntry> {
+    let (level, item, count) = match data.len() {
+        8 => (
+            i16::from_le_bytes(data[0..2].try_into().ok()?),
+            u32::from_le_bytes(data[2..6].try_into().ok()?),
+            i16::from_le_bytes(data[6..8].try_into().ok()?),
+        ),
+        12 => (
+            i16::from_le_bytes(data[0..2].try_into().ok()?),
+            u32::from_le_bytes(data[4..8].try_into().ok()?),
+            i16::from_le_bytes(data[8..10].try_into().ok()?),
+        ),
+        _ => return None,
+    };
+    Some(LeveledListEntry {
+        level: level.max(0) as u16,
+        item_form_id: resolver.adjust(item),
+        count: i32::from(count),
     })
 }
 

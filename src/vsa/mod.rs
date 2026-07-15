@@ -29,9 +29,9 @@ pub(crate) use manifest::{
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
     PreparedDropCollider, PreparedFootstepSet, PreparedInventoryEntry, PreparedItemCatalog,
-    PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedPhysicsClassification,
-    PreparedPickup, PreparedPlacement, PreparedRuntimeMutability, PreparedSceneManifest,
-    PreparedSemantic, cell_label, ensure_baked_scene_compatible,
+    PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedLeveledList,
+    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedRuntimeMutability,
+    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
     ensure_prepared_manifest_compatible,
 };
 pub(crate) use paths::{FO3_SCALE, fingerprint};

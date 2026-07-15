@@ -287,6 +287,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
             script_addressable: 1,
             unknown: 1,
         },
+        leveled_lists: BTreeMap::new(),
     };
 
     assert_eq!(manifest.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
@@ -399,4 +400,122 @@ fn schema_three_semantics_round_trip_through_ron() {
     assert_eq!(decoded.semantic, placement.semantic);
     assert_eq!(decoded.reference_kind, "REFR");
     assert_eq!(decoded.base_kind, "DOOR");
+}
+
+// T74.3: manifest round trip with and without `leveled_lists` (issue #74).
+
+#[test]
+fn manifest_without_leveled_lists_field_deserializes_to_an_empty_map() {
+    let text = format!(
+        r#"(
+                schema_version: {},
+                asset_root: "cache",
+                source_plugin: "Fallout3.esm",
+                source_fingerprint: "fingerprint",
+                cell: (
+                    form_id: 1,
+                    editor_id: None,
+                    name: None,
+                    interior: true,
+                    ambient_rgba: (0.0, 0.0, 0.0, 0.0),
+                    directional_rgba: (0.0, 0.0, 0.0, 0.0),
+                ),
+                placements: [],
+                lights: [],
+                diagnostics: [],
+            )"#,
+        CURRENT_MANIFEST_SCHEMA_VERSION
+    );
+    let manifest: PreparedSceneManifest = ron::de::from_str(&text).unwrap();
+    assert!(manifest.leveled_lists.is_empty());
+}
+
+#[test]
+fn leveled_lists_with_nested_entries_round_trip_through_ron() {
+    let mut leveled_lists = BTreeMap::new();
+    leveled_lists.insert(
+        0x100,
+        PreparedLeveledList {
+            chance_none: 25,
+            flags: 0x02,
+            entries: vec![
+                PreparedLeveledEntry {
+                    level: 1,
+                    base_form_id: 0x200,
+                    count: 1,
+                },
+                // References the nested list below.
+                PreparedLeveledEntry {
+                    level: 5,
+                    base_form_id: 0x300,
+                    count: 2,
+                },
+            ],
+        },
+    );
+    leveled_lists.insert(
+        0x300,
+        PreparedLeveledList {
+            chance_none: 0,
+            flags: 0,
+            entries: vec![PreparedLeveledEntry {
+                level: 1,
+                base_form_id: 0x400,
+                count: 3,
+            }],
+        },
+    );
+
+    let manifest = PreparedSceneManifest {
+        schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+        prepare_revision: None,
+        converter_revision: None,
+        physics_schema_version: None,
+        asset_root: "cache".into(),
+        source_plugin: "Fallout3.esm".into(),
+        source_fingerprint: "fingerprint".into(),
+        source_plugins: Vec::new(),
+        cell: CellInfo {
+            form_id: 1,
+            editor_id: None,
+            name: None,
+            interior: true,
+            ambient_rgba: [0.0; 4],
+            directional_rgba: [0.0; 4],
+            image_space_form_id: None,
+            image_space: None,
+            lighting_template_form_id: None,
+            lighting_template_flags: 0,
+            lighting_template: None,
+            raw_lighting: None,
+            effective_lighting: None,
+            water_form_id: None,
+            water_height: None,
+            grid: None,
+            worldspace_form_id: None,
+        },
+        placements: Vec::new(),
+        lights: Vec::new(),
+        diagnostics: Vec::new(),
+        visual_issues: Vec::new(),
+        navmeshes: Vec::new(),
+        cell_audio: PreparedCellAudio::default(),
+        audio_clips: Vec::new(),
+        footstep_sets: Vec::new(),
+        hard_landing_clips: Vec::new(),
+        bake: None,
+        static_point_shadows: None,
+        mutability_summary: PreparedMutabilitySummary::default(),
+        leveled_lists,
+        item_catalog_path: None,
+        item_catalog_revision: None,
+        item_catalog_hash: None,
+    };
+
+    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).unwrap();
+    let decoded: PreparedSceneManifest = ron::de::from_str(&text).unwrap();
+    assert_eq!(decoded.leveled_lists, manifest.leveled_lists);
+    let re_encoded =
+        ron::ser::to_string_pretty(&decoded, ron::ser::PrettyConfig::default()).unwrap();
+    assert_eq!(re_encoded, text);
 }

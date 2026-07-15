@@ -21,6 +21,11 @@ pub(crate) enum GameplayModal {
     Paused,
     Dialogue,
     PipBoy,
+    /// Container transfer modal (issue #75). Follows the `PipBoy` precedent
+    /// (its own dedicated variant, not a reuse of `Dialogue`) now that both
+    /// waves have landed; see `viewer::interaction::transfer_ui`'s module
+    /// doc for the migration history.
+    Container,
     Console,
     /// Issue #52's door-transition fallback: a destination cell that is not
     /// resident-`Ready` shows a minimal loading overlay while its manifest
@@ -74,6 +79,8 @@ const LEGAL_MODAL_TRANSITIONS: &[(GameplayModal, GameplayModal)] = &[
     (GameplayModal::Dialogue, GameplayModal::None),
     (GameplayModal::None, GameplayModal::PipBoy),
     (GameplayModal::PipBoy, GameplayModal::None),
+    (GameplayModal::None, GameplayModal::Container),
+    (GameplayModal::Container, GameplayModal::None),
     (GameplayModal::None, GameplayModal::Console),
     (GameplayModal::Console, GameplayModal::None),
     (GameplayModal::None, GameplayModal::Loading),
@@ -192,7 +199,10 @@ fn toggle_paused_on_escape(
         GameplayModal::None => GameplayModal::Paused,
         GameplayModal::Paused => GameplayModal::None,
         GameplayModal::Console => GameplayModal::None,
-        GameplayModal::Dialogue | GameplayModal::PipBoy | GameplayModal::Loading => return,
+        GameplayModal::Dialogue
+        | GameplayModal::PipBoy
+        | GameplayModal::Container
+        | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
 }
@@ -213,6 +223,7 @@ fn toggle_pipboy_on_tab(
         GameplayModal::PipBoy => GameplayModal::None,
         GameplayModal::Paused
         | GameplayModal::Dialogue
+        | GameplayModal::Container
         | GameplayModal::Console
         | GameplayModal::Loading => return,
     };
@@ -235,6 +246,7 @@ fn toggle_console_on_backquote(
         GameplayModal::Paused
         | GameplayModal::Dialogue
         | GameplayModal::PipBoy
+        | GameplayModal::Container
         | GameplayModal::Loading => return,
     };
     requests.write(RequestStateTransition::Modal(target));
@@ -309,6 +321,8 @@ impl Plugin for AppStatePlugin {
             .add_systems(OnEnter(GameplayModal::Console), pause_virtual_time)
             .add_systems(OnExit(GameplayModal::Console), resume_virtual_time)
             .add_systems(OnEnter(GameplayModal::PipBoy), pause_virtual_time)
-            .add_systems(OnExit(GameplayModal::PipBoy), resume_virtual_time);
+            .add_systems(OnExit(GameplayModal::PipBoy), resume_virtual_time)
+            .add_systems(OnEnter(GameplayModal::Container), pause_virtual_time)
+            .add_systems(OnExit(GameplayModal::Container), resume_virtual_time);
     }
 }

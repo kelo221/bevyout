@@ -82,6 +82,7 @@ fn every_legal_modal_transition_lands_in_expected_state() {
         GameplayModal::Paused,
         GameplayModal::Dialogue,
         GameplayModal::PipBoy,
+        GameplayModal::Container,
         GameplayModal::Console,
     ] {
         apply(&mut app, RequestStateTransition::Modal(modal));
@@ -164,6 +165,7 @@ fn modal_round_trip_gates_a_none_only_counter() {
         GameplayModal::Paused,
         GameplayModal::PipBoy,
         GameplayModal::Dialogue,
+        GameplayModal::Container,
         GameplayModal::Console,
     ] {
         apply(&mut app, RequestStateTransition::Modal(modal));
@@ -214,6 +216,8 @@ fn probe_system_runs_exactly_once_per_frame_across_modal_round_trip() {
         RequestStateTransition::Modal(GameplayModal::None),
         RequestStateTransition::Modal(GameplayModal::Dialogue),
         RequestStateTransition::Modal(GameplayModal::None),
+        RequestStateTransition::Modal(GameplayModal::Container),
+        RequestStateTransition::Modal(GameplayModal::None),
         RequestStateTransition::Modal(GameplayModal::Console),
         RequestStateTransition::Modal(GameplayModal::None),
     ];
@@ -254,6 +258,20 @@ fn console_modal_pauses_and_resumes_virtual_time() {
     apply(
         &mut app,
         RequestStateTransition::Modal(GameplayModal::Console),
+    );
+    assert!(app.world().resource::<Time<Virtual>>().is_paused());
+    apply(&mut app, RequestStateTransition::Modal(GameplayModal::None));
+    assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+}
+
+#[test]
+fn container_modal_pauses_and_resumes_virtual_time() {
+    let mut app = test_app();
+    apply(&mut app, RequestStateTransition::App(AppState::Loading));
+    apply(&mut app, RequestStateTransition::App(AppState::InGame));
+    apply(
+        &mut app,
+        RequestStateTransition::Modal(GameplayModal::Container),
     );
     assert!(app.world().resource::<Time<Virtual>>().is_paused());
     apply(&mut app, RequestStateTransition::Modal(GameplayModal::None));

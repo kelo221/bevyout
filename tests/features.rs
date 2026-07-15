@@ -125,6 +125,13 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
+// `interaction::container_policy` (issue #75) is dependency-free too (std
+// only, no Bevy) -- see its module doc comment -- so it is included
+// verbatim here too.
+#[path = "../src/viewer/interaction/container_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod container_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -191,6 +198,14 @@ mod vsa_bake {
     }
 }
 use vsa_bake::bake::plan as bake_plan;
+
+// `viewer::interaction::leveled` (issue #74) is dependency-free (std only,
+// no Bevy, no `vsa::manifest` import -- see its module doc comment for why
+// it mirrors `PreparedLeveledList`/`PreparedLeveledEntry` with local plain
+// types), so unlike the modules above it needs no nesting or stand-ins to
+// include verbatim.
+#[path = "../src/viewer/interaction/leveled.rs"]
+mod leveled;
 
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
@@ -332,6 +347,25 @@ struct BevyoutWorld {
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
     performance_summary: Option<performance_policy::FrameProbeSummary>,
+
+    // -- leveled_lists.feature (issue #74) --
+    leveled_lists: std::collections::BTreeMap<u32, leveled::PreparedLeveledList>,
+    leveled_seeds: std::collections::HashMap<String, leveled::LeveledSeed>,
+    leveled_last_resolution: Option<Vec<(u32, i32)>>,
+    // -- container_transfer.feature (issue #75) --
+    container_seed_entries: Vec<container_policy::SeedEntry>,
+    container_resolver_lists: std::collections::BTreeMap<u32, Vec<(u32, i32)>>,
+    container_resolver_calls: u32,
+    container_state: Option<container_policy::ContainerState>,
+    container_stacks: Vec<(u32, i32)>,
+    player_stacks: Vec<(u32, i32)>,
+    transfer_result: Option<Result<i32, container_policy::TransferError>>,
+    // -- container_persistence.feature (issue #76) --
+    container_baselines: std::collections::HashMap<u32, persist_policy::ContainerBaseline>,
+    container_snapshots: std::collections::HashMap<u32, persist_policy::ContainerSnapshot>,
+    container_captured: Option<std::collections::HashMap<u32, persist_policy::ContainerDelta>>,
+    container_deltas: std::collections::HashMap<u32, persist_policy::ContainerDelta>,
+    container_seeded: Option<std::collections::HashMap<u32, persist_policy::ContainerSnapshot>>,
 }
 
 fn find_placement<'a>(
@@ -2805,6 +2839,517 @@ async fn then_frame_probe_p95_and_max(world: &mut BevyoutWorld, p95: f64, max: f
 #[then(regex = r"^(\d+) frames? exceed(?:s)? the probe budget$")]
 async fn then_frames_exceed_budget(world: &mut BevyoutWorld, count: usize) {
     assert_eq!(performance_summary(world).over_budget_count, count);
+}
+
+// ---------------------------------------------------------------------
+// leveled_lists.feature (issue #74)
+// ---------------------------------------------------------------------
+
+/// Parses "level:base_form_id:count" entries, comma-separated; an empty
+/// string yields no entries.
+fn parse_leveled_entries(text: &str) -> Vec<leveled::PreparedLeveledEntry> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let fields: Vec<&str> = part.split(':').collect();
+            let [level, base_form_id, count] = fields.as_slice() else {
+                panic!("leveled entry must be \"level:base_form_id:count\", got {part:?}");
+            };
+            leveled::PreparedLeveledEntry {
+                level: level.parse().expect("entry level must be a u16"),
+                base_form_id: base_form_id.parse().expect("entry form id must be a u32"),
+                count: count.parse().expect("entry count must be an i32"),
+            }
+        })
+        .collect()
+}
+
+/// Parses "base_form_id x count" stacks, comma-separated; an empty string
+/// yields no stacks.
+fn parse_resolved_stacks(text: &str) -> Vec<(u32, i32)> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (form_id, count) = part
+                .split_once('x')
+                .expect("resolved stack must be \"base_form_id x count\"");
+            (
+                form_id.trim().parse().expect("stack form id must be a u32"),
+                count.trim().parse().expect("stack count must be an i32"),
+            )
+        })
+        .collect()
+}
+
+fn parse_leveled_flags(token: &str) -> u8 {
+    match token {
+        "use-all" => leveled::LEVELED_USE_ALL,
+        "calculate-for-each-item" => leveled::LEVELED_CALCULATE_FOR_EACH_ITEM,
+        numeric => numeric
+            .parse()
+            .expect("flags must be numeric or a known name"),
+    }
+}
+
+#[given(
+    regex = r#"^leveled list (\d+) with chance-none (\d+) and flags (\S+) and entries "([^"]*)"$"#
+)]
+async fn given_leveled_list(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+    chance_none: u8,
+    flags: String,
+    entries: String,
+) {
+    world.leveled_lists.insert(
+        form_id,
+        leveled::PreparedLeveledList {
+            chance_none,
+            flags: parse_leveled_flags(&flags),
+            entries: parse_leveled_entries(&entries),
+        },
+    );
+}
+
+#[given(
+    regex = r#"^a leveled seed from playthrough (\d+), cell (\d+), reference (\d+) named "([^"]+)"$"#
+)]
+async fn given_leveled_seed(
+    world: &mut BevyoutWorld,
+    playthrough_seed: u64,
+    cell_form_id: u32,
+    reference_form_id: u32,
+    name: String,
+) {
+    world.leveled_seeds.insert(
+        name,
+        leveled::LeveledSeed::derive(playthrough_seed, cell_form_id, reference_form_id),
+    );
+}
+
+#[when(regex = r#"^list (\d+) is resolved for player level (\d+) using seed "([^"]+)"$"#)]
+async fn when_leveled_list_resolved(
+    world: &mut BevyoutWorld,
+    list_form_id: u32,
+    player_level: u16,
+    seed_name: String,
+) {
+    let seed = *world
+        .leveled_seeds
+        .get(&seed_name)
+        .unwrap_or_else(|| panic!("no leveled seed named {seed_name:?}"));
+    world.leveled_last_resolution = Some(leveled::resolve_leveled(
+        list_form_id,
+        &world.leveled_lists,
+        seed,
+        player_level,
+    ));
+}
+
+#[then("the resolved stacks are empty")]
+async fn then_resolved_stacks_are_empty(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .leveled_last_resolution
+            .as_ref()
+            .expect("no leveled resolution computed yet")
+            .is_empty()
+    );
+}
+
+#[then(regex = r#"^the resolved stacks are "([^"]*)"$"#)]
+async fn then_resolved_stacks_are(world: &mut BevyoutWorld, expected: String) {
+    let resolved = world
+        .leveled_last_resolution
+        .as_ref()
+        .expect("no leveled resolution computed yet");
+    assert_eq!(*resolved, parse_resolved_stacks(&expected));
+}
+
+#[then(regex = r#"^seeds "([^"]+)" and "([^"]+)" are identical$"#)]
+async fn then_leveled_seeds_are_identical(world: &mut BevyoutWorld, a: String, b: String) {
+    assert_eq!(world.leveled_seeds[&a], world.leveled_seeds[&b]);
+}
+
+#[then(regex = r#"^seeds "([^"]+)" and "([^"]+)" are different$"#)]
+async fn then_leveled_seeds_are_different(world: &mut BevyoutWorld, a: String, b: String) {
+    assert_ne!(world.leveled_seeds[&a], world.leveled_seeds[&b]);
+}
+
+// ---------------------------------------------------------------------
+// container_transfer.feature (issue #75)
+// ---------------------------------------------------------------------
+
+fn parse_container_form_id(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16).expect("hex form id")
+}
+
+#[given(regex = r"^a container inventory entry 0x([0-9a-fA-F]+) x(-?\d+) leveled (yes|no)$")]
+async fn given_container_inventory_entry(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    count: i32,
+    leveled: String,
+) {
+    world
+        .container_seed_entries
+        .push(container_policy::SeedEntry {
+            base_form_id: parse_container_form_id(&form_id),
+            count,
+            leveled: leveled == "yes",
+        });
+}
+
+#[given(
+    regex = r"^the leveled resolver for list 0x([0-9a-fA-F]+) returns 0x([0-9a-fA-F]+) x(-?\d+)$"
+)]
+async fn given_leveled_resolver_returns(
+    world: &mut BevyoutWorld,
+    list_form_id: String,
+    item_form_id: String,
+    count: i32,
+) {
+    world
+        .container_resolver_lists
+        .entry(parse_container_form_id(&list_form_id))
+        .or_default()
+        .push((parse_container_form_id(&item_form_id), count));
+}
+
+/// Shared by both "opened for the first time" and "reopened" steps: runs
+/// `container_policy::open_container` against the world's current state,
+/// counting resolver calls and syncing `container_stacks` (the single
+/// source of truth the transfer `Then` steps below read) from the result.
+fn open_world_container(world: &mut BevyoutWorld) {
+    let entries = world.container_seed_entries.clone();
+    let lists = world.container_resolver_lists.clone();
+    let existing = world.container_state.take();
+    let mut calls = 0u32;
+    let resolved = container_policy::open_container(existing, &entries, |list_form_id| {
+        calls += 1;
+        lists.get(&list_form_id).cloned().unwrap_or_default()
+    });
+    world.container_resolver_calls += calls;
+    world.container_stacks = resolved.stacks.clone();
+    world.container_state = Some(resolved);
+}
+
+#[when("the container is opened for the first time")]
+async fn when_container_opened_first_time(world: &mut BevyoutWorld) {
+    open_world_container(world);
+}
+
+#[when("the container is reopened")]
+async fn when_container_reopened(world: &mut BevyoutWorld) {
+    open_world_container(world);
+}
+
+#[then("the container is resolved")]
+async fn then_container_is_resolved(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .container_state
+            .as_ref()
+            .expect("the container has not been opened")
+            .resolved
+    );
+}
+
+#[then(regex = r"^the resolver was called (\d+) times?$")]
+async fn then_resolver_called_n_times(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(world.container_resolver_calls, count);
+}
+
+#[given(regex = r"^a container stack of 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_container_stack(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    world
+        .container_stacks
+        .push((parse_container_form_id(&form_id), count));
+}
+
+#[given(regex = r"^a player stack of 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_player_stack(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    world
+        .player_stacks
+        .push((parse_container_form_id(&form_id), count));
+}
+
+#[when(regex = r"^one 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_one(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_one(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^a stack of (-?\d+) 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_stack(world: &mut BevyoutWorld, count: i32, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_stack(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+        count,
+    ));
+}
+
+#[when(regex = r"^all 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_all(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_all(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^one 0x([0-9a-fA-F]+) is stored into the container$")]
+async fn when_store_one(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::store_one(
+        &mut world.player_stacks,
+        &mut world.container_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^a stack of (-?\d+) 0x([0-9a-fA-F]+) is stored into the container$")]
+async fn when_store_stack(world: &mut BevyoutWorld, count: i32, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::store_stack(
+        &mut world.player_stacks,
+        &mut world.container_stacks,
+        form_id,
+        count,
+    ));
+}
+
+#[then(regex = r"^the container stack for 0x([0-9a-fA-F]+) is (-?\d+)$")]
+async fn then_container_stack_is(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    let form_id = parse_container_form_id(&form_id);
+    assert_eq!(
+        container_policy::stack_count(&world.container_stacks, form_id),
+        count
+    );
+}
+
+#[then(regex = r"^the player stack for 0x([0-9a-fA-F]+) is (-?\d+)$")]
+async fn then_player_stack_is(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    let form_id = parse_container_form_id(&form_id);
+    assert_eq!(
+        container_policy::stack_count(&world.player_stacks, form_id),
+        count
+    );
+}
+
+#[then("the transfer is rejected")]
+async fn then_transfer_is_rejected(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .transfer_result
+            .as_ref()
+            .expect("no transfer op has run yet")
+            .is_err()
+    );
+}
+
+// ---------------------------------------------------------------------
+// container_persistence.feature (issue #76) -- appended section, do not
+// interleave; new steps for this issue belong below this marker.
+// ---------------------------------------------------------------------
+
+/// Parses `0x<hex> x <count>` (e.g. "0x00000010 x 3") into a single-entry
+/// stack list, matching the `Vec<(u32, i32)>` shape `persist_policy`'s
+/// container types use.
+fn parse_single_stack(hex: &str, count: i32) -> Vec<(u32, i32)> {
+    vec![(parse_hex(hex), count)]
+}
+
+#[given(regex = r"^a container baseline 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn given_container_baseline(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_baselines.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerBaseline {
+            stacks: parse_single_stack(&item_hex, count),
+        },
+    );
+}
+
+#[given(regex = r"^a container snapshot 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn given_container_snapshot(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_snapshots.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerSnapshot {
+            stacks: parse_single_stack(&item_hex, count),
+            resolved: false,
+        },
+    );
+}
+
+#[given(
+    regex = r"^a resolved container snapshot 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+)$"
+)]
+async fn given_resolved_container_snapshot(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_snapshots.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerSnapshot {
+            stacks: parse_single_stack(&item_hex, count),
+            resolved: true,
+        },
+    );
+}
+
+#[when("container state is captured")]
+async fn when_container_state_captured(world: &mut BevyoutWorld) {
+    world.container_captured = Some(persist_policy::diff_capture_containers(
+        &world.container_baselines,
+        &world.container_snapshots,
+    ));
+}
+
+fn captured_container_delta(world: &BevyoutWorld, form_id: u32) -> persist_policy::ContainerDelta {
+    world
+        .container_captured
+        .as_ref()
+        .expect("container state not captured yet")
+        .get(&form_id)
+        .cloned()
+        .expect("no container delta captured for reference")
+}
+
+#[then(regex = r"^no container delta is captured for 0x([0-9a-fA-F]+)$")]
+async fn then_no_container_delta(world: &mut BevyoutWorld, hex: String) {
+    let captured = world
+        .container_captured
+        .as_ref()
+        .expect("container state not captured yet");
+    assert!(!captured.contains_key(&parse_hex(&hex)));
+}
+
+#[then(
+    regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has stack 0x([0-9a-fA-F]+) x (-?\d+)$"
+)]
+async fn then_captured_container_delta_has_stack(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let delta = captured_container_delta(world, parse_hex(&container_hex));
+    assert_eq!(delta.inventory, Some(parse_single_stack(&item_hex, count)));
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has no resolved marker$")]
+async fn then_captured_container_delta_has_no_resolved_marker(
+    world: &mut BevyoutWorld,
+    hex: String,
+) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.leveled_resolved, None);
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) has no inventory override$")]
+async fn then_captured_container_delta_has_no_inventory(world: &mut BevyoutWorld, hex: String) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.inventory, None);
+}
+
+#[then(regex = r"^the captured container delta for 0x([0-9a-fA-F]+) is resolved$")]
+async fn then_captured_container_delta_is_resolved(world: &mut BevyoutWorld, hex: String) {
+    let delta = captured_container_delta(world, parse_hex(&hex));
+    assert_eq!(delta.leveled_resolved, Some(true));
+}
+
+#[given(
+    regex = r"^a container delta 0x([0-9a-fA-F]+) with stack 0x([0-9a-fA-F]+) x (-?\d+) and resolved$"
+)]
+async fn given_container_delta(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    world.container_deltas.insert(
+        parse_hex(&container_hex),
+        persist_policy::ContainerDelta {
+            inventory: Some(parse_single_stack(&item_hex, count)),
+            leveled_resolved: Some(true),
+        },
+    );
+}
+
+#[given(regex = r"^a resolved-only container delta 0x([0-9a-fA-F]+)$")]
+async fn given_resolved_only_container_delta(world: &mut BevyoutWorld, hex: String) {
+    world.container_deltas.insert(
+        parse_hex(&hex),
+        persist_policy::ContainerDelta {
+            inventory: None,
+            leveled_resolved: Some(true),
+        },
+    );
+}
+
+#[when("the container state is applied")]
+async fn when_container_state_applied(world: &mut BevyoutWorld) {
+    world.container_seeded = Some(persist_policy::plan_apply_containers(
+        &world.container_baselines,
+        &world.container_deltas,
+    ));
+}
+
+#[then(regex = r"^no container is seeded for 0x([0-9a-fA-F]+)$")]
+async fn then_no_container_seeded(world: &mut BevyoutWorld, hex: String) {
+    let seeded = world
+        .container_seeded
+        .as_ref()
+        .expect("container state not applied yet");
+    assert!(!seeded.contains_key(&parse_hex(&hex)));
+}
+
+fn seeded_container(world: &BevyoutWorld, form_id: u32) -> persist_policy::ContainerSnapshot {
+    world
+        .container_seeded
+        .as_ref()
+        .expect("container state not applied yet")
+        .get(&form_id)
+        .cloned()
+        .expect("no container seeded for reference")
+}
+
+#[then(regex = r"^the seeded container 0x([0-9a-fA-F]+) has stack 0x([0-9a-fA-F]+) x (-?\d+)$")]
+async fn then_seeded_container_has_stack(
+    world: &mut BevyoutWorld,
+    container_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let snapshot = seeded_container(world, parse_hex(&container_hex));
+    assert_eq!(snapshot.stacks, parse_single_stack(&item_hex, count));
+}
+
+#[then(regex = r"^the seeded container 0x([0-9a-fA-F]+) is resolved$")]
+async fn then_seeded_container_is_resolved(world: &mut BevyoutWorld, hex: String) {
+    let snapshot = seeded_container(world, parse_hex(&hex));
+    assert!(snapshot.resolved);
 }
 
 fn main() {

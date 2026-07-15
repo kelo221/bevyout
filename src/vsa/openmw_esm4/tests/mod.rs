@@ -1057,3 +1057,253 @@ fn fallout3_cell_smoke_baselines() {
         );
     }
 }
+
+// T74.1: `LVLI`/`LVLN`/`LVLC` leveled-list parsing (issue #74). OpenMW
+// `components/esm4/loadlvli.cpp` (`ESM4::LevelledItem::load`),
+// `loadlvlc.cpp` (`ESM4::LevelledCreature::load`), and `loadlvln.cpp`
+// (`ESM4::LevelledNpc::load`): `LVLD` chance-none, `LVLF` flags, and one or
+// more `LVLO` entries (12-byte layout, or the 8-byte legacy layout dropping
+// both `unknown`/`unknown2` fields -- see `components/esm4/inventory.hpp`).
+
+fn lvlo12(level: i16, item: u32, count: i16) -> Vec<u8> {
+    let mut data = level.to_le_bytes().to_vec();
+    data.extend_from_slice(&0_u16.to_le_bytes());
+    data.extend_from_slice(&item.to_le_bytes());
+    data.extend_from_slice(&count.to_le_bytes());
+    data.extend_from_slice(&0_u16.to_le_bytes());
+    data
+}
+
+fn lvlo8(level: i16, item: u32, count: i16) -> Vec<u8> {
+    let mut data = level.to_le_bytes().to_vec();
+    data.extend_from_slice(&item.to_le_bytes());
+    data.extend_from_slice(&count.to_le_bytes());
+    data
+}
+
+fn no_masters_resolver() -> FormIdResolver {
+    FormIdResolver {
+        current_index: 0,
+        master_indices: Vec::new(),
+    }
+}
+
+#[test]
+fn parses_flat_leveled_item_list_with_chance_none_and_flags() {
+    let resolver = no_masters_resolver();
+    let base = parse_base(
+        "LVLI",
+        &[
+            Subrecord {
+                signature: "EDID".into(),
+                data: b"LootList\0".to_vec(),
+            },
+            Subrecord {
+                signature: "LVLD".into(),
+                data: vec![25],
+            },
+            Subrecord {
+                signature: "LVLF".into(),
+                data: vec![0x02], // LVLF: "calculate for each item" bit; interpreted by the resolver, not this parser.
+            },
+            Subrecord {
+                signature: "LVLO".into(),
+                data: lvlo12(1, 0x100, 1),
+            },
+            Subrecord {
+                signature: "LVLO".into(),
+                data: lvlo12(5, 0x101, 2),
+            },
+        ],
+        &resolver,
+    )
+    .unwrap();
+    let leveled = base.leveled.as_ref().unwrap();
+    assert_eq!(leveled.chance_none, 25);
+    assert_eq!(leveled.flags, 0x02);
+    assert_eq!(
+        leveled.entries,
+        vec![
+            LeveledListEntry {
+                level: 1,
+                item_form_id: 0x100,
+                count: 1
+            },
+            LeveledListEntry {
+                level: 5,
+                item_form_id: 0x101,
+                count: 2
+            },
+        ]
+    );
+    assert!(base.ignored_subrecords.is_empty());
+}
+
+#[test]
+fn parses_legacy_eight_byte_lvlo_and_leveled_creature_npc_kinds() {
+    let resolver = no_masters_resolver();
+    let creature = parse_base(
+        "LVLC",
+        &[Subrecord {
+            signature: "LVLO".into(),
+            data: lvlo8(3, 0x200, 1),
+        }],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(
+        creature.leveled.unwrap().entries,
+        vec![LeveledListEntry {
+            level: 3,
+            item_form_id: 0x200,
+            count: 1
+        }]
+    );
+
+    let npc = parse_base(
+        "LVLN",
+        &[Subrecord {
+            signature: "LVLO".into(),
+            data: lvlo8(2, 0x201, 1),
+        }],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(
+        npc.leveled.unwrap().entries,
+        vec![LeveledListEntry {
+            level: 2,
+            item_form_id: 0x201,
+            count: 1
+        }]
+    );
+}
+
+#[test]
+fn nested_leveled_list_entry_points_at_another_leveled_list_form_id() {
+    let resolver = no_masters_resolver();
+    let outer = parse_base(
+        "LVLI",
+        &[
+            Subrecord {
+                signature: "LVLD".into(),
+                data: vec![0],
+            },
+            Subrecord {
+                signature: "LVLO".into(),
+                data: lvlo12(1, 0x300, 1),
+            },
+        ],
+        &resolver,
+    )
+    .unwrap();
+    // The parser does not know or care that 0x300 is itself a leveled list;
+    // that transitive expansion happens in `prepare::placements` and the
+    // resolver only sees FormIDs here.
+    assert_eq!(outer.leveled.unwrap().entries[0].item_form_id, 0x300);
+}
+
+#[test]
+fn chance_none_one_hundred_is_preserved_verbatim() {
+    let resolver = no_masters_resolver();
+    let base = parse_base(
+        "LVLI",
+        &[Subrecord {
+            signature: "LVLD".into(),
+            data: vec![100],
+        }],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(base.leveled.unwrap().chance_none, 100);
+}
+
+#[test]
+fn mutually_referencing_leveled_lists_parse_independently() {
+    // Parser-level cycle tolerance: list A's LVLO points at list B's FormID
+    // and vice versa. Parsing either record is independent of the other's
+    // contents, so both parse cleanly here; cycle *resolution* safety
+    // (warn-and-skip instead of looping) is the resolver's job, exercised in
+    // `viewer::interaction::leveled`'s own tests.
+    let resolver = no_masters_resolver();
+    let list_a = parse_base(
+        "LVLI",
+        &[Subrecord {
+            signature: "LVLO".into(),
+            data: lvlo12(1, 0x9002, 1),
+        }],
+        &resolver,
+    )
+    .unwrap();
+    let list_b = parse_base(
+        "LVLI",
+        &[Subrecord {
+            signature: "LVLO".into(),
+            data: lvlo12(1, 0x9001, 1),
+        }],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(
+        list_a.leveled.as_ref().unwrap().entries[0].item_form_id,
+        0x9002
+    );
+    assert_eq!(
+        list_b.leveled.as_ref().unwrap().entries[0].item_form_id,
+        0x9001
+    );
+}
+
+#[test]
+fn non_leveled_records_have_no_leveled_body() {
+    let resolver = no_masters_resolver();
+    let base = parse_base(
+        "MISC",
+        &[Subrecord {
+            signature: "FULL".into(),
+            data: b"Scrap\0".to_vec(),
+        }],
+        &resolver,
+    )
+    .unwrap();
+    assert!(base.leveled.is_none());
+}
+
+#[test]
+fn full_plugin_parse_stores_leveled_list_base_by_form_id() {
+    let list_id = 0x100;
+    let list_record = record(
+        b"LVLI",
+        0,
+        list_id,
+        &[
+            subrecord(b"EDID", b"LootList\0"),
+            subrecord(b"LVLD", &[10]),
+            subrecord(b"LVLO", &lvlo12(1, 0x200, 1)),
+        ]
+        .concat(),
+    );
+    let cell = record(
+        b"CELL",
+        0,
+        0x1,
+        &[subrecord(b"EDID", b"TestCell\0"), subrecord(b"DATA", &[1])].concat(),
+    );
+    let mut plugin = tes4(&[]);
+    plugin.extend(cell);
+    plugin.extend(list_record);
+
+    let parsed = parse_plugin(&plugin, 0x1).unwrap();
+    let list = parsed.bases.get(&list_id).unwrap();
+    assert_eq!(list.kind, "LVLI");
+    let leveled = list.leveled.as_ref().unwrap();
+    assert_eq!(leveled.chance_none, 10);
+    assert_eq!(
+        leveled.entries,
+        vec![LeveledListEntry {
+            level: 1,
+            item_form_id: 0x200,
+            count: 1
+        }]
+    );
+}

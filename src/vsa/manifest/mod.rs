@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
 use bevy::math::{EulerRot, Quat};
 use bevy::prelude::Resource;
@@ -59,6 +61,30 @@ pub(crate) struct PreparedSceneManifest {
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
     pub(crate) mutability_summary: PreparedMutabilitySummary,
+    /// Leveled lists (`LVLI`/`LVLN`/`LVLC`) transitively reachable from
+    /// prepared container inventory entries flagged `leveled: true`, keyed
+    /// by FormID (issue #74, F74.2). Old manifests without this field
+    /// deserialize with an empty map.
+    #[serde(default)]
+    pub(crate) leveled_lists: BTreeMap<u32, PreparedLeveledList>,
+}
+
+/// A single prepared leveled list's body: `LVLD` chance-none percentage,
+/// `LVLF` flags, and its `LVLO` entries. See
+/// `openmw_esm4::records::LeveledListData` for the parsed source shape this
+/// mirrors (issue #74).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedLeveledList {
+    pub(crate) chance_none: u8,
+    pub(crate) flags: u8,
+    pub(crate) entries: Vec<PreparedLeveledEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedLeveledEntry {
+    pub(crate) level: u16,
+    pub(crate) base_form_id: u32,
+    pub(crate) count: i32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Resource)]
