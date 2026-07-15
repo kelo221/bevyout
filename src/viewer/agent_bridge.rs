@@ -6,6 +6,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bevy::ecs::schedule::Schedules;
 use bevy::prelude::*;
 use bevy::remote::{
     BrpError, BrpResult, RemotePlugin, error_codes::INVALID_PARAMS, http::RemoteHttpPlugin,
@@ -15,11 +16,16 @@ use serde_json::{Value, json};
 
 use super::interaction::PlacementRoot;
 use super::player::FpsPlayer;
+use super::{RenderReportBuffer, diagnostics};
 use crate::console::{ConsoleExecutor, ConsoleRegistry, ConsoleRequest, ConsoleSessionId};
 use crate::vsa::PreparedSceneManifest;
 
 const DEFAULT_SNAPSHOT_LIMIT: usize = 100;
 const MAX_SNAPSHOT_LIMIT: usize = 1_000;
+const DEFAULT_FRAME_BUDGET_MS: f64 = 16.667;
+const MAX_PERFORMANCE_SAMPLES: usize = 600;
+const DEFAULT_CONFLICT_LIMIT: usize = 100;
+const MAX_CONFLICT_LIMIT: usize = 1_000;
 
 #[derive(Resource)]
 struct AgentBridgeInfo {
@@ -40,6 +46,8 @@ pub(crate) fn install(app: &mut App, port: u16) {
     let remote = RemotePlugin::default()
         .with_method_main("bevyout.session", session)
         .with_method_main("bevyout.scene_snapshot", scene_snapshot)
+        .with_method_main("bevyout.performance_snapshot", performance_snapshot)
+        .with_method_main("bevyout.schedule_snapshot", schedule_snapshot)
         .with_method_main("bevyout.capture_viewport", capture_viewport)
         .with_method_main("bevyout.console.exec", console_exec)
         .with_method_main("bevyout.console.help", console_help);
@@ -50,6 +58,241 @@ pub(crate) fn install(app: &mut App, port: u16) {
     app.insert_resource(AgentBridgeInfo { port, session_id })
         .add_plugins((remote, http));
     info!("agent bridge enabled on http://127.0.0.1:{port}/ (runtime-only ECS access)");
+}
+
+fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let params = params.unwrap_or_else(|| json!({}));
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid_params("params must be an object"))?;
+    let after_sample = object.get("after_sample").and_then(Value::as_u64);
+    let latest_limit = object
+        .get("latest_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(MAX_PERFORMANCE_SAMPLES as u64) as usize;
+    if !(1..=MAX_PERFORMANCE_SAMPLES).contains(&latest_limit) {
+        return Err(invalid_params(format!(
+            "latest_limit must be between 1 and {MAX_PERFORMANCE_SAMPLES}"
+        )));
+    }
+    let budget_ms = object
+        .get("budget_ms")
+        .and_then(Value::as_f64)
+        .unwrap_or(DEFAULT_FRAME_BUDGET_MS);
+    if !budget_ms.is_finite() || budget_ms <= 0.0 {
+        return Err(invalid_params(
+            "budget_ms must be finite and greater than zero",
+        ));
+    }
+    let include_samples = object
+        .get("include_samples")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let (latest_sample, mut window) = {
+        let report = world.resource::<RenderReportBuffer>();
+        (
+            diagnostics::latest_render_sample(report),
+            diagnostics::summarize_render_samples(report, after_sample, latest_limit, budget_ms),
+        )
+    };
+    if !include_samples {
+        window.samples.clear();
+    }
+
+    let mut diagnostics = world
+        .resource::<bevy::diagnostic::DiagnosticsStore>()
+        .iter()
+        .filter_map(|diagnostic| {
+            let value = diagnostic.value()?;
+            value.is_finite().then(|| {
+                json!({
+                    "path": diagnostic.path().as_str(),
+                    "suffix": diagnostic.suffix.as_ref(),
+                    "value": value,
+                    "average": diagnostic.average().filter(|value| value.is_finite()),
+                    "smoothed": diagnostic.smoothed().filter(|value| value.is_finite()),
+                    "history_len": diagnostic.history_len(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    diagnostics.sort_unstable_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+    });
+
+    let entity_count = world.entities().len();
+    let mesh_entity_count = world
+        .query_filtered::<Entity, With<Mesh3d>>()
+        .iter(world)
+        .count();
+    let point_light_count = world
+        .query_filtered::<Entity, With<PointLight>>()
+        .iter(world)
+        .count();
+    let directional_light_count = world
+        .query_filtered::<Entity, With<DirectionalLight>>()
+        .iter(world)
+        .count();
+
+    Ok(json!({
+        "latest_sample": latest_sample,
+        "raw_samples_included": include_samples,
+        "window": window,
+        "diagnostics": diagnostics,
+        "world": {
+            "entities": entity_count,
+            "mesh_entities": mesh_entity_count,
+            "point_lights": point_light_count,
+            "directional_lights": directional_light_count,
+        },
+    }))
+}
+
+fn schedule_snapshot(In(params): In<Option<Value>>, world: &World) -> BrpResult {
+    let params = params.unwrap_or_else(|| json!({}));
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid_params("params must be an object"))?;
+    let schedule_contains = object
+        .get("schedule_contains")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    let include_systems = object
+        .get("include_systems")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let conflict_limit = object
+        .get("conflict_limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_CONFLICT_LIMIT as u64) as usize;
+    if conflict_limit > MAX_CONFLICT_LIMIT {
+        return Err(invalid_params(format!(
+            "conflict_limit must not exceed {MAX_CONFLICT_LIMIT}"
+        )));
+    }
+
+    let components = world.components();
+    let schedules = world.resource::<Schedules>();
+    let mut rows = Vec::new();
+    let mut total_systems = 0usize;
+    let mut total_exclusive_systems = 0usize;
+    let mut total_conflicts = 0usize;
+    for (label, schedule) in schedules.iter() {
+        let label = format!("{label:?}");
+        if schedule_contains
+            .as_ref()
+            .is_some_and(|needle| !label.to_ascii_lowercase().contains(needle))
+        {
+            continue;
+        }
+
+        let Ok(systems) = schedule.systems() else {
+            rows.push(json!({
+                "label": label,
+                "initialized": false,
+                "system_count": 0,
+                "exclusive_system_count": 0,
+                "non_send_system_count": 0,
+                "deferred_system_count": 0,
+                "conflict_pair_count": 0,
+                "conflicts": [],
+            }));
+            continue;
+        };
+        let system_rows = systems
+            .map(|(key, system)| {
+                (
+                    key,
+                    json!({
+                        "name": system.name().to_string(),
+                        "exclusive": system.is_exclusive(),
+                        "send": system.is_send(),
+                        "deferred": system.has_deferred(),
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let system_names = system_rows
+            .iter()
+            .map(|(key, system)| (*key, system["name"].as_str().unwrap_or_default().to_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let exclusive_system_count = system_rows
+            .iter()
+            .filter(|(_, system)| system["exclusive"] == true)
+            .count();
+        let non_send_system_count = system_rows
+            .iter()
+            .filter(|(_, system)| system["send"] == false)
+            .count();
+        let deferred_system_count = system_rows
+            .iter()
+            .filter(|(_, system)| system["deferred"] == true)
+            .count();
+
+        let conflicts = schedule.graph().conflicting_systems();
+        let conflict_pair_count = conflicts.len();
+        let conflict_rows = conflicts
+            .iter()
+            .take(conflict_limit)
+            .map(|(system_a, system_b, conflicting_components)| {
+                json!({
+                    "system_a": system_names
+                        .get(system_a)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{system_a:?}")),
+                    "system_b": system_names
+                        .get(system_b)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{system_b:?}")),
+                    "components": conflicting_components
+                        .iter()
+                        .map(|component| components
+                            .get_name(*component)
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|| format!("{component:?}")))
+                        .collect::<Vec<_>>(),
+                    "world_access": conflicting_components.is_empty(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        total_systems += system_rows.len();
+        total_exclusive_systems += exclusive_system_count;
+        total_conflicts += conflict_pair_count;
+        rows.push(json!({
+            "label": label,
+            "initialized": true,
+            "system_count": system_rows.len(),
+            "exclusive_system_count": exclusive_system_count,
+            "non_send_system_count": non_send_system_count,
+            "deferred_system_count": deferred_system_count,
+            "conflict_pair_count": conflict_pair_count,
+            "conflicts_truncated": conflict_pair_count > conflict_rows.len(),
+            "conflicts": conflict_rows,
+            "systems": include_systems.then(|| system_rows
+                .into_iter()
+                .map(|(_, system)| system)
+                .collect::<Vec<_>>()),
+        }));
+    }
+    rows.sort_unstable_by(|left, right| {
+        left["label"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["label"].as_str().unwrap_or_default())
+    });
+
+    Ok(json!({
+        "schedule_count": rows.len(),
+        "system_count": total_systems,
+        "exclusive_system_count": total_exclusive_systems,
+        "conflict_pair_count": total_conflicts,
+        "schedules": rows,
+    }))
 }
 
 fn session(
@@ -281,6 +524,8 @@ mod tests {
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, ConsolePlugin))
+            .init_resource::<bevy::diagnostic::DiagnosticsStore>()
+            .insert_resource(RenderReportBuffer::default())
             .insert_resource(AgentBridgeInfo {
                 port: 15_702,
                 session_id: "bridge-test".into(),
@@ -329,6 +574,39 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|entry| entry["name"] == "getpos")
+        );
+    }
+
+    #[test]
+    fn performance_snapshot_exposes_a_bounded_empty_window() {
+        let mut app = app();
+        let value = performance_snapshot(
+            In(Some(json!({
+                "latest_limit": 32,
+                "budget_ms": 20.0,
+                "include_samples": true,
+            }))),
+            app.world_mut(),
+        )
+        .unwrap();
+        assert_eq!(value["window"]["sample_count"], 0);
+        assert_eq!(value["window"]["budget_ms"], 20.0);
+        assert_eq!(value["raw_samples_included"], true);
+        assert!(value["world"]["entities"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn schedule_snapshot_reports_initialized_system_metadata() {
+        let app = app();
+        let value =
+            schedule_snapshot(In(Some(json!({ "include_systems": true }))), app.world()).unwrap();
+        assert!(value["schedule_count"].as_u64().unwrap() > 0);
+        assert!(
+            value["schedules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schedule| schedule["initialized"] == true)
         );
     }
 }

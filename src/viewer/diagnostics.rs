@@ -1,6 +1,7 @@
 //! Render diagnostics and CSV reports.
 
 use super::controls::{LightsDisabled, UnlitMode};
+use super::performance_policy::{FrameProbeSummary, FrameSample, summarize_frame_window};
 use super::*;
 
 #[derive(Resource)]
@@ -9,13 +10,7 @@ pub(crate) struct RenderReportPath(pub(crate) PathBuf);
 #[derive(Resource, Default)]
 pub(crate) struct RenderReportBuffer {
     next_sample: u64,
-    samples: VecDeque<RenderReportSample>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RenderReportSample {
-    sample: u64,
-    frame_time_ms: f64,
+    samples: VecDeque<FrameSample>,
 }
 
 pub(crate) fn render_diagnostics_report_path(report_path: &Path) -> PathBuf {
@@ -52,7 +47,7 @@ pub(crate) fn record_render_sample(
     if !frame_time_ms.is_finite() || frame_time_ms < 0.0 {
         return;
     }
-    let sample = RenderReportSample {
+    let sample = FrameSample {
         sample: report.next_sample,
         frame_time_ms,
     };
@@ -61,6 +56,20 @@ pub(crate) fn record_render_sample(
     while report.samples.len() > RENDER_REPORT_HISTORY {
         report.samples.pop_front();
     }
+}
+
+pub(crate) fn latest_render_sample(report: &RenderReportBuffer) -> Option<u64> {
+    report.samples.back().map(|sample| sample.sample)
+}
+
+pub(crate) fn summarize_render_samples(
+    report: &RenderReportBuffer,
+    after_sample: Option<u64>,
+    latest_limit: usize,
+    budget_ms: f64,
+) -> FrameProbeSummary {
+    let samples = report.samples.iter().copied().collect::<Vec<_>>();
+    summarize_frame_window(&samples, after_sample, latest_limit, budget_ms)
 }
 
 pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathBuf> {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit Bevy Performance"
+  short_description: "Profile Bevy bottlenecks and parallelism"
+  default_prompt: "Use $bevy-performance-audit to find and verify the most important performance and parallelism bottlenecks in this Bevy project."
