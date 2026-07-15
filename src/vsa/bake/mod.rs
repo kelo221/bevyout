@@ -197,6 +197,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
     let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let bake_result: BlenderBakeResult =
         serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
+    validate_placement_contribution(&job.placements, &bake_result.placement_contribution)?;
     let irradiance = bake_result
         .irradiance
         .as_ref()
@@ -319,22 +320,72 @@ pub fn bake(args: BakeArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
-    if placement.physics_classification == PreparedPhysicsClassification::Dynamic {
-        return false;
+fn validate_placement_contribution(
+    expected: &[JobPlacement],
+    actual: &BlenderPlacementContribution,
+) -> Result<()> {
+    let mut expected_ids = expected
+        .iter()
+        .map(|placement| placement.reference_form_id)
+        .collect::<Vec<_>>();
+    let mut actual_ids = actual.reference_form_ids.clone();
+    expected_ids.sort_unstable();
+    actual_ids.sort_unstable();
+    let mut geometry_ids = actual
+        .placements
+        .iter()
+        .map(|placement| placement.reference_form_id)
+        .collect::<Vec<_>>();
+    geometry_ids.sort_unstable();
+    let invalid_geometry = actual.placements.iter().any(|placement| {
+        placement.visual_meshes == 0
+            || placement.vertices == 0
+            || placement.triangles == 0
+            || placement
+                .world_bounds_min
+                .iter()
+                .chain(placement.world_bounds_max.iter())
+                .any(|value| !value.is_finite())
+            || placement
+                .world_bounds_min
+                .iter()
+                .zip(placement.world_bounds_max.iter())
+                .any(|(minimum, maximum)| minimum > maximum)
+    });
+    if actual.expected_placements != expected.len()
+        || actual.contributed_placements != actual.reference_form_ids.len()
+        || actual_ids != expected_ids
+        || geometry_ids != expected_ids
+        || !actual.post_batch_verified
+        || invalid_geometry
+    {
+        let missing = expected_ids
+            .iter()
+            .filter(|form_id| actual_ids.binary_search(form_id).is_err())
+            .map(|form_id| format!("{form_id:08X}"))
+            .collect::<Vec<_>>();
+        bail!(
+            "Blender bake omitted or invalidated placement contribution(s): expected {}, contributed {}, post-batch verified {}; missing references: {}",
+            expected.len(),
+            actual.contributed_placements,
+            actual.post_batch_verified,
+            if missing.is_empty() {
+                "<count or identity mismatch>".into()
+            } else {
+                missing.join(", ")
+            }
+        )
     }
-    !matches!(
-        placement.semantic,
-        PreparedSemantic::Pickup(_)
-            | PreparedSemantic::Container
-            | PreparedSemantic::Door(_)
-            | PreparedSemantic::Activator
-    )
+    Ok(())
+}
+
+pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
+    placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        && matches!(placement.semantic, PreparedSemantic::Static)
 }
 
 fn is_batchable_static(placement: &PreparedPlacement) -> bool {
-    placement.physics_classification != PreparedPhysicsClassification::Dynamic
-        && matches!(placement.semantic, PreparedSemantic::Static)
+    is_bake_static(placement)
 }
 
 #[cfg(test)]

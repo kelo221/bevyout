@@ -47,6 +47,7 @@ mod world;
 
 mod agent_bridge;
 mod app;
+mod bindings;
 mod console;
 mod console_ui;
 mod controls;

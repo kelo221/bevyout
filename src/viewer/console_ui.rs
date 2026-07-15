@@ -307,8 +307,10 @@ fn select_reference_with_mouse(
     };
     let settings = console_pick_settings();
     let mut candidates = Vec::new();
+    let mut saw_unregistered_geometry = false;
     for (hit, _) in raycast.cast_ray(ray, &settings) {
         let Some(root) = find_placement_root(*hit, &parents, &roots) else {
+            saw_unregistered_geometry = true;
             continue;
         };
         if references.identity(root).is_some() && !candidates.contains(&root) {
@@ -317,6 +319,9 @@ fn select_reference_with_mouse(
     }
     let Some(first) = candidates.first().copied() else {
         ui.pick_cycle.candidates.clear();
+        if saw_unregistered_geometry {
+            info!("console pick: NOT_IMPLEMENTED (static-batched geometry)");
+        }
         return;
     };
     ui.pick_cycle.candidates = candidates;

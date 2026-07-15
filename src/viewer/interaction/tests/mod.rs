@@ -60,6 +60,56 @@ fn container_summary_is_bounded() {
     assert!(!summary.contains("Item8"));
 }
 
+#[test]
+fn interaction_prompts_use_e_in_fps_mode() {
+    let placement = PreparedPlacement {
+        reference_form_id: 1,
+        base_form_id: 2,
+        asset_path: None,
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: Default::default(),
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "CONT".into(),
+        base_kind: "CONT".into(),
+        editor_id: Some("TestContainer".into()),
+        display_name: Some("Test Container".into()),
+        count: 1,
+        semantic: PreparedSemantic::Container,
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+
+    let prompt = interaction_prompt(&placement, false, &PlayerInventory::default())
+        .expect("containers should have an interaction prompt");
+    assert!(prompt.starts_with("[E]"));
+    assert!(!prompt.contains("Enter"));
+}
+
+#[test]
+fn probe_status_distinguishes_reference_static_and_no_target() {
+    assert_eq!(
+        probe_status_message(true, Some("VaultDoorRef (0007b240)")),
+        "probe: VaultDoorRef (0007b240)"
+    );
+    assert_eq!(
+        probe_status_message(true, None),
+        "probe: NOT_IMPLEMENTED (static-batched geometry)"
+    );
+    assert_eq!(probe_status_message(false, None), "probe: no target");
+}
+
 // T57.4: Bevy-side door-travel/animation integration, driven end-to-end
 // through `activate_focused_placement`/`tick_pending_door_travel` (a bare
 // `App`, not `animation::install` -- clip discovery is that module's own
@@ -121,6 +171,10 @@ mod door_travel_animation {
             1.0 / 60.0,
         )))
         .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(CameraModeState {
+            mode: CameraMode::Fps,
+            ..default()
+        })
         .insert_resource(RefRegistry::default())
         .insert_resource(crate::console::ConsoleSessionStore::default());
         app.insert_state(AppState::InGame);
@@ -132,11 +186,11 @@ mod door_travel_animation {
         app
     }
 
-    /// Focuses `entity` and presses Enter for exactly one `app.update()`.
+    /// Focuses `entity` and presses E for exactly one `app.update()`.
     fn activate(app: &mut App, entity: Entity) {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::Enter);
+            .press(KeyCode::KeyE);
         app.world_mut().resource_mut::<InteractionState>().focused = Some(entity);
         app.update();
         // `release()` alone doesn't clear `just_pressed` (that's the real
@@ -144,8 +198,8 @@ mod door_travel_animation {
         // run) -- without this, every subsequent `app.update()` in a test
         // would see `just_pressed(Enter)` still true and re-activate.
         let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-        keys.release(KeyCode::Enter);
-        keys.clear_just_pressed(KeyCode::Enter);
+        keys.release(KeyCode::KeyE);
+        keys.clear_just_pressed(KeyCode::KeyE);
     }
 
     fn play_requests(app: &App) -> Vec<(Entity, ClipTransition)> {

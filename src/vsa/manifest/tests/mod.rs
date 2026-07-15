@@ -251,6 +251,14 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
         ],
         lights: Vec::new(),
         diagnostics: Vec::new(),
+        visual_issues: vec![PreparedVisualIssue {
+            code: "unreviewed_root_transform".into(),
+            severity: "warning".into(),
+            model_path: "architecture/test.nif".into(),
+            base_form_ids: vec![0x10],
+            reference_form_ids: vec![0x20],
+            message: "review root".into(),
+        }],
         navmeshes: Vec::new(),
         cell_audio: PreparedCellAudio::default(),
         audio_clips: Vec::new(),
@@ -285,6 +293,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
     assert!(encoded.contains("mutability_summary"));
     assert!(encoded.contains("EnableGroup"));
     assert!(encoded.contains("static_point_shadows"));
+    assert!(encoded.contains("unreviewed_root_transform"));
 
     let decoded: PreparedSceneManifest = ron::de::from_str(&encoded).unwrap();
     assert_eq!(decoded.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
@@ -295,6 +304,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
     );
     assert_eq!(decoded.placements[1].mutability_root_form_id, Some(0x9));
     assert_eq!(decoded.static_point_shadows, manifest.static_point_shadows);
+    assert_eq!(decoded.visual_issues, manifest.visual_issues);
 }
 
 // T38.5: an old-schema manifest fails compatibility with a precise
