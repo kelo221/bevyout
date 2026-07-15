@@ -6,11 +6,13 @@ use bevy::prelude::*;
 use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
-    PreparedDoor, PreparedInventoryEntry, PreparedLeveledList, PreparedPlacement, PreparedSemantic,
+    PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemStats,
+    PreparedLeveledList, PreparedPlacement, PreparedSemantic,
 };
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
+use super::inventory::{Inventory, InventoryStack, StackKey, TransferResult};
 use super::player::{CameraMode, CameraModeState};
 use super::world::{ActiveCell, PlaythroughSeed, ResidentCells};
 
@@ -257,68 +259,48 @@ impl PlacementRoot {
 }
 
 #[derive(Resource, Default, Debug)]
-pub(crate) struct PlayerInventory {
-    counts: HashMap<u32, i32>,
-}
+pub(crate) struct PlayerInventory(Inventory);
 
 impl PlayerInventory {
     pub(crate) fn count(&self, form_id: u32) -> i32 {
-        self.counts.get(&form_id).copied().unwrap_or(0)
+        self.0.count(form_id)
     }
 
     pub(crate) fn contains(&self, form_id: u32) -> bool {
-        self.count(form_id) > 0
+        self.0.contains(form_id)
     }
 
-    /// Issue #75 (F75.3): the only sanctioned way to add to the player's
-    /// inventory -- pickups and container "take" transfers both go through
-    /// this, never the raw map. Issue #71 will swap the map internals for
-    /// authoritative stacks later; only this method's body changes then.
-    /// Non-positive counts are a no-op.
-    pub(crate) fn grant(&mut self, form_id: u32, count: i32) {
-        if count <= 0 {
-            return;
-        }
-        *self.counts.entry(form_id).or_default() += count;
+    pub(crate) fn add_stack(&mut self, stack: InventoryStack) -> TransferResult {
+        self.0.add(stack)
     }
 
-    /// Issue #75 (F75.3): the only sanctioned way to subtract from the
-    /// player's inventory -- container "store" transfers go through this.
-    /// Non-positive counts are a no-op; removing more than is held floors
-    /// at zero and drops the entry rather than going negative.
-    pub(crate) fn remove(&mut self, form_id: u32, count: i32) {
-        if count <= 0 {
-            return;
-        }
-        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.counts.entry(form_id) {
-            let remaining = *entry.get() - count;
-            if remaining <= 0 {
-                entry.remove();
-            } else {
-                *entry.get_mut() = remaining;
-            }
-        }
+    pub(crate) fn remove(&mut self, key: StackKey, count: i32) -> TransferResult {
+        self.0.remove(key, count)
     }
 
-    /// Issue #60 (F60.4): the inventory as sorted `(base_form_id, count)`
-    /// stacks, the shape the save format's player record wants.
-    pub(crate) fn stacks(&self) -> Vec<(u32, i32)> {
-        let mut stacks: Vec<(u32, i32)> = self
-            .counts
-            .iter()
-            .filter(|&(_, &count)| count != 0)
-            .map(|(&form_id, &count)| (form_id, count))
-            .collect();
-        stacks.sort_unstable_by_key(|(form_id, _)| *form_id);
-        stacks
+    pub(crate) fn stack_states(&self) -> Vec<InventoryStack> {
+        self.0.stacks()
+    }
+
+    pub(crate) fn total_weight(&self, weight: impl FnMut(u32) -> Option<f32>) -> f32 {
+        self.0.total_weight(weight)
     }
 
     /// Issue #60 (F60.4): rebuilds the inventory from a loaded save's
     /// player record.
+    #[cfg(test)]
     pub(crate) fn from_stacks(stacks: impl IntoIterator<Item = (u32, i32)>) -> Self {
-        Self {
-            counts: stacks.into_iter().collect(),
-        }
+        Self(Inventory::from_stacks(stacks.into_iter().map(
+            |(base_form_id, count)| InventoryStack {
+                base_form_id,
+                count,
+                condition: None,
+            },
+        )))
+    }
+
+    pub(crate) fn from_stack_states(stacks: impl IntoIterator<Item = InventoryStack>) -> Self {
+        Self(Inventory::from_stacks(stacks))
     }
 }
 
@@ -635,6 +617,26 @@ struct LeveledResolveContext<'w> {
     playthrough_seed: Option<Res<'w, PlaythroughSeed>>,
 }
 
+/// Bundles the container-open resources so `activate_focused_placement`
+/// stays under Bevy's 16-parameter system limit alongside wave-1's dropped
+/// item / catalog params (see `PickupContext` and `LeveledResolveContext`
+/// above for the same reasoning).
+#[derive(bevy::ecs::system::SystemParam)]
+struct ContainerActivation<'w> {
+    states: ResMut<'w, ContainerStates>,
+    active: ResMut<'w, ActiveContainerTarget>,
+    modal_requests: MessageWriter<'w, RequestStateTransition>,
+}
+
+/// Bundles wave-1's dropped-item retrieval resources (save-state removal,
+/// catalog condition lookup) for the same 16-parameter reason as
+/// `ContainerActivation`.
+#[derive(bevy::ecs::system::SystemParam)]
+struct PickupContext<'w> {
+    save_state: Option<ResMut<'w, super::world::ActiveSaveState>>,
+    catalog: Option<Res<'w, PreparedItemCatalog>>,
+}
+
 /// Converts the manifest's leveled-list bodies into `leveled`'s std-only
 /// mirror types (the same mirror pattern `persist_policy` uses toward
 /// `save`; see `leveled`'s module doc).
@@ -669,7 +671,11 @@ fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<CameraModeState>,
     mut commands: Commands,
-    roots: Query<(&PlacementRoot, &GlobalTransform)>,
+    roots: Query<(
+        &PlacementRoot,
+        &GlobalTransform,
+        Option<&super::world_items::RuntimeWorldItem>,
+    )>,
     animated: Query<&animation::AnimatedPlacement>,
     mut inventory: ResMut<PlayerInventory>,
     mut state: ResMut<InteractionState>,
@@ -678,10 +684,9 @@ fn activate_focused_placement(
     mut door_travel: MessageWriter<DoorTravelRequested>,
     mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
     mut pending_travel: ResMut<PendingDoorTravel>,
-    mut container_states: ResMut<ContainerStates>,
-    mut active_container: ResMut<ActiveContainerTarget>,
-    mut modal_requests: MessageWriter<RequestStateTransition>,
+    mut container_activation: ContainerActivation,
     resolve_context: LeveledResolveContext,
+    mut pickup_context: PickupContext,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -689,7 +694,7 @@ fn activate_focused_placement(
     let Some(entity) = state.focused else {
         return;
     };
-    let Ok((root, transform)) = roots.get(entity) else {
+    let Ok((root, transform, runtime_item)) = roots.get(entity) else {
         state.focused = None;
         return;
     };
@@ -700,7 +705,40 @@ fn activate_focused_placement(
     match &placement.semantic {
         PreparedSemantic::Pickup(_) => {
             let count = placement.count.max(1);
-            inventory.grant(placement.base_form_id, count);
+            if let Some(runtime_item) = runtime_item {
+                let Some(save_state) = pickup_context.save_state.as_mut() else {
+                    notice.show("Dropped-item persistence is not ready");
+                    return;
+                };
+                let _ = inventory.add_stack(runtime_item.stack);
+                if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
+                    cell.dropped_items.remove(&runtime_item.runtime_id);
+                    if cell.references.is_empty() && cell.dropped_items.is_empty() {
+                        save_state.0.cells.remove(&runtime_item.cell_form_id);
+                    }
+                }
+                info!(
+                    "retrieved runtime item {} from cell {:08x}",
+                    runtime_item.runtime_id, runtime_item.cell_form_id
+                );
+            } else {
+                let condition = pickup_context
+                    .catalog
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(|catalog| &catalog.items)
+                    .find(|item| item.base_form_id == placement.base_form_id)
+                    .and_then(|item| match &item.stats {
+                        PreparedItemStats::Weapon { max_condition, .. }
+                        | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
+                        _ => None,
+                    });
+                let _ = inventory.add_stack(InventoryStack {
+                    base_form_id: placement.base_form_id,
+                    count,
+                    condition,
+                });
+            }
             write_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
             info!(
@@ -765,13 +803,16 @@ fn activate_focused_placement(
                 active_cell,
                 placement.reference_form_id,
             );
-            let resolved =
-                container_states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
+            let resolved = container_activation.states.open(
+                placement.reference_form_id,
+                &seed_entries,
+                |list_form_id| {
                     leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
-                });
+                },
+            );
             let stack_count = resolved.stacks.len();
             state.open.insert(entity);
-            active_container.0 = Some(ActiveContainer {
+            container_activation.active.0 = Some(ActiveContainer {
                 entity,
                 reference_form_id: placement.reference_form_id,
                 name: name.clone(),
@@ -783,7 +824,9 @@ fn activate_focused_placement(
                 transition: ClipTransition::Opening,
                 lead_ms: 0.0,
             });
-            modal_requests.write(RequestStateTransition::Modal(GameplayModal::Dialogue));
+            container_activation
+                .modal_requests
+                .write(RequestStateTransition::Modal(GameplayModal::Container));
             info!(
                 "container {} ({:08x}) opened with {} stacks",
                 name, placement.reference_form_id, stack_count

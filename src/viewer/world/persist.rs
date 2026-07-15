@@ -20,7 +20,7 @@
 //! despawned and their FormIDs suppressed so no collider is ever rebuilt
 //! for them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,8 +28,8 @@ use bevy::prelude::*;
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
 
 use crate::save::{
-    ItemStack, PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader, SavePlugin,
-    SaveStore, SavedBodyState, SavedTransform,
+    DroppedItemState, ItemStack, PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader,
+    SavePlugin, SaveStore, SavedBodyState, SavedTransform,
 };
 #[cfg(test)]
 use crate::vsa::PreparedInventoryEntry;
@@ -161,6 +161,7 @@ pub(crate) fn apply_cell_state(world: &mut World, cell: u32, root: Entity) {
         return;
     };
     apply_cell_placements(world, cell, root, &manifest.placements);
+    super::super::world_items::restore_dropped_items(world, cell, root);
 }
 
 /// Startup wiring for F60.2/F60.3: applies the (possibly `--save-slot`
@@ -281,6 +282,7 @@ fn capture_cell_placements(
     let container_delta_count = captured_containers.len();
     merge_captured_container_deltas(world, cell, &container_observed, &captured_containers);
 
+    capture_runtime_items(world, cell, root);
     info!("save capture {cell:08x} deltas={delta_count} container_deltas={container_delta_count}");
 }
 
@@ -316,10 +318,10 @@ fn container_baseline(placement: &PreparedPlacement) -> Option<persist_policy::C
 }
 
 /// F76.2: every container reference's live state, read from
-/// `interaction::ContainerStates` (issue #75's runtime resource is not present in
-/// this worktree -- see that resource's doc comment). A container absent
-/// from the stub was never opened this session and is excluded, so capture
-/// never clobbers a previously loaded delta it cannot currently observe.
+/// `interaction::ContainerStates` (issue #75's runtime resource, wired at
+/// wave-2 integration). A container absent from the resource was never
+/// opened this session and is excluded, so capture never clobbers a
+/// previously loaded delta it cannot currently observe.
 fn container_snapshots(
     world: &World,
     placements: &[PreparedPlacement],
@@ -342,6 +344,63 @@ fn container_snapshots(
             })
         })
         .collect()
+}
+
+fn capture_runtime_items(world: &mut World, cell: u32, root: Entity) {
+    let snapshots = {
+        let mut query = world.query::<(
+            Entity,
+            &super::super::world_items::RuntimeWorldItem,
+            &ChildOf,
+            &Transform,
+        )>();
+        query
+            .iter(world)
+            .filter(|(_, item, parent, _)| item.cell_form_id == cell && parent.parent() == root)
+            .map(|(entity, item, _, transform)| {
+                (
+                    entity,
+                    *item,
+                    transform.translation,
+                    transform.rotation,
+                    transform.scale,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut dropped_items = BTreeMap::new();
+    for (entity, item, translation, rotation, scale) in snapshots {
+        let body = dynamic_body_snapshot(world, entity)
+            .map(to_saved_body)
+            .unwrap_or(SavedBodyState {
+                linear_velocity: [0.0; 3],
+                angular_velocity: [0.0; 3],
+                sleeping: true,
+            });
+        dropped_items.insert(
+            item.runtime_id,
+            DroppedItemState {
+                runtime_id: item.runtime_id,
+                stack: ItemStack {
+                    base_form_id: item.stack.base_form_id,
+                    count: item.stack.count,
+                    condition: item.stack.condition,
+                },
+                transform: SavedTransform {
+                    translation: translation.to_array(),
+                    rotation_xyzw: rotation.to_array(),
+                    scale: scale.to_array(),
+                },
+                body,
+            },
+        );
+    }
+    let mut state = world.get_resource_or_insert_with(ActiveSaveState::default);
+    let cell_state = state.0.cells.entry(cell).or_default();
+    cell_state.dropped_items = dropped_items;
+    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
+        state.0.cells.remove(&cell);
+    }
 }
 
 /// Reads one placement entity's live dynamic-body velocities, if it has a
@@ -392,7 +451,7 @@ fn merge_captured_deltas(
             cell_state.references.remove(&form_id);
         }
     }
-    if cell_state.references.is_empty() {
+    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
         state.0.cells.remove(&cell);
     }
 }
@@ -429,12 +488,18 @@ fn merge_captured_container_deltas(
     }
 }
 
+/// Container-delta stacks always carry `condition: None`: `ContainerState`
+/// (issue #75) is condition-less (`Vec<(u32, i32)>`), so a stack captured
+/// from it has no condition to persist. Condition-aware container stacks
+/// are a follow-up (see `interaction::transfer_ui::take`/`store`'s doc
+/// comments for the same ceiling on the runtime side).
 fn to_item_stacks(stacks: &[(u32, i32)]) -> Vec<ItemStack> {
     stacks
         .iter()
         .map(|&(base_form_id, count)| ItemStack {
             base_form_id,
             count,
+            condition: None,
         })
         .collect()
 }
@@ -698,11 +763,12 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
             .get_resource::<interaction::PlayerInventory>()
             .map(|inventory| {
                 inventory
-                    .stacks()
+                    .stack_states()
                     .into_iter()
-                    .map(|(base_form_id, count)| ItemStack {
-                        base_form_id,
-                        count,
+                    .map(|stack| ItemStack {
+                        base_form_id: stack.base_form_id,
+                        count: stack.count,
+                        condition: stack.condition,
                     })
                     .collect()
             })
@@ -715,6 +781,9 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
             .map(|state| state.0.clone())
             .unwrap_or_default(),
         player: Some(player),
+        next_runtime_item_id: world
+            .get_resource::<super::super::world_items::NextRuntimeItemId>()
+            .map_or(1, |next| next.0),
         rng_state: world
             .get_resource::<PlaythroughSeed>()
             .map(|seed| seed.0)
@@ -997,6 +1066,9 @@ mod tests {
             asset_root: ".".into(),
             source_plugin: "Fallout3.esm".into(),
             source_fingerprint: "content-hash".into(),
+            item_catalog_path: None,
+            item_catalog_revision: None,
+            item_catalog_hash: None,
             // `PreparedPluginSource` is not re-exported from `crate::vsa`
             // and widening that surface for a test is not worth it; an
             // empty plugin list exercises the same identity plumbing.
@@ -1085,6 +1157,7 @@ mod tests {
             vec![ItemStack {
                 base_form_id: 0x42,
                 count: 2,
+                condition: None,
             }]
         );
         let _ = std::fs::remove_dir_all(save_dir);
@@ -1122,6 +1195,7 @@ mod tests {
             Some(vec![ItemStack {
                 base_form_id: 0x10,
                 count: 1,
+                condition: None,
             }])
         );
         assert_eq!(saved.leveled_resolved, Some(true));

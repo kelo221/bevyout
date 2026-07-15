@@ -571,8 +571,12 @@ fn prepare_cell(
     // to the same path -- redundant in the worst case, not corrupting. That
     // is what makes it safe to run for several cells concurrently, unlike
     // the Blender/texture-conversion step immediately below.
+    let mut references = std::mem::take(&mut parsed.references);
+    let (catalog_references, catalog_reference_ids) =
+        catalog_item_references(&parsed.bases, &references);
+    references.extend(catalog_references);
     let stage = stage_placements(
-        std::mem::take(&mut parsed.references),
+        references,
         &parsed.bases,
         &data_root,
         &session.archives,
@@ -590,7 +594,7 @@ fn prepare_cell(
     );
     let PlacementStage {
         jobs,
-        visual_assets,
+        mut visual_assets,
         mut placements,
         lights,
         cache_hits,
@@ -609,14 +613,38 @@ fn prepare_cell(
     // block holds `session.blender_lock` for its duration: only one cell's
     // Blender/texture-conversion step runs at a time, while every other
     // cell's parse/stage phase keeps running in parallel around it.
+    let item_icons;
     {
         let _blender_guard = session.blender_lock.lock().unwrap();
+        item_icons = stage_item_icons(
+            &parsed.bases,
+            &data_root,
+            &session.archives,
+            &staging_dir,
+            &source_fingerprint,
+            &mut diagnostics,
+        )?;
         convert_staged_textures(&staging_dir, &mut diagnostics)?;
         if !jobs.is_empty() {
             run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
                 .context("headless Blender conversion failed")?;
         }
     }
+    let mut scene_placements = Vec::new();
+    let mut catalog_placements = Vec::new();
+    for placement in placements {
+        if catalog_reference_ids.contains(&placement.reference_form_id) {
+            catalog_placements.push(placement);
+        } else {
+            scene_placements.push(placement);
+        }
+    }
+    placements = scene_placements;
+    let scene_assets = placements
+        .iter()
+        .filter_map(|placement| placement.asset_path.as_deref())
+        .collect::<HashSet<_>>();
+    visual_assets.retain(|asset| scene_assets.contains(asset.asset_path.as_str()));
     let additional_audio_form_ids =
         apply_container_animation_audio(&cache_dir, &parsed, &mut placements, &mut diagnostics);
     let staged_form_ids = audio_clips
@@ -670,7 +698,7 @@ fn prepare_cell(
     let mut fallback_assets = 0_usize;
     let mut dynamic_placements = 0_usize;
     let mut dynamic_rejections = HashSet::new();
-    for placement in &mut placements {
+    for placement in placements.iter_mut().chain(catalog_placements.iter_mut()) {
         let Some(relative_path) = placement.physics_asset_path.as_ref() else {
             continue;
         };
@@ -694,7 +722,9 @@ fn prepare_cell(
         placement.physics_classification = classify_placement(&placement.semantic, asset);
         placement.step_support =
             retain_static_step_support(placement.step_support, placement.physics_classification);
-        if let Some(reason) = dynamic_rejection_reason(&placement.semantic, asset) {
+        if !catalog_reference_ids.contains(&placement.reference_form_id)
+            && let Some(reason) = dynamic_rejection_reason(&placement.semantic, asset)
+        {
             dynamic_rejections.insert(format!(
                 "physics body for {} ({:08x}) remains static: {reason}",
                 placement
@@ -727,6 +757,32 @@ fn prepare_cell(
             message,
         });
     }
+    let item_catalog = build_item_catalog(
+        &parsed.bases,
+        &item_icons,
+        &catalog_placements,
+        &physics_assets,
+        &source_fingerprint,
+    );
+    let (catalog_path, catalog_hash) = write_item_catalog(&cache_dir, &item_catalog)?;
+    output.push(format!(
+        "item catalog: {} records, {} icons, {} world assets -> {}",
+        item_catalog.items.len(),
+        item_catalog
+            .items
+            .iter()
+            .filter(|item| item.icon_asset_path.is_some())
+            .count(),
+        item_catalog
+            .items
+            .iter()
+            .filter(|item| item.world_asset_path.is_some())
+            .count(),
+        catalog_path
+    ));
+    let item_catalog_path = Some(catalog_path);
+    let item_catalog_revision = Some(ITEM_CATALOG_REVISION.into());
+    let item_catalog_hash = Some(catalog_hash);
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -770,6 +826,9 @@ fn prepare_cell(
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
         source_fingerprint,
+        item_catalog_path,
+        item_catalog_revision,
+        item_catalog_hash,
         source_plugins,
         cell,
         placements,

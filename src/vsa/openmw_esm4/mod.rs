@@ -45,14 +45,17 @@ impl ReferenceKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct BaseRecord {
     pub(crate) kind: String,
     pub(crate) editor_id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) icon: Option<String>,
+    pub(crate) mini_icon: Option<String>,
     pub(crate) value: Option<i32>,
     pub(crate) weight: Option<f32>,
+    pub(crate) item_stats: OpenMwItemStats,
     pub(crate) base_template_form_id: Option<u32>,
     pub(crate) light: Option<LightData>,
     pub(crate) inventory: Vec<InventoryItemRecord>,
@@ -61,6 +64,41 @@ pub(crate) struct BaseRecord {
     /// `records::LeveledListData` for the parsed `LVLD`/`LVLF`/`LVLO` body.
     pub(crate) leveled: Option<LeveledListData>,
     ignored_subrecords: Vec<String>,
+}
+
+/// Item fields decoded from the exact OpenMW ESM4 layouts listed in
+/// `NOTICE.md`. Presentation-independent so preparation can map them into the
+/// stable item catalogue without importing OpenMW runtime classes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum OpenMwItemStats {
+    Weapon {
+        damage: Option<u16>,
+        max_condition: Option<u32>,
+        clip_size: Option<u8>,
+        speed: Option<f32>,
+        reach: Option<f32>,
+    },
+    Apparel {
+        armor_rating: Option<f32>,
+        max_condition: Option<u32>,
+    },
+    Ammo {
+        damage: Option<f32>,
+        speed: Option<f32>,
+    },
+    Aid {
+        effect_form_ids: Vec<u32>,
+    },
+    Book {
+        flags: Option<u8>,
+        text: Option<String>,
+    },
+    Note {
+        text: Option<String>,
+    },
+    Key,
+    #[default]
+    Misc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,40 +1,57 @@
 use super::*;
 
+fn grant(inventory: &mut PlayerInventory, base_form_id: u32, count: i32) {
+    let _ = inventory.add_stack(InventoryStack {
+        base_form_id,
+        count,
+        condition: None,
+    });
+}
+
 #[test]
 fn inventory_accumulates_whole_stacks() {
     let mut inventory = PlayerInventory::default();
-    inventory.grant(0x1234, 3);
-    inventory.grant(0x1234, 2);
+    grant(&mut inventory, 0x1234, 3);
+    grant(&mut inventory, 0x1234, 2);
     assert_eq!(inventory.count(0x1234), 5);
     assert!(inventory.contains(0x1234));
 }
 
-// F75.3: `grant`/`remove` are the sanctioned #71 swap point -- non-positive
-// counts are a no-op in both directions, and `remove` floors at zero
-// (dropping the entry) rather than going negative.
+// F75.3/#71: `add_stack`/`remove` are the sanctioned container-transfer
+// seam -- non-positive counts are a no-op (`InvalidCount`), and `remove` is
+// atomic: removing more than is held is rejected outright rather than
+// flooring at zero (see `inventory::Inventory::remove`, and
+// `failed_remove_is_atomic` in that module for the same contract).
 #[test]
 fn grant_ignores_non_positive_counts() {
     let mut inventory = PlayerInventory::default();
-    inventory.grant(0x1234, 0);
-    inventory.grant(0x1234, -5);
+    grant(&mut inventory, 0x1234, 0);
+    grant(&mut inventory, 0x1234, -5);
     assert_eq!(inventory.count(0x1234), 0);
 }
 
 #[test]
-fn remove_floors_at_zero_and_drops_the_entry() {
+fn remove_more_than_held_is_rejected_atomically() {
     let mut inventory = PlayerInventory::default();
-    inventory.grant(0x1234, 3);
-    inventory.remove(0x1234, 10);
-    assert_eq!(inventory.count(0x1234), 0);
-    assert!(!inventory.contains(0x1234));
+    grant(&mut inventory, 0x1234, 3);
+    let key = StackKey {
+        base_form_id: 0x1234,
+        condition: None,
+    };
+    assert_eq!(inventory.remove(key, 10), TransferResult::InsufficientItems);
+    assert_eq!(inventory.count(0x1234), 3);
 }
 
 #[test]
 fn remove_ignores_non_positive_counts() {
     let mut inventory = PlayerInventory::default();
-    inventory.grant(0x1234, 3);
-    inventory.remove(0x1234, 0);
-    inventory.remove(0x1234, -1);
+    grant(&mut inventory, 0x1234, 3);
+    let key = StackKey {
+        base_form_id: 0x1234,
+        condition: None,
+    };
+    assert_eq!(inventory.remove(key, 0), TransferResult::InvalidCount);
+    assert_eq!(inventory.remove(key, -1), TransferResult::InvalidCount);
     assert_eq!(inventory.count(0x1234), 3);
 }
 
@@ -47,7 +64,7 @@ fn locked_door_requires_its_key() {
     };
     let mut inventory = PlayerInventory::default();
     assert!(door_is_locked(&door, &inventory));
-    inventory.grant(0x42, 1);
+    grant(&mut inventory, 0x42, 1);
     assert!(!door_is_locked(&door, &inventory));
 }
 
@@ -443,12 +460,14 @@ mod container_transfer {
             1.0 / 60.0,
         )))
         .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(ButtonInput::<MouseButton>::default())
         .insert_resource(CameraModeState {
             mode: CameraMode::Fps,
             ..default()
         })
         .insert_resource(RefRegistry::default())
-        .insert_resource(crate::console::ConsoleSessionStore::default());
+        .insert_resource(crate::console::ConsoleSessionStore::default())
+        .insert_resource(PreparedItemCatalog::default());
         install(&mut app);
         app.add_message::<animation::PlayPlacementAnimation>();
         app.add_message::<PlaySound>();
@@ -551,7 +570,7 @@ mod container_transfer {
 
         open_container(&mut app, entity);
 
-        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert_eq!(current_modal(&app), GameplayModal::Container);
         assert!(app.world().resource::<Time<Virtual>>().is_paused());
         assert!(
             app.world()
@@ -584,7 +603,7 @@ mod container_transfer {
             ))
             .id();
         open_container(&mut app, entity);
-        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert_eq!(current_modal(&app), GameplayModal::Container);
 
         press_escape(&mut app);
 
@@ -618,7 +637,7 @@ mod container_transfer {
             ))
             .id();
         open_container(&mut app, entity);
-        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert_eq!(current_modal(&app), GameplayModal::Container);
         assert_eq!(play_sounds(&app), vec![0x100]);
 
         app.world_mut()
@@ -626,7 +645,7 @@ mod container_transfer {
             .press(KeyCode::KeyE);
         app.update();
 
-        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert_eq!(current_modal(&app), GameplayModal::Container);
         assert!(
             play_sounds(&app).is_empty(),
             "activate_focused_placement must not run while the modal is open"

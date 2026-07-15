@@ -11,6 +11,162 @@ fn parse_plugin(bytes: &[u8], target_cell: u32) -> Result<ParsedPlugin> {
 }
 use std::io::Write;
 
+fn direct_subrecord(signature: &str, data: Vec<u8>) -> Subrecord {
+    Subrecord {
+        signature: signature.into(),
+        data,
+    }
+}
+
+fn direct_resolver() -> FormIdResolver {
+    FormIdResolver {
+        current_index: 0,
+        master_indices: Vec::new(),
+    }
+}
+
+#[test]
+fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
+    let resolver = direct_resolver();
+    let mut weapon_data = Vec::new();
+    weapon_data.extend_from_slice(&125_u32.to_le_bytes());
+    weapon_data.extend_from_slice(&250_u32.to_le_bytes());
+    weapon_data.extend_from_slice(&6.5_f32.to_le_bytes());
+    weapon_data.extend_from_slice(&34_u16.to_le_bytes());
+    weapon_data.push(8);
+    let weapon = parse_base(
+        "WEAP",
+        &[
+            direct_subrecord("ICON", b"interface/icons/rifle.dds\0".to_vec()),
+            direct_subrecord("MICO", b"interface/icons/rifle_small.dds\0".to_vec()),
+            direct_subrecord("DATA", weapon_data),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(weapon.value, Some(125));
+    assert_eq!(weapon.weight, Some(6.5));
+    assert_eq!(weapon.icon.as_deref(), Some("interface/icons/rifle.dds"));
+    assert_eq!(
+        weapon.item_stats,
+        OpenMwItemStats::Weapon {
+            damage: Some(34),
+            max_condition: Some(250),
+            clip_size: Some(8),
+            speed: None,
+            reach: None,
+        }
+    );
+
+    let mut armor_data = Vec::new();
+    armor_data.extend_from_slice(&80_u32.to_le_bytes());
+    armor_data.extend_from_slice(&400_u32.to_le_bytes());
+    armor_data.extend_from_slice(&12.0_f32.to_le_bytes());
+    let armor = parse_base(
+        "ARMO",
+        &[
+            direct_subrecord("MICO", b"interface/icons/armor_small.dds\0".to_vec()),
+            direct_subrecord("DATA", armor_data),
+            direct_subrecord("DNAM", 18_u16.to_le_bytes().to_vec()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(armor.icon, None);
+    assert_eq!(
+        armor.mini_icon.as_deref(),
+        Some("interface/icons/armor_small.dds")
+    );
+    assert_eq!(
+        armor.item_stats,
+        OpenMwItemStats::Apparel {
+            armor_rating: Some(18.0),
+            max_condition: Some(400),
+        }
+    );
+
+    let mut ammo_data = Vec::new();
+    ammo_data.extend_from_slice(&3200.0_f32.to_le_bytes());
+    ammo_data.extend_from_slice(&0_u32.to_le_bytes());
+    ammo_data.extend_from_slice(&2_u32.to_le_bytes());
+    ammo_data.push(12);
+    let mut ammo_dnam = vec![0; 8];
+    ammo_dnam.extend_from_slice(&9.5_f32.to_le_bytes());
+    ammo_dnam.extend_from_slice(&100_u32.to_le_bytes());
+    let ammo = parse_base(
+        "AMMO",
+        &[
+            direct_subrecord("DATA", ammo_data),
+            direct_subrecord("DNAM", ammo_dnam),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(ammo.value, Some(2));
+    assert_eq!(
+        ammo.item_stats,
+        OpenMwItemStats::Ammo {
+            damage: Some(9.5),
+            speed: Some(3200.0),
+        }
+    );
+
+    let mut aid_enit = Vec::new();
+    aid_enit.extend_from_slice(&35_i32.to_le_bytes());
+    aid_enit.resize(20, 0);
+    let aid = parse_base(
+        "ALCH",
+        &[
+            direct_subrecord("DATA", 0.5_f32.to_le_bytes().to_vec()),
+            direct_subrecord("ENIT", aid_enit),
+            direct_subrecord("EFID", 0x0001_2345_u32.to_le_bytes().to_vec()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(aid.value, Some(35));
+    assert_eq!(aid.weight, Some(0.5));
+    assert_eq!(
+        aid.item_stats,
+        OpenMwItemStats::Aid {
+            effect_form_ids: vec![0x0001_2345],
+        }
+    );
+
+    let mut book_data = vec![3, 0];
+    book_data.extend_from_slice(&15_i32.to_le_bytes());
+    book_data.extend_from_slice(&1.25_f32.to_le_bytes());
+    let book = parse_base(
+        "BOOK",
+        &[
+            direct_subrecord("DATA", book_data),
+            direct_subrecord("DESC", b"Synthetic book text\0".to_vec()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(book.value, Some(15));
+    assert_eq!(book.weight, Some(1.25));
+    assert_eq!(
+        book.item_stats,
+        OpenMwItemStats::Book {
+            flags: Some(3),
+            text: Some("Synthetic book text".into()),
+        }
+    );
+
+    for kind in ["MISC", "KEYM"] {
+        let mut data = Vec::new();
+        data.extend_from_slice(&7_i32.to_le_bytes());
+        data.extend_from_slice(&0.1_f32.to_le_bytes());
+        let item = parse_base(kind, &[direct_subrecord("DATA", data)], &resolver).unwrap();
+        assert_eq!(item.value, Some(7));
+        assert_eq!(item.weight, Some(0.1));
+    }
+    let note = parse_base("NOTE", &[], &resolver).unwrap();
+    assert_eq!(note.item_stats, OpenMwItemStats::Note { text: None });
+}
+
 #[test]
 fn parses_fo3_lighting_data_in_legacy_and_complete_lengths() {
     let mut data = vec![0_u8; 40];

@@ -213,12 +213,50 @@ closes all three.
 - **A5** (#75) The transfer modal reuses the existing, otherwise-unused
   `GameplayModal::Dialogue` state — a dedicated `Container` variant belongs
   to `app_state`, outside the wave's ownership; one-line migration when it
-  gains one.
+  gains one. Superseded at wave-1/wave-2 merge integration — see
+  "Wave-1/wave-2 merge integration" below.
 - **A6** (#75) "Take/store stack" moves a fixed 10-unit chunk (clamped);
-  a quantity picker is #71's territory.
+  a quantity picker is #71's territory. Superseded at merge integration —
+  see below.
 - **Save version**: #72 (v2) had not landed at integration time, so the
   LVLR subrecord shipped additively on v1 with no version bump — the single
   bump happens with whichever PR lands second, per the coexistence plan.
+  Resolved at merge: master (#72) landed `CURRENT_SAVE_FORMAT_VERSION = 2`
+  first, so the LVLR subrecord now simply rides v2; no code changes needed.
+
+## Wave-1/wave-2 merge integration
+
+Both waves landed independently (#77 on `master`, this wave's #79 on
+`m3-wave2`) and were merged by an orchestrating session per the
+wave-1-coexistence plan above. Beyond the mechanical conflict resolution
+(union imports, keep-both parsers, keep-both save fields), the user directed
+that where wave-1's inventory/UI and wave-2 overlap, wave-1's pattern wins:
+
+- **Player inventory swap**: B's `PlayerInventory::grant`/`remove(form_id,
+  count)` (the reserved #71 swap point) is replaced by #71's real API --
+  `add_stack(InventoryStack) -> TransferResult` for grants, `remove(key:
+  StackKey, count) -> TransferResult` for removal (picking the `StackKey`
+  off `stack_states()`). Container stacks stay condition-less
+  (`ContainerState { stacks: Vec<(u32, i32)>, resolved: bool }`); taking
+  from a container always grants `condition: None`, and storing into one
+  drops the source stack's condition -- marked in code as a follow-up
+  ("condition-aware container stacks").
+- **A5 retired**: `app_state::GameplayModal` gained a dedicated `Container`
+  variant (mirroring `PipBoy`'s own dedicated variant, landed by #71) with
+  its own legal-transition entries and centralized `OnEnter`/`OnExit`
+  `Time<Virtual>` pause/resume. `transfer_ui.rs` no longer reuses `Dialogue`.
+- **A6 retired**: the transfer UI was rebuilt on `pipboy.rs`'s established
+  pattern -- green-on-dark styling constants, mouse `Interaction`-driven row
+  selection/rebuild-on-change, item names resolved through
+  `PreparedItemCatalog` (falling back to the container's prepared-entry
+  names, then the hex form id) -- and the fixed 10-unit chunk was replaced
+  by reusing `inventory::drop_action`/`DropAction`'s existing quantity
+  policy (small stacks move one unit on right-click; larger stacks open a
+  `pipboy`-style quantity-picker overlay) rather than a bespoke numeric
+  entry widget.
+- `container_policy`, `leveled`, the scripted BRP container path, and the
+  persistence capture/apply wiring were untouched -- this integration was
+  scoped to the UI/modal layer and the #71 seam swap only.
 
 ## Measured acceptance (real data, MegatonPlayerHouse 000151e3)
 

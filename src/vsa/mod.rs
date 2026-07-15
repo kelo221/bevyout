@@ -28,11 +28,13 @@ pub(crate) use manifest::{
 };
 pub(crate) use manifest::{
     CellInfo, ImageSpaceInfo, PreparedAudioClip, PreparedCellLighting, PreparedDoor,
-    PreparedFootstepSet, PreparedInventoryEntry, PreparedLeveledList,
-    PreparedPhysicsClassification, PreparedPlacement, PreparedSceneManifest, PreparedSemantic,
-    cell_label, ensure_baked_scene_compatible, ensure_prepared_manifest_compatible,
+    PreparedDropCollider, PreparedFootstepSet, PreparedInventoryEntry, PreparedItemCatalog,
+    PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedLeveledList,
+    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedRuntimeMutability,
+    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
+    ensure_prepared_manifest_compatible,
 };
-pub(crate) use paths::FO3_SCALE;
+pub(crate) use paths::{FO3_SCALE, fingerprint};
 pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
