@@ -3,13 +3,16 @@ use std::collections::{HashMap, HashSet};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
-use crate::app_state::{AppState, GameplayModal};
+use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::player::{CameraMode, CameraModeState};
+
+pub(crate) mod container_policy;
+mod transfer_ui;
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
 const NOTICE_SECONDS: f32 = 3.0;
@@ -210,8 +213,34 @@ impl PlayerInventory {
         self.count(form_id) > 0
     }
 
-    fn add(&mut self, form_id: u32, count: i32) {
-        *self.counts.entry(form_id).or_default() += count.max(1);
+    /// Issue #75 (F75.3): the only sanctioned way to add to the player's
+    /// inventory -- pickups and container "take" transfers both go through
+    /// this, never the raw map. Issue #71 will swap the map internals for
+    /// authoritative stacks later; only this method's body changes then.
+    /// Non-positive counts are a no-op.
+    pub(crate) fn grant(&mut self, form_id: u32, count: i32) {
+        if count <= 0 {
+            return;
+        }
+        *self.counts.entry(form_id).or_default() += count;
+    }
+
+    /// Issue #75 (F75.3): the only sanctioned way to subtract from the
+    /// player's inventory -- container "store" transfers go through this.
+    /// Non-positive counts are a no-op; removing more than is held floors
+    /// at zero and drops the entry rather than going negative.
+    pub(crate) fn remove(&mut self, form_id: u32, count: i32) {
+        if count <= 0 {
+            return;
+        }
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = self.counts.entry(form_id) {
+            let remaining = *entry.get() - count;
+            if remaining <= 0 {
+                entry.remove();
+            } else {
+                *entry.get_mut() = remaining;
+            }
+        }
     }
 
     /// Issue #60 (F60.4): the inventory as sorted `(base_form_id, count)`
@@ -268,6 +297,55 @@ impl InteractionNotice {
     }
 }
 
+/// Fixed seam (issue #75, wired at wave-2 integration into #76's persistence
+/// capture/apply): a container's runtime inventory, keyed by
+/// `reference_form_id` -- the same identity the manifest and console/BRP
+/// paths already use for containers. `pub(crate)` (and the tuple field with
+/// it) so `world::persist` can capture/apply it without this module growing
+/// a second, parallel accessor API.
+#[derive(Resource, Default)]
+pub(crate) struct ContainerStates(pub(crate) HashMap<u32, container_policy::ContainerState>);
+
+impl ContainerStates {
+    /// F75.2/T75.2: opens (or reopens) a container's state. `resolve_leveled`
+    /// is the #74 resolver seam -- called only when this reference has never
+    /// resolved before; a `resolved` state short-circuits straight back
+    /// without touching it (never re-rolls).
+    fn open(
+        &mut self,
+        reference_form_id: u32,
+        entries: &[container_policy::SeedEntry],
+        resolve_leveled: impl FnMut(u32) -> Vec<(u32, i32)>,
+    ) -> &container_policy::ContainerState {
+        let existing = self.0.remove(&reference_form_id);
+        let state = container_policy::open_container(existing, entries, resolve_leveled);
+        self.0.entry(reference_form_id).or_insert(state)
+    }
+
+    pub(crate) fn get(&self, reference_form_id: u32) -> Option<&container_policy::ContainerState> {
+        self.0.get(&reference_form_id)
+    }
+
+    fn get_mut(&mut self, reference_form_id: u32) -> Option<&mut container_policy::ContainerState> {
+        self.0.get_mut(&reference_form_id)
+    }
+}
+
+/// F75.2: which container the transfer modal is currently showing, and the
+/// best-effort item names collected from its prepared inventory at open
+/// time (resolved-leveled or player-only items with no known name fall
+/// back to their hex form id -- name/count is all this issue promises, see
+/// the plan's non-goals).
+struct ActiveContainer {
+    entity: Entity,
+    reference_form_id: u32,
+    name: String,
+    item_names: HashMap<u32, String>,
+}
+
+#[derive(Resource, Default)]
+struct ActiveContainerTarget(Option<ActiveContainer>);
+
 #[derive(Component)]
 struct InteractionPromptText;
 
@@ -279,7 +357,17 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<InteractionState>()
         .init_resource::<InteractionNotice>()
         .init_resource::<PendingDoorTravel>()
+        .init_resource::<ContainerStates>()
+        .init_resource::<ActiveContainerTarget>()
         .add_message::<DoorTravelRequested>()
+        // F75.2: `activate_focused_placement` now also writes
+        // `RequestStateTransition` to open the transfer modal.
+        // `AppStatePlugin` registers this message too (`add_message` is
+        // idempotent -- see `bevy_app::SubApp::add_message` -- so real apps
+        // that already install `AppStatePlugin` are unaffected); this keeps
+        // `interaction::install` self-sufficient for callers/tests (e.g.
+        // `door_travel_animation`'s bare-`App` harness) that don't.
+        .add_message::<RequestStateTransition>()
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
             Update,
@@ -303,6 +391,7 @@ pub(crate) fn install(app: &mut App) {
             Update,
             (update_interaction_notice, cleanup_removed_placements),
         );
+    transfer_ui::install(app);
 }
 
 fn spawn_interaction_ui(mut commands: Commands) {
@@ -489,6 +578,9 @@ fn activate_focused_placement(
     mut door_travel: MessageWriter<DoorTravelRequested>,
     mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
     mut pending_travel: ResMut<PendingDoorTravel>,
+    mut container_states: ResMut<ContainerStates>,
+    mut active_container: ResMut<ActiveContainerTarget>,
+    mut modal_requests: MessageWriter<RequestStateTransition>,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -507,7 +599,7 @@ fn activate_focused_placement(
     match &placement.semantic {
         PreparedSemantic::Pickup(_) => {
             let count = placement.count.max(1);
-            inventory.add(placement.base_form_id, count);
+            inventory.grant(placement.base_form_id, count);
             write_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
             info!(
@@ -522,32 +614,53 @@ fn activate_focused_placement(
             commands.entity(entity).despawn();
         }
         PreparedSemantic::Container => {
-            let opening = !state.open.contains(&entity);
-            let transition = if opening {
-                state.open.insert(entity);
-                write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
-                notice.show(format!(
-                    "{name}: {}",
-                    inventory_summary(&placement.inventory)
-                ));
-                ClipTransition::Opening
-            } else {
-                state.open.remove(&entity);
-                write_sound(&mut sounds, placement.audio.close_sound_form_id, position);
-                notice.show(format!("Closed {name}"));
-                ClipTransition::Closing
-            };
+            // Issue #75 (F75.2): activation now opens the paused transfer
+            // modal rather than toggling a notice in place. `E` on an
+            // already-open container is unreachable in practice --
+            // `activate_focused_placement` only runs in `GameplayModal::None`
+            // (see `install`), and opening a container leaves that state --
+            // but a leftover `open` marker (e.g. restored by a future
+            // persistence apply before the modal system observes it) is
+            // guarded against rather than trusted.
+            if state.open.contains(&entity) {
+                return;
+            }
+            let seed_entries: Vec<container_policy::SeedEntry> = placement
+                .inventory
+                .iter()
+                .map(|entry| container_policy::SeedEntry {
+                    base_form_id: entry.base_form_id,
+                    count: entry.count,
+                    leveled: entry.leveled,
+                })
+                .collect();
+            // #74 seam: `leveled::resolve_leveled` does not exist in this
+            // worktree (agent A, parallel worktree) -- every leveled entry
+            // resolves to no items until the orchestrator wires the real
+            // resolver in at integration.
+            let resolved = container_states.open(
+                placement.reference_form_id,
+                &seed_entries,
+                |_list_form_id| Vec::new(),
+            );
+            let stack_count = resolved.stacks.len();
+            state.open.insert(entity);
+            active_container.0 = Some(ActiveContainer {
+                entity,
+                reference_form_id: placement.reference_form_id,
+                name: name.clone(),
+                item_names: container_item_names(&placement.inventory),
+            });
+            write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {
                 root: entity,
-                transition,
+                transition: ClipTransition::Opening,
                 lead_ms: 0.0,
             });
+            modal_requests.write(RequestStateTransition::Modal(GameplayModal::Dialogue));
             info!(
-                "container {} ({:08x}) {} with {} fixed entries",
-                name,
-                placement.reference_form_id,
-                if opening { "opened" } else { "closed" },
-                placement.inventory.len()
+                "container {} ({:08x}) opened with {} stacks",
+                name, placement.reference_form_id, stack_count
             );
         }
         PreparedSemantic::Door(door) => {
@@ -726,6 +839,15 @@ fn door_is_locked(door: &PreparedDoor, inventory: &PlayerInventory) -> bool {
         .is_none_or(|key_form_id| !inventory.contains(key_form_id))
 }
 
+fn entry_display_name(entry: &PreparedInventoryEntry) -> String {
+    entry
+        .display_name
+        .as_deref()
+        .or(entry.editor_id.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{:08x}", entry.base_form_id))
+}
+
 fn inventory_summary(entries: &[PreparedInventoryEntry]) -> String {
     if entries.is_empty() {
         return "empty".into();
@@ -734,21 +856,26 @@ fn inventory_summary(entries: &[PreparedInventoryEntry]) -> String {
     let mut summary = entries
         .iter()
         .take(DISPLAY_LIMIT)
-        .map(|entry| {
-            let name = entry
-                .display_name
-                .as_deref()
-                .or(entry.editor_id.as_deref())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("{:08x}", entry.base_form_id));
-            format!("{name} x{}", entry.count)
-        })
+        .map(|entry| format!("{} x{}", entry_display_name(entry), entry.count))
         .collect::<Vec<_>>()
         .join(", ");
     if entries.len() > DISPLAY_LIMIT {
         summary.push_str(&format!(", +{} more", entries.len() - DISPLAY_LIMIT));
     }
     summary
+}
+
+/// F75.2: best-effort `base_form_id -> name` lookup for the transfer modal,
+/// built from a container's fixed (non-leveled) prepared inventory entries
+/// at open time. Leveled-resolved items and anything already in the
+/// player's inventory from elsewhere have no name source here -- the
+/// transfer UI falls back to the hex form id for those, matching this
+/// issue's "name + count is enough" scope.
+fn container_item_names(entries: &[PreparedInventoryEntry]) -> HashMap<u32, String> {
+    entries
+        .iter()
+        .map(|entry| (entry.base_form_id, entry_display_name(entry)))
+        .collect()
 }
 
 #[cfg(test)]

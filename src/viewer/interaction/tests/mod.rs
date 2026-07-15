@@ -3,10 +3,39 @@ use super::*;
 #[test]
 fn inventory_accumulates_whole_stacks() {
     let mut inventory = PlayerInventory::default();
-    inventory.add(0x1234, 3);
-    inventory.add(0x1234, 2);
+    inventory.grant(0x1234, 3);
+    inventory.grant(0x1234, 2);
     assert_eq!(inventory.count(0x1234), 5);
     assert!(inventory.contains(0x1234));
+}
+
+// F75.3: `grant`/`remove` are the sanctioned #71 swap point -- non-positive
+// counts are a no-op in both directions, and `remove` floors at zero
+// (dropping the entry) rather than going negative.
+#[test]
+fn grant_ignores_non_positive_counts() {
+    let mut inventory = PlayerInventory::default();
+    inventory.grant(0x1234, 0);
+    inventory.grant(0x1234, -5);
+    assert_eq!(inventory.count(0x1234), 0);
+}
+
+#[test]
+fn remove_floors_at_zero_and_drops_the_entry() {
+    let mut inventory = PlayerInventory::default();
+    inventory.grant(0x1234, 3);
+    inventory.remove(0x1234, 10);
+    assert_eq!(inventory.count(0x1234), 0);
+    assert!(!inventory.contains(0x1234));
+}
+
+#[test]
+fn remove_ignores_non_positive_counts() {
+    let mut inventory = PlayerInventory::default();
+    inventory.grant(0x1234, 3);
+    inventory.remove(0x1234, 0);
+    inventory.remove(0x1234, -1);
+    assert_eq!(inventory.count(0x1234), 3);
 }
 
 #[test]
@@ -18,7 +47,7 @@ fn locked_door_requires_its_key() {
     };
     let mut inventory = PlayerInventory::default();
     assert!(door_is_locked(&door, &inventory));
-    inventory.add(0x42, 1);
+    inventory.grant(0x42, 1);
     assert!(!door_is_locked(&door, &inventory));
 }
 
@@ -343,5 +372,264 @@ mod door_travel_animation {
                 "closing before the lead elapsed must cancel the pending travel"
             );
         }
+    }
+}
+
+// T75.3: Bevy-side container-transfer integration, driven end-to-end
+// through `activate_focused_placement`/`transfer_ui` (a bare `App` plus
+// `AppStatePlugin`, needed here -- unlike `door_travel_animation` above --
+// because opening/closing the transfer modal goes through real
+// `GameplayModal` transitions and their `OnEnter`/`OnExit` hooks).
+mod container_transfer {
+    use super::*;
+    use crate::app_state::{AppState, AppStatePlugin, GameplayModal, RequestStateTransition};
+    use crate::vsa::PreparedPhysicsClassification;
+    use bevy::ecs::message::Messages;
+    use bevy::mesh::MeshPlugin;
+    use bevy::state::app::StatesPlugin;
+    use bevy::time::TimeUpdateStrategy;
+    use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window};
+    use std::time::Duration;
+
+    fn container_placement(inventory: Vec<PreparedInventoryEntry>) -> PreparedPlacement {
+        let mut placement = PreparedPlacement {
+            reference_form_id: 0x0003_0001,
+            base_form_id: 0x2,
+            asset_path: None,
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: PreparedPhysicsClassification::Static,
+            step_support: false,
+            mutability: Default::default(),
+            mutability_root_form_id: None,
+            reference_kind: "REFR".into(),
+            base_kind: "CONT".into(),
+            editor_id: Some("TestContainer".into()),
+            display_name: Some("Footlocker".into()),
+            count: 1,
+            semantic: PreparedSemantic::Container,
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory,
+            audio: Default::default(),
+            ao_mode: "ao-none".into(),
+        };
+        // `PreparedPlacementAudio` isn't reachable from here (`vsa::manifest`
+        // is private to the `vsa` slice) -- its fields are `pub(crate)`
+        // though, so setting them by name on an already-built default value
+        // sidesteps needing the type name at all.
+        placement.audio.open_sound_form_id = Some(0x100);
+        placement.audio.close_sound_form_id = Some(0x101);
+        placement
+    }
+
+    fn build_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            StatesPlugin,
+            TransformPlugin,
+            AssetPlugin::default(),
+            MeshPlugin,
+            AppStatePlugin,
+        ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            1.0 / 60.0,
+        )))
+        .insert_resource(ButtonInput::<KeyCode>::default())
+        .insert_resource(CameraModeState {
+            mode: CameraMode::Fps,
+            ..default()
+        })
+        .insert_resource(RefRegistry::default())
+        .insert_resource(crate::console::ConsoleSessionStore::default());
+        install(&mut app);
+        app.add_message::<animation::PlayPlacementAnimation>();
+        app.add_message::<PlaySound>();
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        drive_to_in_game(&mut app);
+        app
+    }
+
+    fn send(app: &mut App, request: RequestStateTransition) {
+        app.world_mut()
+            .resource_mut::<Messages<RequestStateTransition>>()
+            .write(request);
+        app.update();
+        app.update();
+    }
+
+    fn drive_to_in_game(app: &mut App) {
+        send(app, RequestStateTransition::App(AppState::Loading));
+        send(app, RequestStateTransition::App(AppState::InGame));
+        assert_eq!(
+            *app.world().resource::<State<AppState>>().get(),
+            AppState::InGame
+        );
+    }
+
+    fn current_modal(app: &App) -> GameplayModal {
+        *app.world().resource::<State<GameplayModal>>().get()
+    }
+
+    /// Focuses `entity`, presses E, and updates twice: once for
+    /// `activate_focused_placement` to write the modal request (and
+    /// `apply_state_transition_requests` to queue it in `PostUpdate`), once
+    /// more for `StateTransition` to apply it and fire `OnEnter(Dialogue)`
+    /// (see `world::swap`'s tests for the same two-update pattern).
+    fn open_container(app: &mut App, entity: Entity) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.world_mut().resource_mut::<InteractionState>().focused = Some(entity);
+        app.update();
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(KeyCode::KeyE);
+            keys.clear_just_pressed(KeyCode::KeyE);
+        }
+        app.update();
+    }
+
+    fn press_escape(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(KeyCode::Escape);
+            keys.clear_just_pressed(KeyCode::Escape);
+        }
+        app.update();
+    }
+
+    fn play_sounds(app: &App) -> Vec<u32> {
+        let messages = app.world().resource::<Messages<PlaySound>>();
+        messages
+            .get_cursor()
+            .read(messages)
+            .map(|event| event.form_id)
+            .collect()
+    }
+
+    fn cursor_state(app: &mut App) -> (bool, CursorGrabMode) {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&CursorOptions, With<PrimaryWindow>>();
+        let cursor = query.single(app.world()).unwrap();
+        (cursor.visible, cursor.grab_mode)
+    }
+
+    // T75.3: activating a container opens the paused transfer modal, seeds
+    // `ContainerStates` from its prepared inventory, plays the open sound,
+    // and marks it `open` -- F75.2/F75.4.
+    #[test]
+    fn activating_a_container_opens_the_paused_transfer_modal() {
+        let mut app = build_app();
+        let inventory = vec![PreparedInventoryEntry {
+            base_form_id: 0x10,
+            count: 3,
+            record_kind: "MISC".into(),
+            editor_id: Some("Bottlecap".into()),
+            display_name: None,
+            leveled: false,
+        }];
+        let entity = app
+            .world_mut()
+            .spawn((
+                PlacementRoot::new(container_placement(inventory)),
+                GlobalTransform::default(),
+            ))
+            .id();
+
+        open_container(&mut app, entity);
+
+        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert!(app.world().resource::<Time<Virtual>>().is_paused());
+        assert!(
+            app.world()
+                .resource::<InteractionState>()
+                .open
+                .contains(&entity)
+        );
+        let stacks = app
+            .world()
+            .resource::<ContainerStates>()
+            .get(0x0003_0001)
+            .map(|state| state.stacks.clone());
+        assert_eq!(stacks, Some(vec![(0x10, 3)]));
+        assert_eq!(play_sounds(&app), vec![0x100]);
+        let (visible, grab_mode) = cursor_state(&mut app);
+        assert!(visible);
+        assert_eq!(grab_mode, CursorGrabMode::None);
+    }
+
+    // T75.3: Esc closes the modal, restores the cursor/pause state, plays
+    // the close sound, and clears the container's `open` marker -- F75.4.
+    #[test]
+    fn escape_closes_the_modal_and_restores_gameplay_state() {
+        let mut app = build_app();
+        let entity = app
+            .world_mut()
+            .spawn((
+                PlacementRoot::new(container_placement(Vec::new())),
+                GlobalTransform::default(),
+            ))
+            .id();
+        open_container(&mut app, entity);
+        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+
+        press_escape(&mut app);
+
+        assert_eq!(current_modal(&app), GameplayModal::None);
+        assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+        assert!(
+            !app.world()
+                .resource::<InteractionState>()
+                .open
+                .contains(&entity)
+        );
+        let (visible, grab_mode) = cursor_state(&mut app);
+        assert!(!visible);
+        assert_eq!(grab_mode, CursorGrabMode::Locked);
+        assert!(play_sounds(&app).contains(&0x101));
+    }
+
+    // T75.3: gameplay input is blocked while the modal is open --
+    // `activate_focused_placement` only runs in `GameplayModal::None` (see
+    // `install`), so a second `E` press while the modal is up must not
+    // re-run the container-open branch (no second open sound, modal stays
+    // put).
+    #[test]
+    fn gameplay_input_is_blocked_while_the_modal_is_open() {
+        let mut app = build_app();
+        let entity = app
+            .world_mut()
+            .spawn((
+                PlacementRoot::new(container_placement(Vec::new())),
+                GlobalTransform::default(),
+            ))
+            .id();
+        open_container(&mut app, entity);
+        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert_eq!(play_sounds(&app), vec![0x100]);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.update();
+
+        assert_eq!(current_modal(&app), GameplayModal::Dialogue);
+        assert!(
+            play_sounds(&app).is_empty(),
+            "activate_focused_placement must not run while the modal is open"
+        );
     }
 }

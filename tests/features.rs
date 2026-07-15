@@ -119,6 +119,13 @@ mod ownership_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
+// `interaction::container_policy` (issue #75) is dependency-free too (std
+// only, no Bevy) -- see its module doc comment -- so it is included
+// verbatim here too.
+#[path = "../src/viewer/interaction/container_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod container_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -320,6 +327,15 @@ struct BevyoutWorld {
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
     performance_summary: Option<performance_policy::FrameProbeSummary>,
+
+    // -- container_transfer.feature (issue #75) --
+    container_seed_entries: Vec<container_policy::SeedEntry>,
+    container_resolver_lists: std::collections::BTreeMap<u32, Vec<(u32, i32)>>,
+    container_resolver_calls: u32,
+    container_state: Option<container_policy::ContainerState>,
+    container_stacks: Vec<(u32, i32)>,
+    player_stacks: Vec<(u32, i32)>,
+    transfer_result: Option<Result<i32, container_policy::TransferError>>,
 }
 
 fn find_placement<'a>(
@@ -2687,6 +2703,185 @@ async fn then_frame_probe_p95_and_max(world: &mut BevyoutWorld, p95: f64, max: f
 #[then(regex = r"^(\d+) frames? exceed(?:s)? the probe budget$")]
 async fn then_frames_exceed_budget(world: &mut BevyoutWorld, count: usize) {
     assert_eq!(performance_summary(world).over_budget_count, count);
+}
+
+// ---------------------------------------------------------------------
+// container_transfer.feature (issue #75)
+// ---------------------------------------------------------------------
+
+fn parse_container_form_id(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16).expect("hex form id")
+}
+
+#[given(regex = r"^a container inventory entry 0x([0-9a-fA-F]+) x(-?\d+) leveled (yes|no)$")]
+async fn given_container_inventory_entry(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    count: i32,
+    leveled: String,
+) {
+    world
+        .container_seed_entries
+        .push(container_policy::SeedEntry {
+            base_form_id: parse_container_form_id(&form_id),
+            count,
+            leveled: leveled == "yes",
+        });
+}
+
+#[given(
+    regex = r"^the leveled resolver for list 0x([0-9a-fA-F]+) returns 0x([0-9a-fA-F]+) x(-?\d+)$"
+)]
+async fn given_leveled_resolver_returns(
+    world: &mut BevyoutWorld,
+    list_form_id: String,
+    item_form_id: String,
+    count: i32,
+) {
+    world
+        .container_resolver_lists
+        .entry(parse_container_form_id(&list_form_id))
+        .or_default()
+        .push((parse_container_form_id(&item_form_id), count));
+}
+
+/// Shared by both "opened for the first time" and "reopened" steps: runs
+/// `container_policy::open_container` against the world's current state,
+/// counting resolver calls and syncing `container_stacks` (the single
+/// source of truth the transfer `Then` steps below read) from the result.
+fn open_world_container(world: &mut BevyoutWorld) {
+    let entries = world.container_seed_entries.clone();
+    let lists = world.container_resolver_lists.clone();
+    let existing = world.container_state.take();
+    let mut calls = 0u32;
+    let resolved = container_policy::open_container(existing, &entries, |list_form_id| {
+        calls += 1;
+        lists.get(&list_form_id).cloned().unwrap_or_default()
+    });
+    world.container_resolver_calls += calls;
+    world.container_stacks = resolved.stacks.clone();
+    world.container_state = Some(resolved);
+}
+
+#[when("the container is opened for the first time")]
+async fn when_container_opened_first_time(world: &mut BevyoutWorld) {
+    open_world_container(world);
+}
+
+#[when("the container is reopened")]
+async fn when_container_reopened(world: &mut BevyoutWorld) {
+    open_world_container(world);
+}
+
+#[then("the container is resolved")]
+async fn then_container_is_resolved(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .container_state
+            .as_ref()
+            .expect("the container has not been opened")
+            .resolved
+    );
+}
+
+#[then(regex = r"^the resolver was called (\d+) times?$")]
+async fn then_resolver_called_n_times(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(world.container_resolver_calls, count);
+}
+
+#[given(regex = r"^a container stack of 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_container_stack(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    world
+        .container_stacks
+        .push((parse_container_form_id(&form_id), count));
+}
+
+#[given(regex = r"^a player stack of 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_player_stack(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    world
+        .player_stacks
+        .push((parse_container_form_id(&form_id), count));
+}
+
+#[when(regex = r"^one 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_one(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_one(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^a stack of (-?\d+) 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_stack(world: &mut BevyoutWorld, count: i32, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_stack(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+        count,
+    ));
+}
+
+#[when(regex = r"^all 0x([0-9a-fA-F]+) is taken from the container$")]
+async fn when_take_all(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::take_all(
+        &mut world.container_stacks,
+        &mut world.player_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^one 0x([0-9a-fA-F]+) is stored into the container$")]
+async fn when_store_one(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::store_one(
+        &mut world.player_stacks,
+        &mut world.container_stacks,
+        form_id,
+    ));
+}
+
+#[when(regex = r"^a stack of (-?\d+) 0x([0-9a-fA-F]+) is stored into the container$")]
+async fn when_store_stack(world: &mut BevyoutWorld, count: i32, form_id: String) {
+    let form_id = parse_container_form_id(&form_id);
+    world.transfer_result = Some(container_policy::store_stack(
+        &mut world.player_stacks,
+        &mut world.container_stacks,
+        form_id,
+        count,
+    ));
+}
+
+#[then(regex = r"^the container stack for 0x([0-9a-fA-F]+) is (-?\d+)$")]
+async fn then_container_stack_is(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    let form_id = parse_container_form_id(&form_id);
+    assert_eq!(
+        container_policy::stack_count(&world.container_stacks, form_id),
+        count
+    );
+}
+
+#[then(regex = r"^the player stack for 0x([0-9a-fA-F]+) is (-?\d+)$")]
+async fn then_player_stack_is(world: &mut BevyoutWorld, form_id: String, count: i32) {
+    let form_id = parse_container_form_id(&form_id);
+    assert_eq!(
+        container_policy::stack_count(&world.player_stacks, form_id),
+        count
+    );
+}
+
+#[then("the transfer is rejected")]
+async fn then_transfer_is_rejected(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .transfer_result
+            .as_ref()
+            .expect("no transfer op has run yet")
+            .is_err()
+    );
 }
 
 fn main() {
