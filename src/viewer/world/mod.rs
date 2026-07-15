@@ -18,6 +18,19 @@
 //! `persist.rs`/`persist_policy.rs` (issues #60/#61) own save-state capture
 //! and application across every load/unload path.
 //!
+//! Cell lifecycle (issue #63) — the states the systems below imply, made
+//! explicit: **Absent** (not resident) → **Loading** (background manifest
+//! parse, `PendingPreloadParse`) → **Spawning** (`PendingCellSpawns`
+//! drains bounded chunks under a hidden root) → **Ready** (resident,
+//! hidden, every scene handle loaded) → **Active** (swap: visible,
+//! refs registered, colliders built and recorded in the per-cell
+//! `ownership_policy::CellColliderLedger`, save state applied) →
+//! **Resident-hidden** (swapped away: state captured to `ActiveSaveState`,
+//! colliders torn down via the ledger, scenes stay spawned) → **Evicted**
+//! (captured, colliders torn down, root despawned; Bevy's asset handle
+//! refcounting is the asset barrier — a shared GLB survives as long as any
+//! resident cell's `scene_handles` still hold it).
+//!
 //! `reveal_policy.rs` is a fourth pure, std-only seam (issue #55): bounded
 //! reveal-chunk planning, ordered nearest-to-arrival first, for a
 //! preloaded cell's placement entities. `reveal.rs` is the Bevy-side glue
@@ -25,6 +38,7 @@
 //! in bounded chunks across a few frames instead of all at once -- see that
 //! module's doc comment for the measured spike this amortizes.
 
+mod ownership_policy;
 mod persist;
 mod persist_policy;
 mod policy;
@@ -34,6 +48,7 @@ mod reveal_policy;
 mod swap;
 mod swap_policy;
 
+pub(crate) use ownership_policy::CellColliderLedger;
 pub(crate) use persist::{
     ActiveSaveState, DynamicBodyRestore, PersistRestores, apply_save_state_at_startup,
     write_save_slot,

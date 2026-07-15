@@ -438,6 +438,10 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     // Issue #61 (F61.1): snapshot the departing cell's dynamic/open/taken
     // state into `ActiveSaveState` while its entities are still live.
     super::persist::capture_cell_state(world, source_cell);
+    // Issue #63: then release the departing cell's colliders — the capture
+    // above holds the dynamic poses, and the revisit rebuild restores them
+    // through the save layer.
+    player::teardown_cell_colliders(world, source_cell);
 
     if let Some(source_root) = source_root {
         world.entity_mut(source_root).insert(Visibility::Hidden);

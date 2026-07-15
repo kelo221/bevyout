@@ -109,6 +109,9 @@ pub(crate) fn drain_eviction_captures(world: &mut World) {
             &capture.manifest.placements,
             capture.manifest.bake.is_some(),
         );
+        // Issue #63: an evicted cell's colliders go with it (capture above
+        // already snapshotted the dynamic poses).
+        player::teardown_cell_colliders(world, capture.form_id);
         if let Ok(root) = world.get_entity_mut(capture.root) {
             root.despawn();
         }

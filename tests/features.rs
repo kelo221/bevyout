@@ -103,6 +103,12 @@ mod animation_policy;
 #[allow(dead_code, unused_imports)]
 mod persist_policy;
 
+// `world::ownership_policy` (issue #63) is dependency-free too (std only,
+// generic over the collider id types), included verbatim the same way.
+#[path = "../src/viewer/world/ownership_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod ownership_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -269,6 +275,11 @@ struct BevyoutWorld {
     persist_snapshots: Vec<persist_policy::RuntimeSnapshot>,
     persist_captured: Option<std::collections::HashMap<u32, persist_policy::ReferenceDelta>>,
     persist_applications: Vec<persist_policy::PlacementApplication>,
+
+    // -- collider_ownership.feature (issue #63) --
+    ownership_ledger: ownership_policy::CellColliderLedger<u64, u64>,
+    ownership_released: Option<Option<ownership_policy::CellColliders<u64, u64>>>,
+    ownership_next_id: u64,
 }
 
 fn find_placement<'a>(
@@ -2224,6 +2235,91 @@ async fn then_persist_applied_translation(
         .transform
         .expect("applied placement has no transform delta");
     assert_eq!(transform.translation, [x, y, z]);
+}
+
+// ---------------------------------------------------------------------
+// collider_ownership.feature (issue #63) -- appended section, do not
+// interleave; new steps for this issue belong below this marker.
+// ---------------------------------------------------------------------
+
+fn ownership_record(
+    world: &mut BevyoutWorld,
+    cell: u32,
+    statics: usize,
+    keyframed: usize,
+    dynamics: usize,
+) {
+    for _ in 0..statics {
+        world.ownership_next_id += 1;
+        let id = world.ownership_next_id;
+        world.ownership_ledger.record_static_shape(cell, id);
+    }
+    for _ in 0..keyframed {
+        world.ownership_next_id += 1;
+        let id = world.ownership_next_id;
+        world.ownership_ledger.record_keyframed_body(cell, id);
+    }
+    for _ in 0..dynamics {
+        world.ownership_next_id += 1;
+        let id = world.ownership_next_id;
+        world.ownership_ledger.record_dynamic_body(cell, id);
+    }
+}
+
+#[given(
+    regex = r"^cell 0x([0-9a-fA-F]+) recorded (\d+) static shapes?, (\d+) keyframed bod(?:y|ies), and (\d+) dynamic bod(?:y|ies)$"
+)]
+async fn given_cell_recorded_colliders(
+    world: &mut BevyoutWorld,
+    hex: String,
+    statics: usize,
+    keyframed: usize,
+    dynamics: usize,
+) {
+    ownership_record(world, parse_hex(&hex), statics, keyframed, dynamics);
+}
+
+#[when(regex = r"^cell 0x([0-9a-fA-F]+) records (\d+) more static shapes?$")]
+async fn when_cell_records_more(world: &mut BevyoutWorld, hex: String, statics: usize) {
+    ownership_record(world, parse_hex(&hex), statics, 0, 0);
+}
+
+#[when(regex = r"^cell 0x([0-9a-fA-F]+) is released$")]
+async fn when_cell_released(world: &mut BevyoutWorld, hex: String) {
+    world.ownership_released = Some(world.ownership_ledger.release(parse_hex(&hex)));
+}
+
+#[then(regex = r"^the released set has (\d+) static shapes? and (\d+) bod(?:y|ies)$")]
+async fn then_released_set_counts(world: &mut BevyoutWorld, shapes: usize, bodies: usize) {
+    let released = world
+        .ownership_released
+        .as_ref()
+        .expect("no release performed yet")
+        .as_ref()
+        .expect("release returned nothing");
+    assert_eq!(released.shape_count(), shapes);
+    assert_eq!(released.body_count(), bodies);
+}
+
+#[then("nothing is released")]
+async fn then_nothing_released(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .ownership_released
+            .as_ref()
+            .expect("no release performed yet")
+            .is_none()
+    );
+}
+
+#[then(regex = r"^cell 0x([0-9a-fA-F]+) is no longer tracked$")]
+async fn then_cell_untracked(world: &mut BevyoutWorld, hex: String) {
+    assert!(!world.ownership_ledger.is_tracked(parse_hex(&hex)));
+}
+
+#[then(regex = r"^cell 0x([0-9a-fA-F]+) is still tracked$")]
+async fn then_cell_still_tracked(world: &mut BevyoutWorld, hex: String) {
+    assert!(world.ownership_ledger.is_tracked(parse_hex(&hex)));
 }
 
 fn main() {
