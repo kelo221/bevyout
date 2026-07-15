@@ -133,6 +133,31 @@ use prepare::fingerprints;
 use prepare::jobs;
 use prepare::selectors;
 
+// `vsa::bake::plan` (issue #62) reuses the resumable job-manifest machinery
+// from `vsa::prepare::jobs` (#48) through relative
+// `super::super::prepare::...` imports (in the real crate those names are
+// re-exported at `prepare`'s module level by `prepare/mod.rs`'s
+// `pub(crate) use jobs::*`), plus `vsa::manifest` for `PreparedBake`. It is
+// nested two modules deep here, with small stand-in `manifest`/`prepare`
+// re-export modules alongside it, so both relative paths land on the
+// verbatim includes above rather than needing `prepare/mod.rs` itself.
+#[path = "."]
+mod vsa_bake {
+    pub mod manifest {
+        pub(crate) use crate::manifest::PreparedBake;
+    }
+    pub mod prepare {
+        pub(crate) use crate::prepare::jobs::*;
+    }
+    #[path = "."]
+    pub mod bake {
+        #[path = "../src/vsa/bake/plan.rs"]
+        #[allow(dead_code, unused_imports)]
+        pub mod plan;
+    }
+}
+use vsa_bake::bake::plan as bake_plan;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
@@ -218,6 +243,12 @@ struct BevyoutWorld {
     animation_selected_clip: Option<Option<String>>,
     animation_open_clip_seconds: Option<f32>,
     animation_open_lead: Option<f32>,
+
+    // -- resumable_bake.feature (issue #62) --
+    bake_recorded: std::collections::BTreeMap<u32, Option<manifest::PreparedBake>>,
+    bake_validity: std::collections::BTreeMap<u32, bool>,
+    bake_valid_result: Option<bool>,
+    bake_resume_result: Option<(Vec<u32>, usize, Vec<u32>)>,
 }
 
 fn find_placement<'a>(
@@ -1666,6 +1697,172 @@ async fn then_animation_open_lead_is(world: &mut BevyoutWorld, expected: f32) {
         (lead - expected).abs() < 1e-4,
         "open lead {lead} != expected {expected}"
     );
+}
+
+// ---------------------------------------------------------------------
+// resumable_bake.feature (issue #62) -- appended section, do not interleave
+// ---------------------------------------------------------------------
+
+/// The synthetic "current toolchain" every bake-validity check in this
+/// section compares against; scenarios vary the *checked* revision and job
+/// fingerprint instead.
+const BAKE_CURRENT_REVISION: &str = "bake-current";
+const BAKE_CURRENT_JOB_FINGERPRINT: &str = "job-current";
+
+#[given(
+    regex = r#"^cell 0x([0-9a-fA-F]+) has a recorded bake with revision "([^"]*)" and job fingerprint "([^"]*)"$"#
+)]
+async fn given_bake_recorded(
+    world: &mut BevyoutWorld,
+    hex: String,
+    revision: String,
+    job_fingerprint: String,
+) {
+    world.bake_recorded.insert(
+        parse_hex(&hex),
+        Some(manifest::PreparedBake {
+            bake_revision: Some(revision),
+            source_fingerprint: job_fingerprint,
+            scene_path: "scenes/00000001/baked/scene.glb".into(),
+            irradiance_volume: None,
+        }),
+    );
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+) has no recorded bake$")]
+async fn given_bake_not_recorded(world: &mut BevyoutWorld, hex: String) {
+    world.bake_recorded.insert(parse_hex(&hex), None);
+}
+
+#[given(regex = r"^cell 0x([0-9a-fA-F]+)'s recorded bake is currently (valid|stale)$")]
+async fn given_bake_validity(world: &mut BevyoutWorld, hex: String, validity: String) {
+    let form_id = parse_hex(&hex);
+    // Drive the validity through the real `bake_is_valid` check on a
+    // recorded `PreparedBake` rather than asserting the boolean directly: a
+    // "valid" cell's recorded bake matches the current toolchain, a "stale"
+    // one carries an outdated bake revision.
+    let recorded_revision = if validity == "valid" {
+        BAKE_CURRENT_REVISION
+    } else {
+        "bake-outdated"
+    };
+    let recorded = manifest::PreparedBake {
+        bake_revision: Some(recorded_revision.into()),
+        source_fingerprint: BAKE_CURRENT_JOB_FINGERPRINT.into(),
+        scene_path: "scenes/00000001/baked/scene.glb".into(),
+        irradiance_volume: None,
+    };
+    let valid = bake_plan::bake_is_valid(
+        Some(&recorded),
+        BAKE_CURRENT_REVISION,
+        BAKE_CURRENT_JOB_FINGERPRINT,
+    );
+    world.bake_recorded.insert(form_id, Some(recorded));
+    world.bake_validity.insert(form_id, valid);
+}
+
+#[when(
+    regex = r#"^cell 0x([0-9a-fA-F]+)'s bake is checked against revision "([^"]*)" and job fingerprint "([^"]*)"$"#
+)]
+async fn when_bake_checked(
+    world: &mut BevyoutWorld,
+    hex: String,
+    revision: String,
+    job_fingerprint: String,
+) {
+    let recorded = world
+        .bake_recorded
+        .get(&parse_hex(&hex))
+        .expect("no recorded bake state for that cell");
+    world.bake_valid_result = Some(bake_plan::bake_is_valid(
+        recorded.as_ref(),
+        &revision,
+        &job_fingerprint,
+    ));
+}
+
+#[then(regex = r"^the recorded bake is (valid|stale)$")]
+async fn then_bake_validity_is(world: &mut BevyoutWorld, expected: String) {
+    let valid = world
+        .bake_valid_result
+        .expect("bake validity not checked yet");
+    assert_eq!(valid, expected == "valid");
+}
+
+#[when(regex = r#"^cells "([^"]*)" are bake-resumed (without|with) force$"#)]
+async fn when_bake_cells_resumed(world: &mut BevyoutWorld, list: String, force: String) {
+    let manifest = world
+        .job_manifest
+        .as_ref()
+        .expect("job manifest not created yet");
+    let selection = parse_hex_list(&list);
+    world.bake_resume_result = Some(bake_plan::filter_bake_resume(
+        manifest,
+        &selection,
+        force == "with",
+        &world.bake_validity,
+    ));
+}
+
+#[then(regex = r#"^the bake cells to run are "([^"]*)"$"#)]
+async fn then_bake_cells_to_run_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let (to_run, _, _) = world
+        .bake_resume_result
+        .as_ref()
+        .expect("cells were not bake-resumed yet");
+    assert_eq!(to_run, &expected);
+}
+
+#[then(regex = r"^(\d+) cell\(s\) were skipped as validly baked$")]
+async fn then_bake_cells_skipped(world: &mut BevyoutWorld, count: usize) {
+    let (_, skipped, _) = world
+        .bake_resume_result
+        .as_ref()
+        .expect("cells were not bake-resumed yet");
+    assert_eq!(*skipped, count);
+}
+
+#[then(regex = r#"^the stale bake cells are "([^"]*)"$"#)]
+async fn then_stale_bake_cells_are(world: &mut BevyoutWorld, list: String) {
+    let expected = parse_hex_list(&list);
+    let (_, _, stale) = world
+        .bake_resume_result
+        .as_ref()
+        .expect("cells were not bake-resumed yet");
+    assert_eq!(stale, &expected);
+}
+
+#[then("no bake cells were stale")]
+async fn then_no_bake_cells_stale(world: &mut BevyoutWorld) {
+    let (_, _, stale) = world
+        .bake_resume_result
+        .as_ref()
+        .expect("cells were not bake-resumed yet");
+    assert!(stale.is_empty(), "unexpected stale bake cells: {stale:?}");
+}
+
+#[then(
+    regex = r#"^the bake batch summary line for (\d+) baked, (\d+) skipped, and (\d+) failed is "([^"]*)"$"#
+)]
+async fn then_bake_batch_summary_line_is(
+    world: &mut BevyoutWorld,
+    baked: usize,
+    skipped: usize,
+    failed: usize,
+    expected: String,
+) {
+    let _ = world;
+    assert_eq!(
+        bake_plan::bake_batch_summary_line(baked, skipped, failed),
+        expected
+    );
+}
+
+#[then(regex = r#"^the stale bake line for cell 0x([0-9a-fA-F]+) is "([^"]*)"$"#)]
+async fn then_stale_bake_line_is(world: &mut BevyoutWorld, hex: String, expected: String) {
+    let _ = world;
+    assert_eq!(bake_plan::stale_bake_line(parse_hex(&hex)), expected);
 }
 
 fn main() {
