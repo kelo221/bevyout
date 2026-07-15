@@ -83,15 +83,6 @@ struct SwapTelemetry(Option<SwapMeasurement>);
 #[derive(Component)]
 struct LoadingOverlayRoot;
 
-/// F52.3's live-save seam: `src/save` is deliberately Bevy-free (std +
-/// `anyhow`/`sha2` only, no `Resource` derive), so this thin wrapper is the
-/// viewer's own resource type. Nothing inserts it yet -- no save/load flow
-/// is wired into the viewer (see this issue's final report) -- so
-/// `apply_save_state_to_cell` reading it via `World::get_resource` naturally
-/// falls back to an empty `PersistentWorldState::default()` until one does.
-#[derive(Resource, Default)]
-pub(crate) struct ActiveSaveState(pub(crate) crate::save::PersistentWorldState);
-
 pub(crate) fn install(app: &mut App) {
     app.insert_resource(PendingInstantSwap::default())
         .insert_resource(PendingFallbackSwap::default())
@@ -264,8 +255,9 @@ fn apply_fallback_resolution(world: &mut World) {
 /// `apply_fog_strength`'s change-detection follow via the explicit
 /// `scene::refresh_environment_for_active_cell` refresh), moves
 /// `RefRegistry` registration from the source cell's placements to the
-/// destination's, applies persistent save-state deltas to the destination's
-/// placements, switches the cell ambient loop, and queues the destination's
+/// destination's, captures the source cell's persistent state and applies
+/// the destination's saved deltas through `world::persist` (issues
+/// #60/#61), switches the cell ambient loop, and queues the destination's
 /// colliders for staggered construction.
 fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKind) {
     let SwapRequest {
@@ -299,6 +291,10 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
         .get(&source_cell)
         .map(|resident| resident.root);
 
+    // Issue #61 (F61.1): snapshot the departing cell's dynamic/open/taken
+    // state into `ActiveSaveState` while its entities are still live.
+    super::persist::capture_cell_state(world, source_cell);
+
     if let Some(source_root) = source_root {
         world.entity_mut(source_root).insert(Visibility::Hidden);
     }
@@ -310,12 +306,12 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     scene::refresh_environment_for_active_cell(world);
 
     swap_refs(world, source_root, destination_root);
-    apply_save_state_to_cell(world, destination_cell, destination_root);
+    super::persist::apply_cell_state(world, destination_cell, destination_root);
     audio::rebuild_ambient_for_active_cell(world);
 
     // Issue #55: reveals the destination in bounded, nearest-arrival-first
     // chunks instead of flipping every placement visible in this one frame
-    // -- must run after `apply_save_state_to_cell` so it only ever touches
+    // -- must run after `persist::apply_cell_state` so it only ever touches
     // entities that function already decided should be visible (deleted/
     // disabled references stay `Hidden`, untouched). This is also what
     // makes `destination_root` visible.
@@ -374,84 +370,6 @@ fn swap_refs(world: &mut World, source_root: Option<Entity>, destination_root: E
     }
     for (entity, form_id, editor_id) in to_register {
         references.register(entity, form_id, editor_id.as_deref());
-    }
-}
-
-/// F52.3: applies `apply_persistent_cell_state` to the destination cell's
-/// already-spawned placement roots, sourcing the cell's saved delta from a
-/// live `save::PersistentWorldState` resource if the viewer has one
-/// inserted, or an empty default otherwise (no save/load flow is wired
-/// into the viewer yet -- see this issue's final report).
-fn apply_save_state_to_cell(world: &mut World, destination_cell: u32, destination_root: Entity) {
-    let deltas: HashMap<u32, swap_policy::ReferenceDelta> = world
-        .get_resource::<ActiveSaveState>()
-        .and_then(|state| state.0.cells.get(&destination_cell))
-        .map(|cell_state| {
-            cell_state
-                .references
-                .iter()
-                .map(|(form_id, delta)| {
-                    (
-                        *form_id,
-                        swap_policy::ReferenceDelta {
-                            enabled: delta.enabled,
-                            deleted: delta.deleted,
-                            transform: delta.transform.map(|transform| {
-                                swap_policy::TransformDelta {
-                                    translation: transform.translation,
-                                    rotation_xyzw: transform.rotation_xyzw,
-                                    scale: transform.scale,
-                                }
-                            }),
-                        },
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut query = world.query::<(Entity, &interaction::PlacementRoot, &ChildOf)>();
-    let placements: Vec<(Entity, u32)> = query
-        .iter(world)
-        .filter(|(_, _, child_of)| child_of.parent() == destination_root)
-        .map(|(entity, placement_root, _)| (entity, placement_root.placement().reference_form_id))
-        .collect();
-    let placement_refs: Vec<swap_policy::PlacementRef> = placements
-        .iter()
-        .map(|(_, form_id)| swap_policy::PlacementRef {
-            reference_form_id: *form_id,
-        })
-        .collect();
-    let applications = swap_policy::apply_persistent_cell_state(&deltas, &placement_refs);
-    let entity_by_form_id: HashMap<u32, Entity> = placements
-        .into_iter()
-        .map(|(entity, form_id)| (form_id, entity))
-        .collect();
-
-    for application in applications {
-        let Some(entity) = entity_by_form_id
-            .get(&application.reference_form_id)
-            .copied()
-        else {
-            continue;
-        };
-        let visibility = match application.visibility {
-            swap_policy::VisibilityDecision::Visible => Visibility::Inherited,
-            swap_policy::VisibilityDecision::Hidden => Visibility::Hidden,
-        };
-        world.entity_mut(entity).insert(visibility);
-        if let Some(transform) = application.transform {
-            world.entity_mut(entity).insert(Transform {
-                translation: Vec3::from_array(transform.translation),
-                rotation: Quat::from_xyzw(
-                    transform.rotation_xyzw[0],
-                    transform.rotation_xyzw[1],
-                    transform.rotation_xyzw[2],
-                    transform.rotation_xyzw[3],
-                ),
-                scale: Vec3::from_array(transform.scale),
-            });
-        }
     }
 }
 

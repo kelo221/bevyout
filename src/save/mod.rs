@@ -520,7 +520,11 @@ fn encode_reference(
         write_subrecord(&mut payload, tag("XFRM"), &bytes)?;
     }
     if let Some(inventory) = &delta.inventory {
-        write_subrecord(&mut payload, tag("INVT"), &encode_inventory_bytes(inventory))?;
+        write_subrecord(
+            &mut payload,
+            tag("INVT"),
+            &encode_inventory_bytes(inventory),
+        )?;
     }
     if let Some(body) = delta.body {
         let mut bytes = Vec::with_capacity(25);

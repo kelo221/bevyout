@@ -23,21 +23,30 @@
 //! in bounded chunks across a few frames instead of all at once -- see that
 //! module's doc comment for the measured spike this amortizes.
 
+mod persist;
+mod persist_policy;
 mod policy;
 mod preload;
 mod reveal;
 mod reveal_policy;
 mod swap;
+// Issues #60/#61 moved the save-application path to `persist_policy`, which
+// left `swap_policy`'s `apply_persistent_cell_state` seam (and its
+// ReferenceDelta/TransformDelta/... types) dead in the lib target. Per the
+// wave-4 file-ownership boundary that module is not touched here; the
+// orchestrator deletes the dead seam (and this allow) at merge.
+#[allow(dead_code)]
 mod swap_policy;
 
+pub(crate) use persist::{
+    ActiveSaveState, DynamicBodyRestore, PersistRestores, apply_save_state_at_startup,
+    write_save_slot,
+};
 pub(crate) use preload::{ResidentCell, ResidentCells, ResidentState};
-// The live-save seam (F52.3): nothing inserts it yet; a future save-load
-// flow will (see `swap::ActiveSaveState`'s doc comment).
-#[allow(unused_imports)]
-pub(crate) use swap::ActiveSaveState;
 pub(crate) use swap_policy::{COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildQueue};
 
 pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
+    persist::install(app);
     preload::install(app, resident_cell_limit);
     reveal::install(app);
     swap::install(app);

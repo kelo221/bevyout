@@ -1698,23 +1698,27 @@ fn persist_transform(translation: [f32; 3]) -> persist_policy::TransformDelta {
 
 #[given(regex = r"^a placement 0x([0-9a-fA-F]+) that is initially (enabled|disabled)$")]
 async fn given_persist_placement(world: &mut BevyoutWorld, hex: String, state: String) {
-    world.persist_placements.push(persist_policy::PlacementInfo {
-        reference_form_id: parse_hex(&hex),
-        initially_enabled: state == "enabled",
-        enable_parent: None,
-    });
+    world
+        .persist_placements
+        .push(persist_policy::PlacementInfo {
+            reference_form_id: parse_hex(&hex),
+            initially_enabled: state == "enabled",
+            enable_parent: None,
+        });
 }
 
 #[given(regex = r"^a placement 0x([0-9a-fA-F]+) enable-parented to 0x([0-9a-fA-F]+)$")]
 async fn given_persist_enable_parented(world: &mut BevyoutWorld, hex: String, parent: String) {
-    world.persist_placements.push(persist_policy::PlacementInfo {
-        reference_form_id: parse_hex(&hex),
-        initially_enabled: true,
-        enable_parent: Some(persist_policy::EnableParentLink {
-            reference_form_id: parse_hex(&parent),
-            inverted: false,
-        }),
-    });
+    world
+        .persist_placements
+        .push(persist_policy::PlacementInfo {
+            reference_form_id: parse_hex(&hex),
+            initially_enabled: true,
+            enable_parent: Some(persist_policy::EnableParentLink {
+                reference_form_id: parse_hex(&parent),
+                inverted: false,
+            }),
+        });
 }
 
 #[given(
@@ -1725,14 +1729,16 @@ async fn given_persist_enable_parented_inverted(
     hex: String,
     parent: String,
 ) {
-    world.persist_placements.push(persist_policy::PlacementInfo {
-        reference_form_id: parse_hex(&hex),
-        initially_enabled: true,
-        enable_parent: Some(persist_policy::EnableParentLink {
-            reference_form_id: parse_hex(&parent),
-            inverted: true,
-        }),
-    });
+    world
+        .persist_placements
+        .push(persist_policy::PlacementInfo {
+            reference_form_id: parse_hex(&hex),
+            initially_enabled: true,
+            enable_parent: Some(persist_policy::EnableParentLink {
+                reference_form_id: parse_hex(&parent),
+                inverted: true,
+            }),
+        });
 }
 
 #[given(regex = r"^a save delta disabling reference 0x([0-9a-fA-F]+)$")]
@@ -1757,7 +1763,9 @@ async fn given_persist_delta_deletes(world: &mut BevyoutWorld, hex: String) {
     );
 }
 
-#[given(regex = r"^a save delta pointing reference 0x([0-9a-fA-F]+) at enable root 0x([0-9a-fA-F]+)$")]
+#[given(
+    regex = r"^a save delta pointing reference 0x([0-9a-fA-F]+) at enable root 0x([0-9a-fA-F]+)$"
+)]
 async fn given_persist_delta_enable_root(world: &mut BevyoutWorld, hex: String, root: String) {
     world.persist_deltas.insert(
         parse_hex(&hex),
@@ -1793,10 +1801,12 @@ async fn then_persist_resolves(world: &mut BevyoutWorld, hex: String, state: Str
     regex = r"^a baseline placement 0x([0-9a-fA-F]+) at \[(-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\]$"
 )]
 async fn given_persist_baseline(world: &mut BevyoutWorld, hex: String, x: f32, y: f32, z: f32) {
-    world.persist_baselines.push(persist_policy::BaselinePlacement {
-        reference_form_id: parse_hex(&hex),
-        transform: persist_transform([x, y, z]),
-    });
+    world
+        .persist_baselines
+        .push(persist_policy::BaselinePlacement {
+            reference_form_id: parse_hex(&hex),
+            transform: persist_transform([x, y, z]),
+        });
 }
 
 #[given(
@@ -1813,17 +1823,19 @@ async fn given_persist_snapshot_moving(
     vy: f32,
     vz: f32,
 ) {
-    world.persist_snapshots.push(persist_policy::RuntimeSnapshot {
-        reference_form_id: parse_hex(&hex),
-        present: true,
-        transform: Some(persist_transform([x, y, z])),
-        activated: None,
-        body: Some(persist_policy::BodyDelta {
-            linear_velocity: [vx, vy, vz],
-            angular_velocity: [0.0, 0.0, 0.0],
-            sleeping: false,
-        }),
-    });
+    world
+        .persist_snapshots
+        .push(persist_policy::RuntimeSnapshot {
+            reference_form_id: parse_hex(&hex),
+            present: true,
+            transform: Some(persist_transform([x, y, z])),
+            activated: None,
+            body: Some(persist_policy::BodyDelta {
+                linear_velocity: [vx, vy, vz],
+                angular_velocity: [0.0, 0.0, 0.0],
+                sleeping: false,
+            }),
+        });
 }
 
 #[given(
@@ -1836,35 +1848,41 @@ async fn given_persist_snapshot_at_rest(
     y: f32,
     z: f32,
 ) {
-    world.persist_snapshots.push(persist_policy::RuntimeSnapshot {
-        reference_form_id: parse_hex(&hex),
-        present: true,
-        transform: Some(persist_transform([x, y, z])),
-        activated: None,
-        body: Some(persist_policy::BodyDelta::default()),
-    });
+    world
+        .persist_snapshots
+        .push(persist_policy::RuntimeSnapshot {
+            reference_form_id: parse_hex(&hex),
+            present: true,
+            transform: Some(persist_transform([x, y, z])),
+            activated: None,
+            body: Some(persist_policy::BodyDelta::default()),
+        });
 }
 
 #[given(regex = r"^a runtime snapshot of 0x([0-9a-fA-F]+) that is open$")]
 async fn given_persist_snapshot_open(world: &mut BevyoutWorld, hex: String) {
-    world.persist_snapshots.push(persist_policy::RuntimeSnapshot {
-        reference_form_id: parse_hex(&hex),
-        present: true,
-        transform: None,
-        activated: Some(true),
-        body: None,
-    });
+    world
+        .persist_snapshots
+        .push(persist_policy::RuntimeSnapshot {
+            reference_form_id: parse_hex(&hex),
+            present: true,
+            transform: None,
+            activated: Some(true),
+            body: None,
+        });
 }
 
 #[given(regex = r"^a runtime snapshot of 0x([0-9a-fA-F]+) that is no longer present$")]
 async fn given_persist_snapshot_absent(world: &mut BevyoutWorld, hex: String) {
-    world.persist_snapshots.push(persist_policy::RuntimeSnapshot {
-        reference_form_id: parse_hex(&hex),
-        present: false,
-        transform: None,
-        activated: None,
-        body: None,
-    });
+    world
+        .persist_snapshots
+        .push(persist_policy::RuntimeSnapshot {
+            reference_form_id: parse_hex(&hex),
+            present: false,
+            transform: None,
+            activated: None,
+            body: None,
+        });
 }
 
 #[when("the cell state is captured")]
@@ -1887,12 +1905,20 @@ fn persist_captured_delta(world: &BevyoutWorld, form_id: u32) -> persist_policy:
 
 #[then(regex = r"^the captured delta for 0x([0-9a-fA-F]+) has a transform$")]
 async fn then_persist_captured_has_transform(world: &mut BevyoutWorld, hex: String) {
-    assert!(persist_captured_delta(world, parse_hex(&hex)).transform.is_some());
+    assert!(
+        persist_captured_delta(world, parse_hex(&hex))
+            .transform
+            .is_some()
+    );
 }
 
 #[then(regex = r"^the captured delta for 0x([0-9a-fA-F]+) has a body state$")]
 async fn then_persist_captured_has_body(world: &mut BevyoutWorld, hex: String) {
-    assert!(persist_captured_delta(world, parse_hex(&hex)).body.is_some());
+    assert!(
+        persist_captured_delta(world, parse_hex(&hex))
+            .body
+            .is_some()
+    );
 }
 
 #[then(regex = r"^the captured delta for 0x([0-9a-fA-F]+) is activated$")]

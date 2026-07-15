@@ -44,7 +44,9 @@ pub(crate) struct TransformDelta {
 
 impl TransformDelta {
     fn approx_eq(&self, other: &TransformDelta) -> bool {
-        components(self).zip(components(other)).all(|(a, b)| (a - b).abs() <= TRANSFORM_EPSILON)
+        components(self)
+            .zip(components(other))
+            .all(|(a, b)| (a - b).abs() <= TRANSFORM_EPSILON)
     }
 }
 
@@ -174,8 +176,13 @@ fn resolve_one(
     let value = match by_id.get(&form_id) {
         Some(placement) => match placement.enable_parent {
             Some(link) => {
-                let parent_enabled = resolve_one(link.reference_form_id, by_id, deltas, memo, depth + 1);
-                if link.inverted { !parent_enabled } else { parent_enabled }
+                let parent_enabled =
+                    resolve_one(link.reference_form_id, by_id, deltas, memo, depth + 1);
+                if link.inverted {
+                    !parent_enabled
+                } else {
+                    parent_enabled
+                }
             }
             None => placement.initially_enabled,
         },

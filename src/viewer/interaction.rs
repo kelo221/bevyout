@@ -157,12 +157,36 @@ impl PlayerInventory {
     fn add(&mut self, form_id: u32, count: i32) {
         *self.counts.entry(form_id).or_default() += count.max(1);
     }
+
+    /// Issue #60 (F60.4): the inventory as sorted `(base_form_id, count)`
+    /// stacks, the shape the save format's player record wants.
+    pub(crate) fn stacks(&self) -> Vec<(u32, i32)> {
+        let mut stacks: Vec<(u32, i32)> = self
+            .counts
+            .iter()
+            .filter(|&(_, &count)| count != 0)
+            .map(|(&form_id, &count)| (form_id, count))
+            .collect();
+        stacks.sort_unstable_by_key(|(form_id, _)| *form_id);
+        stacks
+    }
+
+    /// Issue #60 (F60.4): rebuilds the inventory from a loaded save's
+    /// player record.
+    pub(crate) fn from_stacks(stacks: impl IntoIterator<Item = (u32, i32)>) -> Self {
+        Self {
+            counts: stacks.into_iter().collect(),
+        }
+    }
 }
 
+/// `open` is pub(crate) for issues #60/#61: `world::persist` captures
+/// door/container open state on the way out of a cell and re-inserts it on
+/// apply. Everything else stays private to this module.
 #[derive(Resource, Default)]
-struct InteractionState {
+pub(crate) struct InteractionState {
     focused: Option<Entity>,
-    open: HashSet<Entity>,
+    pub(crate) open: HashSet<Entity>,
 }
 
 #[derive(Resource, Default)]
