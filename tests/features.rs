@@ -207,6 +207,12 @@ use vsa_bake::bake::plan as bake_plan;
 #[path = "../src/viewer/interaction/leveled.rs"]
 mod leveled;
 
+// `viewer::interaction::item_rules` (issue #81) is dependency-free (std
+// only, no Bevy) like `container_policy`, so it is included verbatim too.
+#[path = "../src/viewer/interaction/item_rules.rs"]
+#[allow(dead_code, unused_imports)]
+mod item_rules;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
@@ -366,6 +372,12 @@ struct BevyoutWorld {
     container_captured: Option<std::collections::HashMap<u32, persist_policy::ContainerDelta>>,
     container_deltas: std::collections::HashMap<u32, persist_policy::ContainerDelta>,
     container_seeded: Option<std::collections::HashMap<u32, persist_policy::ContainerSnapshot>>,
+    // -- item_flags.feature (issue #81) --
+    flag_record_flags: u32,
+    rule_result: Option<Result<(), item_rules::TransferRejection>>,
+    carried_stacks: Vec<(i32, bool, f32)>,
+    carried_total: Option<f32>,
+    take_classification: Option<item_rules::TakeClassification>,
 }
 
 fn find_placement<'a>(
@@ -3350,6 +3362,116 @@ async fn then_seeded_container_has_stack(
 async fn then_seeded_container_is_resolved(world: &mut BevyoutWorld, hex: String) {
     let snapshot = seeded_container(world, parse_hex(&hex));
     assert!(snapshot.resolved);
+}
+
+// ---------------------------------------------------------------------
+// item_flags.feature (issue #81)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a base record with header flags 0x([0-9a-fA-F]+)$")]
+async fn given_header_flags(world: &mut BevyoutWorld, hex: String) {
+    world.flag_record_flags = parse_hex(&hex);
+}
+
+#[then("the record is a quest item")]
+async fn then_record_is_quest_item(world: &mut BevyoutWorld) {
+    assert!(item_rules::is_quest_item(world.flag_record_flags));
+}
+
+#[then("the record is not a quest item")]
+async fn then_record_is_not_quest_item(world: &mut BevyoutWorld) {
+    assert!(!item_rules::is_quest_item(world.flag_record_flags));
+}
+
+#[when(regex = r"^dropping item 0x([0-9a-fA-F]+) quest (yes|no) is checked$")]
+async fn when_drop_checked(world: &mut BevyoutWorld, hex: String, quest: String) {
+    world.rule_result = Some(item_rules::can_drop(parse_hex(&hex), quest == "yes"));
+}
+
+#[when(regex = r"^storing item 0x([0-9a-fA-F]+) quest (yes|no) is checked$")]
+async fn when_store_checked(world: &mut BevyoutWorld, _hex: String, quest: String) {
+    world.rule_result = Some(item_rules::can_store(quest == "yes"));
+}
+
+#[then("the transfer is allowed")]
+async fn then_transfer_allowed(world: &mut BevyoutWorld) {
+    assert_eq!(world.rule_result, Some(Ok(())));
+}
+
+#[then("the transfer is rejected as quest item")]
+async fn then_transfer_rejected_quest(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rule_result,
+        Some(Err(item_rules::TransferRejection::QuestItem))
+    );
+}
+
+#[then("the transfer is rejected as caps")]
+async fn then_transfer_rejected_caps(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.rule_result,
+        Some(Err(item_rules::TransferRejection::Caps))
+    );
+}
+
+#[given(regex = r"^a carried stack of (\d+) weighing ([\d.]+) each quest (yes|no)$")]
+async fn given_carried_stack(world: &mut BevyoutWorld, count: i32, weight: f32, quest: String) {
+    world.carried_stacks.push((count, quest == "yes", weight));
+}
+
+#[when("the carried weight is totaled")]
+async fn when_carried_weight_totaled(world: &mut BevyoutWorld) {
+    world.carried_total = Some(
+        world
+            .carried_stacks
+            .iter()
+            .map(|&(count, quest, weight)| {
+                count as f32 * item_rules::carried_weight(quest, Some(weight)).unwrap_or(0.0)
+            })
+            .sum(),
+    );
+}
+
+#[then(regex = r"^the carried weight is ([\d.]+)$")]
+async fn then_carried_weight_excluding_quest(world: &mut BevyoutWorld, expected: f32) {
+    let total = world.carried_total.expect("carried weight not totaled yet");
+    assert!((total - expected).abs() < 1e-4, "carried weight {total}");
+}
+
+#[when("taking a reference with no owner is classified")]
+async fn when_take_unowned_classified(world: &mut BevyoutWorld) {
+    world.take_classification = Some(item_rules::classify_take(None));
+}
+
+#[when(regex = r"^taking a reference owned by 0x([0-9a-fA-F]+) is classified$")]
+async fn when_take_owned_classified(world: &mut BevyoutWorld, hex: String) {
+    world.take_classification = Some(item_rules::classify_take(Some(parse_hex(&hex))));
+}
+
+#[then("the take is not theft")]
+async fn then_take_not_theft(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.take_classification,
+        Some(item_rules::TakeClassification::Take)
+    );
+}
+
+#[then(regex = r"^the take is theft from 0x([0-9a-fA-F]+)$")]
+async fn then_take_theft(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(
+        world.take_classification,
+        Some(item_rules::TakeClassification::Steal {
+            owner_form_id: parse_hex(&hex)
+        })
+    );
+}
+
+#[then(regex = r"^the player caps total is (-?\d+)$")]
+async fn then_player_caps_total(world: &mut BevyoutWorld, expected: i32) {
+    assert_eq!(
+        container_policy::stack_count(&world.player_stacks, item_rules::CAPS_FORM_ID),
+        expected
+    );
 }
 
 fn main() {

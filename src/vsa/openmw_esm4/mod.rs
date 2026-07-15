@@ -48,6 +48,9 @@ impl ReferenceKind {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BaseRecord {
     pub(crate) kind: String,
+    /// Record header flags (quest item is `0x0000_0400`), stamped by the
+    /// reader after `parse_base` since only the header carries them.
+    pub(crate) record_flags: u32,
     pub(crate) editor_id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) model: Option<String>,

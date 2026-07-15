@@ -203,7 +203,8 @@ pub(crate) fn walk_container(
             _ => {
                 if flags & RECORD_DELETED != 0 {
                     state.bases.remove(&form_id);
-                } else if let Some(base) = parse_base(&sig, &subs, resolver) {
+                } else if let Some(mut base) = parse_base(&sig, &subs, resolver) {
+                    base.record_flags = flags;
                     state.bases.insert(form_id, base);
                 }
             }

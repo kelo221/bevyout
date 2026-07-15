@@ -5,7 +5,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::GameplayModal;
 
-use super::interaction::PlayerInventory;
+use super::interaction::{PlayerInventory, item_rules};
 use super::inventory::{DropAction, StackKey, drop_action};
 use super::{PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats};
 
@@ -287,7 +287,7 @@ fn spawn_screen(
                 .items
                 .iter()
                 .find(|item| item.base_form_id == form_id)
-                .and_then(|item| item.weight)
+                .and_then(|item| item_rules::carried_weight(item.quest_item, item.weight))
         })
         .max(0.0);
     commands

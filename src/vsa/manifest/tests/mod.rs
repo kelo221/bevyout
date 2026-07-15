@@ -519,3 +519,32 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         ron::ser::to_string_pretty(&decoded, ron::ser::PrettyConfig::default()).unwrap();
     assert_eq!(re_encoded, text);
 }
+
+// --- Issue #81: quest_item defaults for pre-#81 item catalogs -----------
+
+#[test]
+fn legacy_item_catalog_without_quest_item_field_defaults_to_false() {
+    let text = r#"(
+            revision: "openmw-items-v1",
+            source_fingerprint: "fingerprint",
+            items: [
+                (
+                    base_form_id: 1,
+                    record_kind: "MISC",
+                    category: Misc,
+                    editor_id: None,
+                    display_name: None,
+                    source_model_path: None,
+                    icon_asset_path: None,
+                    world_asset_path: None,
+                    physics_asset_path: None,
+                    value: None,
+                    weight: None,
+                    stats: Misc,
+                ),
+            ],
+        )"#;
+    let catalog: PreparedItemCatalog = ron::de::from_str(text).unwrap();
+    assert_eq!(catalog.items.len(), 1);
+    assert!(!catalog.items[0].quest_item);
+}

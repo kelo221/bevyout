@@ -166,9 +166,13 @@ fn subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
 }
 
 fn record(signature: &[u8; 4], form_id: u32, data: &[u8]) -> Vec<u8> {
+    record_with_flags(signature, form_id, 0, data)
+}
+
+fn record_with_flags(signature: &[u8; 4], form_id: u32, flags: u32, data: &[u8]) -> Vec<u8> {
     let mut result = signature.to_vec();
     result.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    result.extend_from_slice(&0u32.to_le_bytes()); // flags
+    result.extend_from_slice(&flags.to_le_bytes());
     result.extend_from_slice(&form_id.to_le_bytes());
     result.extend_from_slice(&[0; 8]);
     result.extend_from_slice(data);
@@ -718,4 +722,48 @@ fn classification_and_summary_are_deterministic_across_repeated_runs() {
             unknown: 2,
         }
     );
+}
+
+// --- Issue #81: quest-item header flag flows into the item catalog ------
+
+#[test]
+fn quest_item_header_flag_flows_from_plugin_bytes_into_the_item_catalog() {
+    const QUEST_ITEM_HEADER_FLAG: u32 = 0x0000_0400;
+
+    let misc_value_weight = {
+        let mut data = 5_i32.to_le_bytes().to_vec();
+        data.extend_from_slice(&1.0_f32.to_le_bytes());
+        data
+    };
+    let mut bytes = record(b"TES4", 0, &[]);
+    bytes.extend(record_with_flags(
+        b"MISC",
+        1,
+        QUEST_ITEM_HEADER_FLAG,
+        &subrecord(b"DATA", &misc_value_weight),
+    ));
+    bytes.extend(record(b"MISC", 2, &subrecord(b"DATA", &misc_value_weight)));
+
+    let parsed = parse_content_set(
+        &[PluginSource {
+            name: "Test.esm",
+            bytes: &bytes,
+        }],
+        &parse_cell_selector("0").unwrap(),
+    )
+    .expect("synthetic quest-item plugin bytes must parse");
+
+    let catalog = build_item_catalog(&parsed.bases, &HashMap::new(), &[], &HashMap::new(), "test");
+    let quest_item = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == 1)
+        .expect("quest MISC item must be present in the catalog");
+    let ordinary_item = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == 2)
+        .expect("ordinary MISC item must be present in the catalog");
+    assert!(quest_item.quest_item);
+    assert!(!ordinary_item.quest_item);
 }
