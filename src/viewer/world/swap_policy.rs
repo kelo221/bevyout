@@ -92,6 +92,9 @@ impl<T> ColliderBuildQueue<T> {
 
 /// Conservative per-frame collider-build budget (F52.2): kept small so a
 /// large destination cell's colliders never spike a single frame.
+/// Wave 4 (#55, A15): 48 was measured against 64 on the largest cell and
+/// was indistinguishable from run-to-run noise (the residual variance is
+/// texture-upload bursts, not collider work) -- left at 64.
 pub(crate) const COLLIDER_BUILD_BUDGET_PER_FRAME: usize = 64;
 
 /// F59.1: whether a fallback swap is currently in flight. `swap.rs` derives

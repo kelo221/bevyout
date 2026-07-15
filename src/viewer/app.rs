@@ -63,6 +63,11 @@ pub(crate) fn run_view(
         AutoExposurePlugin,
     ));
     app.add_plugins(crate::console::ConsolePlugin);
+    // Issue #55 (A15): `RenderAssetBytesPerFrame` was tried here and
+    // REVERTED — a 16 MB/frame upload throttle made the first hop's reveal
+    // measure 119-126 ms (vs 25-35 unthrottled) because the freshly
+    // revealed cell's meshes/images were still queued behind the budget.
+    // Don't reintroduce it without re-measuring the full chain.
     app.insert_resource(physics_assets);
     if let Some(port) = agent_port {
         agent_bridge::install(&mut app, port);

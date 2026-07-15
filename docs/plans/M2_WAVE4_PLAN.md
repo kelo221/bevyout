@@ -177,6 +177,55 @@ swap/preload/reveal systems imply and add an asset-barrier regression test
 handle refcounting is expected to already guarantee this; the test pins it).
 If that exceeds the wave's budget, re-defer with a comment on #63.
 
+## Shipped amendments (found during implementation/acceptance)
+
+- **A12 — #55 was a wave-3 regression, not a missing pre-warm** (commit
+  `d48a77a`): the reveal-frame profile (10 GB `bevy/trace_chrome` capture)
+  showed the two animated vault-tileset GLBs re-running their glTF loader
+  16,217 times in ~10 s. `resolve_pending_animation_discovery` dropped its
+  root `Gltf` handle after building the clip graph; the freed root made
+  every later rediscovery `load::<Gltf>` re-run the loader, firing
+  `Modified` for every subasset → respawning every scene instance (wave 3's
+  A8 hazard) → re-`Added` players → more discoveries, while the render
+  thread re-uploaded the same meshes/images (~15 ms nearly every frame).
+  Pipeline/shader compilation was ruled out. Also explains A9's
+  smaller-chunks-measure-worse paradox. Fix: retain the handle in
+  `AnimatedPlacement`. No pre-warm mechanism was built (F-plan step 2
+  became unnecessary); the pure chunked reveal from wave 3 stays as-is.
+- **A13 — console `activate` toggles containers** (`interaction::
+  scripted_container_toggle`): the #60/#61 gate walk-through runs over the
+  agent bridge, but `activate` was door-only, so container open-state
+  persistence could not be driven on real data. Containers now route
+  through the same open-state/clip/sound/notice path as player activation;
+  the console responds `{opened: bool}`.
+- **A14 — the superseded #52 save-application seam was deleted at merge**
+  (`swap_policy::apply_persistent_cell_state`, its delta types, its tests,
+  and the four `instant_swap.feature` scenarios that exercised it):
+  `persist_policy.rs` owns application now and
+  `state_persistence.feature` covers every removed scenario shape.
+- **A15 — post-fix frame-bar tuning, and what was rejected**: with the
+  reload churn gone (A12), the remaining >33 ms frames split into two
+  phenomena. (1) Reveal/collider overlap on the largest cell:
+  `PRELOAD_SPAWN_BUDGET_PER_FRAME` 128→64 and
+  `COLLIDER_BUILD_BUDGET_PER_FRAME` 64→48 bring every transition/reveal
+  frame of the a→b→d→b→a chain to ≤32 ms on a cool machine (Vault101d
+  first reveal 31.6 ms, was 84 in wave 2 and ~36 in wave 3).
+  (2) An intermittent 90–163 ms frame while a large neighbor preloads in
+  the background: an atomic GPU upload of big uncompressed textures.
+  `RenderAssetBytesPerFrame` (16 MB) was tried against it and REVERTED —
+  deferring uploads starved the next reveal instead (118–126 ms reveals,
+  3/3 runs). No runtime knob splits an atomic upload; the fix is
+  GPU-compressed textures at prepare time (BC7/KTX2, like the
+  point-shadow artifacts). Follow-up to be filed; not gate-blocking —
+  transition frames themselves meet the bar.
+- **Flagged for #63 during #60/#61** (agent finding, confirmed by reading
+  `queue_collider_build`): collider construction has no per-cell ownership
+  or teardown — every swap re-queues the destination's full placement list,
+  so revisits duplicate static shapes and keyframed bindings on the shared
+  static body, and a departed cell's colliders persist indefinitely. The
+  #60/#61 dynamic-body guard fixed only the dynamic case. This is #63's
+  "explicit ownership / unload releases" criterion; see that issue.
+
 ## Orchestrator: gates and real-data acceptance
 
 1. Merge A/B/C branches into `m2-wave4`; resolve `tests/features.rs` and
