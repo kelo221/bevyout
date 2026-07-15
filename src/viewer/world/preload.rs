@@ -254,6 +254,7 @@ fn evaluate_preload_plan(
     resident_cell_limit: Res<ResidentCellLimit>,
     manifest: Res<PreparedSceneManifest>,
     mut pending_reveal: ResMut<super::reveal::PendingReveal>,
+    mut pending_captures: ResMut<super::persist::PendingEvictionCaptures>,
     mut last_planned: Local<Option<u32>>,
 ) {
     if *last_planned == Some(active_cell.0) {
@@ -280,7 +281,15 @@ fn evaluate_preload_plan(
 
     for form_id in plan.evict {
         if let Some(resident) = resident_cells.0.remove(&form_id) {
-            commands.entity(resident.root).despawn();
+            // Issue #61 (F61.1): stage the departing cell for capture;
+            // `persist::drain_eviction_captures` snapshots its dynamic/
+            // open/taken state into `ActiveSaveState` and only then
+            // despawns this root.
+            pending_captures.0.push(super::persist::EvictionCapture {
+                form_id,
+                root: resident.root,
+                manifest: Arc::clone(&resident.manifest),
+            });
         }
         // Issue #55: the active cell is never evicted (see `policy::
         // CellGraph::plan`'s doc comment), so a mid-reveal cell can't

@@ -74,6 +74,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
         args.disable_physics,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        args.save_slot,
     )
 }
 
@@ -140,6 +141,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
         args.disable_physics,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        None,
     )
 }
 

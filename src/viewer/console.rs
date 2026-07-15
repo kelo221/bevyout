@@ -179,6 +179,13 @@ pub(crate) fn install(app: &mut App) {
             activate_reference,
         )
         .mutating(),
+        ConsoleCommand::new(
+            "save",
+            "save <slot>",
+            "Capture the active cell state and write it to a named save slot.",
+            save_slot,
+        )
+        .mutating(),
     ] {
         registry
             .register(command)
@@ -239,6 +246,27 @@ fn activate_reference(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
         )],
+    ))
+}
+
+/// Issue #60 (F60.3): captures the active cell into `ActiveSaveState` and
+/// writes the named slot through `SaveStore`, responding deterministically
+/// with the written path.
+fn save_slot(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [slot] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "save requires exactly one slot name",
+        ));
+    };
+    let path = super::world::write_save_slot(world, slot)
+        .map_err(|error| ConsoleError::new("save_failed", format!("{error:#}")))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "slot": slot, "path": path }),
+        vec![format!("Save written to {}.", path.display())],
     ))
 }
 
@@ -1280,6 +1308,18 @@ mod tests {
             .expect("expected a DoorTravelRequested message");
         assert_eq!(request.destination_cell_form_id, 148753);
         assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    // -- save (issue #60, F60.3) ------------------------------------------
+
+    #[test]
+    fn save_validates_arity_and_fails_deterministically_without_a_world() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "save")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "save a b")), "bad_arity");
+        // The console harness has no active cell, so the failure is a
+        // structured error rather than a panic.
+        assert_eq!(error_code(&exec(&mut app, "save slot1")), "save_failed");
     }
 
     /// Wave-3 amendment: a door with a discovered Open clip stages its travel

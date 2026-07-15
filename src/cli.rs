@@ -167,6 +167,9 @@ pub struct ViewArgs {
     /// Loopback HTTP port used by the agent bridge.
     #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
     pub(crate) agent_port: u16,
+    /// Load this save slot at startup and apply it to the launch cell.
+    #[arg(long, value_name = "SLOT")]
+    pub(crate) save_slot: Option<String>,
 }
 
 #[derive(Parser, Debug)]

@@ -77,6 +77,7 @@ pub(crate) fn advance_pending_collider_builds(
     mut stats: ResMut<CollisionRuntimeStats>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
+    mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
     if pending.0.is_none() {
         return;
@@ -112,6 +113,7 @@ pub(crate) fn advance_pending_collider_builds(
             &mut stats,
             &mut state.unknown_layers,
             &mut state.static_marker_spawned,
+            &mut restores,
         );
     }
     let queue_empty = state.queue.is_empty();
@@ -133,6 +135,7 @@ pub(crate) fn build_prepared_colliders(
     mut collision_world: ResMut<PreparedCollisionWorld>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     roots: Query<(Entity, &super::super::interaction::PlacementRoot)>,
+    mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
     if physics_disabled.0 {
         state.collision_build_complete = true;
@@ -173,6 +176,7 @@ pub(crate) fn build_prepared_colliders(
             &mut stats,
             &mut unknown_layers,
             &mut static_marker_spawned,
+            &mut restores,
         );
     }
     stats.awake_dynamic_bodies = stats.dynamic_bodies;
@@ -217,7 +221,13 @@ fn build_colliders_for_placement(
     stats: &mut CollisionRuntimeStats,
     unknown_layers: &mut HashSet<u8>,
     static_marker_spawned: &mut bool,
+    restores: &mut super::super::world::PersistRestores,
 ) {
+    // Issues #60/#61: a reference the save layer deleted (taken pickup)
+    // must never get colliders rebuilt for it.
+    if restores.suppressed.contains(&placement.reference_form_id) {
+        return;
+    }
     let Some(path) = placement.physics_asset_path.as_ref() else {
         return;
     };
@@ -229,6 +239,15 @@ fn build_colliders_for_placement(
         == PreparedPhysicsClassification::Dynamic)
         .then(|| root_by_reference.get(&placement.reference_form_id).copied())
         .flatten();
+    // Issues #60/#61: re-activating a cell that stayed resident re-queues
+    // its collider build; this placement's dynamic body is still alive with
+    // its live pose/velocity, and building a second one would snap the
+    // entity back to its manifest rest pose. Keep the live body.
+    if let Some(entity) = dynamic_entity
+        && collision_world.dynamic_bodies.contains_key(&entity)
+    {
+        return;
+    }
     let placement_root = root_by_reference.get(&placement.reference_form_id).copied();
     for body in &asset.bodies {
         if !body_blocks_player(body) {
@@ -243,6 +262,17 @@ fn build_colliders_for_placement(
         }
         let (body_id, dynamic, local_space) = if let Some(entity) = dynamic_entity {
             let body_id = create_dynamic_body(world, placement, body);
+            // Issue #60 (F60.2): a saved pose/velocity for this reference is
+            // re-applied the moment its body exists, so the staggered build
+            // itself performs the restoration instead of a later system
+            // fighting it.
+            if let Some(restore) = restores.bodies.remove(&placement.reference_form_id) {
+                apply_dynamic_body_restore(world, body_id, &restore);
+                info!(
+                    "save restore body {:08x} sleeping={}",
+                    placement.reference_form_id, restore.sleeping
+                );
+            }
             collision_world.dynamic_bodies.insert(entity, body_id);
             collision_world.dynamic_entities.insert(body_id, entity);
             commands.entity(entity).insert(PhysicsCollider);
@@ -454,6 +484,25 @@ pub(crate) fn create_dynamic_body(
     let _ = world.try_set_body_angular_damping(body_id, body.angular_damping.max(0.0));
     let _ = world.try_enable_body_sleep(body_id, body.sleep_enabled);
     body_id
+}
+
+/// Issue #60 (F60.2): re-applies a saved dynamic-body pose/velocity/sleep
+/// state. Shared by the collider-build hook above (fresh bodies) and
+/// `world::persist`'s immediate path (bodies that survived as live
+/// residents).
+pub(crate) fn apply_dynamic_body_restore(
+    world: &mut boxddd::World,
+    body_id: BodyId,
+    restore: &super::super::world::DynamicBodyRestore,
+) {
+    let _ = world.try_set_body_transform(
+        body_id,
+        to_box_vec3(restore.translation),
+        to_box_quat(restore.rotation),
+    );
+    let _ = world.try_set_body_linear_velocity(body_id, to_box_vec3(restore.linear_velocity));
+    let _ = world.try_set_body_angular_velocity(body_id, to_box_vec3(restore.angular_velocity));
+    let _ = world.try_set_body_awake(body_id, !restore.sleeping);
 }
 
 pub(crate) fn create_prepared_shape(

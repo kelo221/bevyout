@@ -229,6 +229,14 @@ pub(crate) struct PreparedCollisionWorld {
     surfaces: HashMap<ShapeId, CollisionSurface>,
 }
 
+impl PreparedCollisionWorld {
+    /// Issues #60/#61: read-only lookup for `world::persist`'s capture
+    /// (velocity snapshot) and apply (live-body restore) paths.
+    pub(crate) fn dynamic_body_of(&self, entity: Entity) -> Option<BodyId> {
+        self.dynamic_bodies.get(&entity).copied()
+    }
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct PreparedPhysicsAssets {
     assets: HashMap<String, PreparedPhysicsAsset>,
