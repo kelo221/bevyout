@@ -120,6 +120,61 @@ pub(crate) fn scripted_door_travel(
     lead_seconds * 1000.0
 }
 
+/// Wave-4 acceptance seam: scripted (console/BRP) container activation,
+/// mirroring `activate_focused_placement`'s container branch (open-set
+/// toggle, clip, sound, notice) minus the raycast focus/distance checks.
+/// Returns the new open state. Used to drive the #60/#61 gate walk-through
+/// ("open a container, revisit, restart") over the agent bridge.
+pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bool {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let name = placement
+        .display_name
+        .clone()
+        .or_else(|| placement.editor_id.clone())
+        .unwrap_or_else(|| format!("{:08x}", placement.reference_form_id));
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .unwrap_or_default();
+    let mut state = world.get_resource_or_insert_with(InteractionState::default);
+    let opening = !state.open.contains(&entity);
+    let (sound, transition) = if opening {
+        state.open.insert(entity);
+        (placement.audio.open_sound_form_id, ClipTransition::Opening)
+    } else {
+        state.open.remove(&entity);
+        (placement.audio.close_sound_form_id, ClipTransition::Closing)
+    };
+    if let Some(form_id) = sound {
+        world.write_message(PlaySound::at(form_id, position));
+    }
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition,
+        lead_ms: 0.0,
+    });
+    let notice_text = if opening {
+        format!("{name}: {}", inventory_summary(&placement.inventory))
+    } else {
+        format!("Closed {name}")
+    };
+    world
+        .get_resource_or_insert_with(InteractionNotice::default)
+        .show(notice_text);
+    info!(
+        "container {} ({:08x}) {} with {} fixed entries",
+        name,
+        placement.reference_form_id,
+        if opening { "opened" } else { "closed" },
+        placement.inventory.len()
+    );
+    opening
+}
+
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
 #[derive(Component, Clone, Debug)]
@@ -158,24 +213,58 @@ impl PlayerInventory {
     fn add(&mut self, form_id: u32, count: i32) {
         *self.counts.entry(form_id).or_default() += count.max(1);
     }
+
+    /// Issue #60 (F60.4): the inventory as sorted `(base_form_id, count)`
+    /// stacks, the shape the save format's player record wants.
+    pub(crate) fn stacks(&self) -> Vec<(u32, i32)> {
+        let mut stacks: Vec<(u32, i32)> = self
+            .counts
+            .iter()
+            .filter(|&(_, &count)| count != 0)
+            .map(|(&form_id, &count)| (form_id, count))
+            .collect();
+        stacks.sort_unstable_by_key(|(form_id, _)| *form_id);
+        stacks
+    }
+
+    /// Issue #60 (F60.4): rebuilds the inventory from a loaded save's
+    /// player record.
+    pub(crate) fn from_stacks(stacks: impl IntoIterator<Item = (u32, i32)>) -> Self {
+        Self {
+            counts: stacks.into_iter().collect(),
+        }
+    }
 }
 
+/// `open` is pub(crate) for issues #60/#61: `world::persist` captures
+/// door/container open state on the way out of a cell and re-inserts it on
+/// apply. Everything else stays private to this module.
 #[derive(Resource, Default)]
-struct InteractionState {
+pub(crate) struct InteractionState {
     focused: Option<Entity>,
-    open: HashSet<Entity>,
+    pub(crate) open: HashSet<Entity>,
 }
 
+/// Issue #59's notice seam: `world::swap`'s fallback-cancellation and
+/// failure-recovery systems reach this same HUD line (`show`, made
+/// `pub(crate)` for that) rather than inventing a second notice surface.
 #[derive(Resource, Default)]
-struct InteractionNotice {
+pub(crate) struct InteractionNotice {
     text: String,
     remaining_seconds: f32,
 }
 
 impl InteractionNotice {
-    fn show(&mut self, text: impl Into<String>) {
+    pub(crate) fn show(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.remaining_seconds = NOTICE_SECONDS;
+    }
+
+    /// Read-only view of the currently displayed notice text (issue #59's
+    /// swap tests assert on it; nothing outside tests should).
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        &self.text
     }
 }
 

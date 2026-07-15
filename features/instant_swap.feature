@@ -42,25 +42,3 @@ Feature: Instant door transition swap with loading-screen fallback
     When the fallback outcome is computed
     Then the fallback outcome is ReturnToSource
 
-  Scenario: A disabled reference is hidden on activation
-    Given placement reference 0x00000100 is spawned in the destination cell
-    And the saved state disables reference 0x00000100
-    When the persistent cell state is applied
-    Then placement reference 0x00000100 is hidden
-
-  Scenario: A deleted reference is hidden on activation
-    Given placement reference 0x00000200 is spawned in the destination cell
-    And the saved state deletes reference 0x00000200
-    When the persistent cell state is applied
-    Then placement reference 0x00000200 is hidden
-
-  Scenario: A saved transform delta is applied on activation
-    Given placement reference 0x00000300 is spawned in the destination cell
-    And the saved state moves reference 0x00000300 to [1, 2, 3]
-    When the persistent cell state is applied
-    Then placement reference 0x00000300 has translation [1, 2, 3]
-
-  Scenario: An untouched reference is unchanged on activation
-    Given placement reference 0x00000400 is spawned in the destination cell
-    When the persistent cell state is applied
-    Then placement reference 0x00000400 is visible

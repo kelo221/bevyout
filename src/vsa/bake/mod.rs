@@ -6,10 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod batch;
 mod job;
+mod plan;
 mod tools;
 
+pub(crate) use batch::*;
 pub(crate) use job::*;
+pub(crate) use plan::*;
 pub(crate) use tools::*;
 
 use crate::cli::{BakeArgs, BakeQuality};
@@ -25,6 +29,13 @@ use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
 use super::scenes::resolve_cached_manifest;
 
 pub fn bake(args: BakeArgs) -> Result<()> {
+    // Batch mode (issue #62): `--all-interiors`/`--retry-failed` walk the
+    // prepared cell catalogue through the resumable bake job manifest; a
+    // single selector/--manifest keeps the original single-cell path, which
+    // batch mode reuses per cell via `bake_manifest`.
+    if args.all_interiors || args.retry_failed {
+        return bake_batch(args);
+    }
     let manifest_path = match (args.selector.as_deref(), args.manifest.as_deref()) {
         (Some(_), Some(_)) => {
             bail!("choose either a GECK EditorID/FormID selector or --manifest, not both")
@@ -40,8 +51,21 @@ pub fn bake(args: BakeArgs) -> Result<()> {
             "provide a GECK EditorID/FormID selector or --manifest; run `bevyout bake --help` for usage"
         ),
     };
-    let text = fs::read_to_string(&manifest_path).context("could not read scene manifest")?;
-    let mut manifest: PreparedSceneManifest =
+    bake_manifest(&args, &manifest_path)
+}
+
+/// Reads and validates the prepared scene manifest a bake starts from:
+/// parseable, compatible converter/physics revisions, and at least one
+/// renderable placement. Shared by the single-cell path, each batch cell,
+/// and the batch validity check (`batch::recorded_bake_validity`).
+pub(crate) fn load_prepared_manifest(manifest_path: &Path) -> Result<PreparedSceneManifest> {
+    let text = fs::read_to_string(manifest_path).with_context(|| {
+        format!(
+            "could not read scene manifest {}; run prepare before bake",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: PreparedSceneManifest =
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
     ensure_prepared_manifest_compatible(
         &manifest,
@@ -55,35 +79,52 @@ pub fn bake(args: BakeArgs) -> Result<()> {
     {
         bail!("scene manifest contains no renderable placements");
     }
+    Ok(manifest)
+}
 
-    let blender = if matches!(args.quality, BakeQuality::Irradiance) {
-        find_irradiance_blender(args.irradiance_blender.as_deref(), args.blender.as_deref())?
-    } else {
-        find_blender(args.blender.clone())?
-    };
-    let ktx_tool = if matches!(args.quality, BakeQuality::Irradiance) {
-        Some(find_irradiance_ktx_tool(args.toktx)?)
-    } else {
-        None
-    };
+/// The canonical asset root and every output path a bake derives from it.
+/// Building these performs no writes (only the asset-root canonicalization
+/// reads the filesystem), so the batch validity check can rebuild a cell's
+/// job -- and therefore its job fingerprint -- without touching outputs.
+pub(crate) struct BakeOutputs {
+    pub(crate) asset_root: PathBuf,
+    pub(crate) output_dir: PathBuf,
+    pub(crate) output_scene: PathBuf,
+    pub(crate) preview_output: PathBuf,
+    pub(crate) result_json: PathBuf,
+    pub(crate) irradiance_blend: PathBuf,
+    pub(crate) irradiance_raw: PathBuf,
+    pub(crate) job_file: PathBuf,
+}
+
+pub(crate) fn bake_outputs(manifest: &PreparedSceneManifest) -> Result<BakeOutputs> {
     let asset_root = fs::canonicalize(&manifest.asset_root)
         .with_context(|| format!("asset root does not exist: {}", manifest.asset_root))?;
-    let cell_dir = asset_root
+    let output_dir = asset_root
         .join("scenes")
-        .join(format!("{:08x}", manifest.cell.form_id));
-    let output_dir = cell_dir.join("baked");
-    // Calling bake is itself the user's request to regenerate this output.
-    // Keep reading the legacy --force flag for existing scripts, but do not
-    // require a second confirmation before replacing known bake artifacts.
-    let _legacy_force = args.force;
-    fs::create_dir_all(&output_dir)?;
+        .join(format!("{:08x}", manifest.cell.form_id))
+        .join("baked");
+    Ok(BakeOutputs {
+        output_scene: output_dir.join("scene.glb"),
+        preview_output: output_dir.join("preview.png"),
+        result_json: output_dir.join("result.json"),
+        irradiance_blend: output_dir.join("irradiance.blend"),
+        irradiance_raw: output_dir.join("irradiance.raw"),
+        job_file: output_dir.join("job.json"),
+        asset_root,
+        output_dir,
+    })
+}
 
-    let output_scene = output_dir.join("scene.glb");
-    let preview_output = output_dir.join("preview.png");
-    let result_json = output_dir.join("result.json");
-    let irradiance_blend = output_dir.join("irradiance.blend");
-    let irradiance_raw = output_dir.join("irradiance.raw");
-    let job_file = output_dir.join("job.json");
+/// Assembles the Blender job for one prepared cell. Pure over its inputs:
+/// the same manifest, bake arguments, and output paths always produce the
+/// same job, which is what makes `bake_job_fingerprint` a meaningful
+/// validity key for the batch skip check (F62.1).
+pub(crate) fn build_bake_job(
+    manifest: &PreparedSceneManifest,
+    args: &BakeArgs,
+    outputs: &BakeOutputs,
+) -> BakeJob {
     let cell_lighting =
         manifest
             .cell
@@ -94,12 +135,12 @@ pub fn bake(args: BakeArgs) -> Result<()> {
                 directional_rgba: manifest.cell.directional_rgba,
                 ..Default::default()
             });
-    let job = BakeJob {
-        asset_root: blender_path(&asset_root),
-        output_scene: blender_path(&output_scene),
-        preview_output: blender_path(&preview_output),
-        result_json: blender_path(&result_json),
-        irradiance_blend: blender_path(&irradiance_blend),
+    BakeJob {
+        asset_root: blender_path(&outputs.asset_root),
+        output_scene: blender_path(&outputs.output_scene),
+        preview_output: blender_path(&outputs.preview_output),
+        result_json: blender_path(&outputs.result_json),
+        irradiance_blend: blender_path(&outputs.irradiance_blend),
         irradiance_spacing_meters: args.irradiance_spacing_meters,
         irradiance_samples: args.irradiance_samples,
         preview_only: matches!(args.quality, BakeQuality::Preview),
@@ -148,15 +189,66 @@ pub fn bake(args: BakeArgs) -> Result<()> {
                 },
             })
             .collect(),
+    }
+}
+
+/// The job-parameter fingerprint recorded as `PreparedBake.source_fingerprint`
+/// after a successful bake, and recomputed by the batch skip check to decide
+/// whether a recorded bake is still valid (F62.1): the prepared manifest's
+/// own `source_fingerprint` plus the serialized Blender job, so both a
+/// re-prepared cell and changed bake parameters invalidate a recorded bake.
+pub(crate) fn bake_job_fingerprint(
+    manifest: &PreparedSceneManifest,
+    job: &BakeJob,
+) -> Result<String> {
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(manifest.source_fingerprint.as_bytes());
+    fingerprint.update(serde_json::to_vec(job)?);
+    Ok(format!("{:x}", fingerprint.finalize()))
+}
+
+/// Bakes one prepared scene manifest in place: the whole original
+/// single-cell `bake` path after selector resolution, reused verbatim by
+/// each batch cell.
+pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()> {
+    let mut manifest = load_prepared_manifest(manifest_path)?;
+
+    let blender = if matches!(args.quality, BakeQuality::Irradiance) {
+        find_irradiance_blender(args.irradiance_blender.as_deref(), args.blender.as_deref())?
+    } else {
+        find_blender(args.blender.clone())?
     };
-    fs::write(&job_file, serde_json::to_vec_pretty(&job)?)?;
+    let ktx_tool = if matches!(args.quality, BakeQuality::Irradiance) {
+        Some(find_irradiance_ktx_tool(args.toktx.clone())?)
+    } else {
+        None
+    };
+    let outputs = bake_outputs(&manifest)?;
+    // Calling bake is itself the user's request to regenerate this output.
+    // Keep reading the legacy --force flag for existing scripts, but do not
+    // require a second confirmation before replacing known bake artifacts.
+    let _legacy_force = args.force;
+    fs::create_dir_all(&outputs.output_dir)?;
+
+    let BakeOutputs {
+        asset_root,
+        output_dir,
+        output_scene,
+        preview_output,
+        result_json,
+        irradiance_blend,
+        irradiance_raw,
+        job_file,
+    } = &outputs;
+    let job = build_bake_job(&manifest, args, &outputs);
+    fs::write(job_file, serde_json::to_vec_pretty(&job)?)?;
 
     let script_file = output_dir.join("blender_bake.py");
     fs::write(&script_file, include_str!("../blender_bake.py"))?;
     if matches!(args.quality, BakeQuality::Preview) {
-        let _ = fs::remove_file(&preview_output);
+        let _ = fs::remove_file(preview_output);
     } else {
-        for path in [&output_scene, &irradiance_blend, &result_json] {
+        for path in [output_scene, irradiance_blend, result_json] {
             let _ = fs::remove_file(path);
         }
     }
@@ -166,8 +258,8 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         .arg("--python")
         .arg(&script_file)
         .arg("--")
-        .arg(&job_file)
-        .current_dir(&asset_root)
+        .arg(job_file)
+        .current_dir(asset_root)
         .status()
         .context("failed to start Blender")?;
     if !blender_status.success() {
@@ -181,7 +273,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
             );
         }
         if !args.keep_intermediate {
-            let _ = fs::remove_file(&job_file);
+            let _ = fs::remove_file(job_file);
             let _ = fs::remove_file(&script_file);
         }
         println!("Eevee preview rendered -> {}", preview_output.display());
@@ -196,7 +288,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
 
     let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let bake_result: BlenderBakeResult =
-        serde_json::from_slice(&fs::read(&result_json)?).context("invalid Blender bake result")?;
+        serde_json::from_slice(&fs::read(result_json)?).context("invalid Blender bake result")?;
     validate_placement_contribution(&job.placements, &bake_result.placement_contribution)?;
     let irradiance = bake_result
         .irradiance
@@ -204,7 +296,7 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         .context("Blender produced no irradiance volume metadata")?;
     let exported = export_rgb9e5_atlas(
         Path::new(&irradiance.blend_path),
-        &irradiance_raw,
+        irradiance_raw,
         irradiance.resolution,
     )?;
     let ktx2_path = output_dir.join("irradiance.ktx2");
@@ -277,12 +369,9 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         batching.excluded_large,
         batching.excluded_non_static,
     );
-    let scene_path = relative_asset_path(&asset_root, &output_scene)?;
-    let irradiance_path = relative_asset_path(&asset_root, &ktx2_path)?;
-    let mut fingerprint = Sha256::new();
-    fingerprint.update(manifest.source_fingerprint.as_bytes());
-    fingerprint.update(serde_json::to_vec(&job)?);
-    let source_fingerprint = format!("{:x}", fingerprint.finalize());
+    let scene_path = relative_asset_path(asset_root, output_scene)?;
+    let irradiance_path = relative_asset_path(asset_root, &ktx2_path)?;
+    let source_fingerprint = bake_job_fingerprint(&manifest, &job)?;
     manifest.schema_version = CURRENT_MANIFEST_SCHEMA_VERSION;
     manifest.bake = Some(super::manifest::PreparedBake {
         bake_revision: Some(CURRENT_BAKE_REVISION.into()),
@@ -298,18 +387,18 @@ pub fn bake(args: BakeArgs) -> Result<()> {
         }),
     });
     fs::write(
-        &manifest_path,
+        manifest_path,
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     if !args.keep_intermediate {
-        let _ = fs::remove_file(&job_file);
+        let _ = fs::remove_file(job_file);
         let _ = fs::remove_file(&script_file);
-        let _ = fs::remove_file(&result_json);
+        let _ = fs::remove_file(result_json);
         for raw_slice in &exported.raw_slices {
             let _ = fs::remove_file(raw_slice);
         }
-        let _ = fs::remove_file(&irradiance_raw);
-        let _ = fs::remove_file(&irradiance_blend);
+        let _ = fs::remove_file(irradiance_raw);
+        let _ = fs::remove_file(irradiance_blend);
     }
     println!(
         "baked {}: irradiance volume {:?} -> {}",

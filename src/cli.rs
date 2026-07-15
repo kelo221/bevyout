@@ -167,6 +167,9 @@ pub struct ViewArgs {
     /// Loopback HTTP port used by the agent bridge.
     #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
     pub(crate) agent_port: u16,
+    /// Load this save slot at startup and apply it to the launch cell.
+    #[arg(long, value_name = "SLOT")]
+    pub(crate) save_slot: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -220,7 +223,19 @@ pub struct BakeArgs {
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID", conflicts_with = "manifest")]
     pub(crate) selector: Option<String>,
-    /// Prepared scene cache directory used by selector-based baking.
+    /// Bake every interior cell in the prepared cell catalogue
+    /// (`<cache_dir>/cellmap.ron`, written by `prepare --all-interiors`).
+    /// Resumable: per-cell progress is recorded in
+    /// `<cache_dir>/bake_jobs.ron`, and already-baked, still-valid cells
+    /// are skipped.
+    #[arg(long, conflicts_with_all = ["selector", "manifest"])]
+    pub(crate) all_interiors: bool,
+    /// Retry only cells currently recorded `failed` in the resumable bake
+    /// job manifest, intersected with `--all-interiors` when both are
+    /// given. Alone, retries every failed cell recorded in the manifest.
+    #[arg(long, conflicts_with_all = ["selector", "manifest"])]
+    pub(crate) retry_failed: bool,
+    /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
     /// Fast Eevee preview or Blender 4.5 irradiance-volume bake.
@@ -256,8 +271,11 @@ pub struct BakeArgs {
     /// KTX-Software `ktx.exe` or legacy `toktx.exe` path.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
-    /// Legacy compatibility flag; bake already replaces existing outputs.
-    #[arg(long, hide = true)]
+    /// Re-bake every selected cell in a batch run even when its recorded
+    /// bake is still valid. Single-cell bake already replaces existing
+    /// outputs, so outside `--all-interiors`/`--retry-failed` this remains
+    /// the legacy no-op it always was.
+    #[arg(long)]
     pub(crate) force: bool,
     /// Keep the generated Blender job, script, result, and Blender cache files.
     #[arg(long)]

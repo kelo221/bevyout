@@ -245,6 +245,18 @@ pub(crate) struct PreparedCollisionWorld {
     keyframed_bodies: HashMap<Entity, Vec<collision::KeyframedColliderBinding>>,
     player_proxy: Option<BodyId>,
     surfaces: HashMap<ShapeId, CollisionSurface>,
+    /// Issue #63: which cell's build created which shapes/bodies, so
+    /// swap-away and eviction can tear down exactly that set (see
+    /// `collision::teardown_cell_colliders`).
+    ledger: super::world::CellColliderLedger<ShapeId, BodyId>,
+}
+
+impl PreparedCollisionWorld {
+    /// Issues #60/#61: read-only lookup for `world::persist`'s capture
+    /// (velocity snapshot) and apply (live-body restore) paths.
+    pub(crate) fn dynamic_body_of(&self, entity: Entity) -> Option<BodyId> {
+        self.dynamic_bodies.get(&entity).copied()
+    }
 }
 
 #[derive(Resource, Default)]
