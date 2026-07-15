@@ -178,13 +178,60 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
     world
         .get_resource_or_insert_with(InteractionNotice::default)
         .show(notice_text);
-    info!(
-        "container {} ({:08x}) {} with {} fixed entries",
-        name,
-        placement.reference_form_id,
-        if opening { "opened" } else { "closed" },
-        placement.inventory.len()
-    );
+    // Wave-2 seam: scripted opens go through the same seed-once container
+    // store as the player path, so console/BRP `activate` observes (and
+    // triggers) exactly the state the transfer modal and #76's capture see —
+    // including the deterministic first-open leveled roll. Stacks are logged
+    // for gate evidence (determinism across runs, no re-roll after reload).
+    if opening {
+        let seed_entries: Vec<container_policy::SeedEntry> = placement
+            .inventory
+            .iter()
+            .map(|entry| container_policy::SeedEntry {
+                base_form_id: entry.base_form_id,
+                count: entry.count,
+                leveled: entry.leveled,
+            })
+            .collect();
+        let active_cell = world
+            .get_resource::<ActiveCell>()
+            .map(|cell| cell.0)
+            .unwrap_or_default();
+        let playthrough_seed = world
+            .get_resource::<PlaythroughSeed>()
+            .map(|seed| seed.0)
+            .unwrap_or_default();
+        let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+            world
+                .get_resource::<ResidentCells>()
+                .and_then(|cells| cells.0.get(&active_cell))
+                .map(|resident| leveled_lists_from_manifest(&resident.manifest.leveled_lists))
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        let seed = leveled::LeveledSeed::derive(
+            playthrough_seed,
+            active_cell,
+            placement.reference_form_id,
+        );
+        let mut states = world.get_resource_or_insert_with(ContainerStates::default);
+        let resolved = states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
+            leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
+        });
+        info!(
+            "container {} ({:08x}) opened with {} stacks: {:?}",
+            name,
+            placement.reference_form_id,
+            resolved.stacks.len(),
+            resolved.stacks
+        );
+    } else {
+        info!(
+            "container {} ({:08x}) closed",
+            name, placement.reference_form_id
+        );
+    }
     opening
 }
 
