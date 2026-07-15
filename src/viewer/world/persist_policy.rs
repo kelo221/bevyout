@@ -79,9 +79,14 @@ impl BodyDelta {
 /// `activated` (door/container open state), `enable_root_form_id` (an
 /// enable-group root recorded on a delta, see `resolve_effective_enabled`'s
 /// doc comment), and `body` (dynamic-body pose/velocity), since #60/#61 need
-/// all of them; `lock_level`/`inventory` stay out of this seam exactly like
-/// `swap_policy::ReferenceDelta` leaves them out (no lock-picking or
-/// container-looting UI in this wave's scope).
+/// all of them; `lock_level` stays out of this seam exactly like
+/// `swap_policy::ReferenceDelta` leaves it out (no lock-picking UI in this
+/// wave's scope). Container `inventory`/leveled-resolved state (issue #76)
+/// deliberately does *not* live here: `ContainerDelta` below is its own
+/// small, non-`Copy` seam (a container's stack list is variable-length,
+/// which would cost every other caller of this `Copy` type a `.clone()`),
+/// captured/applied by `diff_capture_containers`/`plan_apply_containers`
+/// alongside this module's placement-shaped capture/apply.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ReferenceDelta {
     pub(crate) enabled: Option<bool>,
@@ -309,6 +314,114 @@ pub(crate) fn diff_capture(
         }
     }
     deltas
+}
+
+/// Issue #76's fixed seam: mirrors agent B's runtime `interaction::
+/// ContainerStates` entry exactly (`ContainerState { stacks: Vec<(u32, i32)>,
+/// resolved: bool }`, not present in this worktree -- #75 builds it in a
+/// parallel worktree). `persist.rs`'s `ContainerStatesStub` resource is the
+/// one Bevy-side adapter point that converts to/from this type; the
+/// orchestrator swaps that stub for B's real resource at integration since
+/// the shapes already match field-for-field.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ContainerSnapshot {
+    pub(crate) stacks: Vec<(u32, i32)>,
+    pub(crate) resolved: bool,
+}
+
+/// A container reference's manifest baseline (F76.2): its fixed, non-leveled
+/// inventory entries as normalized `(base_form_id, count)` stacks (see
+/// `normalize_stacks`). Leveled entries never appear here -- they only ever
+/// exist post-resolution, in a `ContainerSnapshot`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ContainerBaseline {
+    pub(crate) stacks: Vec<(u32, i32)>,
+}
+
+/// F76.1's mirrored delta shape: `inventory`/`leveled_resolved` ride
+/// `save::PersistentReferenceDelta`'s same-named fields. Not `Copy` (see
+/// `ReferenceDelta`'s doc comment) since `inventory` is variable-length.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ContainerDelta {
+    pub(crate) inventory: Option<Vec<(u32, i32)>>,
+    pub(crate) leveled_resolved: Option<bool>,
+}
+
+/// Sorts `stacks` by FormID, coalesces duplicate FormIDs by summing their
+/// counts, and drops any that net to zero -- the same "strictly sorted, no
+/// zero counts" shape `save::validate_inventory` requires, computed here so
+/// both `diff_capture_containers` (snapshot stacks) and `persist.rs`
+/// (manifest baseline stacks) produce identical, comparable output.
+pub(crate) fn normalize_stacks(stacks: &[(u32, i32)]) -> Vec<(u32, i32)> {
+    let mut merged: HashMap<u32, i32> = HashMap::new();
+    for &(form_id, count) in stacks {
+        *merged.entry(form_id).or_insert(0) += count;
+    }
+    let mut result: Vec<(u32, i32)> = merged
+        .into_iter()
+        .filter(|&(_, count)| count != 0)
+        .collect();
+    result.sort_by_key(|&(form_id, _)| form_id);
+    result
+}
+
+/// F76.2: the minimal per-container delta set -- exactly `diff_capture`'s
+/// "untouched -> no delta" contract, but for a container's stacks and its
+/// resolved-leveled marker instead of transform/activated/body. A reference
+/// absent from `snapshots` was never opened this session (or is not a
+/// container) and produces no delta; `persist.rs` only merges observed
+/// references, so an unobserved container's previously loaded delta (if any)
+/// is left untouched rather than cleared.
+pub(crate) fn diff_capture_containers(
+    baselines: &HashMap<u32, ContainerBaseline>,
+    snapshots: &HashMap<u32, ContainerSnapshot>,
+) -> HashMap<u32, ContainerDelta> {
+    let mut deltas = HashMap::new();
+    for (form_id, snapshot) in snapshots {
+        let baseline_stacks = baselines
+            .get(form_id)
+            .map(|baseline| baseline.stacks.as_slice())
+            .unwrap_or(&[]);
+        let stacks = normalize_stacks(&snapshot.stacks);
+        let mut delta = ContainerDelta::default();
+        if stacks.as_slice() != baseline_stacks {
+            delta.inventory = Some(stacks);
+        }
+        if snapshot.resolved {
+            delta.leveled_resolved = Some(true);
+        }
+        if delta != ContainerDelta::default() {
+            deltas.insert(*form_id, delta);
+        }
+    }
+    deltas
+}
+
+/// F76.3: rebuilds a container's runtime seed state from its save delta (if
+/// any) plus the manifest baseline, before first activation. A reference
+/// with no delta is not seeded at all -- absence from the returned map means
+/// the container is still unresolved and rolls on first open, matching
+/// `plan_apply`'s "no delta -> baseline" contract.
+pub(crate) fn plan_apply_containers(
+    baselines: &HashMap<u32, ContainerBaseline>,
+    deltas: &HashMap<u32, ContainerDelta>,
+) -> HashMap<u32, ContainerSnapshot> {
+    deltas
+        .iter()
+        .map(|(form_id, delta)| {
+            let baseline_stacks = baselines
+                .get(form_id)
+                .map(|baseline| baseline.stacks.clone())
+                .unwrap_or_default();
+            (
+                *form_id,
+                ContainerSnapshot {
+                    stacks: delta.inventory.clone().unwrap_or(baseline_stacks),
+                    resolved: delta.leveled_resolved.unwrap_or(false),
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -594,5 +707,156 @@ mod tests {
             .find(|application| application.reference_form_id == 0x2)
             .unwrap();
         assert_eq!(application.visibility, VisibilityDecision::Hidden);
+    }
+
+    // Issue #76 (T76.2): a container whose live stacks match the manifest
+    // baseline and was never resolved produces no delta at all.
+    #[test]
+    fn a_baseline_identical_container_captures_no_delta() {
+        let baselines = HashMap::from([(
+            0x700,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let snapshots = HashMap::from([(
+            0x700,
+            ContainerSnapshot {
+                stacks: vec![(0x10, 3)],
+                resolved: false,
+            },
+        )]);
+        let deltas = diff_capture_containers(&baselines, &snapshots);
+        assert!(!deltas.contains_key(&0x700));
+    }
+
+    // T76.2: a looted container (stacks differ from baseline, no roll
+    // happened) produces a minimal inventory-only delta.
+    #[test]
+    fn a_looted_container_captures_a_minimal_inventory_delta() {
+        let baselines = HashMap::from([(
+            0x701,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let snapshots = HashMap::from([(
+            0x701,
+            ContainerSnapshot {
+                stacks: vec![(0x10, 1)],
+                resolved: false,
+            },
+        )]);
+        let deltas = diff_capture_containers(&baselines, &snapshots);
+        let delta = deltas.get(&0x701).expect("expected a delta");
+        assert_eq!(delta.inventory, Some(vec![(0x10, 1)]));
+        assert_eq!(delta.leveled_resolved, None);
+    }
+
+    // T76.2: a container whose leveled roll happened but whose resulting
+    // stacks still match the baseline (e.g. chance-none) produces an
+    // LVLR-only delta.
+    #[test]
+    fn a_resolved_but_baseline_identical_container_captures_an_lvlr_only_delta() {
+        let baselines = HashMap::from([(
+            0x702,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let snapshots = HashMap::from([(
+            0x702,
+            ContainerSnapshot {
+                stacks: vec![(0x10, 3)],
+                resolved: true,
+            },
+        )]);
+        let deltas = diff_capture_containers(&baselines, &snapshots);
+        let delta = deltas.get(&0x702).expect("expected a delta");
+        assert_eq!(delta.inventory, None);
+        assert_eq!(delta.leveled_resolved, Some(true));
+    }
+
+    // T76.2: duplicate FormIDs and zero-count entries normalize away before
+    // comparison, so a container that nets to the baseline after merging
+    // still captures no delta.
+    #[test]
+    fn container_stacks_normalize_before_comparison() {
+        let baselines = HashMap::from([(
+            0x703,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let snapshots = HashMap::from([(
+            0x703,
+            ContainerSnapshot {
+                stacks: vec![(0x10, 5), (0x10, -2), (0x20, 1), (0x20, -1)],
+                resolved: false,
+            },
+        )]);
+        let deltas = diff_capture_containers(&baselines, &snapshots);
+        assert!(!deltas.contains_key(&0x703));
+    }
+
+    // Issue #76 (F76.3): a container with a saved delta is seeded with the
+    // saved stacks and resolved marker before first activation.
+    #[test]
+    fn apply_seeds_a_container_from_its_delta() {
+        let baselines = HashMap::from([(
+            0x800,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let deltas = HashMap::from([(
+            0x800,
+            ContainerDelta {
+                inventory: Some(vec![(0x10, 1)]),
+                leveled_resolved: Some(true),
+            },
+        )]);
+        let seeded = plan_apply_containers(&baselines, &deltas);
+        let snapshot = seeded.get(&0x800).expect("expected a seeded snapshot");
+        assert_eq!(snapshot.stacks, vec![(0x10, 1)]);
+        assert!(snapshot.resolved);
+    }
+
+    // F76.3: a container with no saved delta is not seeded at all, so it
+    // stays unresolved and rolls on first open.
+    #[test]
+    fn apply_does_not_seed_an_unopened_container() {
+        let baselines = HashMap::from([(
+            0x801,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let seeded = plan_apply_containers(&baselines, &HashMap::new());
+        assert!(!seeded.contains_key(&0x801));
+    }
+
+    // F76.3: an LVLR-only delta (resolved, but stacks matched baseline at
+    // capture) seeds the container with the baseline stacks and
+    // `resolved = true`.
+    #[test]
+    fn apply_seeds_baseline_stacks_for_an_lvlr_only_delta() {
+        let baselines = HashMap::from([(
+            0x802,
+            ContainerBaseline {
+                stacks: vec![(0x10, 3)],
+            },
+        )]);
+        let deltas = HashMap::from([(
+            0x802,
+            ContainerDelta {
+                inventory: None,
+                leveled_resolved: Some(true),
+            },
+        )]);
+        let seeded = plan_apply_containers(&baselines, &deltas);
+        let snapshot = seeded.get(&0x802).expect("expected a seeded snapshot");
+        assert_eq!(snapshot.stacks, vec![(0x10, 3)]);
+        assert!(snapshot.resolved);
     }
 }
