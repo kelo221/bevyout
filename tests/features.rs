@@ -119,6 +119,12 @@ mod ownership_policy;
 #[allow(dead_code, unused_imports)]
 mod inventory_policy;
 
+// `viewer::performance_policy` is the std-only frame selection/statistics
+// seam consumed by the BRP performance probe.
+#[path = "../src/viewer/performance_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod performance_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -322,6 +328,10 @@ struct BevyoutWorld {
     inventory_weights: std::collections::HashMap<u32, f32>,
     inventory_drop_action: Option<inventory_policy::DropAction>,
     inventory_transfer: Option<inventory_policy::TransferResult>,
+
+    // -- performance_probe.feature --
+    performance_samples: Vec<performance_policy::FrameSample>,
+    performance_summary: Option<performance_policy::FrameProbeSummary>,
 }
 
 fn find_placement<'a>(
@@ -2717,6 +2727,84 @@ async fn then_transfer_rejected(world: &mut BevyoutWorld, remaining: i32) {
         Some(inventory_policy::TransferResult::InsufficientItems)
     );
     assert_eq!(world.player_inventory.count(0x10), remaining);
+}
+
+// performance_probe.feature -- appended section, do not interleave;
+// new steps for this feature belong below this marker.
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^frame-time samples "([^"]+)"$"#)]
+async fn given_frame_time_samples(world: &mut BevyoutWorld, encoded: String) {
+    world.performance_samples = encoded
+        .split(',')
+        .map(|pair| {
+            let (sample, frame_time_ms) = pair
+                .split_once(':')
+                .expect("frame sample must use <sample>:<milliseconds>");
+            performance_policy::FrameSample {
+                sample: sample.parse().expect("sample id must be an integer"),
+                frame_time_ms: frame_time_ms.parse().expect("frame time must be a number"),
+            }
+        })
+        .collect();
+}
+
+#[when(
+    regex = r"^frames after sample (\d+) are summarized with latest limit (\d+) and budget ([\d.]+) ms$"
+)]
+async fn when_frames_after_marker_are_summarized(
+    world: &mut BevyoutWorld,
+    marker: u64,
+    limit: usize,
+    budget_ms: f64,
+) {
+    world.performance_summary = Some(performance_policy::summarize_frame_window(
+        &world.performance_samples,
+        Some(marker),
+        limit,
+        budget_ms,
+    ));
+}
+
+#[when(regex = r"^all frames are summarized with latest limit (\d+) and budget ([\d.]+) ms$")]
+async fn when_all_frames_are_summarized(world: &mut BevyoutWorld, limit: usize, budget_ms: f64) {
+    world.performance_summary = Some(performance_policy::summarize_frame_window(
+        &world.performance_samples,
+        None,
+        limit,
+        budget_ms,
+    ));
+}
+
+fn performance_summary(world: &BevyoutWorld) -> &performance_policy::FrameProbeSummary {
+    world
+        .performance_summary
+        .as_ref()
+        .expect("frame samples have not been summarized")
+}
+
+#[then(regex = r"^the frame probe covers samples (\d+) through (\d+)$")]
+async fn then_frame_probe_sample_range(world: &mut BevyoutWorld, first: u64, last: u64) {
+    let summary = performance_summary(world);
+    assert_eq!(summary.first_sample, Some(first));
+    assert_eq!(summary.last_sample, Some(last));
+}
+
+#[then(regex = r"^the frame probe has (\d+) samples$")]
+async fn then_frame_probe_sample_count(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(performance_summary(world).sample_count, count);
+}
+
+#[then(regex = r"^the frame probe p95 and max are ([\d.]+) and ([\d.]+) ms$")]
+async fn then_frame_probe_p95_and_max(world: &mut BevyoutWorld, p95: f64, max: f64) {
+    let summary = performance_summary(world);
+    assert_eq!(summary.p95_ms, Some(p95));
+    assert_eq!(summary.max_ms, Some(max));
+}
+
+#[then(regex = r"^(\d+) frames? exceed(?:s)? the probe budget$")]
+async fn then_frames_exceed_budget(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(performance_summary(world).over_budget_count, count);
 }
 
 fn main() {

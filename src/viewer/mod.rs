@@ -57,6 +57,7 @@ mod console_ui;
 mod controls;
 mod diagnostics;
 mod lighting;
+mod performance_policy;
 mod scene;
 
 pub(crate) use app::run_view;

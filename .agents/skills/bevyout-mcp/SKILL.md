@@ -1,6 +1,6 @@
 ---
 name: bevyout-mcp
-description: Use when an agent needs to inspect or modify a live bevyout Bevy scene, execute structured console commands, call raw BRP methods, capture screenshots, or turn a runtime reproduction into a .bscript transcript.
+description: Use when an agent needs to inspect or modify a live bevyout Bevy scene, execute structured console commands, profile bounded frame windows, inspect schedule parallelism constraints, call raw BRP methods, capture screenshots, or turn a runtime reproduction into a .bscript transcript.
 ---
 
 # Bevyout MCP
@@ -30,6 +30,20 @@ collision, FPS starts in forced no-clip so WASD and Space/Ctrl still work.
    `brp_watch` for methods ending in `+watch`.
 5. Re-query or take another snapshot after mutation. Normal game systems may
    overwrite component values on the next update.
+
+## Profile performance
+
+1. Use `performance_probe` for a timed, bounded frame window. Set warmup,
+   duration, frame budget, and sample limit explicitly when recording evidence.
+2. Use `performance_snapshot` to inspect recent samples or collect raw frames
+   strictly after a known sample marker.
+3. Use `schedule_snapshot` to inspect initialized schedules, exclusive/non-send
+   systems, and ECS access-conflict pairs that constrain parallel execution.
+4. Treat schedule conflicts as constraints, not measured bottlenecks. Correlate
+   them with frame probes or a trace before recommending an optimization.
+
+Use `.agents/skills/bevy-performance-audit/SKILL.md` for the full audit
+workflow.
 
 Console selection is per session. In the human console, click visible placement
 geometry to select its placement root and show `(<formid>)` at the top; `prid`,

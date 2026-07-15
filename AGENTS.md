@@ -126,6 +126,12 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   per-issue implementation agents run on smaller models (Sonnet) inside
   their worktrees, each with a tightly scoped, self-contained brief.
 
+## Model routing
+
+- Always use Sol xhigh for planning, architecture, review, and task
+  decomposition.
+- Always use Luna MAX for implementation and execution.
+
 ## Testing (feature-first)
 
 Mandatory order inside every issue: fix the feature list → write the

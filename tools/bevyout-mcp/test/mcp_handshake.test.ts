@@ -63,12 +63,15 @@ test("FastMCP stdio handshake exposes the bevyout tools", async () => {
     );
     expect(tools).toContain("viewer_status");
     expect(tools).toContain("world_query");
+    expect(tools).toContain("performance_snapshot");
+    expect(tools).toContain("performance_probe");
+    expect(tools).toContain("schedule_snapshot");
     expect(tools).toContain("console_exec");
     expect(tools).toContain("console_help");
     expect(tools).toContain("brp_call");
     expect(tools).toContain("viewport_capture");
   } finally {
-    process.kill();
+    process.kill("SIGKILL");
     await process.exited;
   }
 });
