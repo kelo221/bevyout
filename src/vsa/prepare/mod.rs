@@ -10,6 +10,8 @@ mod audio;
 mod audio_resolve;
 mod batch_cache;
 mod cache;
+mod container_audio;
+mod container_audio_policy;
 mod fingerprints;
 mod image_space;
 mod jobs;
@@ -25,6 +27,8 @@ pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
 pub(crate) use batch_cache::*;
 pub(crate) use cache::*;
+pub(crate) use container_audio::*;
+pub(crate) use container_audio_policy::*;
 pub(crate) use fingerprints::*;
 pub(crate) use image_space::*;
 pub(crate) use jobs::*;
@@ -43,8 +47,8 @@ pub use orchestrator::prepare;
 use super::assets::{
     BlenderAssetJob, NIF_CONVERTER_REVISION, RootTransformPolicy, asset_conversion,
     audit_glb_visuals, content_addressed_glb_name, convert_staged_textures, find_blender,
-    load_archives, resolve_asset, root_transform_policy, run_blender_batch, stage_textures,
-    validate_asset_cache_pair,
+    load_archives, read_glb_animation_sound_cues, resolve_asset, root_transform_policy,
+    run_blender_batch, stage_textures, validate_asset_cache_pair,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{

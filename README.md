@@ -12,8 +12,8 @@ No GECK or original engine runtime is involved at any point.
 - **A licensed copy of Fallout 3 GOTY**, for `Fallout3.esm` and its BSAs. Not
   redistributed here; point `game_root` at your install in
   `.bevyout/config.toml`.
-- **[Blender](https://www.blender.org/download/)** 5.2 (for `prepare`) and
-  **4.5 LTS** (pinned, for `bake`'s irradiance step — see below), both with the
+- **[Blender](https://www.blender.org/download/)** 5.2 (for `prepare` and the
+  optional `bake --quality preview` path), with the
   **[Blender Niftools Addon](https://github.com/niftools/blender_niftools_addon)**
   installed and enabled (`io_scene_niftools`).
 - **[ImageMagick](https://imagemagick.org/script/download.php)** (`magick` on
@@ -21,7 +21,7 @@ No GECK or original engine runtime is involved at any point.
   to PNG during `prepare`. Optional: `prepare` still runs without it, but
   textures are left unconverted.
 - **[KTX-Software](https://github.com/KhronosGroup/KTX-Software/releases)**,
-  unified `ktx` binary (`ktx` or legacy `toktx` on `PATH`) — required for
+  unified `ktx` binary (`ktx` on `PATH`; legacy `toktx` is not sufficient) — required for
   a static point-shadow cache miss during `prepare` and for `bake`'s default
   irradiance mode. It is not resolved when `prepare` reuses an unchanged
   shadow artifact, and is not needed by `view`/`render` or
@@ -30,8 +30,9 @@ No GECK or original engine runtime is involved at any point.
 On Windows the tools above are auto-detected at their default install
 locations; otherwise put them on `PATH` or set `[tools]` in
 `.bevyout/config.toml` (see `config.example.toml`). Auto-detection only checks
-Windows install paths, so macOS/Linux users must set `blender` and
-`irradiance_blender` explicitly even if the binaries are installed.
+Windows install paths, so macOS/Linux users must set `blender` explicitly even
+if the binary is installed. The legacy `irradiance_blender` option is accepted
+for config and CLI compatibility but is ignored by the Rust irradiance baker.
 Without a project-local `.bevyout/config.toml`, a user-level config is also
 read from `%APPDATA%\bevyout\config.toml` on Windows, or
 `$XDG_CONFIG_HOME/bevyout/config.toml` (falling back to
@@ -196,20 +197,20 @@ per-block correction counts; incomplete coverage emits
 because the source and NIFTools parent-chain matrices agree. Authored Havok
 shapes for these models receive the same correction before physics sidecar
 serialization, and their correction coverage is audited with the visual blocks.
-The Blender bake
-conjugates each prepared placement once into Blender's Z-up space before
-composing it with the imported GLB hierarchy. Changing this conversion requires
-preparing and baking the cell again so cached manifests and baked scenes use the
-same transform convention.
+The Rust bake composes each prepared placement directly in Bevy's Y-up space,
+including transforms already present in the imported GLB hierarchy. Changing
+this conversion requires preparing and baking the cell again so cached
+manifests and baked scenes use the same transform convention.
 
 ## Bake lighting
 
-Irradiance baking is a separate step after `prepare`. It writes a Blender 4.5
-Eevee irradiance volume, a composed static-batched GLB, and a 3D KTX2 atlas
-under the scene's cache directory, then updates the same manifest:
+Irradiance baking is a separate step after `prepare`. The normal path composes
+and batches the prepared GLBs in Rust, builds a CPU BVH, traces deterministic
+one-bounce diffuse lighting, writes a 3D RGB9E5 KTX2 atlas, and updates the same
+manifest:
 
 ```powershell
-# Blender 4.5 Eevee irradiance volume plus 64 m static batching.
+# Rust CPU irradiance volume plus 64 m static batching.
 cargo run-dev -- bake SuperDuperMart
 
 # Fast Eevee preview; writes preview.png and leaves the manifest unchanged.
@@ -219,22 +220,21 @@ cargo run-dev -- render SuperDuperMart
 ```
 
 The bake verifies that every eligible static placement imports at least one
-renderable visual mesh and records expected and contributed placement counts in
-its result. A missing placement contribution fails the bake with the reference
-FormID and asset path instead of producing a silently incomplete scene.
+renderable visual mesh. A missing placement contribution fails the bake with
+the reference FormID instead of producing a silently incomplete scene.
 
 The modes are intentionally different:
 
 | Mode | Renderer and settings | Result |
 | --- | --- | --- |
 | `preview` | Eevee screen-space ray tracing and Fast GI | A quick `preview.png`; no KTX2 or manifest bake metadata |
-| `irradiance` | Blender 4.5 Eevee volume, 8 m probe spacing, 64 samples by default | 3D RGB9E5 KTX2 irradiance atlas plus static-batched GLB |
+| `irradiance` | Rust CPU BVH, deterministic one-bounce diffuse GI, 8 m probe spacing, 64 samples per face by default | 3D RGB9E5 KTX2 irradiance atlas plus static-batched GLB |
 
-`irradiance` is the default bake mode and is pinned to Blender 4.5 LTS because
-the exporter reads the uniform Eevee light-probe cache from the saved `.blend`.
-The EEVEE rendering portion is GPU-backed, but this pipeline does not select or
-report a specific GPU; Rust's irradiance extraction and KTX2 packaging remain
-CPU-side. Use
+`irradiance` is the default bake mode and does not invoke Blender. Scene
+composition, material-aware ray traversal, direct-light evaluation, one-bounce
+diffuse transport, and RGB9E5 encoding run on the CPU in Rust using parallel
+probe tracing. KTX-Software remains the only external step in this path and
+packages the validated raw atlas as KTX2. Use
 `--irradiance-spacing-meters` from 2 through 32 to trade probe detail for bake
 time, and `--irradiance-samples` from 1 through 512. Static render geometry is
 grouped by equivalent material within 64 metre world-space chunks by default;
@@ -242,9 +242,9 @@ use `--static-batch-chunk-meters` from 8 through 256 metres to evaluate the
 culling/draw-call tradeoff. Calling `bake` again replaces the existing bake
 artifacts; the hidden `--force` flag remains accepted as a legacy compatibility
 alias.
-`--keep-intermediate` keeps the generated Blender job, script, result JSON,
-`.blend` cache, and raw KTX slices. KTX-Software's unified `ktx.exe` is required
-for irradiance export.
+`--keep-intermediate` keeps raw KTX slices for the Rust irradiance path, or the
+generated Blender job and script for preview. KTX-Software's unified `ktx.exe`
+is required for irradiance export.
 
 The current slice handles interior cells and static geometry plus the first
 semantic interaction pass. The viewer uses the Fallout-to-Bevy coordinate
@@ -302,8 +302,8 @@ state, hardware capacity, memory estimate, and samples per pixel.
 `shadowcache rebuild` deliberately returns an instruction to rerun `prepare
 --rebuild-shadows`; the viewer never regenerates a missing or corrupt artifact
 and never falls back to runtime point-shadow rendering. Camera movement cannot
-invalidate or regenerate the cache. Blender irradiance baking is independent
-and is not required for prepared point shadows.
+invalidate or regenerate the cache. Rust irradiance baking is independent and
+is not required for prepared point shadows.
 The mouse is captured on startup; press
 `Esc` to pause/release it and click the window to capture it again. NIF alpha
 flags and diffuse texture alpha are exported as glTF `MASK`/`BLEND` materials.

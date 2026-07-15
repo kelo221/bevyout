@@ -186,7 +186,7 @@ pub struct RenderArgs {
     /// Blender executable used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) blender: Option<PathBuf>,
-    /// Blender 4.5 LTS executable used if render needs to bake irradiance.
+    /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
     #[arg(long, hide = true)]
     pub(crate) irradiance_blender: Option<PathBuf>,
     /// KTX-Software executable used if render needs to bake irradiance.
@@ -238,7 +238,7 @@ pub struct BakeArgs {
     /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Fast Eevee preview or Blender 4.5 irradiance-volume bake.
+    /// Fast Blender preview or Rust CPU irradiance-volume bake.
     #[arg(long, value_enum, default_value_t = BakeQuality::Irradiance)]
     pub(crate) quality: BakeQuality,
     /// World-space distance between irradiance probes, in metres.
@@ -248,7 +248,7 @@ pub struct BakeArgs {
         value_parser = parse_irradiance_spacing_meters
     )]
     pub(crate) irradiance_spacing_meters: f32,
-    /// Eevee irradiance samples per probe.
+    /// Deterministic CPU hemisphere samples per probe face.
     #[arg(
         long,
         default_value_t = 64,
@@ -262,13 +262,13 @@ pub struct BakeArgs {
         value_parser = parse_static_batch_chunk_meters
     )]
     pub(crate) static_batch_chunk_meters: f32,
-    /// Blender executable path.
+    /// Blender executable path, used only by --quality preview.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
-    /// Blender 4.5 LTS executable used only for irradiance-volume baking.
+    /// Legacy compatibility option; accepted but ignored by the Rust baker.
     #[arg(long)]
     pub(crate) irradiance_blender: Option<PathBuf>,
-    /// KTX-Software `ktx.exe` or legacy `toktx.exe` path.
+    /// Unified KTX-Software `ktx.exe` path (legacy option name).
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
     /// Re-bake every selected cell in a batch run even when its recorded
@@ -277,7 +277,7 @@ pub struct BakeArgs {
     /// the legacy no-op it always was.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Keep the generated Blender job, script, result, and Blender cache files.
+    /// Keep raw irradiance atlas slices, or Blender preview intermediates.
     #[arg(long)]
     pub(crate) keep_intermediate: bool,
 }
@@ -321,7 +321,7 @@ pub struct CellsArgs {
 pub enum BakeQuality {
     /// Fast Eevee lighting preview; does not produce a baked-GI manifest.
     Preview,
-    /// Bake one Blender 4.5 Eevee irradiance volume for the cell.
+    /// Bake one deterministic Rust CPU irradiance volume for the cell.
     Irradiance,
 }
 

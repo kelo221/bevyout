@@ -64,8 +64,31 @@ pub(crate) fn stage_audio(
         );
     }
 
+    let clips = stage_audio_clips(
+        data_root,
+        archives,
+        parsed,
+        diagnostics,
+        audio_dir,
+        form_ids,
+    )?;
+    Ok((cell_audio, clips))
+}
+
+pub(crate) fn stage_audio_clips(
+    data_root: &Path,
+    archives: &[crate::vsa::audio_assets::AudioArchive],
+    parsed: &ParsedPlugin,
+    diagnostics: &mut Vec<Diagnostic>,
+    audio_dir: &Path,
+    form_ids: impl IntoIterator<Item = u32>,
+) -> Result<Vec<PreparedAudioClip>> {
     let mut clips = Vec::new();
-    let mut sorted_ids = form_ids.into_iter().collect::<Vec<_>>();
+    let mut sorted_ids = form_ids
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     sorted_ids.sort_unstable();
     for form_id in sorted_ids {
         let Some(descriptor) = resolve_audio_descriptor(parsed, form_id) else {
@@ -111,7 +134,7 @@ pub(crate) fn stage_audio(
         }
         clips.push(clip);
     }
-    Ok((cell_audio, clips))
+    Ok(clips)
 }
 
 pub(crate) fn stage_footsteps(

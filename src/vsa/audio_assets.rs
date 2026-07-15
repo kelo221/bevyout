@@ -97,7 +97,8 @@ pub(crate) fn resolve_audio_asset(
     archives: &[AudioArchive],
     recorded_path: &str,
 ) -> Result<Option<ResolvedAudioAsset>> {
-    for candidate in sound_path_candidates(recorded_path) {
+    let directory_form = normalize_asset_path(recorded_path).ends_with('/');
+    for (index, candidate) in sound_path_candidates(recorded_path).into_iter().enumerate() {
         let loose = data_root.join(candidate.replace('/', std::path::MAIN_SEPARATOR_STR));
         if loose.is_file() {
             let bytes = fs::read(&loose)
@@ -107,6 +108,13 @@ pub(crate) fn resolve_audio_asset(
                 origin: AudioAssetOrigin::Loose(loose),
                 bytes,
             }));
+        }
+
+        if directory_form
+            && index == 0
+            && let Some(asset) = resolve_loose_directory(&loose, &candidate)?
+        {
+            return Ok(Some(asset));
         }
 
         for archive in archives {
@@ -122,10 +130,63 @@ pub(crate) fn resolve_audio_asset(
                     bytes,
                 }));
             }
+            if directory_form
+                && index == 0
+                && let Some((source_path, bytes)) = archive
+                    .archive
+                    .read_first_with_prefix(&candidate)
+                    .with_context(|| {
+                        format!(
+                            "reading audio directory {candidate} from {}",
+                            archive.path.display()
+                        )
+                    })?
+            {
+                return Ok(Some(ResolvedAudioAsset {
+                    source_path,
+                    origin: AudioAssetOrigin::Archive(archive.path.clone()),
+                    bytes,
+                }));
+            }
         }
     }
 
     Ok(None)
+}
+
+fn resolve_loose_directory(
+    directory: &Path,
+    virtual_directory: &str,
+) -> Result<Option<ResolvedAudioAsset>> {
+    if !directory.is_dir() {
+        return Ok(None);
+    }
+    let mut entries = fs::read_dir(directory)
+        .with_context(|| format!("reading audio directory {}", directory.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        normalize_asset_path(&left.file_name().to_string_lossy())
+            .cmp(&normalize_asset_path(&right.file_name().to_string_lossy()))
+            .then_with(|| left.file_name().cmp(&right.file_name()))
+    });
+    let Some(entry) = entries.into_iter().next() else {
+        return Ok(None);
+    };
+    let path = entry.path();
+    let bytes =
+        fs::read(&path).with_context(|| format!("reading audio asset {}", path.display()))?;
+    let source_path = format!(
+        "{}/{}",
+        virtual_directory.trim_end_matches('/'),
+        normalize_asset_path(&entry.file_name().to_string_lossy())
+    );
+    Ok(Some(ResolvedAudioAsset {
+        source_path,
+        origin: AudioAssetOrigin::Loose(path),
+        bytes,
+    }))
 }
 
 /// Stage an audio asset under a content-addressed filename. The normalized

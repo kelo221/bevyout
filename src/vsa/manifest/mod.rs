@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use super::physics::PreparedPhysicsSource;
 
 pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 14;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-visual-completeness-v4";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-placement-completeness-v10";
-pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v4";
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-shadow-casters-v5";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
+pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v5";
 
 mod compatibility;
 

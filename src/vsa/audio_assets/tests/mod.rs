@@ -18,6 +18,37 @@ fn normalizes_sound_paths_and_adds_mp3_fallback() {
 }
 
 #[test]
+fn sound_path_candidates_keep_directory_paths_as_the_primary_candidate() {
+    assert_eq!(
+        sound_path_candidates(r"fx\drs\containers\metalbox\open\"),
+        vec![
+            "sound/fx/drs/containers/metalbox/open".to_string(),
+            "sound/fx/drs/containers/metalbox/open.mp3".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn loose_directory_audio_uses_a_deterministic_direct_child() {
+    let root = std::env::temp_dir().join(format!("bevyout-audio-directory-{}", std::process::id()));
+    let directory = root.join("sound/fx/drs/containers/metalbox/open");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("z_last.wav"), b"last").unwrap();
+    fs::write(directory.join("a_first.wav"), b"first").unwrap();
+
+    let resolved = resolve_audio_asset(&root, &[], r"fx\drs\containers\metalbox\open\")
+        .unwrap()
+        .expect("directory sound should resolve");
+    assert_eq!(
+        resolved.source_path,
+        "sound/fx/drs/containers/metalbox/open/a_first.wav"
+    );
+    assert_eq!(resolved.bytes, b"first");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn emits_base_dlc_and_plugin_stem_archive_names() {
     assert_eq!(
         audio_archive_candidate_names("Fallout3.esm"),

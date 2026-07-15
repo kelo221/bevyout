@@ -200,10 +200,12 @@ fn fabricated_content() -> ParsedPlugin {
     bytes.extend(record(b"ACTI", 9, &model));
 
     bytes.extend(record(b"SOUN", 100, &[])); // no FNAM -> missing file
-    let clip = subrecord(b"FNAM", b"sound\\test\\clip.wav\0");
+    let mut clip = subrecord(b"EDID", b"DrsTestOpen\0");
+    clip.extend(subrecord(b"FNAM", b"sound\\test\\clip.wav\0"));
     bytes.extend(record(b"SOUN", 101, &clip)); // file present, no parameters
     let looping_clip = {
-        let mut data = subrecord(b"FNAM", b"sound\\test\\clip.xwm\0");
+        let mut data = subrecord(b"EDID", b"DrsTestClose\0");
+        data.extend(subrecord(b"FNAM", b"sound\\test\\clip.xwm\0"));
         let sndx = [5u8, 200, 253, 0, 0x50, 0x00, 0, 0, 0xB0, 0x04, 0, 0];
         data.extend(subrecord(b"SNDX", &sndx));
         data
@@ -351,6 +353,109 @@ fn sound_descriptor_reads_loop_and_2d_flags_for_a_different_extension() {
     assert_eq!(descriptor.max_attenuation, 200);
     assert_eq!(descriptor.frequency_adjustment, -3);
     assert_eq!(descriptor.static_attenuation_hundredths_db, 1200);
+}
+
+#[test]
+fn sound_editor_ids_resolve_case_insensitively_and_deterministically() {
+    let content = fabricated_content();
+    assert_eq!(
+        sound_form_ids_by_editor_id(&content, "drstestopen"),
+        vec![101]
+    );
+    assert_eq!(
+        sound_form_ids_by_editor_id(&content, "DRSTESTCLOSE"),
+        vec![102]
+    );
+    assert!(sound_form_ids_by_editor_id(&content, "missing").is_empty());
+}
+
+#[test]
+fn additional_audio_staging_is_deduplicated_and_form_id_sorted() {
+    let content = fabricated_content();
+    let mut diagnostics = Vec::new();
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-container-audio-stage-{}",
+        std::process::id()
+    ));
+    let clips = stage_audio_clips(
+        &root,
+        &[],
+        &content,
+        &mut diagnostics,
+        &root.join("audio"),
+        [102, 101, 102],
+    )
+    .unwrap();
+    assert_eq!(
+        clips.iter().map(|clip| clip.form_id).collect::<Vec<_>>(),
+        vec![101, 102]
+    );
+    assert_eq!(diagnostics.len(), 2);
+}
+
+#[test]
+fn glb_container_cues_fill_only_missing_record_audio() {
+    fn glb_with_cues(cues: &[AnimationSoundCue]) -> Vec<u8> {
+        let encoded = serde_json::to_string(cues).unwrap();
+        let document = serde_json::json!({
+            "nodes": [{"extras": {"bevyout_animation_sound_cues": encoded}}]
+        });
+        let mut json = serde_json::to_vec(&document).unwrap();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let total_length = 20 + json.len();
+        let mut bytes = Vec::with_capacity(total_length);
+        bytes.extend_from_slice(b"glTF");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&(total_length as u32).to_le_bytes());
+        bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0x4e4f534a_u32.to_le_bytes());
+        bytes.extend_from_slice(&json);
+        bytes
+    }
+
+    let content = fabricated_content();
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-container-audio-glb-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let asset_path = "container.glb";
+    fs::write(
+        root.join(asset_path),
+        glb_with_cues(&[
+            AnimationSoundCue {
+                sequence: "Open".into(),
+                time: 0.01,
+                editor_id: "drstestopen".into(),
+            },
+            AnimationSoundCue {
+                sequence: "Close".into(),
+                time: 0.01,
+                editor_id: "DRSTESTCLOSE".into(),
+            },
+        ]),
+    )
+    .unwrap();
+    let reference = object_reference(3);
+    let mut placement = prepared_placement(
+        &reference,
+        content.bases.get(&3),
+        Some(asset_path.into()),
+        None,
+        &content.bases,
+    );
+    placement.audio.open_sound_form_id = Some(777);
+    let mut placements = vec![placement];
+    let mut diagnostics = Vec::new();
+    let additional =
+        apply_container_animation_audio(&root, &content, &mut placements, &mut diagnostics);
+    assert_eq!(placements[0].audio.open_sound_form_id, Some(777));
+    assert_eq!(placements[0].audio.close_sound_form_id, Some(102));
+    assert_eq!(additional, vec![102]);
+    assert!(diagnostics.is_empty());
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

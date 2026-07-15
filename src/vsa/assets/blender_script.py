@@ -621,6 +621,33 @@ bpy.ops.preferences.addon_enable(module='io_scene_niftools')
 patch_niftools_blender52()
 from io_scene_niftools.utils.singleton import NifData
 from nifgen.formats.nif import classes as NifClasses
+
+def collect_animation_sound_cues():
+    cues = []
+    for block in NifData.data.blocks:
+        if not isinstance(block, NifClasses.NiControllerSequence):
+            continue
+        sequence = str(block.name).strip()
+        text_keys = getattr(block, 'text_keys', None)
+        if not text_keys:
+            continue
+        for key in text_keys.text_keys:
+            text = str(key.value).replace('\r', '\n')
+            for line in text.split('\n'):
+                prefix, separator, value = line.partition(':')
+                if separator and prefix.strip().casefold() == 'sound':
+                    editor_id = value.strip()
+                    if editor_id:
+                        cues.append({
+                            'sequence': sequence,
+                            'time': float(key.time),
+                            'editor_id': editor_id,
+                        })
+    cues.sort(key=lambda cue: (
+        cue['sequence'].casefold(), cue['time'], cue['editor_id'].casefold(), cue['editor_id']
+    ))
+    return cues
+
 if sys.argv[-1] == '--self-test-root-policy':
     run_root_transform_self_test()
     raise SystemExit(0)
@@ -750,6 +777,9 @@ for job in jobs:
     )
     metadata_carrier['bevyout_expected_collision_corrections'] = collision_corrections
     metadata_carrier['bevyout_verified_collision_corrections'] = collision_corrections
+    metadata_carrier['bevyout_animation_sound_cues'] = json.dumps(
+        collect_animation_sound_cues(), separators=(',', ':')
+    )
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:

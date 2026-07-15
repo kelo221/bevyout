@@ -6,13 +6,12 @@ plugin = "Fallout3.esm"
 
 [tools]
 # Optional: omitted values use automatic detection (Windows default install
-# paths, or "magick"/"ktx"/"toktx" on PATH). Automatic detection does not
+# paths, or "magick"/"ktx" on PATH). Automatic detection does not
 # check macOS/Linux install locations for Blender, so set it explicitly there,
 # e.g. "/Applications/Blender.app/Contents/MacOS/Blender" on macOS.
 blender = "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
-# Irradiance baking is pinned to Blender 4.5 LTS; preparation continues to use
-# the general Blender path above.
-irradiance_blender = "C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+# Legacy configs may still contain `irradiance_blender`; it is accepted but
+# ignored because the normal irradiance bake now runs in Rust.
 # Unified KTX-Software packages prepared D32 point-shadow arrays on a cache
 # miss and packages irradiance atlases during `bake`.
 ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"

@@ -99,6 +99,39 @@ impl BsaArchive {
         let Some(entry) = entry else {
             return Ok(None);
         };
+        Ok(Some(self.read_entry(entry)?))
+    }
+
+    /// Read the lexicographically first direct file below a virtual directory.
+    /// Bethesda sound records sometimes store a directory in `FNAM` and leave
+    /// variant selection to the game. Preparation has one clip slot per sound
+    /// FormID, so choose one stable direct child rather than depending on
+    /// `HashMap` iteration order.
+    pub(crate) fn read_first_with_prefix(
+        &self,
+        directory: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let prefix = format!("{}/", normalize_asset_path(directory).trim_end_matches('/'));
+        let mut matches = self
+            .entries
+            .keys()
+            .filter(|path| {
+                path.strip_prefix(&prefix)
+                    .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('/'))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        let Some(path) = matches.first() else {
+            return Ok(None);
+        };
+        let entry = self
+            .entries
+            .get(*path)
+            .expect("prefix match must remain in the archive index");
+        Ok(Some((path.to_string(), self.read_entry(entry)?)))
+    }
+
+    fn read_entry(&self, entry: &ArchiveEntry) -> Result<Vec<u8>> {
         let mut file = File::open(&self.file)?;
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut bytes = vec![0; entry.size as usize];
@@ -113,7 +146,7 @@ impl BsaArchive {
                 || bytes.starts_with(b"ID3")
                 || looks_like_mp3_frame(&bytes)
             {
-                return Ok(Some(bytes));
+                return Ok(bytes);
             }
             // FO3's texture archive embeds the original path before the
             // four-byte unpacked-size field, while the mesh archive usually
@@ -127,12 +160,12 @@ impl BsaArchive {
                 let mut decoder = ZlibDecoder::new(Cursor::new(&bytes[start..]));
                 let mut decoded = Vec::new();
                 if decoder.read_to_end(&mut decoded).is_ok() {
-                    return Ok(Some(decoded));
+                    return Ok(decoded);
                 }
             }
             bail!("compressed BSA entry has no valid zlib stream")
         } else {
-            Ok(Some(bytes))
+            Ok(bytes)
         }
     }
 }

@@ -62,9 +62,10 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 - Point-shadow depth is generated automatically during `prepare`, after GLB
   conversion and physics classification. Do not add Blender shadow baking or
   runtime cubemap rendering back into this path.
-- Static casters must be initially enabled, `PreparedSemantic::Static`, static
-  physics placements with resolved GLBs. Doors, containers, activators,
-  pickups, actors, and dynamic bodies are intentionally non-casters.
+- Casters must be initially enabled placements with resolved GLBs. Every
+  semantic and physics classification contributes its prepared initial-pose
+  geometry except `PreparedSemantic::Door`; doors are intentionally
+  non-casters.
 - The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
@@ -82,6 +83,19 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   stable manifest layers, and forward shading performs at most one dominant
   point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
   benchmark switch; there is no gameplay shadow budget.
+
+## Prepared container audio
+
+- Record-level `CONT` open/close sounds are authoritative. When either field
+  is absent, `prepare` may fill it from the earliest matching `Open`/`Close`
+  `sound:` cue authored in the model's `NiTextKeyExtraData`.
+- NIF animation sound cues are preserved as GLB metadata during conversion,
+  resolved case-insensitively against `SOUN`/`SNDR` EditorIDs, and staged
+  through the existing prepared-audio path. Do not add a separate runtime
+  animation-event audio system for these start-of-animation container cues.
+- Sound records whose `FNAM` is a directory resolve to the lexicographically
+  first direct child (loose `Data` files before archive entries); exact-file
+  paths retain their existing resolution and precedence.
 
 ## Way of working (waves)
 

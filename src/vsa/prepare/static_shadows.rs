@@ -18,8 +18,8 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use super::{
-    Diagnostic, PreparedLight, PreparedPhysicsClassification, PreparedPlacement, PreparedSemantic,
-    PreparedStaticPointShadowLight, PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
+    Diagnostic, PreparedLight, PreparedPlacement, PreparedSemantic, PreparedStaticPointShadowLight,
+    PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
 };
 use crate::vsa::bake::{
     find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
@@ -188,8 +188,7 @@ fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlace
         .filter(|placement| {
             placement.initially_enabled
                 && placement.asset_path.is_some()
-                && placement.physics_classification == PreparedPhysicsClassification::Static
-                && matches!(placement.semantic, PreparedSemantic::Static)
+                && !matches!(placement.semantic, PreparedSemantic::Door(_))
         })
         .collect::<Vec<_>>();
     casters.sort_by_key(|placement| (placement.reference_form_id, placement.base_form_id));
@@ -720,7 +719,10 @@ fn vec3(value: Point3<f32>) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vsa::manifest::{PreparedPlacementAudio, PreparedRuntimeMutability};
+    use crate::vsa::manifest::{
+        PreparedActor, PreparedDoor, PreparedPhysicsClassification, PreparedPickup,
+        PreparedPlacementAudio, PreparedRuntimeMutability,
+    };
     use std::sync::atomic::AtomicUsize;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -839,18 +841,88 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_keeps_only_enabled_static_semantic_static_physics() {
+    fn caster_filter_includes_every_enabled_resolved_non_door_semantic_and_physics_class() {
+        let semantics = [
+            PreparedSemantic::Static,
+            PreparedSemantic::Pickup(PreparedPickup {
+                category: "MISC".into(),
+                value: Some(1),
+                weight: Some(1.0),
+            }),
+            PreparedSemantic::Container,
+            PreparedSemantic::Activator,
+            PreparedSemantic::Furniture,
+            PreparedSemantic::Npc(PreparedActor {
+                base_template_form_id: None,
+            }),
+            PreparedSemantic::Creature(PreparedActor {
+                base_template_form_id: None,
+            }),
+            PreparedSemantic::Unsupported,
+        ];
+        let physics_classes = [
+            PreparedPhysicsClassification::Static,
+            PreparedPhysicsClassification::Kinematic,
+            PreparedPhysicsClassification::Dynamic,
+        ];
+        let mut placements = Vec::new();
+        for (semantic_index, semantic) in semantics.into_iter().enumerate() {
+            for (physics_index, physics_classification) in physics_classes.into_iter().enumerate() {
+                let mut candidate =
+                    placement(&format!("candidate-{semantic_index}-{physics_index}.glb"));
+                candidate.reference_form_id =
+                    (semantic_index * physics_classes.len() + physics_index + 1) as u32;
+                candidate.semantic = semantic.clone();
+                candidate.physics_classification = physics_classification;
+                placements.push(candidate);
+            }
+        }
+
+        let casters = sorted_shadow_casters(&placements);
+        assert_eq!(casters.len(), placements.len());
+        assert!(
+            casters
+                .iter()
+                .any(|placement| placement.physics_classification
+                    == PreparedPhysicsClassification::Kinematic)
+        );
+        assert!(
+            casters
+                .iter()
+                .any(|placement| placement.physics_classification
+                    == PreparedPhysicsClassification::Dynamic)
+        );
+    }
+
+    #[test]
+    fn caster_filter_excludes_only_doors_disabled_placements_and_unresolved_assets() {
         let eligible = placement("eligible.glb");
         let mut disabled = placement("disabled.glb");
         disabled.initially_enabled = false;
-        let mut container = placement("container.glb");
-        container.semantic = PreparedSemantic::Container;
-        let mut dynamic = placement("dynamic.glb");
-        dynamic.physics_classification = PreparedPhysicsClassification::Dynamic;
         let mut unresolved = placement("missing.glb");
         unresolved.asset_path = None;
+        let mut doors = Vec::new();
+        for (index, physics_classification) in [
+            PreparedPhysicsClassification::Static,
+            PreparedPhysicsClassification::Kinematic,
+            PreparedPhysicsClassification::Dynamic,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut door = placement(&format!("door-{index}.glb"));
+            door.reference_form_id = 100 + index as u32;
+            door.semantic = PreparedSemantic::Door(PreparedDoor {
+                lock_level: None,
+                key_form_id: None,
+                destination: None,
+            });
+            door.physics_classification = physics_classification;
+            doors.push(door);
+        }
 
-        let placements = [eligible, disabled, container, dynamic, unresolved];
+        let mut placements = vec![eligible, disabled, unresolved];
+        placements.extend(doors);
         let casters = sorted_shadow_casters(&placements);
         assert_eq!(casters.len(), 1);
         assert_eq!(casters[0].asset_path.as_deref(), Some("eligible.glb"));
@@ -917,6 +989,19 @@ mod tests {
                 .unwrap()
             };
         let baseline = fingerprint(STATIC_POINT_SHADOW_REVISION, &caster, &source_light, 256);
+
+        fs::write(root.join("assets/second-caster.glb"), b"geometry-c").unwrap();
+        let second_caster = placement("assets/second-caster.glb");
+        let expanded_caster_set = shadow_fingerprint_with_revision(
+            STATIC_POINT_SHADOW_REVISION,
+            &root,
+            &[&caster, &second_caster],
+            &[&source_light],
+            256,
+            STATIC_POINT_SHADOW_NEAR_Z,
+        )
+        .unwrap();
+        assert_ne!(baseline, expanded_caster_set);
 
         let mut appearance = source_light.clone();
         appearance.color_rgba = [0.0, 1.0, 0.0, 1.0];
