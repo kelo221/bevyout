@@ -16,7 +16,7 @@ jobs:
           # Keep compatibility with the secret name used by the original snippet.
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.5-flash
+          GEMINI_MODEL: gemini-3.1-flash-lite
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
