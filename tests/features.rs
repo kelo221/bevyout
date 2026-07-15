@@ -202,6 +202,8 @@ struct BevyoutWorld {
     swap_placements: Vec<swap_policy::PlacementRef>,
     swap_deltas: std::collections::HashMap<u32, swap_policy::ReferenceDelta>,
     swap_applications: Vec<swap_policy::PlacementApplication>,
+    collider_work: Vec<(usize, bool)>,
+    collider_phase_partitions: Option<(Vec<usize>, Vec<usize>)>,
 
     // -- fingerprints.feature (issue #49) --
     fingerprint_current: Option<fingerprints::CellFingerprints>,
@@ -1364,6 +1366,76 @@ async fn then_swap_placement_has_translation(
         .transform
         .expect("expected a transform delta on this application");
     assert_eq!(transform.translation, [x, y, z]);
+}
+
+// ---------------------------------------------------------------------
+// physics_readiness.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^collider placements have kinds "([^"]*)"$"#)]
+async fn given_collider_placements_have_kinds(world: &mut BevyoutWorld, kinds: String) {
+    world.collider_work = kinds
+        .split(',')
+        .enumerate()
+        .map(|(index, kind)| {
+            let dynamic = match kind.trim() {
+                "dynamic" => true,
+                "static" | "keyframed" => false,
+                other => panic!("unknown collider kind {other:?}"),
+            };
+            (index, dynamic)
+        })
+        .collect();
+}
+
+#[when("collider placement work is partitioned")]
+async fn when_collider_work_partitioned(world: &mut BevyoutWorld) {
+    world.collider_phase_partitions = Some(swap_policy::partition_collider_indices(
+        world.collider_work.iter().copied(),
+    ));
+}
+
+fn parse_index_list(list: &str) -> Vec<usize> {
+    list.split(',')
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().parse().expect("valid collider index"))
+        .collect()
+}
+
+#[then(regex = r#"^static collider indices are "([^"]*)"$"#)]
+async fn then_static_collider_indices_are(world: &mut BevyoutWorld, expected: String) {
+    let (static_indices, _) = world
+        .collider_phase_partitions
+        .as_ref()
+        .expect("collider work was not partitioned");
+    assert_eq!(*static_indices, parse_index_list(&expected));
+}
+
+#[then(regex = r#"^dynamic collider indices are "([^"]*)"$"#)]
+async fn then_dynamic_collider_indices_are(world: &mut BevyoutWorld, expected: String) {
+    let (_, dynamic_indices) = world
+        .collider_phase_partitions
+        .as_ref()
+        .expect("collider work was not partitioned");
+    assert_eq!(*dynamic_indices, parse_index_list(&expected));
+}
+
+#[then("static collision is required before dynamic bodies")]
+async fn then_static_collision_is_required_before_dynamic_bodies(world: &mut BevyoutWorld) {
+    let (static_indices, dynamic_indices) = world
+        .collider_phase_partitions
+        .as_ref()
+        .expect("collider work was not partitioned");
+    assert!(!static_indices.is_empty());
+    assert!(!dynamic_indices.is_empty());
+    assert_eq!(
+        swap_policy::next_collider_build_phase(false, true, true),
+        swap_policy::ColliderBuildPhase::Dynamic
+    );
+    assert_ne!(
+        swap_policy::next_collider_build_phase(false, true, false),
+        swap_policy::ColliderBuildPhase::Ready
+    );
 }
 
 // ---------------------------------------------------------------------

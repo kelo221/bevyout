@@ -168,6 +168,24 @@ pub(crate) struct KccState {
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub(crate) struct PlayerNoClip(pub(crate) bool);
 
+/// Runtime readiness of the active cell's staggered physics build. A swap
+/// keeps the active-cell transition instant, but the player waits until the
+/// destination's static collision exists and dynamic props wait until their
+/// own queue phase.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CellPhysicsReadiness {
+    #[default]
+    Ready,
+    BuildingStatic,
+    BuildingDynamic,
+}
+
+impl CellPhysicsReadiness {
+    pub(crate) fn static_collision_ready(self) -> bool {
+        self != Self::BuildingStatic
+    }
+}
+
 /// Previous fixed-step position used only to render an interpolated FPS camera.
 ///
 /// The player's [`Transform`] remains authoritative for physics and gameplay;
@@ -344,6 +362,7 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(PreparedCollisionWorld::default())
     .insert_resource(PhysicsDisabled(disable_physics))
     .insert_resource(PlayerNoClip::default())
+    .insert_resource(CellPhysicsReadiness::default())
     .insert_resource(StepDebugSettings::default())
     .insert_resource(PendingColliderBuild::default())
     .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))

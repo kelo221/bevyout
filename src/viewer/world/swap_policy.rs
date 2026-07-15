@@ -168,6 +168,52 @@ impl<T> ColliderBuildQueue<T> {
 /// large destination cell's colliders never spike a single frame.
 pub(crate) const COLLIDER_BUILD_BUDGET_PER_FRAME: usize = 64;
 
+/// The two runtime phases used when a resident cell becomes active. Static
+/// and keyframed collision must exist before dynamic bodies are allowed to
+/// enter gravity, otherwise a prop can cross the floor before its collider is
+/// registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColliderBuildPhase {
+    Static,
+    Dynamic,
+    Ready,
+}
+
+/// Partitions enabled physics work without depending on Bevy or the manifest
+/// types. The boolean is true for a dynamic placement and false for static or
+/// keyframed work.
+pub(crate) fn partition_collider_indices(
+    items: impl IntoIterator<Item = (usize, bool)>,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut static_indices = Vec::new();
+    let mut dynamic_indices = Vec::new();
+    for (index, dynamic) in items {
+        if dynamic {
+            dynamic_indices.push(index);
+        } else {
+            static_indices.push(index);
+        }
+    }
+    (static_indices, dynamic_indices)
+}
+
+/// Resolves the next collider phase from queue state. `static_ready` is kept
+/// separate from queue emptiness so a just-drained static batch cannot also
+/// start dynamic bodies in the same update.
+pub(crate) fn next_collider_build_phase(
+    static_pending: bool,
+    dynamic_pending: bool,
+    static_ready: bool,
+) -> ColliderBuildPhase {
+    if !static_ready && static_pending {
+        ColliderBuildPhase::Static
+    } else if dynamic_pending {
+        ColliderBuildPhase::Dynamic
+    } else {
+        ColliderBuildPhase::Ready
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +362,29 @@ mod tests {
         let mut queue = ColliderBuildQueue::new([1, 2, 3]);
         assert!(queue.drain_budget(0).is_empty());
         assert_eq!(queue.len(), 3);
+    }
+
+    #[test]
+    fn collider_work_partitions_static_before_dynamic() {
+        assert_eq!(
+            partition_collider_indices([(0, false), (1, true), (2, false), (3, true)]),
+            (vec![0, 2], vec![1, 3])
+        );
+    }
+
+    #[test]
+    fn collider_phase_does_not_report_ready_while_dynamic_work_is_pending() {
+        assert_eq!(
+            next_collider_build_phase(false, true, true),
+            ColliderBuildPhase::Dynamic
+        );
+        assert_eq!(
+            next_collider_build_phase(false, false, true),
+            ColliderBuildPhase::Ready
+        );
+        assert_eq!(
+            next_collider_build_phase(true, true, false),
+            ColliderBuildPhase::Static
+        );
     }
 }

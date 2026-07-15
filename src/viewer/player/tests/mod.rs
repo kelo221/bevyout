@@ -26,6 +26,40 @@ fn camera_transition_world(physics_disabled: bool, collisions_ready: bool) -> Wo
     world
 }
 
+fn synthetic_collision_placement(
+    classification: PreparedPhysicsClassification,
+    translation: [f32; 3],
+) -> crate::vsa::PreparedPlacement {
+    crate::vsa::PreparedPlacement {
+        reference_form_id: 1,
+        base_form_id: 1,
+        asset_path: None,
+        translation,
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: classification,
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "REFR".into(),
+        base_kind: "STAT".into(),
+        editor_id: None,
+        display_name: None,
+        count: 1,
+        semantic: crate::vsa::PreparedSemantic::Static,
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    }
+}
+
 #[test]
 fn fps_transition_round_trips_hierarchy_and_player_reference() {
     let mut world = camera_transition_world(false, true);
@@ -353,6 +387,194 @@ fn dynamic_props_settle_collide_push_sync_and_cleanup() {
 
     world.try_destroy_body(first).unwrap();
     assert!(world.try_body_transform(first).is_err());
+}
+
+#[test]
+fn dynamic_body_created_after_static_phase_stays_supported() {
+    use bevy_boxddd::boxddd::{Sphere, Vec3 as BoxVec3, World, WorldDef};
+
+    let mut world = World::new(
+        WorldDef::builder()
+            .gravity(BoxVec3::new(0.0, -GRAVITY, 0.0))
+            .build(),
+    )
+    .expect("BoxDDD world");
+    let floor = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    world.create_hull_shape(
+        floor,
+        &ShapeDef::default(),
+        &BoxHull::transformed(
+            5.0,
+            0.25,
+            5.0,
+            boxddd::Transform::new(
+                BoxVec3::new(0.0, -0.25, 0.0),
+                bevy_boxddd::boxddd::Quat::IDENTITY,
+            ),
+        ),
+    );
+
+    // This models the direct startup path: publish the completed static phase
+    // before the dynamic placement receives gravity, without requiring a
+    // simulation step to have occurred first.
+    world
+        .try_rebuild_static_tree()
+        .expect("BoxDDD static tree rebuild");
+    let prop = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Dynamic)
+            .position([0.0, 1.5, 0.0])
+            .build(),
+    );
+    world.create_sphere_shape(
+        prop,
+        &ShapeDef::builder().density(1.0).friction(0.8).build(),
+        &Sphere::new(BoxVec3::ZERO, 0.3),
+    );
+    for _ in 0..180 {
+        world.step(1.0 / 60.0, 4);
+    }
+
+    let y = world.body_position(prop).y;
+    assert!(
+        (0.20..0.45).contains(&y),
+        "dynamic prop should settle on the static floor, got y={y}"
+    );
+}
+
+#[test]
+fn dynamic_body_created_after_static_mesh_phase_stays_supported() {
+    use bevy_boxddd::boxddd::{Filter, Sphere, Vec3 as BoxVec3, World, WorldDef};
+
+    let mut world = World::new(
+        WorldDef::builder()
+            .gravity(BoxVec3::new(0.0, -GRAVITY, 0.0))
+            .build(),
+    )
+    .expect("BoxDDD world");
+    let floor = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    world
+        .try_create_mesh_shape(
+            floor,
+            &ShapeDef::builder()
+                .filter(Filter {
+                    category_bits: WORLD_STATIC,
+                    mask_bits: WORLD_DYNAMIC,
+                    group_index: 0,
+                })
+                .build(),
+            bevy_boxddd::boxddd::MeshData::box_mesh(
+                BoxVec3::new(0.0, -0.25, 0.0),
+                [5.0, 0.25, 5.0],
+                true,
+            )
+            .expect("BoxDDD floor mesh"),
+            BoxVec3::new(1.0, 1.0, 1.0),
+        )
+        .expect("BoxDDD static mesh");
+    world
+        .try_rebuild_static_tree()
+        .expect("BoxDDD static mesh tree rebuild");
+    let prop = world.create_body(
+        BodyDef::builder()
+            .body_type(BodyType::Dynamic)
+            .position([0.0, 1.5, 0.0])
+            .build(),
+    );
+    world.create_sphere_shape(
+        prop,
+        &ShapeDef::builder()
+            .density(1.0)
+            .friction(0.8)
+            .filter(Filter {
+                category_bits: WORLD_DYNAMIC,
+                mask_bits: WORLD_STATIC,
+                group_index: 0,
+            })
+            .build(),
+        &Sphere::new(BoxVec3::ZERO, 0.3),
+    );
+    for _ in 0..180 {
+        world.step(1.0 / 60.0, 4);
+    }
+
+    let y = world.body_position(prop).y;
+    assert!(
+        (0.20..0.45).contains(&y),
+        "dynamic prop should settle on the static mesh floor, got y={y}"
+    );
+}
+
+#[test]
+fn prepared_downward_wound_mesh_supports_dynamic_prop() {
+    use bevy_boxddd::boxddd::{Vec3 as BoxVec3, World, WorldDef};
+
+    let mut world = World::new(
+        WorldDef::builder()
+            .gravity(BoxVec3::new(0.0, -GRAVITY, 0.0))
+            .build(),
+    )
+    .expect("BoxDDD world");
+    let static_body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+    let static_placement =
+        synthetic_collision_placement(PreparedPhysicsClassification::Static, [0.0, 0.0, 0.0]);
+    let static_body_data = PreparedPhysicsBody::default();
+    let downward_floor = PreparedPhysicsShape::TriangleMesh {
+        vertices: vec![
+            [-5.0, 0.0, -5.0],
+            [5.0, 0.0, -5.0],
+            [5.0, 0.0, 5.0],
+            [-5.0, 0.0, 5.0],
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    };
+    create_prepared_shape(
+        &mut world,
+        static_body,
+        &static_body_data,
+        &downward_floor,
+        &static_placement,
+        false,
+        false,
+    )
+    .expect("prepared downward-wound floor");
+    world
+        .try_rebuild_static_tree()
+        .expect("BoxDDD static tree rebuild");
+
+    let dynamic_placement =
+        synthetic_collision_placement(PreparedPhysicsClassification::Dynamic, [0.0, 1.5, 0.0]);
+    let dynamic_body_data = PreparedPhysicsBody::default();
+    let dynamic_body = create_dynamic_body(&mut world, &dynamic_placement, &dynamic_body_data);
+    create_prepared_shape(
+        &mut world,
+        dynamic_body,
+        &dynamic_body_data,
+        &PreparedPhysicsShape::Sphere {
+            center: [0.0, 0.0, 0.0],
+            radius: 0.3,
+        },
+        &dynamic_placement,
+        true,
+        true,
+    )
+    .expect("prepared dynamic prop");
+    for _ in 0..180 {
+        world.step(1.0 / 60.0, 4);
+    }
+
+    let y = world.body_position(dynamic_body).y;
+    assert!(
+        (0.20..0.45).contains(&y),
+        "dynamic prop should settle on a downward-wound prepared floor, got y={y}"
+    );
+}
+
+#[test]
+fn player_physics_readiness_releases_after_static_phase() {
+    assert!(!CellPhysicsReadiness::BuildingStatic.static_collision_ready());
+    assert!(CellPhysicsReadiness::BuildingDynamic.static_collision_ready());
+    assert!(CellPhysicsReadiness::Ready.static_collision_ready());
 }
 
 #[test]

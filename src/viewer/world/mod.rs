@@ -35,7 +35,10 @@ pub(crate) use preload::{ResidentCell, ResidentCells, ResidentState};
 // flow will (see `swap::ActiveSaveState`'s doc comment).
 #[allow(unused_imports)]
 pub(crate) use swap::ActiveSaveState;
-pub(crate) use swap_policy::{COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildQueue};
+pub(crate) use swap_policy::{
+    COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildPhase, ColliderBuildQueue,
+    next_collider_build_phase, partition_collider_indices,
+};
 
 pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
     preload::install(app, resident_cell_limit);

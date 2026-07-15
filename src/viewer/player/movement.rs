@@ -35,6 +35,7 @@ pub(crate) fn apply_player_controls(
     state: Res<CameraModeState>,
     physics_disabled: Res<PhysicsDisabled>,
     no_clip: Res<PlayerNoClip>,
+    cell_physics: Res<CellPhysicsReadiness>,
     mut step_debug: ResMut<StepDebugSettings>,
     time: Res<Time<Fixed>>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
@@ -48,6 +49,12 @@ pub(crate) fn apply_player_controls(
     let Ok((player, mut transform, mut kcc, mut locomotion)) = players.single_mut() else {
         return;
     };
+    if !cell_physics.static_collision_ready() {
+        kcc.velocity = Vec3::ZERO;
+        kcc.grounded = false;
+        locomotion.set_jump_pressed(false);
+        return;
+    }
     let jump_pressed = keys.pressed(KeyCode::Space);
     let jump_started = jump_pressed && !locomotion.jump_was_pressed();
     locomotion.set_jump_pressed(jump_pressed);

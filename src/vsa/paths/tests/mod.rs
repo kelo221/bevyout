@@ -136,5 +136,6 @@ fn identifies_non_rendering_effects() {
     assert!(is_non_rendering_effect(
         "effects/ambient/spraymeshconnect.nif"
     ));
+    assert!(is_non_rendering_effect("clutter/fakefog01.nif"));
     assert!(!is_non_rendering_effect("meshes/clutter/lampgeneric01.nif"));
 }
