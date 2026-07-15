@@ -1,6 +1,6 @@
 # OpenMW provenance and notices
 
-Source snapshot: `openmw-master`, OpenMW 0.52.0. Exact commit unavailable.
+Source snapshot: `openmw-master`, OpenMW 0.52.0.
 
 ## ESM4 source notice
 
@@ -179,3 +179,32 @@ apps/openmw/mwworld/cellref.cpp 7c9e7857de758b40c93e0622d3256972fed478ec1b1c43b3
 - `lighting.hpp` supplies the FO3 40-byte `XCLL`/`LGTM.DATA` layout; the
   `loadcell` and `loadlgtm` adaptations preserve the nine named `LNAM`
   inheritance masks while leaving unresolved templates on CELL lighting.
+
+## Adapted File Contributors
+
+Upstream Git history identifies the following contributors for these source files:
+
+- Alexei Dobrohotov
+- Alexei Kotov
+- Andrei Kortunov
+- Andrzej Głuszak
+- AnyOldName3
+- Austin English
+- Bret Curtis
+- Cédric Mocquillon
+- Capostrophic
+- cc9cii
+- dteviot
+- elsid
+- Evil Eye
+- florent.teppe
+- fteppe
+- jvoisin
+- Kindi
+- mrohrlach
+- Petr Mikheev
+- Project579
+- psi29a
+- scrawl
+- Shi Han
+- Zackhasacat
