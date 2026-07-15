@@ -168,6 +168,100 @@ impl<T> ColliderBuildQueue<T> {
 /// large destination cell's colliders never spike a single frame.
 pub(crate) const COLLIDER_BUILD_BUDGET_PER_FRAME: usize = 64;
 
+/// F59.1: whether a fallback swap is currently in flight. `swap.rs` derives
+/// this from `PendingFallbackSwap` being `Some`/`None`; it is threaded
+/// through explicitly here (rather than inferred inside this module) so the
+/// table below is total and independently testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FallbackState {
+    Idle,
+    InFlight,
+}
+
+/// F59.1: an event that can resolve or interrupt an in-flight fallback
+/// swap. `DestinationReady`/`ParseFailed` are `check_fallback_progress`'s
+/// existing signals (see `fallback_outcome` above); `PlayerCancelled` is a
+/// new Esc keypress while `GameplayModal::Loading` is up;
+/// `SupersedingRequest` is a second `DoorTravelRequested` arriving before
+/// the first fallback resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FallbackEvent {
+    DestinationReady,
+    ParseFailed,
+    PlayerCancelled,
+    SupersedingRequest,
+}
+
+/// F59.1: the lifecycle outcome for a `(state, event)` pair. `Ignore` covers
+/// every event arriving with no fallback in flight (should not happen in
+/// practice -- `swap.rs` only evaluates this table while
+/// `PendingFallbackSwap` is `Some` -- but the table stays total rather than
+/// partial). `Supersede` means: cancel the in-flight fallback (same as
+/// `Cancel`, but silently -- the player is already requesting somewhere
+/// else) and immediately evaluate the superseding request as a fresh one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FallbackLifecycleOutcome {
+    Ignore,
+    Proceed,
+    ReturnToSource,
+    Cancel,
+    Supersede,
+}
+
+/// Total decision table (F59.1, T59.1): only `FallbackState::InFlight`
+/// produces a real outcome; every event against `Idle` is `Ignore`. The
+/// `DestinationReady`/`ParseFailed` rows extend issue #52's two-outcome
+/// `fallback_outcome` seam (delegated to, not duplicated); the
+/// `PlayerCancelled`/`SupersedingRequest` rows are what issue #59 adds.
+pub(crate) fn fallback_lifecycle_outcome(
+    state: FallbackState,
+    event: FallbackEvent,
+) -> FallbackLifecycleOutcome {
+    match state {
+        FallbackState::Idle => FallbackLifecycleOutcome::Ignore,
+        FallbackState::InFlight => match event {
+            FallbackEvent::DestinationReady | FallbackEvent::ParseFailed => {
+                match fallback_outcome(event == FallbackEvent::DestinationReady) {
+                    FallbackOutcome::Proceed => FallbackLifecycleOutcome::Proceed,
+                    FallbackOutcome::ReturnToSource => FallbackLifecycleOutcome::ReturnToSource,
+                }
+            }
+            FallbackEvent::PlayerCancelled => FallbackLifecycleOutcome::Cancel,
+            FallbackEvent::SupersedingRequest => FallbackLifecycleOutcome::Supersede,
+        },
+    }
+}
+
+/// F59.2: how long the loading overlay takes to fade in or out.
+pub(crate) const OVERLAY_FADE_SECONDS: f32 = 0.25;
+
+/// F59.2: the overlay's fully-opaque background alpha (matches the flat
+/// value it used before this issue).
+pub(crate) const OVERLAY_MAX_ALPHA: f32 = 0.85;
+
+/// F59.2: monotonic 0->1 progress over `duration_seconds`, clamped so
+/// neither endpoint is overshot. A non-positive duration is treated as
+/// already complete (progress 1.0) rather than dividing by zero.
+pub(crate) fn fade_progress(elapsed_seconds: f32, duration_seconds: f32) -> f32 {
+    if duration_seconds <= 0.0 {
+        return 1.0;
+    }
+    (elapsed_seconds / duration_seconds).clamp(0.0, 1.0)
+}
+
+/// F59.2: the overlay's alpha `elapsed_seconds` into fading in, from
+/// transparent up to `max_alpha`.
+pub(crate) fn fade_in_alpha(elapsed_seconds: f32, duration_seconds: f32, max_alpha: f32) -> f32 {
+    fade_progress(elapsed_seconds, duration_seconds) * max_alpha
+}
+
+/// F59.2: the overlay's alpha `elapsed_seconds` into fading out, from
+/// `max_alpha` back down to transparent -- the symmetric mirror of
+/// `fade_in_alpha` (T59.2).
+pub(crate) fn fade_out_alpha(elapsed_seconds: f32, duration_seconds: f32, max_alpha: f32) -> f32 {
+    (1.0 - fade_progress(elapsed_seconds, duration_seconds)) * max_alpha
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +410,109 @@ mod tests {
         let mut queue = ColliderBuildQueue::new([1, 2, 3]);
         assert!(queue.drain_budget(0).is_empty());
         assert_eq!(queue.len(), 3);
+    }
+
+    // T59.1: no fallback in flight -> every event is ignored.
+    #[test]
+    fn idle_state_ignores_every_event() {
+        for event in [
+            FallbackEvent::DestinationReady,
+            FallbackEvent::ParseFailed,
+            FallbackEvent::PlayerCancelled,
+            FallbackEvent::SupersedingRequest,
+        ] {
+            assert_eq!(
+                fallback_lifecycle_outcome(FallbackState::Idle, event),
+                FallbackLifecycleOutcome::Ignore
+            );
+        }
+    }
+
+    // T59.1: an in-flight fallback whose destination becomes ready proceeds.
+    #[test]
+    fn in_flight_destination_ready_proceeds() {
+        assert_eq!(
+            fallback_lifecycle_outcome(FallbackState::InFlight, FallbackEvent::DestinationReady),
+            FallbackLifecycleOutcome::Proceed
+        );
+    }
+
+    // T59.1: an in-flight fallback whose parse fails returns to source.
+    #[test]
+    fn in_flight_parse_failed_returns_to_source() {
+        assert_eq!(
+            fallback_lifecycle_outcome(FallbackState::InFlight, FallbackEvent::ParseFailed),
+            FallbackLifecycleOutcome::ReturnToSource
+        );
+    }
+
+    // T59.1: an in-flight fallback the player cancels (Esc) cancels cleanly.
+    #[test]
+    fn in_flight_player_cancelled_cancels() {
+        assert_eq!(
+            fallback_lifecycle_outcome(FallbackState::InFlight, FallbackEvent::PlayerCancelled),
+            FallbackLifecycleOutcome::Cancel
+        );
+    }
+
+    // T59.1: a superseding travel request cancels the old fallback and
+    // starts the new one -- the caller (`swap.rs`) implements "start the
+    // new one" by re-running `swap_decision` for the superseding request
+    // once this table says `Supersede`.
+    #[test]
+    fn in_flight_superseding_request_supersedes() {
+        assert_eq!(
+            fallback_lifecycle_outcome(FallbackState::InFlight, FallbackEvent::SupersedingRequest),
+            FallbackLifecycleOutcome::Supersede
+        );
+    }
+
+    // T59.2: fade progress is monotonic and clamped to [0, 1].
+    #[test]
+    fn fade_progress_is_monotonic_and_clamped() {
+        assert_eq!(fade_progress(-1.0, 0.25), 0.0);
+        assert_eq!(fade_progress(0.0, 0.25), 0.0);
+        let quarter = fade_progress(0.0625, 0.25);
+        let half = fade_progress(0.125, 0.25);
+        let three_quarter = fade_progress(0.1875, 0.25);
+        assert!(quarter < half);
+        assert!(half < three_quarter);
+        assert!(three_quarter < 1.0);
+        assert_eq!(fade_progress(0.25, 0.25), 1.0);
+        assert_eq!(fade_progress(10.0, 0.25), 1.0);
+    }
+
+    // T59.2: a non-positive duration never divides by zero -- it is
+    // instantaneous instead.
+    #[test]
+    fn fade_progress_treats_non_positive_duration_as_instantaneous() {
+        assert_eq!(fade_progress(0.0, 0.0), 1.0);
+        assert_eq!(fade_progress(0.1, -1.0), 1.0);
+    }
+
+    // T59.2: fade-in reaches 0 at the start and max_alpha at the duration.
+    #[test]
+    fn fade_in_alpha_spans_zero_to_max() {
+        assert_eq!(fade_in_alpha(0.0, 0.25, 0.85), 0.0);
+        assert_eq!(fade_in_alpha(0.25, 0.25, 0.85), 0.85);
+    }
+
+    // T59.2: fade-out is the symmetric mirror of fade-in -- at any elapsed
+    // time `t`, `fade_out_alpha(t)` equals `fade_in_alpha(duration - t)`.
+    #[test]
+    fn fade_out_alpha_is_the_symmetric_mirror_of_fade_in_alpha() {
+        let duration = 0.25;
+        let max_alpha = 0.85;
+        for elapsed in [0.0, 0.05, 0.125, 0.2, 0.25] {
+            let out = fade_out_alpha(elapsed, duration, max_alpha);
+            let mirrored_in = fade_in_alpha(duration - elapsed, duration, max_alpha);
+            assert!(
+                (out - mirrored_in).abs() < 1e-6,
+                "fade_out_alpha({elapsed}) = {out} != fade_in_alpha({}) = {mirrored_in}",
+                duration - elapsed
+            );
+        }
+        assert_eq!(fade_out_alpha(0.0, duration, max_alpha), max_alpha);
+        assert_eq!(fade_out_alpha(duration, duration, max_alpha), 0.0);
     }
 }
