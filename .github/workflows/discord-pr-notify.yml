@@ -2,7 +2,7 @@ name: Discord PR notify
 
 on:
   pull_request:
-    types: [opened, closed]
+    types: [opened]
   workflow_dispatch:
     inputs:
       pr_number:
