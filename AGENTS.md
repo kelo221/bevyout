@@ -62,9 +62,10 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 - Point-shadow depth is generated automatically during `prepare`, after GLB
   conversion and physics classification. Do not add Blender shadow baking or
   runtime cubemap rendering back into this path.
-- Static casters must be initially enabled, `PreparedSemantic::Static`, static
-  physics placements with resolved GLBs. Doors, containers, activators,
-  pickups, actors, and dynamic bodies are intentionally non-casters.
+- Casters must be initially enabled placements with resolved GLBs. Every
+  semantic and physics classification contributes its prepared initial-pose
+  geometry except `PreparedSemantic::Door`; doors are intentionally
+  non-casters.
 - The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
