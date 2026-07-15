@@ -231,9 +231,6 @@ struct BevyoutWorld {
     swap_decision: Option<swap_policy::SwapDecision>,
     swap_fallback_load_ok: bool,
     swap_fallback_outcome: Option<swap_policy::FallbackOutcome>,
-    swap_placements: Vec<swap_policy::PlacementRef>,
-    swap_deltas: std::collections::HashMap<u32, swap_policy::ReferenceDelta>,
-    swap_applications: Vec<swap_policy::PlacementApplication>,
 
     // -- fingerprints.feature (issue #49) --
     fingerprint_current: Option<fingerprints::CellFingerprints>,
@@ -1323,101 +1320,6 @@ async fn then_fallback_outcome_is(world: &mut BevyoutWorld, expected: String) {
         _ => swap_policy::FallbackOutcome::ReturnToSource,
     };
     assert_eq!(outcome, expected);
-}
-
-#[given(regex = r"^placement reference 0x([0-9a-fA-F]+) is spawned in the destination cell$")]
-async fn given_swap_placement_spawned(world: &mut BevyoutWorld, hex: String) {
-    world.swap_placements.push(swap_policy::PlacementRef {
-        reference_form_id: parse_hex(&hex),
-    });
-}
-
-#[given(regex = r"^the saved state disables reference 0x([0-9a-fA-F]+)$")]
-async fn given_swap_state_disables(world: &mut BevyoutWorld, hex: String) {
-    world.swap_deltas.insert(
-        parse_hex(&hex),
-        swap_policy::ReferenceDelta {
-            enabled: Some(false),
-            ..Default::default()
-        },
-    );
-}
-
-#[given(regex = r"^the saved state deletes reference 0x([0-9a-fA-F]+)$")]
-async fn given_swap_state_deletes(world: &mut BevyoutWorld, hex: String) {
-    world.swap_deltas.insert(
-        parse_hex(&hex),
-        swap_policy::ReferenceDelta {
-            deleted: true,
-            ..Default::default()
-        },
-    );
-}
-
-#[given(
-    regex = r"^the saved state moves reference 0x([0-9a-fA-F]+) to \[(-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\]$"
-)]
-async fn given_swap_state_moves(world: &mut BevyoutWorld, hex: String, x: f32, y: f32, z: f32) {
-    world.swap_deltas.insert(
-        parse_hex(&hex),
-        swap_policy::ReferenceDelta {
-            transform: Some(swap_policy::TransformDelta {
-                translation: [x, y, z],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            }),
-            ..Default::default()
-        },
-    );
-}
-
-#[when("the persistent cell state is applied")]
-async fn when_persistent_cell_state_applied(world: &mut BevyoutWorld) {
-    world.swap_applications =
-        swap_policy::apply_persistent_cell_state(&world.swap_deltas, &world.swap_placements);
-}
-
-fn find_swap_application(world: &BevyoutWorld, form_id: u32) -> &swap_policy::PlacementApplication {
-    world
-        .swap_applications
-        .iter()
-        .find(|application| application.reference_form_id == form_id)
-        .expect("persistent cell state not applied yet, or reference not spawned")
-}
-
-#[then(regex = r"^placement reference 0x([0-9a-fA-F]+) is hidden$")]
-async fn then_swap_placement_is_hidden(world: &mut BevyoutWorld, hex: String) {
-    let application = find_swap_application(world, parse_hex(&hex));
-    assert_eq!(
-        application.visibility,
-        swap_policy::VisibilityDecision::Hidden
-    );
-}
-
-#[then(regex = r"^placement reference 0x([0-9a-fA-F]+) is visible$")]
-async fn then_swap_placement_is_visible(world: &mut BevyoutWorld, hex: String) {
-    let application = find_swap_application(world, parse_hex(&hex));
-    assert_eq!(
-        application.visibility,
-        swap_policy::VisibilityDecision::Visible
-    );
-}
-
-#[then(
-    regex = r"^placement reference 0x([0-9a-fA-F]+) has translation \[(-?[\d.]+), (-?[\d.]+), (-?[\d.]+)\]$"
-)]
-async fn then_swap_placement_has_translation(
-    world: &mut BevyoutWorld,
-    hex: String,
-    x: f32,
-    y: f32,
-    z: f32,
-) {
-    let application = find_swap_application(world, parse_hex(&hex));
-    let transform = application
-        .transform
-        .expect("expected a transform delta on this application");
-    assert_eq!(transform.translation, [x, y, z]);
 }
 
 // ---------------------------------------------------------------------

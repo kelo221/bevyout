@@ -1,21 +1,15 @@
-//! Pure swap-eligibility and save-application seam for issue #52's instant
-//! door transition. Std-only (no Bevy, no additional crates) so
-//! `tests/features.rs` can pull this in verbatim exactly like `policy.rs`
-//! (issue #51) does -- see that module's doc comment for the pattern this
-//! follows.
+//! Pure swap-eligibility seam for issue #52's instant door transition, plus
+//! issue #59's fallback lifecycle and overlay-fade policy. Std-only (no
+//! Bevy, no additional crates) so `tests/features.rs` can pull this in
+//! verbatim exactly like `policy.rs` (issue #51) does -- see that module's
+//! doc comment for the pattern this follows. (The save-application seam
+//! that used to live here moved to `persist_policy.rs` in issues #60/#61.)
 //!
 //! Nothing here is ported from OpenMW; it is bevyout's own design against
 //! the door-transition flow read (not copied) from
 //! `apps/openmw/mwworld/scene.cpp`'s `changeCellByMovingPlayer`.
-//!
-//! `ReferenceDelta`/`TransformDelta` deliberately mirror the
-//! runtime-relevant fields of `save::PersistentReferenceDelta`/
-//! `save::SavedTransform` with their own plain types rather than depending
-//! on `src/save` (which is itself std/serde-only but pulls in `anyhow` and
-//! `sha2`), the same stand-in approach `policy::DoorLink` uses for
-//! `vsa::cell_map::DoorEdge`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 /// Residency of the destination cell at the moment a door is activated,
 /// mirroring `world::preload::ResidentState` plus an `Absent` case for a
@@ -61,74 +55,6 @@ pub(crate) fn fallback_outcome(load_ok: bool) -> FallbackOutcome {
     } else {
         FallbackOutcome::ReturnToSource
     }
-}
-
-/// Mirrors the runtime-relevant fields of `save::SavedTransform`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct TransformDelta {
-    pub(crate) translation: [f32; 3],
-    pub(crate) rotation_xyzw: [f32; 4],
-    pub(crate) scale: [f32; 3],
-}
-
-/// Mirrors the runtime-relevant fields of `save::PersistentReferenceDelta`
-/// (F52.3): only `enabled`/`deleted`/`transform` affect the spawned
-/// placement's visibility and pose, so inventory/lock/body deltas are
-/// deliberately left out of this seam.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct ReferenceDelta {
-    pub(crate) enabled: Option<bool>,
-    pub(crate) deleted: bool,
-    pub(crate) transform: Option<TransformDelta>,
-}
-
-/// One spawned placement's reference FormID, for matching against
-/// `ReferenceDelta`s keyed the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PlacementRef {
-    pub(crate) reference_form_id: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VisibilityDecision {
-    Visible,
-    Hidden,
-}
-
-/// One placement's activation-time decision (F52.3): whether to show it and
-/// what transform delta (if any) to apply.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PlacementApplication {
-    pub(crate) reference_form_id: u32,
-    pub(crate) visibility: VisibilityDecision,
-    pub(crate) transform: Option<TransformDelta>,
-}
-
-/// Pure per-reference visibility/transform decision (F52.3, T52.2): deleted
-/// or explicitly-disabled references are hidden, everything else stays
-/// visible; a saved transform delta is carried through untouched. A
-/// placement with no matching delta is returned unchanged (visible, no
-/// transform).
-pub(crate) fn apply_persistent_cell_state(
-    deltas: &HashMap<u32, ReferenceDelta>,
-    placements: &[PlacementRef],
-) -> Vec<PlacementApplication> {
-    placements
-        .iter()
-        .map(|placement| {
-            let delta = deltas.get(&placement.reference_form_id);
-            let hidden = delta.is_some_and(|delta| delta.deleted || delta.enabled == Some(false));
-            PlacementApplication {
-                reference_form_id: placement.reference_form_id,
-                visibility: if hidden {
-                    VisibilityDecision::Hidden
-                } else {
-                    VisibilityDecision::Visible
-                },
-                transform: delta.and_then(|delta| delta.transform),
-            }
-        })
-        .collect()
 }
 
 /// A pure FIFO queue of pending collider-build work items, drained at most
@@ -303,94 +229,6 @@ mod tests {
     #[test]
     fn a_successful_fallback_load_proceeds() {
         assert_eq!(fallback_outcome(true), FallbackOutcome::Proceed);
-    }
-
-    fn transform_delta() -> TransformDelta {
-        TransformDelta {
-            translation: [1.0, 2.0, 3.0],
-            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-        }
-    }
-
-    // T52.2: disabled -> hidden.
-    #[test]
-    fn a_disabled_reference_is_hidden() {
-        let deltas = HashMap::from([(
-            0x100,
-            ReferenceDelta {
-                enabled: Some(false),
-                ..Default::default()
-            },
-        )]);
-        let placements = [PlacementRef {
-            reference_form_id: 0x100,
-        }];
-        let applications = apply_persistent_cell_state(&deltas, &placements);
-        assert_eq!(applications[0].visibility, VisibilityDecision::Hidden);
-    }
-
-    // T52.2: deleted -> hidden.
-    #[test]
-    fn a_deleted_reference_is_hidden() {
-        let deltas = HashMap::from([(
-            0x100,
-            ReferenceDelta {
-                deleted: true,
-                ..Default::default()
-            },
-        )]);
-        let placements = [PlacementRef {
-            reference_form_id: 0x100,
-        }];
-        let applications = apply_persistent_cell_state(&deltas, &placements);
-        assert_eq!(applications[0].visibility, VisibilityDecision::Hidden);
-    }
-
-    // T52.2: transform delta applied.
-    #[test]
-    fn a_transform_delta_is_carried_through() {
-        let deltas = HashMap::from([(
-            0x100,
-            ReferenceDelta {
-                transform: Some(transform_delta()),
-                ..Default::default()
-            },
-        )]);
-        let placements = [PlacementRef {
-            reference_form_id: 0x100,
-        }];
-        let applications = apply_persistent_cell_state(&deltas, &placements);
-        assert_eq!(applications[0].visibility, VisibilityDecision::Visible);
-        assert_eq!(applications[0].transform, Some(transform_delta()));
-    }
-
-    // T52.2: untouched refs (no matching delta) are unchanged.
-    #[test]
-    fn an_untouched_reference_stays_visible_with_no_transform() {
-        let deltas = HashMap::new();
-        let placements = [PlacementRef {
-            reference_form_id: 0x999,
-        }];
-        let applications = apply_persistent_cell_state(&deltas, &placements);
-        assert_eq!(applications[0].visibility, VisibilityDecision::Visible);
-        assert_eq!(applications[0].transform, None);
-    }
-
-    #[test]
-    fn enabled_true_with_no_other_flags_stays_visible() {
-        let deltas = HashMap::from([(
-            0x100,
-            ReferenceDelta {
-                enabled: Some(true),
-                ..Default::default()
-            },
-        )]);
-        let placements = [PlacementRef {
-            reference_form_id: 0x100,
-        }];
-        let applications = apply_persistent_cell_state(&deltas, &placements);
-        assert_eq!(applications[0].visibility, VisibilityDecision::Visible);
     }
 
     #[test]
