@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 14;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-shadow-casters-v5";
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 15;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v5";
 
@@ -26,6 +26,13 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) asset_root: String,
     pub(crate) source_plugin: String,
     pub(crate) source_fingerprint: String,
+    /// Content-fingerprinted item catalogue relative to `asset_root`.
+    #[serde(default)]
+    pub(crate) item_catalog_path: Option<String>,
+    #[serde(default)]
+    pub(crate) item_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) item_catalog_hash: Option<String>,
     #[serde(default)]
     pub(crate) source_plugins: Vec<PreparedPluginSource>,
     pub(crate) cell: CellInfo,
@@ -52,6 +59,91 @@ pub(crate) struct PreparedSceneManifest {
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
     pub(crate) mutability_summary: PreparedMutabilitySummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Resource)]
+pub(crate) struct PreparedItemCatalog {
+    pub(crate) revision: String,
+    pub(crate) source_fingerprint: String,
+    pub(crate) items: Vec<PreparedItemDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PreparedItemDefinition {
+    pub(crate) base_form_id: u32,
+    pub(crate) record_kind: String,
+    pub(crate) category: PreparedItemCategory,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) source_model_path: Option<String>,
+    pub(crate) icon_asset_path: Option<String>,
+    pub(crate) world_asset_path: Option<String>,
+    pub(crate) physics_asset_path: Option<String>,
+    #[serde(default)]
+    pub(crate) drop_collider: PreparedDropCollider,
+    pub(crate) value: Option<i32>,
+    pub(crate) weight: Option<f32>,
+    pub(crate) stats: PreparedItemStats,
+    #[serde(default)]
+    pub(crate) audio: PreparedPlacementAudio,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) enum PreparedDropCollider {
+    Authored,
+    BoundsProxy {
+        center: [f32; 3],
+        half_extents: [f32; 3],
+    },
+    #[default]
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub(crate) enum PreparedItemCategory {
+    Weapons,
+    Apparel,
+    Aid,
+    Misc,
+    Ammo,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) enum PreparedItemStats {
+    Weapon {
+        damage: Option<u16>,
+        max_condition: Option<u32>,
+        clip_size: Option<u8>,
+        speed: Option<f32>,
+        reach: Option<f32>,
+    },
+    Apparel {
+        armor_rating: Option<f32>,
+        max_condition: Option<u32>,
+    },
+    Ammo {
+        damage: Option<f32>,
+        speed: Option<f32>,
+    },
+    Aid {
+        effects: Vec<PreparedItemEffect>,
+    },
+    Book {
+        flags: Option<u8>,
+        text: Option<String>,
+    },
+    Note {
+        text: Option<String>,
+    },
+    Key,
+    #[default]
+    Misc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedItemEffect {
+    pub(crate) form_id: u32,
+    pub(crate) label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

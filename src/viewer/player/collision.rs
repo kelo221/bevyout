@@ -978,6 +978,128 @@ pub(crate) fn cleanup_removed_dynamic_bodies(
     }
 }
 
+/// M3 wave 1: attaches a dynamic body to a player-created dropped item using
+/// the prepared sidecar when it is dynamic-safe, otherwise a conservative
+/// box proxy. Kept here so runtime drops share BoxDDD ownership/filtering with
+/// prepared placements rather than creating a second physics integration.
+pub(crate) fn attach_runtime_item_colliders(
+    mut commands: Commands,
+    disabled: Res<PhysicsDisabled>,
+    physics_assets: Res<PreparedPhysicsAssets>,
+    mut collision: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    pending: Query<(
+        Entity,
+        &super::super::world_items::PendingRuntimeCollider,
+        &super::super::world_items::RuntimeWorldItem,
+    )>,
+) {
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    for (entity, pending, runtime_item) in &pending {
+        if disabled.0 {
+            commands
+                .entity(entity)
+                .remove::<super::super::world_items::PendingRuntimeCollider>();
+            continue;
+        }
+        let placement = &pending.placement;
+        let prepared = placement
+            .physics_asset_path
+            .as_ref()
+            .and_then(|path| physics_assets.assets.get(path));
+        let mut body = match &pending.drop_collider {
+            crate::vsa::PreparedDropCollider::Authored => prepared.and_then(|asset| {
+                asset
+                    .bodies
+                    .iter()
+                    .find(|body| {
+                        body_blocks_player(body)
+                            && !body.shapes.is_empty()
+                            && body
+                                .shapes
+                                .iter()
+                                .all(PreparedPhysicsShape::supports_dynamic)
+                    })
+                    .cloned()
+            }),
+            crate::vsa::PreparedDropCollider::BoundsProxy {
+                center,
+                half_extents,
+            } => Some(PreparedPhysicsBody {
+                motion_type: "MO_SYS_DYNAMIC".into(),
+                quality_type: "MO_QUAL_MOVING".into(),
+                mass: 1.0,
+                linear_damping: 0.05,
+                angular_damping: 0.05,
+                shapes: vec![PreparedPhysicsShape::Box {
+                    center: *center,
+                    half_extents: *half_extents,
+                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                }],
+                ..default()
+            }),
+            crate::vsa::PreparedDropCollider::Missing => None,
+        };
+        let Some(mut body) = body.take() else {
+            warn!(
+                "drop physics unavailable runtime={}",
+                runtime_item.runtime_id
+            );
+            commands
+                .entity(entity)
+                .remove::<super::super::world_items::PendingRuntimeCollider>();
+            continue;
+        };
+        body.shapes.retain(PreparedPhysicsShape::supports_dynamic);
+        let mut placement = placement.clone();
+        placement.physics_classification = PreparedPhysicsClassification::Dynamic;
+        let body_id = create_dynamic_body(world, &placement, &body);
+        let shapes = body
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                create_prepared_shape(world, body_id, &body, shape, &placement, true, true)
+                    .map(|(shape_id, _)| shape_id)
+            })
+            .collect::<Vec<_>>();
+        if shapes.is_empty() {
+            let _ = world.try_destroy_body(body_id);
+            warn!(
+                "drop physics unavailable runtime={}",
+                runtime_item.runtime_id
+            );
+        } else {
+            normalize_dynamic_mass(world, body_id, &body, placement.scale.abs());
+            if let Some(restore) = pending.restore {
+                apply_dynamic_body_restore(world, body_id, &restore);
+            }
+            collision.dynamic_bodies.insert(entity, body_id);
+            collision.dynamic_entities.insert(body_id, entity);
+            collision
+                .ledger
+                .record_dynamic_body(runtime_item.cell_form_id, body_id);
+            for shape_id in shapes {
+                collision.surfaces.insert(
+                    shape_id,
+                    CollisionSurface {
+                        material: body.material,
+                    },
+                );
+                collision
+                    .ledger
+                    .record_body_shape(runtime_item.cell_form_id, shape_id);
+            }
+            commands.entity(entity).insert(PhysicsCollider);
+            info!("drop physics ready runtime={}", runtime_item.runtime_id);
+        }
+        commands
+            .entity(entity)
+            .remove::<super::super::world_items::PendingRuntimeCollider>();
+    }
+}
+
 pub(crate) fn sync_dynamic_transforms(
     mut collision_world: ResMut<PreparedCollisionWorld>,
     context: NonSend<BoxdddPhysicsContext>,

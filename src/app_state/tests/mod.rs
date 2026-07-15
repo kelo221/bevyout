@@ -260,6 +260,20 @@ fn console_modal_pauses_and_resumes_virtual_time() {
     assert!(!app.world().resource::<Time<Virtual>>().is_paused());
 }
 
+#[test]
+fn pipboy_modal_pauses_and_resumes_virtual_time() {
+    let mut app = test_app();
+    apply(&mut app, RequestStateTransition::App(AppState::Loading));
+    apply(&mut app, RequestStateTransition::App(AppState::InGame));
+    apply(
+        &mut app,
+        RequestStateTransition::Modal(GameplayModal::PipBoy),
+    );
+    assert!(app.world().resource::<Time<Virtual>>().is_paused());
+    apply(&mut app, RequestStateTransition::Modal(GameplayModal::None));
+    assert!(!app.world().resource::<Time<Virtual>>().is_paused());
+}
+
 fn tap_key(app: &mut App, key: KeyCode) {
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()

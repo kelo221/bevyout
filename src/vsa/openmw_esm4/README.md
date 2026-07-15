@@ -14,6 +14,9 @@ The adaptation is intentionally limited to the Fallout cell vertical slice:
   lighting-template inheritance;
 - Fallout `SOUN`, `SNDR`, `ASPC`, `MUSC`, and `LGTM` metadata, plus base sound
   links, ownership, enable-parent state, inventory entries, and water fields;
+- Fallout `WEAP`, `ARMO`, `AMMO`, `ALCH`, `MISC`, `BOOK`, `NOTE`, and `KEYM`
+  inventory names, models, `ICON`/`MICO` paths, value/weight layouts, condition,
+  category statistics, text, and effect FormIDs;
 - OpenMW's ESM4 teleport-door rule: resolve `XTEL`'s destination reference and
   use that reference's parent cell as the destination cell.
 

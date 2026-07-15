@@ -14,6 +14,7 @@ mod container_audio;
 mod container_audio_policy;
 mod fingerprints;
 mod image_space;
+mod items;
 mod jobs;
 mod navmesh;
 mod placements;
@@ -31,6 +32,7 @@ pub(crate) use container_audio::*;
 pub(crate) use container_audio_policy::*;
 pub(crate) use fingerprints::*;
 pub(crate) use image_space::*;
+pub(crate) use items::*;
 pub(crate) use jobs::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
@@ -54,20 +56,21 @@ use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_
 use super::manifest::{
     CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, Diagnostic, PreparedActor,
     PreparedAudioClip, PreparedCellAudio, PreparedCellLighting, PreparedDoor,
-    PreparedDoorDestination, PreparedEnableParent, PreparedInventoryEntry, PreparedLight,
-    PreparedLightingTemplate, PreparedMutabilitySummary, PreparedNavMeshChunk,
-    PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup, PreparedPlacement,
-    PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest,
-    PreparedSemantic, PreparedStaticPointShadowLight, PreparedStaticPointShadows,
-    PreparedVisualIssue, STATIC_POINT_SHADOW_REVISION,
+    PreparedDoorDestination, PreparedDropCollider, PreparedEnableParent, PreparedInventoryEntry,
+    PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemEffect,
+    PreparedItemStats, PreparedLight, PreparedLightingTemplate, PreparedMutabilitySummary,
+    PreparedNavMeshChunk, PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup,
+    PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability,
+    PreparedSceneManifest, PreparedSemantic, PreparedStaticPointShadowLight,
+    PreparedStaticPointShadows, PreparedVisualIssue, STATIC_POINT_SHADOW_REVISION,
 };
-use super::openmw_esm4::LightingData;
+use super::openmw_esm4::{LightingData, OpenMwItemStats};
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
     normalize_asset_path, parse_cell_selector, placement_transform, placement_transform_parts,
 };
 use super::physics::{
-    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, classify_placement,
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, classify_placement, dynamic_proxy_bounds,
     dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{

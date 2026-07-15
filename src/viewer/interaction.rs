@@ -1,14 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
 use crate::app_state::{AppState, GameplayModal};
 use crate::console::{ConsoleSessionStore, RefRegistry};
-use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, PreparedSemantic};
+use crate::vsa::{
+    PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemStats,
+    PreparedPlacement, PreparedSemantic,
+};
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
+use super::inventory::{Inventory, InventoryStack, StackKey, TransferResult};
 use super::player::{CameraMode, CameraModeState};
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
@@ -197,42 +201,57 @@ impl PlacementRoot {
 }
 
 #[derive(Resource, Default, Debug)]
-pub(crate) struct PlayerInventory {
-    counts: HashMap<u32, i32>,
-}
+pub(crate) struct PlayerInventory(Inventory);
 
 impl PlayerInventory {
     pub(crate) fn count(&self, form_id: u32) -> i32 {
-        self.counts.get(&form_id).copied().unwrap_or(0)
+        self.0.count(form_id)
     }
 
     pub(crate) fn contains(&self, form_id: u32) -> bool {
-        self.count(form_id) > 0
+        self.0.contains(form_id)
     }
 
+    #[cfg(test)]
     fn add(&mut self, form_id: u32, count: i32) {
-        *self.counts.entry(form_id).or_default() += count.max(1);
+        let _ = self.add_stack(InventoryStack {
+            base_form_id: form_id,
+            count: count.max(1),
+            condition: None,
+        });
     }
 
-    /// Issue #60 (F60.4): the inventory as sorted `(base_form_id, count)`
-    /// stacks, the shape the save format's player record wants.
-    pub(crate) fn stacks(&self) -> Vec<(u32, i32)> {
-        let mut stacks: Vec<(u32, i32)> = self
-            .counts
-            .iter()
-            .filter(|&(_, &count)| count != 0)
-            .map(|(&form_id, &count)| (form_id, count))
-            .collect();
-        stacks.sort_unstable_by_key(|(form_id, _)| *form_id);
-        stacks
+    pub(crate) fn add_stack(&mut self, stack: InventoryStack) -> TransferResult {
+        self.0.add(stack)
+    }
+
+    pub(crate) fn remove(&mut self, key: StackKey, count: i32) -> TransferResult {
+        self.0.remove(key, count)
+    }
+
+    pub(crate) fn stack_states(&self) -> Vec<InventoryStack> {
+        self.0.stacks()
+    }
+
+    pub(crate) fn total_weight(&self, weight: impl FnMut(u32) -> Option<f32>) -> f32 {
+        self.0.total_weight(weight)
     }
 
     /// Issue #60 (F60.4): rebuilds the inventory from a loaded save's
     /// player record.
+    #[cfg(test)]
     pub(crate) fn from_stacks(stacks: impl IntoIterator<Item = (u32, i32)>) -> Self {
-        Self {
-            counts: stacks.into_iter().collect(),
-        }
+        Self(Inventory::from_stacks(stacks.into_iter().map(
+            |(base_form_id, count)| InventoryStack {
+                base_form_id,
+                count,
+                condition: None,
+            },
+        )))
+    }
+
+    pub(crate) fn from_stack_states(stacks: impl IntoIterator<Item = InventoryStack>) -> Self {
+        Self(Inventory::from_stacks(stacks))
     }
 }
 
@@ -480,7 +499,11 @@ fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<CameraModeState>,
     mut commands: Commands,
-    roots: Query<(&PlacementRoot, &GlobalTransform)>,
+    roots: Query<(
+        &PlacementRoot,
+        &GlobalTransform,
+        Option<&super::world_items::RuntimeWorldItem>,
+    )>,
     animated: Query<&animation::AnimatedPlacement>,
     mut inventory: ResMut<PlayerInventory>,
     mut state: ResMut<InteractionState>,
@@ -489,6 +512,8 @@ fn activate_focused_placement(
     mut door_travel: MessageWriter<DoorTravelRequested>,
     mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
     mut pending_travel: ResMut<PendingDoorTravel>,
+    mut save_state: Option<ResMut<super::world::ActiveSaveState>>,
+    catalog: Option<Res<PreparedItemCatalog>>,
 ) {
     if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
@@ -496,7 +521,7 @@ fn activate_focused_placement(
     let Some(entity) = state.focused else {
         return;
     };
-    let Ok((root, transform)) = roots.get(entity) else {
+    let Ok((root, transform, runtime_item)) = roots.get(entity) else {
         state.focused = None;
         return;
     };
@@ -507,7 +532,39 @@ fn activate_focused_placement(
     match &placement.semantic {
         PreparedSemantic::Pickup(_) => {
             let count = placement.count.max(1);
-            inventory.add(placement.base_form_id, count);
+            if let Some(runtime_item) = runtime_item {
+                let Some(save_state) = save_state.as_mut() else {
+                    notice.show("Dropped-item persistence is not ready");
+                    return;
+                };
+                let _ = inventory.add_stack(runtime_item.stack);
+                if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
+                    cell.dropped_items.remove(&runtime_item.runtime_id);
+                    if cell.references.is_empty() && cell.dropped_items.is_empty() {
+                        save_state.0.cells.remove(&runtime_item.cell_form_id);
+                    }
+                }
+                info!(
+                    "retrieved runtime item {} from cell {:08x}",
+                    runtime_item.runtime_id, runtime_item.cell_form_id
+                );
+            } else {
+                let condition = catalog
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(|catalog| &catalog.items)
+                    .find(|item| item.base_form_id == placement.base_form_id)
+                    .and_then(|item| match &item.stats {
+                        PreparedItemStats::Weapon { max_condition, .. }
+                        | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
+                        _ => None,
+                    });
+                let _ = inventory.add_stack(InventoryStack {
+                    base_form_id: placement.base_form_id,
+                    count,
+                    condition,
+                });
+            }
             write_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
             info!(
