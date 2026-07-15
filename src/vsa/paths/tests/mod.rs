@@ -137,5 +137,12 @@ fn identifies_non_rendering_effects() {
         "effects/ambient/spraymeshconnect.nif"
     ));
     assert!(is_non_rendering_effect("clutter/fakefog01.nif"));
+    assert!(is_non_rendering_effect(
+        "clutter/grocery/grocerydisplaycountercubeshado01.nif"
+    ));
+    assert!(is_non_rendering_effect(
+        "clutter/grocery/groceryshelvestiltedshadow01.nif"
+    ));
+    assert!(is_non_rendering_effect("creatures/protectron/skeleton.nif"));
     assert!(!is_non_rendering_effect("meshes/clutter/lampgeneric01.nif"));
 }

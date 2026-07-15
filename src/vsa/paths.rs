@@ -84,9 +84,15 @@ pub(crate) fn is_editor_marker(path: &str) -> bool {
 pub(crate) fn is_non_rendering_effect(path: &str) -> bool {
     path.rsplit('/').next().is_some_and(|name| {
         name.starts_with("fx")
-                || name.starts_with("spraymeshconnect")
-                // Fallout's FakeFog marker has no render mesh by design.
-                || name == "fakefog01.nif"
+            || name.starts_with("spraymeshconnect")
+            // Fallout helper/rig assets below have no render mesh by design.
+            || name == "fakefog01.nif"
+            || matches!(
+                path,
+                "clutter/grocery/grocerydisplaycountercubeshado01.nif"
+                    | "clutter/grocery/groceryshelvestiltedshadow01.nif"
+                    | "creatures/protectron/skeleton.nif"
+            )
     })
 }
 
