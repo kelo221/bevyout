@@ -2,6 +2,13 @@
 
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AnimationSoundCue {
+    pub(crate) sequence: String,
+    pub(crate) time: f32,
+    pub(crate) editor_id: String,
+}
+
 fn read_glb_document(path: &Path) -> Result<(Vec<u8>, serde_json::Value, usize)> {
     let bytes = fs::read(path)?;
     if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
@@ -17,6 +24,34 @@ fn read_glb_document(path: &Path) -> Result<(Vec<u8>, serde_json::Value, usize)>
     }
     let document: serde_json::Value = serde_json::from_slice(&bytes[json_start..json_end])?;
     Ok((bytes, document, json_end))
+}
+
+pub(crate) fn read_glb_animation_sound_cues(path: &Path) -> Result<Vec<AnimationSoundCue>> {
+    let (_, document, _) = read_glb_document(path)?;
+    let mut cues = Vec::new();
+    for encoded in document
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            node.get("extras")?
+                .get("bevyout_animation_sound_cues")?
+                .as_str()
+        })
+    {
+        let mut node_cues: Vec<AnimationSoundCue> =
+            serde_json::from_str(encoded).context("invalid animation sound cue metadata")?;
+        cues.append(&mut node_cues);
+    }
+    cues.sort_by(|left, right| {
+        left.sequence
+            .cmp(&right.sequence)
+            .then_with(|| left.time.total_cmp(&right.time))
+            .then_with(|| left.editor_id.cmp(&right.editor_id))
+    });
+    cues.dedup();
+    Ok(cues)
 }
 
 pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {

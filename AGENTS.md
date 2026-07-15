@@ -84,6 +84,19 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
   benchmark switch; there is no gameplay shadow budget.
 
+## Prepared container audio
+
+- Record-level `CONT` open/close sounds are authoritative. When either field
+  is absent, `prepare` may fill it from the earliest matching `Open`/`Close`
+  `sound:` cue authored in the model's `NiTextKeyExtraData`.
+- NIF animation sound cues are preserved as GLB metadata during conversion,
+  resolved case-insensitively against `SOUN`/`SNDR` EditorIDs, and staged
+  through the existing prepared-audio path. Do not add a separate runtime
+  animation-event audio system for these start-of-animation container cues.
+- Sound records whose `FNAM` is a directory resolve to the lexicographically
+  first direct child (loose `Data` files before archive entries); exact-file
+  paths retain their existing resolution and precedence.
+
 ## Way of working (waves)
 
 Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):

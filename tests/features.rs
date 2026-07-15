@@ -144,8 +144,13 @@ mod prepare {
     #[path = "../src/vsa/prepare/fingerprints.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod fingerprints;
+
+    #[path = "../src/vsa/prepare/container_audio_policy.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod container_audio_policy;
 }
 use prepare::batch_cache;
+use prepare::container_audio_policy;
 use prepare::fingerprints;
 use prepare::jobs;
 use prepare::selectors;
@@ -294,6 +299,17 @@ struct BevyoutWorld {
     ownership_ledger: ownership_policy::CellColliderLedger<u64, u64>,
     ownership_released: Option<Option<ownership_policy::CellColliders<u64, u64>>>,
     ownership_next_id: u64,
+
+    // -- container_audio.feature --
+    container_audio_is_container: bool,
+    container_audio_record_open: Option<u32>,
+    container_audio_record_close: Option<u32>,
+    container_audio_cues: Vec<container_audio_policy::AnimationSoundCue>,
+    container_audio_selected: Option<container_audio_policy::SelectedContainerAudio>,
+    container_audio_resolved_open: Option<u32>,
+    container_audio_resolved_close: Option<u32>,
+    container_audio_prepared_open: Option<u32>,
+    container_audio_prepared_close: Option<u32>,
 }
 
 fn find_placement<'a>(
@@ -2459,6 +2475,129 @@ async fn then_cell_untracked(world: &mut BevyoutWorld, hex: String) {
 #[then(regex = r"^cell 0x([0-9a-fA-F]+) is still tracked$")]
 async fn then_cell_still_tracked(world: &mut BevyoutWorld, hex: String) {
     assert!(world.ownership_ledger.is_tracked(parse_hex(&hex)));
+}
+
+// ---------------------------------------------------------------------
+// container_audio.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given("an animated container with no record open or close sound")]
+async fn given_container_without_record_audio(world: &mut BevyoutWorld) {
+    world.container_audio_is_container = true;
+    world.container_audio_record_open = None;
+    world.container_audio_record_close = None;
+}
+
+#[given(
+    regex = r"^an animated container with record open sound 0x([0-9a-fA-F]+) and record close sound 0x([0-9a-fA-F]+)$"
+)]
+async fn given_container_with_record_audio(world: &mut BevyoutWorld, open: String, close: String) {
+    world.container_audio_is_container = true;
+    world.container_audio_record_open = Some(parse_hex(&open));
+    world.container_audio_record_close = Some(parse_hex(&close));
+}
+
+#[given("a non-container placement with no record open or close sound")]
+async fn given_non_container_without_record_audio(world: &mut BevyoutWorld) {
+    world.container_audio_is_container = false;
+    world.container_audio_record_open = None;
+    world.container_audio_record_close = None;
+}
+
+#[given(regex = r#"^its animation sound cues are "([^"]*)"$"#)]
+async fn given_animation_sound_cues(world: &mut BevyoutWorld, encoded: String) {
+    world.container_audio_cues = encoded
+        .split(',')
+        .map(|entry| {
+            let (sequence_time, editor_id) = entry.split_once('=').expect("cue editor id");
+            let (sequence, time) = sequence_time.split_once('@').expect("cue time");
+            container_audio_policy::AnimationSoundCue {
+                sequence: sequence.into(),
+                time: time.parse().expect("numeric cue time"),
+                editor_id: editor_id.into(),
+            }
+        })
+        .collect();
+}
+
+#[given(
+    regex = r"^its resolved animation sound ids are open 0x([0-9a-fA-F]+) and close 0x([0-9a-fA-F]+)$"
+)]
+async fn given_resolved_animation_sound_ids(world: &mut BevyoutWorld, open: String, close: String) {
+    world.container_audio_resolved_open = Some(parse_hex(&open));
+    world.container_audio_resolved_close = Some(parse_hex(&close));
+}
+
+#[when("authored container animation audio is resolved")]
+async fn when_authored_container_audio_resolved(world: &mut BevyoutWorld) {
+    world.container_audio_selected = Some(container_audio_policy::select_container_audio(
+        &world.container_audio_cues,
+    ));
+}
+
+#[when("resolved container sound ids are applied")]
+async fn when_resolved_container_audio_applied(world: &mut BevyoutWorld) {
+    let (open, close) = container_audio_policy::apply_container_audio_fallback(
+        world.container_audio_is_container,
+        world.container_audio_record_open,
+        world.container_audio_record_close,
+        world.container_audio_resolved_open,
+        world.container_audio_resolved_close,
+    );
+    world.container_audio_prepared_open = open;
+    world.container_audio_prepared_close = close;
+}
+
+#[then(regex = r#"^the selected open sound is "([^"]*)"$"#)]
+async fn then_selected_open_sound(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .container_audio_selected
+            .as_ref()
+            .expect("container audio not selected")
+            .open_editor_id
+            .as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the selected close sound is "([^"]*)"$"#)]
+async fn then_selected_close_sound(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .container_audio_selected
+            .as_ref()
+            .expect("container audio not selected")
+            .close_editor_id
+            .as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r"^the prepared open sound id is 0x([0-9a-fA-F]+)$")]
+async fn then_prepared_open_sound(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.container_audio_prepared_open,
+        Some(parse_hex(&expected))
+    );
+}
+
+#[then(regex = r"^the prepared close sound id is 0x([0-9a-fA-F]+)$")]
+async fn then_prepared_close_sound(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.container_audio_prepared_close,
+        Some(parse_hex(&expected))
+    );
+}
+
+#[then("the prepared open sound id is absent")]
+async fn then_prepared_open_sound_absent(world: &mut BevyoutWorld) {
+    assert_eq!(world.container_audio_prepared_open, None);
+}
+
+#[then("the prepared close sound id is absent")]
+async fn then_prepared_close_sound_absent(world: &mut BevyoutWorld) {
+    assert_eq!(world.container_audio_prepared_close, None);
 }
 
 fn main() {

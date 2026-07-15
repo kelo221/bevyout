@@ -45,6 +45,74 @@ fn truncated_cached_glb_is_rejected_without_panicking() {
     let _ = std::fs::remove_file(path);
 }
 
+fn glb_with_json_document(document: serde_json::Value) -> Vec<u8> {
+    let mut json = serde_json::to_vec(&document).unwrap();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let total_length = 20 + json.len();
+    let mut bytes = Vec::with_capacity(total_length);
+    bytes.extend_from_slice(b"glTF");
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&(total_length as u32).to_le_bytes());
+    bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&0x4e4f534a_u32.to_le_bytes());
+    bytes.extend_from_slice(&json);
+    bytes
+}
+
+#[test]
+fn reads_and_deduplicates_animation_sound_cues_from_glb_extras() {
+    let encoded = serde_json::to_string(&vec![
+        AnimationSoundCue {
+            sequence: "Open".into(),
+            time: 0.2,
+            editor_id: "DRSLate".into(),
+        },
+        AnimationSoundCue {
+            sequence: "Open".into(),
+            time: 0.01,
+            editor_id: "DRSEarly".into(),
+        },
+    ])
+    .unwrap();
+    let document = serde_json::json!({
+        "nodes": [
+            {"extras": {"bevyout_animation_sound_cues": encoded}},
+            {"extras": {"bevyout_animation_sound_cues": encoded}},
+        ]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-animation-audio-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let cues = read_glb_animation_sound_cues(&path).unwrap();
+    assert_eq!(cues.len(), 2);
+    assert_eq!(cues[0].editor_id, "DRSEarly");
+    assert_eq!(cues[1].editor_id, "DRSLate");
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn rejects_malformed_animation_sound_cue_metadata() {
+    let document = serde_json::json!({
+        "nodes": [{"extras": {"bevyout_animation_sound_cues": "not-json"}}]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-invalid-animation-audio-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let error = read_glb_animation_sound_cues(&path).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("invalid animation sound cue metadata")
+    );
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn cache_pair_rebuilds_when_sidecar_is_missing_or_invalid() {
     let stem = format!("bevyout-cache-pair-{}", std::process::id());

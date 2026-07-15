@@ -495,7 +495,7 @@ fn prepare_cell(
     diagnostics.extend(session.archive_diagnostics.iter().cloned());
     // Audio archive indexes: same -- indexed once in `BatchSession::new`.
     diagnostics.extend(session.audio_diagnostics.iter().cloned());
-    let (cell_audio, audio_clips) = stage_audio(
+    let (cell_audio, mut audio_clips) = stage_audio(
         &data_root,
         &session.audio_archives,
         &parsed,
@@ -616,6 +616,24 @@ fn prepare_cell(
                 .context("headless Blender conversion failed")?;
         }
     }
+    let additional_audio_form_ids =
+        apply_container_animation_audio(&cache_dir, &parsed, &mut placements, &mut diagnostics);
+    let staged_form_ids = audio_clips
+        .iter()
+        .map(|clip| clip.form_id)
+        .collect::<HashSet<_>>();
+    let additional_audio_form_ids = additional_audio_form_ids
+        .into_iter()
+        .filter(|form_id| !staged_form_ids.contains(form_id));
+    audio_clips.extend(stage_audio_clips(
+        &data_root,
+        &session.audio_archives,
+        &parsed,
+        &mut diagnostics,
+        &cache_dir.join("audio"),
+        additional_audio_form_ids,
+    )?);
+    audio_clips.sort_by_key(|clip| clip.form_id);
     let cache_summary = format!(
         "asset cache: reused {cache_hits}, missing {cache_missing}, invalid {cache_invalid}, explicitly rebuilt {cache_explicit_rebuilds}; scheduled {} NIF-to-GLB conversion(s)",
         jobs.len()

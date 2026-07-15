@@ -22,7 +22,8 @@ use super::physics::read_physics_asset;
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-v14";
+pub(crate) const NIF_CONVERTER_REVISION: &str =
+    "niftools-blender52-visual-audit-havok-anim-audio-v15";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootTransformPolicy {

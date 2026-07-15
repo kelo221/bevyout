@@ -27,6 +27,35 @@ pub(crate) fn resolve_audio_descriptor(
     visit(parsed, form_id, &mut HashSet::new())
 }
 
+pub(crate) fn sound_form_ids_by_editor_id(parsed: &ParsedPlugin, editor_id: &str) -> Vec<u32> {
+    let mut form_ids = parsed
+        .sounds
+        .values()
+        .filter(|sound| {
+            sound
+                .editor_id
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(editor_id))
+        })
+        .map(|sound| sound.form_id)
+        .chain(
+            parsed
+                .sound_references
+                .values()
+                .filter(|sound| {
+                    sound
+                        .editor_id
+                        .as_deref()
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(editor_id))
+                })
+                .map(|sound| sound.form_id),
+        )
+        .collect::<Vec<_>>();
+    form_ids.sort_unstable();
+    form_ids.dedup();
+    form_ids
+}
+
 pub(crate) fn sound_descriptor(sound: &SoundRecord) -> Option<AudioDescriptor> {
     let params = sound.parameters.unwrap_or_default();
     Some(AudioDescriptor {
