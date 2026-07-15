@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::pbr::PointLightShadowSamples;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -128,6 +129,13 @@ pub(crate) fn install(app: &mut App) {
             "setrender <setting> <value>",
             "Set a validated render setting.",
             set_render,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "tonemap",
+            "tonemap [mode]",
+            "Get or set the active camera tonemapper.",
+            tonemap,
         )
         .mutating(),
         ConsoleCommand::new(
@@ -635,6 +643,126 @@ const RENDER_SETTINGS: [&str; 9] = [
     "shadow_samples",
 ];
 
+const TONEMAPPER_NAMES: [&str; 9] = [
+    "none",
+    "reinhard",
+    "reinhard_luminance",
+    "aces_fitted",
+    "agx",
+    "somewhat_boring_display_transform",
+    "tony_mc_mapface",
+    "blender_filmic",
+    "khronos_pbr_neutral",
+];
+
+fn tonemapper_name(tonemapper: Tonemapping) -> &'static str {
+    match tonemapper {
+        Tonemapping::None => "none",
+        Tonemapping::Reinhard => "reinhard",
+        Tonemapping::ReinhardLuminance => "reinhard_luminance",
+        Tonemapping::AcesFitted => "aces_fitted",
+        Tonemapping::AgX => "agx",
+        Tonemapping::SomewhatBoringDisplayTransform => "somewhat_boring_display_transform",
+        Tonemapping::TonyMcMapface => "tony_mc_mapface",
+        Tonemapping::BlenderFilmic => "blender_filmic",
+        Tonemapping::KhronosPbrNeutral => "khronos_pbr_neutral",
+    }
+}
+
+fn tonemapper_display_name(tonemapper: Tonemapping) -> &'static str {
+    match tonemapper {
+        Tonemapping::None => "None",
+        Tonemapping::Reinhard => "Reinhard",
+        Tonemapping::ReinhardLuminance => "Reinhard Luminance",
+        Tonemapping::AcesFitted => "ACES Fitted",
+        Tonemapping::AgX => "AgX",
+        Tonemapping::SomewhatBoringDisplayTransform => "Somewhat Boring Display Transform",
+        Tonemapping::TonyMcMapface => "Tony McMapface",
+        Tonemapping::BlenderFilmic => "Blender Filmic",
+        Tonemapping::KhronosPbrNeutral => "Khronos PBR Neutral",
+    }
+}
+
+fn parse_tonemapper(value: &str) -> Option<Tonemapping> {
+    match value.to_ascii_lowercase().as_str() {
+        "none" => Some(Tonemapping::None),
+        "reinhard" => Some(Tonemapping::Reinhard),
+        "reinhard_luminance" => Some(Tonemapping::ReinhardLuminance),
+        "aces_fitted" => Some(Tonemapping::AcesFitted),
+        "agx" => Some(Tonemapping::AgX),
+        "somewhat_boring_display_transform" => Some(Tonemapping::SomewhatBoringDisplayTransform),
+        "tony_mc_mapface" => Some(Tonemapping::TonyMcMapface),
+        "blender_filmic" => Some(Tonemapping::BlenderFilmic),
+        "khronos_pbr_neutral" => Some(Tonemapping::KhronosPbrNeutral),
+        _ => None,
+    }
+}
+
+fn tonemapper_camera(world: &mut World) -> Result<Entity, ConsoleError> {
+    let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<Tonemapping>)>();
+    let mut cameras = query.iter(world);
+    let Some(camera) = cameras.next() else {
+        return Err(ConsoleError::new(
+            "camera_unavailable",
+            "expected exactly one active 3D camera with tonemapping",
+        ));
+    };
+    if cameras.next().is_some() {
+        return Err(ConsoleError::new(
+            "camera_unavailable",
+            "expected exactly one active 3D camera with tonemapping",
+        ));
+    }
+    Ok(camera)
+}
+
+fn tonemap(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "tonemap accepts at most one mode",
+        ));
+    }
+    let camera = tonemapper_camera(world)?;
+    let requested = invocation
+        .args
+        .first()
+        .map(|value| {
+            parse_tonemapper(value).ok_or_else(|| {
+                ConsoleError::new(
+                    "unknown_tonemapper",
+                    format!(
+                        "unknown tonemapper '{value}'; expected one of: {}",
+                        TONEMAPPER_NAMES.join(", ")
+                    ),
+                )
+            })
+        })
+        .transpose()?;
+    if let Some(requested) = requested {
+        *world
+            .get_mut::<Tonemapping>(camera)
+            .expect("tonemapper camera query required Tonemapping") = requested;
+    }
+    let current = *world
+        .get::<Tonemapping>(camera)
+        .expect("tonemapper camera query required Tonemapping");
+    let value = tonemapper_name(current);
+    let display = tonemapper_display_name(current);
+    let message = if requested.is_some() {
+        format!("Tonemapper set to {display}.")
+    } else {
+        format!("Tonemapper is {display}.")
+    };
+    Ok(ConsoleCommandResult::new(
+        json!({ "tonemapper": value }),
+        vec![message],
+    ))
+}
+
 fn bloom_values(world: &mut World) -> Result<(f32, f32, f32), ConsoleError> {
     let mut query = world.query_filtered::<&Bloom, With<Camera3d>>();
     let mut blooms = query.iter(world);
@@ -978,6 +1106,7 @@ mod tests {
             Projection::Perspective(super::super::default_perspective_projection()),
             HorizontalFov::default(),
             Bloom::default(),
+            Tonemapping::AgX,
             Transform::from_xyz(0.0, 2.0, 0.0),
             super::super::FlyCamera {
                 yaw: 0.0,
@@ -989,6 +1118,12 @@ mod tests {
         player::set_camera_mode(app.world_mut(), player::CameraMode::Fps).unwrap();
         app.update();
         app
+    }
+
+    fn current_tonemapper(app: &mut App) -> Tonemapping {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Tonemapping, With<Camera3d>>();
+        *query.single(world).unwrap()
     }
 
     fn exec(app: &mut App, line: &str) -> crate::console::ConsoleOutput {
@@ -1150,6 +1285,97 @@ mod tests {
             exec(&mut app, "getrender").value.as_object().unwrap().len(),
             9
         );
+    }
+
+    #[test]
+    fn tonemap_reports_changes_and_rejects_invalid_requests_without_mutation() {
+        let mut app = test_app();
+        let initial = exec(&mut app, "tonemap");
+        assert_eq!(initial.value["tonemapper"], "agx");
+        assert_eq!(initial.log, ["Tonemapper is AgX."]);
+
+        for (input, expected, display) in [
+            ("none", "none", "None"),
+            ("reinhard", "reinhard", "Reinhard"),
+            (
+                "reinhard_luminance",
+                "reinhard_luminance",
+                "Reinhard Luminance",
+            ),
+            ("aces_fitted", "aces_fitted", "ACES Fitted"),
+            ("agx", "agx", "AgX"),
+            (
+                "somewhat_boring_display_transform",
+                "somewhat_boring_display_transform",
+                "Somewhat Boring Display Transform",
+            ),
+            ("tony_mc_mapface", "tony_mc_mapface", "Tony McMapface"),
+            ("blender_filmic", "blender_filmic", "Blender Filmic"),
+            (
+                "khronos_pbr_neutral",
+                "khronos_pbr_neutral",
+                "Khronos PBR Neutral",
+            ),
+        ] {
+            let changed = exec(&mut app, &format!("tonemap {input}"));
+            assert_eq!(changed.value["tonemapper"], expected);
+            assert_eq!(changed.log, [format!("Tonemapper set to {display}.")]);
+            assert_eq!(
+                current_tonemapper(&mut app),
+                parse_tonemapper(expected).unwrap()
+            );
+        }
+
+        let case_insensitive = exec(&mut app, "tonemap AGX");
+        assert_eq!(case_insensitive.value["tonemapper"], "agx");
+        assert_eq!(current_tonemapper(&mut app), Tonemapping::AgX);
+
+        let before_invalid = current_tonemapper(&mut app);
+        assert_eq!(
+            exec(&mut app, "tonemap unsupported").error.unwrap().code,
+            "unknown_tonemapper"
+        );
+        assert_eq!(current_tonemapper(&mut app), before_invalid);
+        assert_eq!(
+            exec(&mut app, "tonemap agx extra").error.unwrap().code,
+            "bad_arity"
+        );
+        assert_eq!(current_tonemapper(&mut app), before_invalid);
+    }
+
+    #[test]
+    fn tonemap_rejects_missing_or_ambiguous_cameras() {
+        let mut missing = test_app();
+        let camera = {
+            let world = missing.world_mut();
+            let mut query = world.query_filtered::<Entity, With<Camera3d>>();
+            query.single(world).unwrap()
+        };
+        missing.world_mut().despawn(camera);
+        assert_eq!(
+            exec(&mut missing, "tonemap agx").error.unwrap().code,
+            "camera_unavailable"
+        );
+
+        let mut ambiguous = test_app();
+        ambiguous
+            .world_mut()
+            .spawn((Camera3d::default(), Tonemapping::TonyMcMapface));
+        let before = {
+            let world = ambiguous.world_mut();
+            let mut query = world.query_filtered::<&Tonemapping, With<Camera3d>>();
+            *query.iter(world).next().unwrap()
+        };
+        assert_eq!(
+            exec(&mut ambiguous, "tonemap none").error.unwrap().code,
+            "camera_unavailable"
+        );
+        let after = {
+            let world = ambiguous.world_mut();
+            let mut query = world.query_filtered::<&Tonemapping, With<Camera3d>>();
+            *query.iter(world).next().unwrap()
+        };
+        assert_eq!(after, before);
     }
 
     #[test]

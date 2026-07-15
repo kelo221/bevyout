@@ -17,7 +17,12 @@ pub(crate) struct PendingColliderBuild(Option<PendingColliderBuildState>);
 
 struct PendingColliderBuildState {
     manifest: Arc<PreparedSceneManifest>,
-    queue: super::super::world::ColliderBuildQueue<usize>,
+    static_queue: super::super::world::ColliderBuildQueue<usize>,
+    dynamic_queue: super::super::world::ColliderBuildQueue<usize>,
+    static_ready: bool,
+    started: Instant,
+    startup: bool,
+    defer_dynamic_until_next_update: bool,
     root_by_reference: HashMap<u32, Entity>,
     unknown_layers: HashSet<u8>,
     static_marker_spawned: bool,
@@ -36,46 +41,63 @@ pub(crate) fn queue_collider_build(
     root_by_reference: HashMap<u32, Entity>,
 ) {
     if world.resource::<PhysicsDisabled>().0 {
+        *world.resource_mut::<CellPhysicsReadiness>() = CellPhysicsReadiness::Ready;
         return;
     }
-    let indices: Vec<usize> = manifest
+    let work = manifest
         .placements
         .iter()
         .enumerate()
         .filter(|(_, placement)| {
             placement.initially_enabled && placement.physics_asset_path.is_some()
         })
-        .map(|(index, _)| index)
-        .collect();
-    if indices.is_empty() {
+        .map(|(index, placement)| {
+            (
+                index,
+                placement.physics_classification == PreparedPhysicsClassification::Dynamic,
+            )
+        });
+    let (static_indices, dynamic_indices) = super::super::world::partition_collider_indices(work);
+    let static_queue = super::super::world::ColliderBuildQueue::new(static_indices);
+    let dynamic_queue = super::super::world::ColliderBuildQueue::new(dynamic_indices);
+    let queued = static_queue.len() + dynamic_queue.len();
+    if queued == 0 {
+        *world.resource_mut::<CellPhysicsReadiness>() = CellPhysicsReadiness::Ready;
         return;
     }
     let form_id = manifest.cell.form_id;
-    let queue = super::super::world::ColliderBuildQueue::new(indices);
-    let queued = queue.len();
     world.resource_mut::<PendingColliderBuild>().0 = Some(PendingColliderBuildState {
         manifest,
-        queue,
+        static_queue,
+        dynamic_queue,
+        static_ready: false,
+        started: Instant::now(),
+        startup: false,
+        defer_dynamic_until_next_update: false,
         root_by_reference,
         unknown_layers: HashSet::new(),
         static_marker_spawned: false,
     });
+    *world.resource_mut::<CellPhysicsReadiness>() = CellPhysicsReadiness::BuildingStatic;
     info!("swap colliders queued for {form_id:08x} ({queued} placements)");
 }
 
 /// Issue #52: drains up to `world::COLLIDER_BUILD_BUDGET_PER_FRAME`
-/// queued placements per frame from `PendingColliderBuild`, building each
-/// one's colliders exactly like the startup `build_prepared_colliders`
-/// pass does (same shared `build_colliders_for_placement`), attaching them
-/// to the single shared static body. Sidecars the startup load never saw
-/// (a swapped-in cell's) are read lazily here, so their file I/O rides the
-/// same per-frame budget. A no-op when nothing is queued.
+/// queued placements per frame from `PendingColliderBuild`. Static and
+/// keyframed work is always drained before the dynamic queue starts, so every
+/// gravity-enabled prop sees the destination floor and walls on its first
+/// simulation step. Sidecars the startup load never saw (a swapped-in cell's)
+/// are read lazily here, so their file I/O rides the same per-frame budget. A
+/// no-op when nothing is queued.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_pending_collider_builds(
     mut commands: Commands,
     mut pending: ResMut<PendingColliderBuild>,
     mut physics_assets: ResMut<PreparedPhysicsAssets>,
     mut stats: ResMut<CollisionRuntimeStats>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut cell_physics: ResMut<CellPhysicsReadiness>,
+    mut camera_state: ResMut<CameraModeState>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
@@ -89,10 +111,42 @@ pub(crate) fn advance_pending_collider_builds(
         return;
     };
     let state = pending.0.as_mut().expect("checked is_none above");
+    if state.defer_dynamic_until_next_update {
+        // Startup builds the static phase from OnEnter. Leave one schedule
+        // boundary for BoxDDD's first broad-phase update before creating
+        // gravity-enabled bodies.
+        state.defer_dynamic_until_next_update = false;
+        return;
+    }
     let asset_root = PathBuf::from(&state.manifest.asset_root);
-    let batch = state
-        .queue
-        .drain_budget(super::super::world::COLLIDER_BUILD_BUDGET_PER_FRAME);
+    let form_id = state.manifest.cell.form_id;
+    if !state.static_ready && state.static_queue.is_empty() {
+        state.static_ready = true;
+        world
+            .try_rebuild_static_tree()
+            .expect("BoxDDD failed to rebuild swapped static tree");
+        *cell_physics = if state.dynamic_queue.is_empty() {
+            CellPhysicsReadiness::Ready
+        } else {
+            CellPhysicsReadiness::BuildingDynamic
+        };
+        info!("swap colliders static ready for {form_id:08x}");
+    }
+    let phase = super::super::world::next_collider_build_phase(
+        !state.static_queue.is_empty(),
+        !state.dynamic_queue.is_empty(),
+        state.static_ready,
+    );
+    let dynamic_phase = matches!(phase, super::super::world::ColliderBuildPhase::Dynamic);
+    let batch = match phase {
+        super::super::world::ColliderBuildPhase::Static => state
+            .static_queue
+            .drain_budget(super::super::world::COLLIDER_BUILD_BUDGET_PER_FRAME),
+        super::super::world::ColliderBuildPhase::Dynamic => state
+            .dynamic_queue
+            .drain_budget(super::super::world::COLLIDER_BUILD_BUDGET_PER_FRAME),
+        super::super::world::ColliderBuildPhase::Ready => Vec::new(),
+    };
     for index in &batch {
         let Some(placement) = state.manifest.placements.get(*index).cloned() else {
             continue;
@@ -114,14 +168,59 @@ pub(crate) fn advance_pending_collider_builds(
             &mut stats,
             &mut state.unknown_layers,
             &mut state.static_marker_spawned,
+            dynamic_phase,
             &mut restores,
         );
     }
-    let queue_empty = state.queue.is_empty();
-    let form_id = state.manifest.cell.form_id;
-    if queue_empty {
+    if !state.static_ready && state.static_queue.is_empty() {
+        state.static_ready = true;
+        world
+            .try_rebuild_static_tree()
+            .expect("BoxDDD failed to rebuild swapped static tree");
+        *cell_physics = if state.dynamic_queue.is_empty() {
+            CellPhysicsReadiness::Ready
+        } else {
+            CellPhysicsReadiness::BuildingDynamic
+        };
+        info!("swap colliders static ready for {form_id:08x}");
+    }
+    let complete = state.static_ready && state.dynamic_queue.is_empty();
+    if complete {
+        let startup = state.startup;
+        let started = state.started;
+        *cell_physics = CellPhysicsReadiness::Ready;
+        if startup {
+            stats.awake_dynamic_bodies = stats.dynamic_bodies;
+            stats.sleeping_dynamic_bodies = 0;
+            stats.dynamic_transform_updates = 0;
+            stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
+            camera_state.collision_build_complete = true;
+            camera_state.collisions_ready = stats.shapes > 0;
+            info!("prepared collision dynamic colliders ready for {form_id:08x}");
+            info!(
+                "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
+                stats.authored_assets,
+                stats.fallback_assets,
+                stats.bodies,
+                stats.dynamic_bodies,
+                stats.shapes,
+                stats.packed_triangles,
+                stats.filtered_shapes,
+                stats.cooking_millis,
+                stats.sidecar_bytes,
+            );
+            if !camera_state.collisions_ready {
+                warn!(
+                    "prepared physics produced no active player-blocking shapes; FPS will be forced no-clip"
+                );
+            }
+        } else {
+            info!("swap colliders dynamic ready for {form_id:08x}");
+            info!("swap colliders complete for {form_id:08x}");
+        }
+    }
+    if complete {
         pending.0 = None;
-        info!("swap colliders complete for {form_id:08x}");
     }
 }
 
@@ -134,12 +233,15 @@ pub(crate) fn build_prepared_colliders(
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<CollisionRuntimeStats>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
+    mut pending: ResMut<PendingColliderBuild>,
+    mut cell_physics: ResMut<CellPhysicsReadiness>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     roots: Query<(Entity, &super::super::interaction::PlacementRoot)>,
     mut restores: ResMut<super::super::world::PersistRestores>,
 ) {
     if physics_disabled.0 {
         state.collision_build_complete = true;
+        *cell_physics = CellPhysicsReadiness::Ready;
         return;
     }
     let Some(world) = context.world_mut() else {
@@ -161,11 +263,26 @@ pub(crate) fn build_prepared_colliders(
         .collect::<HashMap<_, _>>();
     let mut unknown_layers = HashSet::new();
     let mut static_marker_spawned = false;
-    for placement in manifest
-        .placements
-        .iter()
-        .filter(|placement| placement.initially_enabled)
-    {
+    // The startup path is intentionally all-at-once, but it still needs the
+    // same collision ordering as a cell swap: BoxDDD must see every static
+    // and keyframed shape before a dynamic body is allowed to simulate.
+    let (static_indices, dynamic_indices) = super::super::world::partition_collider_indices(
+        manifest
+            .placements
+            .iter()
+            .enumerate()
+            .filter(|(_, placement)| {
+                placement.initially_enabled && placement.physics_asset_path.is_some()
+            })
+            .map(|(index, placement)| {
+                (
+                    index,
+                    placement.physics_classification == PreparedPhysicsClassification::Dynamic,
+                )
+            }),
+    );
+    for index in &static_indices {
+        let placement = &manifest.placements[*index];
         build_colliders_for_placement(
             world,
             &mut commands,
@@ -178,39 +295,73 @@ pub(crate) fn build_prepared_colliders(
             &mut stats,
             &mut unknown_layers,
             &mut static_marker_spawned,
+            false,
             &mut restores,
         );
     }
-    stats.awake_dynamic_bodies = stats.dynamic_bodies;
+    // BoxDDD rebuilds its static broad phase during a world step. Startup has
+    // not had that step yet, so publish the completed static phase explicitly
+    // before creating gravity-enabled bodies. Swap construction gets this
+    // boundary naturally from its static-only frame.
+    world
+        .try_rebuild_static_tree()
+        .expect("BoxDDD failed to rebuild startup static tree");
+    let form_id = manifest.cell.form_id;
+    info!("prepared collision static ready for {form_id:08x}");
+    if dynamic_indices.is_empty() {
+        stats.awake_dynamic_bodies = stats.dynamic_bodies;
+        stats.sleeping_dynamic_bodies = 0;
+        stats.dynamic_transform_updates = 0;
+        stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
+        state.collision_build_complete = true;
+        state.collisions_ready = stats.shapes > 0;
+        *cell_physics = CellPhysicsReadiness::Ready;
+        info!("prepared collision dynamic colliders ready for {form_id:08x}");
+        info!(
+            "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
+            stats.authored_assets,
+            stats.fallback_assets,
+            stats.bodies,
+            stats.dynamic_bodies,
+            stats.shapes,
+            stats.packed_triangles,
+            stats.filtered_shapes,
+            stats.cooking_millis,
+            stats.sidecar_bytes,
+        );
+        if !state.collisions_ready {
+            warn!(
+                "prepared physics produced no active player-blocking shapes; FPS will be forced no-clip"
+            );
+        }
+        return;
+    }
+    stats.awake_dynamic_bodies = 0;
     stats.sleeping_dynamic_bodies = 0;
     stats.dynamic_transform_updates = 0;
-    stats.cooking_millis = started.elapsed().as_secs_f64() * 1000.0;
-    state.collision_build_complete = true;
+    pending.0 = Some(PendingColliderBuildState {
+        manifest: Arc::new((*manifest).clone()),
+        static_queue: super::super::world::ColliderBuildQueue::new(Vec::new()),
+        dynamic_queue: super::super::world::ColliderBuildQueue::new(dynamic_indices),
+        static_ready: true,
+        started,
+        startup: true,
+        defer_dynamic_until_next_update: true,
+        root_by_reference,
+        unknown_layers,
+        static_marker_spawned,
+    });
+    state.collision_build_complete = false;
     state.collisions_ready = stats.shapes > 0;
-    info!(
-        "BoxDDD prepared collision: {} authored / {} fallback assets, {} bodies ({} dynamic), {} shapes, {} packed triangles, {} filtered, {:.1} ms cook, {} sidecar bytes",
-        stats.authored_assets,
-        stats.fallback_assets,
-        stats.bodies,
-        stats.dynamic_bodies,
-        stats.shapes,
-        stats.packed_triangles,
-        stats.filtered_shapes,
-        stats.cooking_millis,
-        stats.sidecar_bytes,
-    );
-    if !state.collisions_ready {
-        warn!(
-            "prepared physics produced no active player-blocking shapes; FPS will use forced no-clip"
-        );
-    }
+    *cell_physics = CellPhysicsReadiness::BuildingDynamic;
 }
 
 /// Builds every BoxDDD body/shape for one placement (shared by the startup
 /// `build_prepared_colliders` pass and issue #52's staggered
 /// `advance_pending_collider_builds`), attaching static shapes to the
 /// single shared `static_body` and dynamic ones to a per-entity body looked
-/// up in `root_by_reference`.
+/// up in `root_by_reference`. `allow_dynamic_bodies` is false during the
+/// destination static phase and true only after that phase is complete.
 #[allow(clippy::too_many_arguments)]
 fn build_colliders_for_placement(
     world: &mut boxddd::World,
@@ -224,6 +375,7 @@ fn build_colliders_for_placement(
     stats: &mut CollisionRuntimeStats,
     unknown_layers: &mut HashSet<u8>,
     static_marker_spawned: &mut bool,
+    allow_dynamic_bodies: bool,
     restores: &mut super::super::world::PersistRestores,
 ) {
     // Issues #60/#61: a reference the save layer deleted (taken pickup)
@@ -238,8 +390,8 @@ fn build_colliders_for_placement(
         warn!("missing preloaded physics sidecar {path}");
         return;
     };
-    let dynamic_entity = (placement.physics_classification
-        == PreparedPhysicsClassification::Dynamic)
+    let dynamic_entity = (allow_dynamic_bodies
+        && placement.physics_classification == PreparedPhysicsClassification::Dynamic)
         .then(|| root_by_reference.get(&placement.reference_form_id).copied())
         .flatten();
     // Issues #60/#61: re-activating a cell that stayed resident re-queues
@@ -635,13 +787,32 @@ pub(crate) fn create_prepared_shape(
                 .iter()
                 .map(|index| i32::try_from(*index).ok())
                 .collect::<Option<Vec<_>>>()?;
-            let mesh = boxddd::MeshData::builder(vertices, indices).build().ok()?;
+            if !indices.len().is_multiple_of(3) {
+                return None;
+            }
+            // BoxDDD triangle meshes are single-sided. Prepared Havok/render
+            // meshes can contain floor faces wound from below, so static and
+            // kinematic geometry must be cooked with both windings present.
+            let mut two_sided_indices = Vec::with_capacity(indices.len() * 2);
+            for triangle in indices.chunks_exact(3) {
+                two_sided_indices.extend_from_slice(triangle);
+                if !dynamic {
+                    two_sided_indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
+                }
+            }
+            let mesh = boxddd::MeshData::builder(vertices, two_sided_indices)
+                .build()
+                .ok()?;
             world
                 .try_create_mesh_shape(body_id, &shape_def, mesh, boxddd::Vec3::new(1.0, 1.0, 1.0))
                 .ok()?
         }
     };
-    Some((shape_id, shape.triangle_count()))
+    let triangle_count = match shape {
+        PreparedPhysicsShape::TriangleMesh { indices, .. } if !dynamic => indices.len() * 2 / 3,
+        _ => shape.triangle_count(),
+    };
+    Some((shape_id, triangle_count))
 }
 
 pub(crate) fn prepared_shape_category(
@@ -855,9 +1026,11 @@ pub(crate) fn sync_dynamic_transforms(
         .saturating_sub(stats.sleeping_dynamic_bodies);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_player_proxy(
     physics_disabled: Res<PhysicsDisabled>,
     no_clip: Res<PlayerNoClip>,
+    cell_physics: Res<CellPhysicsReadiness>,
     state: Res<CameraModeState>,
     time: Res<Time<Fixed>>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
@@ -867,7 +1040,10 @@ pub(crate) fn sync_player_proxy(
     let Some(world) = context.world_mut() else {
         return;
     };
-    let player_transform = (!physics_disabled.0 && !no_clip.0 && state.mode == CameraMode::Fps)
+    let player_transform = (cell_physics.static_collision_ready()
+        && !physics_disabled.0
+        && !no_clip.0
+        && state.mode == CameraMode::Fps)
         .then(|| players.single().ok())
         .flatten();
     let Some(transform) = player_transform else {

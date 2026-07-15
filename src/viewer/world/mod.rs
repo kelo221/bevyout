@@ -54,7 +54,10 @@ pub(crate) use persist::{
     write_save_slot,
 };
 pub(crate) use preload::{ResidentCell, ResidentCells, ResidentState};
-pub(crate) use swap_policy::{COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildQueue};
+pub(crate) use swap_policy::{
+    COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildPhase, ColliderBuildQueue,
+    next_collider_build_phase, partition_collider_indices,
+};
 
 pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
     persist::install(app);

@@ -87,6 +87,13 @@ pub fn render(args: RenderArgs) -> Result<()> {
     let mut manifest_path = match find_cached_manifest(&cache_dir, &args.selector)? {
         Some(path) => path,
         None => {
+            if args.agent_bridge {
+                return Err(anyhow::anyhow!(
+                    "agent bridge launch requires a cached prepared scene for '{}'; run `prepare {}` first",
+                    args.selector,
+                    args.selector,
+                ));
+            }
             let prompt = format!(
                 "Prepared scene '{}' was not found. Import it now?",
                 args.selector
@@ -105,6 +112,12 @@ pub fn render(args: RenderArgs) -> Result<()> {
             PHYSICS_ASSET_SCHEMA_VERSION,
         )
         .expect_err("reprepare action requires an incompatible prepared manifest");
+        if args.agent_bridge {
+            return Err(anyhow::anyhow!(
+                "{compatibility_error}\nagent bridge launch will not reprepare interactively; run `prepare {}` first",
+                args.selector,
+            ));
+        }
         let prompt = format!(
             "{compatibility_error}\nRefresh '{}' now using cached converted assets?",
             cell_label(&manifest.cell)
@@ -131,6 +144,21 @@ pub fn render(args: RenderArgs) -> Result<()> {
                 cell_label(&manifest.cell)
             )
         };
+        if args.agent_bridge {
+            let reason = bake_error.map_or_else(
+                || {
+                    format!(
+                        "prepared scene '{}' has no irradiance bake",
+                        cell_label(&manifest.cell)
+                    )
+                },
+                |error| error.to_string(),
+            );
+            return Err(anyhow::anyhow!(
+                "{reason}\nagent bridge launch requires a compatible irradiance bake; run `bake {}` first",
+                args.selector,
+            ));
+        }
         if confirm(&prompt)? {
             bake_for_render(&args, &cache_dir)?;
         } else if let Some(error) = bake_error {

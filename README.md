@@ -104,6 +104,7 @@ keeps persistent history with draft restoration and Tab completion. Backquote or
 Escape closes it and recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
 `getpos`/`setpos`, `getangle`/`setangle`, `moveto`, `tfc`, `tcl`, `tcg`,
 `tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`, `renderreport`,
+`tonemap`,
 `shadowcache status`, `shadowcache rebuild`,
 `tm`, `tdt`, `sgtm`, and `screenshot`. Positions use Bevy metres and angles use
 degrees. `tcl` is a dedicated FPS no-clip mode with WASD plus Space/Ctrl
@@ -129,6 +130,8 @@ scene is missing, it asks whether to import it (the same operation as
 to run the default `bake SuperDuperMart`; answering `n` continues with the
 prepared, unbaked scene. In a non-interactive terminal, these prompts default
 to `n`, so explicit `prepare` and `bake` commands remain available for scripts.
+Agent-bridge launches never answer these prompts: they fail fast and report the
+required `prepare` or `bake` command.
 
 The selector also accepts an eight-digit hexadecimal FormID. Prepared scenes
 continue to use their hexadecimal FormID directory internally; for example,
@@ -274,8 +277,11 @@ Current keyboard bindings are:
 
 Use `tfc` in the console to toggle free flight; Tab opens the Pip-Boy modal
 placeholder. `getrender` and `setrender` inspect or change lighting,
-irradiance, ambient, bloom, fog, and AO diagnostics. AO strength `0.00`
-disables the generated AO contribution and `1.00` uses the full baked value.
+irradiance, ambient, bloom, fog, and AO diagnostics. `tonemap` reports or
+changes the active camera tonemapper using the supported Bevy mode names;
+the viewer defaults to `aces_fitted`. AO strength defaults to `1.00`;
+`0.00` disables the generated AO contribution and `1.00` uses the full baked
+value.
 Point-light shadows load the prepared KTX2 artifact and never create Bevy
 point-shadow views or render scene geometry into shadow maps. Because WebGPU
 forbids direct buffer copies into `Depth32Float`, the viewer decodes KTX2 on

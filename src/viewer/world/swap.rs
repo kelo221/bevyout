@@ -472,6 +472,10 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     );
 
     let root_by_reference = collect_root_by_reference(world, destination_root);
+    // Collider construction keeps this swap instant: static/keyframed work
+    // is drained first, and only then are gravity-enabled dynamic bodies
+    // created. Player movement is parked by CellPhysicsReadiness until that
+    // static barrier exists.
     player::queue_collider_build(world, destination_manifest, root_by_reference);
 
     let kind_label = match kind {
