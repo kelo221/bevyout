@@ -9,6 +9,7 @@ use crate::vsa::{PreparedDoor, PreparedInventoryEntry, PreparedPlacement, Prepar
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
+use super::player::{CameraMode, CameraModeState};
 
 pub(crate) const INTERACTION_DISTANCE_METERS: f32 = 3.0;
 const NOTICE_SECONDS: f32 = 3.0;
@@ -294,6 +295,12 @@ pub(crate) fn install(app: &mut App) {
         )
         .add_systems(
             Update,
+            probe_center_target
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::None)),
+        )
+        .add_systems(
+            Update,
             (update_interaction_notice, cleanup_removed_placements),
         );
 }
@@ -336,6 +343,7 @@ fn spawn_interaction_ui(mut commands: Commands) {
 #[allow(clippy::too_many_arguments)]
 fn update_focused_placement(
     time: Res<Time>,
+    mode: Res<CameraModeState>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut raycast: MeshRayCast,
     parents: Query<&ChildOf>,
@@ -345,6 +353,13 @@ fn update_focused_placement(
     mut prompt: Query<&mut Text, With<InteractionPromptText>>,
     mut raycast_elapsed: Local<f32>,
 ) {
+    if mode.mode != CameraMode::Fps {
+        state.focused = None;
+        if let Ok(mut prompt) = prompt.single_mut() {
+            prompt.0.clear();
+        }
+        return;
+    }
     *raycast_elapsed += time.delta_secs();
     if *raycast_elapsed < FOCUS_RAYCAST_INTERVAL_SECONDS {
         return;
@@ -414,9 +429,56 @@ fn cleanup_removed_placements(
     }
 }
 
+fn probe_center_target(
+    keys: Res<ButtonInput<KeyCode>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    mut raycast: MeshRayCast,
+    parents: Query<&ChildOf>,
+    roots: Query<&PlacementRoot>,
+    references: Res<RefRegistry>,
+) {
+    if !keys.just_pressed(KeyCode::Enter) {
+        return;
+    }
+
+    let Some(ray) = active_center_ray(&cameras) else {
+        info!("{}", probe_status_message(false, None));
+        return;
+    };
+    let settings = MeshRayCastSettings {
+        visibility: RayCastVisibility::VisibleInView,
+        ..default()
+    };
+    let Some((hit_entity, _)) = raycast.cast_ray(ray, &settings).first() else {
+        info!("{}", probe_status_message(false, None));
+        return;
+    };
+    let Some(root_entity) = find_placement_root(*hit_entity, &parents, &roots) else {
+        info!("{}", probe_status_message(true, None));
+        return;
+    };
+    if references.identity(root_entity).is_none() {
+        info!("{}", probe_status_message(true, None));
+        return;
+    }
+    let label = references.label(root_entity);
+    info!("{}", probe_status_message(true, Some(&label)));
+}
+
+fn probe_status_message(hit: bool, label: Option<&str>) -> String {
+    if !hit {
+        "probe: no target".into()
+    } else if let Some(label) = label {
+        format!("probe: {label}")
+    } else {
+        "probe: NOT_IMPLEMENTED (static-batched geometry)".into()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<CameraModeState>,
     mut commands: Commands,
     roots: Query<(&PlacementRoot, &GlobalTransform)>,
     animated: Query<&animation::AnimatedPlacement>,
@@ -428,7 +490,7 @@ fn activate_focused_placement(
     mut animation_playback: MessageWriter<animation::PlayPlacementAnimation>,
     mut pending_travel: ResMut<PendingDoorTravel>,
 ) {
-    if !keys.just_pressed(KeyCode::Enter) {
+    if mode.mode != CameraMode::Fps || !keys.just_pressed(KeyCode::KeyE) {
         return;
     }
     let Some(entity) = state.focused else {
@@ -621,7 +683,7 @@ fn interaction_prompt(
     let name = placement_name(placement);
     match &placement.semantic {
         PreparedSemantic::Pickup(_) => Some(format!(
-            "[Enter] Take {name}{}",
+            "[E] Take {name}{}",
             if placement.count > 1 {
                 format!(" x{}", placement.count)
             } else {
@@ -629,20 +691,20 @@ fn interaction_prompt(
             }
         )),
         PreparedSemantic::Container => Some(format!(
-            "[Enter] {} {name}",
+            "[E] {} {name}",
             if is_open { "Close" } else { "Open" }
         )),
         PreparedSemantic::Door(door) => {
             if door_is_locked(door, inventory) {
-                Some(format!("[Enter] {name} (Locked)"))
+                Some(format!("[E] {name} (Locked)"))
             } else {
                 Some(format!(
-                    "[Enter] {} {name}",
+                    "[E] {} {name}",
                     if is_open { "Close" } else { "Open" }
                 ))
             }
         }
-        PreparedSemantic::Activator => Some(format!("[Enter] Activate {name}")),
+        PreparedSemantic::Activator => Some(format!("[E] Activate {name}")),
         _ => None,
     }
 }

@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 13;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-static-point-shadows-v1";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-native-havok-v1";
-pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v1";
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 14;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-visual-completeness-v4";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "bake-placement-completeness-v10";
+pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v4";
 
 mod compatibility;
 
@@ -33,6 +33,8 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) lights: Vec<PreparedLight>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     #[serde(default)]
+    pub(crate) visual_issues: Vec<PreparedVisualIssue>,
+    #[serde(default)]
     pub(crate) navmeshes: Vec<PreparedNavMeshSource>,
     #[serde(default)]
     pub(crate) cell_audio: PreparedCellAudio,
@@ -50,6 +52,16 @@ pub(crate) struct PreparedSceneManifest {
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
     pub(crate) mutability_summary: PreparedMutabilitySummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PreparedVisualIssue {
+    pub(crate) code: String,
+    pub(crate) severity: String,
+    pub(crate) model_path: String,
+    pub(crate) base_form_ids: Vec<u32>,
+    pub(crate) reference_form_ids: Vec<u32>,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

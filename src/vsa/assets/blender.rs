@@ -11,17 +11,20 @@ pub(crate) fn run_blender_batch(
     let job_file = staging_dir.join("blender_jobs.ron");
     let job_text = blender_jobs_json(jobs);
     fs::write(&job_file, job_text)?;
-    let script = include_str!("blender_script.py");
+    let script_file = staging_dir.join("blender_script.py");
+    fs::write(&script_file, include_str!("blender_script.py"))?;
     let result = Command::new(blender)
         .arg("--background")
         .arg("--factory-startup")
-        .arg("--python-expr")
-        .arg(script)
+        .arg("--python")
+        .arg(&script_file)
         .arg("--")
         .arg(&job_file)
         .arg(staging_dir)
         .current_dir(data_root)
-        .output()?;
+        .output();
+    let _ = fs::remove_file(&script_file);
+    let result = result?;
     if !result.status.success() {
         bail!(
             "Blender exited with {}:\n{}",

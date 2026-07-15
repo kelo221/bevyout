@@ -16,7 +16,7 @@ fn bake_job_emits_resolved_cell_directional_light() {
 }
 
 #[test]
-fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
+fn only_static_semantics_are_batchable() {
     fn placement(semantic: PreparedSemantic) -> PreparedPlacement {
         PreparedPlacement {
             reference_form_id: 1,
@@ -56,21 +56,6 @@ fn only_static_semantics_are_batchable_without_changing_bake_inclusion() {
     dynamic_placement.physics_classification = PreparedPhysicsClassification::Dynamic;
     assert!(!is_bake_static(&dynamic_placement));
     assert!(!is_batchable_static(&dynamic_placement));
-
-    for semantic in [
-        PreparedSemantic::Furniture,
-        PreparedSemantic::Npc(super::super::manifest::PreparedActor {
-            base_template_form_id: None,
-        }),
-        PreparedSemantic::Creature(super::super::manifest::PreparedActor {
-            base_template_form_id: None,
-        }),
-        PreparedSemantic::Unsupported,
-    ] {
-        let placement = placement(semantic);
-        assert!(is_bake_static(&placement));
-        assert!(!is_batchable_static(&placement));
-    }
 }
 
 #[test]
@@ -108,7 +93,7 @@ fn cell_directional_illuminance_clamps_non_finite_and_negative_luminance() {
 }
 
 #[test]
-fn pickup_container_door_and_activator_are_excluded_from_the_bake() {
+fn non_static_semantics_are_excluded_from_the_bake() {
     fn placement(semantic: PreparedSemantic) -> PreparedPlacement {
         PreparedPlacement {
             reference_form_id: 1,
@@ -152,6 +137,14 @@ fn pickup_container_door_and_activator_are_excluded_from_the_bake() {
             destination: None,
         }),
         PreparedSemantic::Activator,
+        PreparedSemantic::Furniture,
+        PreparedSemantic::Npc(super::super::manifest::PreparedActor {
+            base_template_form_id: None,
+        }),
+        PreparedSemantic::Creature(super::super::manifest::PreparedActor {
+            base_template_form_id: None,
+        }),
+        PreparedSemantic::Unsupported,
     ] {
         let placement = placement(semantic);
         assert!(!is_bake_static(&placement));
@@ -184,6 +177,58 @@ fn ktx_tool_kind_is_unified_only_for_ktx_named_executables() {
         ktx_tool_kind(Path::new("/usr/local/bin/some-other-tool")),
         KtxToolKind::LegacyToktx
     ));
+}
+
+#[test]
+fn bake_contribution_requires_every_reference_exactly_once() {
+    fn job_placement(reference_form_id: u32) -> JobPlacement {
+        JobPlacement {
+            reference_form_id,
+            asset_path: "assets/test.glb".into(),
+            ao_mode: "ao-none".into(),
+            batchable_static: true,
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+        }
+    }
+    let expected = vec![job_placement(0x10), job_placement(0x20)];
+    validate_placement_contribution(
+        &expected,
+        &BlenderPlacementContribution {
+            expected_placements: 2,
+            contributed_placements: 2,
+            reference_form_ids: vec![0x20, 0x10],
+            post_batch_verified: true,
+            placements: vec![placement_geometry(0x20), placement_geometry(0x10)],
+        },
+    )
+    .unwrap();
+
+    let error = validate_placement_contribution(
+        &expected,
+        &BlenderPlacementContribution {
+            expected_placements: 2,
+            contributed_placements: 1,
+            reference_form_ids: vec![0x10],
+            post_batch_verified: false,
+            placements: vec![placement_geometry(0x10)],
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("00000020"));
+}
+
+fn placement_geometry(reference_form_id: u32) -> BlenderPlacementGeometry {
+    BlenderPlacementGeometry {
+        reference_form_id,
+        visual_meshes: 1,
+        vertices: 3,
+        triangles: 1,
+        world_bounds_min: [0.0; 3],
+        world_bounds_max: [1.0; 3],
+    }
 }
 
 #[test]

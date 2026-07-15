@@ -1,5 +1,5 @@
-import bpy, gzip, json, os, sys
-from mathutils import Vector
+import bpy, gzip, json, math, os, sys
+from mathutils import Matrix, Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
@@ -399,6 +399,189 @@ def build_physics_asset():
         return {'schema_version': 1, 'source': 'GeneratedRender', 'bodies': authored_bodies}
     return {'schema_version': 1, 'source': 'GeneratedRender',
             'bodies': authored_bodies + [fallback]}
+
+def matrix_identity_error(matrix):
+    return max(abs(float(matrix[row][column]) - (1.0 if row == column else 0.0))
+               for row in range(4) for column in range(4))
+
+def matrix_max_error(left, right):
+    return max(abs(float(left[row][column]) - float(right[row][column]))
+               for row in range(4) for column in range(4))
+
+def apply_verified_spatial_corrections(objects, model):
+    corrections = {
+        'dungeons/vault/room/vdnwallendcorinr01.nif': (':32', ':41'),
+        'dungeons/vault/room/vdnwallendcoroutr01.nif': (':32',),
+    }.get(str(model).casefold(), ())
+    verified = []
+    verified_collision = 0
+    correction = Matrix.Rotation(-math.pi, 4, 'Z')
+    for obj in objects:
+        if obj.type != 'MESH':
+            continue
+        if obj.get('bevyout_collision', False):
+            if corrections:
+                expected = obj.matrix_local @ correction
+                obj.matrix_local = expected
+                bpy.context.view_layer.update()
+                if matrix_max_error(obj.matrix_local, expected) > 1e-5:
+                    raise RuntimeError('collision spatial correction failed for ' + obj.name)
+                obj['bevyout_spatial_policy'] = 'verified_local_z_180'
+                obj['bevyout_spatial_verified'] = True
+                verified_collision += 1
+            continue
+        niftools = getattr(obj, 'niftools', None)
+        name = str(niftools.longname if niftools and niftools.longname else obj.name)
+        if not name.endswith(corrections):
+            continue
+        before = obj.matrix_local.copy()
+        expected = before @ correction
+        obj.matrix_local = expected
+        bpy.context.view_layer.update()
+        if matrix_max_error(obj.matrix_local, expected) > 1e-5:
+            raise RuntimeError('spatial correction failed for ' + name)
+        obj['bevyout_spatial_policy'] = 'verified_local_z_180'
+        obj['bevyout_spatial_verified'] = True
+        verified.append(name)
+    if len(verified) != len(corrections):
+        raise RuntimeError(
+            'spatial correction coverage mismatch for %s: expected %d, verified %d'
+            % (model, len(corrections), len(verified))
+        )
+    return sorted(verified), verified_collision
+
+def apply_record_zero_transform_policy(
+        objects, model, policy, record_zero_name, record_zero_is_node):
+    """Annotate the NIF root and apply the Rust-selected compatibility policy.
+
+    NIFTools imports a record-0 NiNode branch as a top-level EMPTY or ARMATURE.
+    Rust owns the normalized-model policy registry. Blender records the original
+    transform for cache-hit audits and only resets roots explicitly marked as a
+    verified discard. Bip01 remains protected regardless of the supplied policy.
+    """
+    record_zero_name = str(record_zero_name)
+    if policy not in {
+            'preserve_review_required', 'preserve_verified',
+            'preserve_verified', 'discard_verified'}:
+        raise RuntimeError('unknown root transform policy: ' + str(policy))
+    changed = []
+    candidates = []
+    for obj in sorted(objects, key=lambda item: item.name):
+        if obj.parent is not None:
+            continue
+        niftools = getattr(obj, 'niftools', None)
+        imported_name = (niftools.longname if niftools and niftools.longname
+                         else obj.name)
+        if imported_name.casefold() == record_zero_name.casefold():
+            candidates.insert(0, obj)
+        else:
+            candidates.append(obj)
+    if not candidates:
+        return changed
+    carrier = candidates[0]
+    original = carrier.matrix_local.copy()
+    non_identity = matrix_identity_error(original) > 1e-5
+    carrier['bevyout_source_model'] = str(model)
+    carrier['bevyout_root_transform_policy'] = str(policy)
+    carrier['bevyout_record_zero_non_identity'] = non_identity
+    carrier['bevyout_record_zero_transform'] = [
+        float(original[row][column])
+        for row in range(4) for column in range(4)
+    ]
+    if (policy == 'discard_verified'
+            and record_zero_is_node
+            and carrier.type in {'EMPTY', 'ARMATURE'}
+            and record_zero_name.casefold() != 'bip01'):
+        if non_identity:
+            changed.append(carrier.name)
+        carrier.matrix_local = Matrix.Identity(4)
+    return changed
+
+def run_root_transform_self_test():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    root = bpy.data.objects.new('FixtureRoot', None)
+    child = bpy.data.objects.new('FixtureChild', None)
+    other_root = bpy.data.objects.new('OtherRoot', None)
+    bip01 = bpy.data.objects.new('Bip01', None)
+    mesh = bpy.data.objects.new('GeometryRoot', bpy.data.meshes.new('GeometryRoot'))
+    for obj in (root, child, other_root, bip01, mesh):
+        bpy.context.collection.objects.link(obj)
+    root.niftools.nodetype = 'NiNode'
+    other_root.niftools.nodetype = 'NiNode'
+    bip01.niftools.nodetype = 'NiNode'
+    root.rotation_euler = (math.pi, 0.0, 0.0)
+    child.parent = root
+    child.rotation_euler = (math.pi, 0.0, 0.0)
+    other_root.rotation_euler = (0.0, -0.5, 0.0)
+    bip01.rotation_euler = (0.0, 0.0, 0.5)
+    mesh.rotation_euler = (0.0, 0.25, 0.0)
+    bpy.context.view_layer.update()
+
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/rivetcity/roomsmall/rcsmdoor01.nif',
+        'preserve_review_required',
+        'FixtureRoot',
+        True,
+    ) == []
+    assert matrix_identity_error(root.matrix_local) > 0.1
+    assert root['bevyout_source_model'] == 'dungeons/rivetcity/roomsmall/rcsmdoor01.nif'
+    assert root['bevyout_root_transform_policy'] == 'preserve_review_required'
+    assert root['bevyout_record_zero_non_identity']
+    assert len(root['bevyout_record_zero_transform']) == 16
+
+    changed = apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vrmwallscreen01.nif',
+        'discard_verified',
+        'FixtureRoot',
+        True,
+    )
+    bpy.context.view_layer.update()
+    assert changed == ['FixtureRoot'], (changed, [
+        (obj.name, obj.type, obj.parent.name if obj.parent else None,
+         obj.niftools.nodetype, matrix_identity_error(obj.matrix_local))
+        for obj in bpy.context.scene.objects
+    ])
+    assert matrix_identity_error(root.matrix_local) < 1e-6
+    assert matrix_identity_error(child.matrix_local) > 0.1
+    assert matrix_identity_error(other_root.matrix_local) > 0.1
+    assert matrix_identity_error(bip01.matrix_local) > 0.1
+    assert matrix_identity_error(mesh.matrix_local) > 0.1
+    root.rotation_euler = (0.0, math.pi, 0.0)
+    bpy.context.view_layer.update()
+    changed = apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vdnwallendcoroutr01.nif',
+        'preserve_verified',
+        'FixtureRoot',
+        True,
+    )
+    bpy.context.view_layer.update()
+    assert changed == []
+    assert matrix_identity_error(root.matrix_local) > 0.1
+    assert root['bevyout_source_model'] == 'dungeons/vault/room/vdnwallendcoroutr01.nif'
+    assert root['bevyout_root_transform_policy'] == 'preserve_verified'
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'architecture/geometryroot.nif',
+        'discard_verified',
+        'GeometryRoot',
+        False,
+    ) == []
+    assert mesh['bevyout_source_model'] == 'architecture/geometryroot.nif'
+    assert matrix_identity_error(mesh.matrix_local) > 0.1
+    assert apply_record_zero_transform_policy(
+        list(bpy.context.scene.objects),
+        'dungeons/vault/room/vrmwallscreen01.nif',
+        'discard_verified',
+        'Bip01',
+        True,
+    ) == []
+    assert matrix_identity_error(bip01.matrix_local) > 0.1
+    print('[convert-test] model root transform policy passed', flush=True)
+
 def bake_quick_ao():
     objects = [obj for obj in bpy.context.scene.objects
         if obj.type == 'MESH' and len(obj.data.polygons)
@@ -436,6 +619,11 @@ def bake_quick_ao():
 
 bpy.ops.preferences.addon_enable(module='io_scene_niftools')
 patch_niftools_blender52()
+from io_scene_niftools.utils.singleton import NifData
+from nifgen.formats.nif import classes as NifClasses
+if sys.argv[-1] == '--self-test-root-policy':
+    run_root_transform_self_test()
+    raise SystemExit(0)
 bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
 with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
@@ -457,6 +645,19 @@ for job in jobs:
                 if datablock.users == 0: datablocks.remove(datablock)
         result=bpy.ops.import_scene.nif(filepath=nif_path, process='EVERYTHING', animation=with_animation, scale_correction=1.0/70.0, use_custom_normals=False, use_embedded_texture=False)
         if 'FINISHED' not in result: raise RuntimeError('NIF import failed: '+nif_path)
+        record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
+        reset_roots = apply_record_zero_transform_policy(
+            list(bpy.context.scene.objects),
+            job.get('model', ''),
+            job.get('root_transform_policy', 'preserve_review_required'),
+            record_zero.name if record_zero else '',
+            isinstance(record_zero, NifClasses.NiNode),
+        )
+        if reset_roots:
+            print('[convert] discarded audited root transform(s): ' + ', '.join(reset_roots), flush=True)
+        corrections = apply_verified_spatial_corrections(
+            list(bpy.context.scene.objects), job.get('model', '')
+        )
         for obj in list(bpy.context.scene.objects):
             if obj.get('bevyout_collision', False):
                 obj.hide_render = False
@@ -468,7 +669,8 @@ for job in jobs:
             ):
                 # NIF collision/helper meshes have no texture and should not be rendered.
                 bpy.data.objects.remove(obj, do_unlink=True)
-    import_nif_scene(True)
+        return corrections
+    spatial_corrections, collision_corrections = import_nif_scene(True)
     if bpy.data.actions:
         # Controller import bakes an animated pose into the collision
         # objects' transforms (a door's colliders land in the Open position,
@@ -476,7 +678,7 @@ for job in jobs:
         # rest-pose import; the animated scene is rebuilt after for the GLB.
         import_nif_scene(False)
         physics_asset = build_physics_asset()
-        import_nif_scene(True)
+        spatial_corrections, collision_corrections = import_nif_scene(True)
     else:
         physics_asset = build_physics_asset()
     with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
@@ -515,6 +717,39 @@ for job in jobs:
         # The card is only an authored halo hint. The physical bulb below is
         # rendered with its own diffuse texture and emission instead.
         bpy.data.objects.remove(glow_card, do_unlink=True)
+    render_meshes = [obj for obj in bpy.context.scene.objects
+                     if obj.type == 'MESH' and not obj.get('bevyout_collision', False)]
+    retained_names = {
+        (obj.niftools.longname if obj.niftools.longname else obj.name)
+        for obj in render_meshes
+    }
+    source_render_geometries = [
+        block for block in NifData.data.blocks
+        if str(getattr(block, 'name', '')) in retained_names
+        and getattr(block, 'data', None) is not None
+        and callable(getattr(block, 'get_triangles', None))
+    ]
+    metadata_carrier = next(
+        (obj for obj in bpy.context.scene.objects
+         if obj.get('bevyout_source_model') == job.get('model', '')),
+        None,
+    )
+    if metadata_carrier is None:
+        raise RuntimeError('converted scene lost source metadata carrier: ' + nif_path)
+    metadata_carrier['bevyout_source_render_meshes'] = len(source_render_geometries)
+    metadata_carrier['bevyout_source_render_vertices'] = sum(
+        int(geometry.data.num_vertices) for geometry in source_render_geometries
+    )
+    metadata_carrier['bevyout_source_render_triangles'] = sum(
+        len(geometry.get_triangles()) for geometry in source_render_geometries
+    )
+    metadata_carrier['bevyout_spatial_audit_version'] = 1
+    metadata_carrier['bevyout_expected_spatial_corrections'] = len(spatial_corrections)
+    metadata_carrier['bevyout_verified_spatial_corrections'] = sum(
+        1 for obj in render_meshes if obj.get('bevyout_spatial_verified', False)
+    )
+    metadata_carrier['bevyout_expected_collision_corrections'] = collision_corrections
+    metadata_carrier['bevyout_verified_collision_corrections'] = collision_corrections
     if conversion == 'ao-quick-v1':
         bake_quick_ao()
     for material in bpy.data.materials:

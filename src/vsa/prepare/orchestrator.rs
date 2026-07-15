@@ -590,6 +590,7 @@ fn prepare_cell(
     );
     let PlacementStage {
         jobs,
+        visual_assets,
         mut placements,
         lights,
         cache_hits,
@@ -624,6 +625,24 @@ fn prepare_cell(
         message: cache_summary.clone(),
     });
     output.push(cache_summary);
+    let visual_issues = audit_prepared_visuals(&cache_dir, &visual_assets, &placements)?;
+    for issue in &visual_issues {
+        output.push(format_visual_issue(issue));
+    }
+    let invalid_visuals = visual_issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+    let review_visuals = visual_issues.len() - invalid_visuals;
+    let visual_summary = format!(
+        "visual completeness: {} assets checked, {invalid_visuals} invalid, {review_visuals} review required",
+        visual_assets.len()
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: visual_summary.clone(),
+    });
+    output.push(visual_summary);
     // F47.3: this cell's unique physics assets, sourced through the
     // session-level cache so a sidecar already read for an earlier cell in
     // the batch is reused (a hit) instead of re-read from disk.
@@ -703,9 +722,7 @@ fn prepare_cell(
     });
     output.push(mutability_log);
     let failures = placements.iter().filter(|p| p.error.is_some()).count();
-    if args.strict && failures > 0 {
-        bail!("strict preparation failed with {failures} unresolved placements")
-    }
+    enforce_strict_visual_completeness(args.strict, failures, &visual_issues)?;
     if placements.iter().all(|p| p.asset_path.is_none()) && lights.is_empty() {
         bail!(
             "no renderable assets were found in {}",
@@ -739,6 +756,7 @@ fn prepare_cell(
         placements,
         lights,
         diagnostics,
+        visual_issues,
         navmeshes,
         cell_audio,
         audio_clips,
@@ -754,10 +772,11 @@ fn prepare_cell(
         to_string_pretty(&manifest, PrettyConfig::default())?,
     )?;
     output.push(format!(
-        "prepared {} ({} placements, {} unresolved) -> {}",
+        "prepared {} ({} placements, {} unresolved, {} visual issue(s)) -> {}",
         super::super::manifest::cell_label(&manifest.cell),
         manifest.placements.len(),
         failures,
+        manifest.visual_issues.len(),
         manifest_path.display()
     ));
     Ok(())

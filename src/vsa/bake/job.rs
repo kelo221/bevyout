@@ -57,6 +57,26 @@ pub(crate) struct JobLight {
 pub(crate) struct BlenderBakeResult {
     pub(crate) irradiance: Option<BlenderIrradianceResult>,
     pub(crate) batching: BlenderBatchingStats,
+    pub(crate) placement_contribution: BlenderPlacementContribution,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BlenderPlacementContribution {
+    pub(crate) expected_placements: usize,
+    pub(crate) contributed_placements: usize,
+    pub(crate) reference_form_ids: Vec<u32>,
+    pub(crate) post_batch_verified: bool,
+    pub(crate) placements: Vec<BlenderPlacementGeometry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BlenderPlacementGeometry {
+    pub(crate) reference_form_id: u32,
+    pub(crate) visual_meshes: usize,
+    pub(crate) vertices: usize,
+    pub(crate) triangles: usize,
+    pub(crate) world_bounds_min: [f32; 3],
+    pub(crate) world_bounds_max: [f32; 3],
 }
 
 #[derive(Debug, Deserialize)]

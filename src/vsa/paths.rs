@@ -98,16 +98,25 @@ pub(crate) fn placement_transform_parts(
 ) -> ([f32; 3], [f32; 4], f32) {
     let p = position;
     let translation = [p[0] * FO3_SCALE, p[2] * FO3_SCALE, -p[1] * FO3_SCALE];
-    let q = Quat::from_euler(
+    let rotation = fallout_rotation_to_bevy(rotation_euler).to_array();
+    (translation, rotation, scale)
+}
+
+/// Convert an ESM object rotation to the Bevy/glTF basis used by prepared placements.
+///
+/// The ESM Euler values use the established Fallout 3 placement convention.
+/// Keep the basis conjugation at this boundary so the manifest remains a Bevy
+/// quaternion and both dynamic and baked placement paths consume the same value.
+fn fallout_rotation_to_bevy(rotation_euler: [f32; 3]) -> Quat {
+    let fallout = Quat::from_euler(
         EulerRot::XYZ,
         rotation_euler[0],
         rotation_euler[1],
         rotation_euler[2],
     );
     let basis = Mat3::from_cols(Vec3::X, Vec3::Z, -Vec3::Y);
-    let converted = basis * Mat3::from_quat(q) * basis.transpose();
-    let rotation = Quat::from_mat3(&converted).to_array();
-    (translation, rotation, scale)
+    let converted = basis * Mat3::from_quat(fallout) * basis.transpose();
+    Quat::from_mat3(&converted)
 }
 
 #[cfg(test)]

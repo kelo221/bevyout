@@ -97,10 +97,11 @@ It remains repository-local and is not copied into user-level skill directories.
 ### Gamebryo console and scripts
 
 The viewer starts in FPS mode. Press `~`/Backquote to open the transparent
-Fallout-style console; click a visible placement to select its FormID. The
-console pauses virtual time, releases the cursor, and keeps persistent history
-with draft restoration and Tab completion. Backquote or Escape closes it and
-recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
+Fallout-style console; click a visible individually spawned placement to select
+its FormID. Static-batched geometry is not yet addressable and reports
+`NOT_IMPLEMENTED`. The console pauses virtual time, releases the cursor, and
+keeps persistent history with draft restoration and Tab completion. Backquote or
+Escape closes it and recaptures the cursor. Useful commands include `help`, `prid`, `dump`,
 `getpos`/`setpos`, `getangle`/`setangle`, `moveto`, `tfc`, `tcl`, `tcg`,
 `tlights`, `stairdebug`, `tunlit`, `getrender`, `setrender`, `renderreport`,
 `shadowcache status`, `shadowcache rebuild`,
@@ -148,7 +149,15 @@ The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
 This remains a development-only feature; do not enable it for release builds
 unless the Bevy runtime DLLs are deliberately bundled.
 
-`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-13 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), and optional prepared point-shadow metadata. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+`prepare` reads `Fallout3.esm`, loads its declared masters, indexes loose files and the Fallout mesh/texture/sound BSAs, stages referenced NIFs, textures, and WAV clips, converts DDS files to PNG with ImageMagick, and runs Blender headlessly through the installed Niftools addon. The schema-14 manifest also retains item/container metadata, ownership and enable-parent state, door locks and destinations, cell acoustic/music metadata, native footstep and landing sound banks, source NAVM payloads (NAVM is retained metadata, not runtime navigation), optional prepared point-shadow metadata, and grouped visual-completeness issues. Static meshes receive a fast, mild `ao-quick-v1` vertex AO pass during conversion; dynamic, NPC, creature, weapon, and furniture assets preserve their authored materials. Authored NIF collision shapes and Fallout Havok material IDs are exported as GLB extras for footstep surface probes; ordinary movement continues to use the render-derived colliders. AO is stored in the GLB `COLOR_0` vertex stream, not as a separate image texture or Shading-editor AO node. NIF-to-GLB assets use a content-addressed cache keyed by the NIF bytes, conversion profile, root-transform policy, and `NIF_CONVERTER_REVISION`: valid cached GLBs are reused during normal preparation and with `--force`. Use `--rebuild-assets` to explicitly rerun NIF conversion, or bump `NIF_CONVERTER_REVISION` when the embedded converter changes. Copy `config.example.toml` to `.bevyout/config.toml` to configure the Fallout root, plugin, cache, Blender, and KTX paths. Explicit CLI flags override config values; Blender and KTX still have automatic detection fallbacks. Use `--config path.toml` for a different config file.
+
+Every converted GLB is checked for non-collision mesh primitives with vertex
+positions, including cache hits. `prepare` groups visual warnings by normalized
+model path and prints the affected base and reference FormIDs. A non-identity
+NIF record-zero transform is preserved for compatibility unless its model path
+has a reviewed policy, but it is reported as `unreviewed_root_transform` until
+reviewed. Normal preparation completes with these warnings; `prepare --strict`
+fails when unresolved placements or visual-completeness issues remain.
 
 After GLB conversion and physics classification, `prepare` builds a CPU BVH
 from initially enabled placements whose semantic and physics classifications
@@ -167,8 +176,28 @@ does not invoke Blender and a generation or `ktx validate` failure fails
 `prepare`.
 
 The preparation pipeline converts Fallout's approximately 70 world units per
-metre to Bevy metres. Changing this conversion requires preparing the cell again
-so the cached GLBs and any baked irradiance volumes use the same scale.
+metre to Bevy metres. Initial Fallout object rotations use the validated ESM
+`EulerRot::XYZ` placement convention and are converted at the same manifest
+boundary as position. NIF record-0 transforms are preserved by default. The
+audited `dungeons/vault/room/vrmwallscreen01.nif` model discards its compensating
+record-0 transform so its placement rotation is not applied twice.
+The `dungeons/vault/room/vdnwallendcorinr01.nif` and
+`dungeons/vault/room/vdnwallendcoroutr01.nif` corner pieces preserve their
+verified authored root transforms. These are model-path compatibility rules,
+not FormID overrides. The original root matrix and selected policy are retained
+as GLB extras for preparation audits. Their verified `:32` geometry blocks, and
+the inward corner's `:41` floor block, receive a local 180-degree correction
+during conversion. Converter metadata records the expected and applied
+per-block correction counts; incomplete coverage emits
+`visual_spatial_mismatch`. NIF ancestry alone cannot infer this correction
+because the source and NIFTools parent-chain matrices agree. Authored Havok
+shapes for these models receive the same correction before physics sidecar
+serialization, and their correction coverage is audited with the visual blocks.
+The Blender bake
+conjugates each prepared placement once into Blender's Z-up space before
+composing it with the imported GLB hierarchy. Changing this conversion requires
+preparing and baking the cell again so cached manifests and baked scenes use the
+same transform convention.
 
 ## Bake lighting
 
@@ -185,6 +214,11 @@ cargo run-dev -- bake SuperDuperMart --quality preview
 
 cargo run-dev -- render SuperDuperMart
 ```
+
+The bake verifies that every eligible static placement imports at least one
+renderable visual mesh and records expected and contributed placement counts in
+its result. A missing placement contribution fails the bake with the reference
+FormID and asset path instead of producing a silently incomplete scene.
 
 The modes are intentionally different:
 
@@ -215,14 +249,29 @@ conversion, starts near the prepared scene bounds, spawns the prepared GLB
 scenes and point lights, plays staged ambient/placement loops, and starts with
 the metric FPS capsule controller (WASD, Space/Ctrl, and mouse look). The
 primary window defaults to 1920x1080 with a 90-degree horizontal field of view;
-use `fov` to inspect it or `fov <10..170>` to change it at runtime. Aim at a
-pickup, container, door, or activator and press `Enter` for the initial
-interaction path; door travel and animation remain deferred. Native BoxDDD
+use `fov` to inspect it or `fov <10..170>` to change it at runtime. Press
+`Enter` to probe the center ray; dynamic references are printed to the terminal
+as `EditorID (FormID)`, while static-batched geometry reports
+`NOT_IMPLEMENTED`. In FPS mode, aim at a pickup, container, door, or activator
+and press `E` for the initial interaction path; door travel and animation remain
+deferred. Native BoxDDD
 capsule casts and plane solving handle movement, while the compatibility bridge cooks the current
 render-derived meshes into static BoxDDD triangle shapes. Distance-based native
 Fallout footsteps still use authored Havok collision-material extras as surface
 hints, and the controller keeps the OpenMW-derived directional launch,
 full-height jump arc, reduced air-control steering, and surface landing sounds.
+
+Current keyboard bindings are:
+
+* Movement: W/A/S/D move, Space jumps, E interacts in FPS mode, and E/Z move
+  vertically in free-camera mode.
+* Interaction and UI: Enter probes the center ray, Tab opens the Pip-Boy, Esc
+  opens pause, and ~ (Backquote) opens the developer console.
+* Placeholder bindings: Shift run/walk, Caps Lock always-run, X automatic
+  forward run, F third-person view, Tab-held Pip-Boy flashlight, LMB attack,
+  RMB aim/block, V V.A.T.S., R reload/hold-to-holster, and 1 through 8 item or
+  weapon hotkeys. These currently emit `NOT_IMPLEMENTED` diagnostics.
+
 Use `tfc` in the console to toggle free flight; Tab opens the Pip-Boy modal
 placeholder. `getrender` and `setrender` inspect or change lighting,
 irradiance, ambient, bloom, fog, and AO diagnostics. AO strength `0.00`

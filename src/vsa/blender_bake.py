@@ -27,6 +27,12 @@ STATIC_BATCH_SIZE_METERS = 64.0
 
 
 def bevy_transform_to_blender(translation, rotation_xyzw, scale=1.0):
+    """Conjugate one prepared Bevy transform into Blender's Z-up space.
+
+    Imported GLB objects already carry their asset-local hierarchy transforms.
+    Only the placement is conjugated here; the caller composes it once with the
+    imported template's world matrix before unlinking the template hierarchy.
+    """
     rotation = Quaternion((
         rotation_xyzw[3], rotation_xyzw[0], rotation_xyzw[1], rotation_xyzw[2]
     )).to_matrix().to_4x4()
@@ -349,11 +355,63 @@ def neutralize_quick_vertex_ao(obj):
             item.color = (1.0, 1.0, 1.0, alpha)
 
 
+def require_renderable_visual_templates(placement, path, templates):
+    visual_templates = [
+        obj for obj in templates
+        if obj.type == "MESH" and bool(obj.data.polygons)
+        and not obj.get("bevyout_collision", False)
+        and not is_non_rendering_object(obj)
+    ]
+    if not visual_templates:
+        raise RuntimeError(
+            "placement %08X imported no renderable visual meshes from %s"
+            % (int(placement["reference_form_id"]), path)
+        )
+    return visual_templates
+
+
+def stamp_placement_provenance(obj, reference_form_id):
+    vertex_attribute = obj.data.attributes.new(
+        "bevyout_reference_vertex_id", type="INT", domain="POINT"
+    )
+    for item in vertex_attribute.data:
+        item.value = int(reference_form_id)
+    face_attribute = obj.data.attributes.new(
+        "bevyout_reference_face_id", type="INT", domain="FACE"
+    )
+    for item in face_attribute.data:
+        item.value = int(reference_form_id)
+
+
+def placement_geometry(reference_form_id, objects):
+    minimum = Vector((float("inf"),) * 3)
+    maximum = Vector((float("-inf"),) * 3)
+    for obj in objects:
+        for vertex in obj.data.vertices:
+            world_vertex = obj.matrix_world @ vertex.co
+            minimum = Vector(tuple(
+                min(minimum[i], world_vertex[i]) for i in range(3)
+            ))
+            maximum = Vector(tuple(
+                max(maximum[i], world_vertex[i]) for i in range(3)
+            ))
+    return {
+        "reference_form_id": int(reference_form_id),
+        "visual_meshes": len(objects),
+        "vertices": sum(len(obj.data.vertices) for obj in objects),
+        "triangles": sum(len(obj.data.loop_triangles) for obj in objects),
+        "world_bounds_min": list(minimum),
+        "world_bounds_max": list(maximum),
+    }
+
+
 def import_placements(job):
     objects = []
+    contributed_reference_form_ids = []
     template_cache = {}
     imported_templates = []
     excluded = 0
+    placement_objects = defaultdict(list)
     for placement in job["placements"]:
         path = placement["asset_path"]
         if not os.path.isabs(path):
@@ -374,6 +432,7 @@ def import_placements(job):
             template_cache[path] = imported
             imported_templates.extend(imported_all)
         templates = template_cache[path]
+        require_renderable_visual_templates(placement, path, templates)
         placement_matrix = bevy_transform_to_blender(
             placement["translation"],
             placement["rotation_xyzw"],
@@ -388,6 +447,9 @@ def import_placements(job):
                 or (batchable_static and not template.get("bevyout_collision", False))
             ):
                 obj.data = template.data.copy()
+            # The imported template matrix is the asset-local GLB/NIF hierarchy.
+            # Apply the prepared placement exactly once, then detach so Blender
+            # does not apply the imported parent chain a second time on export.
             obj.parent = None
             obj.matrix_world = placement_matrix @ template.matrix_world
             bpy.context.collection.objects.link(obj)
@@ -395,11 +457,79 @@ def import_placements(job):
             obj["bevyout_ao_mode"] = placement.get("ao_mode", "ao-none")
             obj["bevyout_batchable_static"] = batchable_static
             objects.append((obj, placement["reference_form_id"], local_index))
+            if not obj.get("bevyout_collision", False) and not is_non_rendering_object(obj):
+                obj.data.calc_loop_triangles()
+                stamp_placement_provenance(obj, placement["reference_form_id"])
+                placement_objects[int(placement["reference_form_id"])].append(obj)
             local_index += 1
+        contributed_reference_form_ids.append(int(placement["reference_form_id"]))
     for template in imported_templates:
         bpy.data.objects.remove(template, do_unlink=True)
     print("[bake] excluded non-rendering meshes %d" % excluded, flush=True)
-    return objects
+    geometry = [
+        placement_geometry(reference_form_id, placement_objects[reference_form_id])
+        for reference_form_id in contributed_reference_form_ids
+    ]
+    return objects, {
+        "expected_placements": len(job["placements"]),
+        "contributed_placements": len(contributed_reference_form_ids),
+        "reference_form_ids": contributed_reference_form_ids,
+        "post_batch_verified": False,
+        "placements": geometry,
+    }
+
+
+def verify_post_batch_placement_geometry(expected_geometry):
+    actual = defaultdict(lambda: {
+        "vertices": 0,
+        "triangles": 0,
+        "minimum": Vector((float("inf"),) * 3),
+        "maximum": Vector((float("-inf"),) * 3),
+    })
+    for obj in visual_mesh_objects():
+        vertex_ids = obj.data.attributes.get("bevyout_reference_vertex_id")
+        face_ids = obj.data.attributes.get("bevyout_reference_face_id")
+        if vertex_ids is None or face_ids is None:
+            raise RuntimeError("static batching dropped placement provenance attributes")
+        for vertex, item in zip(obj.data.vertices, vertex_ids.data):
+            record = actual[int(item.value)]
+            world_vertex = obj.matrix_world @ vertex.co
+            record["vertices"] += 1
+            record["minimum"] = Vector(tuple(
+                min(record["minimum"][axis], world_vertex[axis]) for axis in range(3)
+            ))
+            record["maximum"] = Vector(tuple(
+                max(record["maximum"][axis], world_vertex[axis]) for axis in range(3)
+            ))
+        for polygon, item in zip(obj.data.polygons, face_ids.data):
+            actual[int(item.value)]["triangles"] += max(0, polygon.loop_total - 2)
+
+    tolerance = 0.001
+    for expected in expected_geometry:
+        reference_form_id = int(expected["reference_form_id"])
+        record = actual.get(reference_form_id)
+        expected_minimum = Vector(expected["world_bounds_min"])
+        expected_maximum = Vector(expected["world_bounds_max"])
+        if record is None or (
+            record["vertices"] < int(expected["vertices"])
+            or record["triangles"] != int(expected["triangles"])
+            or (record["minimum"] - expected_minimum).length > tolerance
+            or (record["maximum"] - expected_maximum).length > tolerance
+        ):
+            raise RuntimeError(
+                "static batching changed geometry for placement %08X: expected vertices >= %d, triangles %d, bounds %s..%s; got vertices %s, triangles %s, bounds %s..%s"
+                % (
+                    reference_form_id,
+                    int(expected["vertices"]),
+                    int(expected["triangles"]),
+                    tuple(expected_minimum),
+                    tuple(expected_maximum),
+                    None if record is None else record["vertices"],
+                    None if record is None else record["triangles"],
+                    None if record is None else tuple(record["minimum"]),
+                    None if record is None else tuple(record["maximum"]),
+                )
+            )
 
 
 def render_preview(job, objects):
@@ -808,7 +938,82 @@ def glb_mesh_attributes(path):
     }
 
 
+def matrix_max_error(actual, expected):
+    return max(
+        abs(float(actual[row][column]) - float(expected[row][column]))
+        for row in range(4)
+        for column in range(4)
+    )
+
+
+def run_transform_self_test():
+    translation = (12.5, -3.25, 8.75)
+    rotation = Quaternion((0.91, 0.17, -0.28, 0.22)).normalized()
+    rotation_xyzw = (rotation.x, rotation.y, rotation.z, rotation.w)
+    scale = 1.75
+    expected_bevy = (
+        Matrix.Translation(Vector(translation))
+        @ rotation.to_matrix().to_4x4()
+        @ Matrix.Diagonal((scale, scale, scale, 1.0))
+    )
+    blender = bevy_transform_to_blender(translation, rotation_xyzw, scale)
+    recovered_bevy = BLENDER_TO_BEVY @ blender @ BEVY_TO_BLENDER
+    assert matrix_max_error(recovered_bevy, expected_bevy) < 1e-5
+
+    template_bevy = (
+        Matrix.Translation(Vector((-2.0, 1.5, 0.75)))
+        @ Quaternion((0.97, -0.11, 0.08, 0.19)).normalized().to_matrix().to_4x4()
+    )
+    template = BEVY_TO_BLENDER @ template_bevy @ BLENDER_TO_BEVY
+    composed = blender @ template
+    recovered_composed = BLENDER_TO_BEVY @ composed @ BEVY_TO_BLENDER
+    expected_composed = expected_bevy @ template_bevy
+    assert matrix_max_error(recovered_composed, expected_composed) < 1e-5
+    assert matrix_max_error(composed, blender @ blender @ template) > 1e-4
+
+    clear_scene()
+    material = self_test_material("transform_material", (0.6, 0.7, 0.8, 1.0))
+    bpy.ops.mesh.primitive_cube_add(size=2.0)
+    cube = bpy.context.object
+    cube.data.materials.append(material)
+    cube.matrix_world = composed
+    minimum, maximum = world_bounds(cube)
+    with tempfile.TemporaryDirectory() as directory:
+        output = os.path.join(directory, "transform_fixture.glb")
+        bpy.ops.export_scene.gltf(
+            filepath=output, export_format="GLB", export_materials="EXPORT",
+            export_image_format="AUTO", export_apply=True, export_extras=True,
+        )
+        assert os.path.isfile(output)
+        clear_scene()
+        bpy.ops.import_scene.gltf(filepath=output)
+        imported = next(obj for obj in bpy.context.scene.objects if obj.type == "MESH")
+        imported_minimum, imported_maximum = world_bounds(imported)
+        assert (imported_minimum - minimum).length < 1e-5
+        assert (imported_maximum - maximum).length < 1e-5
+    clear_scene()
+    print("[bake-test] transform conjugation/export fixtures passed", flush=True)
+
+
 def run_self_tests():
+    clear_scene()
+    run_transform_self_test()
+    material = self_test_material("contribution_material", (0.5, 0.5, 0.5, 1.0))
+    visual = self_test_cube("contribution_visual", (0.0, 0.0, 0.0), material)
+    assert visual.type == "MESH" and bool(visual.data.polygons)
+    visual["bevyout_collision"] = True
+    try:
+        require_renderable_visual_templates(
+            {"reference_form_id": 0x54426}, "collision-only.glb", [visual]
+        )
+        raise AssertionError("collision-only placement was accepted")
+    except RuntimeError as error:
+        assert "00054426" in str(error)
+        assert "collision-only.glb" in str(error)
+    visual["bevyout_collision"] = False
+    assert require_renderable_visual_templates(
+        {"reference_form_id": 0x54426}, "visual.glb", [visual]
+    ) == [visual]
     clear_scene()
     assert static_chunk(Vector((63.999, 0.0, -0.001))) == (0, 0, -1)
     assert static_chunk(Vector((64.0, -64.0, 0.0))) == (1, -1, 0)
@@ -840,7 +1045,14 @@ def run_self_tests():
     collision["bevyout_collision"] = True
     collision["bevyout_havok_material"] = 17
 
+    fixture_geometry = []
+    for index, obj in enumerate(visual_mesh_objects()):
+        reference_form_id = 0x54426 + index
+        obj.data.calc_loop_triangles()
+        stamp_placement_provenance(obj, reference_form_id)
+        fixture_geometry.append(placement_geometry(reference_form_id, [obj]))
     stats = batch_static_meshes()
+    verify_post_batch_placement_geometry(fixture_geometry)
     assert stats["chunk_size_meters"] == 64.0
     assert stats["batches_created"] >= 2
     assert stats["largest_batch"] >= 2
@@ -932,7 +1144,7 @@ def main(job_path):
         background.inputs["Color"].default_value = tuple(job["ambient_rgba"][:3]) + (1.0,)
         background.inputs["Strength"].default_value = 0.1
 
-    objects = import_placements(job)
+    objects, placement_contribution = import_placements(job)
     stage("import")
     add_lights(job)
     add_cell_directional_light(job)
@@ -949,6 +1161,8 @@ def main(job_path):
     batching = batch_static_meshes(float(job.get(
         "static_batch_chunk_meters", STATIC_BATCH_SIZE_METERS
     )))
+    verify_post_batch_placement_geometry(placement_contribution["placements"])
+    placement_contribution["post_batch_verified"] = True
     stage("static batch")
 
     # Keep the source UV set active for ordinary material textures in the
@@ -961,7 +1175,11 @@ def main(job_path):
                               export_apply=True, export_extras=True)
     stage("scene export")
     with open(job["result_json"], "w", encoding="utf8") as stream:
-        json.dump({"irradiance": irradiance, "batching": batching}, stream, indent=2)
+        json.dump({
+            "irradiance": irradiance,
+            "batching": batching,
+            "placement_contribution": placement_contribution,
+        }, stream, indent=2)
 
 
 if __name__ == "__main__":
