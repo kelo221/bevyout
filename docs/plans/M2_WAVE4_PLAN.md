@@ -226,6 +226,29 @@ If that exceeds the wave's budget, re-defer with a comment on #63.
   #60/#61 dynamic-body guard fixed only the dynamic case. This is #63's
   "explicit ownership / unload releases" criterion; see that issue.
 
+- **A16 — #63 was implemented in-wave (not re-deferred), minimal cut**:
+  pure `ownership_policy.rs` ledger + `teardown_cell_colliders` on
+  swap-away and eviction (always after `persist` capture, which snapshots
+  the dynamic poses teardown destroys; revisits rebuild through the save
+  layer — unifying the revisit and restart restore paths), a mid-build
+  cancel for torn-down cells, and the lifecycle states documented in
+  `world/mod.rs`. Real-data evidence: Vault101b's teardown releases
+  exactly `static_shapes=750 bodies=103` on **both** visits of the
+  a→b→d→b→a chain (duplication would have doubled the second), departed
+  cells release their full sets (a: 253/29, d: 1359/220), and the
+  post-teardown chain re-verified persistence (mug + dresser survive
+  revisit and restart via `save restore body`). Asset barriers stay
+  Bevy's handle refcounting (documented, not reimplemented).
+- **A17 — #62 real-corpus acceptance, environment-limited**: on the real
+  catalogue `bake --all-interiors` walks 421 interiors; 416 unprepared
+  cells record the actionable manifest-missing failure and the 5 prepared
+  cells reach the bake stage and record the exact tool failure
+  ("requires Blender 4.5 LTS; … reported Blender 5.1.2" — 4.5 is not
+  installed on this machine). Rerun and `--retry-failed` requeue exactly
+  the failures; `bake_jobs.ron` persists across runs. A successful bake +
+  fingerprint-valid skip could not be demonstrated without Blender 4.5;
+  that path is covered by the unit/cucumber suites.
+
 ## Orchestrator: gates and real-data acceptance
 
 1. Merge A/B/C branches into `m2-wave4`; resolve `tests/features.rs` and
