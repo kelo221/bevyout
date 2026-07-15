@@ -1,7 +1,6 @@
 # OpenMW provenance and notice
 
-Source snapshot: `openmw-master`, OpenMW 0.52.0. The snapshot has no nested
-Git metadata, so an upstream commit is not claimed here.
+Source snapshot: `openmw-master`, OpenMW 0.52.0.
 
 The Rust adaptation is based on these source regions and whole-file hashes:
 
@@ -25,3 +24,69 @@ Only behavior and numeric rules were adapted into new Rust code; no OpenMW
 C++ or Bullet implementation is compiled. OpenMW is GPL-3.0. This project is
 also distributed under GPL-3.0; the complete license text is at the repository
 root and in `openmw-master/LICENSE`.
+
+## Adapted File Contributors
+
+Upstream Git history identifies the following contributors for these source files:
+
+- ζeh Matt
+- Abdu Sharif
+- Aesylwinn
+- Alexander Perepechko
+- Alexei Dobrohotov
+- Alexei Kotov
+- Allofich
+- Andrei Kortunov
+- AnyOldName3
+- Arthur Moore
+- Bo Svensson
+- Bret Curtis
+- Capostrophic
+- Chris Robinson
+- cody glassman
+- Dave Corley
+- Digmaster
+- dteviot
+- Elias Howell
+- elsid
+- Emanuel Guevel
+- Evgeny Kurnevsky
+- Evil Eye
+- florent.teppe
+- Frederic Chardon
+- fredzio
+- fteppe
+- Glorf
+- gus
+- Harald H
+- James-Deciutiis
+- jeremy
+- jvoisin
+- kpp
+- Lukasz Gromanowski
+- Mads Buvik Sandvei
+- Marc Zinnschlag
+- Max
+- Max Yari
+- Miloslav Číž
+- MiroslavR
+- mrcheko
+- Nelsson Huotari
+- Niek Wilting
+- Perry Hugh
+- Petr Mikheev
+- psi29a
+- Rafael Moura
+- Ragora
+- rexelion
+- Rohit Nirmal
+- scrawl
+- Shi Han
+- Telvanni 4Life
+- Torben Carrington
+- tri4ng1e
+- uramer
+- Vincent Heuken
+- vorenon
+- wareya
+- Zackhasacat
