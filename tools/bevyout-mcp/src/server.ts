@@ -101,6 +101,7 @@ type ViewerState = {
 };
 
 let viewer: ViewerState | undefined;
+let lastViewerFailure: string | undefined;
 
 function clientFor(port = defaultPort): BrpClient {
   if (port === defaultPort && process.env.BEVYOUT_BRP_URL) return new BrpClient(defaultBrpUrl);
@@ -130,10 +131,22 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
-async function waitForSession(client: BrpClient, timeoutMs = 120_000): Promise<Json> {
+async function waitForSession(
+  client: BrpClient,
+  child?: Bun.Subprocess,
+  logs: string[] = [],
+  timeoutMs = 120_000,
+): Promise<Json> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "viewer did not respond";
   while (Date.now() < deadline) {
+    if (child?.exitCode !== null && child?.exitCode !== undefined) {
+      await wait(50);
+      const output = logs.slice(-80).join("\n");
+      throw new Error(
+        `viewer process exited with code ${child.exitCode}${output ? `\nLast viewer output:\n${output}` : ""}`,
+      );
+    }
     try {
       return await probe(client);
     } catch (error) {
@@ -141,7 +154,10 @@ async function waitForSession(client: BrpClient, timeoutMs = 120_000): Promise<J
       await wait(500);
     }
   }
-  throw new Error(`${lastError}; timed out waiting for Bevy Remote Protocol`);
+  const output = logs.slice(-80).join("\n");
+  throw new Error(
+    `${lastError}; timed out waiting for Bevy Remote Protocol${output ? `\nLast viewer output:\n${output}` : ""}`,
+  );
 }
 
 async function status(): Promise<Json> {
@@ -150,7 +166,11 @@ async function status(): Promise<Json> {
       const session = await probe(viewer.client);
       return { connected: true, owned: viewer.owned, brp_url: viewer.client.baseUrl, session };
     } catch (error) {
-      if (viewer.process && viewer.process.exitCode !== null) viewer = undefined;
+      if (viewer.process && viewer.process.exitCode !== null) {
+        const output = viewer.logs.slice(-80).join("\n");
+        lastViewerFailure = `viewer process exited with code ${viewer.process.exitCode}${output ? `\nLast viewer output:\n${output}` : ""}`;
+        viewer = undefined;
+      }
       else throw error;
     }
   }
@@ -160,7 +180,12 @@ async function status(): Promise<Json> {
     const session = await probe(client);
     return { connected: true, owned: false, brp_url: client.baseUrl, session };
   } catch {
-    return { connected: false, owned: false, brp_url: client.baseUrl };
+    return {
+      connected: false,
+      owned: false,
+      brp_url: client.baseUrl,
+      ...(lastViewerFailure ? { error: lastViewerFailure } : {}),
+    };
   }
 }
 
@@ -215,8 +240,9 @@ server.addTool({
     const effectiveDisablePhysics = disablePhysics ?? false;
     const client = clientFor(effectivePort);
     try {
-      const session = await probe(client);
+    const session = await probe(client);
       viewer = { client, logs: [], owned: false };
+      lastViewerFailure = undefined;
       return JSON.stringify({ attached: true, owned: false, session }, null, 2);
     } catch {
       // No existing endpoint: launch below.
@@ -230,6 +256,7 @@ server.addTool({
     args.push("--agent-bridge", "--agent-port", String(effectivePort));
 
     const logs: string[] = [];
+    lastViewerFailure = undefined;
     const child = Bun.spawn(["cargo", ...args], {
       cwd: repoRoot,
       stdin: "ignore",
@@ -239,12 +266,16 @@ server.addTool({
     void readStream(child.stdout, logs);
     void readStream(child.stderr, logs);
     viewer = { client, process: child, logs, owned: true };
-    void child.exited.then(() => {
+    void child.exited.then((exitCode) => {
       if (viewer?.process?.pid === child.pid) viewer = undefined;
+      if (exitCode !== 0) {
+        const output = logs.slice(-80).join("\n");
+        lastViewerFailure = `viewer process exited with code ${exitCode}${output ? `\nLast viewer output:\n${output}` : ""}`;
+      }
     });
 
     try {
-      const session = await waitForSession(client);
+      const session = await waitForSession(client, child, logs);
       return JSON.stringify({ attached: true, owned: true, pid: child.pid, session }, null, 2);
     } catch (error) {
       await stopOwnedViewer();
@@ -264,7 +295,7 @@ server.addTool({
   description: "Return the captured tail of logs from a viewer launched by this MCP server.",
   parameters: z.object({ tail: z.number().int().min(1).max(500).optional() }),
   execute: async ({ tail }) => {
-    if (!viewer?.owned) return "No logs are available for an externally started viewer.";
+    if (!viewer?.owned) return lastViewerFailure ?? "No logs are available for an externally started viewer.";
     return viewer.logs.slice(-(tail ?? 100)).join("\n");
   },
 });
