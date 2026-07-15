@@ -260,6 +260,8 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
     bake(BakeArgs {
         manifest: None,
         selector: Some(args.selector.clone()),
+        all_interiors: false,
+        retry_failed: false,
         cache_dir: Some(cache_dir.to_path_buf()),
         quality: BakeQuality::Irradiance,
         irradiance_spacing_meters: 8.0,
