@@ -327,6 +327,91 @@ server.addTool({
 });
 
 server.addTool({
+  name: "performance_snapshot",
+  description:
+    "Summarize a bounded recent frame window and return current Bevy diagnostics and world counts.",
+  parameters: z.object({
+    afterSample: z.number().int().min(0).optional(),
+    latestLimit: z.number().int().min(1).max(600).optional(),
+    budgetMs: z.number().positive().finite().optional(),
+    includeSamples: z.boolean().optional(),
+  }),
+  execute: async ({ afterSample, latestLimit, budgetMs, includeSamples }) => {
+    const client = viewer?.client ?? clientFor();
+    const result = await client.call("bevyout.performance_snapshot", {
+      ...(afterSample === undefined ? {} : { after_sample: afterSample }),
+      latest_limit: latestLimit ?? 600,
+      budget_ms: budgetMs ?? 16.667,
+      include_samples: includeSamples ?? false,
+    });
+    return JSON.stringify(result, null, 2);
+  },
+});
+
+server.addTool({
+  name: "performance_probe",
+  description:
+    "Measure an exact timed frame window in the connected viewer, excluding an optional warmup period.",
+  parameters: z.object({
+    durationMs: z.number().int().min(100).max(60_000).optional(),
+    warmupMs: z.number().int().min(0).max(30_000).optional(),
+    latestLimit: z.number().int().min(1).max(600).optional(),
+    budgetMs: z.number().positive().finite().optional(),
+    includeSamples: z.boolean().optional(),
+  }),
+  execute: async ({ durationMs, warmupMs, latestLimit, budgetMs, includeSamples }) => {
+    const client = viewer?.client ?? clientFor();
+    const effectiveWarmupMs = warmupMs ?? 1_000;
+    const effectiveDurationMs = durationMs ?? 5_000;
+    if (effectiveWarmupMs > 0) await wait(effectiveWarmupMs);
+    const baseline = (await client.call("bevyout.performance_snapshot", {
+      latest_limit: 1,
+      budget_ms: budgetMs ?? 16.667,
+      include_samples: false,
+    })) as { latest_sample?: number | null };
+    await wait(effectiveDurationMs);
+    const result = await client.call("bevyout.performance_snapshot", {
+      ...(baseline.latest_sample === undefined || baseline.latest_sample === null
+        ? {}
+        : { after_sample: baseline.latest_sample }),
+      latest_limit: latestLimit ?? 600,
+      budget_ms: budgetMs ?? 16.667,
+      include_samples: includeSamples ?? false,
+    });
+    return JSON.stringify(
+      {
+        warmup_ms: effectiveWarmupMs,
+        requested_duration_ms: effectiveDurationMs,
+        start_after_sample: baseline.latest_sample ?? null,
+        result,
+      },
+      null,
+      2,
+    );
+  },
+});
+
+server.addTool({
+  name: "schedule_snapshot",
+  description:
+    "Inspect assembled Bevy schedules, system execution traits, and data-access conflict pairs that constrain parallelism.",
+  parameters: z.object({
+    scheduleContains: z.string().optional(),
+    includeSystems: z.boolean().optional(),
+    conflictLimit: z.number().int().min(0).max(1000).optional(),
+  }),
+  execute: async ({ scheduleContains, includeSystems, conflictLimit }) => {
+    const client = viewer?.client ?? clientFor();
+    const result = await client.call("bevyout.schedule_snapshot", {
+      ...(scheduleContains ? { schedule_contains: scheduleContains } : {}),
+      include_systems: includeSystems ?? false,
+      conflict_limit: conflictLimit ?? 100,
+    });
+    return JSON.stringify(result, null, 2);
+  },
+});
+
+server.addTool({
   name: "console_exec",
   description: "Execute one Gamebryo-style command through bevyout's structured console core.",
   parameters: z.object({
