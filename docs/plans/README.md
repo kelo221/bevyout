@@ -25,4 +25,4 @@ and as comments on the issues; the PR closes the issues.
 | M3 wave 3 — caps, ownership, quest-item flags | [M3_WAVE3_PROMPT.md](M3_WAVE3_PROMPT.md) | [M3_WAVE3_PLAN.md](M3_WAVE3_PLAN.md) | PR #82 (#81) |
 | M3 wave 4 — console additem, pickup activation | [M3_WAVE4_PROMPT.md](M3_WAVE4_PROMPT.md) | [M3_WAVE4_PLAN.md](M3_WAVE4_PLAN.md) | PR #85 (#84; merged into `m3-wave3`, reached master via PR #82's squash) |
 | M3 wave 6 — equipment, consumable use and reading, Pip-Boy Data views | [M3_WAVE6_PROMPT.md](M3_WAVE6_PROMPT.md) | [M3_WAVE6_PLAN.md](M3_WAVE6_PLAN.md) | in flight (#98, #99, #100) |
-| M3 wave 7 — recipe preparation and corpse loot | [M3_WAVE7_PROMPT.md](M3_WAVE7_PROMPT.md) | [M3_WAVE7_PLAN.md](M3_WAVE7_PLAN.md) | in flight (#117, #118) |
+| M3 wave 7 — recipe preparation and corpse loot | [M3_WAVE7_PROMPT.md](M3_WAVE7_PROMPT.md) | [M3_WAVE7_PLAN.md](M3_WAVE7_PLAN.md) — see "Shipped amendments" (A10) | PR #122 (#117, #118); follow-up #120; manual script [M3_WAVE7_MANUAL.md](M3_WAVE7_MANUAL.md) |
