@@ -1,0 +1,15 @@
+name: Discord PR event relay
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark PR event for trusted delivery
+        run: echo "Trusted workflow_run delivery will handle this event."
