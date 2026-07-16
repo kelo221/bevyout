@@ -11,12 +11,14 @@ use std::io::{Cursor, Read};
 use super::manifest::{CellInfo, ImageSpaceInfo};
 use super::paths::CellSelector;
 
+mod actors;
 mod binary;
 mod enable;
 mod inventory;
 mod reader;
 mod records;
 
+pub(crate) use actors::*;
 pub(crate) use binary::*;
 pub(crate) use enable::*;
 pub(crate) use inventory::*;
@@ -66,6 +68,12 @@ pub(crate) struct BaseRecord {
     /// Present only for `LVLI`/`LVLN`/`LVLC` base records (issue #74). See
     /// `records::LeveledListData` for the parsed `LVLD`/`LVLF`/`LVLO` body.
     pub(crate) leveled: Option<LeveledListData>,
+    /// Present only for `NPC_`/`CREA` base records (issue #103, M4 wave 1
+    /// task A). See `actors::ActorData` for the parsed actor subrecords.
+    /// Consumed by task C's actor-catalog resolution; unread within this
+    /// task's own decode-only scope.
+    #[allow(dead_code)]
+    pub(crate) actor: Option<ActorData>,
     ignored_subrecords: Vec<String>,
 }
 
