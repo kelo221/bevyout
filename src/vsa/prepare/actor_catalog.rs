@@ -856,15 +856,25 @@ pub(crate) struct ActorCatalogArtifact {
     pub(crate) reused: bool,
 }
 
-/// Writes the deterministic actor-catalog artifact below the content
-/// fingerprint, exactly mirroring `write_recipe_catalog`/`write_item_catalog`:
-/// a byte-identical existing file is left untouched and reported as reused.
+/// Writes the deterministic actor-catalog artifact into the cell's own
+/// scene directory (`scenes/<cell>/actors.ron`, next to `scene.ron`).
+///
+/// Unlike the item/recipe catalogs -- which are content-set-wide, identical
+/// for every cell, and therefore keyed by the source fingerprint under
+/// `catalogs/` -- the actor catalog embeds this cell's ACHR/ACRE placements,
+/// so it must be stored per cell: a shared fingerprint-keyed file would be
+/// overwritten by each prepared cell in turn, leaving every manifest
+/// pointing at whichever cell was prepared last. The returned hash covers
+/// exactly this cell's serialized catalog. A byte-identical existing file
+/// is left untouched and reported as reused, mirroring
+/// `write_recipe_catalog`.
 pub(crate) fn write_actor_catalog(
     cache_dir: &Path,
+    cell_form_id: u32,
     catalog: &PreparedActorCatalog,
 ) -> Result<ActorCatalogArtifact> {
-    let relative = PathBuf::from("catalogs")
-        .join(&catalog.source_fingerprint)
+    let relative = PathBuf::from("scenes")
+        .join(format!("{cell_form_id:08x}"))
         .join("actors.ron");
     let path = cache_dir.join(&relative);
     if let Some(parent) = path.parent() {
@@ -1225,5 +1235,69 @@ mod tests {
         let ron_a = ron::ser::to_string_pretty(&a, ron::ser::PrettyConfig::default()).unwrap();
         let ron_b = ron::ser::to_string_pretty(&b, ron::ser::PrettyConfig::default()).unwrap();
         assert_eq!(ron_a, ron_b);
+    }
+
+    /// Regression test for the M4 wave 1 acceptance bug: the actor catalog
+    /// was originally keyed by the content-set source fingerprint like the
+    /// item/recipe catalogs, so preparing several cells from the same
+    /// content set overwrote one shared `catalogs/<fp>/actors.ron` and every
+    /// manifest ended up pointing at the last-prepared cell's actors. Two
+    /// different cells from the same content set must get distinct per-cell
+    /// paths, distinct hashes for distinct contents, and both files must
+    /// survive preparing the other cell.
+    #[test]
+    fn two_cells_from_the_same_content_set_get_distinct_catalog_artifacts() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "bevyout-actor-catalog-per-cell-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        ));
+
+        // Same content set (same fingerprint), different cells: different
+        // ACHR placements reference different bases.
+        let mut actors = HashMap::new();
+        actors.insert(0x10, npc(0x10));
+        actors.insert(0x20, npc(0x20));
+        let cell_a_inputs = ActorCatalogInputs {
+            actors: actors.clone(),
+            placements: vec![placement(1, 0x10, ActorRecordKind::Npc)],
+            ..ActorCatalogInputs::default()
+        };
+        let cell_b_inputs = ActorCatalogInputs {
+            actors,
+            placements: vec![placement(2, 0x20, ActorRecordKind::Npc)],
+            ..ActorCatalogInputs::default()
+        };
+        let catalog_a = build_actor_catalog(&cell_a_inputs, "shared-fp");
+        let catalog_b = build_actor_catalog(&cell_b_inputs, "shared-fp");
+
+        let artifact_a = write_actor_catalog(&cache_dir, 0x0000_3a35, &catalog_a).unwrap();
+        let artifact_b = write_actor_catalog(&cache_dir, 0x0002_4d6b, &catalog_b).unwrap();
+
+        assert_ne!(artifact_a.relative_path, artifact_b.relative_path);
+        assert_eq!(artifact_a.relative_path, "scenes/00003a35/actors.ron");
+        assert_eq!(artifact_b.relative_path, "scenes/00024d6b/actors.ron");
+        assert_ne!(artifact_a.hash, artifact_b.hash);
+
+        // Writing cell B must not clobber cell A's artifact: A's file still
+        // exists, still matches A's recorded hash, and still round-trips to
+        // A's own catalog (not B's).
+        let bytes_a = std::fs::read(cache_dir.join(&artifact_a.relative_path)).unwrap();
+        assert_eq!(fingerprint(&bytes_a), artifact_a.hash);
+        let decoded_a: PreparedActorCatalog =
+            ron::de::from_str(std::str::from_utf8(&bytes_a).unwrap()).unwrap();
+        assert_eq!(decoded_a, catalog_a);
+
+        let bytes_b = std::fs::read(cache_dir.join(&artifact_b.relative_path)).unwrap();
+        assert_eq!(fingerprint(&bytes_b), artifact_b.hash);
+
+        // Re-preparing the same cell with identical content reuses the file.
+        let artifact_a_again = write_actor_catalog(&cache_dir, 0x0000_3a35, &catalog_a).unwrap();
+        assert!(artifact_a_again.reused);
+        assert_eq!(artifact_a_again.hash, artifact_a.hash);
+
+        std::fs::remove_dir_all(&cache_dir).unwrap();
     }
 }

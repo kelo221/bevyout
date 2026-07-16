@@ -823,7 +823,11 @@ fn prepare_cell(
     output.push(recipe_summary);
     let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
     let actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
-    let actor_catalog_artifact = write_actor_catalog(&cache_dir, &actor_catalog)?;
+    // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
+    // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
+    // recipe catalogs it must not share one fingerprint-keyed file across
+    // cells (each prepare would overwrite the previous cell's actors).
+    let actor_catalog_artifact = write_actor_catalog(&cache_dir, cell_id, &actor_catalog)?;
     let actor_catalog_summary = format!(
         "actor catalog: prepared {}, inherited {}, unresolved {}, unsupported {}, skipped {}",
         actor_catalog.counters.prepared,
