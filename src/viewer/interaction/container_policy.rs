@@ -307,4 +307,47 @@ mod tests {
         );
         assert_eq!(container, vec![(0x10, 2)]);
     }
+
+    // F118.1: a corpse uses the same lossless holder policy as a container;
+    // the stable reference identity lives in the caller's FormID-keyed
+    // runtime map, while this policy owns the stack conservation contract.
+    #[test]
+    fn corpse_take_all_conserves_every_stack() {
+        let mut corpse = vec![(0x10, 5), (0x11, 2)];
+        let mut player = vec![(0x10, 1)];
+        let before = corpse
+            .iter()
+            .chain(&player)
+            .map(|&(_, count)| count)
+            .sum::<i32>();
+
+        let moved = take_all(&mut corpse, &mut player, 0x10).unwrap();
+
+        let after = corpse
+            .iter()
+            .chain(&player)
+            .map(|&(_, count)| count)
+            .sum::<i32>();
+        assert_eq!(moved, 5);
+        assert_eq!(before, after);
+        assert_eq!(corpse, vec![(0x11, 2)]);
+        assert_eq!(player, vec![(0x10, 6)]);
+    }
+
+    // F118.1: a failed corpse transfer is atomic, so a bad take cannot
+    // destroy loot or partially credit the player.
+    #[test]
+    fn corpse_failed_transfer_leaves_both_holders_unchanged() {
+        let mut corpse = vec![(0x10, 2)];
+        let mut player = vec![(0x10, 1)];
+        let before_corpse = corpse.clone();
+        let before_player = player.clone();
+
+        assert_eq!(
+            take_stack(&mut corpse, &mut player, 0x10, 3),
+            Err(TransferError::InsufficientSource)
+        );
+        assert_eq!(corpse, before_corpse);
+        assert_eq!(player, before_player);
+    }
 }

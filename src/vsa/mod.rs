@@ -11,6 +11,7 @@ mod paths;
 mod physics;
 mod plugin;
 mod prepare;
+mod recipe;
 mod report;
 mod scenes;
 

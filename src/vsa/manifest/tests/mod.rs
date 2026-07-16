@@ -234,6 +234,9 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
         item_catalog_path: None,
         item_catalog_revision: None,
         item_catalog_hash: None,
+        recipe_catalog_path: None,
+        recipe_catalog_revision: None,
+        recipe_catalog_hash: None,
         source_plugins: Vec::new(),
         cell: ron::de::from_str(
             r#"(
@@ -510,6 +513,9 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         item_catalog_path: None,
         item_catalog_revision: None,
         item_catalog_hash: None,
+        recipe_catalog_path: None,
+        recipe_catalog_revision: None,
+        recipe_catalog_hash: None,
     };
 
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).unwrap();
@@ -547,4 +553,32 @@ fn legacy_item_catalog_without_quest_item_field_defaults_to_false() {
     let catalog: PreparedItemCatalog = ron::de::from_str(text).unwrap();
     assert_eq!(catalog.items.len(), 1);
     assert!(!catalog.items[0].quest_item);
+}
+
+#[test]
+fn legacy_scene_manifest_without_recipe_catalog_reference_defaults_cleanly() {
+    let text = format!(
+        r#"(
+                schema_version: {},
+                asset_root: "cache",
+                source_plugin: "Fallout3.esm",
+                source_fingerprint: "fingerprint",
+                cell: (
+                    form_id: 1,
+                    editor_id: None,
+                    name: None,
+                    interior: true,
+                    ambient_rgba: (0.0, 0.0, 0.0, 0.0),
+                    directional_rgba: (0.0, 0.0, 0.0, 0.0),
+                ),
+                placements: [],
+                lights: [],
+                diagnostics: [],
+            )"#,
+        CURRENT_MANIFEST_SCHEMA_VERSION
+    );
+    let manifest: PreparedSceneManifest = ron::de::from_str(&text).unwrap();
+    assert!(manifest.recipe_catalog_path.is_none());
+    assert!(manifest.recipe_catalog_revision.is_none());
+    assert!(manifest.recipe_catalog_hash.is_none());
 }

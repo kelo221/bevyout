@@ -119,6 +119,36 @@ pub(crate) struct InventoryItemRecord {
     pub(crate) count: u32,
 }
 
+/// One `RCIL`/`RCOD` + `RCQY` pair in an ESM4 recipe.  The source format
+/// stores quantities as unsigned 32-bit values; preparation narrows them to
+/// the positive signed count used by the existing item/transfer seams and
+/// diagnoses values that cannot be represented there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecipeItemRecord {
+    pub(crate) item_form_id: u32,
+    pub(crate) quantity: i32,
+    pub(crate) order: u32,
+}
+
+/// Fallout 3/New Vegas `RCPE` recipe metadata.  `CTDA` payloads remain opaque
+/// until a later condition evaluator exists; retaining them keeps preparation
+/// lossless without pretending to execute recipe conditions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecipeRecord {
+    pub(crate) form_id: u32,
+    pub(crate) record_flags: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) skill: i32,
+    pub(crate) level: u32,
+    pub(crate) category_form_id: Option<u32>,
+    pub(crate) sub_category_form_id: Option<u32>,
+    pub(crate) ingredients: Vec<RecipeItemRecord>,
+    pub(crate) outputs: Vec<RecipeItemRecord>,
+    pub(crate) conditions: Vec<Vec<u8>>,
+    pub(crate) ignored_subrecords: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BaseAudioRecord {
     pub(crate) loop_sound_form_id: Option<u32>,
@@ -448,6 +478,7 @@ pub(crate) struct CellMetadata {
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPlugin {
     pub(crate) bases: HashMap<u32, BaseRecord>,
+    pub(crate) recipes: HashMap<u32, RecipeRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,
     pub(crate) sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -643,6 +674,7 @@ impl ParsedContentSet {
                 }
             })
             .collect::<Vec<_>>();
+        diagnostics.extend(state.recipe_diagnostics);
         diagnostics.sort();
 
         let mut navmeshes = state
@@ -654,6 +686,7 @@ impl ParsedContentSet {
 
         Ok(ParsedPlugin {
             bases: state.bases,
+            recipes: state.recipes,
             image_spaces: state.image_spaces,
             sounds: state.sounds,
             sound_references: state.sound_references,
@@ -678,6 +711,7 @@ pub(crate) struct PluginSource<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct ParsedState {
     bases: HashMap<u32, BaseRecord>,
+    recipes: HashMap<u32, RecipeRecord>,
     image_spaces: HashMap<u32, ImageSpaceInfo>,
     sounds: HashMap<u32, SoundRecord>,
     sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -691,6 +725,7 @@ pub(crate) struct ParsedState {
     cell_winning_plugins: HashMap<u32, String>,
     cell_provenance: HashMap<u32, Vec<String>>,
     worldspaces: HashMap<u32, WorldspaceRecord>,
+    recipe_diagnostics: Vec<String>,
 }
 
 #[derive(Debug)]

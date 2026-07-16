@@ -1692,6 +1692,59 @@ mod tests {
         );
     }
 
+    // F118.3: corpse holders deliberately reuse the existing reference
+    // inventory subrecord; no corpse-specific save record is needed, so an
+    // old reader/writer can round-trip the exact stacks unchanged.
+    #[test]
+    fn corpse_inventory_delta_round_trips_through_the_legacy_reference_seam() {
+        let mut save = sample_save();
+        save.world
+            .cells
+            .get_mut(&0x0001_51e3)
+            .unwrap()
+            .references
+            .insert(
+                0x0000_C0DE,
+                PersistentReferenceDelta {
+                    inventory: Some(vec![
+                        ItemStack {
+                            base_form_id: 0x10,
+                            count: 1,
+                            condition: None,
+                        },
+                        ItemStack {
+                            base_form_id: 0x11,
+                            count: 2,
+                            condition: Some(80),
+                        },
+                    ]),
+                    ..Default::default()
+                },
+            );
+        let bytes = encode_save(&save).unwrap();
+        assert_eq!(decode_save(&bytes).unwrap(), save);
+    }
+
+    // F118.3 compatibility: a save written before corpse support has no
+    // corpse-specific section and still decodes as the same empty holder
+    // state rather than requiring a new record.
+    #[test]
+    fn old_save_without_corpse_sections_remains_loadable() {
+        let mut save = sample_save();
+        for cell in save.world.cells.values_mut() {
+            cell.references.clear();
+        }
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        assert!(
+            decoded
+                .world
+                .cells
+                .values()
+                .all(|cell| cell.references.is_empty())
+        );
+    }
+
     // Issue #76 (T76.3): a truncated OBJE.INVT payload (claims one item but
     // carries only the four-byte count header) fails through the existing
     // error path rather than silently producing a corrupt inventory.

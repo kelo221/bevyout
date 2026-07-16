@@ -1325,3 +1325,189 @@ fn full_plugin_parse_stores_leveled_list_base_by_form_id() {
         }]
     );
 }
+
+// Issue #117: RCPE fixtures stay synthetic and exercise the raw ESM4 reader
+// before recipe preparation is layered on top of it.
+fn recipe_data(skill: i32, level: u32, category: u32, sub_category: u32) -> Vec<u8> {
+    [
+        skill.to_le_bytes().as_slice(),
+        level.to_le_bytes().as_slice(),
+        category.to_le_bytes().as_slice(),
+        sub_category.to_le_bytes().as_slice(),
+    ]
+    .concat()
+}
+
+fn recipe_item(subrecord_signature: &[u8; 4], form_id: u32) -> Vec<u8> {
+    subrecord(subrecord_signature, &form_id.to_le_bytes())
+}
+
+fn recipe_quantity(quantity: u32) -> Vec<u8> {
+    subrecord(b"RCQY", &quantity.to_le_bytes())
+}
+
+#[test]
+fn parses_valid_rcpe_fields_and_ordered_ingredient_output_pairs() {
+    let recipe_id = 0x700_u32;
+    let cell_id = 0x701_u32;
+    let mut recipe_payload = Vec::new();
+    recipe_payload.extend(subrecord(b"EDID", b"RecipeSynthetic\0"));
+    recipe_payload.extend(subrecord(b"FULL", b"Synthetic Recipe\0"));
+    recipe_payload.extend(subrecord(b"DATA", &recipe_data(-3, 12, 0x400, 0x401)));
+    recipe_payload.extend(recipe_item(b"RCIL", 0x100));
+    recipe_payload.extend(recipe_quantity(2));
+    recipe_payload.extend(recipe_item(b"RCIL", 0x101));
+    recipe_payload.extend(recipe_quantity(1));
+    recipe_payload.extend(recipe_item(b"RCOD", 0x200));
+    recipe_payload.extend(recipe_quantity(3));
+
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_id,
+        &[
+            subrecord(b"EDID", b"RecipeCell\0"),
+            subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(record(b"RCPE", 0, recipe_id, &recipe_payload));
+
+    let parsed = parse_plugin(&plugin, cell_id).expect("valid synthetic RCPE must parse");
+    let recipe = parsed
+        .recipes
+        .get(&recipe_id)
+        .expect("recipe record must be retained");
+    assert_eq!(recipe.editor_id.as_deref(), Some("RecipeSynthetic"));
+    assert_eq!(recipe.name.as_deref(), Some("Synthetic Recipe"));
+    assert_eq!(recipe.skill, -3);
+    assert_eq!(recipe.level, 12);
+    assert_eq!(recipe.category_form_id, Some(0x400));
+    assert_eq!(recipe.sub_category_form_id, Some(0x401));
+    assert_eq!(
+        recipe.ingredients,
+        vec![
+            RecipeItemRecord {
+                item_form_id: 0x100,
+                quantity: 2,
+                order: 0,
+            },
+            RecipeItemRecord {
+                item_form_id: 0x101,
+                quantity: 1,
+                order: 1,
+            },
+        ]
+    );
+    assert_eq!(
+        recipe.outputs,
+        vec![RecipeItemRecord {
+            item_form_id: 0x200,
+            quantity: 3,
+            order: 0,
+        }]
+    );
+}
+
+#[test]
+fn malformed_rcpe_is_reported_and_does_not_leave_partial_recipe_state() {
+    let recipe_id = 0x710_u32;
+    let cell_id = 0x711_u32;
+    let malformed = [
+        subrecord(b"EDID", b"MalformedRecipe\0"),
+        subrecord(b"DATA", &recipe_data(1, 2, 0, 0)[..8]),
+        recipe_item(b"RCIL", 0x100),
+    ]
+    .concat();
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_id,
+        &[
+            subrecord(b"EDID", b"RecipeCell\0"),
+            subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(record(b"RCPE", 0, recipe_id, &malformed));
+
+    let parsed = parse_plugin(&plugin, cell_id).expect("malformed RCPE boundary is diagnosable");
+    assert!(!parsed.recipes.contains_key(&recipe_id));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("RCPE 00000710") && message.contains("DATA"))
+    );
+}
+
+#[test]
+fn duplicate_rcpe_data_is_reported_without_partial_recipe_state() {
+    let recipe_id = 0x715_u32;
+    let cell_id = 0x716_u32;
+    let payload = [
+        subrecord(b"DATA", &recipe_data(1, 2, 0, 0)),
+        subrecord(b"DATA", &recipe_data(3, 4, 0, 0)),
+        recipe_item(b"RCIL", 0x100),
+        recipe_quantity(1),
+        recipe_item(b"RCOD", 0x200),
+        recipe_quantity(1),
+    ]
+    .concat();
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_id,
+        &[subrecord(b"EDID", b"RecipeCell "), subrecord(b"DATA", &[1])].concat(),
+    ));
+    plugin.extend(record(b"RCPE", 0, recipe_id, &payload));
+
+    let parsed = parse_plugin(&plugin, cell_id).expect("duplicate RCPE fields are diagnosable");
+    assert!(!parsed.recipes.contains_key(&recipe_id));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("RCPE 00000715") && message.contains("duplicate DATA"))
+    );
+}
+
+#[test]
+fn unknown_rcpe_subrecords_are_retained_as_diagnostics() {
+    let recipe_id = 0x720_u32;
+    let cell_id = 0x721_u32;
+    let payload = [
+        subrecord(b"EDID", b"RecipeWithUnknown\0"),
+        subrecord(b"DATA", &recipe_data(1, 2, 0, 0)),
+        recipe_item(b"RCIL", 0x100),
+        recipe_quantity(1),
+        recipe_item(b"RCOD", 0x200),
+        recipe_quantity(1),
+        subrecord(b"ZZZZ", &[1, 2, 3]),
+    ]
+    .concat();
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"CELL",
+        0,
+        cell_id,
+        &[
+            subrecord(b"EDID", b"RecipeCell\0"),
+            subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(record(b"RCPE", 0, recipe_id, &payload));
+
+    let parsed = parse_plugin(&plugin, cell_id).expect("unknown RCPE fields are diagnosable");
+    assert!(parsed.recipes.contains_key(&recipe_id));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("RCPE 00000720") && message.contains("ZZZZ"))
+    );
+}

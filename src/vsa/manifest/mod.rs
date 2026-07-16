@@ -35,6 +35,15 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) item_catalog_revision: Option<String>,
     #[serde(default)]
     pub(crate) item_catalog_hash: Option<String>,
+    /// Content-fingerprinted recipe catalogue relative to `asset_root`.
+    /// Serde defaults keep manifests produced before recipe preparation
+    /// readable and explicitly distinguish them from an empty catalogue.
+    #[serde(default)]
+    pub(crate) recipe_catalog_path: Option<String>,
+    #[serde(default)]
+    pub(crate) recipe_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) recipe_catalog_hash: Option<String>,
     #[serde(default)]
     pub(crate) source_plugins: Vec<PreparedPluginSource>,
     pub(crate) cell: CellInfo,
@@ -594,6 +603,12 @@ pub(crate) enum PreparedSemantic {
     Static,
     Pickup(PreparedPickup),
     Container,
+    /// A staged actor corpse is a loot holder, not an actor-simulation
+    /// state. Its stable identity is the placement's reference FormID and
+    /// its contents ride the same prepared inventory/runtime state as a
+    /// container. Actor death and conversion into this semantic remain
+    /// outside this slice.
+    Corpse,
     Door(PreparedDoor),
     Activator,
     Furniture,
@@ -612,6 +627,15 @@ pub(crate) struct PreparedPickup {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PreparedActor {
     pub(crate) base_template_form_id: Option<u32>,
+}
+
+impl PreparedSemantic {
+    /// Whether this placement owns a transfer-able, FormID-keyed loot
+    /// inventory. Kept on the manifest semantic so persistence and runtime
+    /// activation cannot accidentally diverge on the corpse/container set.
+    pub(crate) fn is_loot_holder(&self) -> bool {
+        matches!(self, Self::Container | Self::Corpse)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

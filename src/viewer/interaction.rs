@@ -190,15 +190,6 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
     // including the deterministic first-open leveled roll. Stacks are logged
     // for gate evidence (determinism across runs, no re-roll after reload).
     if opening {
-        let seed_entries: Vec<container_policy::SeedEntry> = placement
-            .inventory
-            .iter()
-            .map(|entry| container_policy::SeedEntry {
-                base_form_id: entry.base_form_id,
-                count: entry.count,
-                leveled: entry.leveled,
-            })
-            .collect();
         let active_cell = world
             .get_resource::<ActiveCell>()
             .map(|cell| cell.0)
@@ -207,7 +198,7 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
             .get_resource::<PlaythroughSeed>()
             .map(|seed| seed.0)
             .unwrap_or_default();
-        let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+        let leveled_lists = if placement.inventory.iter().any(|entry| entry.leveled) {
             world
                 .get_resource::<ResidentCells>()
                 .and_then(|cells| cells.0.get(&active_cell))
@@ -216,25 +207,149 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
         } else {
             BTreeMap::new()
         };
-        let seed = leveled::LeveledSeed::derive(
-            playthrough_seed,
-            active_cell,
-            placement.reference_form_id,
-        );
         let mut states = world.get_resource_or_insert_with(ContainerStates::default);
-        let resolved = states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
-            leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
-        });
+        let resolved = seed_loot_holder(
+            &mut states,
+            &placement,
+            active_cell,
+            playthrough_seed,
+            &leveled_lists,
+        );
         info!(
             "container {} ({:08x}) opened with {} stacks: {:?}",
-            name,
-            placement.reference_form_id,
-            resolved.stacks.len(),
-            resolved.stacks
+            name, placement.reference_form_id, resolved.0, resolved.1
         );
     } else {
         info!(
             "container {} ({:08x}) closed",
+            name, placement.reference_form_id
+        );
+    }
+    opening
+}
+
+/// F118.2: scripted corpse activation enters the same transfer modal as
+/// player activation. A corpse is deliberately staged data in this slice;
+/// no actor death or AI transition is implied by this function.
+pub(crate) fn scripted_corpse_toggle(world: &mut World, entity: Entity) -> bool {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let name = placement_name(&placement);
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .or_else(|| {
+            world
+                .get::<Transform>(entity)
+                .map(|transform| transform.translation)
+        })
+        .unwrap_or_default();
+    let opening = {
+        let mut state = world.get_resource_or_insert_with(InteractionState::default);
+        if state.open.contains(&entity) {
+            state.open.remove(&entity);
+            false
+        } else {
+            state.open.insert(entity);
+            true
+        }
+    };
+
+    if opening {
+        let active_cell = world
+            .get_resource::<ActiveCell>()
+            .map(|cell| cell.0)
+            .unwrap_or_default();
+        let playthrough_seed = world
+            .get_resource::<PlaythroughSeed>()
+            .map(|seed| seed.0)
+            .unwrap_or_default();
+        let leveled_lists = if placement.inventory.iter().any(|entry| entry.leveled) {
+            world
+                .get_resource::<ResidentCells>()
+                .and_then(|cells| cells.0.get(&active_cell))
+                .map(|resident| leveled_lists_from_manifest(&resident.manifest.leveled_lists))
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
+        let resolved = {
+            let mut states = world.get_resource_or_insert_with(ContainerStates::default);
+            seed_loot_holder(
+                &mut states,
+                &placement,
+                active_cell,
+                playthrough_seed,
+                &leveled_lists,
+            )
+        };
+        world
+            .get_resource_or_insert_with(ActiveContainerTarget::default)
+            .0 = Some(ActiveContainer {
+            kind: LootHolderKind::Corpse,
+            entity,
+            reference_form_id: placement.reference_form_id,
+            name: name.clone(),
+            item_names: container_item_names(&placement.inventory),
+            owner_form_id: placement.owner_form_id,
+        });
+        if world.contains_resource::<Messages<PlaySound>>()
+            && let Some(form_id) = placement.audio.open_sound_form_id
+        {
+            world.write_message(PlaySound::at(form_id, position));
+        }
+        if world.contains_resource::<Messages<animation::PlayPlacementAnimation>>() {
+            world.write_message(animation::PlayPlacementAnimation {
+                root: entity,
+                transition: ClipTransition::Opening,
+                lead_ms: 0.0,
+            });
+        }
+        world
+            .get_resource_or_insert_with(InteractionNotice::default)
+            .show(format!("Looting {name}"));
+        if world.contains_resource::<Messages<RequestStateTransition>>() {
+            world.write_message(RequestStateTransition::Modal(GameplayModal::Container));
+        }
+        info!(
+            "corpse {} ({:08x}) opened with {} stacks",
+            name, placement.reference_form_id, resolved.0
+        );
+    } else {
+        let active_target_matches = world
+            .get_resource::<ActiveContainerTarget>()
+            .and_then(|target| target.0.as_ref())
+            .is_some_and(|target| target.entity == entity && target.kind == LootHolderKind::Corpse);
+        if active_target_matches {
+            world.resource_mut::<ActiveContainerTarget>().0 = None;
+        }
+        if world.contains_resource::<Messages<PlaySound>>()
+            && let Some(form_id) = placement.audio.close_sound_form_id
+        {
+            world.write_message(PlaySound::at(form_id, position));
+        }
+        if world.contains_resource::<Messages<animation::PlayPlacementAnimation>>() {
+            world.write_message(animation::PlayPlacementAnimation {
+                root: entity,
+                transition: ClipTransition::Closing,
+                lead_ms: 0.0,
+            });
+        }
+        world
+            .get_resource_or_insert_with(InteractionNotice::default)
+            .show(format!("Closed {name}"));
+        if world
+            .get_resource::<State<GameplayModal>>()
+            .is_some_and(|state| *state.get() == GameplayModal::Container)
+            && world.contains_resource::<Messages<RequestStateTransition>>()
+        {
+            world.write_message(RequestStateTransition::Modal(GameplayModal::None));
+        }
+        info!(
+            "corpse {} ({:08x}) closed",
             name, placement.reference_form_id
         );
     }
@@ -611,12 +726,30 @@ impl ContainerStates {
     }
 }
 
-/// F75.2: which container the transfer modal is currently showing, and the
+/// The transfer modal's holder kind. Containers and staged corpses share the
+/// stack/persistence implementation but retain distinct stable logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LootHolderKind {
+    Container,
+    Corpse,
+}
+
+impl LootHolderKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Corpse => "corpse",
+        }
+    }
+}
+
+/// F75.2/F118.2: which loot holder the transfer modal is showing, and the
 /// best-effort item names collected from its prepared inventory at open
 /// time (resolved-leveled or player-only items with no known name fall
 /// back to their hex form id -- name/count is all this issue promises, see
 /// the plan's non-goals).
-struct ActiveContainer {
+pub(crate) struct ActiveContainer {
+    kind: LootHolderKind,
     entity: Entity,
     reference_form_id: u32,
     name: String,
@@ -627,7 +760,7 @@ struct ActiveContainer {
 }
 
 #[derive(Resource, Default)]
-struct ActiveContainerTarget(Option<ActiveContainer>);
+pub(crate) struct ActiveContainerTarget(pub(crate) Option<ActiveContainer>);
 
 #[derive(Component)]
 struct InteractionPromptText;
@@ -922,6 +1055,31 @@ fn leveled_lists_from_manifest(
         .collect()
 }
 
+/// Seeds one FormID-keyed loot holder through the existing container policy.
+/// The returned pair is (stack_count, stacks) for deterministic scripted logs.
+fn seed_loot_holder(
+    states: &mut ContainerStates,
+    placement: &PreparedPlacement,
+    active_cell: u32,
+    playthrough_seed: u64,
+    leveled_lists: &BTreeMap<u32, leveled::PreparedLeveledList>,
+) -> (usize, Vec<(u32, i32)>) {
+    let seed_entries: Vec<container_policy::SeedEntry> = placement
+        .inventory
+        .iter()
+        .map(|entry| container_policy::SeedEntry {
+            base_form_id: entry.base_form_id,
+            count: entry.count,
+            leveled: entry.leveled,
+        })
+        .collect();
+    let seed =
+        leveled::LeveledSeed::derive(playthrough_seed, active_cell, placement.reference_form_id);
+    let resolved = states.open(placement.reference_form_id, &seed_entries, |list_form_id| {
+        leveled::resolve_leveled(list_form_id, leveled_lists, seed, PLAYER_LEVEL)
+    });
+    (resolved.stacks.len(), resolved.stacks.clone())
+}
 #[allow(clippy::too_many_arguments)]
 fn activate_focused_placement(
     keys: Res<ButtonInput<KeyCode>>,
@@ -1019,7 +1177,7 @@ fn activate_focused_placement(
             state.open.remove(&entity);
             commands.entity(entity).despawn();
         }
-        PreparedSemantic::Container => {
+        PreparedSemantic::Container | PreparedSemantic::Corpse => {
             // Issue #75 (F75.2): activation now opens the paused transfer
             // modal rather than toggling a notice in place. `E` on an
             // already-open container is unreachable in practice --
@@ -1031,27 +1189,12 @@ fn activate_focused_placement(
             if state.open.contains(&entity) {
                 return;
             }
-            let seed_entries: Vec<container_policy::SeedEntry> = placement
-                .inventory
-                .iter()
-                .map(|entry| container_policy::SeedEntry {
-                    base_form_id: entry.base_form_id,
-                    count: entry.count,
-                    leveled: entry.leveled,
-                })
-                .collect();
-            // #74: leveled entries roll exactly once, on first open, seeded
-            // from playthrough seed + active cell + this reference — two
-            // runs of one playthrough resolve identically, and distinct
-            // containers roll independently. The manifest's list bodies are
-            // converted to `leveled`'s std-only mirror types lazily, only
-            // when this container actually carries a leveled entry.
             let active_cell = resolve_context
                 .active_cell
                 .as_ref()
                 .map(|cell| cell.0)
                 .unwrap_or_default();
-            let leveled_lists = if seed_entries.iter().any(|entry| entry.leveled) {
+            let leveled_lists = if placement.inventory.iter().any(|entry| entry.leveled) {
                 resolve_context
                     .resident_cells
                     .as_ref()
@@ -1061,25 +1204,24 @@ fn activate_focused_placement(
             } else {
                 BTreeMap::new()
             };
-            let seed = leveled::LeveledSeed::derive(
+            let stack_data = seed_loot_holder(
+                &mut container_activation.states,
+                placement,
+                active_cell,
                 resolve_context
                     .playthrough_seed
                     .as_ref()
                     .map(|seed| seed.0)
                     .unwrap_or_default(),
-                active_cell,
-                placement.reference_form_id,
+                &leveled_lists,
             );
-            let resolved = container_activation.states.open(
-                placement.reference_form_id,
-                &seed_entries,
-                |list_form_id| {
-                    leveled::resolve_leveled(list_form_id, &leveled_lists, seed, PLAYER_LEVEL)
-                },
-            );
-            let stack_count = resolved.stacks.len();
             state.open.insert(entity);
             container_activation.active.0 = Some(ActiveContainer {
+                kind: match &placement.semantic {
+                    PreparedSemantic::Container => LootHolderKind::Container,
+                    PreparedSemantic::Corpse => LootHolderKind::Corpse,
+                    _ => unreachable!("guarded loot-holder activation"),
+                },
                 entity,
                 reference_form_id: placement.reference_form_id,
                 name: name.clone(),
@@ -1096,8 +1238,15 @@ fn activate_focused_placement(
                 .modal_requests
                 .write(RequestStateTransition::Modal(GameplayModal::Container));
             info!(
-                "container {} ({:08x}) opened with {} stacks",
-                name, placement.reference_form_id, stack_count
+                "{} {} ({:08x}) opened with {} stacks",
+                match &placement.semantic {
+                    PreparedSemantic::Container => "container",
+                    PreparedSemantic::Corpse => "corpse",
+                    _ => unreachable!("guarded loot-holder activation"),
+                },
+                name,
+                placement.reference_form_id,
+                stack_data.0
             );
         }
         PreparedSemantic::Door(door) => {
@@ -1243,6 +1392,10 @@ fn interaction_prompt(
         PreparedSemantic::Container => Some(format!(
             "[E] {} {name}",
             if is_open { "Close" } else { "Open" }
+        )),
+        PreparedSemantic::Corpse => Some(format!(
+            "[E] {} {name}",
+            if is_open { "Close" } else { "Loot" }
         )),
         PreparedSemantic::Door(door) => {
             if door_is_locked(door, inventory) {
