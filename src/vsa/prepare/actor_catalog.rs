@@ -38,8 +38,11 @@ use super::super::paths::fingerprint;
 /// silently with defaulted fields).
 pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v1";
 
-/// Maximum number of concrete `TPLT` hops followed before giving up and
-/// diagnosing the chain as too deep. Bounds pathological (but non-cyclic)
+/// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
+/// including the starting actor itself (`build_chain` checks `nodes.len()`
+/// before pushing the next node, so the maximum number of `TPLT` hops
+/// followed is `MAX_TEMPLATE_CHAIN_DEPTH - 1`); a chain that would grow
+/// past this is diagnosed as too deep. Bounds pathological (but non-cyclic)
 /// content without an unbounded walk; ordinary FO3 template chains are one
 /// or two hops.
 const MAX_TEMPLATE_CHAIN_DEPTH: usize = 32;
