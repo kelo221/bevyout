@@ -17,6 +17,7 @@ use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
+use super::super::manifest::is_pickup_record_kind;
 use super::{
     Diagnostic, PreparedLight, PreparedPlacement, PreparedSemantic, PreparedStaticPointShadowLight,
     PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
@@ -195,7 +196,11 @@ fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlace
 fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
     placement.initially_enabled
         && placement.asset_path.is_some()
-        && !matches!(placement.semantic, PreparedSemantic::Door(_))
+        && !matches!(
+            placement.semantic,
+            PreparedSemantic::Door(_) | PreparedSemantic::Pickup(_)
+        )
+        && !is_pickup_record_kind(&placement.base_kind)
         && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
 }
 
@@ -845,7 +850,8 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_includes_every_enabled_resolved_non_door_semantic_and_physics_class() {
+    fn caster_filter_includes_every_enabled_resolved_non_door_non_pickup_semantic_and_physics_class()
+     {
         let semantics = [
             PreparedSemantic::Static,
             PreparedSemantic::Pickup(PreparedPickup {
@@ -883,7 +889,12 @@ mod tests {
         }
 
         let casters = sorted_shadow_casters(&placements);
-        assert_eq!(casters.len(), placements.len());
+        assert_eq!(casters.len(), placements.len() - physics_classes.len());
+        assert!(
+            casters
+                .iter()
+                .all(|placement| !matches!(placement.semantic, PreparedSemantic::Pickup(_)))
+        );
         assert!(
             casters
                 .iter()
@@ -896,6 +907,25 @@ mod tests {
                 .any(|placement| placement.physics_classification
                     == PreparedPhysicsClassification::Dynamic)
         );
+    }
+
+    #[test]
+    fn caster_filter_excludes_item_record_kinds_even_when_semantic_is_static() {
+        let mut placements = Vec::new();
+        for (index, kind) in [
+            "WEAP", "AMMO", "ARMO", "ALCH", "MISC", "BOOK", "NOTE", "KEYM",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut candidate = placement(&format!("item-{index}.glb"));
+            candidate.reference_form_id = index as u32 + 1;
+            candidate.base_kind = kind.into();
+            candidate.semantic = PreparedSemantic::Static;
+            placements.push(candidate);
+        }
+
+        assert!(sorted_shadow_casters(&placements).is_empty());
     }
 
     #[test]

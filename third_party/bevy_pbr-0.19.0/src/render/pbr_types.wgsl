@@ -28,6 +28,9 @@ struct StandardMaterial {
     max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     deferred_lighting_pass_id: u32,
+    specular_alpha_roughness_min: f32,
+    specular_alpha_roughness_max: f32,
+    specular_alpha_roughness_curve: f32,
 };
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -54,6 +57,7 @@ const STANDARD_MATERIAL_FLAGS_CLEARCOAT_NORMAL_TEXTURE_BIT: u32      = 1u << 16u
 const STANDARD_MATERIAL_FLAGS_ANISOTROPY_TEXTURE_BIT: u32            = 1u << 17u;
 const STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT: u32              = 1u << 18u;
 const STANDARD_MATERIAL_FLAGS_SPECULAR_TINT_TEXTURE_BIT: u32         = 1u << 19u;
+const STANDARD_MATERIAL_FLAGS_SPECULAR_ALPHA_ROUGHNESS_BIT: u32      = 1u << 20u;
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS: u32          = 7u << 29u; // (0b111u << 29u)
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_OPAQUE: u32                 = 0u << 29u;
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_MASK: u32                   = 1u << 29u;
@@ -88,6 +92,9 @@ fn standard_material_new() -> StandardMaterial {
     material.max_parallax_layer_count = 16.0;
     material.max_relief_mapping_search_steps = 5u;
     material.deferred_lighting_pass_id = 1u;
+    material.specular_alpha_roughness_min = 0.089;
+    material.specular_alpha_roughness_max = 0.9;
+    material.specular_alpha_roughness_curve = 1.0;
     // scale 1, translation 0, rotation 0
     material.uv_transform = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
 

@@ -129,32 +129,25 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   press, and the expected result of every step (including any one-time
   cache/prepare setup the wave requires).
 - Model split: see "Model routing" below; it applies to every wave,
-  including single-issue waves, in every agent runtime (Claude and Codex).
+  including single-issue waves, in the Claude runtime. In the Codex runtime,
+  the orchestrating session executes directly because subagents are slow.
 
 ## Model routing
 
-Strict split, no exceptions — single-issue waves included. The executor
-model executes, the orchestrator model plans; the executor can even
-write the tests, the orchestrator evaluates:
-
-- The orchestrating session owns planning, architecture, task
-  decomposition, GitHub housekeeping (issues, plans, PRs, comments),
-  merges/conflict resolution, diff review, and evaluation: running
-  gates, real-data acceptance, and judging evidence. It never writes
-  implementation or test code directly — not even "small" diffs. It may
-  only touch code to resolve merge conflicts or to amend documentation
-  (plans, README tables, AGENTS.md itself).
-- Executor subagents own all execution: production code and all test
-  writing (feature files, cucumber steps, unit tests), each with a
-  tightly scoped, self-contained brief — in an isolated worktree for
-  parallel waves, or directly on the wave branch for single-issue waves.
-
-Per-runtime model mapping:
-
-- Claude: the orchestrating session runs on the large model (Opus-class
-  or above); executor subagents run on Sonnet.
-- Codex: the orchestrating session runs on Sol xhigh; executor agents
-  run on Luna MAX.
+- **Claude runtime**: Strict split, no exceptions — single-issue waves included.
+  The executor model executes, the orchestrator model plans; the executor can
+  even write the tests, the orchestrator evaluates:
+  - The orchestrating session (Opus-class or above) owns planning, architecture,
+    task decomposition, GitHub housekeeping (issues, plans, PRs, comments),
+    merges/conflict resolution, diff review, and evaluation: running gates,
+    real-data acceptance, and judging evidence. It never writes implementation or
+    test code directly.
+  - Executor subagents (Sonnet) own all execution: production code and all test
+    writing (feature files, cucumber steps, unit tests), each with a tightly
+    scoped, self-contained brief — in an isolated worktree for parallel waves,
+    or directly on the wave branch for single-issue waves.
+- **Codex runtime**: Codex does not spawn subagents because they are slow. The
+  orchestrating session (Sol high) executes and plans directly on the wave branch.
 
 ## Testing (feature-first)
 

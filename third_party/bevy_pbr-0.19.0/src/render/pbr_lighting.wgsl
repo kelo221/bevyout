@@ -525,6 +525,39 @@ fn Fd_Burley(
     return lightScatter * viewScatter * (1.0 / PI);
 }
 
+// Chan's diffuse model gives the reflected direct-light lobe a broader,
+// grazing-angle response than Burley while retaining a compact ALU footprint.
+// The source model is expressed in gloss; Bevy's material path stores
+// perceptual roughness, so the conversion is performed here per light.
+fn chan_pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    return x4 * x;
+}
+
+fn Fd_Chan(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+) -> f32 {
+    let perceptual_roughness = clamp((*input).layers[LAYER_BASE].perceptual_roughness, 0.0, 1.0);
+    let gloss = 1.0 - perceptual_roughness;
+    let NdotV = saturate((*input).layers[LAYER_BASE].NdotV);
+    let NdotL = saturate((*derived_input).NdotL);
+    let NdotH = saturate((*derived_input).NdotH);
+    let LdotH = saturate((*derived_input).LdotH);
+
+    let fd0 = LdotH + chan_pow5(1.0 - LdotH);
+    let fd255 =
+        (1.0 - 0.75 * chan_pow5(1.0 - NdotL)) *
+        (1.0 - 0.75 * chan_pow5(1.0 - NdotV));
+    let t = saturate(2.2 * gloss - 0.5);
+    let A = 34.5 * gloss * gloss - 59.0 * gloss + 24.5;
+    let B = max(73.2 * gloss - 21.2, 8.9);
+    let fd = mix(fd0, fd255, t) +
+        A * exp2(-B * sqrt(NdotH)) * LdotH;
+    return fd * (1.0 / PI);
+}
+
 // Scale/bias approximation
 fn F_AB(perceptual_roughness: f32, NdotV: f32) -> vec2<f32> {
 #ifdef DFG_LUT
@@ -637,6 +670,7 @@ fn point_light(
     input: ptr<function, LightingInput>,
     enable_diffuse: bool,
     enable_texture: bool,
+    use_chan_diffuse: bool,
 ) -> vec3<f32> {
     // Unpack.
     let diffuse_color = (*input).diffuse_color;
@@ -737,7 +771,12 @@ fn point_light(
     var derived_input = derive_lighting_input(N, V, L);
     var diffuse = vec3(0.0);
     if (enable_diffuse) {
-        diffuse = diffuse_color * Fd_Burley(input, &derived_input);
+        let diffuse_brdf = select(
+            Fd_Burley(input, &derived_input),
+            Fd_Chan(input, &derived_input),
+            use_chan_diffuse,
+        );
+        diffuse = diffuse_color * diffuse_brdf;
     }
 
     // See https://google.github.io/filament/Filament.md.html#mjx-eqn-pointLightLuminanceEquation
@@ -788,10 +827,11 @@ fn point_light(
 fn spot_light(
     light_id: u32,
     input: ptr<function, LightingInput>,
-    enable_diffuse: bool
+    enable_diffuse: bool,
+    use_chan_diffuse: bool,
 ) -> vec3<f32> {
     // reuse the point light calculations
-    let point_light = point_light(light_id, input, enable_diffuse, false);
+    let point_light = point_light(light_id, input, enable_diffuse, false, use_chan_diffuse);
 
     let light = &view_bindings::clustered_lights.data[light_id];
 
@@ -837,7 +877,8 @@ fn spot_light(
 fn directional_light(
     light_id: u32,
     input: ptr<function, LightingInput>,
-    enable_diffuse: bool
+    enable_diffuse: bool,
+    use_chan_diffuse: bool,
 ) -> vec3<f32> {
     // Unpack.
     let diffuse_color = (*input).diffuse_color;
@@ -853,7 +894,12 @@ fn directional_light(
 
     var diffuse = vec3(0.0);
     if (enable_diffuse) {
-        diffuse = diffuse_color * Fd_Burley(input, &derived_input);
+        let diffuse_brdf = select(
+            Fd_Burley(input, &derived_input),
+            Fd_Chan(input, &derived_input),
+            use_chan_diffuse,
+        );
+        diffuse = diffuse_color * diffuse_brdf;
     }
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY

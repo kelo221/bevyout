@@ -263,12 +263,14 @@ pbr_input.material.uv_transform = uv_transform;
         pbr_input.material.reflectance = pbr_bindings::material.reflectance;
 #endif  // BINDLESS
 
+        var specular_alpha: f32 = 1.0;
+
 #ifdef PBR_SPECULAR_TEXTURES_SUPPORTED
 #ifdef VERTEX_UVS
 
         // Specular texture
         if ((flags & pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u) {
-            let specular =
+            let specular_sample =
 #ifdef MESHLET_MESH_MATERIAL_PASS
                 textureSampleGrad(
 #else   // MESHLET_MESH_MATERIAL_PASS
@@ -292,10 +294,11 @@ pbr_input.material.uv_transform = uv_transform;
 #else   // MESHLET_MESH_MATERIAL_PASS
                     bias.mip_bias,
 #endif  // MESHLET_MESH_MATERIAL_PASS
-            ).a;
+            );
+            specular_alpha = specular_sample.a;
             // This 0.5 factor is from the `KHR_materials_specular` specification:
             // <https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular#materials-with-reflectance-parameter>
-            pbr_input.material.reflectance *= specular * 0.5;
+            pbr_input.material.reflectance *= specular_alpha * 0.5;
         }
 
         // Specular tint texture
@@ -374,9 +377,18 @@ pbr_input.material.uv_transform = uv_transform;
 #ifdef BINDLESS
         var metallic: f32 = pbr_bindings::material_array[material_indices[slot].material].metallic;
         var perceptual_roughness: f32 = pbr_bindings::material_array[material_indices[slot].material].perceptual_roughness;
+        let specular_alpha_roughness_min =
+                pbr_bindings::material_array[material_indices[slot].material].specular_alpha_roughness_min;
+        let specular_alpha_roughness_max =
+                pbr_bindings::material_array[material_indices[slot].material].specular_alpha_roughness_max;
+        let specular_alpha_roughness_curve =
+                pbr_bindings::material_array[material_indices[slot].material].specular_alpha_roughness_curve;
 #else   // BINDLESS
         var metallic: f32 = pbr_bindings::material.metallic;
         var perceptual_roughness: f32 = pbr_bindings::material.perceptual_roughness;
+        let specular_alpha_roughness_min = pbr_bindings::material.specular_alpha_roughness_min;
+        let specular_alpha_roughness_max = pbr_bindings::material.specular_alpha_roughness_max;
+        let specular_alpha_roughness_curve = pbr_bindings::material.specular_alpha_roughness_curve;
 #endif  // BINDLESS
 
 #ifdef VERTEX_UVS
@@ -411,6 +423,24 @@ pbr_input.material.uv_transform = uv_transform;
             perceptual_roughness *= metallic_roughness.g;
         }
 #endif
+
+#ifdef PBR_SPECULAR_TEXTURES_SUPPORTED
+#ifdef VERTEX_UVS
+        // Fallout's converted normal map also supplies KHR specular strength in
+        // alpha. Use that existing channel as a stable roughness proxy only for
+        // materials explicitly opted in by the CPU policy, and never override an
+        // authored metallic-roughness texture.
+        if ((flags & pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_ALPHA_ROUGHNESS_BIT) != 0u &&
+                (flags & pbr_types::STANDARD_MATERIAL_FLAGS_SPECULAR_TEXTURE_BIT) != 0u &&
+                (flags & pbr_types::STANDARD_MATERIAL_FLAGS_METALLIC_ROUGHNESS_TEXTURE_BIT) == 0u) {
+            let proxy_min = clamp(specular_alpha_roughness_min, 0.089, 1.0);
+            let proxy_max = clamp(specular_alpha_roughness_max, proxy_min, 1.0);
+            let proxy_curve = max(specular_alpha_roughness_curve, 0.1);
+            let proxy = pow(max(1.0 - specular_alpha, 0.0), proxy_curve);
+            perceptual_roughness = mix(proxy_min, proxy_max, proxy);
+        }
+#endif  // VERTEX_UVS
+#endif  // PBR_SPECULAR_TEXTURES_SUPPORTED
         pbr_input.material.metallic = metallic;
         pbr_input.material.perceptual_roughness = perceptual_roughness;
 

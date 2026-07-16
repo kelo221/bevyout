@@ -75,7 +75,10 @@ fn recorded_bake_validity(args: &BakeArgs, scene_manifest: &Path) -> bool {
     let Ok(outputs) = bake_outputs(&manifest) else {
         return false;
     };
-    let job = build_bake_job(&manifest, args, &outputs);
+    let mut job = build_bake_job(&manifest, args, &outputs);
+    if exclude_animated_static_assets(&outputs.asset_root, &mut job).is_err() {
+        return false;
+    }
     let Ok(current_job_fingerprint) = bake_job_fingerprint(&manifest, &job) else {
         return false;
     };

@@ -491,7 +491,7 @@ fn apply_pbr_lighting(
         let enable_diffuse = true;
 #endif  // LIGHTMAP
 
-        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);
+        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true, true);
         direct_light += light_contrib;
 
         var transmitted_light_contrib = vec3<f32>(0.0);
@@ -507,7 +507,7 @@ fn apply_pbr_lighting(
         // F_ab = vec2<f32>(0.1)
         // F0 = vec3<f32>(0.0)
         transmitted_light_contrib =
-            lighting::point_light(light_id, &transmissive_lighting_input, enable_diffuse, true);
+            lighting::point_light(light_id, &transmissive_lighting_input, enable_diffuse, true, false);
         transmitted_light += transmitted_light_contrib;
 #endif
 
@@ -606,7 +606,7 @@ fn apply_pbr_lighting(
 #endif
 #endif
 
-        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse);
+        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse, true);
         direct_light += light_contrib * shadow;
 
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
@@ -632,7 +632,7 @@ fn apply_pbr_lighting(
         }
 
         let transmitted_light_contrib =
-            lighting::spot_light(light_id, &transmissive_lighting_input, enable_diffuse);
+            lighting::spot_light(light_id, &transmissive_lighting_input, enable_diffuse, false);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }
@@ -672,7 +672,7 @@ fn apply_pbr_lighting(
 #endif
 #endif
 
-        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse);
+        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse, true);
 
 #ifdef DIRECTIONAL_LIGHT_SHADOW_MAP_DEBUG_CASCADES
         light_contrib = shadows::cascade_debug_visualization(light_contrib, i, view_z);
@@ -696,7 +696,7 @@ fn apply_pbr_lighting(
         }
 
         let transmitted_light_contrib =
-            lighting::directional_light(i, &transmissive_lighting_input, enable_diffuse);
+            lighting::directional_light(i, &transmissive_lighting_input, enable_diffuse, false);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use ron::ser::{PrettyConfig, to_string_pretty};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +28,7 @@ use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_prepared_manifest_compatible,
+    is_pickup_record_kind,
 };
 use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
 use super::scenes::resolve_cached_manifest;
@@ -243,7 +245,8 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         irradiance_raw,
         job_file,
     } = &outputs;
-    let job = build_bake_job(&manifest, args, &outputs);
+    let mut job = build_bake_job(&manifest, args, &outputs);
+    exclude_animated_static_assets(asset_root, &mut job)?;
     fs::write(job_file, serde_json::to_vec_pretty(&job)?)?;
 
     let script_file = output_dir.join("blender_bake.py");
@@ -470,6 +473,31 @@ fn replace_output(temporary: &Path, final_path: &Path) -> Result<()> {
 pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
     placement.physics_classification != PreparedPhysicsClassification::Dynamic
         && matches!(placement.semantic, PreparedSemantic::Static)
+        && !is_pickup_record_kind(&placement.base_kind)
+}
+
+fn exclude_animated_static_assets(asset_root: &Path, job: &mut BakeJob) -> Result<()> {
+    let mut animation_by_asset = HashMap::<String, bool>::new();
+    let mut retained = Vec::with_capacity(job.placements.len());
+    for placement in job.placements.drain(..) {
+        let animated = if let Some(animated) = animation_by_asset.get(&placement.asset_path) {
+            *animated
+        } else {
+            let animated = rust_scene::asset_contains_animation(asset_root, &placement.asset_path)?;
+            animation_by_asset.insert(placement.asset_path.clone(), animated);
+            animated
+        };
+        if animated {
+            println!(
+                "Rust bake: skipping animated static placement {:08x} ({})",
+                placement.reference_form_id, placement.asset_path
+            );
+        } else {
+            retained.push(placement);
+        }
+    }
+    job.placements = retained;
+    Ok(())
 }
 
 fn is_batchable_static(placement: &PreparedPlacement) -> bool {

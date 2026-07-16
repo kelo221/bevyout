@@ -119,6 +119,7 @@ pub(crate) fn run_view(
     player::install(&mut app, disable_physics);
     bindings::install(&mut app);
     audio::install(&mut app);
+    material_shading::install(&mut app);
     interaction::install(&mut app);
     pipboy::install(&mut app);
     pipboy_reader::install(&mut app);
