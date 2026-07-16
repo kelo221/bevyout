@@ -1,0 +1,3 @@
+# Workflow files execute with repository authority and require owner review.
+/.github/workflows/ @kelo221
+/.github/CODEOWNERS @kelo221
