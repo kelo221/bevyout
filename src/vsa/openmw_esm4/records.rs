@@ -54,6 +54,24 @@ pub(crate) fn parse_base(
         .collect();
     let audio = parse_base_audio(sig, subs, resolver);
     let leveled = is_leveled_list(sig).then(|| parse_leveled_list(subs, resolver));
+    // Issue #103 (M4 wave 1 task A): NPC_/CREA actor subrecords decode into
+    // `BaseRecord::actor`. Their supported signatures extend the diagnostics
+    // allowlist below, and any malformed ACBS/AIDT/DATA payload contributes
+    // its own stable diagnostic rather than panicking.
+    let mut supported_signatures = vec![
+        "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM", "BNAM",
+        "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO", "ICO2", "MIC2",
+        "DESC", "EFID", "EFIT", "SCIT", "DNAM",
+        // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
+        // WEAP/ARMO arms rather than falling through to diagnostics.
+        "BMDT", "NAM0",
+    ];
+    supported_signatures.extend_from_slice(actor_supported_signatures(sig));
+    let mut ignored_subrecords = ignored_signatures(subs, &supported_signatures);
+    let actor = parse_actor(sig, subs, resolver).map(|(actor, diagnostics)| {
+        ignored_subrecords.extend(diagnostics);
+        actor
+    });
     Some(BaseRecord {
         kind: sig.to_string(),
         record_flags: 0,
@@ -74,17 +92,8 @@ pub(crate) fn parse_base(
         inventory,
         audio,
         leveled,
-        ignored_subrecords: ignored_signatures(
-            subs,
-            &[
-                "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM",
-                "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO",
-                "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM",
-                // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
-                // WEAP/ARMO arms rather than falling through to diagnostics.
-                "BMDT", "NAM0",
-            ],
-        ),
+        actor,
+        ignored_subrecords,
     })
 }
 

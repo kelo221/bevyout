@@ -20,6 +20,10 @@ The adaptation is intentionally limited to the Fallout cell vertical slice:
 - Fallout 3/New Vegas `RCPE` recipe metadata, ordered `RCIL`/`RCQY`
   ingredient and `RCOD`/`RCQY` output pairs, and opaque `CTDA`
   conditions;
+- Fallout 3 `NPC_`/`CREA` actor subrecords (`ACBS`, `AIDT`, faction/package/
+  head-part lists, base stats and skills, hair/eyes/combat-style links,
+  creature model/animation/sound metadata), including FO3-specific layouts
+  OpenMW's supplied snapshot recognizes but does not itself decode;
 - OpenMW's ESM4 teleport-door rule: resolve `XTEL`'s destination reference and
   use that reference's parent cell as the destination cell.
 
