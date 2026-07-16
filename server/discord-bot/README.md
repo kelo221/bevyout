@@ -6,8 +6,11 @@ asks Gemini for one original notification, and returns a Discord-ready payload
 to the GitHub workflow. The workflow posts that payload to Discord because the
 VM's Azure egress is rejected by Discord's edge network.
 
-The service reloads `personalities.json` for every request, so adding a profile
-does not require changing the GitHub workflow. The production deployment lives
+The service reloads `personalities.json` for every request and selects exactly
+one profile randomly in Python before calling Gemini. Gemini receives only that
+selected profile, so it cannot repeatedly choose the same personality or blend
+profiles. Adding a profile does not require changing the GitHub workflow. The
+production deployment lives
 at `/opt/bevyout-discord-bot` and listens only on `127.0.0.1:8978`; Caddy exposes
 the authenticated endpoint at `/api/bevyout-discord` over the existing HTTPS
 listener.
