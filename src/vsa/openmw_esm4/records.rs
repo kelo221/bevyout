@@ -80,6 +80,9 @@ pub(crate) fn parse_base(
                 "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM",
                 "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO",
                 "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM",
+                // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
+                // WEAP/ARMO arms rather than falling through to diagnostics.
+                "BMDT", "NAM0",
             ],
         ),
     })
@@ -157,6 +160,9 @@ pub(crate) fn parse_item_stats(
                 clip_size,
                 speed,
                 reach,
+                // Issue #98 (F98.1): FO3's WEAP.NAM0 "Ammo" field, a plain
+                // FormID reference like YNAM/ZNAM.
+                ammo_form_id: sub_form_id(subs, "NAM0", resolver),
             }
         }
         "ARMO" => OpenMwItemStats::Apparel {
@@ -168,6 +174,11 @@ pub(crate) fn parse_item_stats(
                 .and_then(|data| u16_at(data, 0))
                 .map(f32::from),
             max_condition: data.and_then(|data| u32_at_option(data, 4)),
+            // Issue #98 (F98.1): BMDT's first four bytes are the biped-slot
+            // mask in both the FO3 (8-byte) and TES4 (4-byte) layouts (see
+            // `ESM4::Armor::load`'s BMDT case in OpenMW's
+            // `components/esm4/loadarmo.cpp`).
+            biped_slot_mask: sub(subs, "BMDT").and_then(|data| u32_at_option(data, 0)),
         },
         "AMMO" => OpenMwItemStats::Ammo {
             damage: sub(subs, "DNAM")

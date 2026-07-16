@@ -33,6 +33,9 @@ use super::openmw_player::{
 
 mod camera;
 mod collision;
+// Pure std-only equip/unequip rules (issue #98); see its module doc comment
+// for why `tests/features.rs` can include it verbatim via `#[path]`.
+pub(crate) mod equipment;
 mod movement;
 mod surface;
 

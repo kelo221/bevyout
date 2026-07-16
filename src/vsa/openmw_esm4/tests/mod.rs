@@ -40,6 +40,8 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             direct_subrecord("ICON", b"interface/icons/rifle.dds\0".to_vec()),
             direct_subrecord("MICO", b"interface/icons/rifle_small.dds\0".to_vec()),
             direct_subrecord("DATA", weapon_data),
+            // Issue #98 (F98.1): NAM0 is the FO3 "Ammo" FormID field.
+            direct_subrecord("NAM0", 0x0001_2ab3_u32.to_le_bytes().to_vec()),
         ],
         &resolver,
     )
@@ -55,19 +57,30 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             clip_size: Some(8),
             speed: None,
             reach: None,
+            ammo_form_id: Some(0x0001_2ab3),
         }
+    );
+    assert!(
+        !weapon.ignored_subrecords.contains(&"NAM0".to_string()),
+        "NAM0 is now decoded, not merely ignored"
     );
 
     let mut armor_data = Vec::new();
     armor_data.extend_from_slice(&80_u32.to_le_bytes());
     armor_data.extend_from_slice(&400_u32.to_le_bytes());
     armor_data.extend_from_slice(&12.0_f32.to_le_bytes());
+    // Issue #98 (F98.1): FO3's 8-byte BMDT is armor-flags (biped-slot mask)
+    // + general-flags (masked to its low byte by the reader, per
+    // `ESM4::Armor::load`'s BMDT case).
+    let mut armor_bmdt = 0x0000_0025_u32.to_le_bytes().to_vec(); // Head|UpperBody|Weapon
+    armor_bmdt.extend_from_slice(&0_u32.to_le_bytes());
     let armor = parse_base(
         "ARMO",
         &[
             direct_subrecord("MICO", b"interface/icons/armor_small.dds\0".to_vec()),
             direct_subrecord("DATA", armor_data),
             direct_subrecord("DNAM", 18_u16.to_le_bytes().to_vec()),
+            direct_subrecord("BMDT", armor_bmdt),
         ],
         &resolver,
     )
@@ -82,7 +95,12 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
         OpenMwItemStats::Apparel {
             armor_rating: Some(18.0),
             max_condition: Some(400),
+            biped_slot_mask: Some(0x0000_0025),
         }
+    );
+    assert!(
+        !armor.ignored_subrecords.contains(&"BMDT".to_string()),
+        "BMDT is now decoded, not merely ignored"
     );
 
     let mut ammo_data = Vec::new();

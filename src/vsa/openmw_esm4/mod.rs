@@ -80,10 +80,19 @@ pub(crate) enum OpenMwItemStats {
         clip_size: Option<u8>,
         speed: Option<f32>,
         reach: Option<f32>,
+        /// Issue #98 (F98.1): the `WEAP.NAM0` ammo base form id (FO3's `Ammo`
+        /// field, `ESM4::Weapon` in OpenMW's `components/esm4/loadweap.cpp`
+        /// treats it as an opaque skipped subrecord; this port decodes it as
+        /// a FormID reference the way `YNAM`/`ZNAM` already are).
+        ammo_form_id: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,
         max_condition: Option<u32>,
+        /// Issue #98 (F98.1): the FO3 `ARMO.BMDT` biped-slot mask (first four
+        /// bytes of the subrecord in both the FO3 and TES4 layouts --
+        /// `ESM4::Armor::mArmorFlags` in OpenMW's `components/esm4/loadarmo.cpp`).
+        biped_slot_mask: Option<u32>,
     },
     Ammo {
         damage: Option<f32>,

@@ -28,8 +28,9 @@ use bevy::prelude::*;
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
 
 use crate::save::{
-    DroppedItemState, ItemStack, PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader,
-    SavePlugin, SaveStore, SavedBodyState, SavedTransform,
+    DroppedItemState, EquippedItem, EquippedKind, HotkeyBinding, ItemStack,
+    PersistentReferenceDelta, PlayerState, SaveGame, SaveGameHeader, SavePlugin, SaveStore,
+    SavedBodyState, SavedTransform,
 };
 #[cfg(test)]
 use crate::vsa::PreparedInventoryEntry;
@@ -773,6 +774,8 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
                     .collect()
             })
             .unwrap_or_default(),
+        equipped: capture_equipped(world),
+        hotkeys: capture_hotkeys(world),
     };
     let save = SaveGame {
         header,
@@ -799,6 +802,59 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     let path = store.primary_path(slot);
     info!("save write {slot} path={}", path.display());
     Ok(path)
+}
+
+/// Issue #98 (F98.4): flattens `PlayerEquipment` into the sorted save shape
+/// `validate_equipped` requires. Apparel is deduplicated by `StackKey` since
+/// one equipped item can occupy several biped slots at once (see
+/// `player::equipment::EquipmentState::equip_apparel`).
+fn capture_equipped(world: &World) -> Vec<EquippedItem> {
+    let Some(equipment) = world.get_resource::<interaction::PlayerEquipment>() else {
+        return Vec::new();
+    };
+    let mut equipped = Vec::new();
+    let mut seen_apparel = HashSet::new();
+    for (_, key) in equipment.equipped_apparel() {
+        if seen_apparel.insert(key) {
+            equipped.push(EquippedItem {
+                kind: EquippedKind::Apparel,
+                base_form_id: key.base_form_id,
+                condition: key.condition,
+            });
+        }
+    }
+    if let Some(key) = equipment.equipped_weapon() {
+        equipped.push(EquippedItem {
+            kind: EquippedKind::Weapon,
+            base_form_id: key.base_form_id,
+            condition: key.condition,
+        });
+    }
+    if let Some(key) = equipment.equipped_ammo() {
+        equipped.push(EquippedItem {
+            kind: EquippedKind::Ammo,
+            base_form_id: key.base_form_id,
+            condition: key.condition,
+        });
+    }
+    equipped.sort_by_key(|item| (item.kind, item.base_form_id, item.condition));
+    equipped
+}
+
+/// Issue #98 (F98.4): flattens the `HotkeyBindings` resource into the fixed
+/// 8-slot save shape.
+fn capture_hotkeys(world: &World) -> [Option<HotkeyBinding>; 8] {
+    let Some(bindings) = world.get_resource::<super::super::bindings::HotkeyBindings>() else {
+        return Default::default();
+    };
+    let mut hotkeys: [Option<HotkeyBinding>; 8] = Default::default();
+    for (index, slot) in hotkeys.iter_mut().enumerate() {
+        *slot = bindings.get((index + 1) as u8).map(|key| HotkeyBinding {
+            base_form_id: key.base_form_id,
+            condition: key.condition,
+        });
+    }
+    hotkeys
 }
 
 #[cfg(test)]

@@ -146,10 +146,18 @@ pub(crate) enum PreparedItemStats {
         clip_size: Option<u8>,
         speed: Option<f32>,
         reach: Option<f32>,
+        /// Issue #98 (F98.1): base form id of the ammo this weapon takes.
+        /// Serde-defaulted so wave 1/2 catalogs keep deserializing.
+        #[serde(default)]
+        ammo_form_id: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,
         max_condition: Option<u32>,
+        /// Issue #98 (F98.1): FO3 `ARMO.BMDT` biped-slot mask. Serde-defaulted
+        /// so wave 1/2 catalogs keep deserializing.
+        #[serde(default)]
+        biped_slot_mask: Option<u32>,
     },
     Ammo {
         damage: Option<f32>,

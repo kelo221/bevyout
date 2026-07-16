@@ -25,8 +25,8 @@ use crate::vsa::{PreparedItemCatalog, PreparedItemDefinition};
 use super::super::inventory::{DropAction, InventoryStack, StackKey, drop_action};
 use super::animation::{self, ClipTransition};
 use super::{
-    ActiveContainerTarget, ContainerStates, InteractionState, PlaySound, PlayerInventory,
-    container_policy, item_rules,
+    ActiveContainerTarget, ContainerStates, InteractionState, PlaySound, PlayerEquipment,
+    PlayerInventory, container_policy, item_rules,
 };
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
@@ -354,6 +354,7 @@ fn handle_player_rows(
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     mut ui_state: ResMut<TransferUiState>,
     roots: Query<Entity, With<TransferRoot>>,
@@ -387,6 +388,14 @@ fn handle_player_rows(
         return;
     };
     ui_state.selected_player = Some(key);
+    // Issue #98 (F98.2): equipped items cannot be stored into a container.
+    if equipment.is_equipped(key) {
+        warn!(
+            "container transfer rejected: item is equipped {:08x}",
+            key.base_form_id
+        );
+        return;
+    }
     // Issue #81: quest items never enter containers; the rejection happens
     // before store-one or the quantity picker, so the confirm path stays
     // unreachable for them.
