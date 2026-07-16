@@ -46,6 +46,7 @@ pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
+pub(crate) use prepare::ITEM_CATALOG_REVISION;
 pub use prepare::prepare;
 pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

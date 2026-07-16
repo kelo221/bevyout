@@ -33,6 +33,16 @@ pub(crate) fn run_view(
             if manifest.item_catalog_revision.as_deref() != Some(catalog.revision.as_str()) {
                 anyhow::bail!("item catalog revision does not match scene manifest");
             }
+            // A manifest/catalog pair from an older build cross-matches
+            // above even though its shape is stale (serde-defaulted fields
+            // silently degrade equip rules); pin the pair to this build's
+            // catalog revision instead of loading it degraded.
+            if catalog.revision != ITEM_CATALOG_REVISION {
+                anyhow::bail!(
+                    "item catalog revision {} is stale, expected {ITEM_CATALOG_REVISION}; run `prepare` again",
+                    catalog.revision,
+                );
+            }
             if catalog.source_fingerprint != manifest.source_fingerprint {
                 anyhow::bail!(
                     "item catalog fingerprint {} does not match scene {}",
