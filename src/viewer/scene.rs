@@ -5,12 +5,10 @@ use std::sync::Arc;
 use super::controls::{AmbientScale, FogStrength, LightingScale};
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
-use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
-use bevy::render::view::Msaa;
 
 pub(super) fn fallout_bloom() -> Bloom {
     Bloom {
@@ -24,16 +22,6 @@ pub(super) fn fallout_bloom() -> Bloom {
     }
 }
 
-fn prepared_camera_aa() -> (Msaa, Smaa, ShadowFilteringMethod) {
-    (
-        Msaa::Off,
-        Smaa {
-            preset: SmaaPreset::High,
-        },
-        ShadowFilteringMethod::Hardware2x2,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_prepared_scene(
     mut commands: Commands,
@@ -43,7 +31,6 @@ pub(crate) fn spawn_prepared_scene(
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
-    point_shadow_radius: Res<PointShadowSourceRadius>,
     mut references: ResMut<crate::console::RefRegistry>,
     mut resident_cells: ResMut<ResidentCells>,
 ) {
@@ -56,14 +43,11 @@ pub(crate) fn spawn_prepared_scene(
     let cell_lighting = effective_lighting(&manifest.cell);
     let (color_grading, auto_exposure) =
         camera_post_processing(manifest.cell.image_space.as_ref(), &mut compensation_curves);
-    let (msaa, smaa, shadow_filtering) = prepared_camera_aa();
     let mut camera = commands.spawn((
         Camera3d::default(),
         Projection::Perspective(default_perspective_projection()),
         HorizontalFov::default(),
-        msaa,
-        smaa,
-        shadow_filtering,
+        ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
         OcclusionCulling,
         fallout_bloom(),
@@ -264,17 +248,10 @@ pub(crate) fn spawn_prepared_scene(
         if !light.initially_enabled {
             continue;
         }
-        let has_prepared_shadow = prepared_shadow_records.contains_key(&light.reference_form_id);
         let mut light_entity = commands.spawn((
             PointLight {
                 intensity: light.radius * light.radius * 2.0 * lighting.0,
                 range: light.radius,
-                radius: if has_prepared_shadow {
-                    point_shadow_radius.0
-                } else {
-                    0.0
-                },
-                soft_shadows_enabled: has_prepared_shadow && point_shadow_radius.0 > 0.0,
                 color: Color::srgb(
                     light.color_rgba[0],
                     light.color_rgba[1],
@@ -334,19 +311,6 @@ pub(crate) fn spawn_prepared_scene(
     info!(
         "controls: Tab opens Pip-Boy, ` (backquote) opens the console, Esc pauses and releases cursor, left click captures cursor"
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prepared_camera_uses_msaa_off_smaa_high_and_non_temporal_shadows() {
-        let (msaa, smaa, filtering) = prepared_camera_aa();
-        assert_eq!(msaa, Msaa::Off);
-        assert!(matches!(smaa.preset, SmaaPreset::High));
-        assert_eq!(filtering, ShadowFilteringMethod::Hardware2x2);
-    }
 }
 
 /// Content spawned for one cell by `spawn_cell_content`: the scene handles

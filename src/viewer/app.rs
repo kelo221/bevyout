@@ -276,7 +276,6 @@ pub(crate) fn run_view(
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
         .insert_resource(PointLightShadowSamples::default())
-        .insert_resource(PointShadowSourceRadius::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
         // graph but the CLI never observes it (LoadingTarget is always set).
@@ -303,7 +302,6 @@ pub(crate) fn run_view(
                 apply_ao_strength,
                 apply_irradiance_intensity,
                 apply_horizontal_fov,
-                apply_point_shadow_source_radius,
                 update_fps_text,
                 apply_unlit_mode,
                 configure_glow_cards,

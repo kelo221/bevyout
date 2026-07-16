@@ -60,7 +60,6 @@ mod console_ui;
 mod controls;
 mod diagnostics;
 mod lighting;
-mod lighting_policy;
 mod material_shading;
 mod material_shading_policy;
 mod performance_policy;

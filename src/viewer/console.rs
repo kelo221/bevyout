@@ -25,11 +25,9 @@ use super::controls::{
     horizontal_to_vertical_fov,
 };
 use super::inventory::{InventoryStack, StackKey};
-use super::lighting::PointShadowSourceRadius;
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::shadow_cache_status;
-use super::lighting_policy::validate_source_radius;
 use super::{diagnostics, interaction, player};
 
 #[derive(Component)]
@@ -1308,7 +1306,7 @@ fn sync_ui_visibility(
     }
 }
 
-const RENDER_SETTINGS: [&str; 10] = [
+const RENDER_SETTINGS: [&str; 9] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -1318,7 +1316,6 @@ const RENDER_SETTINGS: [&str; 10] = [
     "fog",
     "ao",
     "shadow_samples",
-    "shadow_radius",
 ];
 
 const TONEMAPPER_NAMES: [&str; 9] = [
@@ -1485,10 +1482,6 @@ fn render_values(world: &mut World) -> Result<Map<String, Value>, ConsoleError> 
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
     );
-    values.insert(
-        "shadow_radius".into(),
-        json!(world.resource::<PointShadowSourceRadius>().0),
-    );
     Ok(values)
 }
 
@@ -1514,7 +1507,6 @@ fn render_setting_label(setting: &str) -> &'static str {
         "fog" => "Fog",
         "ao" => "Ambient occlusion",
         "shadow_samples" => "Point-shadow samples per pixel",
-        "shadow_radius" => "Prepared point-shadow source radius (m)",
         _ => "Render setting",
     }
 }
@@ -1579,7 +1571,6 @@ fn set_render(
         "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
-        "shadow_radius" => validate_source_radius(value),
         _ => unreachable!(),
     };
     if !valid {
@@ -1596,12 +1587,6 @@ fn set_render(
         "fog" => world.resource_mut::<FogStrength>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
-        "shadow_radius" => {
-            let mut radius = world.resource_mut::<PointShadowSourceRadius>();
-            if radius.0 != value {
-                radius.0 = value;
-            }
-        }
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
             let camera = {
                 let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<Bloom>)>();
@@ -1783,7 +1768,6 @@ mod tests {
             .insert_resource(LightsDisabled(false))
             .insert_resource(PreparedPointShadowRuntime::default())
             .insert_resource(PointLightShadowSamples::default())
-            .insert_resource(PointShadowSourceRadius::default())
             .insert_resource(BoxdddDebugDrawSettings::default())
             .insert_resource(player::StepDebugSettings::default())
             .insert_resource(interaction::PlayerInventory::default())
@@ -1948,33 +1932,6 @@ mod tests {
         assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 0);
         assert!(exec(&mut app, "setrender shadow_samples 1").ok);
         assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 1);
-        assert!(
-            (exec(&mut app, "getrender shadow_radius").value["value"]
-                .as_f64()
-                .unwrap()
-                - 0.05)
-                .abs()
-                < 1e-6
-        );
-        assert!(exec(&mut app, "setrender shadow_radius 0").ok);
-        assert_eq!(app.world().resource::<PointShadowSourceRadius>().0, 0.0);
-        assert!(exec(&mut app, "setrender shadow_radius 0.25").ok);
-        assert_eq!(app.world().resource::<PointShadowSourceRadius>().0, 0.25);
-        for value in ["-0.01", "0.26", "NaN", "inf"] {
-            let before = app.world().resource::<PointShadowSourceRadius>().0;
-            assert_eq!(
-                exec(&mut app, &format!("setrender shadow_radius {value}"))
-                    .error
-                    .unwrap()
-                    .code,
-                if value == "NaN" || value == "inf" {
-                    "non_finite"
-                } else {
-                    "out_of_range"
-                }
-            );
-            assert_eq!(app.world().resource::<PointShadowSourceRadius>().0, before);
-        }
         assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
         let before = app.world().resource::<LightingScale>().0;
         assert_eq!(
@@ -2005,7 +1962,7 @@ mod tests {
         );
         assert_eq!(
             exec(&mut app, "getrender").value.as_object().unwrap().len(),
-            10
+            9
         );
     }
 
