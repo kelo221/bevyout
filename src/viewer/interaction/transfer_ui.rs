@@ -176,7 +176,7 @@ fn close_transfer_modal(
     if let Ok(root) = placements.get(active_container.entity)
         && let Some(form_id) = root.placement().audio.close_sound_form_id
     {
-        sounds.write(PlaySound::at(form_id, position));
+        sounds.write(PlaySound::container_at(form_id, position));
     }
     animation_playback.write(animation::PlayPlacementAnimation {
         root: active_container.entity,

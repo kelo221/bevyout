@@ -293,10 +293,7 @@ fn drop_inventory_items(
             ))
             .id();
         if let Some(sound) = placement.audio.drop_sound_form_id {
-            sounds.write(PlaySound {
-                form_id: sound,
-                position: Some(spawn),
-            });
+            sounds.write(PlaySound::at(sound, spawn));
         }
         notice.show(format!(
             "Dropped {}{}",

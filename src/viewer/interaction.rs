@@ -170,7 +170,7 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
         (placement.audio.close_sound_form_id, ClipTransition::Closing)
     };
     if let Some(form_id) = sound {
-        world.write_message(PlaySound::at(form_id, position));
+        world.write_message(PlaySound::container_at(form_id, position));
     }
     world.write_message(animation::PlayPlacementAnimation {
         root: entity,
@@ -330,7 +330,7 @@ pub(crate) fn scripted_pickup(
         );
     }
     if let Some(form_id) = placement.audio.pickup_sound_form_id {
-        world.write_message(PlaySound::at(form_id, position));
+        world.write_message(PlaySound::pickup_at(form_id, position));
     }
     world
         .get_resource_or_insert_with(InteractionNotice::default)
@@ -1145,7 +1145,7 @@ fn activate_focused_placement(
                     placement.base_form_id, owner_form_id
                 );
             }
-            write_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
+            write_pickup_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
             info!(
                 "picked up {} x{} ({:08x}); inventory now has {}",
@@ -1225,7 +1225,7 @@ fn activate_focused_placement(
                 item_names: container_item_names(&placement.inventory),
                 owner_form_id: placement.owner_form_id,
             });
-            write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
+            write_container_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {
                 root: entity,
                 transition: ClipTransition::Opening,
@@ -1345,6 +1345,22 @@ fn activate_focused_placement(
 fn write_sound(sounds: &mut MessageWriter<PlaySound>, form_id: Option<u32>, position: Vec3) {
     if let Some(form_id) = form_id {
         sounds.write(PlaySound::at(form_id, position));
+    }
+}
+
+fn write_pickup_sound(sounds: &mut MessageWriter<PlaySound>, form_id: Option<u32>, position: Vec3) {
+    if let Some(form_id) = form_id {
+        sounds.write(PlaySound::pickup_at(form_id, position));
+    }
+}
+
+fn write_container_sound(
+    sounds: &mut MessageWriter<PlaySound>,
+    form_id: Option<u32>,
+    position: Vec3,
+) {
+    if let Some(form_id) = form_id {
+        sounds.write(PlaySound::container_at(form_id, position));
     }
 }
 

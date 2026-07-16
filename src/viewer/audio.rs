@@ -7,6 +7,7 @@ use crate::vsa::{PreparedAudioClip, PreparedFootstepSet, PreparedSceneManifest};
 
 const LISTENER_EAR_GAP_METERS: f32 = 0.2;
 const FOOTSTEP_GAIN_DB: f32 = -6.0;
+pub(crate) const PICKUP_CONTAINER_GAIN_DB: f32 = 3.0;
 
 /// Requests a transient sound by its resolved ESM4 FormID.
 ///
@@ -16,6 +17,7 @@ const FOOTSTEP_GAIN_DB: f32 = -6.0;
 pub(crate) struct PlaySound {
     pub(crate) form_id: u32,
     pub(crate) position: Option<Vec3>,
+    pub(crate) gain_db: f32,
 }
 
 #[derive(Message, Clone, Debug, PartialEq, Eq)]
@@ -34,9 +36,22 @@ pub(crate) struct PlayLanding {
 
 impl PlaySound {
     pub(crate) fn at(form_id: u32, position: Vec3) -> Self {
+        Self::with_gain(form_id, position, 0.0)
+    }
+
+    pub(crate) fn pickup_at(form_id: u32, position: Vec3) -> Self {
+        Self::with_gain(form_id, position, PICKUP_CONTAINER_GAIN_DB)
+    }
+
+    pub(crate) fn container_at(form_id: u32, position: Vec3) -> Self {
+        Self::with_gain(form_id, position, PICKUP_CONTAINER_GAIN_DB)
+    }
+
+    fn with_gain(form_id: u32, position: Vec3, gain_db: f32) -> Self {
         Self {
             form_id,
             position: Some(position),
+            gain_db,
         }
     }
 }
@@ -122,6 +137,7 @@ fn build_catalog_and_spawn_loops(
             None,
             PlaybackMode::Loop,
             true,
+            0.0,
         ) {
             commands.entity(entity).insert(CellAmbientLoop);
         }
@@ -144,6 +160,7 @@ fn build_catalog_and_spawn_loops(
             Some(Vec3::from_array(placement.translation)),
             PlaybackMode::Loop,
             false,
+            0.0,
         ) {
             commands.entity(entity).insert(PlacementLoop {
                 reference_form_id: placement.reference_form_id,
@@ -195,6 +212,7 @@ fn play_requested_sounds(
             request.position,
             PlaybackMode::Despawn,
             request.position.is_none(),
+            request.gain_db,
         );
     }
 }
@@ -316,6 +334,7 @@ fn spawn_catalog_sound(
     position: Option<Vec3>,
     mode: PlaybackMode,
     force_non_spatial: bool,
+    gain_db: f32,
 ) -> Option<Entity> {
     let Some(clip) = catalog.clips.get(&form_id) else {
         report_missing_once(
@@ -330,7 +349,8 @@ fn spawn_catalog_sound(
         return None;
     };
 
-    let settings = playback_settings(clip, mode, position.is_some(), force_non_spatial);
+    let settings =
+        playback_settings_with_gain(clip, mode, position.is_some(), force_non_spatial, gain_db);
     let transform = Transform::from_translation(position.unwrap_or(Vec3::ZERO));
     Some(
         commands
@@ -355,10 +375,20 @@ fn playback_settings(
     has_position: bool,
     force_non_spatial: bool,
 ) -> PlaybackSettings {
+    playback_settings_with_gain(clip, mode, has_position, force_non_spatial, 0.0)
+}
+
+fn playback_settings_with_gain(
+    clip: &PreparedAudioClip,
+    mode: PlaybackMode,
+    has_position: bool,
+    force_non_spatial: bool,
+    gain_db: f32,
+) -> PlaybackSettings {
     PlaybackSettings {
         mode,
         // Fallout stores this as a positive attenuation magnitude in 1/100 dB.
-        volume: Volume::Decibels(-(clip.static_attenuation_hundredths_db as f32) / 100.0),
+        volume: Volume::Decibels(gain_db - (clip.static_attenuation_hundredths_db as f32) / 100.0),
         spatial: has_position && !clip.is_2d && !force_non_spatial,
         ..default()
     }
