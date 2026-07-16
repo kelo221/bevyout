@@ -26,6 +26,7 @@ use crate::vsa::bake::{
 };
 
 pub(crate) const STATIC_POINT_SHADOW_NEAR_Z: f32 = 0.1;
+const RCLIGHTBOX01_BASE_FORM_ID: u32 = 0x0003_54E8;
 const FACE_COUNT: usize = 6;
 static SHADOW_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -185,14 +186,17 @@ pub(crate) fn prepare_static_point_shadows(
 fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlacement> {
     let mut casters = placements
         .iter()
-        .filter(|placement| {
-            placement.initially_enabled
-                && placement.asset_path.is_some()
-                && !matches!(placement.semantic, PreparedSemantic::Door(_))
-        })
+        .filter(|placement| is_static_shadow_caster(placement))
         .collect::<Vec<_>>();
     casters.sort_by_key(|placement| (placement.reference_form_id, placement.base_form_id));
     casters
+}
+
+fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
+    placement.initially_enabled
+        && placement.asset_path.is_some()
+        && !matches!(placement.semantic, PreparedSemantic::Door(_))
+        && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
 }
 
 fn sorted_shadow_lights(lights: &[PreparedLight]) -> Result<Vec<&PreparedLight>> {
@@ -926,6 +930,50 @@ mod tests {
         let casters = sorted_shadow_casters(&placements);
         assert_eq!(casters.len(), 1);
         assert_eq!(casters[0].asset_path.as_deref(), Some("eligible.glb"));
+    }
+
+    #[test]
+    fn caster_filter_excludes_rclightbox01_across_representative_classes() {
+        let semantics = [
+            PreparedSemantic::Static,
+            PreparedSemantic::Container,
+            PreparedSemantic::Activator,
+            PreparedSemantic::Furniture,
+        ];
+        let physics_classes = [
+            PreparedPhysicsClassification::Static,
+            PreparedPhysicsClassification::Kinematic,
+            PreparedPhysicsClassification::Dynamic,
+        ];
+        let mut placements = Vec::new();
+        for (semantic_index, semantic) in semantics.into_iter().enumerate() {
+            for (physics_index, physics_classification) in physics_classes.into_iter().enumerate() {
+                let mut candidate =
+                    placement(&format!("rclightbox-{semantic_index}-{physics_index}.glb"));
+                candidate.reference_form_id =
+                    (semantic_index * physics_classes.len() + physics_index + 1) as u32;
+                candidate.base_form_id = RCLIGHTBOX01_BASE_FORM_ID;
+                candidate.semantic = semantic.clone();
+                candidate.physics_classification = physics_classification;
+                placements.push(candidate);
+            }
+        }
+
+        let mut ordinary_activator = placement("ordinary-activator.glb");
+        ordinary_activator.reference_form_id = 100;
+        ordinary_activator.semantic = PreparedSemantic::Activator;
+        ordinary_activator.physics_classification = PreparedPhysicsClassification::Dynamic;
+        placements.push(ordinary_activator);
+
+        let casters = sorted_shadow_casters(&placements);
+        assert_eq!(casters.len(), 1);
+        assert_eq!(casters[0].reference_form_id, 100);
+        assert_eq!(casters[0].base_form_id, 10);
+        assert_eq!(casters[0].semantic, PreparedSemantic::Activator);
+        assert_eq!(
+            casters[0].physics_classification,
+            PreparedPhysicsClassification::Dynamic
+        );
     }
 
     #[test]

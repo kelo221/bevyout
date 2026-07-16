@@ -138,29 +138,51 @@ pub(crate) fn run_view(
             save.header.current_cell,
             save.world.cells.len()
         );
+        let canonical = save
+            .canonical
+            .clone()
+            .map(interaction::CanonicalItemLedger::from_snapshot)
+            .transpose()
+            .context("loading canonical item ledger")?
+            .unwrap_or_default();
         if let Some(player_state) = &save.player {
-            app.insert_resource(interaction::PlayerInventory::from_stack_states(
-                player_state
-                    .inventory
-                    .iter()
-                    .map(|stack| inventory::InventoryStack {
-                        base_form_id: stack.base_form_id,
-                        count: stack.count,
-                        condition: stack.condition.or_else(|| {
-                            item_catalog
-                                .items
-                                .iter()
-                                .find(|item| item.base_form_id == stack.base_form_id)
-                                .and_then(|item| match &item.stats {
-                                    PreparedItemStats::Weapon { max_condition, .. }
-                                    | PreparedItemStats::Apparel { max_condition, .. } => {
-                                        *max_condition
-                                    }
-                                    _ => None,
-                                })
-                        }),
-                    }),
-            ));
+            let canonical_player = canonical
+                .ledger
+                .holders()
+                .get(&crate::item_transaction::HolderId::Player);
+            let stacks: Vec<inventory::InventoryStack> = canonical_player
+                .map(|state| {
+                    state.items.iter().map(|item| inventory::InventoryStack {
+                        base_form_id: item.base_form_id,
+                        count: i32::try_from(item.count).unwrap_or(i32::MAX),
+                        condition: item.state.condition,
+                    })
+                })
+                .map(|items| items.collect())
+                .unwrap_or_else(|| {
+                    player_state
+                        .inventory
+                        .iter()
+                        .map(|stack| inventory::InventoryStack {
+                            base_form_id: stack.base_form_id,
+                            count: stack.count,
+                            condition: stack.condition.or_else(|| {
+                                item_catalog
+                                    .items
+                                    .iter()
+                                    .find(|item| item.base_form_id == stack.base_form_id)
+                                    .and_then(|item| match &item.stats {
+                                        PreparedItemStats::Weapon { max_condition, .. }
+                                        | PreparedItemStats::Apparel { max_condition, .. } => {
+                                            *max_condition
+                                        }
+                                        _ => None,
+                                    })
+                            }),
+                        })
+                        .collect()
+                });
+            app.insert_resource(interaction::PlayerInventory::from_stack_states(stacks));
             // Issue #98 (F98.4): rebuild the equipped set and hotkey
             // bindings directly from persisted entries -- see
             // `player::equipment::EquipmentState::restore`'s doc comment
@@ -235,6 +257,7 @@ pub(crate) fn run_view(
             }
             app.insert_resource(hotkeys);
         }
+        app.insert_resource(canonical);
         app.insert_resource(world_items::NextRuntimeItemId(save.next_runtime_item_id));
         app.insert_resource(world::ActiveSaveState(save.world));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));

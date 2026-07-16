@@ -206,6 +206,24 @@ can kill the viewer under load — retry.
 
 ## Git cautions
 
+## Canonical item transaction invariants (#95)
+
+- Runtime item movement goes through `src/item_transaction.rs`'s canonical
+  `ItemLedger`; `PlayerInventory`, container state, and dropped-world entities
+  are projections/adapters, not independent authorities.
+- Every canonical stack has a stable `ItemInstanceId`. Full moves preserve it;
+  partial moves allocate a destination ID; compatible merges retain the
+  deterministic lowest ID and remap equipment/hotkey references atomically.
+- Stack compatibility includes condition, ownership provenance, and every
+  namespaced opaque extra-state tag/payload. A holder transfer must not discard
+  any of those fields or partially mutate either side.
+- Save v3's `ITMS` snapshot is authoritative for canonical fields. v1/v2 saves
+  are read and migrated deterministically; legacy `ItemStack` values are DTOs,
+  not a reason to reintroduce condition-less transfer paths.
+- Static merchant buy/sell is a fixed-value, two-holder atomic transaction;
+  quest items and caps are rejected, and restocking/services/crime effects are
+  deferred to later slices.
+
 - Never `git add -A`/`git add .` from the repo root: `.claude/worktrees/*`
   and scratch files get swept in. Stage explicitly by path.
 - **Never commit Bethesda-derived data.** `.gitignore` blocks `*.ron`

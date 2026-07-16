@@ -33,6 +33,16 @@ fn two_dimensional_and_unpositioned_sounds_are_not_spatial() {
 #[test]
 fn sound_request_constructors_preserve_playback_space() {
     assert_eq!(PlaySound::at(8, Vec3::X).position, Some(Vec3::X));
+    assert_eq!(PlaySound::at(8, Vec3::X).gain_db, 0.0);
+}
+
+#[test]
+fn pickup_and_container_sounds_are_boosted_by_three_decibels() {
+    assert_eq!(PlaySound::pickup_at(8, Vec3::X).gain_db, 3.0);
+    assert_eq!(PlaySound::container_at(8, Vec3::X).gain_db, 3.0);
+    let settings =
+        playback_settings_with_gain(&clip(false, 650), PlaybackMode::Despawn, true, false, 3.0);
+    assert!((settings.volume.to_decibels() + 3.5).abs() < f32::EPSILON);
 }
 
 #[test]

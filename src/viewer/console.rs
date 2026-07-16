@@ -16,6 +16,7 @@ use crate::console::{
     ConsoleCommand, ConsoleCommandResult, ConsoleEntityHooks, ConsoleError, ConsoleInvocation,
     ConsoleRegistry, resolve_reference,
 };
+use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
 use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 
 use super::controls::{
@@ -197,12 +198,65 @@ pub(crate) fn install(app: &mut App) {
         .reference_callable(false)
         .mutating(),
         ConsoleCommand::new(
-            "equipitem",
-            "[player.]equipitem <FormID>",
-            "Equip (or unequip, if already equipped) an item FormID already in the player inventory.",
+            "equip",
+            "[player.]equip <ItemInstanceId>",
+            "Equip a canonical player item by stable instance id.",
             equip_item,
         )
         .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
+            "equipitem",
+            "[player.]equipitem <FormID>",
+            "Equip (or unequip, if already equipped) an item FormID already in the player inventory.",
+            equip_item_formid,
+        )
+        .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
+            "unequip",
+            "[player.]unequip",
+            "Unequip the canonical player item.",
+            unequip_item,
+        )
+        .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
+            "hotkey",
+            "[player.]hotkey <0..7> <ItemInstanceId>",
+            "Bind a stable canonical item id to a player hotkey slot.",
+            bind_hotkey,
+        )
+        .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
+            "useitem",
+            "[player.]useitem <ItemInstanceId>",
+            "Consume one unit through the canonical item-use seam.",
+            use_item,
+        )
+        .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
+            "setmerchant",
+            "setmerchant <container-reference> <caps>",
+            "Mark a prepared static container as a merchant with fixed caps.",
+            set_merchant,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "buy",
+            "buy <merchant-reference> <ItemInstanceId> [count]",
+            "Buy a fixed-price item from a prepared static merchant.",
+            buy_item,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "sell",
+            "sell <merchant-reference> <ItemInstanceId> [count]",
+            "Sell a fixed-price item to a prepared static merchant.",
+            sell_item,
+        )
         .mutating(),
         ConsoleCommand::new(
             "save",
@@ -278,6 +332,10 @@ fn activate_reference(
             interaction::ScriptedPickupError::PersistenceNotReady => ConsoleError::new(
                 "persistence_not_ready",
                 "dropped-item persistence is not ready",
+            ),
+            interaction::ScriptedPickupError::ItemTransactionFailed => ConsoleError::new(
+                "item_transaction_failed",
+                "canonical item transaction could not be committed",
             ),
         })?;
         return Ok(ConsoleCommandResult::new(
@@ -388,13 +446,21 @@ fn add_item(
             | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
             _ => None,
         });
+    let stack = InventoryStack {
+        base_form_id: form_id,
+        count,
+        condition,
+    };
+    let before = world
+        .resource::<interaction::PlayerInventory>()
+        .legacy_snapshot();
+    world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .add_player_item(&before, stack)
+        .map_err(|error| ConsoleError::new("item_transaction_failed", error.to_string()))?;
     let _ = world
         .resource_mut::<interaction::PlayerInventory>()
-        .add_stack(InventoryStack {
-            base_form_id: form_id,
-            count,
-            condition,
-        });
+        .add_stack(stack);
     let total = world
         .resource::<interaction::PlayerInventory>()
         .count(form_id);
@@ -410,11 +476,62 @@ fn add_item(
     ))
 }
 
+fn parse_item_instance_id(value: &str) -> Option<ItemInstanceId> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    u64::from_str_radix(digits, 16)
+        .ok()
+        .filter(|id| *id != 0)
+        .map(ItemInstanceId)
+}
+
+fn parse_positive_count(value: Option<&String>) -> Result<u32, ConsoleError> {
+    value
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| ConsoleError::new("bad_type", "count must be a whole number"))
+        })
+        .transpose()
+        .map(|count| count.unwrap_or(1))
+        .and_then(|count| {
+            (count > 0)
+                .then_some(count)
+                .ok_or_else(|| ConsoleError::new("bad_count", "count must be at least 1"))
+        })
+}
+
+/// Equip a canonical player item by stable instance id.
+fn equip_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [value] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "equip requires an item instance id",
+        ));
+    };
+    let item_id = parse_item_instance_id(value)
+        .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .ledger
+        .equip(HolderId::Player, item_id)
+        .map_err(|error| ConsoleError::new("equip_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "item_id": item_id.0, "equipped": true }),
+        vec![format!("equipped item {:016x}", item_id.0)],
+    ))
+}
+
 /// Issue #98 (F98.4): `player.equipitem <FormID>` toggles equip/unequip for
 /// an item already in the player inventory, through the same
 /// `interaction::equip_kind_for`/`PlayerEquipment::toggle` seam the Pip-Boy
 /// and hotkeys use, so all three equip paths behave identically.
-fn equip_item(
+fn equip_item_formid(
     world: &mut World,
     invocation: &ConsoleInvocation,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
@@ -494,6 +611,243 @@ fn equip_item(
             if equipped { "equipped" } else { "unequipped" }
         )],
     ))
+}
+
+fn unequip_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !invocation.args.is_empty() {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "unequip accepts no arguments",
+        ));
+    }
+    let item_id = world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .ledger
+        .unequip(HolderId::Player)
+        .map_err(|error| ConsoleError::new("unequip_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "item_id": item_id.map(|id| id.0), "equipped": false }),
+        vec!["player item unequipped".into()],
+    ))
+}
+
+fn bind_hotkey(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [slot, value] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "hotkey requires a slot and item instance id",
+        ));
+    };
+    let slot = slot
+        .parse::<usize>()
+        .map_err(|_| ConsoleError::new("bad_type", "hotkey slot must be 0..7"))?;
+    let item_id = parse_item_instance_id(value)
+        .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .ledger
+        .bind_hotkey(HolderId::Player, slot, item_id)
+        .map_err(|error| ConsoleError::new("hotkey_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "slot": slot, "item_id": item_id.0 }),
+        vec![format!("hotkey {slot} bound to {:016x}", item_id.0)],
+    ))
+}
+
+fn use_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [value] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "useitem requires an item instance id",
+        ));
+    };
+    let item_id = parse_item_instance_id(value)
+        .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    let used = world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .ledger
+        .use_item(HolderId::Player, item_id)
+        .map_err(|error| ConsoleError::new("useitem_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "item_id": item_id.0, "base_form_id": used.base_form_id, "count": 1 }),
+        vec![format!("used item {:016x}", item_id.0)],
+    ))
+}
+
+fn merchant_stacks(placement: &interaction::PlacementRoot) -> Vec<(u32, i32)> {
+    placement
+        .placement()
+        .inventory
+        .iter()
+        .filter(|entry| !entry.leveled)
+        .map(|entry| (entry.base_form_id, entry.count))
+        .collect()
+}
+
+fn set_merchant(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector, caps] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "setmerchant requires a container reference and caps",
+        ));
+    };
+    let entity = resolve_reference(world, selector)?;
+    let (reference_form_id, stacks) = {
+        let placement = world
+            .get::<interaction::PlacementRoot>(entity)
+            .ok_or_else(|| {
+                ConsoleError::new("not_a_container", "reference has no placement root")
+            })?;
+        if !matches!(placement.placement().semantic, PreparedSemantic::Container) {
+            return Err(ConsoleError::new(
+                "not_a_container",
+                "merchant reference is not a container",
+            ));
+        }
+        (
+            placement.placement().reference_form_id,
+            merchant_stacks(placement),
+        )
+    };
+    let caps = caps
+        .parse::<u64>()
+        .map_err(|_| ConsoleError::new("bad_type", "merchant caps must be a whole number"))?;
+    world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .set_merchant(reference_form_id, &stacks, caps)
+        .map_err(|error| ConsoleError::new("merchant_setup_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "reference_form_id": reference_form_id, "caps": caps }),
+        vec![format!(
+            "merchant {:08x} configured with {caps} caps",
+            reference_form_id
+        )],
+    ))
+}
+
+fn merchant_transaction(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+    buying: bool,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector, item_value, count_value @ ..] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "merchant transfer requires reference, item instance id, and optional count",
+        ));
+    };
+    if count_value.len() > 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "merchant transfer accepts one optional count",
+        ));
+    }
+    let count = parse_positive_count(count_value.first())?;
+    let merchant_entity = resolve_reference(world, selector)?;
+    let reference_form_id = world
+        .get::<interaction::PlacementRoot>(merchant_entity)
+        .ok_or_else(|| ConsoleError::new("not_a_merchant", "reference has no placement root"))?
+        .placement()
+        .reference_form_id;
+    let item_id = parse_item_instance_id(item_value)
+        .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    let merchant = HolderId::FixtureMerchant { reference_form_id };
+    let item = world
+        .resource::<interaction::CanonicalItemLedger>()
+        .ledger
+        .holders()
+        .get(&merchant)
+        .and_then(|state| state.find(item_id))
+        .or_else(|| {
+            world
+                .resource::<interaction::CanonicalItemLedger>()
+                .ledger
+                .holders()
+                .get(&HolderId::Player)
+                .and_then(|state| state.find(item_id))
+        })
+        .ok_or_else(|| ConsoleError::new("item_not_found", "item instance is not available"))?;
+    let value = world
+        .resource::<PreparedItemCatalog>()
+        .items
+        .iter()
+        .find(|definition| definition.base_form_id == item.base_form_id)
+        .and_then(|definition| definition.value)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ConsoleError::new("invalid_price", "item has no non-negative catalog value")
+        })? as u64;
+    if item.base_form_id == interaction::item_rules::CAPS_FORM_ID
+        || world
+            .resource::<PreparedItemCatalog>()
+            .items
+            .iter()
+            .find(|definition| definition.base_form_id == item.base_form_id)
+            .is_some_and(|definition| definition.quest_item)
+    {
+        return Err(ConsoleError::new(
+            "item_not_tradeable",
+            "caps and quest items cannot be traded",
+        ));
+    }
+    let request = if buying {
+        TransactionRequest::Buy {
+            merchant,
+            player: HolderId::Player,
+            item_id,
+            count,
+            unit_price: value,
+        }
+    } else {
+        TransactionRequest::Sell {
+            player: HolderId::Player,
+            merchant,
+            item_id,
+            count,
+            unit_price: value,
+        }
+    };
+    let receipt = world
+        .resource_mut::<interaction::CanonicalItemLedger>()
+        .ledger
+        .execute(request)
+        .map_err(|error| ConsoleError::new("merchant_transfer_failed", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "merchant": reference_form_id, "item_id": item_id.0, "count": count, "unit_price": value, "transaction_id": receipt.id.0 }),
+        vec![format!(
+            "{} {:016x} x{} at {} caps",
+            if buying { "bought" } else { "sold" },
+            item_id.0,
+            count,
+            value
+        )],
+    ))
+}
+
+fn buy_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    merchant_transaction(world, invocation, true)
+}
+
+fn sell_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    merchant_transaction(world, invocation, false)
 }
 
 /// Issue #60 (F60.3): captures the active cell into `ActiveSaveState` and
@@ -1319,6 +1673,7 @@ mod tests {
             .insert_resource(player::StepDebugSettings::default())
             .insert_resource(interaction::PlayerInventory::default())
             .insert_resource(interaction::PlayerEquipment::default());
+        app.init_resource::<interaction::CanonicalItemLedger>();
         app.init_state::<GameplayModal>();
         let camera = player::CameraModeState {
             collision_build_complete: true,

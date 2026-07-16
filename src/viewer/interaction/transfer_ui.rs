@@ -25,8 +25,8 @@ use crate::vsa::{PreparedItemCatalog, PreparedItemDefinition};
 use super::super::inventory::{DropAction, InventoryStack, StackKey, drop_action};
 use super::animation::{self, ClipTransition};
 use super::{
-    ActiveContainerTarget, ContainerStates, InteractionState, PlaySound, PlayerEquipment,
-    PlayerInventory, container_policy, item_rules,
+    ActiveContainerTarget, CanonicalItemLedger, ContainerStates, InteractionState, PlaySound,
+    PlayerEquipment, PlayerInventory, container_policy, item_rules,
 };
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
@@ -176,7 +176,7 @@ fn close_transfer_modal(
     if let Ok(root) = placements.get(active_container.entity)
         && let Some(form_id) = root.placement().audio.close_sound_form_id
     {
-        sounds.write(PlaySound::at(form_id, position));
+        sounds.write(PlaySound::container_at(form_id, position));
     }
     animation_playback.write(animation::PlayPlacementAnimation {
         root: active_container.entity,
@@ -281,6 +281,7 @@ fn handle_container_rows(
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
     catalog: Res<PreparedItemCatalog>,
     mut ui_state: ResMut<TransferUiState>,
     roots: Query<Entity, With<TransferRoot>>,
@@ -327,6 +328,8 @@ fn handle_container_rows(
                     form_id,
                     1,
                     active_container.owner_form_id,
+                    active_container.reference_form_id,
+                    &mut canonical,
                 ),
                 form_id,
                 active_container.reference_form_id,
@@ -356,6 +359,7 @@ fn handle_player_rows(
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
     equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     mut ui_state: ResMut<TransferUiState>,
@@ -419,7 +423,14 @@ fn handle_player_rows(
     match drop_action(count) {
         Some(DropAction::DropOne) => {
             log_transfer(
-                store(container, &mut inventory, key, 1),
+                store(
+                    container,
+                    &mut inventory,
+                    key,
+                    1,
+                    active_container.reference_form_id,
+                    &mut canonical,
+                ),
                 key.base_form_id,
                 active_container.reference_form_id,
                 "-> container",
@@ -449,6 +460,7 @@ fn handle_quantity_buttons(
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
 ) {
     let Some(ref mut picker) = picker else {
         return;
@@ -475,6 +487,8 @@ fn handle_quantity_buttons(
                                 picker.form_id,
                                 picker.quantity,
                                 active_container.owner_form_id,
+                                active_container.reference_form_id,
+                                &mut canonical,
                             ),
                             picker.form_id,
                             "-> player",
@@ -485,7 +499,14 @@ fn handle_quantity_buttons(
                                 condition: picker.condition,
                             };
                             (
-                                store(container, &mut inventory, key, picker.quantity),
+                                store(
+                                    container,
+                                    &mut inventory,
+                                    key,
+                                    picker.quantity,
+                                    active_container.reference_form_id,
+                                    &mut canonical,
+                                ),
                                 picker.form_id,
                                 "-> container",
                             )
@@ -599,16 +620,44 @@ fn take(
     form_id: u32,
     count: i32,
     owner_form_id: Option<u32>,
+    reference_form_id: u32,
+    canonical: &mut CanonicalItemLedger,
 ) -> Result<i32, container_policy::TransferError> {
-    let mut discard = Vec::new();
     let available = container_policy::stack_count(&container.stacks, form_id);
-    let moved = if count >= available {
-        container_policy::take_all(&mut container.stacks, &mut discard, form_id)?
-    } else if count == 1 {
-        container_policy::take_one(&mut container.stacks, &mut discard, form_id)?
-    } else {
-        container_policy::take_stack(&mut container.stacks, &mut discard, form_id, count)?
-    };
+    if count <= 0 || count > available {
+        return Err(if count <= 0 {
+            container_policy::TransferError::NonPositiveCount
+        } else {
+            container_policy::TransferError::InsufficientSource
+        });
+    }
+    canonical
+        .sync_player(&inventory.legacy_snapshot())
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
+    canonical
+        .ensure_container(reference_form_id, &container.stacks)
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
+    let holder = crate::item_transaction::HolderId::FixtureContainer { reference_form_id };
+    let source_item = canonical
+        .ledger
+        .holders()
+        .get(&holder)
+        .and_then(|state| state.items.iter().find(|item| item.base_form_id == form_id))
+        .cloned()
+        .ok_or(container_policy::TransferError::CanonicalTransaction)?;
+    let moved_condition = source_item.state.condition;
+    canonical
+        .ledger
+        .execute(crate::item_transaction::TransactionRequest::Transfer {
+            source: holder,
+            destination: crate::item_transaction::HolderId::Player,
+            item_id: source_item.id,
+            count: u32::try_from(count)
+                .map_err(|_| container_policy::TransferError::NonPositiveCount)?,
+        })
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
+    let mut discard = Vec::new();
+    let moved = container_policy::transfer(&mut container.stacks, &mut discard, form_id, count)?;
     // Issue #81 (F81.4): taking from an owned container is theft; no
     // crime/karma consequences in M3, only the stable log line.
     if let item_rules::TakeClassification::Steal { owner_form_id } =
@@ -619,7 +668,7 @@ fn take(
     let _ = inventory.add_stack(InventoryStack {
         base_form_id: form_id,
         count: moved,
-        condition: None,
+        condition: moved_condition,
     });
     Ok(moved)
 }
@@ -639,18 +688,52 @@ fn store(
     inventory: &mut PlayerInventory,
     key: StackKey,
     count: i32,
+    reference_form_id: u32,
+    canonical: &mut CanonicalItemLedger,
 ) -> Result<i32, container_policy::TransferError> {
     let available = inventory
         .stack_states()
         .into_iter()
         .find(|stack| stack.key() == key)
         .map_or(0, |stack| stack.count);
+    if count <= 0 {
+        return Err(container_policy::TransferError::NonPositiveCount);
+    }
+    if count > available {
+        return Err(container_policy::TransferError::InsufficientSource);
+    }
+    canonical
+        .sync_player(&inventory.legacy_snapshot())
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
+    canonical
+        .ensure_container(reference_form_id, &container.stacks)
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
+    let player_item = canonical
+        .ledger
+        .holders()
+        .get(&crate::item_transaction::HolderId::Player)
+        .and_then(|state| {
+            state.items.iter().find(|item| {
+                item.base_form_id == key.base_form_id
+                    && item.state.condition == key.condition
+                    && item.count >= u32::try_from(count).unwrap_or_default()
+            })
+        })
+        .cloned()
+        .ok_or(container_policy::TransferError::CanonicalTransaction)?;
+    canonical
+        .ledger
+        .execute(crate::item_transaction::TransactionRequest::Transfer {
+            source: crate::item_transaction::HolderId::Player,
+            destination: crate::item_transaction::HolderId::FixtureContainer { reference_form_id },
+            item_id: player_item.id,
+            count: u32::try_from(count)
+                .map_err(|_| container_policy::TransferError::NonPositiveCount)?,
+        })
+        .map_err(|_| container_policy::TransferError::CanonicalTransaction)?;
     let mut scratch = vec![(key.base_form_id, available)];
-    let moved = if count == 1 {
-        container_policy::store_one(&mut scratch, &mut container.stacks, key.base_form_id)?
-    } else {
-        container_policy::store_stack(&mut scratch, &mut container.stacks, key.base_form_id, count)?
-    };
+    let moved =
+        container_policy::transfer(&mut scratch, &mut container.stacks, key.base_form_id, count)?;
     let _ = inventory.remove(key, moved);
     Ok(moved)
 }

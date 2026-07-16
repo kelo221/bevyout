@@ -39,6 +39,7 @@ pub(crate) struct ContainerState {
 pub(crate) enum TransferError {
     NonPositiveCount,
     InsufficientSource,
+    CanonicalTransaction,
 }
 
 fn apply_delta(stacks: &mut Vec<(u32, i32)>, form_id: u32, delta: i32) {
@@ -157,6 +158,7 @@ pub(crate) fn transfer(
     Ok(moved)
 }
 
+#[allow(dead_code)]
 pub(crate) fn take_one(
     container: &mut Vec<(u32, i32)>,
     player: &mut Vec<(u32, i32)>,
@@ -165,6 +167,7 @@ pub(crate) fn take_one(
     transfer(container, player, form_id, 1)
 }
 
+#[allow(dead_code)]
 pub(crate) fn take_stack(
     container: &mut Vec<(u32, i32)>,
     player: &mut Vec<(u32, i32)>,
@@ -174,6 +177,7 @@ pub(crate) fn take_stack(
     transfer(container, player, form_id, count)
 }
 
+#[allow(dead_code)]
 pub(crate) fn take_all(
     container: &mut Vec<(u32, i32)>,
     player: &mut Vec<(u32, i32)>,
@@ -182,6 +186,7 @@ pub(crate) fn take_all(
     transfer(container, player, form_id, stack_count(container, form_id))
 }
 
+#[allow(dead_code)]
 pub(crate) fn store_one(
     player: &mut Vec<(u32, i32)>,
     container: &mut Vec<(u32, i32)>,
@@ -190,6 +195,7 @@ pub(crate) fn store_one(
     transfer(player, container, form_id, 1)
 }
 
+#[allow(dead_code)]
 pub(crate) fn store_stack(
     player: &mut Vec<(u32, i32)>,
     container: &mut Vec<(u32, i32)>,

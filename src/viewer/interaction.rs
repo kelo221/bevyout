@@ -5,6 +5,10 @@ use bevy::prelude::*;
 
 use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
+use crate::item_transaction::{
+    HolderId, ItemHolderState, ItemInstanceId, ItemLedger, ItemLedgerSnapshot, ItemState,
+    TransactionError, TransactionRequest,
+};
 use crate::vsa::{
     PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemCategory,
     PreparedItemDefinition, PreparedItemStats, PreparedLeveledList, PreparedPlacement,
@@ -169,7 +173,7 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
         (placement.audio.close_sound_form_id, ClipTransition::Closing)
     };
     if let Some(form_id) = sound {
-        world.write_message(PlaySound::at(form_id, position));
+        world.write_message(PlaySound::container_at(form_id, position));
     }
     world.write_message(animation::PlayPlacementAnimation {
         root: entity,
@@ -387,9 +391,18 @@ pub(crate) fn scripted_pickup(
         if !world.contains_resource::<super::world::ActiveSaveState>() {
             return Err(ScriptedPickupError::PersistenceNotReady);
         }
-        let _ = world
-            .resource_mut::<PlayerInventory>()
-            .add_stack(runtime_item.stack);
+        let stack = runtime_item.stack;
+        let before = world.resource::<PlayerInventory>().legacy_snapshot();
+        {
+            let mut canonical = world.resource_mut::<CanonicalItemLedger>();
+            canonical
+                .ensure_runtime_item(runtime_item.runtime_id, runtime_item.cell_form_id, stack)
+                .map_err(|_| ScriptedPickupError::ItemTransactionFailed)?;
+            canonical
+                .move_runtime_to_player(&before, runtime_item.runtime_id, runtime_item.cell_form_id)
+                .map_err(|_| ScriptedPickupError::ItemTransactionFailed)?;
+        }
+        let _ = world.resource_mut::<PlayerInventory>().add_stack(stack);
         let mut save_state = world.resource_mut::<super::world::ActiveSaveState>();
         if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
             cell.dropped_items.remove(&runtime_item.runtime_id);
@@ -412,13 +425,17 @@ pub(crate) fn scripted_pickup(
                 | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
                 _ => None,
             });
-        let _ = world
-            .resource_mut::<PlayerInventory>()
-            .add_stack(InventoryStack {
-                base_form_id: placement.base_form_id,
-                count,
-                condition,
-            });
+        let stack = InventoryStack {
+            base_form_id: placement.base_form_id,
+            count,
+            condition,
+        };
+        let before = world.resource::<PlayerInventory>().legacy_snapshot();
+        world
+            .resource_mut::<CanonicalItemLedger>()
+            .add_player_item(&before, stack)
+            .map_err(|_| ScriptedPickupError::ItemTransactionFailed)?;
+        let _ = world.resource_mut::<PlayerInventory>().add_stack(stack);
     }
     // Issue #81 (F81.4): picking up an owned reference is theft; no
     // crime/karma consequences in M3, only the stable log line.
@@ -431,7 +448,7 @@ pub(crate) fn scripted_pickup(
         );
     }
     if let Some(form_id) = placement.audio.pickup_sound_form_id {
-        world.write_message(PlaySound::at(form_id, position));
+        world.write_message(PlaySound::pickup_at(form_id, position));
     }
     world
         .get_resource_or_insert_with(InteractionNotice::default)
@@ -459,6 +476,7 @@ pub(crate) fn scripted_pickup(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScriptedPickupError {
     PersistenceNotReady,
+    ItemTransactionFailed,
 }
 
 /// Attach this component to the root that owns a prepared placement's scene.
@@ -502,8 +520,16 @@ impl PlayerInventory {
         self.0.remove(key, count)
     }
 
+    pub(crate) fn available(&self, key: StackKey) -> i32 {
+        self.0.available(key)
+    }
+
     pub(crate) fn stack_states(&self) -> Vec<InventoryStack> {
         self.0.stacks()
+    }
+
+    pub(crate) fn legacy_snapshot(&self) -> Inventory {
+        self.0.clone()
     }
 
     pub(crate) fn total_weight(&self, weight: impl FnMut(u32) -> Option<f32>) -> f32 {
@@ -525,6 +551,23 @@ impl PlayerInventory {
 
     pub(crate) fn from_stack_states(stacks: impl IntoIterator<Item = InventoryStack>) -> Self {
         Self(Inventory::from_stacks(stacks))
+    }
+}
+
+/// Runtime adapter for the canonical #95 holder ledger. The legacy inventory
+/// resource remains the Pip-Boy-facing projection during this migration; all
+/// entry points call `sync_player` before persisting or moving an item so IDs
+/// and mutable state are retained across the projection boundary.
+#[derive(Resource, Debug, Clone)]
+pub(crate) struct CanonicalItemLedger {
+    pub(crate) ledger: ItemLedger,
+}
+
+impl Default for CanonicalItemLedger {
+    fn default() -> Self {
+        Self {
+            ledger: ItemLedger::new(),
+        }
     }
 }
 
@@ -660,6 +703,222 @@ fn apply_equip_toggle_requests(
     }
 }
 
+impl CanonicalItemLedger {
+    pub(crate) fn from_snapshot(snapshot: ItemLedgerSnapshot) -> Result<Self, TransactionError> {
+        Ok(Self {
+            ledger: ItemLedger::from_snapshot(snapshot)?,
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> ItemLedgerSnapshot {
+        self.ledger.snapshot()
+    }
+
+    pub(crate) fn sync_player(&mut self, inventory: &Inventory) -> Result<(), TransactionError> {
+        if !self.ledger.holders().contains_key(&HolderId::Player) {
+            self.ledger
+                .insert_holder(HolderId::Player, ItemHolderState::default())?;
+        }
+        let mut desired = BTreeMap::new();
+        for stack in inventory.stacks() {
+            if stack.count > 0 {
+                desired.insert(
+                    (stack.base_form_id, stack.condition),
+                    u32::try_from(stack.count).map_err(|_| TransactionError::InvalidCount)?,
+                );
+            }
+        }
+        let mut missing = desired.clone();
+        if let Some(state) = self.ledger.holders_mut().get_mut(&HolderId::Player) {
+            for item in &mut state.items {
+                let remaining = missing
+                    .entry((item.base_form_id, item.state.condition))
+                    .or_default();
+                let kept = item.count.min(*remaining);
+                item.count = kept;
+                *remaining -= kept;
+            }
+            state.items.retain(|item| item.count > 0);
+            state.items.sort_by_key(|item| item.id);
+            state.revision = state.revision.saturating_add(1);
+        }
+        for ((base_form_id, condition), count) in missing {
+            if count > 0 {
+                self.ledger.insert_new_item(
+                    HolderId::Player,
+                    base_form_id,
+                    count,
+                    ItemState {
+                        condition,
+                        ..Default::default()
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_player_item(
+        &mut self,
+        inventory: &Inventory,
+        stack: InventoryStack,
+    ) -> Result<ItemInstanceId, TransactionError> {
+        self.sync_player(inventory)?;
+        self.ledger.insert_new_item(
+            HolderId::Player,
+            stack.base_form_id,
+            u32::try_from(stack.count).map_err(|_| TransactionError::InvalidCount)?,
+            ItemState {
+                condition: stack.condition,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub(crate) fn move_player_to_runtime(
+        &mut self,
+        inventory: &Inventory,
+        runtime_id: u64,
+        cell_form_id: u32,
+        stack: InventoryStack,
+    ) -> Result<(), TransactionError> {
+        self.sync_player(inventory)?;
+        let holder = HolderId::RuntimeWorld {
+            cell_form_id,
+            runtime_id,
+        };
+        self.ledger
+            .insert_holder(holder, ItemHolderState::default())?;
+        let item_id = self
+            .ledger
+            .holders()
+            .get(&HolderId::Player)
+            .and_then(|state| {
+                state.items.iter().find(|item| {
+                    item.base_form_id == stack.base_form_id
+                        && item.state.condition == stack.condition
+                        && item.count >= u32::try_from(stack.count).unwrap_or_default()
+                })
+            })
+            .map(|item| item.id)
+            .ok_or(TransactionError::InsufficientItems)?;
+        self.ledger.execute(TransactionRequest::Transfer {
+            source: HolderId::Player,
+            destination: holder,
+            item_id,
+            count: u32::try_from(stack.count).map_err(|_| TransactionError::InvalidCount)?,
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn move_runtime_to_player(
+        &mut self,
+        inventory: &Inventory,
+        runtime_id: u64,
+        cell_form_id: u32,
+    ) -> Result<i32, TransactionError> {
+        self.sync_player(inventory)?;
+        let source = HolderId::RuntimeWorld {
+            cell_form_id,
+            runtime_id,
+        };
+        let item = self
+            .ledger
+            .holders()
+            .get(&source)
+            .and_then(|state| state.items.first())
+            .cloned()
+            .ok_or(TransactionError::InsufficientItems)?;
+        self.ledger.execute(TransactionRequest::Transfer {
+            source,
+            destination: HolderId::Player,
+            item_id: item.id,
+            count: item.count,
+        })?;
+        Ok(i32::try_from(item.count).unwrap_or(i32::MAX))
+    }
+
+    pub(crate) fn ensure_runtime_item(
+        &mut self,
+        runtime_id: u64,
+        cell_form_id: u32,
+        stack: InventoryStack,
+    ) -> Result<(), TransactionError> {
+        let holder = HolderId::RuntimeWorld {
+            cell_form_id,
+            runtime_id,
+        };
+        if !self.ledger.holders().contains_key(&holder) {
+            self.ledger
+                .insert_holder(holder, ItemHolderState::default())?;
+            self.ledger.insert_new_item(
+                holder,
+                stack.base_form_id,
+                u32::try_from(stack.count).map_err(|_| TransactionError::InvalidCount)?,
+                ItemState {
+                    condition: stack.condition,
+                    ..Default::default()
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_container(
+        &mut self,
+        reference_form_id: u32,
+        stacks: &[(u32, i32)],
+    ) -> Result<(), TransactionError> {
+        let holder = HolderId::FixtureContainer { reference_form_id };
+        if self.ledger.holders().contains_key(&holder) {
+            return Ok(());
+        }
+        self.ledger
+            .insert_holder(holder, ItemHolderState::default())?;
+        for &(base_form_id, count) in stacks {
+            if count > 0 {
+                self.ledger.insert_new_item(
+                    holder,
+                    base_form_id,
+                    u32::try_from(count).map_err(|_| TransactionError::InvalidCount)?,
+                    ItemState::default(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_merchant(
+        &mut self,
+        reference_form_id: u32,
+        stacks: &[(u32, i32)],
+        caps: u64,
+    ) -> Result<(), TransactionError> {
+        let holder = HolderId::FixtureMerchant { reference_form_id };
+        if self.ledger.holders().contains_key(&holder) {
+            return Err(TransactionError::InvalidMerchant);
+        }
+        self.ledger.insert_holder(
+            holder,
+            ItemHolderState {
+                caps,
+                ..Default::default()
+            },
+        )?;
+        for &(base_form_id, count) in stacks {
+            if count > 0 {
+                self.ledger.insert_new_item(
+                    holder,
+                    base_form_id,
+                    u32::try_from(count).map_err(|_| TransactionError::InvalidCount)?,
+                    ItemState::default(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `open` is pub(crate) for issues #60/#61: `world::persist` captures
 /// door/container open state on the way out of a cell and re-inserts it on
 /// apply. Everything else stays private to this module.
@@ -770,6 +1029,7 @@ struct InteractionNoticeText;
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<PlayerInventory>()
+        .init_resource::<CanonicalItemLedger>()
         .init_resource::<PlayerEquipment>()
         // Issue #98: `apply_equip_toggle_requests` reads the item catalog;
         // `run_view` inserts the real one before installing this plugin
@@ -1092,6 +1352,7 @@ fn activate_focused_placement(
     )>,
     animated: Query<&animation::AnimatedPlacement>,
     mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
     mut state: ResMut<InteractionState>,
     mut notice: ResMut<InteractionNotice>,
     mut sounds: MessageWriter<PlaySound>,
@@ -1124,6 +1385,25 @@ fn activate_focused_placement(
                     notice.show("Dropped-item persistence is not ready");
                     return;
                 };
+                let before = inventory.legacy_snapshot();
+                if canonical
+                    .ensure_runtime_item(
+                        runtime_item.runtime_id,
+                        runtime_item.cell_form_id,
+                        runtime_item.stack,
+                    )
+                    .and_then(|_| {
+                        canonical.move_runtime_to_player(
+                            &before,
+                            runtime_item.runtime_id,
+                            runtime_item.cell_form_id,
+                        )
+                    })
+                    .is_err()
+                {
+                    notice.show("Item transaction failed while retrieving the dropped item");
+                    return;
+                }
                 let _ = inventory.add_stack(runtime_item.stack);
                 if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
                     cell.dropped_items.remove(&runtime_item.runtime_id);
@@ -1147,11 +1427,17 @@ fn activate_focused_placement(
                         | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
                         _ => None,
                     });
-                let _ = inventory.add_stack(InventoryStack {
+                let stack = InventoryStack {
                     base_form_id: placement.base_form_id,
                     count,
                     condition,
-                });
+                };
+                let before = inventory.legacy_snapshot();
+                if canonical.add_player_item(&before, stack).is_err() {
+                    notice.show("Item transaction failed while picking up the item");
+                    return;
+                }
+                let _ = inventory.add_stack(stack);
             }
             // Issue #81 (F81.4): picking up an owned reference is theft; no
             // crime/karma consequences in M3, only the stable log line.
@@ -1164,7 +1450,7 @@ fn activate_focused_placement(
                     placement.base_form_id, owner_form_id
                 );
             }
-            write_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
+            write_pickup_sound(&mut sounds, placement.audio.pickup_sound_form_id, position);
             notice.show(format!("Picked up {name} x{count}"));
             info!(
                 "picked up {} x{} ({:08x}); inventory now has {}",
@@ -1228,7 +1514,7 @@ fn activate_focused_placement(
                 item_names: container_item_names(&placement.inventory),
                 owner_form_id: placement.owner_form_id,
             });
-            write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
+            write_container_sound(&mut sounds, placement.audio.open_sound_form_id, position);
             animation_playback.write(animation::PlayPlacementAnimation {
                 root: entity,
                 transition: ClipTransition::Opening,
@@ -1355,6 +1641,22 @@ fn activate_focused_placement(
 fn write_sound(sounds: &mut MessageWriter<PlaySound>, form_id: Option<u32>, position: Vec3) {
     if let Some(form_id) = form_id {
         sounds.write(PlaySound::at(form_id, position));
+    }
+}
+
+fn write_pickup_sound(sounds: &mut MessageWriter<PlaySound>, form_id: Option<u32>, position: Vec3) {
+    if let Some(form_id) = form_id {
+        sounds.write(PlaySound::pickup_at(form_id, position));
+    }
+}
+
+fn write_container_sound(
+    sounds: &mut MessageWriter<PlaySound>,
+    form_id: Option<u32>,
+    position: Vec3,
+) {
+    if let Some(form_id) = form_id {
+        sounds.write(PlaySound::container_at(form_id, position));
     }
 }
 

@@ -73,6 +73,10 @@ impl Inventory {
         self.count(base_form_id) > 0
     }
 
+    pub(crate) fn available(&self, key: StackKey) -> i32 {
+        self.stacks.get(&key).copied().unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn stack_count(&self, key: StackKey) -> i32 {
         self.stacks.get(&key).copied().unwrap_or(0)

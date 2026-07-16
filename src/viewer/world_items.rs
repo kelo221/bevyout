@@ -15,12 +15,15 @@ use crate::vsa::{
 
 use super::audio::PlaySound;
 use super::interaction::{
-    InteractionNotice, PlacementRoot, PlayerEquipment, PlayerInventory, item_rules,
+    CanonicalItemLedger, InteractionNotice, PlacementRoot, PlayerEquipment, PlayerInventory,
+    item_rules,
 };
 use super::inventory::{InventoryStack, TransferResult};
 use super::pipboy::DropInventoryStackRequested;
-use super::player::FpsPlayer;
+use super::player::{CAPSULE_HEIGHT, FpsPlayer};
 use super::world::{ActiveCell, ResidentCells};
+
+mod drop_policy;
 
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct RuntimeWorldItem {
@@ -122,11 +125,50 @@ fn prepared_catalog_asset(item: &PreparedItemDefinition) -> Option<ItemWorldAsse
     })
 }
 
+fn resolve_drop_pose(
+    context: &BoxdddPhysicsContext,
+    camera_origin: Vec3,
+    camera_forward: Vec3,
+    player_fallback: Vec3,
+) -> (Vec3, drop_policy::DropPlacementDecision) {
+    let fallback = if player_fallback.is_finite() {
+        player_fallback
+    } else {
+        camera_origin
+    };
+    let direction = camera_forward.normalize_or_zero();
+    if !camera_origin.is_finite() || !direction.is_finite() || direction == Vec3::ZERO {
+        return (fallback, drop_policy::DropPlacementDecision::fallback());
+    }
+
+    let decision = drop_policy::choose_candidate(|distance| {
+        let Some(world) = context.world() else {
+            return true;
+        };
+        let origin = boxddd::Vec3::new(camera_origin.x, camera_origin.y, camera_origin.z);
+        let length = distance + drop_policy::DROP_COLLISION_CLEARANCE_METERS;
+        let translation = boxddd::Vec3::new(
+            direction.x * length,
+            direction.y * length,
+            direction.z * length,
+        );
+        let filter = QueryFilter::new().category_bits(4).mask_bits(1 | 2);
+        world
+            .cast_ray(origin, translation, filter)
+            .map_or(true, |hits| !hits.is_empty())
+    });
+    let position = decision
+        .distance
+        .map_or(fallback, |distance| camera_origin + direction * distance);
+    (position, decision)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drop_inventory_items(
     mut commands: Commands,
     mut requests: MessageReader<DropInventoryStackRequested>,
     mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
     equipment: Res<PlayerEquipment>,
     assets: Res<ItemWorldAssets>,
     asset_server: Res<AssetServer>,
@@ -182,11 +224,36 @@ fn drop_inventory_items(
             notice.show("Drop quantity must be positive");
             continue;
         }
-        let probe_origin = view.translation() + view.forward() * 1.2 + Vec3::Y * 0.5;
-        let Some(spawn) = safe_drop_pose(&physics, probe_origin) else {
-            notice.show("No safe drop position is available");
+        let player_fallback = players
+            .iter()
+            .next()
+            .map(|transform| {
+                transform.translation()
+                    + Vec3::Y * (CAPSULE_HEIGHT * 0.5 + drop_policy::DROP_FALLBACK_CLEARANCE_METERS)
+            })
+            .unwrap_or_else(|| view.translation());
+        let (spawn, placement_decision) = resolve_drop_pose(
+            &physics,
+            view.translation(),
+            view.forward().into(),
+            player_fallback,
+        );
+        if inventory.available(request.key) < request.count {
+            notice.show("The selected stack changed before it could be dropped");
             continue;
+        }
+        let runtime_id = next_id.0;
+        next_id.0 = next_id.0.saturating_add(1).max(1);
+        let stack = InventoryStack {
+            base_form_id: request.key.base_form_id,
+            count: request.count,
+            condition: request.key.condition,
         };
+        let before = inventory.legacy_snapshot();
+        if let Err(error) = canonical.move_player_to_runtime(&before, runtime_id, active.0, stack) {
+            notice.show(format!("Item transaction failed: {error}"));
+            continue;
+        }
         if !matches!(
             inventory.remove(request.key, request.count),
             TransferResult::Applied { .. }
@@ -194,8 +261,6 @@ fn drop_inventory_items(
             notice.show("The selected stack changed before it could be dropped");
             continue;
         }
-        let runtime_id = next_id.0;
-        next_id.0 = next_id.0.saturating_add(1).max(1);
         let mut placement = template.clone();
         placement.reference_form_id = 0xff00_0000 | (runtime_id as u32 & 0x00ff_ffff);
         placement.translation = spawn.to_array();
@@ -219,11 +284,7 @@ fn drop_inventory_items(
                 PlacementRoot::new(placement.clone()),
                 RuntimeWorldItem {
                     runtime_id,
-                    stack: InventoryStack {
-                        base_form_id: request.key.base_form_id,
-                        count: request.count,
-                        condition: request.key.condition,
-                    },
+                    stack,
                     cell_form_id: active.0,
                 },
                 PendingRuntimeCollider {
@@ -240,10 +301,7 @@ fn drop_inventory_items(
             ))
             .id();
         if let Some(sound) = placement.audio.drop_sound_form_id {
-            sounds.write(PlaySound {
-                form_id: sound,
-                position: Some(spawn),
-            });
+            sounds.write(PlaySound::at(sound, spawn));
         }
         notice.show(format!(
             "Dropped {}{}",
@@ -255,32 +313,15 @@ fn drop_inventory_items(
             if request.count == 1 { "" } else { " stack" }
         ));
         info!(
-            "drop runtime={} base={:08x} count={} cell={:08x} entity={entity:?}",
-            runtime_id, request.key.base_form_id, request.count, active.0
+            "drop runtime={} base={:08x} count={} cell={:08x} placement={:?} distance={:?} entity={entity:?}",
+            runtime_id,
+            request.key.base_form_id,
+            request.count,
+            active.0,
+            placement_decision.mode,
+            placement_decision.distance,
         );
     }
-}
-
-fn safe_drop_pose(context: &BoxdddPhysicsContext, probe_origin: Vec3) -> Option<Vec3> {
-    if !probe_origin.is_finite() {
-        return None;
-    }
-    let world = context.world()?;
-    let origin = boxddd::Vec3::new(probe_origin.x, probe_origin.y, probe_origin.z);
-    let down = boxddd::Vec3::new(0.0, -3.0, 0.0);
-    let filter = QueryFilter::new().category_bits(4).mask_bits(1 | 2);
-    let hit = world
-        .cast_ray(origin, down, filter)
-        .ok()?
-        .into_iter()
-        .filter(|hit| {
-            hit.normal.y >= 0.5
-                && hit.point.x.is_finite()
-                && hit.point.y.is_finite()
-                && hit.point.z.is_finite()
-        })
-        .min_by(|left, right| left.fraction.total_cmp(&right.fraction))?;
-    Some(Vec3::new(hit.point.x, hit.point.y + 0.15, hit.point.z))
 }
 
 pub(crate) fn restore_dropped_items(world: &mut World, cell: u32, root: Entity) {
@@ -320,6 +361,23 @@ pub(crate) fn restore_dropped_items(world: &mut World, cell: u32, root: Entity) 
             );
             continue;
         };
+        if let Some(mut canonical) = world.get_resource_mut::<CanonicalItemLedger>()
+            && let Err(error) = canonical.ensure_runtime_item(
+                saved.runtime_id,
+                cell,
+                InventoryStack {
+                    base_form_id: saved.stack.base_form_id,
+                    count: saved.stack.count,
+                    condition: saved.stack.condition,
+                },
+            )
+        {
+            warn!(
+                "save restore dropped runtime={} canonical item rejected: {error}",
+                saved.runtime_id
+            );
+            continue;
+        }
         let template = &prepared_asset.placement;
         let mut placement = template.clone();
         placement.reference_form_id = 0xff00_0000 | (saved.runtime_id as u32 & 0x00ff_ffff);

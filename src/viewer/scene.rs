@@ -7,7 +7,20 @@ use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
+
+pub(super) fn fallout_bloom() -> Bloom {
+    Bloom {
+        intensity: 0.05,
+        prefilter: BloomPrefilter {
+            threshold: 0.6,
+            threshold_softness: 0.2,
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..Bloom::OLD_SCHOOL
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_prepared_scene(
@@ -37,7 +50,7 @@ pub(crate) fn spawn_prepared_scene(
         ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
         OcclusionCulling,
-        Bloom::NATURAL,
+        fallout_bloom(),
         Tonemapping::AcesFitted,
         Exposure { ev100: 12.0 },
         color_grading,

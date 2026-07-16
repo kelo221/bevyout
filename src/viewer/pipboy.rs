@@ -497,6 +497,7 @@ fn use_item(
         sounds.write(PlaySound {
             form_id,
             position: None,
+            gain_db: 0.0,
         });
     }
     let name = item_name(item);

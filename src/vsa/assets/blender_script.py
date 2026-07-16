@@ -6,10 +6,77 @@ def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.collision import Collision, get_material
     from io_scene_niftools.modules.nif_import.collision.bound import Bound
     from io_scene_niftools.modules.nif_import.collision.havok import BhkCollision
-    from io_scene_niftools.modules.nif_import.property.material import Material
+    from io_scene_niftools.modules.nif_import.property.geometry.niproperty import NiPropertyProcessor
+    from io_scene_niftools.modules.nif_import.property.material import Material, NiMaterial
+    from io_scene_niftools.modules.nif_import.property.shader.bsshaderproperty import BSShaderPropertyProcessor
     from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
     from io_scene_niftools.modules.nif_import.constraint import Constraint
     from nifgen.formats.nif.bshavok.niobjects.BhkConstraint import BhkConstraint
+    def preserve_emission_multiplier(material, key, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value) or value < 0.0:
+            return False
+        material[key] = value
+        material['bevyout_emissive_strength'] = value
+        return True
+
+    def nif_emission_multiplier(prop, primary_name, *fallback_names):
+        value = getattr(prop, primary_name, None)
+        if value is not None:
+            return value
+        for name in fallback_names:
+            value = getattr(prop, name, None)
+            if value is not None:
+                return value
+        return None
+
+    # MeshPropertyProcessor binds process_nimaterial_property when its
+    # singledispatch table is constructed. Patch the material importer itself
+    # so the multiplier survives regardless of when that table was built.
+    original_ni_material_import = NiMaterial.import_material
+    def import_ni_material_with_emission(self, n_block, b_mat, n_mat_prop):
+        result = original_ni_material_import(self, n_block, b_mat, n_mat_prop)
+        preserve_emission_multiplier(
+            b_mat,
+            'bevyout_nimaterial_emit_multi',
+            nif_emission_multiplier(n_mat_prop, 'emit_multi', 'emissive_mult'),
+        )
+        return result
+    NiMaterial.import_material = import_ni_material_with_emission
+
+    original_process_nimaterial_property = NiPropertyProcessor.process_nimaterial_property
+    def process_nimaterial_property_with_emission(self, prop):
+        original_process_nimaterial_property(self, prop)
+        preserve_emission_multiplier(
+            self.b_mat,
+            'bevyout_nimaterial_emit_multi',
+            nif_emission_multiplier(prop, 'emit_multi', 'emissive_mult'),
+        )
+    NiPropertyProcessor.process_nimaterial_property = process_nimaterial_property_with_emission
+
+    original_import_bs_lighting_shader_property = BSShaderPropertyProcessor.import_bs_lighting_shader_property
+    def import_bs_lighting_shader_property_with_emission(self, prop):
+        original_import_bs_lighting_shader_property(self, prop)
+        preserve_emission_multiplier(
+            self._b_mat,
+            'bevyout_bslighting_emissive_multiple',
+            getattr(prop, 'emissive_multiple', None),
+        )
+    BSShaderPropertyProcessor.import_bs_lighting_shader_property = import_bs_lighting_shader_property_with_emission
+
+    original_import_bs_effect_shader_property = BSShaderPropertyProcessor.import_bs_effect_shader_property
+    def import_bs_effect_shader_property_with_emission(self, prop):
+        original_import_bs_effect_shader_property(self, prop)
+        preserve_emission_multiplier(
+            self._b_mat,
+            'bevyout_bseffect_base_color_scale',
+            getattr(prop, 'base_color_scale', None),
+        )
+    BSShaderPropertyProcessor.import_bs_effect_shader_property = import_bs_effect_shader_property_with_emission
+
     def map_normals_compat(b_mesh, normals):
         if len(b_mesh.vertices) != len(normals): raise RuntimeError('normal/vertex count mismatch')
         no_array = Vertex.normalize(normals)
@@ -375,6 +442,92 @@ def fallback_material_eligible(material):
                 if strength is None or strength.default_value > 0.0:
                     return False
     return True
+
+def authored_emission_color(material):
+    """Return the imported NIFTools emission color when it is authored."""
+    niftools = getattr(material, 'niftools', None)
+    color = getattr(niftools, 'emissive_color', None)
+    if color is None:
+        return None
+    try:
+        values = tuple(float(channel) for channel in color[:3])
+    except (TypeError, ValueError):
+        return None
+    if len(values) != 3 or not all(math.isfinite(channel) for channel in values):
+        return None
+    return values if any(channel != 0.0 for channel in values) else None
+
+def source_emission_multiplier(material):
+    """Return the active NIF shader multiplier and whether it was authored."""
+    shader = getattr(material, 'niftools_shader', None)
+    shader_type = str(getattr(shader, 'bs_shadertype', ''))
+    keys = {
+        'BSLightingShaderProperty': 'bevyout_bslighting_emissive_multiple',
+        'BSEffectShaderProperty': 'bevyout_bseffect_base_color_scale',
+    }
+    if shader_type in keys:
+        candidates = [keys[shader_type], 'bevyout_emissive_strength']
+    else:
+        candidates = [
+            'bevyout_emissive_strength',
+            'bevyout_nimaterial_emit_multi',
+            'bevyout_bslighting_emissive_multiple',
+            'bevyout_bseffect_base_color_scale',
+        ]
+    for key in candidates:
+        value = material.get(key)
+        if value is None:
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0.0:
+            # NIFTools' default emit_multi is 1.0. When a material has an
+            # authored nonzero color, let the matching source block below
+            # recover a more specific multiplier instead of accepting that
+            # default as the final value.
+            if value == 1.0 and authored_emission_color(material) is not None:
+                continue
+            return value, True
+    # Some NIFTools import paths construct their material dispatch table
+    # before the compatibility patch is installed. Recover the source value
+    # directly from the loaded NIF property when the authored color uniquely
+    # identifies one source material.
+    authored = authored_emission_color(material)
+    if authored is not None:
+        matches = []
+        for block in NifData.data.blocks:
+            block_name = type(block).__name__
+            if block_name == 'NiMaterialProperty':
+                color_value = getattr(block, 'emissive_color', None)
+                strength_value = getattr(block, 'emit_multi', None)
+                if strength_value is None:
+                    strength_value = getattr(block, 'emissive_mult', None)
+            elif block_name == 'BSLightingShaderProperty':
+                color_value = getattr(block, 'emissive_color', None)
+                strength_value = getattr(block, 'emissive_multiple', None)
+            elif block_name == 'BSEffectShaderProperty':
+                color_value = getattr(block, 'base_color', None)
+                strength_value = getattr(block, 'base_color_scale', None)
+            else:
+                continue
+            if color_value is None:
+                continue
+            source_color = tuple(float(getattr(color_value, channel))
+                                 for channel in ('r', 'g', 'b'))
+            if any(abs(source_color[index] - authored[index]) > 1e-6
+                   for index in range(3)):
+                continue
+            try:
+                strength_value = float(strength_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(strength_value) and strength_value >= 0.0:
+                matches.append(strength_value)
+        if matches and all(value == matches[0] for value in matches):
+            return matches[0], True
+    return 1.0, False
 
 def build_physics_asset():
     collision_objects = [obj for obj in bpy.context.scene.objects
@@ -803,10 +956,13 @@ for job in jobs:
         glow = next((node for node in images if is_glow_image(node)), None)
         diffuse = next((node for node in images if node is not glow and 'normal' not in node.label.lower() and '_n.' not in image_name(node) and not is_glow_image(node)), images[0])
         normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
+        authored_emission = authored_emission_color(material)
+        emission_multiplier, has_emission_multiplier = source_emission_multiplier(material)
         old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
         emission_link = None
         emission_color = None
         emission_strength = None
+        authored_emission_fallback = False
         if old_principled:
             emission_input = old_principled.inputs.get('Emission Color') or old_principled.inputs.get('Emission')
             if emission_input:
@@ -820,14 +976,44 @@ for job in jobs:
         tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
         new_emission = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
         if new_emission:
+            # Blender 5.2 defaults the rebuilt Principled emission socket to
+            # white. Start from Fallout's non-emissive baseline so authored
+            # zero colors cannot become accidental emitters.
+            new_emission.default_value = (0.0, 0.0, 0.0, 1.0)
             if emission_link:
                 tree.links.new(emission_link, new_emission)
-            elif emission_color:
+            elif emission_color is not None and any(channel != 0.0 for channel in emission_color[:3]):
                 new_emission.default_value = emission_color
+            elif authored_emission is not None:
+                new_emission.default_value = (*authored_emission, 1.0)
+                authored_emission_fallback = True
+        source_strength_applies = (
+            authored_emission_fallback and
+            has_emission_multiplier and
+            (emission_strength is None or
+             not math.isfinite(emission_strength) or
+             emission_strength <= 0.0 or
+             emission_strength == 1.0)
+        )
         new_emission_strength = principled.inputs.get('Emission Strength')
-        if new_emission_strength and emission_strength is not None:
+        if new_emission_strength and source_strength_applies:
+            # NIFTools can leave the imported Principled strength at its
+            # zero-valued default even though niftools.emissive_color and the
+            # source shader multiplier are authored. A zero strength makes
+            # glTF omit the otherwise nonzero emissive material.
+            new_emission_strength.default_value = emission_multiplier
+        elif new_emission_strength and authored_emission_fallback and (
+                emission_strength is None or
+                not math.isfinite(emission_strength) or
+                emission_strength <= 0.0 or
+                emission_strength == 1.0):
+            new_emission_strength.default_value = 1.0
+        elif new_emission_strength and emission_strength is not None:
             new_emission_strength.default_value = emission_strength
-        if material.get('bevyout_emissive_bulb', False) and new_emission:
+        if new_emission_strength and emission_strength is None and has_emission_multiplier:
+            new_emission_strength.default_value = emission_multiplier
+        bulb_override = material.get('bevyout_emissive_bulb', False)
+        if bulb_override and new_emission:
             for link in list(new_emission.links):
                 tree.links.remove(link)
             tree.links.new(diffuse.outputs['Color'], new_emission)
@@ -838,11 +1024,13 @@ for job in jobs:
             tree.links.new(glow.outputs['Color'], new_emission)
             if new_emission_strength:
                 # Fallout's NIF shader properties provide the authored emissive
-                # multiplier.  NIFTools imports it into the old Principled
-                # material, which we copied above.  Glow maps are masks/colors,
-                # not calibrated light intensities, so retain that multiplier
-                # instead of replacing it with an arbitrary HDR boost.
-                if emission_strength is None:
+                # multiplier. Glow maps are masks/colors, not calibrated light
+                # intensities, so retain that multiplier instead of replacing it
+                # with an arbitrary HDR boost. A bulb override keeps its existing
+                # minimum strength even when the glow card is also present.
+                if source_strength_applies and not bulb_override:
+                    new_emission_strength.default_value = emission_multiplier
+                elif emission_strength is None and not bulb_override:
                     new_emission_strength.default_value = 1.0
         if alpha_blend or alpha_test:
             alpha_output = diffuse.outputs.get('Alpha')

@@ -740,6 +740,17 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     };
     capture_cell_state(world, active);
 
+    let legacy_inventory = world
+        .get_resource::<interaction::PlayerInventory>()
+        .map(|inventory| inventory.legacy_snapshot());
+    if let Some(legacy_inventory) = legacy_inventory.as_ref() {
+        world.get_resource_or_insert_with(interaction::CanonicalItemLedger::default);
+        world
+            .resource_mut::<interaction::CanonicalItemLedger>()
+            .sync_player(legacy_inventory)
+            .map_err(|error| anyhow::anyhow!("canonical item sync failed: {error}"))?;
+    }
+
     let Some(manifest) = world.get_resource::<PreparedSceneManifest>() else {
         anyhow::bail!("no prepared scene manifest loaded");
     };
@@ -793,6 +804,9 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
             .get_resource::<PlaythroughSeed>()
             .map(|seed| seed.0)
             .unwrap_or_default(),
+        canonical: world
+            .get_resource::<interaction::CanonicalItemLedger>()
+            .map(interaction::CanonicalItemLedger::snapshot),
     };
     let save_dir = world
         .get_resource::<SaveDirectory>()
