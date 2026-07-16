@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v2";
+/// Bump whenever the catalog shape changes, even when the new fields are
+/// serde-defaulted: a stale cached `items.ron` would otherwise deserialize
+/// silently with those fields defaulted and downstream rules degrade
+/// (issue #98 added `WEAP.ammo_form_id`/`ARMO.biped_slot_mask` that way --
+/// v3 makes `view` reject pre-#98 catalogs instead).
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v3";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -271,6 +276,23 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
 mod tests {
     use super::*;
     use crate::vsa::{PreparedPhysicsBody, PreparedPhysicsShape, PreparedPhysicsSource};
+
+    /// Pins the constant so a catalog-shape change that forgets the bump
+    /// fails here instead of shipping silently-degrading caches (issue #98
+    /// added serde-defaulted fields without one; v3 is the correction).
+    /// Bump this expectation together with `ITEM_CATALOG_REVISION`.
+    #[test]
+    fn built_catalogs_carry_the_pinned_revision() {
+        let catalog = build_item_catalog(
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &HashMap::new(),
+            "abc",
+        );
+        assert_eq!(catalog.revision, "openmw-items-v3");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v3");
+    }
 
     #[test]
     fn catalog_is_formid_sorted_and_carries_prepared_drop_assets() {

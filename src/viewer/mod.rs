@@ -32,11 +32,11 @@ use crate::app_state::{
 };
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ImageSpaceInfo, NIF_CONVERTER_REVISION, PHYSICS_ASSET_SCHEMA_VERSION,
-    PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition,
-    PreparedItemStats, PreparedSceneManifest, PreparedSemantic, bake, cell_label,
-    ensure_baked_scene_compatible, ensure_prepared_manifest_compatible, find_cached_manifest,
-    fingerprint, is_bake_static, prepare, resolve_cached_manifest,
+    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, NIF_CONVERTER_REVISION,
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
+    PreparedItemDefinition, PreparedItemStats, PreparedSceneManifest, PreparedSemantic, bake,
+    cell_label, ensure_baked_scene_compatible, ensure_prepared_manifest_compatible,
+    find_cached_manifest, fingerprint, is_bake_static, prepare, resolve_cached_manifest,
 };
 
 mod animation;
