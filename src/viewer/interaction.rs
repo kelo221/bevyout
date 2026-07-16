@@ -238,6 +238,111 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
     opening
 }
 
+/// Issue #84 (F84.2): scripted (console/BRP) pickup, mirroring
+/// `activate_focused_placement`'s `Pickup` arm minus the raycast focus and
+/// distance-state handling -- the runtime-item branch (inventory add plus
+/// `ActiveSaveState` dropped-item cleanup), the prepared-item branch
+/// (`PreparedItemCatalog` `max_condition` lookup for Weapon/Apparel stats),
+/// the #81 steal classification log, the pickup sound, and the notice all
+/// carry over verbatim. Returns the number of items added, or an error if a
+/// runtime item's persistence resource is not ready.
+pub(crate) fn scripted_pickup(
+    world: &mut World,
+    entity: Entity,
+) -> Result<i32, ScriptedPickupError> {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let runtime_item = world
+        .get::<super::world_items::RuntimeWorldItem>(entity)
+        .copied();
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .unwrap_or_default();
+    let name = placement_name(&placement);
+    let count = placement.count.max(1);
+
+    if let Some(runtime_item) = runtime_item {
+        if !world.contains_resource::<super::world::ActiveSaveState>() {
+            return Err(ScriptedPickupError::PersistenceNotReady);
+        }
+        let _ = world
+            .resource_mut::<PlayerInventory>()
+            .add_stack(runtime_item.stack);
+        let mut save_state = world.resource_mut::<super::world::ActiveSaveState>();
+        if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
+            cell.dropped_items.remove(&runtime_item.runtime_id);
+            if cell.references.is_empty() && cell.dropped_items.is_empty() {
+                save_state.0.cells.remove(&runtime_item.cell_form_id);
+            }
+        }
+        info!(
+            "retrieved runtime item {} from cell {:08x}",
+            runtime_item.runtime_id, runtime_item.cell_form_id
+        );
+    } else {
+        let condition = world
+            .get_resource::<PreparedItemCatalog>()
+            .into_iter()
+            .flat_map(|catalog| &catalog.items)
+            .find(|item| item.base_form_id == placement.base_form_id)
+            .and_then(|item| match &item.stats {
+                PreparedItemStats::Weapon { max_condition, .. }
+                | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
+                _ => None,
+            });
+        let _ = world
+            .resource_mut::<PlayerInventory>()
+            .add_stack(InventoryStack {
+                base_form_id: placement.base_form_id,
+                count,
+                condition,
+            });
+    }
+    // Issue #81 (F81.4): picking up an owned reference is theft; no
+    // crime/karma consequences in M3, only the stable log line.
+    if let item_rules::TakeClassification::Steal { owner_form_id } =
+        item_rules::classify_take(placement.owner_form_id)
+    {
+        info!(
+            "steal {:08x} owner {:08x}",
+            placement.base_form_id, owner_form_id
+        );
+    }
+    if let Some(form_id) = placement.audio.pickup_sound_form_id {
+        world.write_message(PlaySound::at(form_id, position));
+    }
+    world
+        .get_resource_or_insert_with(InteractionNotice::default)
+        .show(format!("Picked up {name} x{count}"));
+    info!(
+        "picked up {} x{} ({:08x}); inventory now has {}",
+        name,
+        count,
+        placement.base_form_id,
+        world
+            .resource::<PlayerInventory>()
+            .count(placement.base_form_id)
+    );
+    world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .remove(&entity);
+    world.despawn(entity);
+    Ok(count)
+}
+
+/// Failure mode for [`scripted_pickup`]: a runtime (player-dropped) item was
+/// targeted before `ActiveSaveState` exists, so the dropped-item cleanup that
+/// keeps persistence consistent cannot run yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScriptedPickupError {
+    PersistenceNotReady,
+}
+
 /// Attach this component to the root that owns a prepared placement's scene.
 /// Mesh-ray hits are walked through `ChildOf` ancestors until this root is found.
 #[derive(Component, Clone, Debug)]
