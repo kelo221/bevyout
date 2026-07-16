@@ -62,5 +62,11 @@ deterministic.
 
 ## Shipped amendments
 
-(none yet — add acceptance-driven changes here rather than rewriting the
-fixed feature lists.)
+- **A10 — real-data acceptance exposed a missing source-state seam.** The
+  staged corpse holder and console transfer path passed against a derived
+  manifest, but the exact real scene `00028138` contains the source-authored
+  dead actor `CG04DeadOldLady` (`00054398`) as `Npc`, with no `Corpse`
+  placements. This does not satisfy playable corpse looting. The required
+  source dead-state preparation, real presentation, and exact MCP acceptance
+  are tracked separately in follow-up #120 under epic #7; #118 remains limited
+  to the holder/transfer boundary described above.
