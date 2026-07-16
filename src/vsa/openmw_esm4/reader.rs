@@ -169,6 +169,31 @@ pub(crate) fn walk_container(
                         .insert(form_id, parse_lighting_template(&subs, form_id, flags));
                 }
             }
+            "RCPE" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.recipes.remove(&form_id);
+                } else {
+                    match parse_recipe(&subs, form_id, flags, resolver) {
+                        Ok(recipe) => {
+                            for signature in &recipe.ignored_subrecords {
+                                state.recipe_diagnostics.push(format!(
+                                    "{source_name} RCPE {form_id:08x}: ignored unsupported {signature} subrecord"
+                                ));
+                            }
+                            state.recipes.insert(form_id, recipe);
+                        }
+                        Err(error) => {
+                            // A malformed override must not leave an older
+                            // recipe active under the same FormID. Keep only
+                            // a stable diagnostic and no partial recipe state.
+                            state.recipes.remove(&form_id);
+                            state.recipe_diagnostics.push(format!(
+                                "{source_name} RCPE {form_id:08x}: malformed recipe: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
             "REFR" | "ACHR" | "ACRE" if context.cell.is_some() => {
                 if flags & RECORD_DELETED != 0 {
                     state.references.remove(&form_id);

@@ -213,6 +213,13 @@ mod leveled;
 #[allow(dead_code, unused_imports)]
 mod item_rules;
 
+// The serde/std-only recipe validation seam keeps this executable-spec
+// fixture independent of Bevy and game data. Parser/catalog integration is
+// covered by the recipe unit tests.
+#[path = "../src/vsa/recipe.rs"]
+#[allow(dead_code, unused_imports)]
+mod recipe_policy;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
@@ -378,6 +385,11 @@ struct BevyoutWorld {
     carried_stacks: Vec<(i32, bool, f32)>,
     carried_total: Option<f32>,
     take_classification: Option<item_rules::TakeClassification>,
+
+    // -- recipes.feature (issue #117) --
+    recipe_under_test: Option<recipe_policy::PreparedRecipe>,
+    recipe_available_items: std::collections::BTreeSet<u32>,
+    recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
 }
 
 fn find_placement<'a>(
@@ -3470,6 +3482,107 @@ async fn then_take_theft(world: &mut BevyoutWorld, hex: String) {
 async fn then_player_caps_total(world: &mut BevyoutWorld, expected: i32) {
     assert_eq!(
         container_policy::stack_count(&world.player_stacks, item_rules::CAPS_FORM_ID),
+        expected
+    );
+}
+
+// ---------------------------------------------------------------------
+// recipes.feature (issue #117) -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^a recipe with ingredient 0x([0-9a-fA-F]+) quantity (-?\d+) and output 0x([0-9a-fA-F]+) quantity (-?\d+)$"
+)]
+async fn given_recipe(
+    world: &mut BevyoutWorld,
+    ingredient_form_id: String,
+    ingredient_quantity: i32,
+    output_form_id: String,
+    output_quantity: i32,
+) {
+    world.recipe_under_test = Some(recipe_policy::PreparedRecipe {
+        form_id: 0x100,
+        ingredients: vec![recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&ingredient_form_id),
+            quantity: ingredient_quantity,
+            order: 0,
+        }],
+        outputs: vec![recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&output_form_id),
+            quantity: output_quantity,
+            order: 0,
+        }],
+        ..Default::default()
+    });
+}
+
+#[given(regex = r#"^recipe items "([^"]*)" are available$"#)]
+async fn given_recipe_items_available(world: &mut BevyoutWorld, items: String) {
+    world.recipe_available_items = items
+        .split(',')
+        .map(|item| parse_hex(item.trim()))
+        .collect();
+}
+
+#[given(regex = r"^the recipe also has ingredient 0x([0-9a-fA-F]+) quantity (-?\d+)$")]
+async fn given_duplicate_recipe_ingredient(
+    world: &mut BevyoutWorld,
+    item_form_id: String,
+    quantity: i32,
+) {
+    world
+        .recipe_under_test
+        .as_mut()
+        .expect("recipe must be created first")
+        .ingredients
+        .push(recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&item_form_id),
+            quantity,
+            order: 1,
+        });
+}
+
+#[when("the recipe is validated")]
+async fn when_recipe_validated(world: &mut BevyoutWorld) {
+    let recipe = world
+        .recipe_under_test
+        .as_ref()
+        .expect("recipe must be created first");
+    world.recipe_validation = Some(recipe_policy::validate_recipe(
+        recipe,
+        &world.recipe_available_items,
+    ));
+}
+
+#[then("recipe validation rejects a non-positive quantity")]
+async fn then_recipe_rejects_non_positive_quantity(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.recipe_validation.as_ref(),
+        Some(Err(
+            recipe_policy::RecipeValidationError::NonPositiveQuantity { .. }
+        ))
+    ));
+}
+
+#[then("recipe validation rejects duplicate ingredients")]
+async fn then_recipe_rejects_duplicate_ingredients(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.recipe_validation.as_ref(),
+        Some(Err(
+            recipe_policy::RecipeValidationError::DuplicateIngredient { .. }
+        ))
+    ));
+}
+
+#[then(regex = r"^the recipe ingredient quantity remains (-?\d+)$")]
+async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32) {
+    assert_eq!(
+        world
+            .recipe_under_test
+            .as_ref()
+            .expect("recipe must be created first")
+            .ingredients[0]
+            .quantity,
         expected
     );
 }

@@ -1071,6 +1071,9 @@ mod tests {
             item_catalog_path: None,
             item_catalog_revision: None,
             item_catalog_hash: None,
+            recipe_catalog_path: None,
+            recipe_catalog_revision: None,
+            recipe_catalog_hash: None,
             // `PreparedPluginSource` is not re-exported from `crate::vsa`
             // and widening that surface for a test is not worth it; an
             // empty plugin list exercises the same identity plumbing.

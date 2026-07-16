@@ -35,6 +35,15 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) item_catalog_revision: Option<String>,
     #[serde(default)]
     pub(crate) item_catalog_hash: Option<String>,
+    /// Content-fingerprinted recipe catalogue relative to `asset_root`.
+    /// Serde defaults keep manifests produced before recipe preparation
+    /// readable and explicitly distinguish them from an empty catalogue.
+    #[serde(default)]
+    pub(crate) recipe_catalog_path: Option<String>,
+    #[serde(default)]
+    pub(crate) recipe_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) recipe_catalog_hash: Option<String>,
     #[serde(default)]
     pub(crate) source_plugins: Vec<PreparedPluginSource>,
     pub(crate) cell: CellInfo,
