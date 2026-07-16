@@ -4,6 +4,61 @@ use bevy::pbr::{BakedPointLightShadow, BakedPointShadowGpuStatus, PointLightShad
 use bevy::prelude::*;
 use serde_json::json;
 
+/// Runtime shadows are intentionally limited to the strongest prepared-scene
+/// light for the first experiment.  The shader fades this shadow to zero over
+/// this camera-relative distance so it cannot compete with the baked scene
+/// lighting at longer ranges.
+pub(crate) const REALTIME_SHADOW_FADE_DISTANCE: f32 = 8.0;
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub(crate) struct RealtimeShadowCandidate;
+
+#[derive(Resource, Debug, Default)]
+pub(crate) struct RealtimeShadowLight(pub(crate) Option<Entity>);
+
+fn strongest_candidate<I>(candidates: I) -> Option<Entity>
+where
+    I: IntoIterator<Item = (Entity, f32)>,
+{
+    candidates
+        .into_iter()
+        .filter(|(_, intensity)| intensity.is_finite())
+        .max_by(
+            |(left_entity, left_intensity), (right_entity, right_intensity)| {
+                left_intensity
+                    .total_cmp(right_intensity)
+                    .then_with(|| right_entity.cmp(left_entity))
+            },
+        )
+        .map(|(entity, _)| entity)
+}
+
+/// Enables runtime point shadows on exactly one strongest startup light.
+///
+/// The candidate marker is deliberately only added to startup-cell lights;
+/// preloaded neighbor-cell lights remain hard/unshadowed until the selection
+/// policy is expanded to follow cell activation.
+pub(crate) fn apply_realtime_shadow_light(
+    mut selected: ResMut<RealtimeShadowLight>,
+    mut lights: Query<(Entity, &mut PointLight), With<RealtimeShadowCandidate>>,
+) {
+    let strongest = strongest_candidate(
+        lights
+            .iter()
+            .map(|(entity, light)| (entity, light.intensity)),
+    );
+    if selected.0 != strongest {
+        selected.0 = strongest;
+    }
+
+    for (entity, mut light) in &mut lights {
+        let should_enable = Some(entity) == strongest;
+        if light.shadow_maps_enabled != should_enable {
+            light.shadow_maps_enabled = should_enable;
+        }
+    }
+}
+
 #[derive(Resource, Clone, Debug, Default)]
 pub(crate) struct PreparedPointShadowRuntime {
     pub(crate) revision: Option<String>,
@@ -33,6 +88,10 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
         let mut query = world.query::<&BakedPointLightShadow>();
         query.iter(world).count() as u32
     };
+    let runtime_shadow_passes = world
+        .get_resource::<RealtimeShadowLight>()
+        .and_then(|selected| selected.0)
+        .map_or(0, |_| 1);
     let estimated_bytes = u64::from(runtime.resolution)
         .saturating_mul(u64::from(runtime.resolution))
         .saturating_mul(u64::from(runtime.layers))
@@ -55,7 +114,8 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
         "attached_lights": attached_now.max(runtime.attached_lights),
         "estimated_memory_bytes": estimated_bytes,
         "shadow_samples_per_pixel": samples,
-        "runtime_shadow_passes": 0,
+        "runtime_shadow_passes": runtime_shadow_passes,
+        "runtime_shadow_fade_distance": REALTIME_SHADOW_FADE_DISTANCE,
     })
 }
 
@@ -76,5 +136,19 @@ mod tests {
         let status = shadow_cache_status(&mut world);
         assert_eq!(status["estimated_memory_bytes"], 17_301_504_u64);
         assert_eq!(status["runtime_shadow_passes"], 0);
+    }
+
+    #[test]
+    fn strongest_candidate_uses_intensity_and_stable_entity_tie_breaking() {
+        let low = Entity::from_bits(1);
+        let high = Entity::from_bits(2);
+        assert_eq!(strongest_candidate([(low, 2.0), (high, 8.0)]), Some(high));
+        assert_eq!(strongest_candidate([(low, 8.0), (high, 8.0)]), Some(low));
+    }
+
+    #[test]
+    fn non_finite_candidate_intensities_are_ignored() {
+        let entity = Entity::from_bits(7);
+        assert_eq!(strongest_candidate([(entity, f32::NAN)]), None);
     }
 }

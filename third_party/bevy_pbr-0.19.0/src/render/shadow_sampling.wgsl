@@ -321,8 +321,21 @@ fn sample_shadow_map_pcss(
 // behavior due to some of the fragments in a quad (2x2 fragments) being
 // processed not being sampled, and this messing with mip-mapping functionality.
 // The shadow maps have no mipmaps so Level just samples from LOD 0.
-fn sample_shadow_cubemap_hardware(light_local: vec3<f32>, depth: f32, light_id: u32) -> f32 {
+fn sample_point_shadow_compare(
+    light_local: vec3<f32>,
+    depth: f32,
+    light_id: u32,
+    use_baked_shadow: bool,
+) -> f32 {
 #ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
+    if use_baked_shadow {
+        return textureSampleCompare(
+            view_bindings::baked_point_shadow_textures,
+            view_bindings::point_shadow_textures_comparison_sampler,
+            light_local,
+            depth
+        );
+    }
     return textureSampleCompare(
         view_bindings::point_shadow_textures,
         view_bindings::point_shadow_textures_comparison_sampler,
@@ -330,6 +343,15 @@ fn sample_shadow_cubemap_hardware(light_local: vec3<f32>, depth: f32, light_id: 
         depth
     );
 #else
+    if use_baked_shadow {
+        return textureSampleCompareLevel(
+            view_bindings::baked_point_shadow_textures,
+            view_bindings::point_shadow_textures_comparison_sampler,
+            light_local,
+            i32(light_id),
+            depth
+        );
+    }
     return textureSampleCompareLevel(
         view_bindings::point_shadow_textures,
         view_bindings::point_shadow_textures_comparison_sampler,
@@ -340,12 +362,61 @@ fn sample_shadow_cubemap_hardware(light_local: vec3<f32>, depth: f32, light_id: 
 #endif
 }
 
+// This helper is only available when Bevy exposes the PCSS linear sampler.
+#ifdef PCSS_SAMPLERS_AVAILABLE
+fn sample_point_shadow_linear(
+    light_local: vec3<f32>,
+    light_id: u32,
+    use_baked_shadow: bool,
+) -> f32 {
+#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
+    if use_baked_shadow {
+        return textureSample(
+            view_bindings::baked_point_shadow_textures,
+            view_bindings::point_shadow_textures_linear_sampler,
+            light_local,
+        );
+    }
+    return textureSample(
+        view_bindings::point_shadow_textures,
+        view_bindings::point_shadow_textures_linear_sampler,
+        light_local,
+    );
+#else
+    if use_baked_shadow {
+        return textureSample(
+            view_bindings::baked_point_shadow_textures,
+            view_bindings::point_shadow_textures_linear_sampler,
+            light_local,
+            i32(light_id),
+        );
+    }
+    return textureSample(
+        view_bindings::point_shadow_textures,
+        view_bindings::point_shadow_textures_linear_sampler,
+        light_local,
+        i32(light_id),
+    );
+#endif
+}
+#endif  // PCSS_SAMPLERS_AVAILABLE
+
+fn sample_shadow_cubemap_hardware(
+    light_local: vec3<f32>,
+    depth: f32,
+    light_id: u32,
+    use_baked_shadow: bool,
+) -> f32 {
+    return sample_point_shadow_compare(light_local, depth, light_id, use_baked_shadow);
+}
+
 // Performs one sample of the blocker search. This variation of the blocker
 // search function is for point and spot lights.
 fn search_for_blockers_in_shadow_cubemap_hardware(
     light_local: vec3<f32>,
     depth: f32,
     light_id: u32,
+    use_baked_shadow: bool,
 ) -> vec2<f32> {
 #ifdef WEBGL2
     // Make sure that the WebGL 2 compiler doesn't see `sampled_depth` sampled
@@ -355,20 +426,7 @@ fn search_for_blockers_in_shadow_cubemap_hardware(
 
 #ifdef PCSS_SAMPLERS_AVAILABLE
 
-#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
-    let sampled_depth = textureSample(
-        view_bindings::point_shadow_textures,
-        view_bindings::point_shadow_textures_linear_sampler,
-        light_local,
-    );
-#else
-    let sampled_depth = textureSample(
-        view_bindings::point_shadow_textures,
-        view_bindings::point_shadow_textures_linear_sampler,
-        light_local,
-        i32(light_id),
-    );
-#endif
+    let sampled_depth = sample_point_shadow_linear(light_local, light_id, use_baked_shadow);
 
     return select(vec2(0.0), vec2(sampled_depth, 1.0), sampled_depth >= depth);
 
@@ -387,11 +445,13 @@ fn sample_shadow_cubemap_at_offset(
     light_local: vec3<f32>,
     depth: f32,
     light_id: u32,
+    use_baked_shadow: bool,
 ) -> f32 {
     return sample_shadow_cubemap_hardware(
         light_local + position.x * x_basis + position.y * y_basis,
         depth,
-        light_id
+        light_id,
+        use_baked_shadow,
     ) * coeff;
 }
 
@@ -407,11 +467,13 @@ fn search_for_blockers_in_shadow_cubemap_at_offset(
     light_local: vec3<f32>,
     depth: f32,
     light_id: u32,
+    use_baked_shadow: bool,
 ) -> vec2<f32> {
     return search_for_blockers_in_shadow_cubemap_hardware(
         light_local + position.x * x_basis + position.y * y_basis,
         depth,
-        light_id
+        light_id,
+        use_baked_shadow,
     );
 }
 
@@ -426,6 +488,7 @@ fn sample_shadow_cubemap_gaussian(
     scale: f32,
     distance_to_light: f32,
     light_id: u32,
+    use_baked_shadow: bool,
 ) -> f32 {
     // Create an orthonormal basis so we can apply a 2D sampling pattern to a
     // cubemap.
@@ -434,28 +497,28 @@ fn sample_shadow_cubemap_gaussian(
     var sum: f32 = 0.0;
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[0], D3D_SAMPLE_POINT_COEFFS[0],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[1], D3D_SAMPLE_POINT_COEFFS[1],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[2], D3D_SAMPLE_POINT_COEFFS[2],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[3], D3D_SAMPLE_POINT_COEFFS[3],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[4], D3D_SAMPLE_POINT_COEFFS[4],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[5], D3D_SAMPLE_POINT_COEFFS[5],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[6], D3D_SAMPLE_POINT_COEFFS[6],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
         D3D_SAMPLE_POINT_POSITIONS[7], D3D_SAMPLE_POINT_COEFFS[7],
-        basis[0], basis[1], light_local, depth, light_id);
+        basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     return sum;
 }
 
@@ -470,6 +533,7 @@ fn sample_shadow_cubemap_jittered(
     distance_to_light: f32,
     light_id: u32,
     temporal: bool,
+    use_baked_shadow: bool,
 ) -> f32 {
     let rotation_matrix = random_rotation_matrix(frag_coord_xy, temporal);
 
@@ -496,21 +560,21 @@ fn sample_shadow_cubemap_jittered(
 
     var sum: f32 = 0.0;
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset0, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset0, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset1, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset1, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset2, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset2, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset3, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset3, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset4, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset4, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset5, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset5, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset6, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset6, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     sum += sample_shadow_cubemap_at_offset(
-        sample_offset7, 0.125, basis[0], basis[1], light_local, depth, light_id);
+        sample_offset7, 0.125, basis[0], basis[1], light_local, depth, light_id, use_baked_shadow);
     return sum;
 }
 
@@ -520,15 +584,17 @@ fn sample_shadow_cubemap(
     depth: f32,
     light_id: u32,
     frag_coord_xy: vec2<f32>,
+    use_baked_shadow: bool,
 ) -> f32 {
 #ifdef SHADOW_FILTER_METHOD_GAUSSIAN
     return sample_shadow_cubemap_gaussian(
-        light_local, depth, POINT_SHADOW_SCALE, distance_to_light, light_id);
+        light_local, depth, POINT_SHADOW_SCALE, distance_to_light, light_id, use_baked_shadow);
 #else ifdef SHADOW_FILTER_METHOD_TEMPORAL
     return sample_shadow_cubemap_jittered(
-        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE, distance_to_light, light_id, true);
+        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE, distance_to_light, light_id, true,
+        use_baked_shadow);
 #else ifdef SHADOW_FILTER_METHOD_HARDWARE_2X2
-    return sample_shadow_cubemap_hardware(light_local, depth, light_id);
+    return sample_shadow_cubemap_hardware(light_local, depth, light_id, use_baked_shadow);
 #else
     // This needs a default return value to avoid shader compilation errors if it's compiled with no SHADOW_FILTER_METHOD_* defined.
     // (eg. if the normal prepass is enabled it ends up compiling this due to the normal prepass depending on pbr_functions, which depends on shadows)
@@ -551,6 +617,7 @@ fn search_for_blockers_in_shadow_cubemap(
     scale: f32,
     distance_to_light: f32,
     light_id: u32,
+    use_baked_shadow: bool,
 ) -> f32 {
     // Create an orthonormal basis so we can apply a 2D sampling pattern to a
     // cubemap.
@@ -558,21 +625,29 @@ fn search_for_blockers_in_shadow_cubemap(
 
     var sum: vec2<f32> = vec2(0.0);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[0], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[0], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[1], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[1], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[2], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[2], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[3], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[3], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[4], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[4], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[5], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[5], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[6], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[6], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
     sum += search_for_blockers_in_shadow_cubemap_at_offset(
-        D3D_SAMPLE_POINT_POSITIONS[7], basis[0], basis[1], light_local, depth, light_id);
+        D3D_SAMPLE_POINT_POSITIONS[7], basis[0], basis[1], light_local, depth, light_id,
+        use_baked_shadow);
 
     if (sum.y == 0.0) {
         return 0.0;
@@ -592,18 +667,21 @@ fn sample_shadow_cubemap_pcss(
     light_id: u32,
     light_size: f32,
     frag_coord_xy: vec2<f32>,
+    use_baked_shadow: bool,
 ) -> f32 {
     let z_blocker = search_for_blockers_in_shadow_cubemap(
-        light_local, depth, light_size, distance_to_light, light_id);
+        light_local, depth, light_size, distance_to_light, light_id, use_baked_shadow);
 
     // Don't let the blur size go below 0.5, or shadows will look unacceptably aliased.
     let blur_size = max((z_blocker - depth) * light_size / depth, 0.5);
 
 #ifdef SHADOW_FILTER_METHOD_TEMPORAL
     return sample_shadow_cubemap_jittered(
-        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE * blur_size, distance_to_light, light_id, true);
+        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE * blur_size, distance_to_light,
+        light_id, true, use_baked_shadow);
 #else
     return sample_shadow_cubemap_jittered(
-        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE * blur_size, distance_to_light, light_id, false);
+        light_local, depth, frag_coord_xy, POINT_SHADOW_SCALE * blur_size, distance_to_light,
+        light_id, false, use_baked_shadow);
 #endif
 }

@@ -9,6 +9,46 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
+use bevy::world_serialization::WorldInstance;
+
+#[derive(Component)]
+pub(crate) struct BakedStaticSceneRoot;
+
+#[derive(Component)]
+pub(crate) struct BakedStaticScenePrepared;
+
+/// The combined baked scene is the authoritative baked-shadow receiver. Its
+/// individually spawned dynamic/interactive placements intentionally remain
+/// outside this marker and can receive the experimental runtime shadow.
+#[allow(clippy::type_complexity)]
+pub(crate) fn mark_baked_scene_meshes(
+    mut commands: Commands,
+    roots: Query<
+        (Entity, &Children),
+        (
+            With<BakedStaticSceneRoot>,
+            With<WorldInstance>,
+            Without<BakedStaticScenePrepared>,
+        ),
+    >,
+    children_query: Query<&Children>,
+    mesh_query: Query<(), With<Mesh3d>>,
+) {
+    for (root, children) in &roots {
+        let mut pending = children.iter().collect::<Vec<_>>();
+        while let Some(entity) = pending.pop() {
+            if mesh_query.get(entity).is_ok() {
+                commands
+                    .entity(entity)
+                    .insert(bevy::pbr::BakedPointShadowReceiver);
+            }
+            if let Ok(children) = children_query.get(entity) {
+                pending.extend(children.iter());
+            }
+        }
+        commands.entity(root).insert(BakedStaticScenePrepared);
+    }
+}
 
 pub(super) fn fallout_bloom() -> Bloom {
     Bloom {
@@ -198,8 +238,11 @@ pub(crate) fn spawn_prepared_scene(
     };
     let mut attached_shadow_lights = 0_u32;
     if let Some(bake) = &manifest.bake {
-        commands.spawn(WorldAssetRoot(
-            asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
+        commands.spawn((
+            WorldAssetRoot(
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
+            ),
+            BakedStaticSceneRoot,
         ));
         if let Some(volume) = &bake.irradiance_volume {
             commands.spawn((
@@ -262,6 +305,7 @@ pub(crate) fn spawn_prepared_scene(
                 ..default()
             },
             Transform::from_translation(Vec3::from_array(light.translation)),
+            RealtimeShadowCandidate,
             ChildOf(root),
         ));
         if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {

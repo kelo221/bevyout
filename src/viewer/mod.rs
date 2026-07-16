@@ -6,7 +6,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::light::{IrradianceVolume, LightProbe, ShadowFilteringMethod};
+use bevy::light::{IrradianceVolume, LightProbe, PointLightShadowMap, ShadowFilteringMethod};
 use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::{
@@ -75,6 +75,10 @@ const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 const DEFAULT_FOG_STRENGTH: f32 = 0.01;
 const RENDER_REPORT_HISTORY: usize = 600;
+/// Runtime point-shadow cubemap face size. Prepared/baked shadow artifacts
+/// keep their independent 512px cache resolution.
+pub(crate) const REALTIME_POINT_SHADOW_MAP_SIZE: usize = 256;
+const FPS_HUD_UPDATE_INTERVAL_SECS: f32 = 0.1;
 pub(crate) const DEFAULT_HORIZONTAL_FOV_DEGREES: f32 = 90.0;
 pub(crate) const DEFAULT_WINDOW_WIDTH: u32 = 1920;
 pub(crate) const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
@@ -319,12 +323,30 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
 #[derive(Component)]
 struct FpsText;
 
-fn update_fps_text(diagnostics: Res<DiagnosticsStore>, mut text: Single<&mut Text, With<FpsText>>) {
+fn update_fps_text(
+    diagnostics: Res<DiagnosticsStore>,
+    report: Res<RenderReportBuffer>,
+    time: Res<Time>,
+    mut elapsed: Local<f32>,
+    mut text: Single<&mut Text, With<FpsText>>,
+) {
+    *elapsed += time.delta_secs();
+    if *elapsed < FPS_HUD_UPDATE_INTERVAL_SECS {
+        return;
+    }
+    // Preserve any fractional remainder so the cadence stays close to 10 Hz
+    // even when the frame rate is not an exact multiple of the interval.
+    *elapsed %= FPS_HUD_UPDATE_INTERVAL_SECS;
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|diagnostic| diagnostic.smoothed())
         .unwrap_or(0.0);
-    text.0 = format!("{fps:.0} FPS");
+    let one_percent_low = summarize_render_samples(&report, None, RENDER_REPORT_HISTORY, 0.0)
+        .p99_ms
+        .filter(|frame_time_ms| *frame_time_ms > 0.0)
+        .map(|frame_time_ms| 1000.0 / frame_time_ms)
+        .unwrap_or(0.0);
+    text.0 = format!("{fps:.0} FPS | 1% low {one_percent_low:.0} FPS");
 }
 
 #[derive(Component)]

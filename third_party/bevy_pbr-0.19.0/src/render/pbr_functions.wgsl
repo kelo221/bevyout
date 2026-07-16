@@ -13,7 +13,11 @@
     view_transformations,
     raymarch,
     utils,
-    mesh_types::{MESH_FLAGS_SHADOW_RECEIVER_BIT, MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT},
+    mesh_types::{
+        MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT,
+        MESH_FLAGS_SHADOW_RECEIVER_BIT,
+        MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT,
+    },
 }
 #import bevy_pbr::mesh_view_bindings::globals
 #import bevy_pbr::view_transformations::{position_world_to_ndc}
@@ -472,6 +476,7 @@ fn apply_pbr_lighting(
     var dominant_point_light_id = 0u;
     var dominant_point_light_score = 0.0;
     var dominant_point_light_contrib = vec3<f32>(0.0);
+    var dominant_point_light_baked_receiver = false;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
     var dominant_point_transmitted_contrib = vec3<f32>(0.0);
 #endif
@@ -511,10 +516,15 @@ fn apply_pbr_lighting(
         transmitted_light += transmitted_light_contrib;
 #endif
 
-        let shadow_capable =
-            (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u &&
-            (view_bindings::clustered_lights.data[light_id].flags &
-                mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        let receives_shadow = (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
+        let baked_receiver =
+            (in.flags & MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT) != 0u;
+        let light_flags = view_bindings::clustered_lights.data[light_id].flags;
+        let shadow_capable = receives_shadow &&
+            ((baked_receiver &&
+                (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT) != 0u) ||
+            (!baked_receiver &&
+                (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_RUNTIME_SHADOWS_ENABLED_BIT) != 0u));
         let contribution_score = dot(
             max(light_contrib, vec3<f32>(0.0)),
             vec3<f32>(0.2126, 0.7152, 0.0722),
@@ -524,6 +534,7 @@ fn apply_pbr_lighting(
             dominant_point_light_id = light_id;
             dominant_point_light_score = contribution_score;
             dominant_point_light_contrib = light_contrib;
+            dominant_point_light_baked_receiver = baked_receiver;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
             dominant_point_transmitted_contrib = transmitted_light_contrib;
 #endif
@@ -536,7 +547,20 @@ fn apply_pbr_lighting(
             in.world_position,
             in.world_normal,
             in.frag_coord.xy,
+            dominant_point_light_baked_receiver,
         );
+
+        // Runtime shadows are only a local contact/detail pass. Fade their
+        // occlusion back to fully lit over the configured eight metre camera
+        // distance; baked receivers remain unaffected.
+        if (!dominant_point_light_baked_receiver) {
+            let realtime_shadow_fade = clamp(
+                1.0 - distance(in.world_position.xyz, view_bindings::view.world_position.xyz) / 8.0,
+                0.0,
+                1.0,
+            );
+            dominant_shadow = mix(1.0, dominant_shadow, realtime_shadow_fade);
+        }
 
 #ifdef CONTACT_SHADOWS
 #ifdef DEPTH_PREPASS

@@ -100,6 +100,12 @@ pub(crate) fn run_view(
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
+    // Realtime point shadows are a short-range quality/performance aid for
+    // the strongest light. Keep the prepared cubemap artifacts at their
+    // independent resolution; this only lowers the runtime shadow target.
+    app.insert_resource(PointLightShadowMap {
+        size: REALTIME_POINT_SHADOW_MAP_SIZE,
+    });
     app.add_plugins(crate::console::ConsolePlugin);
     // Issue #55 (A15): `RenderAssetBytesPerFrame` was tried here and
     // REVERTED — a 16 MB/frame upload throttle made the first hop's reveal
@@ -275,6 +281,7 @@ pub(crate) fn run_view(
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
+        .insert_resource(RealtimeShadowLight::default())
         .insert_resource(PointLightShadowSamples::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
@@ -295,6 +302,11 @@ pub(crate) fn run_view(
                 .chain(),
         )
         .add_systems(Update, apply_lighting_scale)
+        .add_systems(
+            Update,
+            (apply_realtime_shadow_light, mark_baked_scene_meshes)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             Update,
             (

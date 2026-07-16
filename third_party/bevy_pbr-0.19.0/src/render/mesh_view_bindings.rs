@@ -350,6 +350,26 @@ fn layout_entries(
                 )
                 .visibility(ShaderStages::VERTEX),
             ),
+            // Prepared/baked point-shadow texture. Runtime and baked maps are
+            // different arrays; the shader selects the one matching the
+            // receiver policy.
+            (
+                39,
+                #[cfg(all(
+                    not(target_abi = "sim"),
+                    any(
+                        not(feature = "webgl"),
+                        not(target_arch = "wasm32"),
+                        feature = "webgpu"
+                    )
+                ))]
+                texture_cube_array(TextureSampleType::Depth),
+                #[cfg(any(
+                    target_abi = "sim",
+                    all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu"))
+                ))]
+                texture_cube(TextureSampleType::Depth),
+            ),
         ),
     );
 
@@ -779,6 +799,7 @@ pub fn prepare_mesh_view_bind_groups(
                 (6, &shadow_samplers.directional_light_comparison_sampler),
                 #[cfg(feature = "experimental_pbr_pcss")]
                 (7, &shadow_samplers.directional_light_linear_sampler),
+                (39, &shadow_bindings.baked_point_light_depth_texture_view),
                 (8, clusterable_objects_binding.clone()),
                 (
                     9,
