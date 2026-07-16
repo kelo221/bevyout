@@ -24,3 +24,4 @@ and as comments on the issues; the PR closes the issues.
 | M3 wave 2 — leveled loot, container transfer, container persistence | [M3_WAVE2_PROMPT.md](M3_WAVE2_PROMPT.md) | [M3_WAVE2_PLAN.md](M3_WAVE2_PLAN.md) | PR #79 (#74, #75, #76) |
 | M3 wave 3 — caps, ownership, quest-item flags | [M3_WAVE3_PROMPT.md](M3_WAVE3_PROMPT.md) | [M3_WAVE3_PLAN.md](M3_WAVE3_PLAN.md) | PR #82 (#81) |
 | M3 wave 4 — console additem, pickup activation | [M3_WAVE4_PROMPT.md](M3_WAVE4_PROMPT.md) | [M3_WAVE4_PLAN.md](M3_WAVE4_PLAN.md) | in flight (#84) |
+| M3 wave 5 — canonical item instances, atomic holders, save v3, static merchant | [M3_WAVE5_PROMPT.md](M3_WAVE5_PROMPT.md) | [M3_WAVE5_PLAN.md](M3_WAVE5_PLAN.md) | in progress (#95) |

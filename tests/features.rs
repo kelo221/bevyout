@@ -36,6 +36,13 @@ mod plugin {
     }
 }
 
+// M3/#95 canonical item instances and atomic holder transactions are pure
+// serde/std policy, so the executable-spec harness drives the same source as
+// the Bevy runtime instead of maintaining a test-only model.
+#[path = "../src/item_transaction.rs"]
+#[allow(dead_code, unused_imports)]
+mod item_transaction;
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -213,8 +220,18 @@ mod leveled;
 #[allow(dead_code, unused_imports)]
 mod item_rules;
 
+// Drop placement is a Bevy-free candidate policy, so the runtime and the
+// executable spec share the same retreat/fallback decision logic.
+#[path = "../src/viewer/world_items/drop_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod drop_policy;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
+use item_transaction::{
+    HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
+    TransactionError, TransactionRequest,
+};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
 use selectors::{CellSummary, SelectionSpec, resolve_selection};
@@ -378,6 +395,16 @@ struct BevyoutWorld {
     carried_stacks: Vec<(i32, bool, f32)>,
     carried_total: Option<f32>,
     take_classification: Option<item_rules::TakeClassification>,
+
+    // -- item_transactions.feature (M3/#95) --
+    canonical_ledger: item_transaction::ItemLedger,
+    canonical_result:
+        Option<Result<item_transaction::TransactionReceipt, item_transaction::TransactionError>>,
+
+    // -- drop_placement.feature (M3/#95) --
+    drop_blocked_count: usize,
+    drop_all_blocked: bool,
+    drop_decision: Option<drop_policy::DropPlacementDecision>,
 }
 
 fn find_placement<'a>(
@@ -3472,6 +3499,219 @@ async fn then_player_caps_total(world: &mut BevyoutWorld, expected: i32) {
         container_policy::stack_count(&world.player_stacks, item_rules::CAPS_FORM_ID),
         expected
     );
+}
+
+// ---------------------------------------------------------------------
+// item_transactions.feature (M3/#95)
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^the canonical player holds item 0x([0-9a-fA-F]+) form 0x([0-9a-fA-F]+) x(\d+) condition (none|\d+)$"
+)]
+async fn given_canonical_player_item(
+    world: &mut BevyoutWorld,
+    item_hex: String,
+    form_hex: String,
+    count: u32,
+    condition: String,
+) {
+    world.canonical_ledger = ItemLedger::new();
+    let item = ItemInstance::new(
+        ItemInstanceId(parse_hex(&item_hex) as u64),
+        parse_hex(&form_hex),
+        count,
+        ItemState {
+            condition: (condition != "none").then(|| condition.parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    world
+        .canonical_ledger
+        .insert_holder(
+            HolderId::Player,
+            ItemHolderState {
+                items: vec![item],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+#[given(regex = r"^the canonical holder 0x([0-9a-fA-F]+) is empty$")]
+async fn given_empty_canonical_holder(world: &mut BevyoutWorld, reference_hex: String) {
+    world
+        .canonical_ledger
+        .insert_holder(
+            HolderId::FixtureContainer {
+                reference_form_id: parse_hex(&reference_hex),
+            },
+            ItemHolderState::default(),
+        )
+        .unwrap();
+}
+
+#[when(
+    regex = r"^transferring (\d+) of item 0x([0-9a-fA-F]+) to canonical holder 0x([0-9a-fA-F]+)$"
+)]
+async fn when_canonical_transfer(
+    world: &mut BevyoutWorld,
+    count: u32,
+    item_hex: String,
+    reference_hex: String,
+) {
+    world.canonical_result = Some(
+        world
+            .canonical_ledger
+            .execute(TransactionRequest::Transfer {
+                source: HolderId::Player,
+                destination: HolderId::FixtureContainer {
+                    reference_form_id: parse_hex(&reference_hex),
+                },
+                item_id: ItemInstanceId(parse_hex(&item_hex) as u64),
+                count,
+            }),
+    );
+}
+
+#[then(regex = r"^the canonical player item 0x([0-9a-fA-F]+) has count (\d+)$")]
+async fn then_canonical_player_count(world: &mut BevyoutWorld, item_hex: String, count: u32) {
+    let item_id = ItemInstanceId(parse_hex(&item_hex) as u64);
+    let item = world
+        .canonical_ledger
+        .holders()
+        .get(&HolderId::Player)
+        .and_then(|state| state.find(item_id))
+        .unwrap_or_else(|| panic!("canonical player item {item_id:?} is missing"));
+    assert_eq!(item.count, count);
+}
+
+#[then(regex = r"^canonical holder 0x([0-9a-fA-F]+) has item count (\d+)$")]
+async fn then_canonical_holder_count(world: &mut BevyoutWorld, reference_hex: String, count: u32) {
+    let holder = HolderId::FixtureContainer {
+        reference_form_id: parse_hex(&reference_hex),
+    };
+    let actual = world
+        .canonical_ledger
+        .holders()
+        .get(&holder)
+        .and_then(|state| state.items.first())
+        .map_or(0, |item| item.count);
+    assert_eq!(actual, count);
+}
+
+#[then(regex = r"^the transaction moved item id 0x([0-9a-fA-F]+)$")]
+async fn then_canonical_moved_id(world: &mut BevyoutWorld, item_hex: String) {
+    let receipt = world
+        .canonical_result
+        .as_ref()
+        .expect("canonical transaction was not run")
+        .as_ref()
+        .expect("canonical transaction failed");
+    assert_eq!(
+        receipt.moved[0].0,
+        ItemInstanceId(parse_hex(&item_hex) as u64)
+    );
+}
+
+#[then("the canonical transaction is rejected")]
+async fn then_canonical_rejected(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.canonical_result.as_ref(),
+        Some(Err(TransactionError::InsufficientItems))
+    ));
+}
+
+#[then(regex = r"^canonical holder 0x([0-9a-fA-F]+) is empty$")]
+async fn then_canonical_holder_empty(world: &mut BevyoutWorld, reference_hex: String) {
+    let holder = HolderId::FixtureContainer {
+        reference_form_id: parse_hex(&reference_hex),
+    };
+    assert!(
+        world
+            .canonical_ledger
+            .holders()
+            .get(&holder)
+            .is_some_and(|state| state.items.is_empty())
+    );
+}
+
+// ---------------------------------------------------------------------
+// drop_placement.feature (M3/#95)
+// ---------------------------------------------------------------------
+
+#[given("no drop candidates are blocked")]
+async fn given_no_drop_candidates_blocked(world: &mut BevyoutWorld) {
+    world.drop_blocked_count = 0;
+    world.drop_all_blocked = false;
+}
+
+#[given(regex = r"^the first (\d+) drop candidates are blocked$")]
+async fn given_first_drop_candidates_blocked(world: &mut BevyoutWorld, count: usize) {
+    world.drop_blocked_count = count;
+    world.drop_all_blocked = false;
+}
+
+#[given("every drop candidate is blocked")]
+async fn given_every_drop_candidate_blocked(world: &mut BevyoutWorld) {
+    world.drop_blocked_count = 0;
+    world.drop_all_blocked = true;
+}
+
+#[when("the drop placement candidates are evaluated")]
+async fn when_drop_placement_candidates_are_evaluated(world: &mut BevyoutWorld) {
+    let blocked_count = world.drop_blocked_count;
+    let all_blocked = world.drop_all_blocked;
+    world.drop_decision = Some(drop_policy::choose_candidate(|distance| {
+        if all_blocked {
+            return true;
+        }
+        let candidate_index = ((drop_policy::DROP_DISTANCE_METERS - distance)
+            / drop_policy::DROP_RETREAT_STEP_METERS)
+            .round() as usize;
+        candidate_index < blocked_count
+    }));
+}
+
+#[then(regex = r"^the drop placement mode is (Camera|Retreat|PlayerFallback)$")]
+async fn then_drop_placement_mode(world: &mut BevyoutWorld, mode: String) {
+    let expected = match mode.as_str() {
+        "Camera" => drop_policy::DropPlacementMode::Camera,
+        "Retreat" => drop_policy::DropPlacementMode::Retreat,
+        "PlayerFallback" => drop_policy::DropPlacementMode::PlayerFallback,
+        other => panic!("unknown drop placement mode {other}"),
+    };
+    let decision = world
+        .drop_decision
+        .as_ref()
+        .expect("drop placement was not evaluated");
+    assert_eq!(decision.mode, expected);
+}
+
+#[then(regex = r"^the selected drop distance is ([\d.]+) metres$")]
+async fn then_selected_drop_distance(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .drop_decision
+        .as_ref()
+        .and_then(|decision| decision.distance)
+        .expect("drop placement did not select a camera distance");
+    assert!(
+        (actual - expected).abs() < 0.001,
+        "expected {expected}, got {actual}"
+    );
+}
+
+#[then("the drop distance is the player fallback")]
+async fn then_drop_distance_is_player_fallback(world: &mut BevyoutWorld) {
+    let decision = world
+        .drop_decision
+        .as_ref()
+        .expect("drop placement was not evaluated");
+    assert_eq!(
+        decision.mode,
+        drop_policy::DropPlacementMode::PlayerFallback
+    );
+    assert_eq!(decision.distance, None);
 }
 
 fn main() {

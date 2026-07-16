@@ -7,19 +7,24 @@
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use crate::item_transaction::{
+    HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedgerSnapshot, ItemState,
+    TransactionId,
+};
 
 mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 3;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SaveGame {
     pub header: SaveGameHeader,
     pub world: PersistentWorldState,
@@ -30,6 +35,24 @@ pub struct SaveGame {
     pub player: Option<PlayerState>,
     pub next_runtime_item_id: u64,
     pub rng_state: u64,
+    /// Canonical M3 item-holder state. `None` is retained for v1/v2 callers;
+    /// decoding or encoding a legacy save deterministically migrates it.
+    pub canonical: Option<ItemLedgerSnapshot>,
+}
+
+impl PartialEq for SaveGame {
+    fn eq(&self, other: &Self) -> bool {
+        self.header == other.header
+            && self.world == other.world
+            && self.player == other.player
+            && self.next_runtime_item_id == other.next_runtime_item_id
+            && self.rng_state == other.rng_state
+            && canonical_for_compare(self) == canonical_for_compare(other)
+    }
+}
+
+fn canonical_for_compare(save: &SaveGame) -> Option<ItemLedgerSnapshot> {
+    save.canonical.clone().or_else(|| migrate_legacy(save).ok())
 }
 
 impl Default for SaveGame {
@@ -40,6 +63,7 @@ impl Default for SaveGame {
             player: None,
             next_runtime_item_id: 1,
             rng_state: 0,
+            canonical: None,
         }
     }
 }
@@ -155,7 +179,11 @@ pub struct SaveLoadOutcome {
 }
 
 pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
-    validate_save(save)?;
+    let mut save = save.clone();
+    if save.header.format_version >= 3 && save.canonical.is_none() {
+        save.canonical = Some(migrate_legacy(&save)?);
+    }
+    validate_save(&save)?;
     let mut bytes = Vec::new();
     write_record(&mut bytes, tag("SAVE"), &encode_header(&save.header)?)?;
     if let Some(player) = &save.player {
@@ -170,6 +198,19 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
             &mut bytes,
             tag("NITM"),
             &save.next_runtime_item_id.to_le_bytes(),
+        )?;
+    }
+    if save.header.format_version >= 3 {
+        let canonical = save
+            .canonical
+            .as_ref()
+            .context("v3 save is missing canonical item state")?;
+        write_record(
+            &mut bytes,
+            tag("ITMS"),
+            ron::ser::to_string(canonical)
+                .context("encoding canonical item state")?
+                .as_bytes(),
         )?;
     }
     for (cell_form_id, cell) in &save.world.cells {
@@ -210,6 +251,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut saw_header = false;
     let mut saw_rng = false;
     let mut saw_next_runtime_item = false;
+    let mut saw_canonical = false;
     let mut checksum = None;
     let mut checksum_offset = None;
     let mut offset = 0usize;
@@ -257,6 +299,19 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                         record.payload.as_slice().try_into().expect("checked NITM"),
                     );
                     saw_next_runtime_item = true;
+                }
+                record_tag if *record_tag == tag("ITMS") => {
+                    if saw_canonical {
+                        bail!("save contains duplicate ITMS records");
+                    }
+                    if !saw_header || save.header.format_version < 3 {
+                        bail!("ITMS is only valid in save format v3 or newer");
+                    }
+                    save.canonical = Some(
+                        ron::de::from_bytes(&record.payload)
+                            .context("decoding canonical item state")?,
+                    );
+                    saw_canonical = true;
                 }
                 record_tag if *record_tag == tag("CSTA") => {
                     let cell_form_id = decode_cell_state(&record.payload)?;
@@ -330,8 +385,79 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     if save.header.format_version >= 2 && !saw_next_runtime_item {
         bail!("save format v2 is missing NITM");
     }
+    if save.header.format_version >= 3 && !saw_canonical {
+        save.canonical = Some(migrate_legacy(&save)?);
+    }
     validate_save(&save)?;
     Ok(save)
+}
+
+/// Deterministic v1/v2 migration. Legacy records are already sorted by
+/// holder/FormID/condition, so assigning IDs in that traversal order makes a
+/// migration reproducible while preserving every legacy count and condition.
+fn migrate_legacy(save: &SaveGame) -> Result<ItemLedgerSnapshot> {
+    let mut snapshot = ItemLedgerSnapshot {
+        next_item_id: ItemInstanceId(1),
+        next_transaction_id: TransactionId(1),
+        ..Default::default()
+    };
+    let mut next_id = 1u64;
+    let mut add_stack = |items: &mut Vec<ItemInstance>, stack: &ItemStack| -> Result<()> {
+        if stack.count <= 0 {
+            bail!("legacy item count must be positive during v3 migration");
+        }
+        items.push(ItemInstance::new(
+            ItemInstanceId(next_id),
+            stack.base_form_id,
+            u32::try_from(stack.count).context("legacy item count exceeds v3 range")?,
+            ItemState {
+                condition: stack.condition,
+                ..Default::default()
+            },
+        )?);
+        next_id = next_id.saturating_add(1);
+        Ok(())
+    };
+
+    if let Some(player) = &save.player {
+        let mut state = ItemHolderState::default();
+        for stack in &player.inventory {
+            add_stack(&mut state.items, stack)?;
+        }
+        snapshot.holders.insert(HolderId::Player, state);
+    }
+    for (cell_form_id, cell) in &save.world.cells {
+        for (reference_form_id, delta) in &cell.references {
+            let Some(inventory) = &delta.inventory else {
+                continue;
+            };
+            let holder = HolderId::FixtureContainer {
+                reference_form_id: *reference_form_id,
+            };
+            if snapshot.holders.contains_key(&holder) {
+                bail!("legacy migration found duplicate container holder {reference_form_id:08x}");
+            }
+            let mut state = ItemHolderState::default();
+            for stack in inventory {
+                add_stack(&mut state.items, stack)?;
+            }
+            snapshot.holders.insert(holder, state);
+        }
+        for (runtime_id, dropped) in &cell.dropped_items {
+            let holder = HolderId::RuntimeWorld {
+                cell_form_id: *cell_form_id,
+                runtime_id: *runtime_id,
+            };
+            let mut state = ItemHolderState::default();
+            add_stack(&mut state.items, &dropped.stack)?;
+            snapshot.holders.insert(holder, state);
+        }
+    }
+    for holder in snapshot.holders.keys().copied() {
+        snapshot.bindings.entry(holder).or_default();
+    }
+    snapshot.next_item_id = ItemInstanceId(next_id);
+    Ok(snapshot)
 }
 
 impl SaveGame {
@@ -978,6 +1104,50 @@ fn validate_save(save: &SaveGame) -> Result<()> {
             }
         }
     }
+    if save.header.format_version >= 3 {
+        let canonical = save
+            .canonical
+            .as_ref()
+            .context("v3 save is missing canonical item state")?;
+        validate_canonical(canonical)?;
+    } else if save.canonical.is_some() {
+        bail!("canonical item state is not valid in save format v1/v2");
+    }
+    Ok(())
+}
+
+fn validate_canonical(snapshot: &ItemLedgerSnapshot) -> Result<()> {
+    if snapshot.next_item_id.0 == 0 || snapshot.next_transaction_id.0 == 0 {
+        bail!("canonical save counters must be non-zero");
+    }
+    let mut ids = BTreeSet::new();
+    let mut max_id = 0;
+    for (holder, state) in &snapshot.holders {
+        state.validate().map_err(|error| anyhow::anyhow!(error))?;
+        for item in &state.items {
+            if !ids.insert(item.id) {
+                bail!(
+                    "canonical item id {:?} appears in more than one holder",
+                    item.id
+                );
+            }
+            max_id = max_id.max(item.id.0);
+        }
+        if let Some(binding) = snapshot.bindings.get(holder) {
+            let binding_ids = binding
+                .equipped
+                .into_iter()
+                .chain(binding.hotkeys.into_iter().flatten());
+            for id in binding_ids {
+                if !ids.contains(&id) {
+                    bail!("canonical binding references unknown item {:?}", id);
+                }
+            }
+        }
+    }
+    if snapshot.next_item_id.0 <= max_id {
+        bail!("canonical next item id must exceed every item id");
+    }
     Ok(())
 }
 
@@ -1170,6 +1340,7 @@ impl<K: Ord, V> InsertChecked<K, V> for BTreeMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item_transaction::ItemExtraEntry;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_save() -> SaveGame {
@@ -1259,6 +1430,7 @@ mod tests {
             }),
             next_runtime_item_id: 6,
             rng_state: 0x0123_4567_89ab_cdef,
+            canonical: None,
         }
     }
 
@@ -1534,5 +1706,45 @@ mod tests {
         assert_eq!(outcome.save, first);
         assert!(outcome.warning.is_some());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canonical_v3_round_trip_preserves_ids_conditions_and_opaque_state() {
+        let mut save = SaveGame::default();
+        save.header.content_fingerprint = "content".into();
+        let item = ItemInstance::new(
+            ItemInstanceId(42),
+            0x1234,
+            2,
+            ItemState {
+                condition: Some(77),
+                extras: vec![ItemExtraEntry {
+                    namespace_form_id: 0x99,
+                    tag: *b"READ",
+                    payload: vec![1, 2, 3, 4],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut holders = BTreeMap::new();
+        holders.insert(
+            HolderId::Player,
+            ItemHolderState {
+                items: vec![item],
+                caps: 50,
+                revision: 3,
+            },
+        );
+        save.canonical = Some(ItemLedgerSnapshot {
+            holders,
+            next_item_id: ItemInstanceId(43),
+            next_transaction_id: TransactionId(1),
+            ..Default::default()
+        });
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        assert_eq!(decoded.canonical, save.canonical);
+        assert_eq!(encode_save(&decoded).unwrap(), bytes);
     }
 }

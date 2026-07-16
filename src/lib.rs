@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod console;
+pub mod item_transaction;
 
 mod app_state;
 mod config;
