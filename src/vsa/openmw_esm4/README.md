@@ -17,6 +17,9 @@ The adaptation is intentionally limited to the Fallout cell vertical slice:
 - Fallout `WEAP`, `ARMO`, `AMMO`, `ALCH`, `MISC`, `BOOK`, `NOTE`, and `KEYM`
   inventory names, models, `ICON`/`MICO` paths, value/weight layouts, condition,
   category statistics, text, and effect FormIDs;
+- Fallout 3/New Vegas `RCPE` recipe metadata, ordered `RCIL`/`RCQY`
+  ingredient and `RCOD`/`RCQY` output pairs, and opaque `CTDA`
+  conditions;
 - OpenMW's ESM4 teleport-door rule: resolve `XTEL`'s destination reference and
   use that reference's parent cell as the destination cell.
 

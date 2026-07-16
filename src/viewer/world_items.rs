@@ -14,7 +14,9 @@ use crate::vsa::{
 };
 
 use super::audio::PlaySound;
-use super::interaction::{InteractionNotice, PlacementRoot, PlayerInventory, item_rules};
+use super::interaction::{
+    InteractionNotice, PlacementRoot, PlayerEquipment, PlayerInventory, item_rules,
+};
 use super::inventory::{InventoryStack, TransferResult};
 use super::pipboy::DropInventoryStackRequested;
 use super::player::FpsPlayer;
@@ -125,6 +127,7 @@ fn drop_inventory_items(
     mut commands: Commands,
     mut requests: MessageReader<DropInventoryStackRequested>,
     mut inventory: ResMut<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     assets: Res<ItemWorldAssets>,
     asset_server: Res<AssetServer>,
     active: Res<ActiveCell>,
@@ -150,6 +153,12 @@ fn drop_inventory_items(
                 item_rules::TransferRejection::QuestItem => "Quest items cannot be dropped",
                 item_rules::TransferRejection::Caps => "Caps cannot be dropped",
             });
+            continue;
+        }
+        // Issue #98 (F98.2): equipped items cannot be dropped -- the same
+        // authoritative choke point as the quest/caps check above.
+        if equipment.is_equipped(request.key) {
+            notice.show("Equipped items cannot be dropped");
             continue;
         }
         let template = &prepared_asset.placement;

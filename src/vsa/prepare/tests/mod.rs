@@ -1,5 +1,8 @@
 use super::super::manifest::CellInfo;
 use super::super::openmw_esm4::EnableParentRecord;
+use super::super::recipe::{
+    PreparedRecipe, PreparedRecipeItem, RecipeValidationError, validate_recipe,
+};
 use super::*;
 
 #[test]
@@ -766,4 +769,234 @@ fn quest_item_header_flag_flows_from_plugin_bytes_into_the_item_catalog() {
         .expect("ordinary MISC item must be present in the catalog");
     assert!(quest_item.quest_item);
     assert!(!ordinary_item.quest_item);
+}
+
+// --- Issue #117: prepared recipes and pure validation --------------------
+
+fn recipe_item(item_form_id: u32, quantity: i32, order: u32) -> RecipeItemRecord {
+    RecipeItemRecord {
+        item_form_id,
+        quantity,
+        order,
+    }
+}
+
+fn recipe_record(
+    form_id: u32,
+    ingredients: Vec<RecipeItemRecord>,
+    outputs: Vec<RecipeItemRecord>,
+) -> RecipeRecord {
+    RecipeRecord {
+        form_id,
+        record_flags: 0,
+        editor_id: Some(format!("Recipe{form_id:08x}")),
+        name: Some(format!("Recipe {form_id:08x}")),
+        skill: 25,
+        level: 4,
+        category_form_id: Some(0x500),
+        sub_category_form_id: Some(0x501),
+        ingredients,
+        outputs,
+        conditions: Vec::new(),
+        ignored_subrecords: Vec::new(),
+    }
+}
+
+fn recipe_bases(ids: &[u32]) -> HashMap<u32, BaseRecord> {
+    ids.iter()
+        .copied()
+        .map(|form_id| {
+            let mut base = BaseRecord::default();
+            base.kind = "MISC".into();
+            base.name = Some(format!("Item {form_id:08x}"));
+            (form_id, base)
+        })
+        .collect()
+}
+
+#[test]
+fn recipe_catalog_sorts_records_and_items_without_mutating_source_order() {
+    let bases = recipe_bases(&[0x10, 0x20, 0x30]);
+    let mut recipes = HashMap::new();
+    recipes.insert(
+        0x20,
+        recipe_record(
+            0x20,
+            vec![recipe_item(0x30, 1, 0), recipe_item(0x10, 2, 1)],
+            vec![recipe_item(0x30, 1, 0)],
+        ),
+    );
+    recipes.insert(
+        0x10,
+        recipe_record(
+            0x10,
+            vec![recipe_item(0x20, 1, 0)],
+            vec![recipe_item(0x30, 1, 0)],
+        ),
+    );
+
+    let built = build_recipe_catalog(&recipes, &bases, "content-fingerprint");
+    assert!(built.invalid.is_empty());
+    assert_eq!(
+        built
+            .catalog
+            .recipes
+            .iter()
+            .map(|recipe| recipe.form_id)
+            .collect::<Vec<_>>(),
+        vec![0x10, 0x20]
+    );
+    assert_eq!(
+        built.catalog.recipes[1]
+            .ingredients
+            .iter()
+            .map(|item| item.item_form_id)
+            .collect::<Vec<_>>(),
+        vec![0x10, 0x30]
+    );
+    assert_eq!(
+        recipes[&0x20]
+            .ingredients
+            .iter()
+            .map(|item| item.item_form_id)
+            .collect::<Vec<_>>(),
+        vec![0x30, 0x10],
+        "catalog ordering must not mutate parsed records"
+    );
+}
+
+#[test]
+fn recipe_catalog_serialization_is_independent_of_hash_map_insertion_order() {
+    let bases = recipe_bases(&[0x10, 0x20, 0x30]);
+    let first_recipe = recipe_record(
+        0x20,
+        vec![recipe_item(0x30, 1, 0), recipe_item(0x10, 2, 1)],
+        vec![recipe_item(0x30, 1, 0)],
+    );
+    let second_recipe = recipe_record(
+        0x10,
+        vec![recipe_item(0x20, 1, 0)],
+        vec![recipe_item(0x30, 1, 0)],
+    );
+    let first = HashMap::from([(0x20, first_recipe.clone()), (0x10, second_recipe.clone())]);
+    let second = HashMap::from([(0x10, second_recipe), (0x20, first_recipe)]);
+    let first_catalog = build_recipe_catalog(&first, &bases, "content-fingerprint");
+    let second_catalog = build_recipe_catalog(&second, &bases, "content-fingerprint");
+    let ron_config = ron::ser::PrettyConfig::default();
+
+    assert_eq!(
+        ron::ser::to_string_pretty(&first_catalog.catalog, ron_config.clone()).unwrap(),
+        ron::ser::to_string_pretty(&second_catalog.catalog, ron_config).unwrap()
+    );
+}
+
+#[test]
+fn invalid_recipe_records_are_diagnosed_and_excluded_as_a_unit() {
+    let bases = recipe_bases(&[0x10, 0x20]);
+    let mut recipes = HashMap::new();
+    recipes.insert(
+        0x30,
+        recipe_record(0x30, vec![recipe_item(0x10, 1, 0)], Vec::new()),
+    );
+    recipes.insert(
+        0x31,
+        recipe_record(0x31, Vec::new(), vec![recipe_item(0x20, 1, 0)]),
+    );
+    recipes.insert(
+        0x32,
+        recipe_record(
+            0x32,
+            vec![recipe_item(0x10, 1, 0), recipe_item(0x10, 2, 1)],
+            vec![recipe_item(0x20, 1, 0)],
+        ),
+    );
+    recipes.insert(
+        0x33,
+        recipe_record(
+            0x33,
+            vec![recipe_item(0x10, 0, 0)],
+            vec![recipe_item(0x20, 1, 0)],
+        ),
+    );
+    recipes.insert(
+        0x34,
+        recipe_record(
+            0x34,
+            vec![recipe_item(0x999, 1, 0)],
+            vec![recipe_item(0x20, 1, 0)],
+        ),
+    );
+
+    let built = build_recipe_catalog(&recipes, &bases, "content-fingerprint");
+    assert!(built.catalog.recipes.is_empty());
+    assert_eq!(built.invalid.len(), 5);
+    assert!(built.invalid[0].message.contains("no outputs"));
+    assert!(built.invalid[1].message.contains("no ingredients"));
+    assert!(built.invalid[2].message.contains("duplicate ingredient"));
+    assert!(built.invalid[3].message.contains("non-positive quantity"));
+    assert!(built.invalid[4].message.contains("missing ingredient item"));
+}
+
+#[test]
+fn recipe_catalog_write_is_content_fingerprinted_and_reused() {
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-recipe-catalog-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let bases = recipe_bases(&[0x10, 0x20]);
+    let recipes = HashMap::from([(
+        0x30,
+        recipe_record(
+            0x30,
+            vec![recipe_item(0x10, 1, 0)],
+            vec![recipe_item(0x20, 1, 0)],
+        ),
+    )]);
+    let catalog = build_recipe_catalog(&recipes, &bases, "content-fingerprint");
+
+    let first = write_recipe_catalog(&root, &catalog.catalog).unwrap();
+    let second = write_recipe_catalog(&root, &catalog.catalog).unwrap();
+    assert!(!first.reused);
+    assert!(second.reused);
+    assert_eq!(first.relative_path, second.relative_path);
+    assert_eq!(first.hash, second.hash);
+    assert!(root.join(&first.relative_path).is_file());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recipe_validation_rejects_non_positive_quantities_without_partial_state() {
+    let bases = recipe_bases(&[0x10, 0x20]);
+    let recipe = PreparedRecipe {
+        form_id: 0x30,
+        record_flags: 0,
+        editor_id: None,
+        display_name: None,
+        skill: 0,
+        level: 0,
+        category_form_id: None,
+        sub_category_form_id: None,
+        ingredients: vec![PreparedRecipeItem {
+            item_form_id: 0x10,
+            quantity: -1,
+            order: 0,
+        }],
+        outputs: vec![PreparedRecipeItem {
+            item_form_id: 0x20,
+            quantity: 1,
+            order: 0,
+        }],
+        conditions: Vec::new(),
+    };
+    let available = bases
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let error = validate_recipe(&recipe, &available).unwrap_err();
+    assert!(matches!(
+        error,
+        RecipeValidationError::NonPositiveQuantity { .. }
+    ));
+    assert_eq!(recipe.ingredients[0].quantity, -1);
 }

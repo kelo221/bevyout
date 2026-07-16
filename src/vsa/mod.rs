@@ -11,6 +11,7 @@ mod paths;
 mod physics;
 mod plugin;
 mod prepare;
+mod recipe;
 mod report;
 mod scenes;
 
@@ -21,6 +22,12 @@ pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
+/// Test-only re-export (issue #99): `viewer::pipboy`'s use-path unit tests
+/// construct `PreparedItemStats::Aid` effect labels; nothing outside tests
+/// names the type through `vsa`, so a plain re-export would trip
+/// `unused_imports` on non-test builds.
+#[cfg(test)]
+pub(crate) use manifest::PreparedItemEffect;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,
@@ -39,6 +46,7 @@ pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
+pub(crate) use prepare::ITEM_CATALOG_REVISION;
 pub use prepare::prepare;
 pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

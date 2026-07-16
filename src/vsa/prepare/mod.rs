@@ -19,6 +19,7 @@ mod jobs;
 mod navmesh;
 mod placements;
 mod plugins;
+mod recipes;
 mod selectors;
 mod session;
 mod static_shadows;
@@ -37,6 +38,7 @@ pub(crate) use jobs::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
+pub(crate) use recipes::*;
 pub(crate) use selectors::*;
 pub(crate) use session::*;
 pub(crate) use static_shadows::*;
@@ -74,8 +76,9 @@ use super::physics::{
     dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{
-    BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, ReferenceKind,
-    ReferenceRecord, SoundRecord, SoundReferenceRecord, parse_content_set, read_master_names,
+    BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, RecipeItemRecord,
+    RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord, SoundReferenceRecord,
+    parse_content_set, read_master_names,
 };
 use crate::cli::PrepareArgs;
 
