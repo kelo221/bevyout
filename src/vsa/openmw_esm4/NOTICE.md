@@ -184,6 +184,25 @@ apps/openmw/mwworld/cellref.cpp 7c9e7857de758b40c93e0622d3256972fed478ec1b1c43b3
 - `lighting.hpp` supplies the FO3 40-byte `XCLL`/`LGTM.DATA` layout; the
   `loadcell` and `loadlgtm` adaptations preserve the nine named `LNAM`
   inheritance masks while leaving unresolved templates on CELL lighting.
+- The `actor_support.rs` RACE/CLAS/FACT/PACK adapters (M4 wave 1, issue
+  #103) draw on the OpenMW master-branch `components/esm4/loadrace.cpp`/
+  `loadrace.hpp`, `loadclas.cpp`/`loadclas.hpp`, and `loadpack.cpp`/
+  `loadpack.hpp` (fetched from gitlab.com/OpenMW/openmw at master commit
+  `c7830d9ee5367a750f70cb5e9b9f87c16634b079`; these six files are not part
+  of the 0.52.0 snapshot listed above). Adapted layouts: the RACE 36-byte
+  `DATA` (TES4/FO3/FONV branch of `ESM4::Race::load`), the
+  `NAM0`/`NAM1`/`MNAM`/`FNAM`/`INDX`/`MODL` head/body-part traversal state
+  machine, `DNAM` default hair, `HNAM`/`ENAM` FormID arrays,
+  `FGGS`/`FGGA`/`FGTS` per-sex FaceGen retention, and PACK's legacy 4-byte
+  "flags only" `PKDT` special case plus the `PLDT` type-5 "not a FormID"
+  gate. FO3-specific extensions beyond OpenMW (decoded from the fopdoc
+  Fallout3 pages where OpenMW skips or stubs the subrecord): RACE
+  `ONAM`/`YNAM`/`CNAM`, the CLAS 28-byte `DATA`, the PACK 12-byte FO3
+  `PKDT`, the FO3-sized `PSDT` (8 bytes) and `PTDT` (16 bytes, gated on
+  `PTDT`'s own type field rather than reproducing `loadpack.cpp`'s
+  `mLocation.type` check), and opaque `CTDA` retention. `FACT` has no
+  OpenMW ESM4 loader at all and is decoded purely from the fopdoc
+  Fallout3 FACT page.
 
 ## Adapted File Contributors
 
