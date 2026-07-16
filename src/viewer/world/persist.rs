@@ -743,12 +743,27 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     let legacy_inventory = world
         .get_resource::<interaction::PlayerInventory>()
         .map(|inventory| inventory.legacy_snapshot());
-    if let Some(legacy_inventory) = legacy_inventory.as_ref() {
+    let canonical_player_present = world
+        .get_resource::<interaction::CanonicalItemLedger>()
+        .is_some_and(|ledger| {
+            ledger
+                .ledger
+                .holders()
+                .contains_key(&crate::item_transaction::HolderId::Player)
+        });
+    if !canonical_player_present {
+        let legacy_inventory = legacy_inventory.unwrap_or_default();
         world.get_resource_or_insert_with(interaction::CanonicalItemLedger::default);
-        world
-            .resource_mut::<interaction::CanonicalItemLedger>()
-            .sync_player(legacy_inventory)
-            .map_err(|error| anyhow::anyhow!("canonical item sync failed: {error}"))?;
+        let mut ledger = world.resource_mut::<interaction::CanonicalItemLedger>();
+        if !ledger
+            .ledger
+            .holders()
+            .contains_key(&crate::item_transaction::HolderId::Player)
+        {
+            ledger
+                .sync_player(&legacy_inventory)
+                .map_err(|error| anyhow::anyhow!("canonical item bootstrap failed: {error}"))?;
+        }
     }
 
     let Some(manifest) = world.get_resource::<PreparedSceneManifest>() else {
@@ -772,21 +787,23 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         description: format!("cell {active:08x}"),
         ..Default::default()
     };
+    let canonical_inventory = world
+        .get_resource::<interaction::CanonicalItemLedger>()
+        .and_then(interaction::CanonicalItemLedger::player_legacy_snapshot)
+        .map(|inventory| {
+            inventory
+                .stacks()
+                .into_iter()
+                .map(|stack| ItemStack {
+                    base_form_id: stack.base_form_id,
+                    count: stack.count,
+                    condition: stack.condition,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let player = PlayerState {
-        inventory: world
-            .get_resource::<interaction::PlayerInventory>()
-            .map(|inventory| {
-                inventory
-                    .stack_states()
-                    .into_iter()
-                    .map(|stack| ItemStack {
-                        base_form_id: stack.base_form_id,
-                        count: stack.count,
-                        condition: stack.condition,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        inventory: canonical_inventory,
         equipped: capture_equipped(world),
         hotkeys: capture_hotkeys(world),
     };
@@ -876,6 +893,10 @@ fn capture_hotkeys(world: &World) -> [Option<HotkeyBinding>; 8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item_transaction::{
+        HolderId, ItemExtraEntry, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger,
+        ItemState, OwnershipProvenance,
+    };
 
     fn placement(reference_form_id: u32, translation: [f32; 3]) -> PreparedPlacement {
         PreparedPlacement {
@@ -1235,6 +1256,130 @@ mod tests {
                 condition: None,
             }]
         );
+        assert!(
+            outcome
+                .save
+                .canonical
+                .as_ref()
+                .and_then(|snapshot| snapshot.holders.get(&HolderId::Player))
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(save_dir);
+    }
+
+    #[test]
+    fn save_uses_canonical_player_items_and_preserves_opaque_state_and_revision() {
+        let save_dir = std::env::temp_dir().join(format!(
+            "bevyout-canonical-save-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut world = test_world();
+        world.init_resource::<super::super::preload::ResidentCells>();
+        world.insert_resource(ActiveCell(0xC0DE));
+        world.insert_resource(minimal_manifest(0xC0DE));
+        world.insert_resource(SaveDirectory(save_dir.clone()));
+        world.insert_resource(interaction::PlayerInventory::from_stacks([(0x99, 99)]));
+
+        let item = ItemInstance::new(
+            ItemInstanceId(42),
+            0x42,
+            2,
+            ItemState {
+                condition: Some(80),
+                ownership: OwnershipProvenance {
+                    origin_owner_form_id: Some(0x1234),
+                    origin_faction_rank: Some(2),
+                    stolen: true,
+                },
+                extras: vec![ItemExtraEntry {
+                    namespace_form_id: 0x77,
+                    tag: *b"TEST",
+                    payload: vec![1, 2, 3],
+                }],
+            },
+        )
+        .unwrap();
+        let state = ItemHolderState {
+            items: vec![item.clone()],
+            caps: 12,
+            revision: 7,
+        };
+        let mut canonical = ItemLedger::new();
+        canonical.insert_holder(HolderId::Player, state).unwrap();
+        canonical.bind_hotkey(HolderId::Player, 0, item.id).unwrap();
+        canonical.equip(HolderId::Player, item.id).unwrap();
+        let before = canonical.snapshot();
+        world.insert_resource(interaction::CanonicalItemLedger { ledger: canonical });
+
+        write_save_slot(&mut world, "canonical").expect("canonical save must write");
+
+        let after = world
+            .resource::<interaction::CanonicalItemLedger>()
+            .snapshot();
+        assert_eq!(
+            after.holders[&HolderId::Player].revision,
+            before.holders[&HolderId::Player].revision
+        );
+        assert_eq!(after, before);
+        let outcome = SaveStore::from_save_dir(&save_dir)
+            .read_slot("canonical")
+            .expect("canonical slot must read back");
+        let saved = outcome.save.canonical.expect("v3 canonical state");
+        assert_eq!(saved, before);
+        assert_eq!(
+            outcome.save.player.unwrap().inventory,
+            vec![ItemStack {
+                base_form_id: 0x42,
+                count: 2,
+                condition: Some(80),
+            }]
+        );
+        let _ = std::fs::remove_dir_all(save_dir);
+    }
+
+    #[test]
+    fn save_does_not_bootstrap_over_an_intentionally_empty_canonical_player() {
+        let save_dir = std::env::temp_dir().join(format!(
+            "bevyout-empty-canonical-save-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut world = test_world();
+        world.init_resource::<super::super::preload::ResidentCells>();
+        world.insert_resource(ActiveCell(0xC0DE));
+        world.insert_resource(minimal_manifest(0xC0DE));
+        world.insert_resource(SaveDirectory(save_dir.clone()));
+        world.insert_resource(interaction::PlayerInventory::from_stacks([(0x99, 99)]));
+
+        let mut canonical = ItemLedger::new();
+        canonical
+            .insert_holder(
+                HolderId::Player,
+                ItemHolderState {
+                    revision: 11,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        world.insert_resource(interaction::CanonicalItemLedger { ledger: canonical });
+
+        write_save_slot(&mut world, "empty").expect("empty canonical save must write");
+
+        let outcome = SaveStore::from_save_dir(&save_dir)
+            .read_slot("empty")
+            .expect("empty canonical slot must read back");
+        let snapshot = outcome.save.canonical.expect("v3 canonical state");
+        let player = &snapshot.holders[&HolderId::Player];
+        assert!(player.items.is_empty());
+        assert_eq!(player.revision, 11);
+        assert!(outcome.save.player.unwrap().inventory.is_empty());
         let _ = std::fs::remove_dir_all(save_dir);
     }
 

@@ -555,9 +555,8 @@ impl PlayerInventory {
 }
 
 /// Runtime adapter for the canonical #95 holder ledger. The legacy inventory
-/// resource remains the Pip-Boy-facing projection during this migration; all
-/// entry points call `sync_player` before persisting or moving an item so IDs
-/// and mutable state are retained across the projection boundary.
+/// resource remains the Pip-Boy-facing projection during this migration; item
+/// ownership and mutable state live in this ledger.
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct CanonicalItemLedger {
     pub(crate) ledger: ItemLedger,
@@ -574,7 +573,7 @@ impl Default for CanonicalItemLedger {
 /// Issue #98 (F98.2/F98.3): the authoritative equipped set. Thin `Resource`
 /// wrapper around the pure `equipment::EquipmentState`, mirroring how
 /// `PlayerInventory` wraps `Inventory`.
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Default, Debug, Clone)]
 pub(crate) struct PlayerEquipment(EquipmentState);
 
 impl PlayerEquipment {
@@ -602,6 +601,18 @@ impl PlayerEquipment {
         kind: EquipKind,
     ) -> Result<EquipOutcome, EquipError> {
         self.0.toggle(key, kind)
+    }
+
+    pub(crate) fn equip(
+        &mut self,
+        key: StackKey,
+        kind: EquipKind,
+    ) -> Result<EquipOutcome, EquipError> {
+        self.0.equip(key, kind)
+    }
+
+    pub(crate) fn unequip(&mut self, key: StackKey) -> EquipOutcome {
+        self.0.unequip(key)
     }
 
     /// Issue #60/#98 (F98.4): rebuilds equipment from a loaded save's
@@ -712,6 +723,36 @@ impl CanonicalItemLedger {
 
     pub(crate) fn snapshot(&self) -> ItemLedgerSnapshot {
         self.ledger.snapshot()
+    }
+
+    pub(crate) fn player_stack_key(&self, item_id: ItemInstanceId) -> Option<StackKey> {
+        self.ledger
+            .holders()
+            .get(&HolderId::Player)
+            .and_then(|state| state.find(item_id))
+            .map(|item| StackKey {
+                base_form_id: item.base_form_id,
+                condition: item.state.condition,
+            })
+    }
+
+    pub(crate) fn player_legacy_snapshot(&self) -> Option<Inventory> {
+        let state = self.ledger.holders().get(&HolderId::Player)?;
+        let mut stacks = BTreeMap::<(u32, Option<u32>), i32>::new();
+        for item in &state.items {
+            let count = i32::try_from(item.count).unwrap_or(i32::MAX);
+            let entry = stacks
+                .entry((item.base_form_id, item.state.condition))
+                .or_default();
+            *entry = entry.saturating_add(count);
+        }
+        Some(Inventory::from_stacks(stacks.into_iter().map(
+            |((base_form_id, condition), count)| InventoryStack {
+                base_form_id,
+                count,
+                condition,
+            },
+        )))
     }
 
     pub(crate) fn sync_player(&mut self, inventory: &Inventory) -> Result<(), TransactionError> {

@@ -1282,16 +1282,23 @@ fn validate_canonical(snapshot: &ItemLedgerSnapshot) -> Result<()> {
             }
             max_id = max_id.max(item.id.0);
         }
-        if let Some(binding) = snapshot.bindings.get(holder) {
-            let binding_ids = binding
+        if let Some(binding) = snapshot.bindings.get(holder)
+            && let Some(item_id) = binding
                 .equipped
                 .into_iter()
-                .chain(binding.hotkeys.into_iter().flatten());
-            for id in binding_ids {
-                if !ids.contains(&id) {
-                    bail!("canonical binding references unknown item {:?}", id);
-                }
-            }
+                .chain(binding.hotkeys.into_iter().flatten())
+                .find(|item_id| state.find(*item_id).is_none())
+        {
+            bail!(
+                "canonical binding for holder {:?} references item {:?} in another holder or no holder",
+                holder,
+                item_id
+            );
+        }
+    }
+    for holder in snapshot.bindings.keys() {
+        if !snapshot.holders.contains_key(holder) {
+            bail!("canonical bindings reference unknown holder {:?}", holder);
         }
     }
     if snapshot.next_item_id.0 <= max_id {

@@ -140,6 +140,15 @@ impl BindingState {
     fn references(&self, id: ItemInstanceId) -> bool {
         self.equipped == Some(id)
     }
+
+    fn prune_to(&mut self, items: &ItemHolderState) {
+        self.equipped = self
+            .equipped
+            .filter(|item_id| items.find(*item_id).is_some());
+        for hotkey in &mut self.hotkeys {
+            *hotkey = hotkey.filter(|item_id| items.find(*item_id).is_some());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -221,6 +230,10 @@ pub enum TransactionError {
         namespace_form_id: u32,
         tag: [u8; 4],
     },
+    InvalidBinding {
+        holder: HolderId,
+        item_id: ItemInstanceId,
+    },
     EquippedItem(ItemInstanceId),
     InvalidMerchant,
     EquipmentOccupied,
@@ -298,6 +311,24 @@ impl ItemLedger {
     pub fn from_snapshot(snapshot: ItemLedgerSnapshot) -> Result<Self, TransactionError> {
         for state in snapshot.holders.values() {
             state.validate()?;
+        }
+        for (holder, bindings) in &snapshot.bindings {
+            let state = snapshot
+                .holders
+                .get(holder)
+                .ok_or(TransactionError::UnknownHolder(*holder))?;
+            for item_id in bindings
+                .equipped
+                .into_iter()
+                .chain(bindings.hotkeys.into_iter().flatten())
+            {
+                if state.find(item_id).is_none() {
+                    return Err(TransactionError::InvalidBinding {
+                        holder: *holder,
+                        item_id,
+                    });
+                }
+            }
         }
         Ok(Self {
             holders: snapshot.holders,
@@ -622,10 +653,12 @@ impl ItemLedger {
             destination_state.items.push(moved_item.clone());
         }
         destination_state.items.sort_by_key(|item| item.id);
-        if let Some((from, to)) = remaps.first().copied() {
+        for (from, to) in remaps.iter().copied() {
             source_bindings.remap(from, to);
             destination_bindings.remap(from, to);
         }
+        source_bindings.prune_to(&source_state);
+        destination_bindings.prune_to(&destination_state);
         source_state.revision = source_state.revision.saturating_add(1);
         destination_state.revision = destination_state.revision.saturating_add(1);
         source_state.validate()?;
@@ -725,6 +758,64 @@ mod tests {
     }
 
     #[test]
+    fn full_transfer_prunes_source_hotkeys() {
+        let container = HolderId::FixtureContainer {
+            reference_form_id: 9,
+        };
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(HolderId::Player, holder(vec![item(7, 1, 1, None)], 0))
+            .unwrap();
+        ledger.insert_holder(container, holder(vec![], 0)).unwrap();
+        ledger
+            .bind_hotkey(HolderId::Player, 0, ItemInstanceId(7))
+            .unwrap();
+
+        ledger
+            .execute(TransactionRequest::Transfer {
+                source: HolderId::Player,
+                destination: container,
+                item_id: ItemInstanceId(7),
+                count: 1,
+            })
+            .unwrap();
+
+        assert_eq!(ledger.bindings()[&HolderId::Player].hotkeys[0], None);
+        assert_eq!(ledger.bindings()[&container].hotkeys[0], None);
+    }
+
+    #[test]
+    fn partial_transfer_keeps_source_hotkey_and_leaves_destination_unbound() {
+        let container = HolderId::FixtureContainer {
+            reference_form_id: 9,
+        };
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(HolderId::Player, holder(vec![item(7, 1, 5, None)], 0))
+            .unwrap();
+        ledger.insert_holder(container, holder(vec![], 0)).unwrap();
+        ledger
+            .bind_hotkey(HolderId::Player, 0, ItemInstanceId(7))
+            .unwrap();
+
+        let receipt = ledger
+            .execute(TransactionRequest::Transfer {
+                source: HolderId::Player,
+                destination: container,
+                item_id: ItemInstanceId(7),
+                count: 2,
+            })
+            .unwrap();
+
+        assert_eq!(
+            ledger.bindings()[&HolderId::Player].hotkeys[0],
+            Some(ItemInstanceId(7))
+        );
+        assert_eq!(ledger.bindings()[&container].hotkeys[0], None);
+        assert_eq!(receipt.moved, vec![(ItemInstanceId(8), 2)]);
+    }
+
+    #[test]
     fn compatible_merge_keeps_lowest_id_and_reports_remap() {
         let mut ledger = ItemLedger::new();
         ledger
@@ -765,6 +856,79 @@ mod tests {
                 .count,
             4
         );
+    }
+
+    #[test]
+    fn merge_remaps_destination_binding_and_prunes_source_binding() {
+        let container = HolderId::FixtureContainer {
+            reference_form_id: 9,
+        };
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(HolderId::Player, holder(vec![item(2, 1, 1, None)], 0))
+            .unwrap();
+        ledger
+            .insert_holder(container, holder(vec![item(4, 1, 3, None)], 0))
+            .unwrap();
+        ledger.bind_hotkey(container, 0, ItemInstanceId(4)).unwrap();
+
+        let receipt = ledger
+            .execute(TransactionRequest::Transfer {
+                source: HolderId::Player,
+                destination: container,
+                item_id: ItemInstanceId(2),
+                count: 1,
+            })
+            .unwrap();
+
+        assert_eq!(receipt.remaps, vec![(ItemInstanceId(4), ItemInstanceId(2))]);
+        assert_eq!(
+            ledger.bindings()[&container].hotkeys[0],
+            Some(ItemInstanceId(2))
+        );
+        assert_eq!(ledger.bindings()[&HolderId::Player].hotkeys[0], None);
+    }
+
+    #[test]
+    fn snapshot_rejects_cross_holder_binding() {
+        let container = HolderId::FixtureContainer {
+            reference_form_id: 9,
+        };
+        let mut snapshot = ItemLedgerSnapshot {
+            next_item_id: ItemInstanceId(4),
+            next_transaction_id: TransactionId(1),
+            ..Default::default()
+        };
+        snapshot
+            .holders
+            .insert(HolderId::Player, holder(vec![item(2, 1, 1, None)], 0));
+        snapshot
+            .holders
+            .insert(container, holder(vec![item(3, 1, 1, None)], 0));
+        snapshot.bindings.insert(
+            HolderId::Player,
+            BindingState {
+                hotkeys: [
+                    Some(ItemInstanceId(3)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            ItemLedger::from_snapshot(snapshot),
+            Err(TransactionError::InvalidBinding {
+                holder: HolderId::Player,
+                item_id: ItemInstanceId(3),
+            })
+        ));
     }
 
     #[test]
