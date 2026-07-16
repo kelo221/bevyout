@@ -14,7 +14,7 @@ use crate::vsa::{
 };
 
 use super::audio::PlaySound;
-use super::interaction::{InteractionNotice, PlacementRoot, PlayerInventory};
+use super::interaction::{InteractionNotice, PlacementRoot, PlayerInventory, item_rules};
 use super::inventory::{InventoryStack, TransferResult};
 use super::pipboy::DropInventoryStackRequested;
 use super::player::FpsPlayer;
@@ -38,6 +38,7 @@ pub(crate) struct PendingRuntimeCollider {
 struct ItemWorldAsset {
     placement: PreparedPlacement,
     drop_collider: PreparedDropCollider,
+    quest_item: bool,
 }
 
 #[derive(Resource, Default)]
@@ -115,6 +116,7 @@ fn prepared_catalog_asset(item: &PreparedItemDefinition) -> Option<ItemWorldAsse
             ao_mode: "ao-none".into(),
         },
         drop_collider: item.drop_collider.clone(),
+        quest_item: item.quest_item,
     })
 }
 
@@ -139,6 +141,17 @@ fn drop_inventory_items(
             notice.show("That item has no prepared world asset");
             continue;
         };
+        // Issue #81: the authoritative drop path refuses quest items and
+        // caps regardless of which UI produced the request.
+        if let Err(rejection) =
+            item_rules::can_drop(request.key.base_form_id, prepared_asset.quest_item)
+        {
+            notice.show(match rejection {
+                item_rules::TransferRejection::QuestItem => "Quest items cannot be dropped",
+                item_rules::TransferRejection::Caps => "Caps cannot be dropped",
+            });
+            continue;
+        }
         let template = &prepared_asset.placement;
         let Some(asset_path) = template.asset_path.as_ref() else {
             notice.show("That item has no prepared world model");

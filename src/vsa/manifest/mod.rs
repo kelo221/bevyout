@@ -109,6 +109,10 @@ pub(crate) struct PreparedItemDefinition {
     pub(crate) drop_collider: PreparedDropCollider,
     pub(crate) value: Option<i32>,
     pub(crate) weight: Option<f32>,
+    /// Base-record quest-item header flag (issue #81). Serde-default so
+    /// wave 1/2 catalogs deserialize as ordinary items.
+    #[serde(default)]
+    pub(crate) quest_item: bool,
     pub(crate) stats: PreparedItemStats,
     #[serde(default)]
     pub(crate) audio: PreparedPlacementAudio,

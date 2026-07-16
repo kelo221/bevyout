@@ -56,6 +56,7 @@ pub(crate) fn parse_base(
     let leveled = is_leveled_list(sig).then(|| parse_leveled_list(subs, resolver));
     Some(BaseRecord {
         kind: sig.to_string(),
+        record_flags: 0,
         editor_id: sub(subs, "EDID").map(cstring),
         name: sub(subs, "FULL").map(cstring),
         model,

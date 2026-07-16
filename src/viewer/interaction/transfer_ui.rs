@@ -26,7 +26,7 @@ use super::super::inventory::{DropAction, InventoryStack, StackKey, drop_action}
 use super::animation::{self, ClipTransition};
 use super::{
     ActiveContainerTarget, ContainerStates, InteractionState, PlaySound, PlayerInventory,
-    container_policy,
+    container_policy, item_rules,
 };
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
@@ -319,7 +319,13 @@ fn handle_container_rows(
     match drop_action(count) {
         Some(DropAction::DropOne) => {
             log_transfer(
-                take(container, &mut inventory, form_id, 1),
+                take(
+                    container,
+                    &mut inventory,
+                    form_id,
+                    1,
+                    active_container.owner_form_id,
+                ),
                 form_id,
                 active_container.reference_form_id,
                 "-> player",
@@ -381,6 +387,16 @@ fn handle_player_rows(
         return;
     };
     ui_state.selected_player = Some(key);
+    // Issue #81: quest items never enter containers; the rejection happens
+    // before store-one or the quantity picker, so the confirm path stays
+    // unreachable for them.
+    if let Err(rejection) = item_rules::can_store(quest_item(&catalog, key.base_form_id)) {
+        warn!(
+            "container transfer rejected: {rejection:?} {:08x}",
+            key.base_form_id
+        );
+        return;
+    }
     let count = inventory
         .stack_states()
         .into_iter()
@@ -442,7 +458,13 @@ fn handle_quantity_buttons(
                 {
                     let (result, form_id, direction) = match picker.direction {
                         TransferDirection::ContainerToPlayer => (
-                            take(container, &mut inventory, picker.form_id, picker.quantity),
+                            take(
+                                container,
+                                &mut inventory,
+                                picker.form_id,
+                                picker.quantity,
+                                active_container.owner_form_id,
+                            ),
                             picker.form_id,
                             "-> player",
                         ),
@@ -520,6 +542,14 @@ fn refresh_after_change(
     );
 }
 
+fn quest_item(catalog: &PreparedItemCatalog, form_id: u32) -> bool {
+    catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == form_id)
+        .is_some_and(|item| item.quest_item)
+}
+
 fn log_transfer(
     result: Result<i32, container_policy::TransferError>,
     form_id: u32,
@@ -557,6 +587,7 @@ fn take(
     inventory: &mut PlayerInventory,
     form_id: u32,
     count: i32,
+    owner_form_id: Option<u32>,
 ) -> Result<i32, container_policy::TransferError> {
     let mut discard = Vec::new();
     let available = container_policy::stack_count(&container.stacks, form_id);
@@ -567,6 +598,13 @@ fn take(
     } else {
         container_policy::take_stack(&mut container.stacks, &mut discard, form_id, count)?
     };
+    // Issue #81 (F81.4): taking from an owned container is theft; no
+    // crime/karma consequences in M3, only the stable log line.
+    if let item_rules::TakeClassification::Steal { owner_form_id } =
+        item_rules::classify_take(owner_form_id)
+    {
+        info!("steal {:08x} owner {:08x}", form_id, owner_form_id);
+    }
     let _ = inventory.add_stack(InventoryStack {
         base_form_id: form_id,
         count: moved,

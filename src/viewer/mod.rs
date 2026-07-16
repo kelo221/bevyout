@@ -41,7 +41,9 @@ use crate::vsa::{
 
 mod animation;
 mod audio;
-mod interaction;
+// `pub(crate)` so `vsa::prepare::items` can reach the shared
+// `interaction::item_rules` quest-flag decode (issue #81).
+pub(crate) mod interaction;
 mod inventory;
 mod openmw_player;
 mod pipboy;

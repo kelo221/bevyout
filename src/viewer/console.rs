@@ -16,13 +16,14 @@ use crate::console::{
     ConsoleCommand, ConsoleCommandResult, ConsoleEntityHooks, ConsoleError, ConsoleInvocation,
     ConsoleRegistry, resolve_reference,
 };
-use crate::vsa::PreparedSemantic;
+use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 
 use super::controls::{
     AmbientScale, AoStrength, FogStrength, HorizontalFov, IrradianceIntensity, LightingScale,
     LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES, UnlitMode,
     horizontal_to_vertical_fov,
 };
+use super::inventory::InventoryStack;
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::shadow_cache_status;
@@ -183,9 +184,17 @@ pub(crate) fn install(app: &mut App) {
         ConsoleCommand::new(
             "activate",
             "activate <reference>",
-            "Activate a door reference; a door with a destination requests cell travel (locks bypassed).",
+            "Activate a door, container, or pickup reference; a door with a destination requests cell travel (locks bypassed).",
             activate_reference,
         )
+        .mutating(),
+        ConsoleCommand::new(
+            "additem",
+            "[player.]additem <FormID> [count]",
+            "Add count (default 1) of an item FormID to the player inventory.",
+            add_item,
+        )
+        .reference_callable(false)
         .mutating(),
         ConsoleCommand::new(
             "save",
@@ -238,10 +247,29 @@ fn activate_reference(
             )],
         ));
     }
+    // Issue #84 (F84.2): pickups activate through the same seam as door and
+    // container references, mirroring the player's `E` pickup minus the
+    // raycast focus and distance-state handling.
+    if matches!(placement.semantic, PreparedSemantic::Pickup(_)) {
+        let count = interaction::scripted_pickup(world, entity).map_err(|error| match error {
+            interaction::ScriptedPickupError::PersistenceNotReady => ConsoleError::new(
+                "persistence_not_ready",
+                "dropped-item persistence is not ready",
+            ),
+        })?;
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "base_form_id": placement.base_form_id,
+                "count": count,
+            }),
+            vec![format!("picked up {:08x} x{count}", placement.base_form_id)],
+        ));
+    }
     let PreparedSemantic::Door(door) = &placement.semantic else {
         return Err(ConsoleError::new(
             "not_a_door",
-            "activate supports only door and container references",
+            "activate supports only door, container, and pickup references",
         ));
     };
     let Some(destination) = &door.destination else {
@@ -270,6 +298,91 @@ fn activate_reference(
         vec![format!(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
+        )],
+    ))
+}
+
+/// Parses a raw item FormID argument: 1..=8 hex digits, with or without a
+/// `0x` prefix -- the Bethesda console accepts bare short hex like
+/// `player.additem f 100`. Deliberately looser than `console::executor`'s
+/// private reference-selector parser (which requires a prefix or exactly 8
+/// digits to disambiguate from EditorIDs): `additem` targets a catalog item
+/// FormID rather than a live reference, so there is no EditorID form to
+/// collide with and no `RefRegistry` resolution.
+fn parse_item_form_id(value: &str) -> Option<u32> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    ((1..=8).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
+/// Issue #84 (F84.1): `additem`/`player.additem <FormID> [count]` always
+/// targets the player inventory -- the Bethesda-console `player.` prefix is
+/// accepted (`.reference_callable(false)`) but never used to pick a
+/// container, matching real `additem`'s player-only scope. Condition is
+/// seeded from `PreparedItemCatalog`'s `max_condition` for Weapon/Apparel
+/// stats, exactly as picking the item up in the world would; an absent or
+/// uncataloged item still adds, with condition `None`.
+fn add_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.is_empty() || invocation.args.len() > 2 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "additem expects a FormID and an optional count",
+        ));
+    }
+    let form_id = parse_item_form_id(&invocation.args[0]).ok_or_else(|| {
+        ConsoleError::new(
+            "bad_type",
+            "additem FormID must be 1-8 hex digits, e.g. f, 0x1f, or 0000000f",
+        )
+    })?;
+    let count = invocation
+        .args
+        .get(1)
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .map_err(|_| ConsoleError::new("bad_type", "count must be a whole number"))
+        })
+        .transpose()?
+        .unwrap_or(1);
+    if count < 1 {
+        return Err(ConsoleError::new("bad_count", "count must be at least 1"));
+    }
+    let condition = world
+        .get_resource::<PreparedItemCatalog>()
+        .into_iter()
+        .flat_map(|catalog| &catalog.items)
+        .find(|item| item.base_form_id == form_id)
+        .and_then(|item| match &item.stats {
+            PreparedItemStats::Weapon { max_condition, .. }
+            | PreparedItemStats::Apparel { max_condition, .. } => *max_condition,
+            _ => None,
+        });
+    let _ = world
+        .resource_mut::<interaction::PlayerInventory>()
+        .add_stack(InventoryStack {
+            base_form_id: form_id,
+            count,
+            condition,
+        });
+    let total = world
+        .resource::<interaction::PlayerInventory>()
+        .count(form_id);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "form_id": form_id,
+            "count": count,
+            "total": total,
+        }),
+        vec![format!(
+            "additem {form_id:08x} x{count}; inventory now has {total}"
         )],
     ))
 }
@@ -1076,6 +1189,7 @@ fn screenshot(
 mod tests {
     use super::*;
     use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
+    use crate::vsa::{PreparedItemCategory, PreparedItemDefinition};
     use bevy::state::app::StatesPlugin;
 
     fn test_app() -> App {
@@ -1093,7 +1207,8 @@ mod tests {
             .insert_resource(PreparedPointShadowRuntime::default())
             .insert_resource(PointLightShadowSamples::default())
             .insert_resource(BoxdddDebugDrawSettings::default())
-            .insert_resource(player::StepDebugSettings::default());
+            .insert_resource(player::StepDebugSettings::default())
+            .insert_resource(interaction::PlayerInventory::default());
         app.init_state::<GameplayModal>();
         let camera = player::CameraModeState {
             collision_build_complete: true,
@@ -1550,6 +1665,47 @@ mod tests {
         assert_eq!(output.value["opened"], false);
     }
 
+    // -- activate pickup (issue #84, F84.2) --------------------------------
+
+    const PICKUP_SEMANTIC: &str = "Pickup((category: \"Misc\", value: None, weight: None))";
+
+    #[test]
+    fn activate_picks_up_a_prepared_item_and_despawns_the_reference() {
+        let mut app = test_app();
+        register_placement(&mut app, PICKUP_SEMANTIC);
+        let entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+            .single(app.world())
+            .unwrap();
+        let output = exec(&mut app, "activate 00000010");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["reference_form_id"], 16);
+        assert_eq!(output.value["base_form_id"], 1);
+        assert_eq!(output.value["count"], 1);
+        assert_eq!(output.log, ["picked up 00000001 x1"]);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerInventory>()
+                .count(1),
+            1
+        );
+        assert!(!app.world().entities().contains(entity));
+    }
+
+    // The pickup route only accepts `PreparedSemantic::Pickup`; every other
+    // unsupported semantic (Furniture here, matching the door/container
+    // routes rejecting `Static` above) still errors deterministically.
+    #[test]
+    fn activate_rejects_unsupported_semantics_for_pickup() {
+        let mut app = test_app();
+        register_placement(&mut app, "Furniture");
+        assert_eq!(
+            error_code(&exec(&mut app, "activate 00000010")),
+            "not_a_door"
+        );
+    }
+
     #[test]
     fn activate_door_with_destination_writes_a_travel_request() {
         let mut app = test_app();
@@ -1610,5 +1766,146 @@ mod tests {
             0,
             "travel must be staged behind the open lead, not fired same-frame"
         );
+    }
+
+    // -- additem (issue #84, F84.1) -----------------------------------------
+
+    #[test]
+    fn additem_rejects_bad_arity_bad_count_and_bad_form_id() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "additem")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "additem 1 2 3")), "bad_arity");
+        assert_eq!(
+            error_code(&exec(&mut app, "additem 00000001 0")),
+            "bad_count"
+        );
+        assert_eq!(
+            error_code(&exec(&mut app, "additem 00000001 -1")),
+            "bad_count"
+        );
+        // Bare short hex is a valid FormID, so an invalid count is reported
+        // as bad_count, not masked by the FormID parse.
+        assert_eq!(error_code(&exec(&mut app, "additem f -5")), "bad_count");
+        assert_eq!(error_code(&exec(&mut app, "additem zz")), "bad_type");
+        assert_eq!(
+            error_code(&exec(&mut app, "additem 123456789 1")),
+            "bad_type"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerInventory>()
+                .count(1),
+            0
+        );
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerInventory>()
+                .count(0xf),
+            0
+        );
+    }
+
+    // Issue #84's gate evidence line is literally `player.additem f 100`:
+    // the Bethesda console accepts bare short hex without a 0x prefix, and
+    // the player. prefix is accepted without selecting a container.
+    #[test]
+    fn additem_accepts_bare_short_hex_and_the_player_prefix() {
+        let mut app = test_app();
+        let player = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut()
+            .resource_mut::<crate::console::RefRegistry>()
+            .set_player(player);
+        let output = exec(&mut app, "player.additem f 100");
+        assert!(output.ok, "additem failed: {:?}", output.error);
+        assert_eq!(output.value["form_id"], 15);
+        assert_eq!(output.value["count"], 100);
+        assert_eq!(output.value["total"], 100);
+        assert_eq!(output.log, ["additem 0000000f x100; inventory now has 100"]);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerInventory>()
+                .count(0xf),
+            100
+        );
+    }
+
+    #[test]
+    fn additem_adds_the_default_count_of_one() {
+        let mut app = test_app();
+        let output = exec(&mut app, "additem 00000005");
+        assert!(output.ok, "additem failed: {:?}", output.error);
+        assert_eq!(output.value["form_id"], 5);
+        assert_eq!(output.value["count"], 1);
+        assert_eq!(output.value["total"], 1);
+        assert_eq!(output.log, ["additem 00000005 x1; inventory now has 1"]);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerInventory>()
+                .count(5),
+            1
+        );
+    }
+
+    #[test]
+    fn additem_adds_a_requested_count_seeded_with_catalog_condition() {
+        let mut app = test_app();
+        app.insert_resource(PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![PreparedItemDefinition {
+                base_form_id: 0x42,
+                record_kind: "WEAP".into(),
+                category: PreparedItemCategory::Weapons,
+                editor_id: None,
+                display_name: None,
+                source_model_path: None,
+                icon_asset_path: None,
+                world_asset_path: None,
+                physics_asset_path: None,
+                drop_collider: Default::default(),
+                value: None,
+                weight: None,
+                quest_item: false,
+                stats: PreparedItemStats::Weapon {
+                    damage: None,
+                    max_condition: Some(255),
+                    clip_size: None,
+                    speed: None,
+                    reach: None,
+                },
+                audio: Default::default(),
+            }],
+        });
+        let output = exec(&mut app, "additem 00000042 3");
+        assert!(output.ok, "additem failed: {:?}", output.error);
+        assert_eq!(output.value["count"], 3);
+        assert_eq!(output.value["total"], 3);
+        assert_eq!(output.log, ["additem 00000042 x3; inventory now has 3"]);
+        let stack = app
+            .world()
+            .resource::<interaction::PlayerInventory>()
+            .stack_states()
+            .into_iter()
+            .find(|stack| stack.base_form_id == 0x42)
+            .expect("expected the added stack");
+        assert_eq!(stack.count, 3);
+        assert_eq!(stack.condition, Some(255));
+    }
+
+    #[test]
+    fn additem_without_a_catalog_entry_adds_with_no_condition() {
+        let mut app = test_app();
+        let output = exec(&mut app, "additem 000000aa 2");
+        assert!(output.ok, "additem failed: {:?}", output.error);
+        assert_eq!(output.value["total"], 2);
+        let stack = app
+            .world()
+            .resource::<interaction::PlayerInventory>()
+            .stack_states()
+            .into_iter()
+            .find(|stack| stack.base_form_id == 0xaa)
+            .expect("expected the added stack");
+        assert_eq!(stack.count, 2);
+        assert_eq!(stack.condition, None);
     }
 }
