@@ -501,9 +501,46 @@ type KinematicAgentQuery<'w, 's> = Query<
     (With<TestNavAgentMarker>, Without<DoorTraversal>),
 >;
 
-fn apply_kinematic_velocity(time: Res<Time>, mut agents: KinematicAgentQuery<'_, '_>) {
+/// Sampling envelope for the per-frame ground snap in
+/// [`apply_kinematic_velocity`]. Matches the archipelago's own
+/// `point_sample_distance` (see `ensure_archipelago`): the snap must never
+/// find ground the pathing layer itself would not, or the agent could stand
+/// somewhere landmass considers off-mesh.
+const GROUND_SNAP_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d {
+    horizontal_distance: 1.0,
+    distance_above: 1.0,
+    distance_below: 2.0,
+    vertical_preference_ratio: 2.0,
+    animation_link_max_vertical_distance: 1.0,
+};
+
+/// Applies the landmass desired velocity kinematically, then snaps the
+/// agent's y to the nav-mesh surface under its new x/z
+/// (`Archipelago3d::sample_point`). Without the snap a sloped/stair path
+/// (FranklinMetro02's descending floor, mesh y spanning ~94-105 m) leaves y
+/// frozen at spawn height until the agent exits the vertical sampling
+/// envelope and flips to `AgentNotOnNavMesh` mid-route. A miss (agent
+/// momentarily outside the envelope, e.g. pushed off-mesh by avoidance)
+/// leaves y unchanged rather than teleporting; landmass then reports the
+/// off-mesh state through the normal status path. Door-link crossings
+/// (`DoorTraversal`) are excluded -- the lerp owns the transform there.
+fn apply_kinematic_velocity(
+    time: Res<Time>,
+    state: Res<NavArchipelagoState>,
+    archipelagos: Query<&Archipelago3d>,
+    mut agents: KinematicAgentQuery<'_, '_>,
+) {
+    let archipelago = state
+        .archipelago
+        .and_then(|entity| archipelagos.get(entity).ok());
     for (mut transform, velocity) in &mut agents {
         transform.translation += velocity.velocity * time.delta_secs();
+        if let Some(archipelago) = archipelago
+            && let Ok(sampled) =
+                archipelago.sample_point(transform.translation, &GROUND_SNAP_SAMPLE_DISTANCE)
+        {
+            transform.translation.y = sampled.point().y;
+        }
     }
 }
 
@@ -715,6 +752,102 @@ mod tests {
         world.init_resource::<NavArchipelagoState>();
         world.init_resource::<TestNavAgentState>();
         world
+    }
+
+    /// Real-data acceptance defect on FranklinMetro02 (0001a273): a sloped
+    /// route froze the agent's y at spawn height until it left the vertical
+    /// sampling envelope and flipped to `AgentNotOnNavMesh`. This drives the
+    /// real `Landmass3dPlugin` island sync (one flat square island at
+    /// y = 2.0), places the agent 0.5 m above the surface, runs the kinematic
+    /// system once, and asserts the ground snap pulled y onto the mesh.
+    #[test]
+    fn kinematic_velocity_snaps_agent_y_to_the_sampled_navmesh_surface() {
+        use bevy::app::App;
+        use bevy::ecs::system::RunSystemOnce;
+        use std::sync::Arc;
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            Landmass3dPlugin::default(),
+        ));
+        app.init_resource::<NavArchipelagoState>();
+        app.init_resource::<TestNavAgentState>();
+
+        // Flat square at y = 2.0 through the same pure conversion the
+        // runtime uses.
+        let mesh = landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: vec![
+                [0.0, 2.0, 0.0],
+                [4.0, 2.0, 0.0],
+                [0.0, 2.0, 4.0],
+                [4.0, 2.0, 4.0],
+            ],
+            polygons: vec![
+                landmass_graph::PolygonInput {
+                    index: 0,
+                    vertex_indices: [0, 1, 2],
+                    is_water: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 1,
+                    vertex_indices: [1, 3, 2],
+                    is_water: false,
+                },
+            ],
+            doors: Vec::new(),
+        };
+        let valid = landmass_graph::build_navigation_mesh(&mesh)
+            .nav_mesh
+            .expect("synthetic square validates");
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+
+        let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+        options.point_sample_distance = GROUND_SNAP_SAMPLE_DISTANCE;
+        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(handle),
+        });
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .archipelago = Some(archipelago);
+
+        // Run the plugin's own sync systems (FixedPreUpdate) so the island
+        // lands in the archipelago.
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let agent = app
+            .world_mut()
+            .spawn((
+                TestNavAgentMarker,
+                Transform::from_xyz(2.0, 2.5, 2.0),
+                Velocity3d::default(),
+            ))
+            .id();
+
+        app.world_mut()
+            .run_system_once(apply_kinematic_velocity)
+            .expect("kinematic system runs");
+
+        let y = app
+            .world()
+            .get::<Transform>(agent)
+            .expect("agent has a transform")
+            .translation
+            .y;
+        assert!(
+            (y - 2.0).abs() < 1e-4,
+            "agent y should snap to the mesh surface (2.0), got {y}"
+        );
     }
 
     #[test]
