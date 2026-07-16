@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 15;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 16;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
@@ -44,6 +44,19 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) recipe_catalog_revision: Option<String>,
     #[serde(default)]
     pub(crate) recipe_catalog_hash: Option<String>,
+    /// Per-cell actor catalogue relative to `asset_root`
+    /// (`scenes/<cell>/actors.ron`, issue #103, M4 wave 1 task C). Unlike
+    /// the content-set-wide item/recipe catalogs it embeds this cell's
+    /// ACHR/ACRE placements, so it lives next to `scene.ron` rather than
+    /// under the shared fingerprint-keyed `catalogs/` directory. Serde
+    /// defaults keep manifests produced before actor-catalog preparation
+    /// readable.
+    #[serde(default)]
+    pub(crate) actor_catalog_path: Option<String>,
+    #[serde(default)]
+    pub(crate) actor_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) actor_catalog_hash: Option<String>,
     #[serde(default)]
     pub(crate) source_plugins: Vec<PreparedPluginSource>,
     pub(crate) cell: CellInfo,
