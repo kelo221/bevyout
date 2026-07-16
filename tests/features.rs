@@ -213,6 +213,12 @@ mod leveled;
 #[allow(dead_code, unused_imports)]
 mod item_rules;
 
+// `viewer::interaction::item_use` (issue #99) is dependency-free (std only,
+// no Bevy) like `item_rules`, so it is included verbatim too.
+#[path = "../src/viewer/interaction/item_use.rs"]
+#[allow(dead_code, unused_imports)]
+mod item_use;
+
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
@@ -378,6 +384,10 @@ struct BevyoutWorld {
     carried_stacks: Vec<(i32, bool, f32)>,
     carried_total: Option<f32>,
     take_classification: Option<item_rules::TakeClassification>,
+    // -- item_use.feature (issue #99) --
+    item_use_stats: Option<item_use::ItemStats>,
+    item_use_quest_item: bool,
+    item_use_action: Option<item_use::ItemUseAction>,
 }
 
 fn find_placement<'a>(
@@ -3472,6 +3482,76 @@ async fn then_player_caps_total(world: &mut BevyoutWorld, expected: i32) {
         container_policy::stack_count(&world.player_stacks, item_rules::CAPS_FORM_ID),
         expected
     );
+}
+
+// ---------------------------------------------------------------------
+// item_use.feature (issue #99) -- appended section, do not interleave;
+// new steps for later issues belong below this marker.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^an item with stats (Aid|Key|Misc) quest (yes|no)$")]
+async fn given_item_stats_flat(world: &mut BevyoutWorld, stats: String, quest: String) {
+    world.item_use_stats = Some(match stats.as_str() {
+        "Aid" => item_use::ItemStats::Aid,
+        "Key" => item_use::ItemStats::Key,
+        "Misc" => item_use::ItemStats::Misc,
+        other => panic!("unexpected item stats {other}"),
+    });
+    world.item_use_quest_item = quest == "yes";
+}
+
+#[given(regex = r"^an item with stats (Book|Note) text (yes|no) quest (yes|no)$")]
+async fn given_item_stats_with_text(
+    world: &mut BevyoutWorld,
+    stats: String,
+    has_text: String,
+    quest: String,
+) {
+    let has_text = has_text == "yes";
+    world.item_use_stats = Some(match stats.as_str() {
+        "Book" => item_use::ItemStats::Book { has_text },
+        "Note" => item_use::ItemStats::Note { has_text },
+        other => panic!("unexpected item stats {other}"),
+    });
+    world.item_use_quest_item = quest == "yes";
+}
+
+#[then(regex = r"^the item use action is (Use|Read|Inert)$")]
+async fn then_item_use_action_is(world: &mut BevyoutWorld, expected: String) {
+    let stats = world
+        .item_use_stats
+        .expect("item stats not given for this scenario");
+    world.item_use_action = Some(item_use::classify(stats, world.item_use_quest_item));
+    let expected = match expected.as_str() {
+        "Use" => item_use::ItemUseAction::Use,
+        "Read" => item_use::ItemUseAction::Read,
+        "Inert" => item_use::ItemUseAction::Inert,
+        other => panic!("unexpected item use action {other}"),
+    };
+    assert_eq!(world.item_use_action, Some(expected));
+}
+
+#[when(regex = r"^item 0x([0-9a-fA-F]+) with stats (Aid|Key) quest (yes|no) is used$")]
+async fn when_item_is_used(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    stats: String,
+    quest: String,
+) {
+    let stats = match stats.as_str() {
+        "Aid" => item_use::ItemStats::Aid,
+        "Key" => item_use::ItemStats::Key,
+        other => panic!("unexpected item stats {other}"),
+    };
+    if item_use::classify(stats, quest == "yes") == item_use::ItemUseAction::Use {
+        world.player_inventory.remove(
+            inventory_policy::StackKey {
+                base_form_id: parse_hex(&form_id),
+                condition: None,
+            },
+            item_use::USE_CONSUMES_COUNT,
+        );
+    }
 }
 
 fn main() {

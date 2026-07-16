@@ -21,6 +21,12 @@ pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
+/// Test-only re-export (issue #99): `viewer::pipboy`'s use-path unit tests
+/// construct `PreparedItemStats::Aid` effect labels; nothing outside tests
+/// names the type through `vsa`, so a plain re-export would trip
+/// `unused_imports` on non-test builds.
+#[cfg(test)]
+pub(crate) use manifest::PreparedItemEffect;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,

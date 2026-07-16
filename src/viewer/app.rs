@@ -111,6 +111,7 @@ pub(crate) fn run_view(
     audio::install(&mut app);
     interaction::install(&mut app);
     pipboy::install(&mut app);
+    pipboy_reader::install(&mut app);
     animation::install(&mut app);
     console::install(&mut app);
     console_ui::install(&mut app);

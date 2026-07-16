@@ -5,8 +5,10 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::GameplayModal;
 
-use super::interaction::{PlayerInventory, item_rules};
-use super::inventory::{DropAction, StackKey, drop_action};
+use super::audio::PlaySound;
+use super::interaction::{InteractionNotice, PlayerInventory, item_rules, item_use};
+use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
+use super::pipboy_reader::OpenReaderRequested;
 use super::{PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats};
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
@@ -64,8 +66,25 @@ enum QuantityButton {
     Cancel,
 }
 
+/// F99.2/F99.3: the details pane's contextual action button, shown only for
+/// a selected stack that `item_use::classify` calls `Use` (Aid) or `Read`
+/// (Book/Note with text) -- `Inert` stacks (Key/Misc, textless Book/Note, a
+/// quest-flagged Aid item) show no button.
+#[derive(Component, Clone, Copy)]
+enum ItemActionButton {
+    Use(StackKey),
+    Read(u32),
+}
+
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
+        // `handle_item_action_button`'s dependencies, normally registered by
+        // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
+        // and `add_message` are both no-ops when already registered, so this
+        // only matters for the self-contained test harness below.
+        .init_resource::<InteractionNotice>()
+        .add_message::<PlaySound>()
+        .add_message::<OpenReaderRequested>()
         .add_message::<DropInventoryStackRequested>()
         .add_systems(OnEnter(GameplayModal::PipBoy), enter_pipboy)
         .add_systems(OnExit(GameplayModal::PipBoy), exit_pipboy)
@@ -75,6 +94,7 @@ pub(crate) fn install(app: &mut App) {
                 handle_item_rows,
                 handle_category_tabs,
                 handle_quantity_buttons,
+                handle_item_action_button,
                 refresh_after_inventory_change,
             )
                 .run_if(in_state(GameplayModal::PipBoy)),
@@ -246,6 +266,118 @@ fn close_quantity_picker(commands: &mut Commands, overlays: &Query<Entity, With<
         commands.entity(entity).despawn();
     }
     commands.remove_resource::<QuantityPicker>();
+}
+
+/// F99.2 (use) / F99.3 (read): the details pane's single contextual action
+/// button. Using an Aid stack drives the existing `Inventory::remove` op
+/// through the `item_use` pure classification, plays its prepared pickup
+/// sound as the stand-in "use" audio (the manifest has no dedicated use-sound
+/// field yet), and posts a notice naming the item and its effect labels
+/// (magnitudes are out of scope, see issue #99). Reading just forwards to
+/// `pipboy_reader`'s public seam -- the stack is never touched.
+fn handle_item_action_button(
+    buttons: Query<(&Interaction, &ItemActionButton), Changed<Interaction>>,
+    mut inventory: ResMut<PlayerInventory>,
+    catalog: Res<PreparedItemCatalog>,
+    mut notice: ResMut<InteractionNotice>,
+    mut sounds: MessageWriter<PlaySound>,
+    mut reader_requests: MessageWriter<OpenReaderRequested>,
+) {
+    for (interaction, action) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match *action {
+            ItemActionButton::Use(key) => {
+                use_item(key, &mut inventory, &catalog, &mut notice, &mut sounds)
+            }
+            ItemActionButton::Read(base_form_id) => {
+                reader_requests.write(OpenReaderRequested { base_form_id });
+            }
+        }
+    }
+}
+
+fn use_item(
+    key: StackKey,
+    inventory: &mut PlayerInventory,
+    catalog: &PreparedItemCatalog,
+    notice: &mut InteractionNotice,
+    sounds: &mut MessageWriter<PlaySound>,
+) {
+    let Some(item) = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == key.base_form_id)
+    else {
+        return;
+    };
+    if item_use::classify(item_use_stats(&item.stats), item.quest_item)
+        != item_use::ItemUseAction::Use
+    {
+        return;
+    }
+    if !matches!(
+        inventory.remove(key, item_use::USE_CONSUMES_COUNT),
+        TransferResult::Applied { .. }
+    ) {
+        return;
+    }
+    if let Some(form_id) = item.audio.pickup_sound_form_id {
+        sounds.write(PlaySound {
+            form_id,
+            position: None,
+        });
+    }
+    let name = item_name(item);
+    let effects = match &item.stats {
+        PreparedItemStats::Aid { effects } => effects
+            .iter()
+            .map(|effect| effect.label.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    };
+    notice.show(if effects.is_empty() {
+        format!("Used {name}")
+    } else {
+        format!("Used {name}: {effects}")
+    });
+    info!("used {:08x} ({name})", key.base_form_id);
+}
+
+/// F99.2/F99.3: the details pane's contextual button label/action for a
+/// selected stack, or `None` for an `Inert` one (no button rendered).
+fn item_action_button(
+    key: StackKey,
+    item: &PreparedItemDefinition,
+) -> Option<(&'static str, ItemActionButton)> {
+    match item_use::classify(item_use_stats(&item.stats), item.quest_item) {
+        item_use::ItemUseAction::Use => Some(("USE", ItemActionButton::Use(key))),
+        item_use::ItemUseAction::Read => Some(("READ", ItemActionButton::Read(item.base_form_id))),
+        item_use::ItemUseAction::Inert => None,
+    }
+}
+
+/// Mirrors the relevant part of `PreparedItemStats` into `item_use`'s
+/// dependency-free `ItemStats` (see that module's doc comment for why it
+/// keeps its own local type rather than depending on this Bevy-touching
+/// one).
+fn item_use_stats(stats: &PreparedItemStats) -> item_use::ItemStats {
+    match stats {
+        PreparedItemStats::Aid { .. } => item_use::ItemStats::Aid,
+        PreparedItemStats::Book { text, .. } => item_use::ItemStats::Book {
+            has_text: text.as_deref().is_some_and(|text| !text.is_empty()),
+        },
+        PreparedItemStats::Note { text } => item_use::ItemStats::Note {
+            has_text: text.as_deref().is_some_and(|text| !text.is_empty()),
+        },
+        PreparedItemStats::Key => item_use::ItemStats::Key,
+        PreparedItemStats::Misc => item_use::ItemStats::Misc,
+        PreparedItemStats::Weapon { .. }
+        | PreparedItemStats::Apparel { .. }
+        | PreparedItemStats::Ammo { .. } => item_use::ItemStats::Other,
+    }
 }
 
 fn rebuild(
@@ -420,6 +552,22 @@ fn spawn_screen(
                             },
                             BorderColor::all(GREEN_DIM),
                         ));
+                        if let Some((label, action)) = item_action_button(stack.key(), item) {
+                            details
+                                .spawn((
+                                    Button,
+                                    action,
+                                    Node {
+                                        margin: UiRect::top(Val::Px(16.0)),
+                                        padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
+                                        border: UiRect::all(Val::Px(1.0)),
+                                        ..default()
+                                    },
+                                    BorderColor::all(GREEN),
+                                    BackgroundColor(GREEN_DIM),
+                                ))
+                                .with_child((Text::new(label), TextColor(GREEN)));
+                        }
                     }
                 });
             });
@@ -710,5 +858,94 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    // -- issue #99 (F99.1/F99.2): consumable use from the Items view --
+
+    fn aid_item(base_form_id: u32, quest_item: bool) -> PreparedItemDefinition {
+        PreparedItemDefinition {
+            base_form_id,
+            record_kind: "ALCH".into(),
+            category: PreparedItemCategory::Aid,
+            editor_id: Some("Stimpak".into()),
+            display_name: Some("Stimpak".into()),
+            source_model_path: None,
+            icon_asset_path: None,
+            world_asset_path: None,
+            physics_asset_path: None,
+            drop_collider: Default::default(),
+            value: None,
+            weight: None,
+            quest_item,
+            stats: PreparedItemStats::Aid {
+                effects: vec![crate::vsa::PreparedItemEffect {
+                    form_id: 0x99,
+                    label: "Restore Health".into(),
+                }],
+            },
+            audio: Default::default(),
+        }
+    }
+
+    fn aid_test_app(quest_item: bool) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
+            .init_state::<GameplayModal>()
+            .insert_resource(PlayerInventory::from_stack_states([
+                super::super::inventory::InventoryStack {
+                    base_form_id: 0x77,
+                    count: 3,
+                    condition: None,
+                },
+            ]))
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(PreparedItemCatalog {
+                revision: "test".into(),
+                source_fingerprint: "test".into(),
+                items: vec![aid_item(0x77, quest_item)],
+            });
+        app.world_mut()
+            .spawn((CursorOptions::default(), PrimaryWindow));
+        install(&mut app);
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Aid;
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn using_an_aid_stack_decrements_the_authoritative_inventory() {
+        let mut app = aid_test_app(false);
+        let button = app
+            .world_mut()
+            .query::<(Entity, &ItemActionButton)>()
+            .iter(app.world())
+            .find_map(|(entity, action)| {
+                matches!(action, ItemActionButton::Use(_)).then_some(entity)
+            })
+            .expect("an Aid stack should render a USE button");
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
+        app.update();
+
+        assert_eq!(app.world().resource::<PlayerInventory>().count(0x77), 2);
+        assert_eq!(
+            app.world().resource::<InteractionNotice>().text(),
+            "Used Stimpak: Restore Health"
+        );
+    }
+
+    #[test]
+    fn a_quest_flagged_aid_stack_renders_no_use_button() {
+        let mut app = aid_test_app(true);
+        assert_eq!(
+            app.world_mut()
+                .query::<&ItemActionButton>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(app.world().resource::<PlayerInventory>().count(0x77), 3);
     }
 }

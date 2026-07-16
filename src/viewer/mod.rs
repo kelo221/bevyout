@@ -47,6 +47,7 @@ pub(crate) mod interaction;
 mod inventory;
 mod openmw_player;
 mod pipboy;
+mod pipboy_reader;
 mod player;
 mod world;
 mod world_items;

@@ -21,6 +21,7 @@ use super::world::{ActiveCell, PlaythroughSeed, ResidentCells};
 // the pattern (issue #74 resolver, issue #75 transfer policy).
 pub(crate) mod container_policy;
 pub(crate) mod item_rules;
+pub(crate) mod item_use;
 pub(crate) mod leveled;
 mod transfer_ui;
 
