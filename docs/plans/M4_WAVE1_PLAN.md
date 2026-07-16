@@ -110,3 +110,27 @@ merge. Real-data acceptance prepares representative human, ghoul/super-
 mutant-style, and creature records from the FO3 masters and reports
 counts, unresolved links, cache size, and preparation time on #103.
 Manual steps land in `docs/plans/M4_WAVE1_MANUAL.md` before the PR.
+
+## Shipped amendments
+
+- **A1 — per-cell actor catalog storage.** Real-data acceptance caught the
+  initial task C artifact layout keying the actor catalog by the
+  content-set source fingerprint (the item/recipe catalog precedent).
+  Those catalogs are cell-independent; the actor catalog embeds per-cell
+  ACHR/ACRE placements, so consecutive prepares overwrote one shared
+  `catalogs/<fingerprint>/actors.ron` and left earlier cells' manifests
+  pointing at the wrong actors. Fixed to `scenes/<cell>/actors.ron` next
+  to `scene.ron` (self-cleaning with the scene directory);
+  `actor_catalog_hash` covers exactly that cell's serialized catalog, and
+  a regression test asserts two cells from one content set keep distinct,
+  non-clobbered artifacts.
+- **A2 — FO3 FACT has no crime fields.** The planned "FO3 crime-related
+  values if present" resolved to none: fopdoc documents FACT `CNAM` as an
+  unused float and no CRVA-style subrecord exists in FO3 (that is
+  FNV/TES5). `CNAM` is accepted-and-ignored rather than diagnosed.
+- **A3 — deliberate OpenMW divergence.** PACK `PTDT` FormID resolution is
+  gated on `PTDT`'s own type field; OpenMW's `loadpack.cpp` gates it on
+  `mLocation.type`, a copy-paste bug not reproduced here (documented in
+  `NOTICE.md`). FO3's 20-byte `AIDT`, 11-byte `NPC_.DATA`, 28-byte
+  `NPC_.DNAM`, and 17-byte `CREA.DATA` are decoded from fopdoc where the
+  OpenMW snapshot skips or only handles TES4 layouts.
