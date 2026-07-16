@@ -87,28 +87,41 @@ fn read_nav_graph(path: &Path) -> anyhow::Result<PreparedNavGraph> {
 /// Builds one `Mesh` per `PreparedNavMesh` that has at least one polygon
 /// (an empty mesh would just waste a draw call), positions duplicated per
 /// triangle (3 unique vertices per polygon, no shared indices) so each
-/// triangle can carry its own flat `ATTRIBUTE_COLOR`.
-fn build_triangle_mesh(mesh: &PreparedNavMesh) -> Mesh {
+/// triangle can carry its own flat `ATTRIBUTE_COLOR`. A polygon carrying the
+/// `nav_graph::build_mesh` `u32::MAX` invalid-vertex-index sentinel (or any
+/// other index past `mesh.vertices`) is skipped entirely rather than
+/// rendered as a garbage triangle at the origin -- the out-of-range error
+/// diagnostic at prepare time already covers it. Returns the mesh and the
+/// number of triangles actually emitted (excluding skipped polygons), so
+/// callers report an accurate triangle count.
+fn build_triangle_mesh(mesh: &PreparedNavMesh) -> (Mesh, usize) {
     let mut positions = Vec::with_capacity(mesh.polygons.len() * 3);
     let mut colors = Vec::with_capacity(mesh.polygons.len() * 3);
+    let mut triangle_count = 0usize;
     for polygon in &mesh.polygons {
+        if polygon
+            .vertex_indices
+            .iter()
+            .any(|&index| index as usize >= mesh.vertices.len())
+        {
+            continue;
+        }
         let color = triangle_color(polygon.index, OVERLAY_ALPHA);
         for vertex_index in polygon.vertex_indices {
-            let position = mesh
-                .vertices
-                .get(vertex_index as usize)
-                .copied()
-                .unwrap_or_default();
-            positions.push(position);
+            positions.push(mesh.vertices[vertex_index as usize]);
             colors.push(color);
         }
+        triangle_count += 1;
     }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+    (
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors),
+        triangle_count,
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
 }
 
 /// Spawns the overlay root (offset `+OVERLAY_Y_OFFSET` metres in Y) plus one
@@ -140,8 +153,14 @@ fn spawn_nav_mesh_overlay(world: &mut World, graph: &PreparedNavGraph) -> (Entit
         if mesh.polygons.is_empty() {
             continue;
         }
-        let bevy_mesh = build_triangle_mesh(mesh);
-        triangle_count += mesh.polygons.len();
+        let (bevy_mesh, mesh_triangle_count) = build_triangle_mesh(mesh);
+        // Every polygon in this mesh carried an invalid vertex index (the
+        // out-of-range error diagnostic already covers it) -- skip spawning
+        // an empty mesh entity/draw call for it.
+        if mesh_triangle_count == 0 {
+            continue;
+        }
+        triangle_count += mesh_triangle_count;
         mesh_count += 1;
         let mesh_handle = world.resource_mut::<Assets<Mesh>>().add(bevy_mesh);
         let child = world
@@ -538,6 +557,38 @@ mod tests {
 
         assert!(world.get_entity(entity).is_err());
         assert!(world.resource::<NavMeshOverlayState>().overlay.is_none());
+    }
+
+    // PR #127 review: a polygon carrying an invalid vertex index (the
+    // `nav_graph::build_mesh` `u32::MAX` sentinel, or any other index past
+    // `mesh.vertices`) must be skipped rather than rendered as a garbage
+    // triangle at the origin, and must not count toward the returned
+    // triangle count.
+    #[test]
+    fn build_triangle_mesh_skips_polygons_with_invalid_vertex_indices() {
+        let mesh = PreparedNavMesh {
+            form_id: 0x10,
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            polygons: vec![
+                PreparedNavPolygon {
+                    index: 0,
+                    vertex_indices: [0, 1, 2],
+                    ..Default::default()
+                },
+                PreparedNavPolygon {
+                    index: 1,
+                    // Slot 2 carries the invalid-index sentinel.
+                    vertex_indices: [0, 1, u32::MAX],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (built, triangle_count) = build_triangle_mesh(&mesh);
+
+        assert_eq!(triangle_count, 1);
+        assert_eq!(built.count_vertices(), 3);
     }
 
     // Pure unit test (issue #128's spec): the golden-ratio hue assignment

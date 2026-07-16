@@ -94,7 +94,10 @@ pub(crate) struct NavMeshRecord {
     pub(crate) version: Option<u32>,
     /// `DATA` "Cell": FormID of the owning `CELL` record.
     pub(crate) cell_form_id: Option<u32>,
-    /// `NVVX`, converted to `None` if `DATA` was absent/malformed.
+    /// `NVVX`: one `[f32; 3]` per decoded vertex. Decodes independently of
+    /// `DATA` -- an absent/malformed `DATA` only skips the declared-count
+    /// cross-check (`check_count`), not decoding itself; empty when the
+    /// record has no `NVVX` subrecord at all.
     pub(crate) vertices: Vec<[f32; 3]>,
     pub(crate) triangles: Vec<NavMeshTriangle>,
     /// `NVCA` "Unknown, may be triangle IDs" -- retained verbatim, widened

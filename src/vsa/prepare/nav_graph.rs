@@ -116,6 +116,13 @@ pub(crate) struct PreparedNavPolygon {
     /// triangle index, so doors/external connections/cover ids -- all keyed
     /// by triangle index -- line up directly).
     pub(crate) index: u32,
+    /// Per-vertex index into this mesh's `vertices`. `u32::MAX` is an
+    /// explicit invalid-index sentinel for a slot whose source `NVTR` index
+    /// was negative or out of range -- already diagnosed as an error at
+    /// construction, so the polygon is kept in place (its `index` must stay
+    /// stable for doors/external connections/cover ids) rather than dropped.
+    /// Consumers must check `index >= vertices.len()` (equivalently, `index
+    /// == u32::MAX`) before indexing.
     pub(crate) vertex_indices: [u32; 3],
     /// Per-edge same-mesh neighbour polygon index (`NVTR`'s edge fields);
     /// `None` when the edge has no same-mesh neighbour (mesh boundary, or
@@ -227,12 +234,12 @@ fn error(message: String) -> NavGraphDiagnostic {
 /// Builds the full graph from `inputs`, in deterministic
 /// (mesh `form_id`, polygon/entry index) order.
 pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
-    let mut sorted_meshes = inputs.meshes.clone();
+    let mut sorted_meshes: Vec<&NavGraphMeshInput> = inputs.meshes.iter().collect();
     sorted_meshes.sort_by_key(|mesh| mesh.form_id);
 
     let mut meshes = Vec::with_capacity(sorted_meshes.len());
     let mut diagnostics = Vec::new();
-    for mesh_input in &sorted_meshes {
+    for mesh_input in sorted_meshes.iter().copied() {
         let (mesh, mesh_diagnostics) = build_mesh(mesh_input, &inputs.navi_entries);
         diagnostics.extend(mesh_diagnostics);
         meshes.push(mesh);
@@ -282,19 +289,29 @@ fn build_mesh(
     let mut incoming = vec![0_u32; triangle_count];
     for (index, triangle) in input.triangles.iter().enumerate() {
         let mut vertex_indices = [0_u32; 3];
+        let mut has_invalid_vertex_index = false;
         for (slot, raw) in triangle.vertex_indices.iter().enumerate() {
             if *raw < 0 || *raw as usize >= vertex_count {
                 diagnostics.push(error(format!(
                     "mesh {:08x} polygon {index}: vertex index {raw} out of range (0..{vertex_count})",
                     input.form_id
                 )));
+                // Explicit invalid-index sentinel (see
+                // `PreparedNavPolygon::vertex_indices`'s doc comment) --
+                // never silently collapse to a valid-looking `0`, which
+                // would both hide the defect from consumers and risk a
+                // spurious "degenerate triangle" warning below for the same
+                // triangle.
+                vertex_indices[slot] = u32::MAX;
+                has_invalid_vertex_index = true;
             } else {
                 vertex_indices[slot] = *raw as u32;
             }
         }
-        if vertex_indices[0] == vertex_indices[1]
-            || vertex_indices[1] == vertex_indices[2]
-            || vertex_indices[0] == vertex_indices[2]
+        if !has_invalid_vertex_index
+            && (vertex_indices[0] == vertex_indices[1]
+                || vertex_indices[1] == vertex_indices[2]
+                || vertex_indices[0] == vertex_indices[2])
         {
             diagnostics.push(warning(format!(
                 "mesh {:08x} polygon {index}: degenerate triangle (repeated vertex index)",
@@ -794,6 +811,47 @@ mod tests {
                 .any(|d| d.severity == "error" && d.message.contains("neighbor index 9"))
         );
         assert_eq!(graph.counters.diagnostics_error, 2);
+    }
+
+    #[test]
+    fn invalid_vertex_indices_become_sentinel_without_degenerate_warning() {
+        let mut mesh = mesh(1);
+        mesh.vertices = vec![
+            NavGraphVertexInput { source: [0.0; 3] },
+            NavGraphVertexInput {
+                source: [70.0, 0.0, 0.0],
+            },
+        ];
+        // Slot 0 is valid; slot 1 is negative; slot 2 is out of range.
+        mesh.triangles = vec![triangle([0, -1, 9], [-1, -1, -1])];
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+
+        assert_eq!(
+            graph.meshes[0].polygons[0].vertex_indices,
+            [0, u32::MAX, u32::MAX]
+        );
+
+        let vertex_index_errors = graph
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == "error" && d.message.contains("vertex index"))
+            .count();
+        assert_eq!(vertex_index_errors, 2, "{:?}", graph.diagnostics);
+        assert_eq!(graph.counters.diagnostics_error, 2);
+
+        assert!(
+            !graph
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("degenerate triangle")),
+            "{:?}",
+            graph.diagnostics
+        );
     }
 
     #[test]
