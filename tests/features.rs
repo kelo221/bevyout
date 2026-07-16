@@ -3706,6 +3706,18 @@ async fn given_empty_canonical_holder(world: &mut BevyoutWorld, reference_hex: S
         .unwrap();
 }
 
+#[given(regex = r"^the canonical player hotkey (\d+) is item 0x([0-9a-fA-F]+)$")]
+async fn given_canonical_player_hotkey(world: &mut BevyoutWorld, slot: usize, item_hex: String) {
+    world
+        .canonical_ledger
+        .bind_hotkey(
+            HolderId::Player,
+            slot,
+            ItemInstanceId(parse_hex(&item_hex) as u64),
+        )
+        .unwrap();
+}
+
 #[when(
     regex = r"^transferring (\d+) of item 0x([0-9a-fA-F]+) to canonical holder 0x([0-9a-fA-F]+)$"
 )]
@@ -3788,6 +3800,49 @@ async fn then_canonical_holder_empty(world: &mut BevyoutWorld, reference_hex: St
             .holders()
             .get(&holder)
             .is_some_and(|state| state.items.is_empty())
+    );
+}
+
+#[then(regex = r"^the canonical player hotkey (\d+) is item 0x([0-9a-fA-F]+)$")]
+async fn then_canonical_player_hotkey(world: &mut BevyoutWorld, slot: usize, item_hex: String) {
+    assert_eq!(
+        world
+            .canonical_ledger
+            .bindings()
+            .get(&HolderId::Player)
+            .and_then(|bindings| bindings.hotkeys.get(slot).copied().flatten()),
+        Some(ItemInstanceId(parse_hex(&item_hex) as u64))
+    );
+}
+
+#[then(regex = r"^the canonical player hotkey (\d+) is empty$")]
+async fn then_canonical_player_hotkey_empty(world: &mut BevyoutWorld, slot: usize) {
+    assert_eq!(
+        world
+            .canonical_ledger
+            .bindings()
+            .get(&HolderId::Player)
+            .and_then(|bindings| bindings.hotkeys.get(slot).copied().flatten()),
+        None
+    );
+}
+
+#[then(regex = r"^canonical holder 0x([0-9a-fA-F]+) hotkey (\d+) is empty$")]
+async fn then_canonical_holder_hotkey_empty(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    slot: usize,
+) {
+    let holder = HolderId::FixtureContainer {
+        reference_form_id: parse_hex(&reference_hex),
+    };
+    assert_eq!(
+        world
+            .canonical_ledger
+            .bindings()
+            .get(&holder)
+            .and_then(|bindings| bindings.hotkeys.get(slot).copied().flatten()),
+        None
     );
 }
 

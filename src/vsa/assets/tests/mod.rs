@@ -213,7 +213,7 @@ fn blender_script_recovers_authored_emission_from_zero_imported_strength() {
     assert!(BLENDER_CONVERSION_SCRIPT.contains("authored_emission_fallback = True"));
     assert!(
         BLENDER_CONVERSION_SCRIPT
-            .contains("authored_emission_fallback and\n            has_emission_multiplier")
+            .contains("source_strength_applies = (\r\n            authored_emission_fallback and\r\n            has_emission_multiplier")
     );
     assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength <= 0.0"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength == 1.0"));

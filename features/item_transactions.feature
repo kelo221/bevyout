@@ -5,11 +5,22 @@ Feature: Canonical item instances and atomic holder transactions
 
   Scenario: A partial transfer preserves the source id and allocates a destination id
     Given the canonical player holds item 0x7 form 0x00000001 x5 condition 80
+    And the canonical player hotkey 0 is item 0x7
     And the canonical holder 0x00000009 is empty
     When transferring 2 of item 0x7 to canonical holder 0x00000009
     Then the canonical player item 0x7 has count 3
     And canonical holder 0x00000009 has item count 2
     And the transaction moved item id 0x8
+    And the canonical player hotkey 0 is item 0x7
+    And canonical holder 0x00000009 hotkey 0 is empty
+
+  Scenario: A full transfer clears the source hotkey
+    Given the canonical player holds item 0x7 form 0x00000001 x1 condition none
+    And the canonical player hotkey 0 is item 0x7
+    And the canonical holder 0x00000009 is empty
+    When transferring 1 of item 0x7 to canonical holder 0x00000009
+    Then the canonical player hotkey 0 is empty
+    And canonical holder 0x00000009 hotkey 0 is empty
 
   Scenario: A failed transfer is atomic
     Given the canonical player holds item 0x7 form 0x00000001 x2 condition none

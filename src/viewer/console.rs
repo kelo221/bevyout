@@ -24,7 +24,7 @@ use super::controls::{
     LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES, UnlitMode,
     horizontal_to_vertical_fov,
 };
-use super::inventory::InventoryStack;
+use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::shadow_cache_status;
@@ -503,6 +503,54 @@ fn parse_positive_count(value: Option<&String>) -> Result<u32, ConsoleError> {
         })
 }
 
+fn canonical_equip_target(
+    world: &World,
+    item_id: ItemInstanceId,
+) -> Result<(StackKey, player::equipment::EquipKind), ConsoleError> {
+    let key = world
+        .resource::<interaction::CanonicalItemLedger>()
+        .player_stack_key(item_id)
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "item_not_found",
+                "item instance is not in the player inventory",
+            )
+        })?;
+    let item = world
+        .get_resource::<PreparedItemCatalog>()
+        .and_then(|catalog| {
+            catalog
+                .items
+                .iter()
+                .find(|item| item.base_form_id == key.base_form_id)
+        })
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "no_catalog_entry",
+                "item instance has no prepared item definition",
+            )
+        })?;
+    let kind = interaction::equip_kind_for(item)
+        .ok_or_else(|| ConsoleError::new("not_equippable", "item instance cannot be equipped"))?;
+    Ok((key, kind))
+}
+
+fn equip_error(error: player::equipment::EquipError) -> ConsoleError {
+    match error {
+        player::equipment::EquipError::NotEquippable => {
+            ConsoleError::new("not_equippable", "item instance cannot be equipped")
+        }
+        player::equipment::EquipError::IncompatibleAmmo => ConsoleError::new(
+            "incompatible_ammo",
+            "item instance ammo does not match the equipped weapon",
+        ),
+        player::equipment::EquipError::NoWeaponEquipped => ConsoleError::new(
+            "no_weapon_equipped",
+            "item instance ammo requires a weapon to be equipped first",
+        ),
+    }
+}
+
 /// Equip a canonical player item by stable instance id.
 fn equip_item(
     world: &mut World,
@@ -516,11 +564,22 @@ fn equip_item(
     };
     let item_id = parse_item_instance_id(value)
         .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    let (key, kind) = canonical_equip_target(world, item_id)?;
+    let previous_equipment = world.resource::<interaction::PlayerEquipment>().clone();
     world
+        .resource_mut::<interaction::PlayerEquipment>()
+        .equip(key, kind)
+        .map_err(equip_error)?;
+    if let Err(error) = world
         .resource_mut::<interaction::CanonicalItemLedger>()
         .ledger
         .equip(HolderId::Player, item_id)
-        .map_err(|error| ConsoleError::new("equip_failed", error.to_string()))?;
+    {
+        world
+            .resource_mut::<interaction::PlayerEquipment>()
+            .clone_from(&previous_equipment);
+        return Err(ConsoleError::new("equip_failed", error.to_string()));
+    }
     Ok(ConsoleCommandResult::new(
         json!({ "item_id": item_id.0, "equipped": true }),
         vec![format!("equipped item {:016x}", item_id.0)],
@@ -624,10 +683,32 @@ fn unequip_item(
         ));
     }
     let item_id = world
+        .resource::<interaction::CanonicalItemLedger>()
+        .ledger
+        .bindings()
+        .get(&HolderId::Player)
+        .and_then(|bindings| bindings.equipped);
+    let key = item_id.and_then(|item_id| {
+        world
+            .resource::<interaction::CanonicalItemLedger>()
+            .player_stack_key(item_id)
+    });
+    if item_id.is_some() && key.is_none() {
+        return Err(ConsoleError::new(
+            "unequip_failed",
+            "canonical equipped item is not in the player inventory",
+        ));
+    }
+    let item_id = world
         .resource_mut::<interaction::CanonicalItemLedger>()
         .ledger
         .unequip(HolderId::Player)
         .map_err(|error| ConsoleError::new("unequip_failed", error.to_string()))?;
+    if let Some(key) = key {
+        world
+            .resource_mut::<interaction::PlayerEquipment>()
+            .unequip(key);
+    }
     Ok(ConsoleCommandResult::new(
         json!({ "item_id": item_id.map(|id| id.0), "equipped": false }),
         vec!["player item unequipped".into()],
@@ -647,13 +728,31 @@ fn bind_hotkey(
     let slot = slot
         .parse::<usize>()
         .map_err(|_| ConsoleError::new("bad_type", "hotkey slot must be 0..7"))?;
+    if slot >= 8 {
+        return Err(ConsoleError::new(
+            "hotkey_failed",
+            "hotkey slot must be 0..7",
+        ));
+    }
     let item_id = parse_item_instance_id(value)
         .ok_or_else(|| ConsoleError::new("bad_type", "item instance id must be hexadecimal"))?;
+    let key = world
+        .resource::<interaction::CanonicalItemLedger>()
+        .player_stack_key(item_id)
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "item_not_found",
+                "item instance is not in the player inventory",
+            )
+        })?;
     world
         .resource_mut::<interaction::CanonicalItemLedger>()
         .ledger
         .bind_hotkey(HolderId::Player, slot, item_id)
         .map_err(|error| ConsoleError::new("hotkey_failed", error.to_string()))?;
+    world
+        .get_resource_or_insert_with(super::bindings::HotkeyBindings::default)
+        .assign((slot + 1) as u8, key);
     Ok(ConsoleCommandResult::new(
         json!({ "slot": slot, "item_id": item_id.0 }),
         vec![format!("hotkey {slot} bound to {:016x}", item_id.0)],
@@ -2578,6 +2677,136 @@ mod tests {
         assert_eq!(
             error_code(&exec(&mut app, "equipitem 00000020")),
             "no_weapon_equipped"
+        );
+    }
+
+    #[test]
+    fn canonical_instance_commands_update_ledger_and_runtime_projections() {
+        let mut app = test_app();
+        app.insert_resource(PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![apparel_item(0x10, 0x1)],
+        });
+        assert!(exec(&mut app, "additem 00000010").ok);
+        let item_id = app
+            .world()
+            .resource::<interaction::CanonicalItemLedger>()
+            .ledger
+            .holders()[&HolderId::Player]
+            .items[0]
+            .id;
+        let key = super::super::inventory::StackKey {
+            base_form_id: 0x10,
+            condition: None,
+        };
+
+        let equipped = exec(&mut app, &format!("equip {:016x}", item_id.0));
+        assert!(equipped.ok, "equip failed: {:?}", equipped.error);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::CanonicalItemLedger>()
+                .ledger
+                .bindings()[&HolderId::Player]
+                .equipped,
+            Some(item_id)
+        );
+        assert!(
+            app.world()
+                .resource::<interaction::PlayerEquipment>()
+                .is_equipped(key)
+        );
+
+        let hotkey = exec(&mut app, &format!("hotkey 0 {:016x}", item_id.0));
+        assert!(hotkey.ok, "hotkey failed: {:?}", hotkey.error);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::CanonicalItemLedger>()
+                .ledger
+                .bindings()[&HolderId::Player]
+                .hotkeys[0],
+            Some(item_id)
+        );
+        assert_eq!(
+            app.world()
+                .resource::<super::super::bindings::HotkeyBindings>()
+                .get(1),
+            Some(key)
+        );
+
+        let unequipped = exec(&mut app, "unequip");
+        assert!(unequipped.ok, "unequip failed: {:?}", unequipped.error);
+        assert_eq!(
+            app.world()
+                .resource::<interaction::CanonicalItemLedger>()
+                .ledger
+                .bindings()[&HolderId::Player]
+                .equipped,
+            None
+        );
+        assert!(
+            !app.world()
+                .resource::<interaction::PlayerEquipment>()
+                .is_equipped(key)
+        );
+    }
+
+    #[test]
+    fn canonical_instance_commands_fail_without_partial_mutation() {
+        let mut app = test_app();
+        assert!(exec(&mut app, "additem 00000010").ok);
+        let item_id = app
+            .world()
+            .resource::<interaction::CanonicalItemLedger>()
+            .ledger
+            .holders()[&HolderId::Player]
+            .items[0]
+            .id;
+        let before_ledger = app
+            .world()
+            .resource::<interaction::CanonicalItemLedger>()
+            .snapshot();
+        let before_equipped = app
+            .world()
+            .resource::<interaction::PlayerEquipment>()
+            .is_equipped(super::super::inventory::StackKey {
+                base_form_id: 0x10,
+                condition: None,
+            });
+        assert_eq!(
+            error_code(&exec(&mut app, &format!("equip {:016x}", item_id.0))),
+            "no_catalog_entry"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<interaction::CanonicalItemLedger>()
+                .snapshot(),
+            before_ledger
+        );
+        assert_eq!(
+            app.world()
+                .resource::<interaction::PlayerEquipment>()
+                .is_equipped(super::super::inventory::StackKey {
+                    base_form_id: 0x10,
+                    condition: None,
+                }),
+            before_equipped
+        );
+
+        assert_eq!(
+            error_code(&exec(&mut app, "hotkey 0 deadbeef")),
+            "item_not_found"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<interaction::CanonicalItemLedger>()
+                .snapshot(),
+            before_ledger
+        );
+        assert!(
+            app.world()
+                .get_resource::<super::super::bindings::HotkeyBindings>()
+                .is_none()
         );
     }
 }
