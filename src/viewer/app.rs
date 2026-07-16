@@ -132,6 +132,10 @@ pub(crate) fn run_view(
     // use, defaulting to 4 when no config file is found.
     world::install(&mut app, crate::config::resident_cell_limit());
     world_items::install(&mut app);
+    // M4 wave 3 (#112): after `interaction::install` (the door-open
+    // boundary `nav::agent`'s door-link system calls into) and `world`
+    // (`PreparedSceneManifest`'s eventual home, inserted below).
+    nav::install(&mut app);
     if let Some(save) = loaded_save {
         info!(
             "save slot loaded: cell {:08x}, {} cell states",

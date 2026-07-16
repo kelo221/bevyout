@@ -28,7 +28,7 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::shadow_cache_status;
-use super::{diagnostics, interaction, nav_overlay, player};
+use super::{diagnostics, interaction, nav, nav_overlay, player};
 
 #[derive(Component)]
 pub(crate) struct GameUi;
@@ -117,6 +117,13 @@ pub(crate) fn install(app: &mut App) {
             nav_overlay::toggle_nav_mesh,
         )
         .aliases(&["togglenavmesh"])
+        .mutating(),
+        ConsoleCommand::new(
+            "tna",
+            "tna spawn|goto <x> <y> <z>|goto player|status|despawn",
+            "Test nav agent (issue #112): spawn/goto/status/despawn a bevy_landmass-driven agent.",
+            nav::agent::tna_command,
+        )
         .mutating(),
         ConsoleCommand::new(
             "stairdebug",
