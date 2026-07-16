@@ -19,9 +19,10 @@ catches the class of bug the automated checks can't (Blender/ImageMagick/KTX
 tool detection, manifest/viewer drift) on your actual machine.
 
 CI (`.github/workflows/ci.yml`) runs the first three checks on Linux, macOS,
-and Windows on every push and PR. It must be green before merging — it exists
-so drift and OS-specific bugs (e.g. hardcoded Windows paths in a test) get
-caught before they land on someone else's machine.
+and Windows when a push or PR changes Rust core paths, tests, feature files,
+build manifests, or the CI workflow itself. Documentation, plans, server-side
+Discord personalities, and other non-core changes intentionally do not start
+the full Rust matrix. The Discord notification workflow remains independent.
 
 ## Two people, no formal review process (yet)
 
