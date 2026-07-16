@@ -226,19 +226,23 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             clip_size,
             speed,
             reach,
+            ammo_form_id,
         } => PreparedItemStats::Weapon {
             damage: *damage,
             max_condition: *max_condition,
             clip_size: *clip_size,
             speed: *speed,
             reach: *reach,
+            ammo_form_id: *ammo_form_id,
         },
         OpenMwItemStats::Apparel {
             armor_rating,
             max_condition,
+            biped_slot_mask,
         } => PreparedItemStats::Apparel {
             armor_rating: *armor_rating,
             max_condition: *max_condition,
+            biped_slot_mask: *biped_slot_mask,
         },
         OpenMwItemStats::Ammo { damage, speed } => PreparedItemStats::Ammo {
             damage: *damage,
@@ -344,6 +348,57 @@ mod tests {
         assert!(matches!(
             catalog.items[1].drop_collider,
             PreparedDropCollider::Missing
+        ));
+    }
+
+    // Issue #98 (F98.1): the new ammo/biped-slot fields carry through
+    // `prepared_stats` unchanged.
+    #[test]
+    fn weapon_ammo_and_armor_biped_slot_mask_carry_into_prepared_stats() {
+        let mut weapon = BaseRecord::default();
+        weapon.kind = "WEAP".into();
+        weapon.item_stats = OpenMwItemStats::Weapon {
+            damage: Some(10),
+            max_condition: None,
+            clip_size: None,
+            speed: None,
+            reach: None,
+            ammo_form_id: Some(0x0000_00aa),
+        };
+        let mut armor = BaseRecord::default();
+        armor.kind = "ARMO".into();
+        armor.item_stats = OpenMwItemStats::Apparel {
+            armor_rating: None,
+            max_condition: None,
+            biped_slot_mask: Some(0x0000_0005),
+        };
+        let bases = HashMap::from([(1, weapon), (2, armor)]);
+        let catalog = build_item_catalog(&bases, &HashMap::new(), &[], &HashMap::new(), "abc");
+        let weapon_stats = &catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 1)
+            .unwrap()
+            .stats;
+        assert!(matches!(
+            weapon_stats,
+            PreparedItemStats::Weapon {
+                ammo_form_id: Some(0x0000_00aa),
+                ..
+            }
+        ));
+        let armor_stats = &catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 2)
+            .unwrap()
+            .stats;
+        assert!(matches!(
+            armor_stats,
+            PreparedItemStats::Apparel {
+                biped_slot_mask: Some(0x0000_0005),
+                ..
+            }
         ));
     }
 

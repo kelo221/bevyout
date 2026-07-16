@@ -6,13 +6,15 @@ use bevy::prelude::*;
 use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
-    PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemStats,
-    PreparedLeveledList, PreparedPlacement, PreparedSemantic,
+    PreparedDoor, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemCategory,
+    PreparedItemDefinition, PreparedItemStats, PreparedLeveledList, PreparedPlacement,
+    PreparedSemantic,
 };
 
 use super::animation::{self, ClipTransition};
 use super::audio::PlaySound;
 use super::inventory::{Inventory, InventoryStack, StackKey, TransferResult};
+use super::player::equipment::{self, EquipError, EquipKind, EquipOutcome, EquipmentState};
 use super::player::{CameraMode, CameraModeState};
 use super::world::{ActiveCell, PlaythroughSeed, ResidentCells};
 
@@ -411,6 +413,138 @@ impl PlayerInventory {
     }
 }
 
+/// Issue #98 (F98.2/F98.3): the authoritative equipped set. Thin `Resource`
+/// wrapper around the pure `equipment::EquipmentState`, mirroring how
+/// `PlayerInventory` wraps `Inventory`.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct PlayerEquipment(EquipmentState);
+
+impl PlayerEquipment {
+    pub(crate) fn is_equipped(&self, key: StackKey) -> bool {
+        self.0.is_equipped(key)
+    }
+
+    pub(crate) fn equipped_apparel(
+        &self,
+    ) -> impl Iterator<Item = (equipment::BipedSlot, StackKey)> + '_ {
+        self.0.equipped_apparel()
+    }
+
+    pub(crate) fn equipped_weapon(&self) -> Option<StackKey> {
+        self.0.equipped_weapon()
+    }
+
+    pub(crate) fn equipped_ammo(&self) -> Option<StackKey> {
+        self.0.equipped_ammo()
+    }
+
+    pub(crate) fn toggle(
+        &mut self,
+        key: StackKey,
+        kind: EquipKind,
+    ) -> Result<EquipOutcome, EquipError> {
+        self.0.toggle(key, kind)
+    }
+
+    /// Issue #60/#98 (F98.4): rebuilds equipment from a loaded save's
+    /// persisted entries.
+    pub(crate) fn restore(
+        apparel: impl IntoIterator<Item = (equipment::BipedSlot, StackKey)>,
+        weapon: Option<(StackKey, Option<u32>)>,
+        ammo: Option<StackKey>,
+    ) -> Self {
+        Self(EquipmentState::restore(apparel, weapon, ammo))
+    }
+}
+
+/// F98.3: the biped-slot mask (apparel), required ammo form id (weapon), or
+/// plain ammo-slot membership an item's `PreparedItemStats` maps to, if it
+/// is equippable at all. Shared by the Pip-Boy equip toggle, hotkeys, and
+/// the `player.equipitem` console command so all three equip through the
+/// same classification.
+pub(crate) fn equip_kind_for(item: &PreparedItemDefinition) -> Option<EquipKind> {
+    match item.category {
+        PreparedItemCategory::Weapons => {
+            let ammo_form_id = match &item.stats {
+                PreparedItemStats::Weapon { ammo_form_id, .. } => *ammo_form_id,
+                _ => None,
+            };
+            Some(EquipKind::Weapon { ammo_form_id })
+        }
+        PreparedItemCategory::Apparel => {
+            let biped_slot_mask = match &item.stats {
+                PreparedItemStats::Apparel {
+                    biped_slot_mask, ..
+                } => biped_slot_mask.unwrap_or(0),
+                _ => 0,
+            };
+            Some(EquipKind::Apparel { biped_slot_mask })
+        }
+        PreparedItemCategory::Ammo => Some(EquipKind::Ammo),
+        _ => None,
+    }
+}
+
+/// F98.3: written by `viewer::pipboy`'s equip-toggle row action and by
+/// `viewer::bindings`' outside-Pip-Boy hotkey press; `apply_equip_toggle_requests`
+/// is the single choke point that resolves the catalog entry, decides the
+/// `EquipKind`, and mutates `PlayerEquipment`, so both callers get identical
+/// behavior and notices.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct EquipToggleRequested(pub(crate) StackKey);
+
+fn apply_equip_toggle_requests(
+    mut requests: MessageReader<EquipToggleRequested>,
+    catalog: Res<PreparedItemCatalog>,
+    inventory: Res<PlayerInventory>,
+    mut equipment_state: ResMut<PlayerEquipment>,
+    mut notice: ResMut<InteractionNotice>,
+) {
+    for request in requests.read() {
+        let key = request.0;
+        if !inventory
+            .stack_states()
+            .iter()
+            .any(|stack| stack.key() == key)
+        {
+            notice.show("That item is not in your inventory");
+            continue;
+        }
+        let Some(item) = catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == key.base_form_id)
+        else {
+            notice.show("That item has no prepared definition");
+            continue;
+        };
+        let Some(kind) = equip_kind_for(item) else {
+            notice.show("That item cannot be equipped");
+            continue;
+        };
+        let label = item
+            .display_name
+            .clone()
+            .or_else(|| item.editor_id.clone())
+            .unwrap_or_else(|| format!("{:08X}", item.base_form_id));
+        match equipment_state.toggle(key, kind) {
+            Ok(_outcome) => {
+                let now_equipped = equipment_state.is_equipped(key);
+                notice.show(if now_equipped {
+                    format!("Equipped {label}")
+                } else {
+                    format!("Unequipped {label}")
+                });
+            }
+            Err(EquipError::NotEquippable) => notice.show("That item cannot be equipped"),
+            Err(EquipError::IncompatibleAmmo) => {
+                notice.show("That ammo does not fit the equipped weapon")
+            }
+            Err(EquipError::NoWeaponEquipped) => notice.show("Equip a weapon before loading ammo"),
+        }
+    }
+}
+
 /// `open` is pub(crate) for issues #60/#61: `world::persist` captures
 /// door/container open state on the way out of a cell and re-inserts it on
 /// apply. Everything else stays private to this module.
@@ -503,12 +637,20 @@ struct InteractionNoticeText;
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<PlayerInventory>()
+        .init_resource::<PlayerEquipment>()
+        // Issue #98: `apply_equip_toggle_requests` reads the item catalog;
+        // `run_view` inserts the real one before installing this plugin
+        // (`init_resource` never overwrites an existing resource), and bare
+        // test harnesses get an empty default instead of a missing-resource
+        // panic.
+        .init_resource::<PreparedItemCatalog>()
         .init_resource::<InteractionState>()
         .init_resource::<InteractionNotice>()
         .init_resource::<PendingDoorTravel>()
         .init_resource::<ContainerStates>()
         .init_resource::<ActiveContainerTarget>()
         .add_message::<DoorTravelRequested>()
+        .add_message::<EquipToggleRequested>()
         // F75.2: `activate_focused_placement` now also writes
         // `RequestStateTransition` to open the transfer modal.
         // `AppStatePlugin` registers this message too (`add_message` is
@@ -538,7 +680,11 @@ pub(crate) fn install(app: &mut App) {
         )
         .add_systems(
             Update,
-            (update_interaction_notice, cleanup_removed_placements),
+            (
+                update_interaction_notice,
+                cleanup_removed_placements,
+                apply_equip_toggle_requests,
+            ),
         );
     transfer_ui::install(app);
 }

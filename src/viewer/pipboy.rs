@@ -6,10 +6,32 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::app_state::GameplayModal;
 
 use super::audio::PlaySound;
-use super::interaction::{InteractionNotice, PlayerInventory, item_rules, item_use};
+use super::bindings::HotkeyBindings;
+use super::interaction::{
+    EquipToggleRequested, InteractionNotice, PlayerEquipment, PlayerInventory, item_rules, item_use,
+};
 use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::{PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats};
+
+/// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
+const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
+    (KeyCode::Digit1, 1),
+    (KeyCode::Digit2, 2),
+    (KeyCode::Digit3, 3),
+    (KeyCode::Digit4, 4),
+    (KeyCode::Digit5, 5),
+    (KeyCode::Digit6, 6),
+    (KeyCode::Digit7, 7),
+    (KeyCode::Digit8, 8),
+];
+
+fn is_equip_eligible(category: PreparedItemCategory) -> bool {
+    matches!(
+        category,
+        PreparedItemCategory::Weapons | PreparedItemCategory::Apparel | PreparedItemCategory::Ammo
+    )
+}
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
 const GREEN_DIM: Color = Color::srgba(0.08, 0.45, 0.22, 0.85);
@@ -95,16 +117,55 @@ pub(crate) fn install(app: &mut App) {
                 handle_category_tabs,
                 handle_quantity_buttons,
                 handle_item_action_button,
+                handle_equip_and_hotkeys,
                 refresh_after_inventory_change,
             )
                 .run_if(in_state(GameplayModal::PipBoy)),
         );
 }
 
+/// F98.3: while the Items view has a row selected, `E` toggles equip/unequip
+/// for eligible rows (Weapons/Apparel/Ammo) and digits 1-8 bind that row to a
+/// hotkey slot -- the "simple, discoverable" Pip-Boy assignment interaction;
+/// pressing the same digit outside the Pip-Boy (`bindings::apply_hotkeys`)
+/// equips whatever is bound to it.
+fn handle_equip_and_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    state: Res<PipBoyState>,
+    catalog: Res<PreparedItemCatalog>,
+    mut equip_requests: MessageWriter<EquipToggleRequested>,
+    mut hotkeys: ResMut<HotkeyBindings>,
+    mut notice: ResMut<InteractionNotice>,
+) {
+    let Some(selected) = state.selected else {
+        return;
+    };
+    let Some(item) = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == selected.base_form_id)
+    else {
+        return;
+    };
+    if !is_equip_eligible(item.category) {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        equip_requests.write(EquipToggleRequested(selected));
+    }
+    for (key_code, number) in HOTKEY_DIGITS {
+        if keys.just_pressed(key_code) {
+            hotkeys.assign(number, selected);
+            notice.show(format!("Bound hotkey {number}"));
+        }
+    }
+}
+
 fn enter_pipboy(
     mut commands: Commands,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     inventory: Res<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     assets: Res<AssetServer>,
     mut state: ResMut<PipBoyState>,
@@ -114,7 +175,14 @@ fn enter_pipboy(
         cursor.grab_mode = CursorGrabMode::None;
     }
     normalize_selection(&mut state, &inventory, &catalog);
-    spawn_screen(&mut commands, &inventory, &catalog, &assets, &state);
+    spawn_screen(
+        &mut commands,
+        &inventory,
+        &equipment,
+        &catalog,
+        &assets,
+        &state,
+    );
 }
 
 fn exit_pipboy(
@@ -136,20 +204,30 @@ fn exit_pipboy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refresh_after_inventory_change(
     mut commands: Commands,
     inventory: Res<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     assets: Res<AssetServer>,
     mut state: ResMut<PipBoyState>,
     roots: Query<Entity, With<PipBoyRoot>>,
     picker: Option<Res<QuantityPicker>>,
 ) {
-    if !inventory.is_changed() || picker.is_some() {
+    if (!inventory.is_changed() && !equipment.is_changed()) || picker.is_some() {
         return;
     }
     normalize_selection(&mut state, &inventory, &catalog);
-    rebuild(&mut commands, &roots, &inventory, &catalog, &assets, &state);
+    rebuild(
+        &mut commands,
+        &roots,
+        &inventory,
+        &equipment,
+        &catalog,
+        &assets,
+        &state,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,6 +237,7 @@ fn handle_item_rows(
     rows: Query<(&Interaction, &ItemRow), Changed<Interaction>>,
     all_rows: Query<(&Interaction, &ItemRow)>,
     inventory: Res<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     assets: Res<AssetServer>,
     mut state: ResMut<PipBoyState>,
@@ -169,7 +248,15 @@ fn handle_item_rows(
     for (interaction, row) in &rows {
         if *interaction == Interaction::Pressed && state.selected != Some(row.0) {
             state.selected = Some(row.0);
-            rebuild(&mut commands, &roots, &inventory, &catalog, &assets, &state);
+            rebuild(
+                &mut commands,
+                &roots,
+                &inventory,
+                &equipment,
+                &catalog,
+                &assets,
+                &state,
+            );
             return;
         }
     }
@@ -204,10 +291,12 @@ fn handle_item_rows(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_category_tabs(
     mut commands: Commands,
     tabs: Query<(&Interaction, &CategoryTab), Changed<Interaction>>,
     inventory: Res<PlayerInventory>,
+    equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
     assets: Res<AssetServer>,
     mut state: ResMut<PipBoyState>,
@@ -218,7 +307,15 @@ fn handle_category_tabs(
             state.category = tab.0;
             state.selected = None;
             normalize_selection(&mut state, &inventory, &catalog);
-            rebuild(&mut commands, &roots, &inventory, &catalog, &assets, &state);
+            rebuild(
+                &mut commands,
+                &roots,
+                &inventory,
+                &equipment,
+                &catalog,
+                &assets,
+                &state,
+            );
             return;
         }
     }
@@ -380,10 +477,12 @@ fn item_use_stats(stats: &PreparedItemStats) -> item_use::ItemStats {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild(
     commands: &mut Commands,
     roots: &Query<Entity, With<PipBoyRoot>>,
     inventory: &PlayerInventory,
+    equipment: &PlayerEquipment,
     catalog: &PreparedItemCatalog,
     assets: &AssetServer,
     state: &PipBoyState,
@@ -391,12 +490,13 @@ fn rebuild(
     for root in roots {
         commands.entity(root).despawn();
     }
-    spawn_screen(commands, inventory, catalog, assets, state);
+    spawn_screen(commands, inventory, equipment, catalog, assets, state);
 }
 
 fn spawn_screen(
     commands: &mut Commands,
     inventory: &PlayerInventory,
+    equipment: &PlayerEquipment,
     catalog: &PreparedItemCatalog,
     assets: &AssetServer,
     state: &PipBoyState,
@@ -489,7 +589,12 @@ fn spawn_screen(
                             BorderColor::all(GREEN),
                         ))
                         .with_child((
-                            Text::new(format!("{}{}", item_name(item), count_suffix(stack.count))),
+                            Text::new(format!(
+                                "{}{}{}",
+                                equipped_marker(equipment.is_equipped(key)),
+                                item_name(item),
+                                count_suffix(stack.count)
+                            )),
                             TextColor(GREEN),
                             TextFont {
                                 font_size: FontSize::Px(24.0),
@@ -731,6 +836,11 @@ fn count_suffix(count: i32) -> String {
     }
 }
 
+/// F98.3: the equipped marker shown ahead of an equipped row's name.
+fn equipped_marker(equipped: bool) -> &'static str {
+    if equipped { "[E] " } else { "" }
+}
+
 fn detail_text(stack: super::inventory::InventoryStack, item: &PreparedItemDefinition) -> String {
     let mut lines = vec![item_name(item)];
     if let Some(value) = item.value {
@@ -749,6 +859,7 @@ fn detail_text(stack: super::inventory::InventoryStack, item: &PreparedItemDefin
             clip_size,
             speed,
             reach,
+            ..
         } => {
             if let Some(damage) = damage {
                 lines.push(format!("DAM  {damage}"));
@@ -769,6 +880,7 @@ fn detail_text(stack: super::inventory::InventoryStack, item: &PreparedItemDefin
         PreparedItemStats::Apparel {
             armor_rating,
             max_condition,
+            ..
         } => {
             if let Some(rating) = armor_rating {
                 lines.push(format!("DR  {rating:.1}"));
@@ -816,19 +928,29 @@ mod tests {
     use bevy::asset::AssetPlugin;
     use bevy::state::app::StatesPlugin;
 
-    #[test]
-    fn pipboy_round_trip_releases_and_recaptures_pointer() {
+    fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
             .init_state::<GameplayModal>()
             .insert_resource(PlayerInventory::default())
+            .insert_resource(PlayerEquipment::default())
+            .insert_resource(HotkeyBindings::default())
             .insert_resource(ButtonInput::<MouseButton>::default())
-            .insert_resource(PreparedItemCatalog::default());
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(PreparedItemCatalog::default())
+            .add_message::<EquipToggleRequested>()
+            .init_resource::<InteractionNotice>();
+        install(&mut app);
+        app
+    }
+
+    #[test]
+    fn pipboy_round_trip_releases_and_recaptures_pointer() {
+        let mut app = test_app();
         let window = app
             .world_mut()
             .spawn((CursorOptions::default(), PrimaryWindow))
             .id();
-        install(&mut app);
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
             .set(GameplayModal::PipBoy);
@@ -898,12 +1020,16 @@ mod tests {
                     condition: None,
                 },
             ]))
+            .insert_resource(PlayerEquipment::default())
+            .insert_resource(HotkeyBindings::default())
             .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(PreparedItemCatalog {
                 revision: "test".into(),
                 source_fingerprint: "test".into(),
                 items: vec![aid_item(0x77, quest_item)],
-            });
+            })
+            .add_message::<EquipToggleRequested>();
         app.world_mut()
             .spawn((CursorOptions::default(), PrimaryWindow));
         install(&mut app);
@@ -947,5 +1073,144 @@ mod tests {
             0
         );
         assert_eq!(app.world().resource::<PlayerInventory>().count(0x77), 3);
+    }
+
+    fn seed_item(app: &mut App, base_form_id: u32, category: PreparedItemCategory, name: &str) {
+        app.world_mut().resource_mut::<PlayerInventory>().add_stack(
+            super::super::inventory::InventoryStack {
+                base_form_id,
+                count: 1,
+                condition: None,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<PreparedItemCatalog>()
+            .items
+            .push(PreparedItemDefinition {
+                base_form_id,
+                record_kind: "WEAP".into(),
+                category,
+                editor_id: None,
+                display_name: Some(name.into()),
+                source_model_path: None,
+                icon_asset_path: None,
+                world_asset_path: None,
+                physics_asset_path: None,
+                drop_collider: Default::default(),
+                value: None,
+                weight: None,
+                quest_item: false,
+                stats: PreparedItemStats::Apparel {
+                    armor_rating: None,
+                    max_condition: None,
+                    biped_slot_mask: Some(1),
+                },
+                audio: Default::default(),
+            });
+    }
+
+    // -- equip toggle and hotkeys (issue #98, F98.3) -----------------------
+
+    #[test]
+    fn pressing_e_writes_an_equip_toggle_request_for_the_selected_row() {
+        let mut app = test_app();
+        seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+        let selected = app
+            .world()
+            .resource::<PipBoyState>()
+            .selected
+            .expect("a row should be auto-selected");
+        assert_eq!(selected.base_form_id, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.update();
+        let messages = app.world().resource::<Messages<EquipToggleRequested>>();
+        let request = messages
+            .iter_current_update_messages()
+            .next()
+            .expect("expected an EquipToggleRequested message");
+        assert_eq!(request.0, selected);
+    }
+
+    #[test]
+    fn pressing_a_digit_binds_the_selected_row_to_that_hotkey_slot() {
+        let mut app = test_app();
+        seed_item(&mut app, 2, PreparedItemCategory::Weapons, "Test Rifle");
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+        let selected = app
+            .world()
+            .resource::<PipBoyState>()
+            .selected
+            .expect("a row should be auto-selected");
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit3);
+        app.update();
+        assert_eq!(
+            app.world().resource::<HotkeyBindings>().get(3),
+            Some(selected)
+        );
+    }
+
+    #[test]
+    fn ineligible_categories_do_not_bind_hotkeys_or_equip() {
+        let mut app = test_app();
+        seed_item(&mut app, 3, PreparedItemCategory::Misc, "Junk");
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Misc;
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit1);
+        app.update();
+        assert_eq!(app.world().resource::<HotkeyBindings>().get(1), None);
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn equipped_rows_show_the_equipped_marker() {
+        use super::super::player::equipment::EquipKind;
+        let mut app = test_app();
+        seed_item(&mut app, 4, PreparedItemCategory::Apparel, "Test Armor");
+        let key = StackKey {
+            base_form_id: 4,
+            condition: None,
+        };
+        app.world_mut()
+            .resource_mut::<PlayerEquipment>()
+            .toggle(key, EquipKind::Apparel { biped_slot_mask: 1 })
+            .unwrap();
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+        let texts: Vec<String> = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "[E] Test Armor"),
+            "expected an equipped marker, got {texts:?}"
+        );
     }
 }

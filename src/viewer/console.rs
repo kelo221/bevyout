@@ -197,6 +197,14 @@ pub(crate) fn install(app: &mut App) {
         .reference_callable(false)
         .mutating(),
         ConsoleCommand::new(
+            "equipitem",
+            "[player.]equipitem <FormID>",
+            "Equip (or unequip, if already equipped) an item FormID already in the player inventory.",
+            equip_item,
+        )
+        .reference_callable(false)
+        .mutating(),
+        ConsoleCommand::new(
             "save",
             "save <slot>",
             "Capture the active cell state and write it to a named save slot.",
@@ -383,6 +391,92 @@ fn add_item(
         }),
         vec![format!(
             "additem {form_id:08x} x{count}; inventory now has {total}"
+        )],
+    ))
+}
+
+/// Issue #98 (F98.4): `player.equipitem <FormID>` toggles equip/unequip for
+/// an item already in the player inventory, through the same
+/// `interaction::equip_kind_for`/`PlayerEquipment::toggle` seam the Pip-Boy
+/// and hotkeys use, so all three equip paths behave identically.
+fn equip_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [raw_form_id] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "equipitem expects exactly one FormID",
+        ));
+    };
+    let form_id = parse_item_form_id(raw_form_id).ok_or_else(|| {
+        ConsoleError::new(
+            "bad_type",
+            "equipitem FormID must be 1-8 hex digits, e.g. f, 0x1f, or 0000000f",
+        )
+    })?;
+    let key = world
+        .resource::<interaction::PlayerInventory>()
+        .stack_states()
+        .into_iter()
+        .find(|stack| stack.base_form_id == form_id)
+        .map(|stack| stack.key())
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "not_in_inventory",
+                "equipitem target is not in the player inventory",
+            )
+        })?;
+    let item = world
+        .get_resource::<PreparedItemCatalog>()
+        .and_then(|catalog| {
+            catalog
+                .items
+                .iter()
+                .find(|item| item.base_form_id == form_id)
+                .cloned()
+        })
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "no_catalog_entry",
+                "equipitem target has no prepared item definition",
+            )
+        })?;
+    let kind = interaction::equip_kind_for(&item).ok_or_else(|| {
+        ConsoleError::new("not_equippable", "equipitem target cannot be equipped")
+    })?;
+    let outcome = world
+        .resource_mut::<interaction::PlayerEquipment>()
+        .toggle(key, kind)
+        .map_err(|error| match error {
+            player::equipment::EquipError::NotEquippable => {
+                ConsoleError::new("not_equippable", "equipitem target cannot be equipped")
+            }
+            player::equipment::EquipError::IncompatibleAmmo => ConsoleError::new(
+                "incompatible_ammo",
+                "equipitem ammo does not match the equipped weapon",
+            ),
+            player::equipment::EquipError::NoWeaponEquipped => ConsoleError::new(
+                "no_weapon_equipped",
+                "equipitem ammo requires a weapon to be equipped first",
+            ),
+        })?;
+    let equipped = world
+        .resource::<interaction::PlayerEquipment>()
+        .is_equipped(key);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "form_id": form_id,
+            "equipped": equipped,
+            "evicted": outcome
+                .evicted
+                .iter()
+                .map(|key| format!("{:08x}", key.base_form_id))
+                .collect::<Vec<_>>(),
+        }),
+        vec![format!(
+            "equipitem {form_id:08x} {}",
+            if equipped { "equipped" } else { "unequipped" }
         )],
     ))
 }
@@ -1208,7 +1302,8 @@ mod tests {
             .insert_resource(PointLightShadowSamples::default())
             .insert_resource(BoxdddDebugDrawSettings::default())
             .insert_resource(player::StepDebugSettings::default())
-            .insert_resource(interaction::PlayerInventory::default());
+            .insert_resource(interaction::PlayerInventory::default())
+            .insert_resource(interaction::PlayerEquipment::default());
         app.init_state::<GameplayModal>();
         let camera = player::CameraModeState {
             collision_build_complete: true,
@@ -1872,6 +1967,7 @@ mod tests {
                     clip_size: None,
                     speed: None,
                     reach: None,
+                    ammo_form_id: None,
                 },
                 audio: Default::default(),
             }],
@@ -1907,5 +2003,144 @@ mod tests {
             .expect("expected the added stack");
         assert_eq!(stack.count, 2);
         assert_eq!(stack.condition, None);
+    }
+
+    // -- equipitem (issue #98, F98.4) --------------------------------------
+
+    fn apparel_item(base_form_id: u32, biped_slot_mask: u32) -> PreparedItemDefinition {
+        PreparedItemDefinition {
+            base_form_id,
+            record_kind: "ARMO".into(),
+            category: PreparedItemCategory::Apparel,
+            editor_id: None,
+            display_name: None,
+            source_model_path: None,
+            icon_asset_path: None,
+            world_asset_path: None,
+            physics_asset_path: None,
+            drop_collider: Default::default(),
+            value: None,
+            weight: None,
+            quest_item: false,
+            stats: PreparedItemStats::Apparel {
+                armor_rating: None,
+                max_condition: None,
+                biped_slot_mask: Some(biped_slot_mask),
+            },
+            audio: Default::default(),
+        }
+    }
+
+    #[test]
+    fn equipitem_rejects_bad_arity_and_bad_form_id() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "equipitem")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "equipitem 1 2")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "equipitem zz")), "bad_type");
+    }
+
+    #[test]
+    fn equipitem_rejects_a_form_id_not_in_the_inventory() {
+        let mut app = test_app();
+        assert_eq!(
+            error_code(&exec(&mut app, "equipitem 00000001")),
+            "not_in_inventory"
+        );
+    }
+
+    #[test]
+    fn equipitem_rejects_a_form_id_with_no_catalog_entry() {
+        let mut app = test_app();
+        exec(&mut app, "additem 00000001");
+        assert_eq!(
+            error_code(&exec(&mut app, "equipitem 00000001")),
+            "no_catalog_entry"
+        );
+    }
+
+    #[test]
+    fn equipitem_equips_and_toggling_again_unequips() {
+        let mut app = test_app();
+        app.insert_resource(PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![apparel_item(0x10, 0x1)],
+        });
+        exec(&mut app, "additem 00000010");
+        let output = exec(&mut app, "player.equipitem 00000010");
+        assert!(output.ok, "equipitem failed: {:?}", output.error);
+        assert_eq!(output.value["equipped"], true);
+        assert_eq!(output.log, ["equipitem 00000010 equipped"]);
+        assert!(
+            app.world()
+                .resource::<interaction::PlayerEquipment>()
+                .is_equipped(super::super::inventory::StackKey {
+                    base_form_id: 0x10,
+                    condition: None,
+                })
+        );
+
+        let output = exec(&mut app, "equipitem 00000010");
+        assert!(output.ok, "equipitem failed: {:?}", output.error);
+        assert_eq!(output.value["equipped"], false);
+        assert_eq!(output.log, ["equipitem 00000010 unequipped"]);
+        assert!(
+            !app.world()
+                .resource::<interaction::PlayerEquipment>()
+                .is_equipped(super::super::inventory::StackKey {
+                    base_form_id: 0x10,
+                    condition: None,
+                })
+        );
+    }
+
+    #[test]
+    fn equipitem_evicts_the_previous_occupant_of_a_shared_slot() {
+        let mut app = test_app();
+        app.insert_resource(PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![apparel_item(0x10, 0x1), apparel_item(0x11, 0x1)],
+        });
+        exec(&mut app, "additem 00000010");
+        exec(&mut app, "additem 00000011");
+        exec(&mut app, "equipitem 00000010");
+        let output = exec(&mut app, "equipitem 00000011");
+        assert!(output.ok, "equipitem failed: {:?}", output.error);
+        assert_eq!(output.value["evicted"], json!(["00000010"]));
+    }
+
+    #[test]
+    fn equipitem_rejects_ammo_with_no_weapon_equipped() {
+        let mut app = test_app();
+        app.insert_resource(PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![PreparedItemDefinition {
+                base_form_id: 0x20,
+                record_kind: "AMMO".into(),
+                category: PreparedItemCategory::Ammo,
+                editor_id: None,
+                display_name: None,
+                source_model_path: None,
+                icon_asset_path: None,
+                world_asset_path: None,
+                physics_asset_path: None,
+                drop_collider: Default::default(),
+                value: None,
+                weight: None,
+                quest_item: false,
+                stats: PreparedItemStats::Ammo {
+                    damage: None,
+                    speed: None,
+                },
+                audio: Default::default(),
+            }],
+        });
+        exec(&mut app, "additem 00000020");
+        assert_eq!(
+            error_code(&exec(&mut app, "equipitem 00000020")),
+            "no_weapon_equipped"
+        );
     }
 }

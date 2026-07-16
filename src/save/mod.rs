@@ -16,7 +16,7 @@ mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 3;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,11 +44,45 @@ impl Default for SaveGame {
     }
 }
 
-/// Persistent player state (issue #60, F60.4). Currently just the
-/// inventory, so picked-up keys still open locked doors after a restart.
+/// Persistent player state (issue #60, F60.4; equipment/hotkeys added by
+/// issue #98, F98.4, format v3).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlayerState {
     pub inventory: Vec<ItemStack>,
+    /// The equipped set (issue #98). Absent (empty) on saves written before
+    /// format v3 -- `equipitem`/Pip-Boy equip state simply didn't exist yet.
+    /// Sorted by `(kind, base_form_id, condition)`, see `validate_equipped`.
+    pub equipped: Vec<EquippedItem>,
+    /// Hotkey digit 1-8 bindings (issue #98), each optionally bound to a
+    /// carried stack. Absent (all `None`) on saves written before format v3.
+    pub hotkeys: [Option<HotkeyBinding>; 8],
+}
+
+/// Which equip slot an `EquippedItem` occupies. Carries no slot-specific
+/// data (a biped-slot mask, a required ammo form id) -- that is catalog data
+/// re-derived at load time via `player::equipment`'s `equip`, exactly the
+/// way picking an item up re-derives its condition from the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EquippedKind {
+    Apparel,
+    Weapon,
+    Ammo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquippedItem {
+    pub kind: EquippedKind,
+    pub base_form_id: u32,
+    pub condition: Option<u32>,
+}
+
+/// A hotkey digit's bound stack identity (issue #98). No `kind` needed --
+/// pressing the hotkey re-resolves the category from the catalog exactly
+/// like an equip toggle from the Pip-Boy would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotkeyBinding {
+    pub base_form_id: u32,
+    pub condition: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -532,6 +566,18 @@ fn encode_player(player: &PlayerState, format_version: u32) -> Result<Vec<u8>> {
         tag("INVT"),
         &encode_inventory_bytes(&player.inventory, format_version)?,
     )?;
+    // Issue #98 (F98.4): equipment/hotkeys are new in format v3 -- v1/v2
+    // writers never emit these subrecords, so older readers (which simply
+    // skip unknown subrecords) and this reader's own absent-defaults path
+    // both keep working.
+    if format_version >= 3 {
+        write_subrecord(
+            &mut payload,
+            tag("EQIP"),
+            &encode_equipped(&player.equipped),
+        )?;
+        write_subrecord(&mut payload, tag("HOTK"), &encode_hotkeys(&player.hotkeys))?;
+    }
     Ok(payload)
 }
 
@@ -542,12 +588,114 @@ fn decode_player(payload: &[u8], format_version: u32) -> Result<PlayerState> {
         if subrecord.tag == tag("INVT") {
             ensure_once(&mut saw_inventory, "PLYR.INVT")?;
             player.inventory = decode_inventory(&subrecord.payload, format_version)?;
+        } else if subrecord.tag == tag("EQIP") {
+            player.equipped = decode_equipped(&subrecord.payload)?;
+        } else if subrecord.tag == tag("HOTK") {
+            player.hotkeys = decode_hotkeys(&subrecord.payload)?;
         }
     }
     if !saw_inventory {
         bail!("PLYR record is missing its INVT subrecord");
     }
     Ok(player)
+}
+
+fn encode_equipped(equipped: &[EquippedItem]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(4 + equipped.len() * 10);
+    bytes.extend_from_slice(&(equipped.len() as u32).to_le_bytes());
+    for item in equipped {
+        bytes.push(match item.kind {
+            EquippedKind::Apparel => 0,
+            EquippedKind::Weapon => 1,
+            EquippedKind::Ammo => 2,
+        });
+        bytes.extend_from_slice(&item.base_form_id.to_le_bytes());
+        bytes.push(item.condition.is_some() as u8);
+        bytes.extend_from_slice(&item.condition.unwrap_or_default().to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_equipped(bytes: &[u8]) -> Result<Vec<EquippedItem>> {
+    if bytes.len() < 4 {
+        bail!("PLYR.EQIP is truncated");
+    }
+    let count = read_u32(&bytes[..4], "PLYR.EQIP")? as usize;
+    let mut offset = 4usize;
+    let mut equipped = Vec::with_capacity(count);
+    for _ in 0..count {
+        let entry = bytes
+            .get(offset..offset + 10)
+            .context("PLYR.EQIP entry is truncated")?;
+        let kind = match entry[0] {
+            0 => EquippedKind::Apparel,
+            1 => EquippedKind::Weapon,
+            2 => EquippedKind::Ammo,
+            other => bail!("PLYR.EQIP has an unknown kind tag {other}"),
+        };
+        let base_form_id = read_u32(&entry[1..5], "PLYR.EQIP")?;
+        let condition = read_optional_condition(entry[5], &entry[6..10], "PLYR.EQIP")?;
+        equipped.push(EquippedItem {
+            kind,
+            base_form_id,
+            condition,
+        });
+        offset += 10;
+    }
+    if offset != bytes.len() {
+        bail!("PLYR.EQIP has trailing bytes");
+    }
+    validate_equipped(&equipped)?;
+    Ok(equipped)
+}
+
+fn encode_hotkeys(hotkeys: &[Option<HotkeyBinding>; 8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(8 * 10);
+    for slot in hotkeys {
+        match slot {
+            Some(binding) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&binding.base_form_id.to_le_bytes());
+                bytes.push(binding.condition.is_some() as u8);
+                bytes.extend_from_slice(&binding.condition.unwrap_or_default().to_le_bytes());
+            }
+            None => bytes.extend_from_slice(&[0u8; 10]),
+        }
+    }
+    bytes
+}
+
+fn decode_hotkeys(bytes: &[u8]) -> Result<[Option<HotkeyBinding>; 8]> {
+    if bytes.len() != 80 {
+        bail!("PLYR.HOTK must contain 80 bytes");
+    }
+    let mut hotkeys: [Option<HotkeyBinding>; 8] = Default::default();
+    for (index, slot) in hotkeys.iter_mut().enumerate() {
+        let entry = &bytes[index * 10..index * 10 + 10];
+        if entry[0] > 1 {
+            bail!("PLYR.HOTK present flag must be 0 or 1");
+        }
+        if entry[0] == 1 {
+            let base_form_id = read_u32(&entry[1..5], "PLYR.HOTK")?;
+            let condition = read_optional_condition(entry[5], &entry[6..10], "PLYR.HOTK")?;
+            *slot = Some(HotkeyBinding {
+                base_form_id,
+                condition,
+            });
+        }
+    }
+    Ok(hotkeys)
+}
+
+/// Shared by `decode_equipped`/`decode_hotkeys`: a one-byte "has condition"
+/// flag followed by a four-byte condition value, exactly `ItemStack`'s v2+
+/// condition layout (see `encode_inventory_bytes`).
+fn read_optional_condition(has_condition: u8, bytes: &[u8], label: &str) -> Result<Option<u32>> {
+    match has_condition {
+        0 => Ok(None),
+        1 => Ok(Some(read_u32(bytes, label)?)),
+        other => bail!("{label} condition flag must be 0 or 1, got {other}"),
+    }
 }
 
 fn encode_inventory_bytes(inventory: &[ItemStack], format_version: u32) -> Result<Vec<u8>> {
@@ -951,6 +1099,7 @@ fn validate_save(save: &SaveGame) -> Result<()> {
     }
     if let Some(player) = &save.player {
         validate_inventory(&player.inventory)?;
+        validate_equipped(&player.equipped)?;
     }
     for cell in save.world.cells.values() {
         for delta in cell.references.values() {
@@ -990,6 +1139,21 @@ fn validate_inventory(inventory: &[ItemStack]) -> Result<()> {
         let key = (item.base_form_id, item.condition);
         if previous.is_some_and(|previous| previous >= key) {
             bail!("save inventory stacks must be strictly sorted by FormID and condition");
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+/// Issue #98 (F98.4): mirrors `validate_inventory`'s strict-sort invariant,
+/// keyed by `(kind, base_form_id, condition)` so encode/decode stays
+/// deterministic byte-for-byte.
+fn validate_equipped(equipped: &[EquippedItem]) -> Result<()> {
+    let mut previous: Option<(EquippedKind, u32, Option<u32>)> = None;
+    for item in equipped {
+        let key = (item.kind, item.base_form_id, item.condition);
+        if previous.is_some_and(|previous| previous >= key) {
+            bail!("save equipped items must be strictly sorted by kind, FormID, and condition");
         }
         previous = Some(key);
     }
@@ -1256,6 +1420,39 @@ mod tests {
                         condition: None,
                     },
                 ],
+                equipped: vec![
+                    EquippedItem {
+                        kind: EquippedKind::Apparel,
+                        base_form_id: 0x0000_0011,
+                        condition: Some(100),
+                    },
+                    EquippedItem {
+                        kind: EquippedKind::Weapon,
+                        base_form_id: 0x0000_0042,
+                        condition: None,
+                    },
+                    EquippedItem {
+                        kind: EquippedKind::Ammo,
+                        base_form_id: 0x0000_0055,
+                        condition: None,
+                    },
+                ],
+                hotkeys: [
+                    Some(HotkeyBinding {
+                        base_form_id: 0x0000_0011,
+                        condition: Some(100),
+                    }),
+                    None,
+                    Some(HotkeyBinding {
+                        base_form_id: 0x0000_0042,
+                        condition: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
             }),
             next_runtime_item_id: 6,
             rng_state: 0x0123_4567_89ab_cdef,
@@ -1298,8 +1495,87 @@ mod tests {
                 stack.condition = None;
             }
         }
+        // Issue #98 (F98.4): equipment/hotkeys did not exist at format v1 --
+        // a v1 writer cannot encode them, so the decoded round trip must
+        // come back empty.
+        let player = save.player.as_mut().expect("sample player");
+        player.equipped.clear();
+        player.hotkeys = Default::default();
         let bytes = encode_save(&save).unwrap();
         assert_eq!(decode_save(&bytes).unwrap(), save);
+    }
+
+    // Issue #98 (F98.4): a v2 save (equipment/hotkeys did not exist yet)
+    // loads with an empty equipped set and no hotkey bindings, not an error.
+    #[test]
+    fn version_two_save_loads_with_empty_equipment_and_hotkeys() {
+        let mut save = sample_save();
+        save.header.format_version = 2;
+        let player = save.player.as_mut().expect("sample player");
+        player.equipped.clear();
+        player.hotkeys = Default::default();
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        assert_eq!(decoded, save);
+        let decoded_player = decoded.player.expect("decoded player");
+        assert!(decoded_player.equipped.is_empty());
+        assert_eq!(decoded_player.hotkeys, [None; 8]);
+    }
+
+    // Issue #98 (F98.4): a v3 save round-trips its equipped set and hotkey
+    // bindings byte-identically (the general `round_trip_is_deterministic`
+    // test above already exercises this via `sample_save`; this test pins
+    // the shape narrowly).
+    #[test]
+    fn version_three_save_round_trips_equipment_and_hotkeys() {
+        let save = sample_save();
+        assert_eq!(save.header.format_version, 3);
+        let bytes = encode_save(&save).unwrap();
+        let decoded = decode_save(&bytes).unwrap();
+        let player = decoded.player.expect("decoded player");
+        assert_eq!(
+            player.equipped,
+            vec![
+                EquippedItem {
+                    kind: EquippedKind::Apparel,
+                    base_form_id: 0x0000_0011,
+                    condition: Some(100),
+                },
+                EquippedItem {
+                    kind: EquippedKind::Weapon,
+                    base_form_id: 0x0000_0042,
+                    condition: None,
+                },
+                EquippedItem {
+                    kind: EquippedKind::Ammo,
+                    base_form_id: 0x0000_0055,
+                    condition: None,
+                },
+            ]
+        );
+        assert_eq!(player.hotkeys[0].unwrap().base_form_id, 0x0000_0011);
+        assert_eq!(player.hotkeys[1], None);
+        assert_eq!(player.hotkeys[2].unwrap().base_form_id, 0x0000_0042);
+    }
+
+    // Issue #98 (F98.4): equipped items must stay strictly sorted by kind,
+    // FormID, and condition, exactly like inventory stacks.
+    #[test]
+    fn an_invalid_equipped_set_is_rejected() {
+        let mut save = sample_save();
+        save.player.as_mut().unwrap().equipped = vec![
+            EquippedItem {
+                kind: EquippedKind::Weapon,
+                base_form_id: 0x2,
+                condition: None,
+            },
+            EquippedItem {
+                kind: EquippedKind::Weapon,
+                base_form_id: 0x1,
+                condition: None,
+            },
+        ];
+        assert!(encode_save(&save).is_err());
     }
 
     #[test]
@@ -1337,6 +1613,7 @@ mod tests {
                 count: 0,
                 condition: None,
             }],
+            ..Default::default()
         });
         assert!(encode_save(&save).is_err());
         save.player = Some(PlayerState {
@@ -1352,6 +1629,7 @@ mod tests {
                     condition: None,
                 },
             ],
+            ..Default::default()
         });
         assert!(encode_save(&save).is_err());
     }

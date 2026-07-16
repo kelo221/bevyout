@@ -218,6 +218,25 @@ mod item_rules;
 #[path = "../src/viewer/interaction/item_use.rs"]
 #[allow(dead_code, unused_imports)]
 mod item_use;
+// `viewer::player::equipment` (issue #98) reuses `viewer::inventory::StackKey`
+// via a relative `super::super::inventory::StackKey` import (the same
+// nesting-depth trick `vsa::prepare::selectors` uses for `vsa::paths`), so it
+// is nested two modules deep here behind a `viewer_player` stand-in that
+// aliases the existing `inventory_policy` include as `inventory` -- mirroring
+// how `vsa_bake` above aliases `manifest`/`prepare` for `bake::plan`.
+#[path = "."]
+mod viewer_player {
+    pub mod inventory {
+        pub(crate) use crate::inventory_policy::*;
+    }
+    #[path = "."]
+    pub mod player {
+        #[path = "../src/viewer/player/equipment.rs"]
+        #[allow(dead_code, unused_imports)]
+        pub mod equipment;
+    }
+}
+use viewer_player::player::equipment;
 
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
@@ -388,6 +407,10 @@ struct BevyoutWorld {
     item_use_stats: Option<item_use::ItemStats>,
     item_use_quest_item: bool,
     item_use_action: Option<item_use::ItemUseAction>,
+
+    // -- equipment.feature (issue #98) --
+    equipment_state: equipment::EquipmentState,
+    equip_result: Option<Result<equipment::EquipOutcome, equipment::EquipError>>,
 }
 
 fn find_placement<'a>(
@@ -3552,6 +3575,149 @@ async fn when_item_is_used(
             item_use::USE_CONSUMES_COUNT,
         );
     }
+}
+
+// equipment.feature (issue #98)
+// ---------------------------------------------------------------------
+
+fn equipment_stack_key(hex: &str, condition: &str) -> viewer_player::inventory::StackKey {
+    viewer_player::inventory::StackKey {
+        base_form_id: parse_hex(hex),
+        condition: if condition == "none" {
+            None
+        } else {
+            Some(condition.parse().expect("condition must be a whole number"))
+        },
+    }
+}
+
+#[given(regex = r"^apparel 0x([0-9a-fA-F]+) condition (\S+) mask 0x([0-9a-fA-F]+) is equipped$")]
+async fn given_apparel_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    mask: String,
+) {
+    when_apparel_equipped(world, hex, condition, mask).await;
+}
+
+#[when(regex = r"^apparel 0x([0-9a-fA-F]+) condition (\S+) mask 0x([0-9a-fA-F]+) is equipped$")]
+async fn when_apparel_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    mask: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    let biped_slot_mask = parse_hex(&mask);
+    world.equip_result = Some(
+        world
+            .equipment_state
+            .equip(key, equipment::EquipKind::Apparel { biped_slot_mask }),
+    );
+}
+
+#[given(
+    regex = r"^weapon 0x([0-9a-fA-F]+) condition (\S+) requiring ammo 0x([0-9a-fA-F]+) is equipped$"
+)]
+async fn given_weapon_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    ammo_hex: String,
+) {
+    when_weapon_equipped(world, hex, condition, ammo_hex).await;
+}
+
+#[when(
+    regex = r"^weapon 0x([0-9a-fA-F]+) condition (\S+) requiring ammo 0x([0-9a-fA-F]+) is equipped$"
+)]
+async fn when_weapon_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    ammo_hex: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    let ammo_form_id = Some(parse_hex(&ammo_hex));
+    world.equip_result = Some(
+        world
+            .equipment_state
+            .equip(key, equipment::EquipKind::Weapon { ammo_form_id }),
+    );
+}
+
+#[given(regex = r"^ammo 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn given_ammo_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    when_ammo_equipped(world, hex, condition).await;
+}
+
+#[when(regex = r"^ammo 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn when_ammo_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    world.equip_result = Some(world.equipment_state.equip(key, equipment::EquipKind::Ammo));
+}
+
+#[then(regex = r"^(?:apparel|weapon|ammo) 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn then_stack_is_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(world.equipment_state.is_equipped(key));
+}
+
+#[then(regex = r"^(?:apparel|weapon|ammo) 0x([0-9a-fA-F]+) condition (\S+) is evicted$")]
+async fn then_stack_is_evicted(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(!world.equipment_state.is_equipped(key));
+    let outcome = world
+        .equip_result
+        .clone()
+        .expect("no equip has been performed yet")
+        .expect("the last equip did not succeed");
+    assert!(
+        outcome.evicted.contains(&key),
+        "expected {key:?} in evicted {:?}",
+        outcome.evicted
+    );
+}
+
+#[then("the equip attempt is rejected as not equippable")]
+async fn then_rejected_not_equippable(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::NotEquippable))
+    );
+}
+
+#[then("the equip attempt is rejected as incompatible ammo")]
+async fn then_rejected_incompatible_ammo(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::IncompatibleAmmo))
+    );
+}
+
+#[then("the equip attempt is rejected with no weapon equipped")]
+async fn then_rejected_no_weapon_equipped(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::NoWeaponEquipped))
+    );
+}
+
+#[then(regex = r"^dropping apparel 0x([0-9a-fA-F]+) condition (\S+) is refused while equipped$")]
+async fn then_drop_refused_while_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(world.equipment_state.is_equipped(key));
+}
+
+#[then(regex = r"^dropping apparel 0x([0-9a-fA-F]+) condition (\S+) is allowed$")]
+async fn then_drop_allowed(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(!world.equipment_state.is_equipped(key));
 }
 
 fn main() {
