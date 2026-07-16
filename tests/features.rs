@@ -255,6 +255,12 @@ struct BevyoutWorld {
     // -- asset_materials.feature --
     is_static: bool,
     conversion: Option<AssetConversion>,
+    authored_emission: Option<[f32; 3]>,
+    source_emission_strength: Option<f32>,
+    explicit_emission: bool,
+    bulb_emission_override: bool,
+    glow_emission_override: bool,
+    emission_policy: Option<assets::MaterialEmissionPolicy>,
 
     // -- cell_map.feature --
     cell_map_cells: Vec<cell_map::CellMapEntry>,
@@ -704,6 +710,111 @@ async fn then_profile_tag_is(world: &mut BevyoutWorld, expected: String) {
         .conversion
         .expect("conversion profile not selected yet");
     assert_eq!(conversion.profile_tag(), expected);
+}
+
+#[given(
+    regex = r#"^an imported material has NIFTools emissive color \(([\d.]+), ([\d.]+), ([\d.]+)\)$"#
+)]
+async fn given_niftools_emissive_color(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+) {
+    world.authored_emission = Some([
+        red.parse().unwrap(),
+        green.parse().unwrap(),
+        blue.parse().unwrap(),
+    ]);
+}
+
+#[given(regex = r"^the source emission multiplier is ([\d.]+)$")]
+async fn given_source_emission_multiplier(world: &mut BevyoutWorld, strength: String) {
+    world.source_emission_strength = Some(strength.parse().unwrap());
+}
+
+#[given("an explicit emission is present")]
+async fn given_explicit_emission_present(world: &mut BevyoutWorld) {
+    world.explicit_emission = true;
+}
+
+#[given("an emissive bulb override is present")]
+async fn given_emissive_bulb_override_present(world: &mut BevyoutWorld) {
+    world.bulb_emission_override = true;
+}
+
+#[given("a glow texture override is present")]
+async fn given_glow_texture_override_present(world: &mut BevyoutWorld) {
+    world.glow_emission_override = true;
+}
+
+#[when("its material emission policy is evaluated")]
+async fn when_material_emission_policy_evaluated(world: &mut BevyoutWorld) {
+    let color = world
+        .authored_emission
+        .expect("authored emission color was not provided");
+    world.emission_policy = Some(assets::material_emission_policy(
+        color,
+        world.source_emission_strength.unwrap_or(1.0),
+        world.explicit_emission,
+        world.bulb_emission_override,
+        world.glow_emission_override,
+    ));
+}
+
+#[then(regex = r#"^the exported emission color is \(([\d.]+), ([\d.]+), ([\d.]+)\)$"#)]
+async fn then_exported_emission_color(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+) {
+    let expected = [
+        red.parse::<f32>().unwrap(),
+        green.parse::<f32>().unwrap(),
+        blue.parse::<f32>().unwrap(),
+    ];
+    match world.emission_policy {
+        Some(assets::MaterialEmissionPolicy::Authored(emission)) => {
+            assert_eq!(emission.color, expected);
+        }
+        other => panic!("expected authored emission, got {other:?}"),
+    }
+}
+
+#[then(regex = r"^the exported emission strength is ([\d.]+)$")]
+async fn then_exported_emission_strength(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected.parse::<f32>().unwrap();
+    match world.emission_policy {
+        Some(assets::MaterialEmissionPolicy::Authored(emission)) => {
+            assert_eq!(emission.strength, expected);
+        }
+        other => panic!("expected authored emission, got {other:?}"),
+    }
+}
+
+#[then("the exported material has no emission")]
+async fn then_exported_material_has_no_emission(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.emission_policy,
+        Some(assets::MaterialEmissionPolicy::None)
+    );
+}
+
+#[then(regex = r"^the selected emission source is (Authored|Explicit|Bulb|Glow|None)$")]
+async fn then_selected_emission_source(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .emission_policy
+        .expect("emission policy was not evaluated");
+    let matches = match expected.as_str() {
+        "Authored" => matches!(actual, assets::MaterialEmissionPolicy::Authored(_)),
+        "Explicit" => actual == assets::MaterialEmissionPolicy::Explicit,
+        "Bulb" => actual == assets::MaterialEmissionPolicy::Bulb,
+        "Glow" => actual == assets::MaterialEmissionPolicy::Glow,
+        "None" => actual == assets::MaterialEmissionPolicy::None,
+        other => panic!("unknown emission source {other}"),
+    };
+    assert!(matches, "expected {expected}, got {actual:?}");
 }
 
 // ---------------------------------------------------------------------

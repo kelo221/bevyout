@@ -10,7 +10,7 @@ use super::physics::PreparedPhysicsSource;
 pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 15;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
-pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v5";
+pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 
 mod compatibility;
 

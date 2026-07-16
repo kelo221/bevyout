@@ -8,16 +8,11 @@ Feature: Asset conversion profile selection
   #     conversion; dynamic, NPC, creature, weapon, and furniture assets
   #     preserve their authored materials."
   #
-  # Scope note: (1) is decided entirely inside the embedded Blender Python
-  # conversion script (the NIFTOOLS_COMPAT_PY constant in src/vsa/assets.rs,
-  # around `alpha_blend`/`alpha_test`/the normal-alpha-to-specular link) --
-  # there is no pure Rust function for it, only Blender-side node-graph
-  # wiring that this hermetic, no-Blender test suite cannot exercise. So
-  # this feature pins what IS decided in Rust instead: which conversion
-  # profile a mesh gets (src/vsa/assets.rs `asset_conversion`/
-  # `AssetConversion::profile_tag`), which is the seam that actually chooses
-  # between the AO bake path and the "preserve authored materials" path
-  # promise (2) above.
+  # The material node graph is rebuilt inside the embedded Blender Python
+  # converter. The std-only policy seam below pins the authored-emission
+  # decision without requiring Blender, while src/vsa/assets/tests/mod.rs
+  # also checks that the embedded script reads the NIFTools property and
+  # preserves the existing bulb/glow override order.
 
   Scenario: Static meshes get the quick vertex-AO conversion profile
     Given an asset is static
@@ -30,3 +25,25 @@ Feature: Asset conversion profile selection
     When its conversion profile is selected
     Then the conversion is Preserve
     And the profile tag is "ao-none"
+
+  Scenario: Nonzero NIFTools authored emission exports its source multiplier
+    Given an imported material has NIFTools emissive color (0.8, 0.4, 0.1)
+    And the source emission multiplier is 2.5
+    When its material emission policy is evaluated
+    Then the exported emission color is (0.8, 0.4, 0.1)
+    And the exported emission strength is 2.5
+
+  Scenario: Zero NIFTools authored emission remains non-emissive
+    Given an imported material has NIFTools emissive color (0.0, 0.0, 0.0)
+    And the source emission multiplier is 2.5
+    When its material emission policy is evaluated
+    Then the exported material has no emission
+
+  Scenario: Glow texture is the final emission override
+    Given an imported material has NIFTools emissive color (0.8, 0.4, 0.1)
+    And the source emission multiplier is 2.5
+    And an explicit emission is present
+    And an emissive bulb override is present
+    And a glow texture override is present
+    When its material emission policy is evaluated
+    Then the selected emission source is Glow

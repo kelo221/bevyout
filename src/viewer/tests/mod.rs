@@ -1,4 +1,5 @@
 use super::*;
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
 
 fn compatible_render_manifest() -> PreparedSceneManifest {
     let mut manifest: PreparedSceneManifest =
@@ -149,6 +150,21 @@ fn missing_image_space_keeps_fixed_camera_post_processing() {
     assert_eq!(grading.global.exposure, 0.0);
     assert!(auto_exposure.is_none());
     assert_eq!(curves.len(), 0);
+}
+
+#[test]
+fn fallout_bloom_uses_explicit_old_school_baseline() {
+    let bloom = super::scene::fallout_bloom();
+
+    assert_eq!(bloom.intensity, 0.05);
+    assert_eq!(bloom.prefilter.threshold, 0.6);
+    assert_eq!(bloom.prefilter.threshold_softness, 0.2);
+    assert_eq!(bloom.composite_mode, BloomCompositeMode::Additive);
+    assert!(bloom.prefilter.threshold > 0.0);
+    assert_ne!(
+        bloom.prefilter.threshold,
+        Bloom::NATURAL.prefilter.threshold
+    );
 }
 
 #[test]

@@ -3,6 +3,8 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write;
 
+const BLENDER_CONVERSION_SCRIPT: &str = include_str!("../blender_script.py");
+
 #[test]
 fn finds_length_adjacent_texture_names_in_nif_bytes() {
     let references = texture_references(b"textures\\clutter\\machine\\panel.dds4");
@@ -144,6 +146,117 @@ fn cache_pair_rebuilds_when_sidecar_is_missing_or_invalid() {
 fn static_assets_use_quick_ao_and_dynamic_assets_preserve_materials() {
     assert_eq!(asset_conversion(true), AssetConversion::QuickAo);
     assert_eq!(asset_conversion(false), AssetConversion::Preserve);
+}
+
+#[test]
+fn authored_emission_policy_exports_nonzero_colors_and_rejects_zero() {
+    let authored = [0.8, 0.4, 0.1];
+    assert_eq!(authored_emission_color(authored), Some(authored));
+    assert_eq!(authored_emission_color([0.0, 0.0, 0.0]), None);
+    assert_eq!(
+        authored_emission(authored, 2.5),
+        Some(AuthoredEmission {
+            color: authored,
+            strength: 2.5,
+        })
+    );
+    assert_eq!(authored_emission(authored, f32::NAN).unwrap().strength, 1.0);
+    assert_eq!(authored_emission(authored, -1.0).unwrap().strength, 1.0);
+}
+
+#[test]
+fn blender_script_reads_authored_emission_before_existing_overrides() {
+    for source_field in [
+        "nif_emission_multiplier(prop, 'emit_multi', 'emissive_mult')",
+        "nif_emission_multiplier(n_mat_prop, 'emit_multi', 'emissive_mult')",
+        "getattr(prop, 'emissive_multiple', None)",
+        "getattr(prop, 'base_color_scale', None)",
+    ] {
+        assert!(
+            BLENDER_CONVERSION_SCRIPT.contains(source_field),
+            "missing NIFTools source field: {source_field}"
+        );
+    }
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_emissive_strength"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("candidates = [keys[shader_type], 'bevyout_emissive_strength']")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("value < 0.0"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("return 1.0, False"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("getattr(niftools, 'emissive_color', None)"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT.contains("new_emission.default_value = (0.0, 0.0, 0.0, 1.0)")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("elif authored_emission is not None:"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT.contains("if new_emission_strength and source_strength_applies:")
+    );
+    let authored = BLENDER_CONVERSION_SCRIPT
+        .find("elif authored_emission is not None:")
+        .expect("authored emission fallback is missing");
+    let strength = BLENDER_CONVERSION_SCRIPT
+        .find("if new_emission_strength and source_strength_applies:")
+        .expect("source emission strength fallback is missing");
+    let bulb = BLENDER_CONVERSION_SCRIPT
+        .find("if bulb_override and new_emission:")
+        .expect("emissive bulb override is missing");
+    let glow = BLENDER_CONVERSION_SCRIPT
+        .find("if glow and new_emission:")
+        .expect("glow texture override is missing");
+    assert!(authored < strength && strength < bulb && bulb < glow);
+}
+
+#[test]
+fn blender_script_recovers_authored_emission_from_zero_imported_strength() {
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("authored_emission_fallback = False"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("authored_emission_fallback = True"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("authored_emission_fallback and\n            has_emission_multiplier")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength <= 0.0"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength == 1.0"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("new_emission_strength.default_value = emission_multiplier")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("new_emission_strength.default_value = 1.0"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT.contains("if source_strength_applies and not bulb_override:")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("original_ni_material_import"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("NifData.data.blocks"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("BSLightingShaderProperty"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("BSEffectShaderProperty"));
+}
+
+#[test]
+fn material_emission_policy_preserves_source_strength_and_override_precedence() {
+    let authored = [0.8, 0.4, 0.1];
+    assert_eq!(
+        material_emission_policy(authored, 2.5, false, false, false),
+        MaterialEmissionPolicy::Authored(AuthoredEmission {
+            color: authored,
+            strength: 2.5,
+        })
+    );
+    assert_eq!(
+        material_emission_policy(authored, 2.5, true, false, false),
+        MaterialEmissionPolicy::Explicit
+    );
+    assert_eq!(
+        material_emission_policy(authored, 2.5, true, true, false),
+        MaterialEmissionPolicy::Bulb
+    );
+    assert_eq!(
+        material_emission_policy(authored, 2.5, true, true, true),
+        MaterialEmissionPolicy::Glow
+    );
+    assert_eq!(
+        material_emission_policy([0.0, 0.0, 0.0], 2.5, false, false, false),
+        MaterialEmissionPolicy::None
+    );
 }
 
 #[test]

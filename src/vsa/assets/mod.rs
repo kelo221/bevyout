@@ -23,7 +23,61 @@ use super::physics::read_physics_asset;
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-visual-audit-havok-anim-audio-v15";
+    "niftools-blender52-visual-audit-havok-anim-audio-emission-v24";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AuthoredEmission {
+    pub(crate) color: [f32; 3],
+    pub(crate) strength: f32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum MaterialEmissionPolicy {
+    None,
+    Authored(AuthoredEmission),
+    Explicit,
+    Bulb,
+    Glow,
+}
+
+pub(crate) fn authored_emission(color: [f32; 3], strength: f32) -> Option<AuthoredEmission> {
+    let strength = if strength.is_finite() && strength >= 0.0 {
+        strength
+    } else {
+        1.0
+    };
+    (color.iter().all(|channel| channel.is_finite()) && color.iter().any(|channel| *channel != 0.0))
+        .then_some(AuthoredEmission { color, strength })
+}
+
+/// Mirrors the Blender-side authored-emission gate for std-only tests.
+/// Zero-valued NIFTools colors are intentionally not exported as emission.
+#[allow(dead_code)]
+pub(crate) fn authored_emission_color(color: [f32; 3]) -> Option<[f32; 3]> {
+    authored_emission(color, 1.0).map(|emission| emission.color)
+}
+
+#[allow(dead_code)]
+pub(crate) fn material_emission_policy(
+    color: [f32; 3],
+    strength: f32,
+    explicit: bool,
+    bulb: bool,
+    glow: bool,
+) -> MaterialEmissionPolicy {
+    if glow {
+        MaterialEmissionPolicy::Glow
+    } else if bulb {
+        MaterialEmissionPolicy::Bulb
+    } else if explicit {
+        MaterialEmissionPolicy::Explicit
+    } else {
+        authored_emission(color, strength)
+            .map(MaterialEmissionPolicy::Authored)
+            .unwrap_or(MaterialEmissionPolicy::None)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootTransformPolicy {
