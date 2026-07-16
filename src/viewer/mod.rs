@@ -60,6 +60,7 @@ mod console_ui;
 mod controls;
 mod diagnostics;
 mod lighting;
+mod nav_overlay;
 mod performance_policy;
 mod scene;
 

@@ -1196,6 +1196,7 @@ mod tests {
             lights: Vec::new(),
             diagnostics: Vec::new(),
             navmeshes: Vec::new(),
+            nav_graph: None,
             cell_audio: Default::default(),
             audio_clips: Vec::new(),
             footstep_sets: Vec::new(),

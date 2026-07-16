@@ -561,7 +561,15 @@ fn prepare_cell(
         cell.effective_lighting = Some(prepared_lighting(legacy_lighting(&cell)));
     }
     let blender = find_blender(args.blender)?;
-    let navmeshes = stage_navmeshes(&scene_dir, &mut diagnostics, &parsed.navmeshes)?;
+    let (navmeshes, nav_graph, nav_graph_summary) = stage_navmeshes(
+        &cache_dir,
+        &scene_dir,
+        cell_id,
+        &mut diagnostics,
+        &parsed.navmeshes,
+        parsed.navigation.as_ref(),
+    )?;
+    output.push(nav_graph_summary);
     // Parses the cell's references and stages their NIF/texture files under
     // the shared `staging_dir`/`assets_dir` (F48.4 parallel phase). Every
     // path written here is content-addressed (the NIF by its
@@ -903,6 +911,7 @@ fn prepare_cell(
         diagnostics,
         visual_issues,
         navmeshes,
+        nav_graph,
         cell_audio,
         audio_clips,
         footstep_sets,

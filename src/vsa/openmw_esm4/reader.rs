@@ -308,9 +308,22 @@ pub(crate) fn walk_container(
                         form_id,
                         (
                             context.cell.unwrap_or_default(),
-                            parse_navmesh(&subs, form_id, flags, data),
+                            parse_navmesh(&subs, form_id, flags, resolver, data),
                         ),
                     );
+                }
+            }
+            "NAVI" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.navigation = None;
+                } else {
+                    let (navigation, diagnostics) = parse_navi(&subs, form_id, flags, resolver);
+                    for message in diagnostics {
+                        state
+                            .navigation_diagnostics
+                            .push(format!("{source_name} NAVI {form_id:08x}: {message}"));
+                    }
+                    state.navigation = Some(navigation);
                 }
             }
             _ => {

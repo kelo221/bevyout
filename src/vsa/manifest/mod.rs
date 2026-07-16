@@ -67,6 +67,11 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) visual_issues: Vec<PreparedVisualIssue>,
     #[serde(default)]
     pub(crate) navmeshes: Vec<PreparedNavMeshSource>,
+    /// Decoded per-cell polygon navigation graph (issue #111, M4 wave 2).
+    /// `None` only for manifests prepared before this wave (serde default)
+    /// or when the cell has no NAVM records at all.
+    #[serde(default)]
+    pub(crate) nav_graph: Option<PreparedNavGraphSource>,
     #[serde(default)]
     pub(crate) cell_audio: PreparedCellAudio,
     #[serde(default)]
@@ -673,6 +678,26 @@ pub(crate) struct PreparedNavMeshSource {
     pub(crate) version: Option<u32>,
     pub(crate) asset_path: String,
     pub(crate) chunks: Vec<PreparedNavMeshChunk>,
+}
+
+/// Pointer to the decoded per-cell navigation-graph asset
+/// (`scenes/<cell>/navmesh/navgraph.ron`, issue #111, M4 wave 2). The
+/// viewer-side consumers (#112/#113) need only this asset -- never the raw
+/// ESM bytes -- so the counts/diagnostic summary here are QA metadata, not
+/// runtime inputs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PreparedNavGraphSource {
+    pub(crate) asset_path: String,
+    pub(crate) revision: String,
+    pub(crate) hash: String,
+    pub(crate) mesh_count: usize,
+    pub(crate) polygon_count: usize,
+    pub(crate) vertex_count: usize,
+    pub(crate) door_count: usize,
+    pub(crate) external_connection_count: usize,
+    pub(crate) diagnostics_warning: usize,
+    pub(crate) diagnostics_error: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
