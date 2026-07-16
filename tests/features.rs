@@ -185,12 +185,22 @@ mod prepare {
     #[path = "../src/vsa/prepare/actor_catalog.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod actor_catalog;
+
+    // `vsa::prepare::nav_graph` (issue #111, M4 wave 2) reuses
+    // `vsa::paths::{FO3_SCALE, fingerprint}` via relative `super::super::`
+    // imports, so it is nested here too -- same pattern as `actor_catalog`
+    // above -- to land those paths on the `mod paths` include near the top
+    // of this file.
+    #[path = "../src/vsa/prepare/nav_graph.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod nav_graph;
 }
 use prepare::actor_catalog;
 use prepare::batch_cache;
 use prepare::container_audio_policy;
 use prepare::fingerprints;
 use prepare::jobs;
+use prepare::nav_graph;
 use prepare::selectors;
 
 // `vsa::bake::plan` (issue #62) reuses the resumable job-manifest machinery
@@ -217,6 +227,27 @@ mod vsa_bake {
     }
 }
 use vsa_bake::bake::plan as bake_plan;
+
+// The attributed ESM4 reader (`vsa::openmw_esm4`, issue #111's NAVM/NAVI
+// decode seam) is anyhow/flate2/std-only apart from
+// `super::manifest::{CellInfo, ImageSpaceInfo}` and
+// `super::paths::CellSelector`, both already included verbatim above. It is
+// nested one module deep behind stand-in re-export modules -- the same trick
+// `vsa_bake` uses -- so nav_graph.feature can drive the real byte-level
+// NAVM/NAVI subrecord decode with synthetic in-memory plugin byte streams.
+#[path = "."]
+mod vsa_esm {
+    pub mod manifest {
+        pub(crate) use crate::manifest::{CellInfo, ImageSpaceInfo};
+    }
+    pub mod paths {
+        pub(crate) use crate::paths::CellSelector;
+    }
+    #[path = "../src/vsa/openmw_esm4/mod.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod openmw_esm4;
+}
+use vsa_esm::openmw_esm4;
 
 // `viewer::interaction::leveled` (issue #74) is dependency-free (std only,
 // no Bevy, no `vsa::manifest` import -- see its module doc comment for why
@@ -471,6 +502,19 @@ struct BevyoutWorld {
     // -- actor_catalog.feature (issue #103, M4 wave 1 task C) --
     actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
     actor_catalog_result: Option<actor_catalog::PreparedActorCatalog>,
+
+    // -- nav_graph.feature (issue #111, M4 wave 2) --
+    nav_cell_form_id: u32,
+    nav_navm_form_id: u32,
+    /// Pending NAVM subrecord payloads (signature, raw bytes), assembled
+    /// into one synthetic plugin byte stream by the When step.
+    nav_navm_parts: Vec<(String, Vec<u8>)>,
+    nav_navi_first: Option<NaviFixtureEntry>,
+    nav_navi_second: Option<NaviFixtureEntry>,
+    nav_navi_second_deleted: Option<u32>,
+    nav_parsed: Option<openmw_esm4::ParsedPlugin>,
+    nav_graph_inputs: nav_graph::NavGraphInputs,
+    nav_graph_result: Option<nav_graph::PreparedNavGraph>,
 }
 
 fn find_placement<'a>(
@@ -4636,6 +4680,827 @@ async fn then_actor_catalog_ron_deterministic(world: &mut BevyoutWorld) {
     let a = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     let b = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------
+// nav_graph.feature (issue #111, M4 wave 2) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+/// One synthetic `NAVI` `NVMI` fixture entry (a plugin either carries one
+/// of these or a deleted-override record).
+#[derive(Debug, Clone, Copy)]
+struct NaviFixtureEntry {
+    form_id: u32,
+    navmesh_form_id: u32,
+    location_form_id: u32,
+    grid_x: i16,
+    grid_y: i16,
+}
+
+fn nav_subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut result = signature.to_vec();
+    result.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    result.extend_from_slice(data);
+    result
+}
+
+fn nav_record(signature: &[u8; 4], flags: u32, form_id: u32, data: &[u8]) -> Vec<u8> {
+    let mut result = signature.to_vec();
+    result.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    result.extend_from_slice(&flags.to_le_bytes());
+    result.extend_from_slice(&form_id.to_le_bytes());
+    result.extend_from_slice(&[0; 8]);
+    result.extend_from_slice(data);
+    result
+}
+
+fn nav_group(label: u32, group_type: i32, children: &[u8]) -> Vec<u8> {
+    let mut result = b"GRUP".to_vec();
+    result.extend_from_slice(&((children.len() + 24) as u32).to_le_bytes());
+    result.extend_from_slice(&label.to_le_bytes());
+    result.extend_from_slice(&group_type.to_le_bytes());
+    result.extend_from_slice(&[0; 8]);
+    result.extend_from_slice(children);
+    result
+}
+
+fn nav_tes4(masters: &[&str]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for master in masters {
+        data.extend(nav_subrecord(b"MAST", format!("{master}\0").as_bytes()));
+        data.extend(nav_subrecord(b"DATA", &[0; 8]));
+    }
+    nav_record(b"TES4", 0, 0, &data)
+}
+
+fn nav_navi_payload(entry: NaviFixtureEntry) -> Vec<u8> {
+    let mut nvmi = vec![0_u8; 4]; // leading undocumented "Unknown" field
+    nvmi.extend_from_slice(&entry.navmesh_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.location_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_x.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_y.to_le_bytes());
+    [
+        nav_subrecord(b"NVER", &12_u32.to_le_bytes()),
+        nav_subrecord(b"NVMI", &nvmi),
+    ]
+    .concat()
+}
+
+fn nav_navm_part_mut<'a>(world: &'a mut BevyoutWorld, signature: &str) -> &'a mut Vec<u8> {
+    if !world
+        .nav_navm_parts
+        .iter()
+        .any(|(existing, _)| existing == signature)
+    {
+        world
+            .nav_navm_parts
+            .push((signature.to_string(), Vec::new()));
+    }
+    &mut world
+        .nav_navm_parts
+        .iter_mut()
+        .find(|(existing, _)| existing == signature)
+        .expect("part was just inserted")
+        .1
+}
+
+fn nav_parse_i16_triple(list: &str) -> [i16; 3] {
+    let values = list
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<i16>()
+                .unwrap_or_else(|error| panic!("invalid i16 {value:?}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 3, "expected exactly three values in {list:?}");
+    [values[0], values[1], values[2]]
+}
+
+fn nav_parsed_navmesh<'a>(
+    world: &'a BevyoutWorld,
+    form_hex: &str,
+) -> &'a openmw_esm4::NavMeshRecord {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first")
+        .navmeshes
+        .iter()
+        .find(|navmesh| navmesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("no parsed NAVM {form_hex}"))
+}
+
+fn nav_graph_mesh_input_mut<'a>(
+    world: &'a mut BevyoutWorld,
+    form_hex: &str,
+) -> &'a mut nav_graph::NavGraphMeshInput {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_graph_inputs
+        .meshes
+        .iter_mut()
+        .find(|mesh| mesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("nav graph mesh {form_hex} was not created first"))
+}
+
+fn nav_graph_result_mesh<'a>(
+    world: &'a BevyoutWorld,
+    form_hex: &str,
+) -> &'a nav_graph::PreparedNavMesh {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .meshes
+        .iter()
+        .find(|mesh| mesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("no prepared nav mesh {form_hex}"))
+}
+
+#[given(regex = r"^a plugin cell 0x([0-9a-fA-F]+)$")]
+async fn given_nav_plugin_cell(world: &mut BevyoutWorld, hex: String) {
+    world.nav_cell_form_id = parse_hex(&hex);
+}
+
+#[given(regex = r"^a NAVM 0x([0-9a-fA-F]+) in the cell with version (\d+)$")]
+async fn given_navm_in_cell(world: &mut BevyoutWorld, hex: String, version: u32) {
+    world.nav_navm_form_id = parse_hex(&hex);
+    nav_navm_part_mut(world, "NVER").extend_from_slice(&version.to_le_bytes());
+}
+
+#[given(
+    regex = r"^the NAVM declares counts vertices (\d+) triangles (\d+) external (\d+) cover (\d+) doors (\d+)$"
+)]
+async fn given_navm_counts(
+    world: &mut BevyoutWorld,
+    vertices: u32,
+    triangles: u32,
+    external: u32,
+    cover: u32,
+    doors: u32,
+) {
+    let cell = world.nav_cell_form_id;
+    let data = nav_navm_part_mut(world, "DATA");
+    data.extend_from_slice(&cell.to_le_bytes());
+    for count in [vertices, triangles, external, cover, doors] {
+        data.extend_from_slice(&count.to_le_bytes());
+    }
+}
+
+#[given(regex = r#"^the NAVM has vertices "([^"]*)"$"#)]
+async fn given_navm_vertices(world: &mut BevyoutWorld, list: String) {
+    let mut payload = Vec::new();
+    for vertex in list.split(';') {
+        for value in vertex.split(',') {
+            let value = value
+                .trim()
+                .parse::<f32>()
+                .unwrap_or_else(|error| panic!("invalid f32 {value:?}: {error}"));
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    nav_navm_part_mut(world, "NVVX").extend_from_slice(&payload);
+}
+
+#[given(
+    regex = r"^the NAVM has triangle ([-\d,\s]+) with edges ([-\d,\s]+) and flags 0x([0-9a-fA-F]+)$"
+)]
+async fn given_navm_triangle(
+    world: &mut BevyoutWorld,
+    vertices: String,
+    edges: String,
+    flags_hex: String,
+) {
+    let mut payload = Vec::new();
+    for value in nav_parse_i16_triple(&vertices) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in nav_parse_i16_triple(&edges) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload.extend_from_slice(&parse_hex(&flags_hex).to_le_bytes());
+    nav_navm_part_mut(world, "NVTR").extend_from_slice(&payload);
+}
+
+#[given(regex = r#"^the NAVM has cover ids "([^"]*)"$"#)]
+async fn given_navm_cover(world: &mut BevyoutWorld, list: String) {
+    let mut payload = Vec::new();
+    for value in list.split(',') {
+        let value = value
+            .trim()
+            .parse::<i16>()
+            .unwrap_or_else(|error| panic!("invalid i16 {value:?}: {error}"));
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    nav_navm_part_mut(world, "NVCA").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has door 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_navm_door(world: &mut BevyoutWorld, door_hex: String, triangle: u16) {
+    let door = parse_hex(&door_hex);
+    let payload = [
+        door.to_le_bytes().as_slice(),
+        triangle.to_le_bytes().as_slice(),
+        &[0, 0], // unused
+    ]
+    .concat();
+    nav_navm_part_mut(world, "NVDP").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has a grid with divisor (\d+)$")]
+async fn given_navm_grid(world: &mut BevyoutWorld, divisor: u32) {
+    let mut payload = divisor.to_le_bytes().to_vec();
+    for value in [140.0_f32, 140.0, -70.0, -70.0, 0.0, 70.0, 70.0, 0.0] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    nav_navm_part_mut(world, "NVGD").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_navm_external(world: &mut BevyoutWorld, target_hex: String, triangle: u16) {
+    let target = parse_hex(&target_hex);
+    let payload = [
+        [0_u8; 4].as_slice(), // leading undocumented "Unknown" field
+        target.to_le_bytes().as_slice(),
+        triangle.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    nav_navm_part_mut(world, "NVEX").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM NVTR payload is truncated by (\d+) bytes$")]
+async fn given_navm_truncated(world: &mut BevyoutWorld, bytes: usize) {
+    let part = nav_navm_part_mut(world, "NVTR");
+    let new_len = part.len().checked_sub(bytes).expect("NVTR too short");
+    part.truncate(new_len);
+}
+
+#[given(
+    regex = r"^the plugin has a NAVI 0x([0-9a-fA-F]+) entry linking NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_navi_first(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world.nav_navi_first = Some(NaviFixtureEntry {
+        form_id: parse_hex(&form_hex),
+        navmesh_form_id: parse_hex(&navm_hex),
+        location_form_id: parse_hex(&location_hex),
+        grid_x,
+        grid_y,
+    });
+}
+
+#[given(
+    regex = r"^a second plugin has a NAVI 0x([0-9a-fA-F]+) entry linking NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_navi_second(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world.nav_navi_second = Some(NaviFixtureEntry {
+        form_id: parse_hex(&form_hex),
+        navmesh_form_id: parse_hex(&navm_hex),
+        location_form_id: parse_hex(&location_hex),
+        grid_x,
+        grid_y,
+    });
+}
+
+#[given(regex = r"^a second plugin deletes the NAVI 0x([0-9a-fA-F]+) record$")]
+async fn given_navi_second_deleted(world: &mut BevyoutWorld, form_hex: String) {
+    world.nav_navi_second_deleted = Some(parse_hex(&form_hex));
+}
+
+#[when(regex = r"^the content set is parsed for cell 0x([0-9a-fA-F]+)$")]
+async fn when_nav_content_set_parsed(world: &mut BevyoutWorld, cell_hex: String) {
+    let cell = parse_hex(&cell_hex);
+    let mut first = nav_tes4(&[]);
+    first.extend(nav_record(
+        b"CELL",
+        0,
+        world.nav_cell_form_id,
+        &[
+            nav_subrecord(b"EDID", b"NavCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    if world.nav_navm_form_id != 0 {
+        let payload = world
+            .nav_navm_parts
+            .iter()
+            .map(|(signature, data)| {
+                let signature: [u8; 4] = signature
+                    .as_bytes()
+                    .try_into()
+                    .expect("subrecord signatures are 4 bytes");
+                nav_subrecord(&signature, data)
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        first.extend(nav_group(
+            world.nav_cell_form_id,
+            6,
+            &nav_record(b"NAVM", 0, world.nav_navm_form_id, &payload),
+        ));
+    }
+    if let Some(entry) = world.nav_navi_first {
+        first.extend(nav_record(
+            b"NAVI",
+            0,
+            entry.form_id,
+            &nav_navi_payload(entry),
+        ));
+    }
+
+    let mut second = None;
+    if let Some(entry) = world.nav_navi_second {
+        let mut bytes = nav_tes4(&["Fallout3.esm"]);
+        bytes.extend(nav_record(
+            b"NAVI",
+            0,
+            entry.form_id,
+            &nav_navi_payload(entry),
+        ));
+        second = Some(bytes);
+    } else if let Some(form_id) = world.nav_navi_second_deleted {
+        let mut bytes = nav_tes4(&["Fallout3.esm"]);
+        // 0x20 is the ESM4 record-header "deleted" flag
+        // (openmw_esm4::RECORD_DELETED).
+        bytes.extend(nav_record(b"NAVI", 0x20, form_id, &[]));
+        second = Some(bytes);
+    }
+
+    let mut sources = vec![openmw_esm4::PluginSource {
+        name: "Fallout3.esm",
+        bytes: &first,
+    }];
+    if let Some(bytes) = second.as_ref() {
+        sources.push(openmw_esm4::PluginSource {
+            name: "Update.esp",
+            bytes,
+        });
+    }
+    let parsed = openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(cell))
+        .expect("synthetic content set must parse");
+    world.nav_parsed = Some(parsed);
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has version (\d+) and owner cell 0x([0-9a-fA-F]+)$"
+)]
+async fn then_parsed_navmesh_version_owner(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    version: u32,
+    cell_hex: String,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.version, Some(version));
+    assert_eq!(navmesh.cell_form_id, Some(parse_hex(&cell_hex)));
+}
+
+#[then(regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has (\d+) vertices and (\d+) triangles$")]
+async fn then_parsed_navmesh_counts(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    vertices: usize,
+    triangles: usize,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.vertices.len(), vertices);
+    assert_eq!(navmesh.triangles.len(), triangles);
+}
+
+#[then(regex = r"^parsed navmesh 0x([0-9a-fA-F]+) triangle (\d+) has flags 0x([0-9a-fA-F]+)$")]
+async fn then_parsed_triangle_flags(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    flags_hex: String,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.triangles[index].flags, parse_hex(&flags_hex));
+}
+
+#[then(regex = r#"^the parsed navmesh 0x([0-9a-fA-F]+) has cover ids "([^"]*)"$"#)]
+async fn then_parsed_cover(world: &mut BevyoutWorld, form_hex: String, list: String) {
+    let expected = list
+        .split(',')
+        .map(|value| value.trim().parse::<i16>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nav_parsed_navmesh(world, &form_hex).cover_triangle_ids,
+        expected
+    );
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has door 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn then_parsed_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle: u16,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    let door = parse_hex(&door_hex);
+    assert!(
+        navmesh
+            .doors
+            .iter()
+            .any(|entry| entry.door_reference_form_id == Some(door) && entry.triangle == triangle),
+        "no door {door_hex} at triangle {triangle} in {:?}",
+        navmesh.doors
+    );
+}
+
+#[then(regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has grid divisor (\d+)$")]
+async fn then_parsed_grid(world: &mut BevyoutWorld, form_hex: String, divisor: u32) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(
+        navmesh.grid.as_ref().expect("grid must decode").divisor,
+        divisor
+    );
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn then_parsed_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    triangle: u16,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    let target = parse_hex(&target_hex);
+    assert!(
+        navmesh
+            .external_connections
+            .iter()
+            .any(|entry| entry.target_navmesh_form_id == Some(target)
+                && entry.triangle == triangle),
+        "no external connection to {target_hex} at triangle {triangle} in {:?}",
+        navmesh.external_connections
+    );
+}
+
+#[then("the content set has no NAVM diagnostics")]
+async fn then_no_navm_diagnostics(world: &mut BevyoutWorld) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    let navm_diagnostics = parsed
+        .diagnostics
+        .iter()
+        .filter(|message| message.contains("NAVM"))
+        .collect::<Vec<_>>();
+    assert!(
+        navm_diagnostics.is_empty(),
+        "unexpected NAVM diagnostics: {navm_diagnostics:?}"
+    );
+}
+
+#[then(regex = r#"^the content set diagnostics include "([^"]*)"$"#)]
+async fn then_content_set_diagnostics_include(world: &mut BevyoutWorld, expected: String) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    assert!(
+        parsed.diagnostics.contains(&expected),
+        "expected diagnostic {expected:?} in {:?}",
+        parsed.diagnostics
+    );
+}
+
+#[then(
+    regex = r"^the navigation singleton links NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn then_navigation_singleton(
+    world: &mut BevyoutWorld,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    let navigation = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first")
+        .navigation
+        .as_ref()
+        .expect("a navigation singleton must be captured");
+    assert_eq!(navigation.entries.len(), 1, "{:?}", navigation.entries);
+    let entry = &navigation.entries[0];
+    assert_eq!(entry.navmesh_form_id, Some(parse_hex(&navm_hex)));
+    assert_eq!(entry.location_form_id, Some(parse_hex(&location_hex)));
+    assert_eq!(entry.grid_x, grid_x);
+    assert_eq!(entry.grid_y, grid_y);
+}
+
+#[then("there is no navigation singleton")]
+async fn then_no_navigation_singleton(world: &mut BevyoutWorld) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    assert!(parsed.navigation.is_none(), "{:?}", parsed.navigation);
+}
+
+#[given(regex = r"^a nav graph mesh 0x([0-9a-fA-F]+) for cell 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_mesh(world: &mut BevyoutWorld, form_hex: String, cell_hex: String) {
+    world
+        .nav_graph_inputs
+        .meshes
+        .push(nav_graph::NavGraphMeshInput {
+            form_id: parse_hex(&form_hex),
+            cell_form_id: Some(parse_hex(&cell_hex)),
+            ..nav_graph::NavGraphMeshInput::default()
+        });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has source vertex (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_nav_graph_vertex(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .vertices
+        .push(nav_graph::NavGraphVertexInput { source: [x, y, z] });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has triangle ([-\d,\s]+) with edges ([-\d,\s]+)$")]
+async fn given_nav_graph_triangle(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    vertices: String,
+    edges: String,
+) {
+    let vertex_indices = nav_parse_i16_triple(&vertices).map(i32::from);
+    let edge_neighbors = nav_parse_i16_triple(&edges).map(i32::from);
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .triangles
+        .push(nav_graph::NavGraphTriangleInput {
+            vertex_indices,
+            edge_neighbors,
+            flags: 0,
+        });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has a door 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_nav_graph_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle: u32,
+) {
+    let door_reference_form_id = Some(parse_hex(&door_hex));
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .doors
+        .push(nav_graph::NavGraphDoorInput {
+            door_reference_form_id,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn given_nav_graph_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    triangle: u32,
+) {
+    let target_navmesh_form_id = Some(parse_hex(&target_hex));
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .external_connections
+        .push(nav_graph::NavGraphExternalInput {
+            target_navmesh_form_id,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection with no target at triangle (\d+)$"
+)]
+async fn given_nav_graph_external_no_target(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    triangle: u32,
+) {
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .external_connections
+        .push(nav_graph::NavGraphExternalInput {
+            target_navmesh_form_id: None,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^a nav graph NAVI entry links mesh 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_nav_graph_navi_entry(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world
+        .nav_graph_inputs
+        .navi_entries
+        .push(nav_graph::NavGraphNaviEntryInput {
+            navmesh_form_id: Some(parse_hex(&form_hex)),
+            location_form_id: Some(parse_hex(&location_hex)),
+            grid_x,
+            grid_y,
+        });
+}
+
+#[when(regex = r"^the nav graph is built for cell 0x([0-9a-fA-F]+)$")]
+async fn when_nav_graph_built(world: &mut BevyoutWorld, cell_hex: String) {
+    world.nav_graph_inputs.cell_form_id = parse_hex(&cell_hex);
+    world.nav_graph_result = Some(nav_graph::build_nav_graph(&world.nav_graph_inputs));
+}
+
+#[then(
+    regex = r"^mesh 0x([0-9a-fA-F]+) vertex (\d+) is (-?[\d.]+), (-?[\d.]+), (-?[\d.]+) in Bevy metres$"
+)]
+async fn then_nav_graph_vertex_bevy(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let vertex = nav_graph_result_mesh(world, &form_hex).vertices[index];
+    for (actual, expected) in vertex.iter().zip([x, y, z]) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "expected vertex {index} to be [{x}, {y}, {z}], got {vertex:?}"
+        );
+    }
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) neighbours polygon (\d+)$")]
+async fn then_nav_graph_adjacency(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+    neighbor: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert_eq!(mesh.polygons[polygon].adjacency[edge], Some(neighbor));
+}
+
+#[then("the nav graph has no diagnostics")]
+async fn then_nav_graph_no_diagnostics(world: &mut BevyoutWorld) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) has door 0x([0-9a-fA-F]+) at polygon (\d+)$")]
+async fn then_nav_graph_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    polygon: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    let door = parse_hex(&door_hex);
+    assert!(
+        mesh.doors
+            .iter()
+            .any(|entry| entry.door_reference_form_id == Some(door)
+                && entry.triangle_index == polygon),
+        "no door {door_hex} at polygon {polygon} in {:?}",
+        mesh.doors
+    );
+}
+
+#[then(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at polygon (\d+)$"
+)]
+async fn then_nav_graph_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    polygon: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    let target = parse_hex(&target_hex);
+    assert!(
+        mesh.external_connections
+            .iter()
+            .any(|entry| entry.target_navmesh_form_id == Some(target)
+                && entry.triangle_index == polygon),
+        "no external connection to {target_hex} at polygon {polygon} in {:?}",
+        mesh.external_connections
+    );
+}
+
+#[then(
+    regex = r"^the nav graph counters are meshes (\d+) polygons (\d+) vertices (\d+) doors (\d+) external (\d+)$"
+)]
+async fn then_nav_graph_counters(
+    world: &mut BevyoutWorld,
+    meshes: usize,
+    polygons: usize,
+    vertices: usize,
+    doors: usize,
+    external: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.meshes, meshes);
+    assert_eq!(counters.polygons, polygons);
+    assert_eq!(counters.vertices, vertices);
+    assert_eq!(counters.doors, doors);
+    assert_eq!(counters.external_connections, external);
+}
+
+#[then(regex = r#"^the nav graph has an? "(warning|error)" diagnostic containing "([^"]*)"$"#)]
+async fn then_nav_graph_diagnostic(world: &mut BevyoutWorld, severity: String, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(
+        graph
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == severity
+                && diagnostic.message.contains(expected.as_str())),
+        "expected a {severity} diagnostic containing {expected:?} in {:?}",
+        graph.diagnostics
+    );
+}
+
+#[then(regex = r#"^the nav graph meshes are ordered "([^"]*)"$"#)]
+async fn then_nav_graph_ordered(world: &mut BevyoutWorld, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let actual = graph
+        .meshes
+        .iter()
+        .map(|mesh| mesh.form_id)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, parse_hex_list(&expected));
+}
+
+#[then("serializing the nav graph twice yields identical RON")]
+async fn then_nav_graph_ron_deterministic(world: &mut BevyoutWorld) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let a = ron::ser::to_string_pretty(graph, ron::ser::PrettyConfig::default()).unwrap();
+    let b = ron::ser::to_string_pretty(graph, ron::ser::PrettyConfig::default()).unwrap();
+    assert_eq!(a, b);
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) grid is (-?\d+),(-?\d+)$")]
+async fn then_nav_graph_grid(world: &mut BevyoutWorld, form_hex: String, grid_x: i16, grid_y: i16) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert_eq!(
+        mesh.grid,
+        Some(nav_graph::PreparedNavGrid {
+            x: grid_x,
+            y: grid_y
+        })
+    );
 }
 
 fn main() {
