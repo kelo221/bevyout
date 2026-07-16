@@ -37,11 +37,8 @@ pub(crate) struct ActorBaseConfig {
 }
 
 // Named template-flag bits and `uses_template_flag` are consumed by task C's
-// template-inheritance resolution (issue #103); unused for now within this
-// task's own decode-only scope, matching the `#[allow(dead_code)]` precedent
-// already used for other not-yet-consumed records in this file (e.g.
-// `SoundRecord`, `MusicRecord`).
-#[allow(dead_code)]
+// template-inheritance resolution (issue #103), via
+// `prepare::orchestrator::actor_template_usage`.
 impl ActorBaseConfig {
     pub(crate) const TEMPLATE_USE_TRAITS: u16 = 0x0001;
     pub(crate) const TEMPLATE_USE_STATS: u16 = 0x0002;

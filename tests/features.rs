@@ -167,7 +167,19 @@ mod prepare {
     #[path = "../src/vsa/prepare/container_audio_policy.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod container_audio_policy;
+
+    // `vsa::prepare::actor_catalog` (issue #103, M4 wave 1 task C) reuses
+    // `vsa::manifest::PreparedInventoryEntry` (for the reused item-catalog
+    // inventory-entry contract) and `vsa::paths::fingerprint` via relative
+    // `super::super::...` imports, so it is nested here too -- same pattern
+    // as `selectors`/`batch_cache`/`fingerprints` above -- to land those
+    // paths on the `mod manifest`/`mod paths` includes near the top of this
+    // file.
+    #[path = "../src/vsa/prepare/actor_catalog.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod actor_catalog;
 }
+use prepare::actor_catalog;
 use prepare::batch_cache;
 use prepare::container_audio_policy;
 use prepare::fingerprints;
@@ -422,6 +434,10 @@ struct BevyoutWorld {
     recipe_under_test: Option<recipe_policy::PreparedRecipe>,
     recipe_available_items: std::collections::BTreeSet<u32>,
     recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
+
+    // -- actor_catalog.feature (issue #103, M4 wave 1 task C) --
+    actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
+    actor_catalog_result: Option<actor_catalog::PreparedActorCatalog>,
 }
 
 fn find_placement<'a>(
@@ -3829,6 +3845,383 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
             .quantity,
         expected
     );
+}
+
+// actor_catalog.feature (issue #103, M4 wave 1 task C) -- appended section,
+// do not interleave.
+// ---------------------------------------------------------------------
+
+fn actor_catalog_actor_mut(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+) -> &mut actor_catalog::ActorRecordInput {
+    world
+        .actor_catalog_inputs
+        .actors
+        .get_mut(&form_id)
+        .unwrap_or_else(|| panic!("actor {form_id:08x} was not created first"))
+}
+
+#[given(regex = r"^an NPC_ actor 0x([0-9a-fA-F]+) with race 0x([0-9a-fA-F]+)$")]
+async fn given_npc_actor(world: &mut BevyoutWorld, hex: String, race_hex: String) {
+    let form_id = parse_hex(&hex);
+    let mut actor = actor_catalog::ActorRecordInput {
+        form_id,
+        kind: actor_catalog::ActorRecordKind::Npc,
+        ..actor_catalog::ActorRecordInput::default()
+    };
+    actor.traits.race_form_id = Some(parse_hex(&race_hex));
+    world.actor_catalog_inputs.actors.insert(form_id, actor);
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has template 0x([0-9a-fA-F]+) using ([a-z_,]+)$")]
+async fn given_actor_template(
+    world: &mut BevyoutWorld,
+    hex: String,
+    template_hex: String,
+    groups: String,
+) {
+    let form_id = parse_hex(&hex);
+    let template = parse_hex(&template_hex);
+    let actor = actor_catalog_actor_mut(world, form_id);
+    actor.base_template_form_id = Some(template);
+    for group in groups.split(',') {
+        match group.trim() {
+            "traits" => actor.template_usage.traits = true,
+            "stats" => actor.template_usage.stats = true,
+            "factions" => actor.template_usage.factions = true,
+            "actor_effect_list" => actor.template_usage.actor_effect_list = true,
+            "ai_data" => actor.template_usage.ai_data = true,
+            "ai_packages" => actor.template_usage.ai_packages = true,
+            "model_animation" => actor.template_usage.model_animation = true,
+            "base_data" => actor.template_usage.base_data = true,
+            "inventory" => actor.template_usage.inventory = true,
+            "script" => actor.template_usage.script = true,
+            other => panic!("unknown template group {other:?}"),
+        }
+    }
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) class is 0x([0-9a-fA-F]+)$")]
+async fn given_actor_class(world: &mut BevyoutWorld, hex: String, class_hex: String) {
+    let form_id = parse_hex(&hex);
+    let class_form_id = parse_hex(&class_hex);
+    actor_catalog_actor_mut(world, form_id).class_form_id = Some(class_form_id);
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) rank (-?\d+)$")]
+async fn given_actor_faction(world: &mut BevyoutWorld, hex: String, faction_hex: String, rank: i8) {
+    let form_id = parse_hex(&hex);
+    let faction_form_id = parse_hex(&faction_hex);
+    actor_catalog_actor_mut(world, form_id)
+        .factions
+        .push(actor_catalog::ActorFactionInput {
+            faction_form_id,
+            rank,
+        });
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has package 0x([0-9a-fA-F]+)$")]
+async fn given_actor_package(world: &mut BevyoutWorld, hex: String, package_hex: String) {
+    let form_id = parse_hex(&hex);
+    let package_form_id = parse_hex(&package_hex);
+    actor_catalog_actor_mut(world, form_id)
+        .package_form_ids
+        .push(package_form_id);
+}
+
+#[given(regex = r#"^a leveled list 0x([0-9a-fA-F]+) with entries "([^"]*)"$"#)]
+async fn given_actor_catalog_leveled_list(world: &mut BevyoutWorld, hex: String, entries: String) {
+    let form_id = parse_hex(&hex);
+    world.actor_catalog_inputs.leveled.insert(
+        form_id,
+        actor_catalog::LeveledInput {
+            form_id,
+            entries: parse_hex_list(&entries),
+        },
+    );
+}
+
+#[given(
+    regex = r#"^faction 0x([0-9a-fA-F]+) is known with rank (-?\d+) male title "([^"]*)" female title "([^"]*)"$"#
+)]
+async fn given_faction_known(
+    world: &mut BevyoutWorld,
+    hex: String,
+    rank: i32,
+    male_title: String,
+    female_title: String,
+) {
+    let form_id = parse_hex(&hex);
+    world.actor_catalog_inputs.factions.insert(
+        form_id,
+        actor_catalog::FactionInput {
+            form_id,
+            ranks: vec![actor_catalog::FactionRankInput {
+                rank_number: rank,
+                male_title: Some(male_title),
+                female_title: Some(female_title),
+            }],
+        },
+    );
+}
+
+#[given(regex = r"^a placement 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) as (Npc|Creature)$")]
+async fn given_placement(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    kind: String,
+) {
+    let kind = match kind.as_str() {
+        "Npc" => actor_catalog::ActorRecordKind::Npc,
+        "Creature" => actor_catalog::ActorRecordKind::Creature,
+        other => panic!("unknown actor kind {other:?}"),
+    };
+    world
+        .actor_catalog_inputs
+        .placements
+        .push(actor_catalog::ActorPlacementInput {
+            reference_form_id: parse_hex(&reference_hex),
+            base_form_id: parse_hex(&base_hex),
+            kind,
+            ..actor_catalog::ActorPlacementInput::default()
+        });
+}
+
+#[when("the actor catalog is built")]
+async fn when_actor_catalog_built(world: &mut BevyoutWorld) {
+    world.actor_catalog_result = Some(actor_catalog::build_actor_catalog(
+        &world.actor_catalog_inputs,
+        "fixture-fingerprint",
+    ));
+}
+
+fn actor_catalog_blueprint<'a>(
+    world: &'a BevyoutWorld,
+    reference_hex: &str,
+) -> &'a actor_catalog::ActorBlueprint {
+    let reference_form_id = parse_hex(reference_hex);
+    world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first")
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            actor_catalog::ActorCatalogEntry::Prepared(blueprint)
+                if blueprint.reference_form_id == reference_form_id =>
+            {
+                Some(blueprint.as_ref())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no prepared blueprint for reference {reference_hex}"))
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) has race 0x([0-9a-fA-F]+)$")]
+async fn then_blueprint_race(world: &mut BevyoutWorld, reference_hex: String, race_hex: String) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert_eq!(blueprint.race_form_id, Some(parse_hex(&race_hex)));
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is inherited$")]
+async fn then_blueprint_inherited(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(actor_catalog_blueprint(world, &reference_hex).inherited);
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is not inherited$")]
+async fn then_blueprint_not_inherited(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(!actor_catalog_blueprint(world, &reference_hex).inherited);
+}
+
+#[then(regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has diagnostic "([^"]*)"$"#)]
+async fn then_blueprint_diagnostic(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(
+        blueprint.diagnostics.contains(&expected),
+        "expected diagnostic {expected:?} in {:?}",
+        blueprint.diagnostics
+    );
+}
+
+#[then(regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has diagnostic containing "([^"]*)"$"#)]
+async fn then_blueprint_diagnostic_containing(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(
+        blueprint
+            .diagnostics
+            .iter()
+            .any(|message| message.contains(expected.as_str())),
+        "expected a diagnostic containing {expected:?} in {:?}",
+        blueprint.diagnostics
+    );
+}
+
+#[then(
+    regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) is a leveled template with candidates "([^"]*)"$"#
+)]
+async fn then_blueprint_leveled_template(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    candidates: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(blueprint.is_leveled_template);
+    assert_eq!(blueprint.template_candidates, parse_hex_list(&candidates));
+}
+
+#[then(
+    regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) title "([^"]*)"$"#
+)]
+async fn then_blueprint_faction_title(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    faction_hex: String,
+    title: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    let faction_form_id = parse_hex(&faction_hex);
+    let membership = blueprint
+        .factions
+        .iter()
+        .find(|membership| membership.faction_form_id == faction_form_id)
+        .unwrap_or_else(|| panic!("no faction membership {faction_form_id:08x}"));
+    assert_eq!(membership.title.as_deref(), Some(title.as_str()));
+}
+
+fn assert_actor_catalog_entry_kind(world: &BevyoutWorld, reference_hex: &str, expected_kind: &str) {
+    let reference_form_id = parse_hex(reference_hex);
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let found = catalog
+        .entries
+        .iter()
+        .any(|entry| match (entry, expected_kind) {
+            (
+                actor_catalog::ActorCatalogEntry::Unresolved {
+                    reference_form_id: id,
+                    ..
+                },
+                "Unresolved",
+            ) => *id == reference_form_id,
+            (
+                actor_catalog::ActorCatalogEntry::Skipped {
+                    reference_form_id: id,
+                    ..
+                },
+                "Skipped",
+            ) => *id == reference_form_id,
+            (
+                actor_catalog::ActorCatalogEntry::Unsupported {
+                    reference_form_id: id,
+                    ..
+                },
+                "Unsupported",
+            ) => *id == reference_form_id,
+            _ => false,
+        });
+    assert!(
+        found,
+        "no {expected_kind} entry for reference {reference_hex}"
+    );
+}
+
+#[then(regex = r"^entry for reference 0x([0-9a-fA-F]+) is unresolved$")]
+async fn then_entry_unresolved(world: &mut BevyoutWorld, reference_hex: String) {
+    assert_actor_catalog_entry_kind(world, &reference_hex, "Unresolved");
+}
+
+#[then(regex = r"^entry for reference 0x([0-9a-fA-F]+) is skipped$")]
+async fn then_entry_skipped(world: &mut BevyoutWorld, reference_hex: String) {
+    assert_actor_catalog_entry_kind(world, &reference_hex, "Skipped");
+}
+
+#[then(
+    regex = r"^the actor catalog counts prepared (\d+) inherited (\d+) unresolved (\d+) unsupported (\d+) skipped (\d+)$"
+)]
+async fn then_actor_catalog_counts(
+    world: &mut BevyoutWorld,
+    prepared: usize,
+    inherited: usize,
+    unresolved: usize,
+    unsupported: usize,
+    skipped: usize,
+) {
+    let counters = &world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first")
+        .counters;
+    assert_eq!(counters.prepared, prepared);
+    assert_eq!(counters.inherited, inherited);
+    assert_eq!(counters.unresolved, unresolved);
+    assert_eq!(counters.unsupported, unsupported);
+    assert_eq!(counters.skipped, skipped);
+}
+
+#[then(regex = r#"^the actor catalog entries are ordered "([^"]*)"$"#)]
+async fn then_actor_catalog_ordered(world: &mut BevyoutWorld, expected: String) {
+    let expected_keys = expected
+        .split(',')
+        .map(|pair| {
+            let (base, reference) = pair
+                .trim()
+                .split_once('/')
+                .expect("expected a base/reference pair");
+            (parse_hex(base), parse_hex(reference))
+        })
+        .collect::<Vec<(u32, u32)>>();
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let actual_keys = catalog
+        .entries
+        .iter()
+        .map(|entry| match entry {
+            actor_catalog::ActorCatalogEntry::Prepared(blueprint) => {
+                (blueprint.base_form_id, blueprint.reference_form_id)
+            }
+            actor_catalog::ActorCatalogEntry::Unresolved {
+                base_form_id,
+                reference_form_id,
+                ..
+            }
+            | actor_catalog::ActorCatalogEntry::Unsupported {
+                base_form_id,
+                reference_form_id,
+                ..
+            }
+            | actor_catalog::ActorCatalogEntry::Skipped {
+                base_form_id,
+                reference_form_id,
+                ..
+            } => (*base_form_id, *reference_form_id),
+        })
+        .collect::<Vec<(u32, u32)>>();
+    assert_eq!(actual_keys, expected_keys);
+}
+
+#[then("serializing the actor catalog twice yields identical RON")]
+async fn then_actor_catalog_ron_deterministic(world: &mut BevyoutWorld) {
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let a = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
+    let b = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
+    assert_eq!(a, b);
 }
 
 fn main() {

@@ -72,9 +72,8 @@ pub(crate) struct BaseRecord {
     pub(crate) leveled: Option<LeveledListData>,
     /// Present only for `NPC_`/`CREA` base records (issue #103, M4 wave 1
     /// task A). See `actors::ActorData` for the parsed actor subrecords.
-    /// Consumed by task C's actor-catalog resolution; unread within this
-    /// task's own decode-only scope.
-    #[allow(dead_code)]
+    /// Consumed by task C's actor-catalog resolution
+    /// (`prepare::orchestrator::actor_record_input`).
     pub(crate) actor: Option<ActorData>,
     ignored_subrecords: Vec<String>,
 }
@@ -489,16 +488,11 @@ pub(crate) struct CellMetadata {
 pub(crate) struct ParsedPlugin {
     pub(crate) bases: HashMap<u32, BaseRecord>,
     pub(crate) recipes: HashMap<u32, RecipeRecord>,
-    // M4 wave 1 task B (#103): decoded ahead of their consumer, the actor
-    // catalog resolver landing in task C (phase 2). Same ahead-of-consumer
-    // pattern as `SoundRecord`/`AcousticSpaceRecord`/etc. below.
-    #[allow(dead_code)]
+    // M4 wave 1 task B (#103): decoded for the actor catalog resolver built
+    // in task C (`prepare::orchestrator::build_actor_catalog_inputs`).
     pub(crate) races: HashMap<u32, RaceRecord>,
-    #[allow(dead_code)]
     pub(crate) classes: HashMap<u32, ClassRecord>,
-    #[allow(dead_code)]
     pub(crate) factions: HashMap<u32, FactionRecord>,
-    #[allow(dead_code)]
     pub(crate) packages: HashMap<u32, PackageRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,

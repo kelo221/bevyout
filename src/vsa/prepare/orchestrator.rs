@@ -571,6 +571,16 @@ fn prepare_cell(
     // to the same path -- redundant in the worst case, not corrupting. That
     // is what makes it safe to run for several cells concurrently, unlike
     // the Blender/texture-conversion step immediately below.
+    // Snapshot every ACHR/ACRE reference before `references` is taken below
+    // (issue #103, M4 wave 1 task C): the actor catalog needs the raw
+    // reference identity/transform/enable state independent of whether
+    // `stage_placements` later produces a renderable placement for it.
+    let actor_references = parsed
+        .references
+        .iter()
+        .filter(|reference| matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature))
+        .cloned()
+        .collect::<Vec<_>>();
     let mut references = std::mem::take(&mut parsed.references);
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
@@ -811,6 +821,25 @@ fn prepare_cell(
         message: recipe_summary.clone(),
     });
     output.push(recipe_summary);
+    let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
+    let actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
+    let actor_catalog_artifact = write_actor_catalog(&cache_dir, &actor_catalog)?;
+    let actor_catalog_summary = format!(
+        "actor catalog: prepared {}, inherited {}, unresolved {}, unsupported {}, skipped {}",
+        actor_catalog.counters.prepared,
+        actor_catalog.counters.inherited,
+        actor_catalog.counters.unresolved,
+        actor_catalog.counters.unsupported,
+        actor_catalog.counters.skipped
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: actor_catalog_summary.clone(),
+    });
+    output.push(actor_catalog_summary);
+    let actor_catalog_path = Some(actor_catalog_artifact.relative_path);
+    let actor_catalog_revision = Some(ACTOR_CATALOG_REVISION.into());
+    let actor_catalog_hash = Some(actor_catalog_artifact.hash);
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -860,6 +889,9 @@ fn prepare_cell(
         recipe_catalog_path: Some(recipe_artifact.relative_path),
         recipe_catalog_revision: Some(RECIPE_CATALOG_REVISION.into()),
         recipe_catalog_hash: Some(recipe_artifact.hash),
+        actor_catalog_path,
+        actor_catalog_revision,
+        actor_catalog_hash,
         source_plugins,
         cell,
         placements,
@@ -890,4 +922,288 @@ fn prepare_cell(
         manifest_path.display()
     ));
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Actor catalog wiring (issue #103, M4 wave 1 task C)
+//
+// `actor_catalog.rs` is a pure std/serde-only module (no `openmw_esm4`
+// imports, so it can be pulled into `tests/features.rs` verbatim -- see its
+// module doc comment). The boundary conversion from the parser's
+// `ActorData`/`RaceRecord`/`ClassRecord`/`FactionRecord`/`PackageRecord`/
+// `ReferenceRecord` types into its plain input types lives here, the same
+// way `cell_map::CellMap::build` is fed by `catalog.rs` rather than
+// importing the ESM4 reader itself.
+// ---------------------------------------------------------------------
+
+/// Computes which of the 10 documented `ACBS.template_flags` bits (FO3
+/// fopdoc's `ACBS` page) this actor's own record sets, consuming
+/// `ActorBaseConfig::uses_template_flag`/`TEMPLATE_USE_*` so the pure
+/// catalog resolver never needs the bitmask constants themselves.
+fn actor_template_usage(config: Option<ActorBaseConfig>) -> ActorTemplateUsage {
+    let Some(config) = config else {
+        return ActorTemplateUsage::default();
+    };
+    let known_mask = ActorBaseConfig::TEMPLATE_USE_TRAITS
+        | ActorBaseConfig::TEMPLATE_USE_STATS
+        | ActorBaseConfig::TEMPLATE_USE_FACTIONS
+        | ActorBaseConfig::TEMPLATE_USE_ACTOR_EFFECT_LIST
+        | ActorBaseConfig::TEMPLATE_USE_AI_DATA
+        | ActorBaseConfig::TEMPLATE_USE_AI_PACKAGES
+        | ActorBaseConfig::TEMPLATE_USE_MODEL_ANIMATION
+        | ActorBaseConfig::TEMPLATE_USE_BASE_DATA
+        | ActorBaseConfig::TEMPLATE_USE_INVENTORY
+        | ActorBaseConfig::TEMPLATE_USE_SCRIPT;
+    ActorTemplateUsage {
+        traits: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_TRAITS),
+        stats: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_STATS),
+        factions: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_FACTIONS),
+        actor_effect_list: config
+            .uses_template_flag(ActorBaseConfig::TEMPLATE_USE_ACTOR_EFFECT_LIST),
+        ai_data: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_AI_DATA),
+        ai_packages: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_AI_PACKAGES),
+        model_animation: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_MODEL_ANIMATION),
+        base_data: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_BASE_DATA),
+        inventory: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_INVENTORY),
+        script: config.uses_template_flag(ActorBaseConfig::TEMPLATE_USE_SCRIPT),
+        unsupported_bits: config.template_flags & !known_mask,
+    }
+}
+
+/// Converts one `NPC_`/`CREA` `BaseRecord` into the pure module's plain
+/// `ActorRecordInput`, or `None` for any other record kind (or an `NPC_`/
+/// `CREA` record whose `ActorData` failed to decode, which cannot happen
+/// today since task A always attaches `Some(ActorData)` for those kinds,
+/// but is handled defensively rather than panicking). `form_id` is filled
+/// in by the caller since `BaseRecord` does not carry its own FormID.
+fn actor_record_input(
+    base: &BaseRecord,
+    all_bases: &HashMap<u32, BaseRecord>,
+) -> Option<ActorRecordInput> {
+    let kind = match base.kind.as_str() {
+        "NPC_" => ActorRecordKind::Npc,
+        "CREA" => ActorRecordKind::Creature,
+        _ => return None,
+    };
+    let actor = base.actor.as_ref()?;
+    let config = actor.base_config;
+    let acbs_flags = config.map(|config| config.flags).unwrap_or_default();
+    // Bit 0x1 of ACBS.flags is the standard "Female" flag shared by ACBS
+    // across Bethesda's ESM/ESM4 games and confirmed against the FO3 fopdoc
+    // ACBS page; it travels with the `traits` group per this task's brief
+    // ("race/sex-relevant traits"), not `base_data`.
+    let female = acbs_flags & 0x1 != 0;
+    let traits = ActorTraits {
+        race_form_id: actor.race_form_id,
+        female,
+        height: actor.height,
+        weight: actor.weight,
+        hair_form_id: actor.hair_form_id,
+        eyes_form_id: actor.eyes_form_id,
+        head_part_form_ids: actor.head_part_form_ids.clone(),
+        voice_form_id: actor.voice_form_id,
+        facegen_present: actor.facegen_geometry_symmetric.is_some()
+            || actor.facegen_geometry_asymmetric.is_some()
+            || actor.facegen_texture_symmetric.is_some(),
+    };
+    let mut stats = ActorStats {
+        level_or_mult: config
+            .map(|config| config.level_or_mult)
+            .unwrap_or_default(),
+        calc_min_level: config
+            .map(|config| config.calc_min_level)
+            .unwrap_or_default(),
+        calc_max_level: config
+            .map(|config| config.calc_max_level)
+            .unwrap_or_default(),
+        speed_multiplier: config
+            .map(|config| config.speed_multiplier)
+            .unwrap_or_default(),
+        karma: config.map(|config| config.karma).unwrap_or_default(),
+        disposition_base: config
+            .map(|config| config.disposition_base)
+            .unwrap_or_default(),
+        fatigue: config.map(|config| config.fatigue).unwrap_or_default(),
+        barter_gold: config.map(|config| config.barter_gold).unwrap_or_default(),
+        ..ActorStats::default()
+    };
+    if let Some(npc_stats) = actor.base_stats {
+        stats.health = Some(npc_stats.base_health);
+        stats.special = Some([
+            npc_stats.strength,
+            npc_stats.perception,
+            npc_stats.endurance,
+            npc_stats.charisma,
+            npc_stats.intelligence,
+            npc_stats.agility,
+            npc_stats.luck,
+        ]);
+    }
+    stats.npc_skill_values = actor.skills.map(|skills| skills.values);
+    if let Some(creature_stats) = actor.creature.as_ref().and_then(|creature| creature.stats) {
+        stats.health = Some(i32::from(creature_stats.health));
+        stats.special = Some([
+            creature_stats.strength,
+            creature_stats.perception,
+            creature_stats.endurance,
+            creature_stats.charisma,
+            creature_stats.intelligence,
+            creature_stats.agility,
+            creature_stats.luck,
+        ]);
+        stats.creature_type = Some(creature_stats.creature_type);
+        stats.combat_skill = Some(creature_stats.combat_skill);
+        stats.magic_skill = Some(creature_stats.magic_skill);
+        stats.stealth_skill = Some(creature_stats.stealth_skill);
+        stats.creature_damage = Some(creature_stats.damage);
+    }
+    let factions = actor
+        .factions
+        .iter()
+        .map(|membership| ActorFactionInput {
+            faction_form_id: membership.faction_form_id,
+            rank: membership.rank,
+        })
+        .collect();
+    let model_animation = ActorModelAnimation {
+        model_path: base.model.clone(),
+        creature_model_list: actor
+            .creature
+            .as_ref()
+            .map(|creature| creature.model_list.clone())
+            .unwrap_or_default(),
+        creature_animation_files: actor
+            .creature
+            .as_ref()
+            .map(|creature| creature.animation_files.clone())
+            .unwrap_or_default(),
+    };
+    let base_data = ActorBaseData {
+        name: base.name.clone(),
+        acbs_flags,
+    };
+    let inventory = base
+        .inventory
+        .iter()
+        .map(|item| prepared_inventory_entry(item, all_bases))
+        .collect();
+    Some(ActorRecordInput {
+        form_id: 0,
+        kind,
+        editor_id: base.editor_id.clone(),
+        base_template_form_id: base.base_template_form_id,
+        template_usage: actor_template_usage(config),
+        traits,
+        stats,
+        factions,
+        actor_effect_form_id: actor.unarmed_attack_effect_form_id,
+        ai_data: actor.ai_data.map(|data| ActorAiDataInput {
+            aggression: data.aggression,
+            confidence: data.confidence,
+            energy_level: data.energy_level,
+            responsibility: data.responsibility,
+            mood: data.mood,
+            services: data.services,
+            teaches: data.teaches,
+            max_training_level: data.max_training_level,
+            assistance: data.assistance,
+            aggro_radius_behavior: data.aggro_radius_behavior,
+            aggro_radius: data.aggro_radius,
+        }),
+        package_form_ids: actor.package_form_ids.clone(),
+        model_animation,
+        base_data,
+        inventory,
+        script_form_id: actor.script_form_id,
+        class_form_id: actor.class_form_id,
+        combat_style_form_id: actor.combat_style_form_id,
+        death_item_form_id: actor.death_item_form_id,
+    })
+}
+
+/// Assembles the pure `ActorCatalogInputs` for one prepared cell:
+/// `NPC_`/`CREA` bases and `LVLN`/`LVLC` leveled lists both come from
+/// `parsed.bases` (task A/B's parser puts every decoded base record kind in
+/// the same map), `races`/`classes`/`factions`/`packages` come from their
+/// own maps for existence checks and faction rank titles, and
+/// `known_bases` is every decoded base FormID (used for hair/eyes/
+/// head-part existence checks -- see `ActorCatalogInputs::known_bases`'s
+/// doc comment for why those links are honestly diagnosed unresolved until
+/// `HAIR`/`EYES`/`HDPT` get their own decode task).
+fn build_actor_catalog_inputs(
+    parsed: &ParsedPlugin,
+    actor_references: &[ReferenceRecord],
+) -> ActorCatalogInputs {
+    let mut actors = HashMap::new();
+    let mut leveled = HashMap::new();
+    let known_bases = parsed.bases.keys().copied().collect::<HashSet<_>>();
+    for (&form_id, base) in &parsed.bases {
+        if let Some(data) = &base.leveled {
+            leveled.insert(
+                form_id,
+                LeveledInput {
+                    form_id,
+                    entries: data
+                        .entries
+                        .iter()
+                        .map(|entry| entry.item_form_id)
+                        .collect(),
+                },
+            );
+            continue;
+        }
+        if let Some(mut input) = actor_record_input(base, &parsed.bases) {
+            input.form_id = form_id;
+            actors.insert(form_id, input);
+        }
+    }
+    let races = parsed.races.keys().copied().collect::<HashSet<_>>();
+    let classes = parsed.classes.keys().copied().collect::<HashSet<_>>();
+    let packages = parsed.packages.keys().copied().collect::<HashSet<_>>();
+    let factions = parsed
+        .factions
+        .iter()
+        .map(|(&form_id, faction)| {
+            let ranks = faction
+                .ranks
+                .iter()
+                .map(|rank| FactionRankInput {
+                    rank_number: rank.rank_number,
+                    male_title: rank.male_title.clone(),
+                    female_title: rank.female_title.clone(),
+                })
+                .collect();
+            (form_id, FactionInput { form_id, ranks })
+        })
+        .collect();
+    let placements = actor_references
+        .iter()
+        .filter_map(|reference| {
+            let kind = match reference.kind {
+                ReferenceKind::Npc => ActorRecordKind::Npc,
+                ReferenceKind::Creature => ActorRecordKind::Creature,
+                ReferenceKind::Object => return None,
+            };
+            let transform = placement_transform(reference);
+            Some(ActorPlacementInput {
+                reference_form_id: reference.form_id,
+                base_form_id: reference.base_form_id,
+                kind,
+                translation: transform.0,
+                rotation_xyzw: transform.1,
+                scale: transform.2,
+                initially_enabled: reference.initially_enabled,
+            })
+        })
+        .collect();
+    ActorCatalogInputs {
+        actors,
+        leveled,
+        races,
+        classes,
+        factions,
+        packages,
+        known_bases,
+        placements,
+    }
 }

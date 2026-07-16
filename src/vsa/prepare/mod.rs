@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+mod actor_catalog;
 mod audio;
 mod audio_resolve;
 mod batch_cache;
@@ -25,6 +26,7 @@ mod session;
 mod static_shadows;
 mod visual;
 
+pub(crate) use actor_catalog::*;
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
 pub(crate) use batch_cache::*;
@@ -76,9 +78,9 @@ use super::physics::{
     dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{
-    BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, RecipeItemRecord,
-    RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord, SoundReferenceRecord,
-    parse_content_set, read_master_names,
+    ActorBaseConfig, BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED,
+    RecipeItemRecord, RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord,
+    SoundReferenceRecord, parse_content_set, read_master_names,
 };
 use crate::cli::PrepareArgs;
 
