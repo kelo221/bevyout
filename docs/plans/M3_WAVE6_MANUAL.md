@@ -20,15 +20,13 @@ vanilla Fallout 3 and confirmed present in the prepared item catalog.
 
 ## 0. One-time setup
 
-The item catalog on disk may predate this wave's new equip fields.
-Force a rebuild once:
+The item catalog on disk may predate this wave's new equip fields. Re-run
+prepare once (it rewrites the catalog, now revision `openmw-items-v3`; the
+viewer refuses a stale catalog with a "run prepare again" error):
 
 ```
-rm -rf .bevyout/cache/catalogs
 cargo run-dev -- prepare --cell 000151e3
 ```
-
-Expected: prepare completes and reports the item catalog was rebuilt.
 
 ## 1. Launch
 
