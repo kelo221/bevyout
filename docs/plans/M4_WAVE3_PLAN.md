@@ -122,3 +122,36 @@ avoidance tuning (#114); AI packages (#115); exterior stitching (M6).
 
 `docs/plans/M4_WAVE3_MANUAL.md`, written before the wave PR and linked
 from its body.
+
+## Shipped amendments
+
+- **No intra-cell two-sided door links exist in real FO3 interior data.**
+  Every door triangle across the prepared cells (000151e3, 00003a35,
+  0001a273) is single-sided: the other side lives in another cell's NAVM,
+  linked via NAVI door-merge data. The animation-link runtime, the
+  `scripted_door_open` boundary, and the pause/open/resume state machine
+  shipped fully unit- and cucumber-tested, but cannot fire on real data;
+  wiring them to travel doors (and NAVI-based cross-NAVM merges) is
+  #113's job, per this plan's own "or document precisely why" branch.
+- **Per-frame ground snap added to the kinematic agent.** Real-data
+  acceptance on FranklinMetro02's sloped corridor exposed y frozen at
+  spawn height until the agent left the sampling envelope
+  (`AgentNotOnNavMesh` mid-route). `apply_kinematic_velocity` now snaps y
+  to `Archipelago3d::sample_point`'s surface point using the same
+  envelope as the archipelago options; a miss leaves y unchanged. This is
+  surface tracking for the spike agent, not #114's grounded movement.
+- **`glam` pinned to bevy_math 0.19's exact version (`=0.32.1`)** so the
+  pure conversion module's `Vec3` is type-identical to
+  `bevy_landmass`'s coordinates without importing `bevy`; the plain
+  `landmass` crate was not needed.
+- **`PointSampleDistance3d::from_agent_radius` defaults rejected on real
+  data** (0.07 m horizontal / 0.35 m below reports `AgentNotOnNavMesh`
+  for an agent standing on the MegatonPlayerHouse mesh); explicit
+  humanoid-scale distances (1.0/1.0/2.0) shipped instead.
+- **Real FO3 NAVM winding requires landmass's reversed attempt** on every
+  mesh tested; the conversion tries authored order first, then reversed,
+  once per mesh, with a warning diagnostic.
+- **Intra-cell multi-mesh routing is not connected**: FranklinMetro02's
+  two NAVMs validate as separate landmass islands and a cross-mesh target
+  deterministically reports `NoPath`. Connecting them needs NAVI merge
+  decode in the adapter (#113).
