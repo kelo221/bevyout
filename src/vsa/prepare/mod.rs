@@ -17,6 +17,7 @@ mod fingerprints;
 mod image_space;
 mod items;
 mod jobs;
+mod nav_graph;
 mod navmesh;
 mod placements;
 mod plugins;
@@ -37,6 +38,7 @@ pub(crate) use fingerprints::*;
 pub(crate) use image_space::*;
 pub(crate) use items::*;
 pub(crate) use jobs::*;
+pub(crate) use nav_graph::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
@@ -63,10 +65,11 @@ use super::manifest::{
     PreparedDoorDestination, PreparedDropCollider, PreparedEnableParent, PreparedInventoryEntry,
     PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemEffect,
     PreparedItemStats, PreparedLight, PreparedLightingTemplate, PreparedMutabilitySummary,
-    PreparedNavMeshChunk, PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup,
-    PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability,
-    PreparedSceneManifest, PreparedSemantic, PreparedStaticPointShadowLight,
-    PreparedStaticPointShadows, PreparedVisualIssue, STATIC_POINT_SHADOW_REVISION,
+    PreparedNavGraphSource, PreparedNavMeshChunk, PreparedNavMeshSource,
+    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
+    PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
+    PreparedStaticPointShadowLight, PreparedStaticPointShadows, PreparedVisualIssue,
+    STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::{LightingData, OpenMwItemStats};
 use super::paths::{
