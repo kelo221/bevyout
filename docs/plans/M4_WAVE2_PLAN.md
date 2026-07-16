@@ -111,3 +111,26 @@ real-data acceptance.
 
 Runtime pathfinding/steering (#112/#113), grounded movement (#114),
 exterior tile stitching (M6 #13/#87), runtime NAVM generation, Blender.
+
+## Shipped amendments
+
+- **NAVM/NAVI layouts are fopdoc-derived, not OpenMW-ported.** OpenMW's
+  `loadnavm.cpp`/`loadnavi.cpp` decode only the newer Skyrim-era `NVNM`
+  chunk and skip the FO3/FNV per-field subrecords, so the fopdoc
+  FalloutNV pages are the layout authority. Real `Fallout3.esm` data
+  parses with zero diagnostics under those layouts; no `NVER` version
+  gate was needed.
+- **`NVPP` is not decoded.** The plan listed it, but fopdoc documents no
+  `NVPP` for FO3/FNV and real `Fallout3.esm` NAVI contains none; it is an
+  OpenMW/Skyrim-era subrecord. Any unexpected occurrence degrades to the
+  opaque-with-diagnostic path, like `NVCI` (whose fields fopdoc itself
+  labels "Unknown" — one such diagnostic appears per content set on real
+  data).
+- **`NVMI` uses the fopdoc 16-byte header, not OpenMW's layout.** The two
+  disagree; fopdoc's offsets produced FormIDs matching the cell's actual
+  NAVM/CELL records on real data. The undocumented tail is retained
+  opaquely per entry.
+- **Boundary conversion lives in `prepare/navmesh.rs`** (which may import
+  `openmw_esm4`) rather than `orchestrator.rs` — the same split
+  `actor_catalog.rs` uses; the plan's "extend `stage_navmeshes`" seam,
+  taken literally.
