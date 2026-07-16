@@ -12,7 +12,10 @@ use super::interaction::{
 };
 use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
-use super::{PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats};
+use super::{
+    CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
+    PreparedSceneManifest, cell_label,
+};
 
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
 const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
@@ -43,17 +46,38 @@ pub(crate) struct DropInventoryStackRequested {
     pub(crate) count: i32,
 }
 
+/// F100.1: which top-level Pip-Boy surface is showing -- the wave-1 Items
+/// surface or issue #100's Data view beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipBoyView {
+    Items,
+    Data,
+}
+
+/// F100.2/F100.3: the Data view's sections. Deliberately only these two --
+/// map, quests, and radio are out of M3 scope entirely, with no placeholder
+/// entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataSection {
+    Notes,
+    World,
+}
+
 #[derive(Resource, Debug)]
 struct PipBoyState {
+    view: PipBoyView,
     category: PreparedItemCategory,
     selected: Option<StackKey>,
+    data_section: DataSection,
 }
 
 impl Default for PipBoyState {
     fn default() -> Self {
         Self {
+            view: PipBoyView::Items,
             category: PreparedItemCategory::Weapons,
             selected: None,
+            data_section: DataSection::Notes,
         }
     }
 }
@@ -73,6 +97,21 @@ struct ItemRow(StackKey);
 
 #[derive(Component, Clone, Copy)]
 struct CategoryTab(PreparedItemCategory);
+
+/// F100.1: the top-level Items/Data switcher tabs in the header row,
+/// following `CategoryTab`'s interaction pattern one level up.
+#[derive(Component, Clone, Copy)]
+struct ViewTab(PipBoyView);
+
+/// F100.2/F100.3: the Notes/World section tabs shown in the footer while
+/// the Data view is active.
+#[derive(Component, Clone, Copy)]
+struct DataSectionTab(DataSection);
+
+/// F100.2: a Data -> Notes list row; pressing it opens issue #99's reader
+/// on this base form id through `OpenReaderRequested`.
+#[derive(Component, Clone, Copy)]
+struct NoteRow(u32);
 
 #[derive(Component)]
 struct QuantityOverlay;
@@ -98,6 +137,21 @@ enum ItemActionButton {
     Read(u32),
 }
 
+/// Everything `spawn_screen` reads, bundled (`interaction`'s
+/// `LeveledResolveContext` precedent) so the rebuild-triggering systems
+/// stay small as issue #100 widens the screen beyond the Items surface.
+/// `manifest` is `Option` because the bare test harness runs without a
+/// prepared scene; the World section then shows a no-session line.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ScreenSources<'w> {
+    inventory: Res<'w, PlayerInventory>,
+    equipment: Res<'w, PlayerEquipment>,
+    catalog: Res<'w, PreparedItemCatalog>,
+    assets: Res<'w, AssetServer>,
+    manifest: Option<Res<'w, PreparedSceneManifest>>,
+    time: Res<'w, Time>,
+}
+
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
         // `handle_item_action_button`'s dependencies, normally registered by
@@ -115,6 +169,9 @@ pub(crate) fn install(app: &mut App) {
             (
                 handle_item_rows,
                 handle_category_tabs,
+                handle_view_tabs,
+                handle_data_section_tabs,
+                handle_note_rows,
                 handle_quantity_buttons,
                 handle_item_action_button,
                 handle_equip_and_hotkeys,
@@ -137,6 +194,11 @@ fn handle_equip_and_hotkeys(
     mut hotkeys: ResMut<HotkeyBindings>,
     mut notice: ResMut<InteractionNotice>,
 ) {
+    // F100.1: equip/hotkey input belongs to the Items surface only; the
+    // Data view keeps the last selection but must not act on it.
+    if state.view != PipBoyView::Items {
+        return;
+    }
     let Some(selected) = state.selected else {
         return;
     };
@@ -164,25 +226,15 @@ fn handle_equip_and_hotkeys(
 fn enter_pipboy(
     mut commands: Commands,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    inventory: Res<PlayerInventory>,
-    equipment: Res<PlayerEquipment>,
-    catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    sources: ScreenSources,
     mut state: ResMut<PipBoyState>,
 ) {
     if let Ok(mut cursor) = cursor.single_mut() {
         cursor.visible = true;
         cursor.grab_mode = CursorGrabMode::None;
     }
-    normalize_selection(&mut state, &inventory, &catalog);
-    spawn_screen(
-        &mut commands,
-        &inventory,
-        &equipment,
-        &catalog,
-        &assets,
-        &state,
-    );
+    normalize_selection(&mut state, &sources.inventory, &sources.catalog);
+    spawn_screen(&mut commands, &sources, &state);
 }
 
 fn exit_pipboy(
@@ -204,30 +256,18 @@ fn exit_pipboy(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn refresh_after_inventory_change(
     mut commands: Commands,
-    inventory: Res<PlayerInventory>,
-    equipment: Res<PlayerEquipment>,
-    catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    sources: ScreenSources,
     mut state: ResMut<PipBoyState>,
     roots: Query<Entity, With<PipBoyRoot>>,
     picker: Option<Res<QuantityPicker>>,
 ) {
-    if (!inventory.is_changed() && !equipment.is_changed()) || picker.is_some() {
+    if (!sources.inventory.is_changed() && !sources.equipment.is_changed()) || picker.is_some() {
         return;
     }
-    normalize_selection(&mut state, &inventory, &catalog);
-    rebuild(
-        &mut commands,
-        &roots,
-        &inventory,
-        &equipment,
-        &catalog,
-        &assets,
-        &state,
-    );
+    normalize_selection(&mut state, &sources.inventory, &sources.catalog);
+    rebuild(&mut commands, &roots, &sources, &state);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -236,10 +276,7 @@ fn handle_item_rows(
     mouse: Res<ButtonInput<MouseButton>>,
     rows: Query<(&Interaction, &ItemRow), Changed<Interaction>>,
     all_rows: Query<(&Interaction, &ItemRow)>,
-    inventory: Res<PlayerInventory>,
-    equipment: Res<PlayerEquipment>,
-    catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    sources: ScreenSources,
     mut state: ResMut<PipBoyState>,
     roots: Query<Entity, With<PipBoyRoot>>,
     picker: Option<Res<QuantityPicker>>,
@@ -248,15 +285,7 @@ fn handle_item_rows(
     for (interaction, row) in &rows {
         if *interaction == Interaction::Pressed && state.selected != Some(row.0) {
             state.selected = Some(row.0);
-            rebuild(
-                &mut commands,
-                &roots,
-                &inventory,
-                &equipment,
-                &catalog,
-                &assets,
-                &state,
-            );
+            rebuild(&mut commands, &roots, &sources, &state);
             return;
         }
     }
@@ -270,7 +299,8 @@ fn handle_item_rows(
         return;
     };
     state.selected = Some(row);
-    let count = inventory
+    let count = sources
+        .inventory
         .stack_states()
         .into_iter()
         .find(|stack| stack.key() == row)
@@ -291,14 +321,10 @@ fn handle_item_rows(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_category_tabs(
     mut commands: Commands,
     tabs: Query<(&Interaction, &CategoryTab), Changed<Interaction>>,
-    inventory: Res<PlayerInventory>,
-    equipment: Res<PlayerEquipment>,
-    catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    sources: ScreenSources,
     mut state: ResMut<PipBoyState>,
     roots: Query<Entity, With<PipBoyRoot>>,
 ) {
@@ -306,17 +332,64 @@ fn handle_category_tabs(
         if *interaction == Interaction::Pressed && state.category != tab.0 {
             state.category = tab.0;
             state.selected = None;
-            normalize_selection(&mut state, &inventory, &catalog);
-            rebuild(
-                &mut commands,
-                &roots,
-                &inventory,
-                &equipment,
-                &catalog,
-                &assets,
-                &state,
-            );
+            normalize_selection(&mut state, &sources.inventory, &sources.catalog);
+            rebuild(&mut commands, &roots, &sources, &state);
             return;
+        }
+    }
+}
+
+/// F100.1: the top-level Items/Data switcher -- `handle_category_tabs`'
+/// interaction pattern one level up. Switching back to Items re-normalizes
+/// the selection so the view is never left pointing at a stack that was
+/// consumed or dropped while Data was showing.
+fn handle_view_tabs(
+    mut commands: Commands,
+    tabs: Query<(&Interaction, &ViewTab), Changed<Interaction>>,
+    sources: ScreenSources,
+    mut state: ResMut<PipBoyState>,
+    roots: Query<Entity, With<PipBoyRoot>>,
+) {
+    for (interaction, tab) in &tabs {
+        if *interaction == Interaction::Pressed && state.view != tab.0 {
+            state.view = tab.0;
+            if state.view == PipBoyView::Items {
+                normalize_selection(&mut state, &sources.inventory, &sources.catalog);
+            }
+            rebuild(&mut commands, &roots, &sources, &state);
+            return;
+        }
+    }
+}
+
+/// F100.2/F100.3: the Notes/World section tabs inside the Data view.
+fn handle_data_section_tabs(
+    mut commands: Commands,
+    tabs: Query<(&Interaction, &DataSectionTab), Changed<Interaction>>,
+    sources: ScreenSources,
+    mut state: ResMut<PipBoyState>,
+    roots: Query<Entity, With<PipBoyRoot>>,
+) {
+    for (interaction, tab) in &tabs {
+        if *interaction == Interaction::Pressed && state.data_section != tab.0 {
+            state.data_section = tab.0;
+            rebuild(&mut commands, &roots, &sources, &state);
+            return;
+        }
+    }
+}
+
+/// F100.2: pressing a Notes row opens issue #99's reader through its public
+/// `OpenReaderRequested` seam -- the stack itself is never touched.
+fn handle_note_rows(
+    rows: Query<(&Interaction, &NoteRow), Changed<Interaction>>,
+    mut reader_requests: MessageWriter<OpenReaderRequested>,
+) {
+    for (interaction, row) in &rows {
+        if *interaction == Interaction::Pressed {
+            reader_requests.write(OpenReaderRequested {
+                base_form_id: row.0,
+            });
         }
     }
 }
@@ -477,45 +550,24 @@ fn item_use_stats(stats: &PreparedItemStats) -> item_use::ItemStats {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn rebuild(
     commands: &mut Commands,
     roots: &Query<Entity, With<PipBoyRoot>>,
-    inventory: &PlayerInventory,
-    equipment: &PlayerEquipment,
-    catalog: &PreparedItemCatalog,
-    assets: &AssetServer,
+    sources: &ScreenSources,
     state: &PipBoyState,
 ) {
     for root in roots {
         commands.entity(root).despawn();
     }
-    spawn_screen(commands, inventory, equipment, catalog, assets, state);
+    spawn_screen(commands, sources, state);
 }
 
-fn spawn_screen(
-    commands: &mut Commands,
-    inventory: &PlayerInventory,
-    equipment: &PlayerEquipment,
-    catalog: &PreparedItemCatalog,
-    assets: &AssetServer,
-    state: &PipBoyState,
-) {
-    let mut rows = visible_rows(inventory, catalog, state.category);
-    rows.sort_by(|(a_stack, a), (b_stack, b)| {
-        item_name(a)
-            .to_ascii_lowercase()
-            .cmp(&item_name(b).to_ascii_lowercase())
-            .then(a_stack.base_form_id.cmp(&b_stack.base_form_id))
-    });
-    let selected_item = state.selected.and_then(|key| {
-        rows.iter()
-            .find(|(stack, _)| stack.key() == key)
-            .map(|(stack, item)| (*stack, *item))
-    });
-    let weight = inventory
+fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoyState) {
+    let weight = sources
+        .inventory
         .total_weight(|form_id| {
-            catalog
+            sources
+                .catalog
                 .items
                 .iter()
                 .find(|item| item.base_form_id == form_id)
@@ -538,144 +590,66 @@ fn spawn_screen(
         ))
         .with_children(|root| {
             root.spawn((
-                Text::new(format!(
-                    "ITEMS                                      WG {weight:.1}"
-                )),
-                TextColor(GREEN),
-                TextFont {
-                    font_size: FontSize::Px(32.0),
-                    ..default()
-                },
                 Node {
                     height: Val::Px(56.0),
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::SpaceBetween,
+                    align_items: AlignItems::Center,
                     border: UiRect::bottom(Val::Px(2.0)),
                     ..default()
                 },
                 BorderColor::all(GREEN_DIM),
-            ));
-            root.spawn(Node {
-                flex_grow: 1.0,
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                ..default()
-            })
-            .with_children(|body| {
-                body.spawn(Node {
-                    width: Val::Percent(52.0),
-                    flex_direction: FlexDirection::Column,
-                    overflow: Overflow::scroll_y(),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    ..default()
-                })
-                .with_children(|list| {
-                    if rows.is_empty() {
-                        list.spawn((Text::new("No items"), TextColor(GREEN_DIM)));
-                    }
-                    for (stack, item) in &rows {
-                        let key = stack.key();
-                        let selected = state.selected == Some(key);
-                        list.spawn((
-                            Button,
-                            ItemRow(key),
-                            Node {
-                                min_height: Val::Px(42.0),
-                                width: Val::Percent(100.0),
-                                padding: UiRect::horizontal(Val::Px(10.0)),
-                                align_items: AlignItems::Center,
-                                border: UiRect::all(Val::Px(if selected { 2.0 } else { 0.0 })),
-                                ..default()
-                            },
-                            BackgroundColor(if selected { GREEN_DIM } else { Color::NONE }),
-                            BorderColor::all(GREEN),
-                        ))
-                        .with_child((
-                            Text::new(format!(
-                                "{}{}{}",
-                                equipped_marker(equipment.is_equipped(key)),
-                                item_name(item),
-                                count_suffix(stack.count)
-                            )),
-                            TextColor(GREEN),
-                            TextFont {
-                                font_size: FontSize::Px(24.0),
-                                ..default()
-                            },
-                        ));
-                    }
-                });
-                body.spawn(Node {
-                    width: Val::Percent(48.0),
-                    padding: UiRect::all(Val::Px(24.0)),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    ..default()
-                })
-                .with_children(|details| {
-                    if let Some((stack, item)) = selected_item {
-                        if let Some(path) = item.icon_asset_path.as_deref() {
-                            details.spawn((
-                                ImageNode {
-                                    image: assets.load(path.to_owned()),
-                                    color: GREEN,
-                                    ..default()
-                                },
-                                Node {
-                                    width: Val::Px(256.0),
-                                    height: Val::Px(256.0),
-                                    margin: UiRect::bottom(Val::Px(24.0)),
-                                    ..default()
-                                },
-                            ));
-                        } else {
-                            warn!("pipboy missing icon base={:08x}", item.base_form_id);
-                            details.spawn((
-                                Text::new("[ NO ITEM ART ]"),
-                                TextColor(GREEN_DIM),
-                                TextFont {
-                                    font_size: FontSize::Px(26.0),
-                                    ..default()
-                                },
-                                Node {
-                                    height: Val::Px(256.0),
-                                    align_content: AlignContent::Center,
-                                    ..default()
-                                },
-                            ));
-                        }
-                        details.spawn((
-                            Text::new(detail_text(stack, item)),
-                            TextColor(GREEN),
-                            TextFont {
-                                font_size: FontSize::Px(22.0),
-                                ..default()
-                            },
-                            Node {
-                                width: Val::Percent(100.0),
-                                border: UiRect::top(Val::Px(2.0)),
-                                padding: UiRect::top(Val::Px(18.0)),
-                                ..default()
-                            },
-                            BorderColor::all(GREEN_DIM),
-                        ));
-                        if let Some((label, action)) = item_action_button(stack.key(), item) {
-                            details
+            ))
+            .with_children(|header| {
+                header
+                    .spawn(Node {
+                        column_gap: Val::Px(18.0),
+                        ..default()
+                    })
+                    .with_children(|views| {
+                        for (view, label) in
+                            [(PipBoyView::Items, "ITEMS"), (PipBoyView::Data, "DATA")]
+                        {
+                            let active = state.view == view;
+                            views
                                 .spawn((
                                     Button,
-                                    action,
+                                    ViewTab(view),
                                     Node {
-                                        margin: UiRect::top(Val::Px(16.0)),
-                                        padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
-                                        border: UiRect::all(Val::Px(1.0)),
+                                        padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
+                                        border: UiRect::all(Val::Px(if active {
+                                            2.0
+                                        } else {
+                                            0.0
+                                        })),
                                         ..default()
                                     },
+                                    BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
                                     BorderColor::all(GREEN),
-                                    BackgroundColor(GREEN_DIM),
                                 ))
-                                .with_child((Text::new(label), TextColor(GREEN)));
+                                .with_child((
+                                    Text::new(label),
+                                    TextColor(GREEN),
+                                    TextFont {
+                                        font_size: FontSize::Px(32.0),
+                                        ..default()
+                                    },
+                                ));
                         }
-                    }
-                });
+                    });
+                header.spawn((
+                    Text::new(format!("WG {weight:.1}")),
+                    TextColor(GREEN),
+                    TextFont {
+                        font_size: FontSize::Px(32.0),
+                        ..default()
+                    },
+                ));
             });
+            match state.view {
+                PipBoyView::Items => spawn_items_body(root, sources, state),
+                PipBoyView::Data => spawn_data_body(root, sources, state),
+            }
             root.spawn(Node {
                 height: Val::Px(64.0),
                 width: Val::Percent(100.0),
@@ -683,22 +657,202 @@ fn spawn_screen(
                 border: UiRect::top(Val::Px(2.0)),
                 ..default()
             })
-            .with_children(|tabs| {
-                for (category, label) in categories() {
-                    let active = state.category == category;
-                    tabs.spawn((
-                        Button,
-                        CategoryTab(category),
-                        Node {
-                            padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
-                            border: UiRect::all(Val::Px(if active { 2.0 } else { 0.0 })),
+            .with_children(|tabs| match state.view {
+                PipBoyView::Items => {
+                    for (category, label) in categories() {
+                        footer_tab(
+                            tabs,
+                            label,
+                            state.category == category,
+                            CategoryTab(category),
+                        );
+                    }
+                }
+                PipBoyView::Data => {
+                    for (section, label) in data_sections() {
+                        footer_tab(
+                            tabs,
+                            label,
+                            state.data_section == section,
+                            DataSectionTab(section),
+                        );
+                    }
+                }
+            });
+        });
+}
+
+fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, state: &PipBoyState) {
+    let mut rows = visible_rows(&sources.inventory, &sources.catalog, state.category);
+    rows.sort_by(|(a_stack, a), (b_stack, b)| {
+        item_name(a)
+            .to_ascii_lowercase()
+            .cmp(&item_name(b).to_ascii_lowercase())
+            .then(a_stack.base_form_id.cmp(&b_stack.base_form_id))
+    });
+    let selected_item = state.selected.and_then(|key| {
+        rows.iter()
+            .find(|(stack, _)| stack.key() == key)
+            .map(|(stack, item)| (*stack, *item))
+    });
+    root.spawn(Node {
+        flex_grow: 1.0,
+        width: Val::Percent(100.0),
+        flex_direction: FlexDirection::Row,
+        ..default()
+    })
+    .with_children(|body| {
+        body.spawn(Node {
+            width: Val::Percent(52.0),
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::scroll_y(),
+            padding: UiRect::all(Val::Px(12.0)),
+            ..default()
+        })
+        .with_children(|list| {
+            if rows.is_empty() {
+                list.spawn((Text::new("No items"), TextColor(GREEN_DIM)));
+            }
+            for (stack, item) in &rows {
+                let key = stack.key();
+                let selected = state.selected == Some(key);
+                list.spawn((
+                    Button,
+                    ItemRow(key),
+                    Node {
+                        min_height: Val::Px(42.0),
+                        width: Val::Percent(100.0),
+                        padding: UiRect::horizontal(Val::Px(10.0)),
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(Val::Px(if selected { 2.0 } else { 0.0 })),
+                        ..default()
+                    },
+                    BackgroundColor(if selected { GREEN_DIM } else { Color::NONE }),
+                    BorderColor::all(GREEN),
+                ))
+                .with_child((
+                    Text::new(format!(
+                        "{}{}{}",
+                        equipped_marker(sources.equipment.is_equipped(key)),
+                        item_name(item),
+                        count_suffix(stack.count)
+                    )),
+                    TextColor(GREEN),
+                    TextFont {
+                        font_size: FontSize::Px(24.0),
+                        ..default()
+                    },
+                ));
+            }
+        });
+        body.spawn(Node {
+            width: Val::Percent(48.0),
+            padding: UiRect::all(Val::Px(24.0)),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|details| {
+            if let Some((stack, item)) = selected_item {
+                if let Some(path) = item.icon_asset_path.as_deref() {
+                    details.spawn((
+                        ImageNode {
+                            image: sources.assets.load(path.to_owned()),
+                            color: GREEN,
                             ..default()
                         },
-                        BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
-                        BorderColor::all(GREEN),
+                        Node {
+                            width: Val::Px(256.0),
+                            height: Val::Px(256.0),
+                            margin: UiRect::bottom(Val::Px(24.0)),
+                            ..default()
+                        },
+                    ));
+                } else {
+                    warn!("pipboy missing icon base={:08x}", item.base_form_id);
+                    details.spawn((
+                        Text::new("[ NO ITEM ART ]"),
+                        TextColor(GREEN_DIM),
+                        TextFont {
+                            font_size: FontSize::Px(26.0),
+                            ..default()
+                        },
+                        Node {
+                            height: Val::Px(256.0),
+                            align_content: AlignContent::Center,
+                            ..default()
+                        },
+                    ));
+                }
+                details.spawn((
+                    Text::new(detail_text(stack, item)),
+                    TextColor(GREEN),
+                    TextFont {
+                        font_size: FontSize::Px(22.0),
+                        ..default()
+                    },
+                    Node {
+                        width: Val::Percent(100.0),
+                        border: UiRect::top(Val::Px(2.0)),
+                        padding: UiRect::top(Val::Px(18.0)),
+                        ..default()
+                    },
+                    BorderColor::all(GREEN_DIM),
+                ));
+                if let Some((label, action)) = item_action_button(stack.key(), item) {
+                    details
+                        .spawn((
+                            Button,
+                            action,
+                            Node {
+                                margin: UiRect::top(Val::Px(16.0)),
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor::all(GREEN),
+                            BackgroundColor(GREEN_DIM),
+                        ))
+                        .with_child((Text::new(label), TextColor(GREEN)));
+                }
+            }
+        });
+    });
+}
+
+/// F100.2/F100.3: the Data view body -- either the Notes list of readable
+/// stacks or the read-only World session summary.
+fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, state: &PipBoyState) {
+    match state.data_section {
+        DataSection::Notes => {
+            let rows = notes_rows(&sources.inventory, &sources.catalog);
+            root.spawn(Node {
+                flex_grow: 1.0,
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::scroll_y(),
+                padding: UiRect::all(Val::Px(12.0)),
+                ..default()
+            })
+            .with_children(|list| {
+                if rows.is_empty() {
+                    list.spawn((Text::new("No notes"), TextColor(GREEN_DIM)));
+                }
+                for (stack, item) in &rows {
+                    list.spawn((
+                        Button,
+                        NoteRow(item.base_form_id),
+                        Node {
+                            min_height: Val::Px(42.0),
+                            width: Val::Percent(100.0),
+                            padding: UiRect::horizontal(Val::Px(10.0)),
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
                     ))
                     .with_child((
-                        Text::new(label),
+                        Text::new(format!("{}{}", item_name(item), count_suffix(stack.count))),
                         TextColor(GREEN),
                         TextFont {
                             font_size: FontSize::Px(24.0),
@@ -707,7 +861,64 @@ fn spawn_screen(
                     ));
                 }
             });
-        });
+        }
+        DataSection::World => {
+            root.spawn(Node {
+                flex_grow: 1.0,
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(24.0)),
+                row_gap: Val::Px(12.0),
+                ..default()
+            })
+            .with_children(|body| {
+                let session = sources
+                    .manifest
+                    .as_deref()
+                    .map(|manifest| (&manifest.cell, manifest.placements.len()));
+                for line in world_lines(session, sources.time.elapsed_secs_f64()) {
+                    body.spawn((
+                        Text::new(line),
+                        TextColor(GREEN),
+                        TextFont {
+                            font_size: FontSize::Px(24.0),
+                            ..default()
+                        },
+                    ));
+                }
+            });
+        }
+    }
+}
+
+/// One footer tab (Items category tabs and Data section tabs share the
+/// exact same look; only the marker component differs).
+fn footer_tab(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    active: bool,
+    marker: impl Component,
+) {
+    parent
+        .spawn((
+            Button,
+            marker,
+            Node {
+                padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
+                border: UiRect::all(Val::Px(if active { 2.0 } else { 0.0 })),
+                ..default()
+            },
+            BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
+            BorderColor::all(GREEN),
+        ))
+        .with_child((
+            Text::new(label.to_owned()),
+            TextColor(GREEN),
+            TextFont {
+                font_size: FontSize::Px(24.0),
+                ..default()
+            },
+        ));
 }
 
 fn spawn_quantity_picker(commands: &mut Commands, quantity: i32, max: i32) {
@@ -805,6 +1016,80 @@ fn visible_rows<'a>(
                 .map(|item| (stack, item))
         })
         .collect()
+}
+
+/// F100.2: which inventory stacks appear in the Data -> Notes list --
+/// exactly the stacks issue #99's `classify` calls `Read` (Book/Note with
+/// authored text; quest-flagged ones stay readable, everything else is
+/// filtered out) -- sorted deterministically by lowercase display name,
+/// then stack key.
+fn notes_rows<'a>(
+    inventory: &PlayerInventory,
+    catalog: &'a PreparedItemCatalog,
+) -> Vec<(super::inventory::InventoryStack, &'a PreparedItemDefinition)> {
+    let mut rows: Vec<_> = inventory
+        .stack_states()
+        .into_iter()
+        .filter_map(|stack| {
+            catalog
+                .items
+                .iter()
+                .find(|item| item.base_form_id == stack.base_form_id)
+                .filter(|item| {
+                    item_use::classify(item_use_stats(&item.stats), item.quest_item)
+                        == item_use::ItemUseAction::Read
+                })
+                .map(|item| (stack, item))
+        })
+        .collect();
+    rows.sort_by(|(a_stack, a), (b_stack, b)| {
+        item_name(a)
+            .to_ascii_lowercase()
+            .cmp(&item_name(b).to_ascii_lowercase())
+            .then(a_stack.key().cmp(&b_stack.key()))
+    });
+    rows
+}
+
+/// F100.3: the World section's read-only lines, mirroring what
+/// `bevyout.session` reports over the agent bridge (cell identity and
+/// placement count from the prepared manifest) plus the same play-time
+/// clock the save header records (`Time::elapsed_secs_f64`). Display only
+/// -- no new stat tracking.
+fn world_lines(session: Option<(&CellInfo, usize)>, play_seconds: f64) -> Vec<String> {
+    let mut lines = Vec::new();
+    match session {
+        Some((cell, placement_count)) => {
+            if let Some(name) = cell.name.as_deref() {
+                lines.push(format!("CELL  {name}"));
+            }
+            lines.push(format!("LOC   {}", cell_label(cell)));
+            lines.push(
+                if cell.interior {
+                    "INTERIOR"
+                } else {
+                    "EXTERIOR"
+                }
+                .into(),
+            );
+            lines.push(format!("PLACEMENTS  {placement_count}"));
+        }
+        None => lines.push("NO ACTIVE CELL".into()),
+    }
+    lines.push(format!("PLAY TIME  {}", format_play_time(play_seconds)));
+    lines
+}
+
+/// F100.3: whole seconds as `H:MM:SS`, matching the save header's
+/// `play_time_seconds` clock.
+fn format_play_time(seconds: f64) -> String {
+    let total = seconds.max(0.0) as u64;
+    format!(
+        "{}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
 }
 
 fn normalize_selection(
@@ -920,6 +1205,10 @@ fn categories() -> [(PreparedItemCategory, &'static str); 5] {
         (PreparedItemCategory::Misc, "Misc"),
         (PreparedItemCategory::Ammo, "Ammo"),
     ]
+}
+
+fn data_sections() -> [(DataSection, &'static str); 2] {
+    [(DataSection::Notes, "Notes"), (DataSection::World, "World")]
 }
 
 #[cfg(test)]
@@ -1211,6 +1500,300 @@ mod tests {
         assert!(
             texts.iter().any(|text| text == "[E] Test Armor"),
             "expected an equipped marker, got {texts:?}"
+        );
+    }
+
+    // -- issue #100: Data tab, Notes view-model, Notes/World views ---------
+
+    fn stats_item(
+        base_form_id: u32,
+        name: &str,
+        stats: PreparedItemStats,
+        quest_item: bool,
+    ) -> PreparedItemDefinition {
+        PreparedItemDefinition {
+            base_form_id,
+            record_kind: "NOTE".into(),
+            category: PreparedItemCategory::Misc,
+            editor_id: None,
+            display_name: Some(name.into()),
+            source_model_path: None,
+            icon_asset_path: None,
+            world_asset_path: None,
+            physics_asset_path: None,
+            drop_collider: Default::default(),
+            value: None,
+            weight: None,
+            quest_item,
+            stats,
+            audio: Default::default(),
+        }
+    }
+
+    fn stack(base_form_id: u32, count: i32) -> super::super::inventory::InventoryStack {
+        super::super::inventory::InventoryStack {
+            base_form_id,
+            count,
+            condition: None,
+        }
+    }
+
+    #[test]
+    fn notes_rows_select_only_readable_stacks_sorted_by_name() {
+        let inventory = PlayerInventory::from_stack_states([
+            stack(1, 1), // note with text, name sorts last
+            stack(2, 2), // book with text, name sorts first (case-insensitively)
+            stack(3, 1), // textless note: inert, filtered out
+            stack(4, 1), // aid: usable not readable, filtered out
+            stack(5, 1), // quest-flagged note with text: still readable
+            stack(6, 1), // uncataloged: filtered out
+        ]);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![
+                stats_item(
+                    1,
+                    "zebra note",
+                    PreparedItemStats::Note {
+                        text: Some("z".into()),
+                    },
+                    false,
+                ),
+                stats_item(
+                    2,
+                    "Alpha book",
+                    PreparedItemStats::Book {
+                        flags: None,
+                        text: Some("a".into()),
+                    },
+                    false,
+                ),
+                stats_item(
+                    3,
+                    "empty note",
+                    PreparedItemStats::Note { text: None },
+                    false,
+                ),
+                aid_item(4, false),
+                stats_item(
+                    5,
+                    "quest note",
+                    PreparedItemStats::Note {
+                        text: Some("q".into()),
+                    },
+                    true,
+                ),
+            ],
+        };
+        let rows: Vec<u32> = notes_rows(&inventory, &catalog)
+            .iter()
+            .map(|(stack, _)| stack.base_form_id)
+            .collect();
+        assert_eq!(rows, [2, 5, 1]);
+    }
+
+    #[test]
+    fn world_lines_report_cell_identity_and_play_time() {
+        let cell = CellInfo {
+            form_id: 0x0001_51e3,
+            editor_id: Some("MegatonPlayerHouse".into()),
+            name: Some("My Megaton House".into()),
+            interior: true,
+            ambient_rgba: [0.0; 4],
+            directional_rgba: [0.0; 4],
+            image_space_form_id: None,
+            image_space: None,
+            lighting_template_form_id: None,
+            lighting_template_flags: 0,
+            lighting_template: None,
+            raw_lighting: None,
+            effective_lighting: None,
+            water_form_id: None,
+            water_height: None,
+            grid: None,
+            worldspace_form_id: None,
+        };
+        assert_eq!(
+            world_lines(Some((&cell, 7)), 3661.0),
+            [
+                "CELL  My Megaton House",
+                "LOC   MegatonPlayerHouse (000151e3)",
+                "INTERIOR",
+                "PLACEMENTS  7",
+                "PLAY TIME  1:01:01",
+            ]
+        );
+    }
+
+    #[test]
+    fn world_lines_without_a_session_fall_back() {
+        assert_eq!(
+            world_lines(None, 0.0),
+            ["NO ACTIVE CELL", "PLAY TIME  0:00:00"]
+        );
+    }
+
+    fn seed_note(app: &mut App, base_form_id: u32, name: &str, text: &str) {
+        app.world_mut()
+            .resource_mut::<PlayerInventory>()
+            .add_stack(stack(base_form_id, 1));
+        app.world_mut()
+            .resource_mut::<PreparedItemCatalog>()
+            .items
+            .push(stats_item(
+                base_form_id,
+                name,
+                PreparedItemStats::Note {
+                    text: Some(text.into()),
+                },
+                false,
+            ));
+    }
+
+    fn open_pipboy(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+    }
+
+    fn press_view_tab(app: &mut App, view: PipBoyView) {
+        let entity = app
+            .world_mut()
+            .query::<(Entity, &ViewTab)>()
+            .iter(app.world())
+            .find_map(|(entity, tab)| (tab.0 == view).then_some(entity))
+            .expect("the view tab should be spawned");
+        *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Pressed;
+        app.update();
+    }
+
+    fn press_data_section_tab(app: &mut App, section: DataSection) {
+        let entity = app
+            .world_mut()
+            .query::<(Entity, &DataSectionTab)>()
+            .iter(app.world())
+            .find_map(|(entity, tab)| (tab.0 == section).then_some(entity))
+            .expect("the data section tab should be spawned");
+        *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Pressed;
+        app.update();
+    }
+
+    #[test]
+    fn data_tab_shows_the_notes_list() {
+        let mut app = test_app();
+        seed_note(&mut app, 0x21, "Keller Family Transcript", "tape text");
+        seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        open_pipboy(&mut app);
+        press_view_tab(&mut app, PipBoyView::Data);
+        let notes: Vec<u32> = app
+            .world_mut()
+            .query::<&NoteRow>()
+            .iter(app.world())
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(notes, [0x21]);
+        assert_eq!(
+            app.world_mut()
+                .query::<&ItemRow>()
+                .iter(app.world())
+                .count(),
+            0,
+            "the Items surface should be replaced while Data is showing"
+        );
+    }
+
+    #[test]
+    fn activating_a_note_row_requests_the_reader() {
+        let mut app = test_app();
+        seed_note(&mut app, 0x21, "Keller Family Transcript", "tape text");
+        open_pipboy(&mut app);
+        press_view_tab(&mut app, PipBoyView::Data);
+        let row = app
+            .world_mut()
+            .query::<(Entity, &NoteRow)>()
+            .iter(app.world())
+            .find_map(|(entity, row)| (row.0 == 0x21).then_some(entity))
+            .expect("the note row should be spawned");
+        *app.world_mut().get_mut::<Interaction>(row).unwrap() = Interaction::Pressed;
+        app.update();
+        let messages = app.world().resource::<Messages<OpenReaderRequested>>();
+        let request = messages
+            .iter_current_update_messages()
+            .next()
+            .expect("expected an OpenReaderRequested message");
+        assert_eq!(request.base_form_id, 0x21);
+    }
+
+    #[test]
+    fn world_section_shows_the_session_summary() {
+        let mut app = test_app();
+        open_pipboy(&mut app);
+        press_view_tab(&mut app, PipBoyView::Data);
+        press_data_section_tab(&mut app, DataSection::World);
+        let texts: Vec<String> = app
+            .world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect();
+        // The bare harness has no prepared scene manifest, so the World
+        // section falls back; cell rendering itself is covered by the pure
+        // `world_lines` test above.
+        assert!(
+            texts.iter().any(|text| text == "NO ACTIVE CELL"),
+            "expected the no-session line, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.starts_with("PLAY TIME  ")),
+            "expected a play-time line, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn items_view_still_works_after_a_data_round_trip() {
+        let mut app = test_app();
+        seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
+        open_pipboy(&mut app);
+        press_view_tab(&mut app, PipBoyView::Data);
+        // Equip/hotkey input must be inert while Data is showing.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0,
+            "E must not equip from the Data view"
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        press_view_tab(&mut app, PipBoyView::Items);
+        let rows: Vec<StackKey> = app
+            .world_mut()
+            .query::<&ItemRow>()
+            .iter(app.world())
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].base_form_id, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyE);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            1,
+            "E should equip again once back on Items"
         );
     }
 }
