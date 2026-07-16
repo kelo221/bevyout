@@ -132,6 +132,12 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
+// Prepared point-shadow softness is deliberately std-only so the executable
+// feature suite pins the same range and hard/PCSS fallback policy as runtime.
+#[path = "../src/viewer/lighting_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod lighting_policy;
+
 // Material shading policy is intentionally std-only so the executable spec can
 // pin the same eligibility decision used by the runtime material event system.
 #[path = "../src/viewer/material_shading_policy.rs"]
@@ -468,6 +474,11 @@ struct BevyoutWorld {
     recipe_under_test: Option<recipe_policy::PreparedRecipe>,
     recipe_available_items: std::collections::BTreeSet<u32>,
     recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
+
+    // -- prepared_point_shadows.feature --
+    prepared_shadow_radius: f32,
+    prepared_shadow_valid: Option<bool>,
+    prepared_shadow_filter: Option<lighting_policy::PreparedPointShadowFilter>,
 }
 
 fn find_placement<'a>(
@@ -4298,6 +4309,57 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
             .ingredients[0]
             .quantity,
         expected
+    );
+}
+
+// prepared_point_shadows.feature
+// ---------------------------------------------------------------------
+
+#[given("the default prepared point-shadow source radius")]
+async fn given_default_prepared_shadow_radius(world: &mut BevyoutWorld) {
+    world.prepared_shadow_radius = lighting_policy::DEFAULT_SOURCE_RADIUS_METERS;
+}
+
+#[given(regex = r"^a prepared point-shadow source radius of (-?[\d.]+) metres$")]
+async fn given_prepared_shadow_radius(world: &mut BevyoutWorld, radius: f32) {
+    world.prepared_shadow_radius = radius;
+}
+
+#[when("the prepared point-shadow radius policy is evaluated")]
+async fn when_prepared_shadow_radius_policy_evaluated(world: &mut BevyoutWorld) {
+    world.prepared_shadow_valid = Some(lighting_policy::validate_source_radius(
+        world.prepared_shadow_radius,
+    ));
+    if world.prepared_shadow_valid == Some(true) {
+        world.prepared_shadow_filter = Some(lighting_policy::filter_for_source_radius(
+            world.prepared_shadow_radius,
+        ));
+    }
+}
+
+#[then(regex = r"^the prepared point-shadow radius is accepted$")]
+async fn then_prepared_shadow_radius_accepted(world: &mut BevyoutWorld) {
+    assert_eq!(world.prepared_shadow_valid, Some(true));
+}
+
+#[then(regex = r"^the prepared point-shadow radius is rejected$")]
+async fn then_prepared_shadow_radius_rejected(world: &mut BevyoutWorld) {
+    assert_eq!(world.prepared_shadow_valid, Some(false));
+}
+
+#[then("prepared point shadows use PCSS filtering")]
+async fn then_prepared_shadow_pcss(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.prepared_shadow_filter,
+        Some(lighting_policy::PreparedPointShadowFilter::Pcss)
+    );
+}
+
+#[then("prepared point shadows use hardware 2x2 filtering")]
+async fn then_prepared_shadow_hardware(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.prepared_shadow_filter,
+        Some(lighting_policy::PreparedPointShadowFilter::Hard)
     );
 }
 

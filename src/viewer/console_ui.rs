@@ -14,8 +14,9 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::app_state::GameplayModal;
 use crate::console::openmw_ui::{CommandHistory, CompletionState, load_history, save_history};
 use crate::console::{
-    ConsoleQueue, ConsoleRegistry, ConsoleResponses, ConsoleSessionId, ConsoleSessionStore,
-    ConsoleSystemSet, RefRegistry,
+    ConsoleCommand, ConsoleCommandResult, ConsoleError, ConsoleInvocation, ConsoleQueue,
+    ConsoleRegistry, ConsoleResponses, ConsoleSessionId, ConsoleSessionStore, ConsoleSystemSet,
+    RefRegistry,
 };
 
 use super::interaction::{PlacementRoot, find_placement_root};
@@ -84,6 +85,36 @@ pub(crate) fn install(app: &mut App) {
             .after(ConsoleSystemSet::Execute)
             .before(TransformSystems::Propagate),
     );
+
+    let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
+    registry
+        .register(
+            ConsoleCommand::new(
+                "clear",
+                "clear",
+                "Clear the in-game console scrollback.",
+                clear_console,
+            )
+            .mutating(),
+        )
+        .expect("console clear command is unique");
+}
+
+fn clear_console(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !invocation.args.is_empty() {
+        return Err(ConsoleError::new("bad_arity", "clear takes no arguments"));
+    }
+    if let Some(mut state) = world.get_resource_mut::<ConsoleUiState>() {
+        state.scrollback.clear();
+    }
+    let mut scrollback = world.query_filtered::<&mut Text, With<ConsoleScrollback>>();
+    if let Ok(mut text) = scrollback.single_mut(world) {
+        text.0.clear();
+    }
+    Ok(ConsoleCommandResult::value(serde_json::Value::Null))
 }
 
 fn spawn_console_ui(mut commands: Commands) {
@@ -419,6 +450,12 @@ fn consume_console_responses(
     let mut changed = false;
     while let Some(response) = responses.0.pop_front() {
         changed = true;
+        let clear_command = response.output.ok
+            && response.request.line.trim().eq_ignore_ascii_case("clear");
+        if clear_command {
+            ui.scrollback.clear();
+            continue;
+        }
         push_scrollback(&mut ui.scrollback, response.request.line);
         let has_log = !response.output.log.is_empty();
         for line in response.output.log {
