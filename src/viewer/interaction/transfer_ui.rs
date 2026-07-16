@@ -184,8 +184,10 @@ fn close_transfer_modal(
         lead_ms: 0.0,
     });
     info!(
-        "container {} ({:08x}) closed",
-        active_container.name, active_container.reference_form_id
+        "{} {} ({:08x}) closed",
+        active_container.kind.label(),
+        active_container.name,
+        active_container.reference_form_id
     );
 }
 
@@ -714,9 +716,13 @@ fn spawn_screen(
                 ..default()
             })
             .with_children(|body| {
+                let holder_title = match active_container.kind {
+                    super::LootHolderKind::Container => "Container",
+                    super::LootHolderKind::Corpse => "Corpse",
+                };
                 spawn_pane(
                     body,
-                    "Container",
+                    holder_title,
                     container_stacks.iter().map(|&(form_id, count)| {
                         (
                             ContainerRow(form_id),

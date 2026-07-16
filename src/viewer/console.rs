@@ -184,7 +184,7 @@ pub(crate) fn install(app: &mut App) {
         ConsoleCommand::new(
             "activate",
             "activate <reference>",
-            "Activate a door, container, or pickup reference; a door with a destination requests cell travel (locks bypassed).",
+            "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).",
             activate_reference,
         )
         .mutating(),
@@ -233,6 +233,21 @@ fn activate_reference(
     // Wave-4 amendment: containers toggle through the same open-state and
     // clip path as player activation, so the #60/#61 persistence gate can
     // be driven over the agent bridge.
+    if matches!(placement.semantic, PreparedSemantic::Corpse) {
+        let opened = interaction::scripted_corpse_toggle(world, entity);
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "kind": "corpse",
+                "opened": opened,
+            }),
+            vec![format!(
+                "corpse {:08x} {}",
+                placement.reference_form_id,
+                if opened { "opened" } else { "closed" }
+            )],
+        ));
+    }
     if matches!(placement.semantic, PreparedSemantic::Container) {
         let opened = interaction::scripted_container_toggle(world, entity);
         return Ok(ConsoleCommandResult::new(
@@ -269,7 +284,7 @@ fn activate_reference(
     let PreparedSemantic::Door(door) = &placement.semantic else {
         return Err(ConsoleError::new(
             "not_a_door",
-            "activate supports only door, container, and pickup references",
+            "activate supports only door, container, corpse, and pickup references",
         ));
     };
     let Some(destination) = &door.destination else {
@@ -1663,6 +1678,73 @@ mod tests {
         let output = exec(&mut app, "activate 00000010");
         assert!(output.ok, "activate failed: {:?}", output.error);
         assert_eq!(output.value["opened"], false);
+    }
+
+    fn register_corpse_placement(app: &mut App) {
+        let ron = r#"(
+            reference_form_id: 16,
+            base_form_id: 1,
+            asset_path: None,
+            translation: (0.0, 0.0, 0.0),
+            rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            error: None,
+            semantic: Corpse,
+            inventory: [
+                (base_form_id: 2, count: 3, record_kind: "MISC", editor_id: Some("CorpseItem"), display_name: Some("Corpse Item"), leveled: false),
+            ],
+        )"#;
+        let placement: crate::vsa::PreparedPlacement = ron::de::from_str(ron).unwrap();
+        let entity = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                interaction::PlacementRoot::new(placement),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::console::RefRegistry>()
+            .register(entity, 0x10, Some("TestCorpse"));
+    }
+
+    // F118.2: scripted corpse activation uses the loot-holder transfer seam,
+    // seeds the stable FormID-keyed state, and requests the existing modal.
+    #[test]
+    fn activate_opens_a_corpse_holder_with_stable_console_output() {
+        let mut app = test_app();
+        app.add_message::<super::super::audio::PlaySound>();
+        app.add_message::<super::super::animation::PlayPlacementAnimation>();
+        app.add_message::<crate::app_state::RequestStateTransition>();
+        register_corpse_placement(&mut app);
+
+        let output = exec(&mut app, "activate TestCorpse");
+        assert!(output.ok, "activate failed: {:?}", output.error);
+        assert_eq!(output.value["reference_form_id"], 16);
+        assert_eq!(output.value["kind"], "corpse");
+        assert_eq!(output.value["opened"], true);
+        assert_eq!(output.log, ["corpse 00000010 opened"]);
+        assert_eq!(
+            app.world().resource::<interaction::ContainerStates>().0[&0x10].stacks,
+            vec![(0x2, 3)]
+        );
+        let requests = app
+            .world()
+            .resource::<Messages<crate::app_state::RequestStateTransition>>();
+        assert!(requests.iter_current_update_messages().any(|request| {
+            *request == crate::app_state::RequestStateTransition::Modal(GameplayModal::Container)
+        }));
+    }
+
+    // F118.2: non-corpse actor references remain unsupported until the actor
+    // simulation/death slice exists; the error is deterministic.
+    #[test]
+    fn activate_rejects_a_live_actor_as_a_corpse_holder() {
+        let mut app = test_app();
+        register_placement(&mut app, "Npc((base_template_form_id: None))");
+        assert_eq!(
+            error_code(&exec(&mut app, "activate TestRef")),
+            "not_a_door"
+        );
     }
 
     // -- activate pickup (issue #84, F84.2) --------------------------------

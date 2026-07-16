@@ -33,7 +33,9 @@ use crate::save::{
 };
 #[cfg(test)]
 use crate::vsa::PreparedInventoryEntry;
-use crate::vsa::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic, is_bake_static};
+#[cfg(test)]
+use crate::vsa::PreparedSemantic;
+use crate::vsa::{PreparedPlacement, PreparedSceneManifest, is_bake_static};
 
 use super::super::{animation, interaction, player};
 use super::persist_policy;
@@ -303,7 +305,7 @@ fn container_baselines(
 }
 
 fn container_baseline(placement: &PreparedPlacement) -> Option<persist_policy::ContainerBaseline> {
-    if placement.semantic != PreparedSemantic::Container {
+    if !placement.semantic.is_loot_holder() {
         return None;
     }
     let stacks: Vec<(u32, i32)> = placement
@@ -331,7 +333,7 @@ fn container_snapshots(
     };
     placements
         .iter()
-        .filter(|placement| placement.semantic == PreparedSemantic::Container)
+        .filter(|placement| placement.semantic.is_loot_holder())
         .filter_map(|placement| {
             states.0.get(&placement.reference_form_id).map(|state| {
                 (
@@ -1212,6 +1214,75 @@ mod tests {
         let restored = &world.resource::<interaction::ContainerStates>().0[&0x900];
         assert_eq!(restored.stacks, vec![(0x10, 1)]);
         assert!(restored.resolved);
+    }
+
+    // F118.3: corpse contents reuse the FormID-keyed ContainerStates and the
+    // existing OBJE inventory delta, so leaving and re-entering a cell does
+    // not lose or duplicate a looted stack.
+    #[test]
+    fn capture_and_apply_restore_looted_corpse_state() {
+        let mut world = test_world();
+        let mut corpse = container_placement(0x902, vec![inventory_entry(0x10, 3, false)]);
+        corpse.semantic = PreparedSemantic::Corpse;
+        corpse.base_kind = "ACHR".into();
+        corpse.display_name = Some("Corpse".into());
+        let placements = [corpse];
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .insert(
+                0x902,
+                interaction::container_policy::ContainerState {
+                    stacks: vec![(0x10, 1)],
+                    resolved: true,
+                },
+            );
+
+        capture_cell_placements(&mut world, 0xC0DE, root, &placements, false);
+        let saved = &world.resource::<ActiveSaveState>().0.cells[&0xC0DE].references[&0x902];
+        assert_eq!(
+            saved.inventory,
+            Some(vec![ItemStack {
+                base_form_id: 0x10,
+                count: 1,
+                condition: None,
+            }])
+        );
+        assert_eq!(saved.leveled_resolved, Some(true));
+
+        world.entity_mut(root).despawn();
+        world
+            .resource_mut::<interaction::ContainerStates>()
+            .0
+            .clear();
+        let (root, _children) = spawn_cell(&mut world, &placements);
+        apply_cell_placements(&mut world, 0xC0DE, root, &placements);
+
+        let restored = &world.resource::<interaction::ContainerStates>().0[&0x902];
+        assert_eq!(restored.stacks, vec![(0x10, 1)]);
+        assert!(restored.resolved);
+    }
+
+    // F118.3 compatibility: an old save with no corpse section does not
+    // synthesize a corpse runtime holder during apply.
+    #[test]
+    fn apply_old_save_without_corpse_delta_leaves_corpse_unseeded() {
+        let mut world = test_world();
+        let mut corpse = container_placement(0x903, vec![inventory_entry(0x10, 3, false)]);
+        corpse.semantic = PreparedSemantic::Corpse;
+        corpse.base_kind = "ACHR".into();
+        let placements = [corpse];
+        let (root, _children) = spawn_cell(&mut world, &placements);
+
+        apply_cell_placements(&mut world, 0xC0DE, root, &placements);
+
+        assert!(
+            !world
+                .resource::<interaction::ContainerStates>()
+                .0
+                .contains_key(&0x903)
+        );
     }
 
     // F76.2: a container whose stacks and resolved marker never diverge from
