@@ -209,11 +209,14 @@ fn blender_script_reads_authored_emission_before_existing_overrides() {
 
 #[test]
 fn blender_script_recovers_authored_emission_from_zero_imported_strength() {
+    let normalized_script = BLENDER_CONVERSION_SCRIPT
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
     assert!(BLENDER_CONVERSION_SCRIPT.contains("authored_emission_fallback = False"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("authored_emission_fallback = True"));
     assert!(
-        BLENDER_CONVERSION_SCRIPT
-            .contains("source_strength_applies = (\r\n            authored_emission_fallback and\r\n            has_emission_multiplier")
+        normalized_script
+            .contains("source_strength_applies = (\n            authored_emission_fallback and\n            has_emission_multiplier")
     );
     assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength <= 0.0"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_strength == 1.0"));

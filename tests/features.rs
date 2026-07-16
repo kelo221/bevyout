@@ -870,6 +870,18 @@ fn parse_hex(hex: &str) -> u32 {
         .unwrap_or_else(|error| panic!("invalid hex FormID {hex:?}: {error}"))
 }
 
+fn parse_item_instance_id(hex: &str) -> ItemInstanceId {
+    let digits = hex.strip_prefix("0x").unwrap_or(hex);
+    ItemInstanceId(
+        u64::from_str_radix(digits, 16)
+            .unwrap_or_else(|error| panic!("invalid item instance id {hex:?}: {error}")),
+    )
+}
+
+fn assert_hotkey_slot(slot: usize) {
+    assert!(slot < 8, "hotkey slot {slot} must be in the range 0..7");
+}
+
 #[given(regex = r#"^a cell map with an interior cell "([^"]*)" 0x([0-9a-fA-F]+) and no grid$"#)]
 async fn given_interior_cell(world: &mut BevyoutWorld, editor_id: String, hex: String) {
     world.cell_map_cells.push(cell_map::CellMapEntry {
@@ -3672,7 +3684,7 @@ async fn given_canonical_player_item(
 ) {
     world.canonical_ledger = ItemLedger::new();
     let item = ItemInstance::new(
-        ItemInstanceId(parse_hex(&item_hex) as u64),
+        parse_item_instance_id(&item_hex),
         parse_hex(&form_hex),
         count,
         ItemState {
@@ -3708,13 +3720,10 @@ async fn given_empty_canonical_holder(world: &mut BevyoutWorld, reference_hex: S
 
 #[given(regex = r"^the canonical player hotkey (\d+) is item 0x([0-9a-fA-F]+)$")]
 async fn given_canonical_player_hotkey(world: &mut BevyoutWorld, slot: usize, item_hex: String) {
+    assert_hotkey_slot(slot);
     world
         .canonical_ledger
-        .bind_hotkey(
-            HolderId::Player,
-            slot,
-            ItemInstanceId(parse_hex(&item_hex) as u64),
-        )
+        .bind_hotkey(HolderId::Player, slot, parse_item_instance_id(&item_hex))
         .unwrap();
 }
 
@@ -3735,7 +3744,7 @@ async fn when_canonical_transfer(
                 destination: HolderId::FixtureContainer {
                     reference_form_id: parse_hex(&reference_hex),
                 },
-                item_id: ItemInstanceId(parse_hex(&item_hex) as u64),
+                item_id: parse_item_instance_id(&item_hex),
                 count,
             }),
     );
@@ -3743,7 +3752,7 @@ async fn when_canonical_transfer(
 
 #[then(regex = r"^the canonical player item 0x([0-9a-fA-F]+) has count (\d+)$")]
 async fn then_canonical_player_count(world: &mut BevyoutWorld, item_hex: String, count: u32) {
-    let item_id = ItemInstanceId(parse_hex(&item_hex) as u64);
+    let item_id = parse_item_instance_id(&item_hex);
     let item = world
         .canonical_ledger
         .holders()
@@ -3775,10 +3784,7 @@ async fn then_canonical_moved_id(world: &mut BevyoutWorld, item_hex: String) {
         .expect("canonical transaction was not run")
         .as_ref()
         .expect("canonical transaction failed");
-    assert_eq!(
-        receipt.moved[0].0,
-        ItemInstanceId(parse_hex(&item_hex) as u64)
-    );
+    assert_eq!(receipt.moved[0].0, parse_item_instance_id(&item_hex));
 }
 
 #[then("the canonical transaction is rejected")]
@@ -3805,18 +3811,20 @@ async fn then_canonical_holder_empty(world: &mut BevyoutWorld, reference_hex: St
 
 #[then(regex = r"^the canonical player hotkey (\d+) is item 0x([0-9a-fA-F]+)$")]
 async fn then_canonical_player_hotkey(world: &mut BevyoutWorld, slot: usize, item_hex: String) {
+    assert_hotkey_slot(slot);
     assert_eq!(
         world
             .canonical_ledger
             .bindings()
             .get(&HolderId::Player)
             .and_then(|bindings| bindings.hotkeys.get(slot).copied().flatten()),
-        Some(ItemInstanceId(parse_hex(&item_hex) as u64))
+        Some(parse_item_instance_id(&item_hex))
     );
 }
 
 #[then(regex = r"^the canonical player hotkey (\d+) is empty$")]
 async fn then_canonical_player_hotkey_empty(world: &mut BevyoutWorld, slot: usize) {
+    assert_hotkey_slot(slot);
     assert_eq!(
         world
             .canonical_ledger
@@ -3833,6 +3841,7 @@ async fn then_canonical_holder_hotkey_empty(
     reference_hex: String,
     slot: usize,
 ) {
+    assert_hotkey_slot(slot);
     let holder = HolderId::FixtureContainer {
         reference_form_id: parse_hex(&reference_hex),
     };
