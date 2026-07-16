@@ -11,12 +11,14 @@ use std::io::{Cursor, Read};
 use super::manifest::{CellInfo, ImageSpaceInfo};
 use super::paths::CellSelector;
 
+mod actor_support;
 mod binary;
 mod enable;
 mod inventory;
 mod reader;
 mod records;
 
+pub(crate) use actor_support::*;
 pub(crate) use binary::*;
 pub(crate) use enable::*;
 pub(crate) use inventory::*;
@@ -479,6 +481,17 @@ pub(crate) struct CellMetadata {
 pub(crate) struct ParsedPlugin {
     pub(crate) bases: HashMap<u32, BaseRecord>,
     pub(crate) recipes: HashMap<u32, RecipeRecord>,
+    // M4 wave 1 task B (#103): decoded ahead of their consumer, the actor
+    // catalog resolver landing in task C (phase 2). Same ahead-of-consumer
+    // pattern as `SoundRecord`/`AcousticSpaceRecord`/etc. below.
+    #[allow(dead_code)]
+    pub(crate) races: HashMap<u32, RaceRecord>,
+    #[allow(dead_code)]
+    pub(crate) classes: HashMap<u32, ClassRecord>,
+    #[allow(dead_code)]
+    pub(crate) factions: HashMap<u32, FactionRecord>,
+    #[allow(dead_code)]
+    pub(crate) packages: HashMap<u32, PackageRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,
     pub(crate) sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -675,6 +688,7 @@ impl ParsedContentSet {
             })
             .collect::<Vec<_>>();
         diagnostics.extend(state.recipe_diagnostics);
+        diagnostics.extend(state.actor_support_diagnostics);
         diagnostics.sort();
 
         let mut navmeshes = state
@@ -687,6 +701,10 @@ impl ParsedContentSet {
         Ok(ParsedPlugin {
             bases: state.bases,
             recipes: state.recipes,
+            races: state.races,
+            classes: state.classes,
+            factions: state.factions,
+            packages: state.packages,
             image_spaces: state.image_spaces,
             sounds: state.sounds,
             sound_references: state.sound_references,
@@ -712,6 +730,10 @@ pub(crate) struct PluginSource<'a> {
 pub(crate) struct ParsedState {
     bases: HashMap<u32, BaseRecord>,
     recipes: HashMap<u32, RecipeRecord>,
+    races: HashMap<u32, RaceRecord>,
+    classes: HashMap<u32, ClassRecord>,
+    factions: HashMap<u32, FactionRecord>,
+    packages: HashMap<u32, PackageRecord>,
     image_spaces: HashMap<u32, ImageSpaceInfo>,
     sounds: HashMap<u32, SoundRecord>,
     sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -726,6 +748,7 @@ pub(crate) struct ParsedState {
     cell_provenance: HashMap<u32, Vec<String>>,
     worldspaces: HashMap<u32, WorldspaceRecord>,
     recipe_diagnostics: Vec<String>,
+    actor_support_diagnostics: Vec<String>,
 }
 
 #[derive(Debug)]

@@ -194,6 +194,94 @@ pub(crate) fn walk_container(
                     }
                 }
             }
+            "RACE" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.races.remove(&form_id);
+                } else {
+                    match parse_race(&subs, form_id, flags, resolver) {
+                        Ok(race) => {
+                            for signature in &race.ignored_subrecords {
+                                state.actor_support_diagnostics.push(format!(
+                                    "{source_name} RACE {form_id:08x}: ignored unsupported {signature} subrecord"
+                                ));
+                            }
+                            state.races.insert(form_id, race);
+                        }
+                        Err(error) => {
+                            state.races.remove(&form_id);
+                            state.actor_support_diagnostics.push(format!(
+                                "{source_name} RACE {form_id:08x}: malformed race: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            "CLAS" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.classes.remove(&form_id);
+                } else {
+                    match parse_class(&subs, form_id, flags) {
+                        Ok(class) => {
+                            for signature in &class.ignored_subrecords {
+                                state.actor_support_diagnostics.push(format!(
+                                    "{source_name} CLAS {form_id:08x}: ignored unsupported {signature} subrecord"
+                                ));
+                            }
+                            state.classes.insert(form_id, class);
+                        }
+                        Err(error) => {
+                            state.classes.remove(&form_id);
+                            state.actor_support_diagnostics.push(format!(
+                                "{source_name} CLAS {form_id:08x}: malformed class: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            "FACT" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.factions.remove(&form_id);
+                } else {
+                    match parse_faction(&subs, form_id, flags, resolver) {
+                        Ok(faction) => {
+                            for signature in &faction.ignored_subrecords {
+                                state.actor_support_diagnostics.push(format!(
+                                    "{source_name} FACT {form_id:08x}: ignored unsupported {signature} subrecord"
+                                ));
+                            }
+                            state.factions.insert(form_id, faction);
+                        }
+                        Err(error) => {
+                            state.factions.remove(&form_id);
+                            state.actor_support_diagnostics.push(format!(
+                                "{source_name} FACT {form_id:08x}: malformed faction: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            "PACK" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.packages.remove(&form_id);
+                } else {
+                    match parse_package(&subs, form_id, flags, resolver) {
+                        Ok(package) => {
+                            for signature in &package.ignored_subrecords {
+                                state.actor_support_diagnostics.push(format!(
+                                    "{source_name} PACK {form_id:08x}: ignored unsupported {signature} subrecord"
+                                ));
+                            }
+                            state.packages.insert(form_id, package);
+                        }
+                        Err(error) => {
+                            state.packages.remove(&form_id);
+                            state.actor_support_diagnostics.push(format!(
+                                "{source_name} PACK {form_id:08x}: malformed package: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
             "REFR" | "ACHR" | "ACRE" if context.cell.is_some() => {
                 if flags & RECORD_DELETED != 0 {
                     state.references.remove(&form_id);
