@@ -21,13 +21,11 @@ PERSONALITIES_FILE = Path(
     os.environ.get("PERSONALITIES_FILE", str(BASE_DIR / "personalities.json"))
 )
 BOT_AUTH_TOKEN = os.environ["BOT_AUTH_TOKEN"]
-DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 PORT = int(os.environ.get("PORT", "8978"))
 MAX_BODY_BYTES = 1_000_000
 GEMINI_TIMEOUT_SECONDS = 20
-DISCORD_TIMEOUT_SECONDS = 15
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -149,7 +147,7 @@ def generate_message(
     return generated, "gemini"
 
 
-def send_discord(
+def build_discord_payload(
     message: str,
     number: int,
     title: str,
@@ -157,7 +155,7 @@ def send_discord(
     status_key: str,
     status_text: str,
     url: str,
-) -> None:
+) -> dict[str, Any]:
     color = {
         "merged": 3066993,
         "closed": 15158332,
@@ -177,15 +175,7 @@ def send_discord(
         ],
         "allowed_mentions": {"parse": []},
     }
-    request = Request(
-        DISCORD_WEBHOOK_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=DISCORD_TIMEOUT_SECONDS) as response:
-        if response.status >= 300:
-            raise RuntimeError(f"Discord returned HTTP {response.status}")
+    return payload
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -241,9 +231,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 LOGGER.exception("Gemini generation failed; using fallback")
                 message, source, personality = fallback, "fallback", fallback_profile
-            send_discord(message, number, title, author, status_key, status_text, url)
+            discord_payload = build_discord_payload(
+                message, number, title, author, status_key, status_text, url
+            )
             LOGGER.info(
-                "sent PR #%s event=%s source=%s personality=%s",
+                "generated PR #%s event=%s source=%s personality=%s",
                 number,
                 event,
                 source,
@@ -256,14 +248,16 @@ class Handler(BaseHTTPRequestHandler):
                     "event": event,
                     "personality": personality,
                     "source": source,
+                    "message": message,
+                    "discord_payload": discord_payload,
                 },
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self.write_json(400, {"ok": False, "error": "invalid request"})
             LOGGER.warning("invalid request: %s", error)
         except Exception:
-            LOGGER.exception("notification delivery failed")
-            self.write_json(502, {"ok": False, "error": "notification delivery failed"})
+            LOGGER.exception("notification generation failed")
+            self.write_json(502, {"ok": False, "error": "notification generation failed"})
 
 
 def main() -> None:

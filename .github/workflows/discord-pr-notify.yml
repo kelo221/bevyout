@@ -21,6 +21,7 @@ jobs:
         env:
           DISCORD_BOT_URL: ${{ secrets.DISCORD_BOT_URL }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -33,8 +34,8 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          if [[ -z "${DISCORD_BOT_URL:-}" || -z "${DISCORD_BOT_TOKEN:-}" ]]; then
-            echo "Discord bot URL/token are not available; skipping notification."
+          if [[ -z "${DISCORD_BOT_URL:-}" || -z "${DISCORD_BOT_TOKEN:-}" || -z "${DISCORD_WEBHOOK:-}" ]]; then
+            echo "Discord bot URL/token/webhook are not available; skipping notification."
             exit 0
           fi
 
@@ -92,6 +93,18 @@ jobs:
             exit 1
           fi
 
+          discord_payload=$(jq -c '.discord_payload // empty' <<<"$response")
+          if [[ -z "$discord_payload" ]]; then
+            echo "Discord bot did not return a Discord payload."
+            exit 1
+          fi
+
+          curl --silent --show-error --fail --max-time 15 \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d "$discord_payload" \
+            "$DISCORD_WEBHOOK" >/dev/null
+
           source=$(jq -r '.source // "unknown"' <<<"$response")
           personality=$(jq -r '.personality // "unknown"' <<<"$response")
-          echo "Sent server-side Discord notification for PR #${PR_NUMBER} (${ACTION}); source=${source}; personality=${personality}."
+          echo "Sent server-generated Discord notification for PR #${PR_NUMBER} (${ACTION}); source=${source}; personality=${personality}."
