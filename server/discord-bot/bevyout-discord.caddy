@@ -1,0 +1,5 @@
+(bevyout_discord_endpoint) {
+    handle_path /api/bevyout-discord* {
+        reverse_proxy 127.0.0.1:8978
+    }
+}
