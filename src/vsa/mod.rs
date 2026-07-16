@@ -28,6 +28,12 @@ pub(crate) use cell_map::CellMap;
 /// `unused_imports` on non-test builds.
 #[cfg(test)]
 pub(crate) use manifest::PreparedItemEffect;
+/// Test-only re-export (issue #128): `viewer::nav_overlay`'s unit tests build
+/// a synthetic `nav_graph` manifest entry; production code only ever reads
+/// `manifest.nav_graph`'s fields (never names the type), so a plain
+/// re-export would trip `unused_imports` on non-test builds.
+#[cfg(test)]
+pub(crate) use manifest::PreparedNavGraphSource;
 #[cfg(test)]
 pub(crate) use manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, PreparedBake,
@@ -47,6 +53,15 @@ pub(crate) use physics::{
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
 pub(crate) use prepare::ITEM_CATALOG_REVISION;
+// Issue #128's `tnm` console command decodes `navgraph.ron` (issue #111)
+// straight into these types -- see `viewer::nav_overlay`.
+/// Test-only re-export (issue #128): only `viewer::nav_overlay`'s unit
+/// tests construct a `PreparedNavPolygon` fixture directly; production code
+/// only ever iterates `PreparedNavMesh::polygons` without naming the
+/// element type.
+#[cfg(test)]
+pub(crate) use prepare::PreparedNavPolygon;
 pub use prepare::prepare;
+pub(crate) use prepare::{PreparedNavGraph, PreparedNavMesh};
 pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};
