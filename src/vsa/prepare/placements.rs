@@ -256,6 +256,7 @@ pub(crate) fn classify_runtime_mutability(
         PreparedSemantic::Door(_)
         | PreparedSemantic::Activator
         | PreparedSemantic::Container
+        | PreparedSemantic::Corpse
         | PreparedSemantic::Furniture
         | PreparedSemantic::Npc(_)
         | PreparedSemantic::Creature(_)

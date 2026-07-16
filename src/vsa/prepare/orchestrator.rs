@@ -783,6 +783,34 @@ fn prepare_cell(
     let item_catalog_path = Some(catalog_path);
     let item_catalog_revision = Some(ITEM_CATALOG_REVISION.into());
     let item_catalog_hash = Some(catalog_hash);
+    let recipe_catalog_build =
+        build_recipe_catalog(&parsed.recipes, &parsed.bases, &source_fingerprint);
+    for issue in &recipe_catalog_build.invalid {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: format!(
+                "recipe {:08x} excluded from prepared catalog: {}",
+                issue.form_id, issue.message
+            ),
+        });
+    }
+    let recipe_artifact = write_recipe_catalog(&cache_dir, &recipe_catalog_build.catalog)?;
+    let recipe_cache_state = if recipe_artifact.reused {
+        "reused"
+    } else {
+        "written"
+    };
+    let recipe_summary = format!(
+        "recipe catalog: {} valid, {} invalid, cache {recipe_cache_state} -> {}",
+        recipe_catalog_build.catalog.recipes.len(),
+        recipe_catalog_build.invalid.len(),
+        recipe_artifact.relative_path
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: recipe_summary.clone(),
+    });
+    output.push(recipe_summary);
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -829,6 +857,9 @@ fn prepare_cell(
         item_catalog_path,
         item_catalog_revision,
         item_catalog_hash,
+        recipe_catalog_path: Some(recipe_artifact.relative_path),
+        recipe_catalog_revision: Some(RECIPE_CATALOG_REVISION.into()),
+        recipe_catalog_hash: Some(recipe_artifact.hash),
         source_plugins,
         cell,
         placements,

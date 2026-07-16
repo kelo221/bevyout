@@ -120,6 +120,14 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   acceptance before opening one PR with `Closes #NN` per issue.
 - Measured results are commented on each issue; follow-ups discovered during
   acceptance get their own issues rather than silently expanding the wave.
+- Every wave ends with a manual acceptance script,
+  `docs/plans/M<m>_WAVE<n>_MANUAL.md`, written before the wave PR and
+  linked from its body. It opens with a short plain-language summary of
+  what the wave shipped, then numbered step-by-step instructions a human
+  can follow verbatim: which prepared cell to launch, the exact console
+  commands with real FormIDs from the prepared catalog, which keys to
+  press, and the expected result of every step (including any one-time
+  cache/prepare setup the wave requires).
 - Model split: see "Model routing" below; it applies to every wave,
   including single-issue waves, in every agent runtime (Claude and Codex).
 

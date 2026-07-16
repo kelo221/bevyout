@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v2";
+/// Bump whenever the catalog shape changes, even when the new fields are
+/// serde-defaulted: a stale cached `items.ron` would otherwise deserialize
+/// silently with those fields defaulted and downstream rules degrade
+/// (issue #98 added `WEAP.ammo_form_id`/`ARMO.biped_slot_mask` that way --
+/// v3 makes `view` reject pre-#98 catalogs instead).
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v3";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -226,19 +231,23 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             clip_size,
             speed,
             reach,
+            ammo_form_id,
         } => PreparedItemStats::Weapon {
             damage: *damage,
             max_condition: *max_condition,
             clip_size: *clip_size,
             speed: *speed,
             reach: *reach,
+            ammo_form_id: *ammo_form_id,
         },
         OpenMwItemStats::Apparel {
             armor_rating,
             max_condition,
+            biped_slot_mask,
         } => PreparedItemStats::Apparel {
             armor_rating: *armor_rating,
             max_condition: *max_condition,
+            biped_slot_mask: *biped_slot_mask,
         },
         OpenMwItemStats::Ammo { damage, speed } => PreparedItemStats::Ammo {
             damage: *damage,
@@ -267,6 +276,23 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
 mod tests {
     use super::*;
     use crate::vsa::{PreparedPhysicsBody, PreparedPhysicsShape, PreparedPhysicsSource};
+
+    /// Pins the constant so a catalog-shape change that forgets the bump
+    /// fails here instead of shipping silently-degrading caches (issue #98
+    /// added serde-defaulted fields without one; v3 is the correction).
+    /// Bump this expectation together with `ITEM_CATALOG_REVISION`.
+    #[test]
+    fn built_catalogs_carry_the_pinned_revision() {
+        let catalog = build_item_catalog(
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+            &HashMap::new(),
+            "abc",
+        );
+        assert_eq!(catalog.revision, "openmw-items-v3");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v3");
+    }
 
     #[test]
     fn catalog_is_formid_sorted_and_carries_prepared_drop_assets() {
@@ -344,6 +370,57 @@ mod tests {
         assert!(matches!(
             catalog.items[1].drop_collider,
             PreparedDropCollider::Missing
+        ));
+    }
+
+    // Issue #98 (F98.1): the new ammo/biped-slot fields carry through
+    // `prepared_stats` unchanged.
+    #[test]
+    fn weapon_ammo_and_armor_biped_slot_mask_carry_into_prepared_stats() {
+        let mut weapon = BaseRecord::default();
+        weapon.kind = "WEAP".into();
+        weapon.item_stats = OpenMwItemStats::Weapon {
+            damage: Some(10),
+            max_condition: None,
+            clip_size: None,
+            speed: None,
+            reach: None,
+            ammo_form_id: Some(0x0000_00aa),
+        };
+        let mut armor = BaseRecord::default();
+        armor.kind = "ARMO".into();
+        armor.item_stats = OpenMwItemStats::Apparel {
+            armor_rating: None,
+            max_condition: None,
+            biped_slot_mask: Some(0x0000_0005),
+        };
+        let bases = HashMap::from([(1, weapon), (2, armor)]);
+        let catalog = build_item_catalog(&bases, &HashMap::new(), &[], &HashMap::new(), "abc");
+        let weapon_stats = &catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 1)
+            .unwrap()
+            .stats;
+        assert!(matches!(
+            weapon_stats,
+            PreparedItemStats::Weapon {
+                ammo_form_id: Some(0x0000_00aa),
+                ..
+            }
+        ));
+        let armor_stats = &catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 2)
+            .unwrap()
+            .stats;
+        assert!(matches!(
+            armor_stats,
+            PreparedItemStats::Apparel {
+                biped_slot_mask: Some(0x0000_0005),
+                ..
+            }
         ));
     }
 

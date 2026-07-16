@@ -33,6 +33,16 @@ pub(crate) fn run_view(
             if manifest.item_catalog_revision.as_deref() != Some(catalog.revision.as_str()) {
                 anyhow::bail!("item catalog revision does not match scene manifest");
             }
+            // A manifest/catalog pair from an older build cross-matches
+            // above even though its shape is stale (serde-defaulted fields
+            // silently degrade equip rules); pin the pair to this build's
+            // catalog revision instead of loading it degraded.
+            if catalog.revision != ITEM_CATALOG_REVISION {
+                anyhow::bail!(
+                    "item catalog revision {} is stale, expected {ITEM_CATALOG_REVISION}; run `prepare` again",
+                    catalog.revision,
+                );
+            }
             if catalog.source_fingerprint != manifest.source_fingerprint {
                 anyhow::bail!(
                     "item catalog fingerprint {} does not match scene {}",
@@ -111,6 +121,7 @@ pub(crate) fn run_view(
     audio::install(&mut app);
     interaction::install(&mut app);
     pipboy::install(&mut app);
+    pipboy_reader::install(&mut app);
     animation::install(&mut app);
     console::install(&mut app);
     console_ui::install(&mut app);
@@ -172,6 +183,79 @@ pub(crate) fn run_view(
                         .collect()
                 });
             app.insert_resource(interaction::PlayerInventory::from_stack_states(stacks));
+            // Issue #98 (F98.4): rebuild the equipped set and hotkey
+            // bindings directly from persisted entries -- see
+            // `player::equipment::EquipmentState::restore`'s doc comment
+            // for why this trusts the save rather than replaying `equip`.
+            app.insert_resource(interaction::PlayerEquipment::restore(
+                player_state
+                    .equipped
+                    .iter()
+                    .filter(|item| item.kind == crate::save::EquippedKind::Apparel)
+                    .flat_map(|item| {
+                        let key = inventory::StackKey {
+                            base_form_id: item.base_form_id,
+                            condition: item.condition,
+                        };
+                        let mask = item_catalog
+                            .items
+                            .iter()
+                            .find(|catalog_item| catalog_item.base_form_id == item.base_form_id)
+                            .and_then(|catalog_item| match &catalog_item.stats {
+                                PreparedItemStats::Apparel {
+                                    biped_slot_mask, ..
+                                } => *biped_slot_mask,
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                        player::equipment::slots_from_mask(mask)
+                            .into_iter()
+                            .map(move |slot| (slot, key))
+                            .collect::<Vec<_>>()
+                    }),
+                player_state
+                    .equipped
+                    .iter()
+                    .find(|item| item.kind == crate::save::EquippedKind::Weapon)
+                    .map(|item| {
+                        let ammo_form_id = item_catalog
+                            .items
+                            .iter()
+                            .find(|catalog_item| catalog_item.base_form_id == item.base_form_id)
+                            .and_then(|catalog_item| match &catalog_item.stats {
+                                PreparedItemStats::Weapon { ammo_form_id, .. } => *ammo_form_id,
+                                _ => None,
+                            });
+                        (
+                            inventory::StackKey {
+                                base_form_id: item.base_form_id,
+                                condition: item.condition,
+                            },
+                            ammo_form_id,
+                        )
+                    }),
+                player_state
+                    .equipped
+                    .iter()
+                    .find(|item| item.kind == crate::save::EquippedKind::Ammo)
+                    .map(|item| inventory::StackKey {
+                        base_form_id: item.base_form_id,
+                        condition: item.condition,
+                    }),
+            ));
+            let mut hotkeys = bindings::HotkeyBindings::default();
+            for (index, binding) in player_state.hotkeys.iter().enumerate() {
+                if let Some(binding) = binding {
+                    hotkeys.assign(
+                        (index + 1) as u8,
+                        inventory::StackKey {
+                            base_form_id: binding.base_form_id,
+                            condition: binding.condition,
+                        },
+                    );
+                }
+            }
+            app.insert_resource(hotkeys);
         }
         app.insert_resource(canonical);
         app.insert_resource(world_items::NextRuntimeItemId(save.next_runtime_item_id));

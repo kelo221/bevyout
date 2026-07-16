@@ -225,6 +225,36 @@ mod item_rules;
 #[path = "../src/viewer/world_items/drop_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod drop_policy;
+// `viewer::interaction::item_use` (issue #99) is dependency-free (std only,
+// no Bevy) like `item_rules`, so it is included verbatim too.
+#[path = "../src/viewer/interaction/item_use.rs"]
+#[allow(dead_code, unused_imports)]
+mod item_use;
+// `viewer::player::equipment` (issue #98) reuses `viewer::inventory::StackKey`
+// via a relative `super::super::inventory::StackKey` import (the same
+// nesting-depth trick `vsa::prepare::selectors` uses for `vsa::paths`), so it
+// is nested two modules deep here behind a `viewer_player` stand-in that
+// aliases the existing `inventory_policy` include as `inventory` -- mirroring
+// how `vsa_bake` above aliases `manifest`/`prepare` for `bake::plan`.
+#[path = "."]
+mod viewer_player {
+    pub mod inventory {
+        pub(crate) use crate::inventory_policy::*;
+    }
+    #[path = "."]
+    pub mod player {
+        #[path = "../src/viewer/player/equipment.rs"]
+        #[allow(dead_code, unused_imports)]
+        pub mod equipment;
+    }
+}
+use viewer_player::player::equipment;
+// The serde/std-only recipe validation seam keeps this executable-spec
+// fixture independent of Bevy and game data. Parser/catalog integration is
+// covered by the recipe unit tests.
+#[path = "../src/vsa/recipe.rs"]
+#[allow(dead_code, unused_imports)]
+mod recipe_policy;
 
 use assets::AssetConversion;
 use cucumber::{World as _, given, then, when};
@@ -411,6 +441,20 @@ struct BevyoutWorld {
     drop_blocked_count: usize,
     drop_all_blocked: bool,
     drop_decision: Option<drop_policy::DropPlacementDecision>,
+
+    // -- item_use.feature (issue #99) --
+    item_use_stats: Option<item_use::ItemStats>,
+    item_use_quest_item: bool,
+    item_use_action: Option<item_use::ItemUseAction>,
+
+    // -- equipment.feature (issue #98) --
+    equipment_state: equipment::EquipmentState,
+    equip_result: Option<Result<equipment::EquipOutcome, equipment::EquipError>>,
+
+    // -- recipes.feature (issue #117) --
+    recipe_under_test: Option<recipe_policy::PreparedRecipe>,
+    recipe_available_items: std::collections::BTreeSet<u32>,
+    recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
 }
 
 fn find_placement<'a>(
@@ -3823,6 +3867,318 @@ async fn then_drop_distance_is_player_fallback(world: &mut BevyoutWorld) {
         drop_policy::DropPlacementMode::PlayerFallback
     );
     assert_eq!(decision.distance, None);
+}
+
+// item_use.feature (issue #99) -- appended section, do not interleave;
+// new steps for later issues belong below this marker.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^an item with stats (Aid|Key|Misc) quest (yes|no)$")]
+async fn given_item_stats_flat(world: &mut BevyoutWorld, stats: String, quest: String) {
+    world.item_use_stats = Some(match stats.as_str() {
+        "Aid" => item_use::ItemStats::Aid,
+        "Key" => item_use::ItemStats::Key,
+        "Misc" => item_use::ItemStats::Misc,
+        other => panic!("unexpected item stats {other}"),
+    });
+    world.item_use_quest_item = quest == "yes";
+}
+
+#[given(regex = r"^an item with stats (Book|Note) text (yes|no) quest (yes|no)$")]
+async fn given_item_stats_with_text(
+    world: &mut BevyoutWorld,
+    stats: String,
+    has_text: String,
+    quest: String,
+) {
+    let has_text = has_text == "yes";
+    world.item_use_stats = Some(match stats.as_str() {
+        "Book" => item_use::ItemStats::Book { has_text },
+        "Note" => item_use::ItemStats::Note { has_text },
+        other => panic!("unexpected item stats {other}"),
+    });
+    world.item_use_quest_item = quest == "yes";
+}
+
+#[then(regex = r"^the item use action is (Use|Read|Inert)$")]
+async fn then_item_use_action_is(world: &mut BevyoutWorld, expected: String) {
+    let stats = world
+        .item_use_stats
+        .expect("item stats not given for this scenario");
+    world.item_use_action = Some(item_use::classify(stats, world.item_use_quest_item));
+    let expected = match expected.as_str() {
+        "Use" => item_use::ItemUseAction::Use,
+        "Read" => item_use::ItemUseAction::Read,
+        "Inert" => item_use::ItemUseAction::Inert,
+        other => panic!("unexpected item use action {other}"),
+    };
+    assert_eq!(world.item_use_action, Some(expected));
+}
+
+#[when(regex = r"^item 0x([0-9a-fA-F]+) with stats (Aid|Key) quest (yes|no) is used$")]
+async fn when_item_is_used(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    stats: String,
+    quest: String,
+) {
+    let stats = match stats.as_str() {
+        "Aid" => item_use::ItemStats::Aid,
+        "Key" => item_use::ItemStats::Key,
+        other => panic!("unexpected item stats {other}"),
+    };
+    if item_use::classify(stats, quest == "yes") == item_use::ItemUseAction::Use {
+        world.player_inventory.remove(
+            inventory_policy::StackKey {
+                base_form_id: parse_hex(&form_id),
+                condition: None,
+            },
+            item_use::USE_CONSUMES_COUNT,
+        );
+    }
+}
+
+// equipment.feature (issue #98)
+// ---------------------------------------------------------------------
+
+fn equipment_stack_key(hex: &str, condition: &str) -> viewer_player::inventory::StackKey {
+    viewer_player::inventory::StackKey {
+        base_form_id: parse_hex(hex),
+        condition: if condition == "none" {
+            None
+        } else {
+            Some(condition.parse().expect("condition must be a whole number"))
+        },
+    }
+}
+
+#[given(regex = r"^apparel 0x([0-9a-fA-F]+) condition (\S+) mask 0x([0-9a-fA-F]+) is equipped$")]
+async fn given_apparel_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    mask: String,
+) {
+    when_apparel_equipped(world, hex, condition, mask).await;
+}
+
+#[when(regex = r"^apparel 0x([0-9a-fA-F]+) condition (\S+) mask 0x([0-9a-fA-F]+) is equipped$")]
+async fn when_apparel_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    mask: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    let biped_slot_mask = parse_hex(&mask);
+    world.equip_result = Some(
+        world
+            .equipment_state
+            .equip(key, equipment::EquipKind::Apparel { biped_slot_mask }),
+    );
+}
+
+#[given(
+    regex = r"^weapon 0x([0-9a-fA-F]+) condition (\S+) requiring ammo 0x([0-9a-fA-F]+) is equipped$"
+)]
+async fn given_weapon_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    ammo_hex: String,
+) {
+    when_weapon_equipped(world, hex, condition, ammo_hex).await;
+}
+
+#[when(
+    regex = r"^weapon 0x([0-9a-fA-F]+) condition (\S+) requiring ammo 0x([0-9a-fA-F]+) is equipped$"
+)]
+async fn when_weapon_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+    ammo_hex: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    let ammo_form_id = Some(parse_hex(&ammo_hex));
+    world.equip_result = Some(
+        world
+            .equipment_state
+            .equip(key, equipment::EquipKind::Weapon { ammo_form_id }),
+    );
+}
+
+#[given(regex = r"^ammo 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn given_ammo_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    when_ammo_equipped(world, hex, condition).await;
+}
+
+#[when(regex = r"^ammo 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn when_ammo_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    world.equip_result = Some(world.equipment_state.equip(key, equipment::EquipKind::Ammo));
+}
+
+#[then(regex = r"^(?:apparel|weapon|ammo) 0x([0-9a-fA-F]+) condition (\S+) is equipped$")]
+async fn then_stack_is_equipped(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(world.equipment_state.is_equipped(key));
+}
+
+#[then(regex = r"^(?:apparel|weapon|ammo) 0x([0-9a-fA-F]+) condition (\S+) is evicted$")]
+async fn then_stack_is_evicted(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(!world.equipment_state.is_equipped(key));
+    let outcome = world
+        .equip_result
+        .clone()
+        .expect("no equip has been performed yet")
+        .expect("the last equip did not succeed");
+    assert!(
+        outcome.evicted.contains(&key),
+        "expected {key:?} in evicted {:?}",
+        outcome.evicted
+    );
+}
+
+#[then("the equip attempt is rejected as not equippable")]
+async fn then_rejected_not_equippable(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::NotEquippable))
+    );
+}
+
+#[then("the equip attempt is rejected as incompatible ammo")]
+async fn then_rejected_incompatible_ammo(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::IncompatibleAmmo))
+    );
+}
+
+#[then("the equip attempt is rejected with no weapon equipped")]
+async fn then_rejected_no_weapon_equipped(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.equip_result,
+        Some(Err(equipment::EquipError::NoWeaponEquipped))
+    );
+}
+
+#[then(regex = r"^dropping apparel 0x([0-9a-fA-F]+) condition (\S+) is refused while equipped$")]
+async fn then_drop_refused_while_equipped(
+    world: &mut BevyoutWorld,
+    hex: String,
+    condition: String,
+) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(world.equipment_state.is_equipped(key));
+}
+
+#[then(regex = r"^dropping apparel 0x([0-9a-fA-F]+) condition (\S+) is allowed$")]
+async fn then_drop_allowed(world: &mut BevyoutWorld, hex: String, condition: String) {
+    let key = equipment_stack_key(&hex, &condition);
+    assert!(!world.equipment_state.is_equipped(key));
+}
+
+// recipes.feature (issue #117) -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^a recipe with ingredient 0x([0-9a-fA-F]+) quantity (-?\d+) and output 0x([0-9a-fA-F]+) quantity (-?\d+)$"
+)]
+async fn given_recipe(
+    world: &mut BevyoutWorld,
+    ingredient_form_id: String,
+    ingredient_quantity: i32,
+    output_form_id: String,
+    output_quantity: i32,
+) {
+    world.recipe_under_test = Some(recipe_policy::PreparedRecipe {
+        form_id: 0x100,
+        ingredients: vec![recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&ingredient_form_id),
+            quantity: ingredient_quantity,
+            order: 0,
+        }],
+        outputs: vec![recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&output_form_id),
+            quantity: output_quantity,
+            order: 0,
+        }],
+        ..Default::default()
+    });
+}
+
+#[given(regex = r#"^recipe items "([^"]*)" are available$"#)]
+async fn given_recipe_items_available(world: &mut BevyoutWorld, items: String) {
+    world.recipe_available_items = items
+        .split(',')
+        .map(|item| parse_hex(item.trim()))
+        .collect();
+}
+
+#[given(regex = r"^the recipe also has ingredient 0x([0-9a-fA-F]+) quantity (-?\d+)$")]
+async fn given_duplicate_recipe_ingredient(
+    world: &mut BevyoutWorld,
+    item_form_id: String,
+    quantity: i32,
+) {
+    world
+        .recipe_under_test
+        .as_mut()
+        .expect("recipe must be created first")
+        .ingredients
+        .push(recipe_policy::PreparedRecipeItem {
+            item_form_id: parse_hex(&item_form_id),
+            quantity,
+            order: 1,
+        });
+}
+
+#[when("the recipe is validated")]
+async fn when_recipe_validated(world: &mut BevyoutWorld) {
+    let recipe = world
+        .recipe_under_test
+        .as_ref()
+        .expect("recipe must be created first");
+    world.recipe_validation = Some(recipe_policy::validate_recipe(
+        recipe,
+        &world.recipe_available_items,
+    ));
+}
+
+#[then("recipe validation rejects a non-positive quantity")]
+async fn then_recipe_rejects_non_positive_quantity(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.recipe_validation.as_ref(),
+        Some(Err(
+            recipe_policy::RecipeValidationError::NonPositiveQuantity { .. }
+        ))
+    ));
+}
+
+#[then("recipe validation rejects duplicate ingredients")]
+async fn then_recipe_rejects_duplicate_ingredients(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.recipe_validation.as_ref(),
+        Some(Err(
+            recipe_policy::RecipeValidationError::DuplicateIngredient { .. }
+        ))
+    ));
+}
+
+#[then(regex = r"^the recipe ingredient quantity remains (-?\d+)$")]
+async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32) {
+    assert_eq!(
+        world
+            .recipe_under_test
+            .as_ref()
+            .expect("recipe must be created first")
+            .ingredients[0]
+            .quantity,
+        expected
+    );
 }
 
 fn main() {

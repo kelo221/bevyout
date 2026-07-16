@@ -1,9 +1,46 @@
-//! Viewer bindings whose gameplay implementations are not available yet.
+//! Viewer bindings whose gameplay implementations are not available yet,
+//! plus (issue #98) the item/weapon hotkey bindings that are now real.
 
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::{AppState, GameplayModal};
+
+use super::interaction::EquipToggleRequested;
+use super::inventory::StackKey;
+
+/// Issue #98 (F98.3): hotkey digits 1-8, each optionally bound to a
+/// `StackKey` assigned from the Pip-Boy (`pipboy::handle_equip_and_hotkeys`).
+/// Pressing the same digit outside the Pip-Boy (`apply_hotkeys` below)
+/// equips whatever is bound to it.
+#[derive(Resource, Debug, Default, Clone)]
+pub(crate) struct HotkeyBindings([Option<StackKey>; 8]);
+
+impl HotkeyBindings {
+    pub(crate) fn get(&self, number: u8) -> Option<StackKey> {
+        self.0
+            .get(usize::from(number.wrapping_sub(1)))
+            .copied()
+            .flatten()
+    }
+
+    pub(crate) fn assign(&mut self, number: u8, key: StackKey) {
+        if let Some(slot) = self.0.get_mut(usize::from(number.wrapping_sub(1))) {
+            *slot = Some(key);
+        }
+    }
+}
+
+const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
+    (KeyCode::Digit1, 1),
+    (KeyCode::Digit2, 2),
+    (KeyCode::Digit3, 3),
+    (KeyCode::Digit4, 4),
+    (KeyCode::Digit5, 5),
+    (KeyCode::Digit6, 6),
+    (KeyCode::Digit7, 7),
+    (KeyCode::Digit8, 8),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnsupportedAction {
@@ -16,7 +53,6 @@ enum UnsupportedAction {
     Vats,
     Reload,
     Holster,
-    Hotkey(u8),
 }
 
 impl UnsupportedAction {
@@ -31,7 +67,6 @@ impl UnsupportedAction {
             Self::Vats => "V.A.T.S. targeting".into(),
             Self::Reload => "reload".into(),
             Self::Holster => "holster weapon".into(),
-            Self::Hotkey(number) => format!("item/weapon hotkey {number}"),
         }
     }
 }
@@ -44,31 +79,48 @@ fn keyboard_action(key: KeyCode) -> Option<UnsupportedAction> {
         KeyCode::KeyF => Some(UnsupportedAction::ThirdPersonView),
         KeyCode::KeyV => Some(UnsupportedAction::Vats),
         KeyCode::KeyR => Some(UnsupportedAction::Reload),
-        KeyCode::Digit1 => Some(UnsupportedAction::Hotkey(1)),
-        KeyCode::Digit2 => Some(UnsupportedAction::Hotkey(2)),
-        KeyCode::Digit3 => Some(UnsupportedAction::Hotkey(3)),
-        KeyCode::Digit4 => Some(UnsupportedAction::Hotkey(4)),
-        KeyCode::Digit5 => Some(UnsupportedAction::Hotkey(5)),
-        KeyCode::Digit6 => Some(UnsupportedAction::Hotkey(6)),
-        KeyCode::Digit7 => Some(UnsupportedAction::Hotkey(7)),
-        KeyCode::Digit8 => Some(UnsupportedAction::Hotkey(8)),
         _ => None,
     }
 }
 
 pub(crate) fn install(app: &mut App) {
-    app.add_systems(
-        Update,
-        report_unsupported_bindings
-            .run_if(in_state(AppState::InGame))
-            .run_if(in_state(GameplayModal::None)),
-    )
-    .add_systems(
-        Update,
-        report_pipboy_flashlight_hold
-            .run_if(in_state(AppState::InGame))
-            .run_if(in_state(GameplayModal::PipBoy)),
-    );
+    app.init_resource::<HotkeyBindings>()
+        .add_systems(
+            Update,
+            report_unsupported_bindings
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::None)),
+        )
+        .add_systems(
+            Update,
+            apply_hotkeys
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::None)),
+        )
+        .add_systems(
+            Update,
+            report_pipboy_flashlight_hold
+                .run_if(in_state(AppState::InGame))
+                .run_if(in_state(GameplayModal::PipBoy)),
+        );
+}
+
+/// Issue #98 (F98.3): outside the Pip-Boy, pressing a bound hotkey digit
+/// equips (or unequips, since equip is a toggle -- see
+/// `player::equipment::EquipmentState::toggle`) whatever `StackKey` is
+/// bound to it.
+fn apply_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<HotkeyBindings>,
+    mut requests: MessageWriter<EquipToggleRequested>,
+) {
+    for (key_code, number) in HOTKEY_DIGITS {
+        if keys.just_pressed(key_code)
+            && let Some(bound) = bindings.get(number)
+        {
+            requests.write(EquipToggleRequested(bound));
+        }
+    }
 }
 
 fn report_unsupported_bindings(
@@ -104,14 +156,6 @@ fn collect_unsupported_actions(
         KeyCode::KeyF,
         KeyCode::KeyV,
         KeyCode::KeyR,
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-        KeyCode::Digit7,
-        KeyCode::Digit8,
     ] {
         if keys.just_pressed(key)
             && let Some(action) = keyboard_action(key)
@@ -173,19 +217,17 @@ mod tests {
             keyboard_action(KeyCode::KeyV),
             Some(UnsupportedAction::Vats)
         );
-        assert_eq!(
-            keyboard_action(KeyCode::Digit8),
-            Some(UnsupportedAction::Hotkey(8))
-        );
+        // Issue #98: hotkeys 1-8 are real actions now, not placeholders.
+        assert_eq!(keyboard_action(KeyCode::Digit8), None);
     }
 
     #[test]
     fn unsupported_action_labels_are_stable() {
-        assert_eq!(UnsupportedAction::Hotkey(3).label(), "item/weapon hotkey 3");
         assert_eq!(
             UnsupportedAction::ThirdPersonView.label(),
             "third-person view"
         );
+        assert_eq!(UnsupportedAction::Holster.label(), "holster weapon");
     }
 
     #[test]
@@ -205,6 +247,113 @@ mod tests {
         keys.press(KeyCode::KeyF);
         assert!(
             collect_unsupported_actions(&keys, &buttons, false, GameplayModal::Console).is_empty()
+        );
+    }
+
+    // -- hotkey bindings (issue #98, F98.3) --------------------------------
+
+    fn stack_key(base_form_id: u32) -> StackKey {
+        StackKey {
+            base_form_id,
+            condition: None,
+        }
+    }
+
+    #[test]
+    fn hotkey_bindings_assign_and_get_round_trip_by_slot_number() {
+        let mut bindings = HotkeyBindings::default();
+        assert_eq!(bindings.get(1), None);
+        bindings.assign(1, stack_key(5));
+        bindings.assign(8, stack_key(9));
+        assert_eq!(bindings.get(1), Some(stack_key(5)));
+        assert_eq!(bindings.get(8), Some(stack_key(9)));
+        assert_eq!(bindings.get(2), None);
+        // Rebinding a slot overwrites it.
+        bindings.assign(1, stack_key(6));
+        assert_eq!(bindings.get(1), Some(stack_key(6)));
+    }
+
+    #[test]
+    fn hotkey_bindings_ignore_out_of_range_slot_numbers() {
+        let mut bindings = HotkeyBindings::default();
+        bindings.assign(0, stack_key(5));
+        bindings.assign(9, stack_key(5));
+        assert_eq!(bindings.get(0), None);
+        assert_eq!(bindings.get(9), None);
+    }
+
+    fn hotkey_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .init_state::<AppState>()
+            .init_state::<GameplayModal>()
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_message::<EquipToggleRequested>();
+        install(&mut app);
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn pressing_a_bound_hotkey_outside_pipboy_writes_an_equip_toggle_request() {
+        let mut app = hotkey_test_app();
+        let key = stack_key(7);
+        app.world_mut()
+            .resource_mut::<HotkeyBindings>()
+            .assign(4, key);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit4);
+        app.update();
+        let messages = app.world().resource::<Messages<EquipToggleRequested>>();
+        let request = messages
+            .iter_current_update_messages()
+            .next()
+            .expect("expected an EquipToggleRequested message");
+        assert_eq!(request.0, key);
+    }
+
+    #[test]
+    fn pressing_an_unbound_hotkey_writes_no_request() {
+        let mut app = hotkey_test_app();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit4);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn hotkeys_do_not_fire_while_the_pipboy_is_open() {
+        let mut app = hotkey_test_app();
+        let key = stack_key(7);
+        app.world_mut()
+            .resource_mut::<HotkeyBindings>()
+            .assign(4, key);
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Digit4);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0
         );
     }
 }
