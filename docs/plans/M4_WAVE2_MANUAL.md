@@ -72,14 +72,27 @@ re-prepare once because the pipeline revision changed
    nav graph: meshes 2, polygons 1338, vertices 1198, doors 3, external 0, diagnostics warn 0 error 0
    ```
 
-7. (Regression) Launch the viewer on any prepared cell:
+7. See the nav graph in game (#128). Launch the viewer:
 
    ```
    cargo run-dev -- view --manifest .bevyout/cache/scenes/000151e3/scene.ron
    ```
 
-   Expected: the cell loads and plays exactly as before this wave; the nav
-   graph has no runtime consumer yet.
+   Open the console and run `tnm` (alias `togglenavmesh`). Expected reply:
+
+   ```
+   nav mesh visualization on (1 meshes, 183 triangles)
+   ```
+
+   and the walkable floor is covered by flat triangles, each a visibly
+   different color, lifted just above the ground. `tnm` again replies
+   `nav mesh visualization off` and hides the overlay; a third `tnm`
+   shows it again without rebuilding. In a cell prepared without any
+   NAVM records, `tnm` replies `no nav graph prepared for this cell`.
+
+8. (Regression) Aside from the `tnm` overlay, the cell loads and plays
+   exactly as before this wave; the nav graph has no other runtime
+   consumer yet.
 
 ## Known diagnostics on real data
 
