@@ -1515,3 +1515,5 @@ fn unknown_rcpe_subrecords_are_retained_as_diagnostics() {
 mod actor_support;
 
 mod actors;
+
+mod navmesh;

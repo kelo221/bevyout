@@ -28,10 +28,14 @@ The adaptation is intentionally limited to the Fallout cell vertical slice:
   use that reference's parent cell as the destination cell.
 
 It is a Rust adaptation, not a C++ binding. No OpenMW runtime, OSG, Bullet,
-Detour, or VFS code is compiled into bevyout. Fallout 3's `NAVM` chunks are
-retained as source metadata only because the supplied OpenMW code recognizes
-but does not decode the FO3 `NVVX`, `NVTR`, `NVCA`, `NVDP`, `NVGD`, and `NVEX`
-payloads.
+Detour, or VFS code is compiled into bevyout. Fallout 3's `NAVM` subrecords
+(`NVER`, `DATA`, `NVVX`, `NVTR`, `NVCA`, `NVDP`, `NVGD`, `NVEX`) and the
+`NAVI` singleton's `NVER`/`NVMI` entries are decoded (issue #111, M4 wave 2)
+from the fopdoc FalloutNV pages rather than adapted from OpenMW, whose
+supplied `loadnavm.cpp` skips exactly these per-field FO3/FNV subrecords in
+favour of the newer combined `NVNM` chunk; the raw record payload is still
+retained as source metadata. `NVGD`'s undocumented trailing triangle grid
+and `NAVI.NVCI` remain opaque with diagnostics.
 
 The importer preserves CELL lighting instructions for the viewer and Blender
 bake path. Original Fallout NIF/BSA lightmap extraction is intentionally not

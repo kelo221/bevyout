@@ -16,6 +16,7 @@ mod actors;
 mod binary;
 mod enable;
 mod inventory;
+mod navmesh;
 mod reader;
 mod records;
 
@@ -24,6 +25,7 @@ pub(crate) use actors::*;
 pub(crate) use binary::*;
 pub(crate) use enable::*;
 pub(crate) use inventory::*;
+pub(crate) use navmesh::*;
 pub(crate) use reader::*;
 pub(crate) use records::*;
 
@@ -280,21 +282,6 @@ pub(crate) struct DoorEdgeRecord {
     pub(crate) rotation: [f32; 3],
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct NavMeshRecord {
-    pub(crate) form_id: u32,
-    pub(crate) flags: u32,
-    pub(crate) version: Option<u32>,
-    pub(crate) payload: Vec<u8>,
-    pub(crate) chunks: Vec<NavMeshChunk>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NavMeshChunk {
-    pub(crate) signature: String,
-    pub(crate) byte_len: u32,
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct SoundRecord {
@@ -502,6 +489,10 @@ pub(crate) struct ParsedPlugin {
     pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
     pub(crate) references: Vec<ReferenceRecord>,
     pub(crate) navmeshes: Vec<NavMeshRecord>,
+    /// Content-set-wide `NAVI` singleton (issue #111, M4 wave 2):
+    /// last-loader-wins like `WRLD`/`IMGS`, independent of which cell is
+    /// selected.
+    pub(crate) navigation: Option<NaviRecord>,
     pub(crate) cell: Option<CellInfo>,
     pub(crate) cell_metadata: Option<CellMetadata>,
     pub(crate) diagnostics: Vec<String>,
@@ -671,6 +662,13 @@ impl ParsedContentSet {
                     .or_default() += 1;
             }
         }
+        let mut navmeshes = state
+            .navmeshes
+            .into_values()
+            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
+            .collect::<Vec<_>>();
+        navmeshes.sort_by_key(|navmesh| navmesh.form_id);
+
         let mut diagnostics = ignored
             .into_iter()
             .map(|((record, subrecord), count)| {
@@ -691,14 +689,13 @@ impl ParsedContentSet {
             .collect::<Vec<_>>();
         diagnostics.extend(state.recipe_diagnostics);
         diagnostics.extend(state.actor_support_diagnostics);
+        diagnostics.extend(state.navigation_diagnostics);
+        for navmesh in &navmeshes {
+            for message in &navmesh.diagnostics {
+                diagnostics.push(format!("NAVM {:08x}: {message}", navmesh.form_id));
+            }
+        }
         diagnostics.sort();
-
-        let mut navmeshes = state
-            .navmeshes
-            .into_values()
-            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
-            .collect::<Vec<_>>();
-        navmeshes.sort_by_key(|navmesh| navmesh.form_id);
 
         Ok(ParsedPlugin {
             bases: state.bases,
@@ -715,6 +712,7 @@ impl ParsedContentSet {
             lighting_templates: state.lighting_templates,
             references,
             navmeshes,
+            navigation: state.navigation,
             cell: state.cells.remove(&target_cell),
             cell_metadata: state.cell_metadata.remove(&target_cell),
             diagnostics,
@@ -744,6 +742,7 @@ pub(crate) struct ParsedState {
     lighting_templates: HashMap<u32, LightingTemplateRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
+    navigation: Option<NaviRecord>,
     cells: HashMap<u32, CellInfo>,
     cell_metadata: HashMap<u32, CellMetadata>,
     cell_winning_plugins: HashMap<u32, String>,
@@ -751,6 +750,7 @@ pub(crate) struct ParsedState {
     worldspaces: HashMap<u32, WorldspaceRecord>,
     recipe_diagnostics: Vec<String>,
     actor_support_diagnostics: Vec<String>,
+    navigation_diagnostics: Vec<String>,
 }
 
 #[derive(Debug)]

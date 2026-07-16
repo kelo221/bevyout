@@ -167,7 +167,17 @@ components/esm4/actor.hpp 0c0b76f589e3818356e3eaa98cd79f79fbb55f4dfd3a9212c39264
 - Unknown record and subrecord types are ignored or represented semantically;
   malformed size boundaries remain hard errors.
 - The original runtime object hierarchy was not copied.
-- FO3 NAVM chunks are catalogued and retained, not decoded.
+- FO3 `NAVM`/`NAVI` subrecord decoding (`navmesh.rs`, issue #111, M4 wave 2)
+  is a fopdoc-derived extension, not an OpenMW port: the supplied snapshot's
+  `loadnavm.cpp` explicitly skips the per-field FO3/FNV `NVER`/`DATA`/
+  `NVVX`/`NVTR`/`NVCA`/`NVDP`/`NVGD`/`NVEX` subrecords (decoding only the
+  newer combined `NVNM` chunk), and its `loadnavi.cpp` `NavMeshInfo::load`
+  targets the newer `NVMI` layout, which disagrees with the fopdoc FO3/FNV
+  16-byte `NVMI` header. The fopdoc layouts were verified against real
+  Fallout3.esm data (the decoded `NVMI` NAVM/location FormIDs match the
+  cell's actual NAVM and CELL records), which is the FO3-wins tie-break this
+  wave's brief calls for. The raw NAVM record payload continues to be
+  catalogued and retained alongside the decode.
 - Sound, sound-descriptor, acoustic-space, music, lighting-template, activator,
   terminal, and tactical-activator fields were ported as owned metadata for
   the audio/world-state milestone. Their source files are listed above; the

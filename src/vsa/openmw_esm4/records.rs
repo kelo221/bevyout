@@ -843,30 +843,6 @@ pub(crate) fn ignored_signatures(subs: &[Subrecord], supported: &[&str]) -> Vec<
     signatures
 }
 
-pub(crate) fn parse_navmesh(
-    subs: &[Subrecord],
-    form_id: u32,
-    flags: u32,
-    payload: Vec<u8>,
-) -> NavMeshRecord {
-    NavMeshRecord {
-        form_id,
-        flags,
-        version: sub(subs, "NVER").and_then(|data| {
-            data.get(..4)
-                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
-        }),
-        chunks: subs
-            .iter()
-            .map(|sub| NavMeshChunk {
-                signature: sub.signature.clone(),
-                byte_len: sub.data.len() as u32,
-            })
-            .collect(),
-        payload,
-    }
-}
-
 pub(crate) fn parse_image_space(subs: &[Subrecord], form_id: u32) -> Option<ImageSpaceInfo> {
     let data = sub(subs, "DNAM")?;
     let mut image_space = ImageSpaceInfo {
