@@ -179,6 +179,13 @@ mod repath;
 #[allow(dead_code, unused_imports)]
 mod ledger_policy;
 
+// `viewer::nav::movement_policy` (issue #114, M4 wave 5) is std-only, same
+// flat top-level include rationale as `door_link`/`repath`/`ledger_policy`
+// above.
+#[path = "../src/viewer/nav/movement_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod movement_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -592,6 +599,29 @@ struct BevyoutWorld {
     nav_ledger_claim_result: Option<ledger_policy::ClaimResult>,
     nav_ledger_route_door: Option<u32>,
     nav_ledger_eligibility: Option<ledger_policy::SwapEligibility>,
+
+    // -- nav_movement.feature (issue #114, M4 wave 5) --
+    nav_movement_grounded_observation: movement_policy::GroundedObservation,
+    nav_movement_grounded_decision: Option<bool>,
+    nav_movement_velocity_observation: Option<movement_policy::VelocityObservation>,
+    nav_movement_collision_outcome: Option<movement_policy::CollisionOutcome>,
+    nav_movement_stuck_observation: Option<movement_policy::StuckObservation>,
+    nav_movement_stuck_decision: Option<movement_policy::StuckDecision>,
+
+    // -- nav_door_gate.feature (issue #137, M4 wave 5) --
+    nav_door_gate_observation: door_link::CrossingObservation,
+
+    // -- nav_movement.feature (issue #114 added scope, M4 wave 5): solve-rate
+    // divisor gating `LandmassSystems::Update`.
+    nav_solve_step: u64,
+    nav_solve_interval: u32,
+    nav_solve_decision: Option<bool>,
+
+    // -- nav_movement.feature (issue #114 added scope, M4 wave 5): solve-
+    // output interpolation fraction.
+    nav_solve_steps_since_solve: u32,
+    nav_solve_blend_interval: u32,
+    nav_solve_blend_fraction: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -6585,6 +6615,182 @@ async fn then_swap_eligibility(world: &mut BevyoutWorld, expected: String) {
         other => panic!("unknown eligibility {other:?}"),
     };
     assert_eq!(world.nav_ledger_eligibility, Some(expected));
+}
+
+// ---------------------------------------------------------------------
+// nav_movement.feature (issue #114, M4 wave 5) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^a grounded observation with walkable plane (true|false) and stepped up (true|false)$"
+)]
+async fn given_grounded_observation(
+    world: &mut BevyoutWorld,
+    has_walkable_plane: String,
+    stepped_up: String,
+) {
+    world.nav_movement_grounded_observation = movement_policy::GroundedObservation {
+        has_walkable_plane: has_walkable_plane == "true",
+        stepped_up: stepped_up == "true",
+    };
+}
+
+#[when("the grounded decision is made")]
+async fn when_grounded_decision_made(world: &mut BevyoutWorld) {
+    world.nav_movement_grounded_decision = Some(movement_policy::decide_grounded(
+        world.nav_movement_grounded_observation,
+    ));
+}
+
+#[then(regex = r"^the agent is (not )?grounded$")]
+async fn then_agent_is_grounded(world: &mut BevyoutWorld, negation: String) {
+    let expected = negation.is_empty();
+    assert_eq!(world.nav_movement_grounded_decision, Some(expected));
+}
+
+#[given(
+    regex = r"^a velocity observation with desired speed ([\d.]+) and achieved speed ([\d.]+)$"
+)]
+async fn given_velocity_observation(
+    world: &mut BevyoutWorld,
+    desired_horizontal_speed: f32,
+    achieved_horizontal_speed: f32,
+) {
+    world.nav_movement_velocity_observation = Some(movement_policy::VelocityObservation {
+        desired_horizontal_speed,
+        achieved_horizontal_speed,
+    });
+}
+
+#[when("the collision outcome decision is made")]
+async fn when_collision_outcome_decision_made(world: &mut BevyoutWorld) {
+    let observation = world
+        .nav_movement_velocity_observation
+        .expect("a velocity observation must be given first");
+    world.nav_movement_collision_outcome =
+        Some(movement_policy::decide_collision_outcome(observation));
+}
+
+#[then(regex = r"^the collision outcome is (clear|blocked)$")]
+async fn then_collision_outcome(world: &mut BevyoutWorld, expected: String) {
+    let expected = match expected.as_str() {
+        "clear" => movement_policy::CollisionOutcome::Clear,
+        "blocked" => movement_policy::CollisionOutcome::Blocked,
+        other => panic!("unknown collision outcome {other:?}"),
+    };
+    assert_eq!(world.nav_movement_collision_outcome, Some(expected));
+}
+
+#[given(
+    regex = r"^a stuck observation with distance ([\d.]+), best distance ([\d.]+), ticks without progress (\d+), recovery active (true|false)$"
+)]
+async fn given_stuck_observation(
+    world: &mut BevyoutWorld,
+    distance_to_target: f32,
+    best_distance_so_far: f32,
+    ticks_without_progress: u32,
+    recovery_active: String,
+) {
+    world.nav_movement_stuck_observation = Some(movement_policy::StuckObservation {
+        distance_to_target,
+        best_distance_so_far,
+        ticks_without_progress,
+        recovery_active: recovery_active == "true",
+    });
+}
+
+#[when("the stuck decision is made")]
+async fn when_stuck_decision_made(world: &mut BevyoutWorld) {
+    let observation = world
+        .nav_movement_stuck_observation
+        .expect("a stuck observation must be given first");
+    world.nav_movement_stuck_decision = Some(movement_policy::decide_stuck(observation));
+}
+
+#[then(regex = r"^the stuck decision is (progressing|start-recovery|recovery-pending|stuck)$")]
+async fn then_stuck_decision(world: &mut BevyoutWorld, expected: String) {
+    let expected = match expected.as_str() {
+        "progressing" => movement_policy::StuckDecision::Progressing,
+        "start-recovery" => movement_policy::StuckDecision::StartRecovery,
+        "recovery-pending" => movement_policy::StuckDecision::RecoveryPending,
+        "stuck" => movement_policy::StuckDecision::Stuck,
+        other => panic!("unknown stuck decision {other:?}"),
+    };
+    assert_eq!(world.nav_movement_stuck_decision, Some(expected));
+}
+
+// ---------------------------------------------------------------------
+// nav_door_gate.feature (issue #137, M4 wave 5) -- appended section, do
+// not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a mid-route door that is (open|closed) and (unlocked|locked)$")]
+async fn given_mid_route_door_observation(world: &mut BevyoutWorld, open: String, locked: String) {
+    world.nav_door_gate_observation = door_link::CrossingObservation {
+        door_open: open == "open",
+        door_locked: locked == "locked",
+    };
+}
+
+#[then(regex = r"^the crossing gate is (pass|wait|blocked)$")]
+async fn then_crossing_gate(world: &mut BevyoutWorld, expected: String) {
+    let gate = door_link::crossing_gate(world.nav_door_gate_observation);
+    let expected = match expected.as_str() {
+        "pass" => door_link::CrossingGate::Pass,
+        "wait" => door_link::CrossingGate::Wait,
+        "blocked" => door_link::CrossingGate::Blocked,
+        other => panic!("unknown crossing gate {other:?}"),
+    };
+    assert_eq!(gate, expected);
+}
+
+// ---------------------------------------------------------------------
+// nav_movement.feature (issue #114 added scope, M4 wave 5) -- solve-rate
+// divisor. Appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a solve step count of (\d+) and an interval of (\d+)$")]
+async fn given_solve_step_and_interval(world: &mut BevyoutWorld, step_count: u64, interval: u32) {
+    world.nav_solve_step = step_count;
+    world.nav_solve_interval = interval;
+}
+
+#[when("the solve decision is made")]
+async fn when_solve_decision_made(world: &mut BevyoutWorld) {
+    world.nav_solve_decision = Some(movement_policy::should_solve(
+        world.nav_solve_step,
+        world.nav_solve_interval,
+    ));
+}
+
+#[then(regex = r"^the solve decision is (solve|skip)$")]
+async fn then_solve_decision(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected == "solve";
+    assert_eq!(world.nav_solve_decision, Some(expected));
+}
+
+#[given(regex = r"^(\d+) steps since the last solve and an interval of (\d+)$")]
+async fn given_steps_since_solve_and_interval(
+    world: &mut BevyoutWorld,
+    steps_since_solve: u32,
+    interval: u32,
+) {
+    world.nav_solve_steps_since_solve = steps_since_solve;
+    world.nav_solve_blend_interval = interval;
+}
+
+#[when("the solve blend fraction is computed")]
+async fn when_solve_blend_fraction_computed(world: &mut BevyoutWorld) {
+    world.nav_solve_blend_fraction = Some(movement_policy::solve_blend_fraction(
+        world.nav_solve_steps_since_solve,
+        world.nav_solve_blend_interval,
+    ));
+}
+
+#[then(regex = r"^the solve blend fraction is ([\d.]+)$")]
+async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.nav_solve_blend_fraction, Some(expected));
 }
 
 fn main() {

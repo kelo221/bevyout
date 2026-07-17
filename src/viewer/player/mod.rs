@@ -172,7 +172,12 @@ impl FootstepState {
 
 #[derive(Component, Debug, Default)]
 pub(crate) struct KccState {
-    velocity: Vec3,
+    /// `pub(crate)` (issue #114 added scope, M4 wave 5) so
+    /// `nav/agent.rs`'s player-mirroring landmass `Character3d` can read the
+    /// player's *actual* post-collision KCC velocity every fixed tick --
+    /// the only cross-module edit this wave makes to the player controller
+    /// itself.
+    pub(crate) velocity: Vec3,
     grounded: bool,
 }
 
