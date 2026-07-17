@@ -6913,6 +6913,18 @@ async fn then_every_eroded_polygon_keeps_winding_sign(world: &mut BevyoutWorld) 
     }
 }
 
+#[then("the erosion relax passes is greater than 0")]
+async fn then_erosion_relax_passes_positive(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert!(
+        result.relax_passes > 0,
+        "expected at least one corrective pass, got {result:?}"
+    );
+}
+
 fn main() {
     futures::executor::block_on(async {
         BevyoutWorld::cucumber()

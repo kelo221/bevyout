@@ -43,3 +43,28 @@ Feature: Navmesh clearance erosion for agent radius
     And erosion mesh has polygon 1 with vertices 0,2,3
     When the erosion mesh is eroded by radius 0.35
     Then the erosion pinch guard count is 0
+
+  Scenario: A shared vertex's combined push never inverts a neighboring triangle
+    # Regression (real-data failure on Vault 101 Entrance mesh 0001862b,
+    # polygon 164: "concave or has edges in clockwise order"). Vertex 0
+    # is a narrow-corridor corner (polygons 0 and 1) that also anchors an
+    # unrelated thin triangle (polygon 2) sticking out to one side. The
+    # corridor's own boundary edges push vertex 0 hard enough that, at
+    # full erosion strength, the thin triangle it shares no boundary edge
+    # with still flips -- exactly the "a shared vertex's combined
+    # displacement inverts a neighboring polygon" class a per-polygon-
+    # isolated check misses.
+    Given an erosion mesh
+    And erosion mesh has vertex 0 at 0, 0, 0
+    And erosion mesh has vertex 1 at 2, 0, 0
+    And erosion mesh has vertex 2 at 2, 0, 0.1
+    And erosion mesh has vertex 3 at 0, 0, 0.1
+    And erosion mesh has vertex 4 at -1, 0, 0.05
+    And erosion mesh has vertex 5 at -1, 0, -0.05
+    And erosion mesh has polygon 0 with vertices 0,1,2
+    And erosion mesh has polygon 1 with vertices 0,2,3
+    And erosion mesh has polygon 2 with vertices 0,4,5
+    When the erosion mesh is eroded by radius 0.35
+    Then the erosion pinch guard count is greater than 0
+    And the erosion relax passes is greater than 0
+    And every eroded polygon keeps its original winding sign
