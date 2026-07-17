@@ -1,6 +1,7 @@
 //! Viewer cursor, adjustment, and diagnostic controls.
 
 use bevy::input::keyboard::{Key, KeyboardFocusLost};
+use bevy::window::WindowFocused;
 
 use super::scene::CellDirectionalLight;
 use super::*;
@@ -10,16 +11,41 @@ use super::*;
 /// from the window) but never releases the logical `ButtonInput<Key>`
 /// resource. A stuck `Key::Super` then makes `bevy_ui_widgets`' text input
 /// treat every subsequent keystroke as a Cmd-chord, breaking console typing.
-/// Mirror Bevy's own `release_all()` call for the logical resource here; this
-/// system (and its registration) can be deleted once upstream fixes the
-/// asymmetry. Runs in `PreUpdate` after `bevy::input::InputSystems` so it is
-/// not immediately clobbered by that frame's `ButtonInput::clear()`.
-pub(crate) fn release_stuck_logical_modifiers_on_focus_lost(
+///
+/// `KeyboardFocusLost` alone is not enough. `bevy_winit`'s
+/// `check_keyboard_focus_lost` (bevy_winit 0.19.0 `src/system.rs`, ~line 74)
+/// only emits synthetic key-up events and `KeyboardFocusLost` when it drains
+/// a frame's `WindowFocused` messages and finds `focus_gained == false` --
+/// i.e. no `WindowFocused { focused: true }` was read that frame. macOS's
+/// Cmd+Shift+5 screen-recording overlay stalls the winit event loop long
+/// enough that the `Focused(false)`/`Focused(true)` pair for that window
+/// coalesces into a single frame's message batch: `focus_gained` ends up
+/// `true`, so neither the synthetic releases nor `KeyboardFocusLost` fire,
+/// and Bevy's own `ButtonInput<KeyCode>` release_all() is suppressed too --
+/// both the physical and logical modifier state stay stuck.
+///
+/// So this system triggers on either signal: any `WindowFocused` message at
+/// all (covers the same-frame bounce, in both directions) or a
+/// `KeyboardFocusLost` message (belt and braces, covering whatever winit
+/// path emits it without a paired `WindowFocused`). On trigger it releases
+/// both `ButtonInput<Key>` and `ButtonInput<KeyCode>`, mirroring and
+/// extending Bevy's own `release_all()`. Trade-off accepted: a modifier
+/// genuinely held across a real refocus now reads as released until
+/// re-pressed, which is benign compared to a permanently stuck modifier.
+/// Runs in `PreUpdate` after `bevy::input::InputSystems` so it is not
+/// immediately clobbered by that frame's `ButtonInput::clear()`. This system
+/// (and its registration) can be deleted once upstream fixes the asymmetry.
+pub(crate) fn release_stuck_keys_on_focus_change(
     mut key_input: ResMut<ButtonInput<Key>>,
+    mut key_code_input: ResMut<ButtonInput<KeyCode>>,
+    mut window_focused: MessageReader<WindowFocused>,
     mut focus_lost: MessageReader<KeyboardFocusLost>,
 ) {
-    if focus_lost.read().next().is_some() {
+    let window_focus_changed = window_focused.read().next().is_some();
+    let keyboard_focus_lost = focus_lost.read().next().is_some();
+    if window_focus_changed || keyboard_focus_lost {
         key_input.release_all();
+        key_code_input.release_all();
     }
 }
 
@@ -355,29 +381,24 @@ mod tests {
     use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
     use bevy::input::{ButtonInput, InputPlugin, InputSystems};
     use bevy::prelude::{App, IntoScheduleConfigs, MinimalPlugins};
+    use bevy::window::WindowFocused;
 
     use super::{
-        horizontal_to_vertical_fov, mouse_look_is_safe,
-        release_stuck_logical_modifiers_on_focus_lost,
+        horizontal_to_vertical_fov, mouse_look_is_safe, release_stuck_keys_on_focus_change,
     };
 
-    /// Issue #131 regression test: a real `bevy_input::InputPlugin` (so
-    /// `keyboard_input_system` runs exactly as it does in the viewer) drives
-    /// `Key::Super` pressed, then a `KeyboardFocusLost` message arrives.
-    /// Without `release_stuck_logical_modifiers_on_focus_lost` registered
-    /// after `InputSystems`, `ButtonInput<Key>` stays stuck on `Key::Super`
-    /// even though `ButtonInput<KeyCode>` correctly clears -- this is the
-    /// asymmetry that broke console typing after Cmd+Tab.
-    #[test]
-    fn focus_lost_releases_stuck_logical_super_after_input_systems() {
+    fn app_with_system() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, InputPlugin)).add_systems(
-            PreUpdate,
-            release_stuck_logical_modifiers_on_focus_lost.after(InputSystems),
-        );
+        app.add_plugins((MinimalPlugins, InputPlugin))
+            .add_message::<WindowFocused>()
+            .add_systems(
+                PreUpdate,
+                release_stuck_keys_on_focus_change.after(InputSystems),
+            );
+        app
+    }
 
-        // Frame 1: press Super through the real keyboard_input_system, the
-        // same path winit uses.
+    fn press_super(app: &mut App) {
         app.world_mut()
             .resource_mut::<Messages<KeyboardInput>>()
             .write(KeyboardInput {
@@ -388,6 +409,22 @@ mod tests {
                 repeat: false,
                 window: Entity::PLACEHOLDER,
             });
+    }
+
+    /// Issue #131 regression test: a real `bevy_input::InputPlugin` (so
+    /// `keyboard_input_system` runs exactly as it does in the viewer) drives
+    /// `Key::Super` pressed, then a `KeyboardFocusLost` message arrives.
+    /// Without `release_stuck_keys_on_focus_change` registered after
+    /// `InputSystems`, `ButtonInput<Key>` stays stuck on `Key::Super` even
+    /// though `ButtonInput<KeyCode>` correctly clears -- this is the
+    /// asymmetry that broke console typing after Cmd+Tab.
+    #[test]
+    fn focus_lost_releases_stuck_logical_super_after_input_systems() {
+        let mut app = app_with_system();
+
+        // Frame 1: press Super through the real keyboard_input_system, the
+        // same path winit uses.
+        press_super(&mut app);
         app.update();
         assert!(
             app.world()
@@ -429,6 +466,140 @@ mod tests {
                 .resource::<ButtonInput<KeyCode>>()
                 .pressed(KeyCode::SuperLeft),
             "physical SuperLeft release (Bevy's own release_all) must still work"
+        );
+    }
+
+    /// Issue #131 root-cause test: macOS's Cmd+Shift+5 screen-recording
+    /// overlay stalls the winit event loop long enough that the window's
+    /// `Focused(false)`/`Focused(true)` pair coalesces into a single frame.
+    /// `bevy_winit::system::check_keyboard_focus_lost` only emits synthetic
+    /// key releases and `KeyboardFocusLost` when it sees no
+    /// `WindowFocused { focused: true }` in that frame's batch -- with the
+    /// bounce, it sees one, so neither fires and both `ButtonInput<Key>` and
+    /// `ButtonInput<KeyCode>` stay stuck. Simulate that: press Super/Shift,
+    /// then in one frame write a false/true `WindowFocused` pair with no
+    /// `KeyboardFocusLost` and no release `KeyboardInput` -- our system must
+    /// still clear both resources because it triggers on `WindowFocused`
+    /// alone, not just `KeyboardFocusLost`.
+    #[test]
+    fn window_focus_bounce_releases_stuck_keys_without_focus_lost_message() {
+        let mut app = app_with_system();
+        let window = app.world_mut().spawn_empty().id();
+
+        // Frame 1: press Super and Shift through the real
+        // keyboard_input_system.
+        press_super(&mut app);
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::ShiftLeft,
+                logical_key: Key::Shift,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Super)
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Shift)
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::SuperLeft)
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::ShiftLeft)
+        );
+
+        // Frame 2: a same-frame focus false->true bounce, with no
+        // KeyboardFocusLost and no release KeyboardInput -- the suppressed
+        // bounce that check_keyboard_focus_lost's `!focus_gained` gate
+        // produces.
+        {
+            let mut focused = app.world_mut().resource_mut::<Messages<WindowFocused>>();
+            focused.write(WindowFocused {
+                window,
+                focused: false,
+            });
+            focused.write(WindowFocused {
+                window,
+                focused: true,
+            });
+        }
+        app.update();
+
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Super),
+            "logical Super must be released on a same-frame focus bounce \
+             even without a KeyboardFocusLost message"
+        );
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Shift),
+            "logical Shift must be released on a same-frame focus bounce"
+        );
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::SuperLeft),
+            "physical SuperLeft must be released on a same-frame focus bounce \
+             because Bevy's own keyboard_input_system release_all() is \
+             suppressed by the same !focus_gained gate"
+        );
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::ShiftLeft),
+            "physical ShiftLeft must be released on a same-frame focus bounce"
+        );
+    }
+
+    /// Startup case: a lone `WindowFocused { focused: true }` (the window
+    /// gaining focus for the first time) with nothing pressed must not
+    /// panic, and must leave key state empty.
+    #[test]
+    fn lone_initial_focus_gained_with_nothing_pressed_is_a_no_op() {
+        let mut app = app_with_system();
+        let window = app.world_mut().spawn_empty().id();
+
+        app.world_mut()
+            .resource_mut::<Messages<WindowFocused>>()
+            .write(WindowFocused {
+                window,
+                focused: true,
+            });
+        app.update();
+
+        assert!(
+            app.world()
+                .resource::<ButtonInput<Key>>()
+                .get_pressed()
+                .next()
+                .is_none(),
+            "no logical keys should be pressed after a startup focus-gained \
+             message with nothing pressed"
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .get_pressed()
+                .next()
+                .is_none(),
+            "no physical keys should be pressed after a startup focus-gained \
+             message with nothing pressed"
         );
     }
 
