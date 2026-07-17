@@ -97,6 +97,17 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   first direct child (loose `Data` files before archive entries); exact-file
   paths retain their existing resolution and precedence.
 
+## Prepared asset revisions
+
+Every prepared serialized asset carries a `*_REVISION` constant
+(`NAV_GRAPH_REVISION`, `ACTOR_CATALOG_REVISION`, `ITEM_CATALOG_REVISION`,
+…). Bump it whenever the asset's serialized shape changes — **including
+new serde-defaulted fields**, which otherwise let stale caches parse
+cleanly with silently missing data. This is part of the orchestrator's
+pre-PR diff review: a wave that touches a prepared type's fields without
+bumping its revision is not ready. (Caught late in M4 wave 4 by external
+review: `mesh_merges` shipped without a `nav-graph-v2` bump.)
+
 ## Way of working (waves)
 
 Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
@@ -122,8 +133,22 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   integration branch (`m<milestone>-wave<n>`) collects the merges; the
   orchestrator resolves conflicts, runs gates, and does real-data
   acceptance before opening one PR with `Closes #NN` per issue.
+- **Sequential exception:** when wave issues rework the same runtime seam
+  (same module/file), run their executors sequentially on the wave branch
+  instead of parallel worktrees — a later brief builds on the earlier
+  issue's landed seam. Precedent: M4 wave 4 (#113 then #134, both in
+  `src/viewer/nav/agent.rs`).
+- PR review findings (human or bot) are verified by the orchestrator
+  against the actual code before acting: confirmed code fixes are
+  dispatched to an executor like any other change; wrong or
+  out-of-scope findings are answered on the PR with the evidence.
 - Measured results are commented on each issue; follow-ups discovered during
   acceptance get their own issues rather than silently expanding the wave.
+- **External posting:** nothing is posted outside this repository
+  (upstream bug reports, third-party PRs/comments) without showing the
+  human a full draft and getting an explicit yes — it publishes under
+  their identity. Housekeeping inside this repository's issues/PRs is
+  pre-authorized by these conventions.
 - Every wave ends with a manual acceptance script,
   `docs/plans/M<m>_WAVE<n>_MANUAL.md`, written before the wave PR and
   linked from its body. It opens with a short plain-language summary of
@@ -208,7 +233,10 @@ curl -X POST http://127.0.0.1:15702/ -H 'Content-Type: application/json' \
 Methods: `bevyout.session` (active cell), `bevyout.scene_snapshot`
 (placements/entities), `bevyout.console.exec` (`{"line": "activate
 00028579"}` drives door travel; `setrender`, `tfc`, `getpos`, … also work),
-`bevyout.capture_viewport`. Known limits: `capture_viewport` returns black
+`bevyout.capture_viewport`. `help` lists every console command;
+`player.setpos <x|y|z> <metres>` repositions the player one axis at a
+time — the standard fix when acceptance needs an on-mesh start
+(`tna spawn` at an off-mesh player start reports `AgentNotOnNavMesh`). Known limits: `capture_viewport` returns black
 PNGs when the window is occluded (macOS) — use snapshots + logs as evidence;
 frame-time measurements are only comparable on a cool machine (the startup
 "BoxDDD prepared collision ... cook" line is the canary: ~10 ms cool,
