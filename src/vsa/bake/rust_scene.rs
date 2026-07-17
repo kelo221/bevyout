@@ -470,6 +470,23 @@ fn load_asset(path: &Path, resources: &mut OutputResources) -> Result<LoadedAsse
     Ok(LoadedAsset { primitives })
 }
 
+/// Returns whether a cached GLB contains animation channels. Irradiance
+/// volumes are baked from a fixed pose, so animated assets must be left out of
+/// the static bake while remaining available to the runtime viewer.
+pub(crate) fn asset_contains_animation(asset_root: &Path, relative: &str) -> Result<bool> {
+    let path = resolve_asset_path(asset_root, relative);
+    let bytes =
+        fs::read(&path).with_context(|| format!("could not read GLB {}", path.display()))?;
+    let json = glb_json_bytes(&bytes)
+        .with_context(|| format!("could not parse GLB {}", path.display()))?;
+    // This is deliberately a bounded byte scan rather than deserializing the
+    // full document: some source exports contain very deeply nested node
+    // arrays, and the bake preflight must not recurse through those graphs.
+    Ok(json
+        .windows(b"\"animations\"".len())
+        .any(|window| window == b"\"animations\""))
+}
+
 fn load_document(path: &Path) -> Result<AssetDocument> {
     let bytes = fs::read(path).with_context(|| format!("could not read GLB {}", path.display()))?;
     let json = parse_glb_json(&bytes)?;
@@ -1723,6 +1740,10 @@ fn write_glb(path: &Path, root: &Value, binary: &[u8]) -> Result<()> {
 }
 
 fn parse_glb_json(bytes: &[u8]) -> Result<Value> {
+    Ok(serde_json::from_slice(glb_json_bytes(bytes)?)?)
+}
+
+fn glb_json_bytes(bytes: &[u8]) -> Result<&[u8]> {
     if bytes.len() < 20 || u32::from_le_bytes(bytes[0..4].try_into()?) != GLB_MAGIC {
         bail!("invalid GLB header");
     }
@@ -1731,7 +1752,7 @@ fn parse_glb_json(bytes: &[u8]) -> Result<Value> {
     if kind != GLB_JSON_CHUNK || 20 + length > bytes.len() {
         bail!("GLB has no valid JSON chunk");
     }
-    Ok(serde_json::from_slice(&bytes[20..20 + length])?)
+    Ok(&bytes[20..20 + length])
 }
 
 fn align_binary(bytes: &mut Vec<u8>, alignment: usize) {

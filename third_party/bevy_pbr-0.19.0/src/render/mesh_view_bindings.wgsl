@@ -18,6 +18,13 @@
 #ifdef PCSS_SAMPLERS_AVAILABLE
 @group(0) @binding(4) var point_shadow_textures_linear_sampler: sampler;
 #endif  // PCSS_SAMPLERS_AVAILABLE
+// Prepared/baked point shadows use a separate cubemap array from the
+// runtime-rendered point shadows. The receiver flag selects the source.
+#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
+@group(0) @binding(39) var baked_point_shadow_textures: texture_depth_cube;
+#else
+@group(0) @binding(39) var baked_point_shadow_textures: texture_depth_cube_array;
+#endif
 #ifdef NO_ARRAY_TEXTURES_SUPPORT
 @group(0) @binding(5) var directional_shadow_textures: texture_depth_2d;
 #else

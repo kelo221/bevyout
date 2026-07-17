@@ -102,8 +102,9 @@ pub struct ExtractedPointLight {
 
 /// Prepared point-shadow metadata attached to a runtime point light.
 ///
-/// These maps are generated before the viewer starts. The component never
-/// enables Bevy's runtime point-shadow passes.
+/// These maps are generated before the viewer starts. The component supplies
+/// the baked path; a separate viewer policy may also enable a runtime pass on
+/// the same light for non-baked receivers.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct BakedPointLightShadow {
     /// Stable cubemap layer in [`BakedPointShadowMap`].
@@ -440,6 +441,8 @@ bitflags::bitflags! {
         const AFFECTS_LIGHTMAPPED_MESH_DIFFUSE  = 1 << 3;
         const CONTACT_SHADOWS_ENABLED           = 1 << 4;
         const SPOT_LIGHT                        = 1 << 5;
+        const RUNTIME_SHADOWS_ENABLED           = 1 << 6;
+        const BAKED_SHADOWS_ENABLED             = 1 << 7;
         const NONE                              = 0;
         const UNINITIALIZED                     = 0xFFFF;
     }
@@ -1258,6 +1261,8 @@ pub struct ShadowView {
 pub struct ViewShadowBindings {
     pub point_light_depth_texture: Texture,
     pub point_light_depth_texture_view: TextureView,
+    pub baked_point_light_depth_texture: Texture,
+    pub baked_point_light_depth_texture_view: TextureView,
     pub directional_light_depth_texture: Texture,
     pub directional_light_depth_texture_view: TextureView,
 }
@@ -1634,15 +1639,19 @@ pub fn prepare_lights(
         let mut flags = PointLightFlags::NONE;
 
         // Lights are sorted, shadow enabled lights are first
-        let runtime_shadow_enabled = light.shadow_maps_enabled && !baked_shadow_resident;
-        let baked_shadow_enabled = light.baked_shadow.is_some() && baked_shadow_sampling_enabled;
-        if baked_shadow_enabled
-            || (runtime_shadow_enabled
+        let runtime_shadow_enabled = light.shadow_maps_enabled
             && (index < point_light_shadow_maps_count
                 || (light.spot_light_angles.is_some()
-                    && index - point_light_count < spot_light_shadow_maps_count)))
-        {
+                    && index - point_light_count < spot_light_shadow_maps_count));
+        let baked_shadow_enabled = light.baked_shadow.is_some() && baked_shadow_sampling_enabled;
+        if baked_shadow_enabled || runtime_shadow_enabled {
             flags |= PointLightFlags::SHADOW_MAPS_ENABLED;
+        }
+        if runtime_shadow_enabled {
+            flags |= PointLightFlags::RUNTIME_SHADOWS_ENABLED;
+        }
+        if baked_shadow_enabled {
+            flags |= PointLightFlags::BAKED_SHADOWS_ENABLED;
         }
 
         if light.contact_shadows_enabled {
@@ -1726,10 +1735,11 @@ pub fn prepare_lights(
                 {
                     spot_light_tan_angle.to_bits()
                 } else {
-                    light
+                    let baked_layer = light
                         .baked_shadow
                         .filter(|_| baked_shadow_sampling_enabled)
-                        .map_or(index as u32, |shadow| shadow.layer)
+                        .map_or(u32::MAX, |shadow| shadow.layer);
+                    (index as u32 & 0xFFFF) | (baked_layer << 16)
                 },
                 decal_index: decals
                     .as_ref()
@@ -1843,7 +1853,7 @@ pub fn prepare_lights(
                 array_layer_count: None,
             });
 
-    let (bound_point_light_depth_texture, point_light_depth_texture_view) =
+    let (baked_point_light_depth_texture, baked_point_light_depth_texture_view) =
         if let (Some(texture), Some(texture_view)) = (
             baked_shadow_gpu_cache.texture.as_ref(),
             baked_shadow_gpu_cache.texture_view.as_ref(),
@@ -1852,7 +1862,7 @@ pub fn prepare_lights(
         } else {
             (
                 point_light_depth_texture.texture.clone(),
-                runtime_point_light_depth_texture_view,
+                runtime_point_light_depth_texture_view.clone(),
             )
         };
 
@@ -2403,8 +2413,10 @@ pub fn prepare_lights(
 
         commands.entity(entity).insert((
             ViewShadowBindings {
-                point_light_depth_texture: bound_point_light_depth_texture.clone(),
-                point_light_depth_texture_view: point_light_depth_texture_view.clone(),
+                point_light_depth_texture: point_light_depth_texture.texture.clone(),
+                point_light_depth_texture_view: runtime_point_light_depth_texture_view.clone(),
+                baked_point_light_depth_texture: baked_point_light_depth_texture.clone(),
+                baked_point_light_depth_texture_view: baked_point_light_depth_texture_view.clone(),
                 directional_light_depth_texture: directional_light_depth_texture.texture.clone(),
                 directional_light_depth_texture_view: directional_light_depth_texture_view.clone(),
             },
@@ -3427,10 +3439,13 @@ mod prepared_point_shadow_tests {
     }
 
     #[test]
-    fn forward_shader_has_exactly_one_point_shadow_fetch_site() {
+    fn forward_shader_has_one_dominant_light_and_two_hybrid_source_fetch_sites() {
         let shader = include_str!("pbr_functions.wgsl");
-        assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 1);
+        assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 2);
         assert!(shader.contains("dominant_point_light_score"));
+        assert!(shader.contains("dominant_point_light_uses_baked_shadow"));
+        assert!(shader.contains("dominant_point_light_uses_realtime_shadow"));
+        assert!(shader.contains("min(dominant_shadow, realtime_shadow)"));
         assert!(shader.contains("dominant_point_transmitted_contrib"));
         assert!(shader.contains("transmitted_light -= dominant_point_transmitted_contrib"));
     }

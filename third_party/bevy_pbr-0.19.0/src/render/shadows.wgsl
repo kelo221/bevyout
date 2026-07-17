@@ -1,7 +1,10 @@
 #define_import_path bevy_pbr::shadows
 
 #import bevy_pbr::{
-    mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    mesh_view_types::{
+        POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    },
     mesh_view_bindings as view_bindings,
     shadow_sampling::{
         SPOT_SHADOW_TEXEL_SIZE, sample_shadow_cubemap, sample_shadow_cubemap_pcss,
@@ -21,6 +24,7 @@ fn fetch_point_shadow(
     frag_position: vec4<f32>,
     surface_normal: vec3<f32>,
     frag_coord_xy: vec2<f32>,
+    use_baked_shadow: bool,
 ) -> f32 {
     let light = &view_bindings::clustered_lights.data[light_id];
 
@@ -52,14 +56,21 @@ fn fetch_point_shadow(
     // If soft shadows are enabled, use the PCSS path. Cubemaps assume a
     // left-handed coordinate space, so we have to flip the z-axis when
     // sampling.
+    var shadow_map_index = (*light).shadow_map_index_or_spot_light_tan_angle & 0xFFFFu;
+    if (use_baked_shadow &&
+            ((*light).flags & POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT) != 0u) {
+        shadow_map_index = (*light).shadow_map_index_or_spot_light_tan_angle >> 16u;
+    }
+
     if ((*light).soft_shadow_size > 0.0) {
         return sample_shadow_cubemap_pcss(
             frag_ls * flip_z,
             distance_to_light,
             depth,
-            (*light).shadow_map_index_or_spot_light_tan_angle,
+            shadow_map_index,
             (*light).soft_shadow_size,
             frag_coord_xy,
+            use_baked_shadow,
         );
     }
 
@@ -69,8 +80,9 @@ fn fetch_point_shadow(
         frag_ls * flip_z,
         distance_to_light,
         depth,
-        (*light).shadow_map_index_or_spot_light_tan_angle,
+        shadow_map_index,
         frag_coord_xy,
+        use_baked_shadow,
     );
 }
 

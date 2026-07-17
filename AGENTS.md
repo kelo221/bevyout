@@ -61,11 +61,12 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 
 - Point-shadow depth is generated automatically during `prepare`, after GLB
   conversion and physics classification. Do not add Blender shadow baking or
-  runtime cubemap rendering back into this path.
-- Casters must be initially enabled placements with resolved GLBs. Every
-  semantic and physics classification contributes its prepared initial-pose
-  geometry except `PreparedSemantic::Door`; doors are intentionally
-  non-casters.
+  per-frame runtime cubemap rendering to this preparation path.
+- Casters must be initially enabled placements with resolved GLBs. Prepared
+  static geometry excludes `PreparedSemantic::Door`, pickups, and
+  `PreparedPhysicsClassification::Dynamic`; dynamic physics placements remain
+  individually spawned so their current pose can cast through the viewer's
+  realtime pass.
 - The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
@@ -79,10 +80,16 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   `bevy_pbr` patch stages the decoded data through `R32Float` and writes the
   depth array once with a GPU render pass. This upload pass must not enqueue
   scene meshes or become a per-frame shadow pass.
-- Keep point-light runtime shadow rendering disabled. GPU light metadata uses
-  stable manifest layers, and forward shading performs at most one dominant
-  point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
-  benchmark switch; there is no gameplay shadow budget.
+- The viewer may enable exactly one camera-relevant startup-cell point light's
+  native runtime shadow cubemap with the explicit `--realtime-shadows` viewer
+  or render opt-in; it is disabled by default for performance. The console can
+  toggle it at runtime with `setrender realtime_shadows 0|1`. The combined prepared scene is marked
+  `NotShadowCaster`, while individually spawned dynamic/interactive meshes
+  remain runtime casters and prepared receivers.
+- Forward shading performs at most two cubemap lookups for one dominant point
+  light: prepared and realtime visibility are combined with `min`. The
+  `setrender shadow_samples 0|1` switch remains the benchmark control; there
+  is no configurable multi-light gameplay shadow budget.
 
 ## Prepared container audio
 
@@ -165,32 +172,25 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   Precedent: `tnm` (#128) visualizing the #111 nav graph, which would
   otherwise only be inspectable as a RON file.
 - Model split: see "Model routing" below; it applies to every wave,
-  including single-issue waves, in every agent runtime (Claude and Codex).
+  including single-issue waves, in the Claude runtime. In the Codex runtime,
+  the orchestrating session executes directly because subagents are slow.
 
 ## Model routing
 
-Strict split, no exceptions — single-issue waves included. The executor
-model executes, the orchestrator model plans; the executor can even
-write the tests, the orchestrator evaluates:
-
-- The orchestrating session owns planning, architecture, task
-  decomposition, GitHub housekeeping (issues, plans, PRs, comments),
-  merges/conflict resolution, diff review, and evaluation: running
-  gates, real-data acceptance, and judging evidence. It never writes
-  implementation or test code directly — not even "small" diffs. It may
-  only touch code to resolve merge conflicts or to amend documentation
-  (plans, README tables, AGENTS.md itself).
-- Executor subagents own all execution: production code and all test
-  writing (feature files, cucumber steps, unit tests), each with a
-  tightly scoped, self-contained brief — in an isolated worktree for
-  parallel waves, or directly on the wave branch for single-issue waves.
-
-Per-runtime model mapping:
-
-- Claude: the orchestrating session runs on the large model (Opus-class
-  or above); executor subagents run on Sonnet.
-- Codex: the orchestrating session runs on Sol xhigh; executor agents
-  run on Luna MAX.
+- **Claude runtime**: Strict split, no exceptions — single-issue waves included.
+  The executor model executes, the orchestrator model plans; the executor can
+  even write the tests, the orchestrator evaluates:
+  - The orchestrating session (Opus-class or above) owns planning, architecture,
+    task decomposition, GitHub housekeeping (issues, plans, PRs, comments),
+    merges/conflict resolution, diff review, and evaluation: running gates,
+    real-data acceptance, and judging evidence. It never writes implementation or
+    test code directly.
+  - Executor subagents (Sonnet) own all execution: production code and all test
+    writing (feature files, cucumber steps, unit tests), each with a tightly
+    scoped, self-contained brief — in an isolated worktree for parallel waves,
+    or directly on the wave branch for single-issue waves.
+- **Codex runtime**: Codex does not spawn subagents because they are slow. The
+  orchestrating session (Sol high) executes and plans directly on the wave branch.
 
 ## Testing (feature-first)
 

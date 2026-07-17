@@ -59,6 +59,50 @@ fn only_static_semantics_are_batchable() {
 }
 
 #[test]
+fn item_record_kinds_never_enter_the_static_bake() {
+    fn placement(kind: &str) -> PreparedPlacement {
+        PreparedPlacement {
+            reference_form_id: 1,
+            base_form_id: 2,
+            asset_path: Some("assets/test.glb".into()),
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: PreparedPhysicsClassification::Static,
+            step_support: false,
+            mutability: PreparedRuntimeMutability::Immutable,
+            mutability_root_form_id: None,
+            reference_kind: "REFR".into(),
+            base_kind: kind.into(),
+            editor_id: None,
+            display_name: None,
+            count: 1,
+            semantic: PreparedSemantic::Static,
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory: Vec::new(),
+            audio: Default::default(),
+            ao_mode: "ao-none".into(),
+        }
+    }
+
+    for kind in [
+        "WEAP", "AMMO", "ARMO", "ALCH", "MISC", "BOOK", "NOTE", "KEYM",
+    ] {
+        assert!(
+            !is_bake_static(&placement(kind)),
+            "{kind} should remain spawnable instead of entering the static bake"
+        );
+    }
+    assert!(!is_bake_static(&placement("weap")));
+}
+
+#[test]
 fn cell_directional_illuminance_clamps_non_finite_and_negative_luminance() {
     fn lighting_with(directional_rgba: [f32; 4]) -> PreparedCellLighting {
         PreparedCellLighting {

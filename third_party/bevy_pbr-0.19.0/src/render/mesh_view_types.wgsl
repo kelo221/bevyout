@@ -10,7 +10,8 @@ struct ClusteredLight {
     flags: u32,
     shadow_depth_bias: f32,
     shadow_normal_bias: f32,
-    // Point: stable shadow cubemap layer. Spot: bitcast tangent angle.
+    // Point: low 16 bits are the runtime shadow-map index and high 16 bits
+    // are the prepared baked cubemap layer. Spot: bitcast tangent angle.
     shadow_map_index_or_spot_light_tan_angle: u32,
     soft_shadow_size: f32,
     shadow_map_near_z: f32,
@@ -24,6 +25,8 @@ const POINT_LIGHT_FLAGS_VOLUMETRIC_BIT: u32                         = 1u << 2u;
 const POINT_LIGHT_FLAGS_AFFECTS_LIGHTMAPPED_MESH_DIFFUSE_BIT: u32   = 1u << 3u;
 const POINT_LIGHT_FLAGS_CONTACT_SHADOWS_ENABLED_BIT: u32            = 1u << 4u;
 const POINT_LIGHT_FLAGS_SPOT_LIGHT_BIT: u32                         = 1u << 5u;
+const POINT_LIGHT_FLAGS_RUNTIME_SHADOWS_ENABLED_BIT: u32            = 1u << 6u;
+const POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT: u32              = 1u << 7u;
 
 struct DirectionalCascade {
     clip_from_world: mat4x4<f32>,

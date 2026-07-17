@@ -132,6 +132,19 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
+// Material shading policy is intentionally std-only so the executable spec can
+// pin the same eligibility decision used by the runtime material event system.
+#[path = "../src/viewer/material_shading_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod material_shading_policy;
+
+// Hybrid point-shadow composition is intentionally Bevy-free so the
+// executable specification drives the same source-selection policy as the
+// runtime shader contract.
+#[path = "../src/viewer/hybrid_shadow_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod hybrid_shadow_policy;
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -333,6 +346,7 @@ use item_transaction::{
     TransactionError, TransactionRequest,
 };
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
+use material_shading_policy::specular_alpha_roughness_eligible;
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
 use selectors::{CellSummary, SelectionSpec, resolve_selection};
 
@@ -361,6 +375,12 @@ struct BevyoutWorld {
     bulb_emission_override: bool,
     glow_emission_override: bool,
     emission_policy: Option<assets::MaterialEmissionPolicy>,
+    material_has_normal_map: bool,
+    material_has_specular_map: bool,
+    material_shared_texture: bool,
+    material_has_roughness_map: bool,
+    material_is_non_opaque: bool,
+    material_roughness_proxy_eligible: Option<bool>,
 
     // -- cell_map.feature --
     cell_map_cells: Vec<cell_map::CellMapEntry>,
@@ -525,6 +545,11 @@ struct BevyoutWorld {
     recipe_under_test: Option<recipe_policy::PreparedRecipe>,
     recipe_available_items: std::collections::BTreeSet<u32>,
     recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
+
+    // -- hybrid_lighting.feature --
+    hybrid_prepared_visibility: Option<f32>,
+    hybrid_realtime_visibility: Option<f32>,
+    hybrid_combined_visibility: Option<f32>,
 
     // -- actor_catalog.feature (issue #103, M4 wave 1 task C) --
     actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
@@ -971,6 +996,49 @@ async fn then_selected_emission_source(world: &mut BevyoutWorld, expected: Strin
         other => panic!("unknown emission source {other}"),
     };
     assert!(matches, "expected {expected}, got {actual:?}");
+}
+
+#[given("an imported material has a shared normal and specular image")]
+async fn given_shared_normal_specular_image(world: &mut BevyoutWorld) {
+    world.material_has_normal_map = true;
+    world.material_has_specular_map = true;
+    world.material_shared_texture = true;
+}
+
+#[given("it has no authored metallic roughness map")]
+async fn given_no_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
+    world.material_has_roughness_map = false;
+}
+
+#[given("it has an authored metallic roughness map")]
+async fn given_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
+    world.material_has_roughness_map = true;
+}
+
+#[given("it is a non-opaque decal")]
+async fn given_non_opaque_decal(world: &mut BevyoutWorld) {
+    world.material_is_non_opaque = true;
+}
+
+#[when("its roughness proxy policy is evaluated")]
+async fn when_roughness_proxy_policy_evaluated(world: &mut BevyoutWorld) {
+    world.material_roughness_proxy_eligible = Some(specular_alpha_roughness_eligible(
+        world.material_has_normal_map,
+        world.material_has_specular_map,
+        world.material_shared_texture,
+        world.material_has_roughness_map,
+        world.material_is_non_opaque,
+    ));
+}
+
+#[then("specular-alpha roughness is enabled")]
+async fn then_specular_alpha_roughness_enabled(world: &mut BevyoutWorld) {
+    assert_eq!(world.material_roughness_proxy_eligible, Some(true));
+}
+
+#[then("specular-alpha roughness is disabled")]
+async fn then_specular_alpha_roughness_disabled(world: &mut BevyoutWorld) {
+    assert_eq!(world.material_roughness_proxy_eligible, Some(false));
 }
 
 // ---------------------------------------------------------------------
@@ -4355,6 +4423,36 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
             .quantity,
         expected
     );
+}
+
+// ---------------------------------------------------------------------
+// hybrid_lighting.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^prepared point-shadow visibility is ([\d.]+)$")]
+async fn given_hybrid_prepared_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.hybrid_prepared_visibility = Some(visibility);
+}
+
+#[given(regex = r"^realtime point-shadow visibility is ([\d.]+)$")]
+async fn given_hybrid_realtime_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.hybrid_realtime_visibility = Some(visibility);
+}
+
+#[when("hybrid point-shadow visibility is combined")]
+async fn when_hybrid_visibility_is_combined(world: &mut BevyoutWorld) {
+    world.hybrid_combined_visibility = Some(hybrid_shadow_policy::hybrid_shadow_visibility(
+        world.hybrid_prepared_visibility,
+        world.hybrid_realtime_visibility,
+    ));
+}
+
+#[then(regex = r"^combined point-shadow visibility is ([\d.]+)$")]
+async fn then_hybrid_visibility(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .hybrid_combined_visibility
+        .expect("hybrid visibility was not evaluated");
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
 }
 
 // actor_catalog.feature (issue #103, M4 wave 1 task C) -- appended section,

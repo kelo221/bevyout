@@ -47,3 +47,22 @@ Feature: Asset conversion profile selection
     And a glow texture override is present
     When its material emission policy is evaluated
     Then the selected emission source is Glow
+
+  Scenario: Shared Fallout normal/specular texture enables roughness proxy
+    Given an imported material has a shared normal and specular image
+    And it has no authored metallic roughness map
+    When its roughness proxy policy is evaluated
+    Then specular-alpha roughness is enabled
+
+  Scenario: Authored roughness takes precedence over proxy
+    Given an imported material has a shared normal and specular image
+    And it has an authored metallic roughness map
+    When its roughness proxy policy is evaluated
+    Then specular-alpha roughness is disabled
+
+  Scenario: Non-opaque decals stay off the roughness proxy
+    Given an imported material has a shared normal and specular image
+    And it is a non-opaque decal
+    And it has no authored metallic roughness map
+    When its roughness proxy policy is evaluated
+    Then specular-alpha roughness is disabled

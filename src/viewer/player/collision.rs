@@ -1118,10 +1118,19 @@ pub(crate) fn sync_dynamic_transforms(
                 let Some(entity) = collision_world.dynamic_entities.get(&body).copied() else {
                     continue;
                 };
+                let was_sleeping = collision_world.sleeping_dynamic_bodies.contains(&entity);
                 if event.fell_asleep() {
                     collision_world.sleeping_dynamic_bodies.insert(entity);
                 } else {
                     collision_world.sleeping_dynamic_bodies.remove(&entity);
+                }
+                // BoxDDD normally emits no repeated events for a settled
+                // body, but keep the invariant explicit: a body that was
+                // already sleeping must not cause another Bevy transform
+                // write until a wake event arrives. The first sleep event is
+                // still applied so the final pose is not left one frame stale.
+                if was_sleeping && event.fell_asleep() {
+                    continue;
                 }
                 let Ok(mut transform) = roots.get_mut(entity) else {
                     continue;

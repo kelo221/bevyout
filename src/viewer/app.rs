@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn run_view(
     manifest_path: PathBuf,
     disable_physics: bool,
+    realtime_shadows: bool,
     trace_seconds: Option<f32>,
     agent_port: Option<u16>,
     save_slot: Option<String>,
@@ -100,6 +101,12 @@ pub(crate) fn run_view(
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
     ));
+    // Realtime point shadows are a short-range quality/performance aid for
+    // the strongest light. Keep the prepared cubemap artifacts at their
+    // independent resolution; this only lowers the runtime shadow target.
+    app.insert_resource(PointLightShadowMap {
+        size: REALTIME_POINT_SHADOW_MAP_SIZE,
+    });
     app.add_plugins(crate::console::ConsolePlugin);
     // Issue #55 (A15): `RenderAssetBytesPerFrame` was tried here and
     // REVERTED — a 16 MB/frame upload throttle made the first hop's reveal
@@ -119,6 +126,7 @@ pub(crate) fn run_view(
     player::install(&mut app, disable_physics);
     bindings::install(&mut app);
     audio::install(&mut app);
+    material_shading::install(&mut app);
     interaction::install(&mut app);
     pipboy::install(&mut app);
     pipboy_reader::install(&mut app);
@@ -278,6 +286,10 @@ pub(crate) fn run_view(
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
+        .insert_resource(RealtimeShadowLight::default())
+        .insert_resource(RealtimeShadowSettings {
+            enabled: realtime_shadows,
+        })
         .insert_resource(PointLightShadowSamples::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
@@ -320,6 +332,11 @@ pub(crate) fn run_view(
                 .chain(),
         )
         .add_systems(Update, apply_lighting_scale)
+        .add_systems(
+            Update,
+            (apply_realtime_shadow_light, mark_prepared_shadow_meshes)
+                .run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             Update,
             (

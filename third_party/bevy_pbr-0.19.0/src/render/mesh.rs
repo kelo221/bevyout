@@ -1,5 +1,6 @@
 use crate::contact_shadows::ViewContactShadowsUniformOffset;
 use crate::{
+    BakedPointShadowReceiver,
     material_bind_groups::MaterialBindGroupSlot, resources::write_atmosphere_buffer,
     skin::skin_uniforms_from_world,
 };
@@ -718,6 +719,7 @@ bitflags::bitflags! {
         /// This corresponds to the
         /// [`bevy_render::view::visibility::NoFrustumCulling`] component.
         const NO_FRUSTUM_CULLING          = 1 << 28;
+        const BAKED_POINT_SHADOW_RECEIVER = 1 << 26;
         const SHADOW_RECEIVER             = 1 << 29;
         const TRANSMITTED_SHADOW_RECEIVER = 1 << 30;
         // Indicates the sign of the determinant of the 3x3 model matrix. If the sign is positive,
@@ -735,6 +737,7 @@ impl MeshFlags {
         visibility_range: Option<&VisibilityRange>,
         no_frustum_culling: bool,
         not_shadow_receiver: bool,
+        baked_point_shadow_receiver: bool,
         transmitted_receiver: bool,
     ) -> MeshFlags {
         let mut mesh_flags = if not_shadow_receiver {
@@ -747,6 +750,9 @@ impl MeshFlags {
         }
         if no_frustum_culling {
             mesh_flags |= MeshFlags::NO_FRUSTUM_CULLING;
+        }
+        if baked_point_shadow_receiver {
+            mesh_flags |= MeshFlags::BAKED_POINT_SHADOW_RECEIVER;
         }
         if transmitted_receiver {
             mesh_flags |= MeshFlags::TRANSMITTED_SHADOW_RECEIVER;
@@ -1771,6 +1777,7 @@ pub fn extract_meshes_for_cpu_building(
             Option<&MeshTag>,
             Has<NoFrustumCulling>,
             Has<NotShadowReceiver>,
+            Has<BakedPointShadowReceiver>,
             Has<TransmittedShadowReceiver>,
             Has<NotShadowCaster>,
             Has<NoAutomaticBatching>,
@@ -1791,6 +1798,7 @@ pub fn extract_meshes_for_cpu_building(
             tag,
             no_frustum_culling,
             not_shadow_receiver,
+            baked_point_shadow_receiver,
             transmitted_receiver,
             not_shadow_caster,
             no_automatic_batching,
@@ -1812,6 +1820,7 @@ pub fn extract_meshes_for_cpu_building(
                 visibility_range,
                 no_frustum_culling,
                 not_shadow_receiver,
+                baked_point_shadow_receiver,
                 transmitted_receiver,
             );
 
@@ -1881,6 +1890,7 @@ type GpuMeshExtractionQuery = (
     (
         Has<NoFrustumCulling>,
         Has<NotShadowReceiver>,
+        Has<BakedPointShadowReceiver>,
         Has<TransmittedShadowReceiver>,
         Has<NotShadowCaster>,
         Has<NoAutomaticBatching>,
@@ -1916,6 +1926,7 @@ pub fn extract_meshes_for_gpu_building(
                 Or<(
                     Changed<NoFrustumCulling>,
                     Changed<NotShadowReceiver>,
+                    Changed<BakedPointShadowReceiver>,
                     Changed<TransmittedShadowReceiver>,
                     Changed<NotShadowCaster>,
                     Changed<NoAutomaticBatching>,
@@ -1933,6 +1944,7 @@ pub fn extract_meshes_for_gpu_building(
         mut removed_mesh_tag_query,
         mut removed_no_frustum_culling_query,
         mut removed_not_shadow_receiver_query,
+        mut removed_baked_point_shadow_receiver_query,
         mut removed_transmitted_receiver_query,
         mut removed_not_shadow_caster_query,
         mut removed_no_automatic_batching_query,
@@ -1946,6 +1958,7 @@ pub fn extract_meshes_for_gpu_building(
         Extract<RemovedComponents<MeshTag>>,
         Extract<RemovedComponents<NoFrustumCulling>>,
         Extract<RemovedComponents<NotShadowReceiver>>,
+        Extract<RemovedComponents<BakedPointShadowReceiver>>,
         Extract<RemovedComponents<TransmittedShadowReceiver>>,
         Extract<RemovedComponents<NotShadowCaster>>,
         Extract<RemovedComponents<NoAutomaticBatching>>,
@@ -1986,6 +1999,7 @@ pub fn extract_meshes_for_gpu_building(
             .chain(removed_mesh_tag_query.read())
             .chain(removed_no_frustum_culling_query.read())
             .chain(removed_not_shadow_receiver_query.read())
+            .chain(removed_baked_point_shadow_receiver_query.read())
             .chain(removed_transmitted_receiver_query.read())
             .chain(removed_not_shadow_caster_query.read())
             .chain(removed_no_automatic_batching_query.read())
@@ -2094,6 +2108,7 @@ fn extract_mesh_for_gpu_building(
         (
             no_frustum_culling,
             not_shadow_receiver,
+            baked_point_shadow_receiver,
             transmitted_receiver,
             not_shadow_caster,
             no_automatic_batching,
@@ -2126,6 +2141,7 @@ fn extract_mesh_for_gpu_building(
         visibility_range,
         no_frustum_culling,
         not_shadow_receiver,
+        baked_point_shadow_receiver,
         transmitted_receiver,
     );
 

@@ -13,7 +13,11 @@
     view_transformations,
     raymarch,
     utils,
-    mesh_types::{MESH_FLAGS_SHADOW_RECEIVER_BIT, MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT},
+    mesh_types::{
+        MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT,
+        MESH_FLAGS_SHADOW_RECEIVER_BIT,
+        MESH_FLAGS_TRANSMITTED_SHADOW_RECEIVER_BIT,
+    },
 }
 #import bevy_pbr::mesh_view_bindings::globals
 #import bevy_pbr::view_transformations::{position_world_to_ndc}
@@ -465,13 +469,15 @@ fn apply_pbr_lighting(
 #endif
 
     // Point lights (direct). All clustered lights illuminate the surface, but
-    // only the strongest shadow-capable BRDF contribution performs a cubemap
-    // lookup. This bounds prepared point-shadow sampling to one fetch per
-    // pixel regardless of how many point lights overlap the cluster.
+    // only the strongest shadow-capable BRDF contribution performs cubemap
+    // lookups. That light may use one prepared-static source, one realtime
+    // source, or both; overlapping point lights never add more shadow work.
     var dominant_point_light_found = false;
     var dominant_point_light_id = 0u;
     var dominant_point_light_score = 0.0;
     var dominant_point_light_contrib = vec3<f32>(0.0);
+    var dominant_point_light_uses_baked_shadow = false;
+    var dominant_point_light_uses_realtime_shadow = false;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
     var dominant_point_transmitted_contrib = vec3<f32>(0.0);
 #endif
@@ -491,7 +497,7 @@ fn apply_pbr_lighting(
         let enable_diffuse = true;
 #endif  // LIGHTMAP
 
-        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true);
+        let light_contrib = lighting::point_light(light_id, &lighting_input, enable_diffuse, true, true);
         direct_light += light_contrib;
 
         var transmitted_light_contrib = vec3<f32>(0.0);
@@ -507,14 +513,19 @@ fn apply_pbr_lighting(
         // F_ab = vec2<f32>(0.1)
         // F0 = vec3<f32>(0.0)
         transmitted_light_contrib =
-            lighting::point_light(light_id, &transmissive_lighting_input, enable_diffuse, true);
+            lighting::point_light(light_id, &transmissive_lighting_input, enable_diffuse, true, false);
         transmitted_light += transmitted_light_contrib;
 #endif
 
-        let shadow_capable =
-            (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u &&
-            (view_bindings::clustered_lights.data[light_id].flags &
-                mesh_view_types::POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        let receives_shadow = (in.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
+        let baked_receiver =
+            (in.flags & MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT) != 0u;
+        let light_flags = view_bindings::clustered_lights.data[light_id].flags;
+        let uses_baked_shadow = baked_receiver &&
+            (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT) != 0u;
+        let uses_realtime_shadow =
+            (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_RUNTIME_SHADOWS_ENABLED_BIT) != 0u;
+        let shadow_capable = receives_shadow && (uses_baked_shadow || uses_realtime_shadow);
         let contribution_score = dot(
             max(light_contrib, vec3<f32>(0.0)),
             vec3<f32>(0.2126, 0.7152, 0.0722),
@@ -524,6 +535,8 @@ fn apply_pbr_lighting(
             dominant_point_light_id = light_id;
             dominant_point_light_score = contribution_score;
             dominant_point_light_contrib = light_contrib;
+            dominant_point_light_uses_baked_shadow = uses_baked_shadow;
+            dominant_point_light_uses_realtime_shadow = uses_realtime_shadow;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
             dominant_point_transmitted_contrib = transmitted_light_contrib;
 #endif
@@ -531,12 +544,27 @@ fn apply_pbr_lighting(
     }
 
     if dominant_point_light_found {
-        var dominant_shadow = shadows::fetch_point_shadow(
-            dominant_point_light_id,
-            in.world_position,
-            in.world_normal,
-            in.frag_coord.xy,
-        );
+        var dominant_shadow = 1.0;
+        if (dominant_point_light_uses_baked_shadow) {
+            dominant_shadow = shadows::fetch_point_shadow(
+                dominant_point_light_id,
+                in.world_position,
+                in.world_normal,
+                in.frag_coord.xy,
+                true,
+            );
+        }
+
+        if (dominant_point_light_uses_realtime_shadow) {
+            let realtime_shadow = shadows::fetch_point_shadow(
+                dominant_point_light_id,
+                in.world_position,
+                in.world_normal,
+                in.frag_coord.xy,
+                false,
+            );
+            dominant_shadow = min(dominant_shadow, realtime_shadow);
+        }
 
 #ifdef CONTACT_SHADOWS
 #ifdef DEPTH_PREPASS
@@ -606,7 +634,7 @@ fn apply_pbr_lighting(
 #endif
 #endif
 
-        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse);
+        let light_contrib = lighting::spot_light(light_id, &lighting_input, enable_diffuse, true);
         direct_light += light_contrib * shadow;
 
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
@@ -632,7 +660,7 @@ fn apply_pbr_lighting(
         }
 
         let transmitted_light_contrib =
-            lighting::spot_light(light_id, &transmissive_lighting_input, enable_diffuse);
+            lighting::spot_light(light_id, &transmissive_lighting_input, enable_diffuse, false);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }
@@ -672,7 +700,7 @@ fn apply_pbr_lighting(
 #endif
 #endif
 
-        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse);
+        var light_contrib = lighting::directional_light(i, &lighting_input, enable_diffuse, true);
 
 #ifdef DIRECTIONAL_LIGHT_SHADOW_MAP_DEBUG_CASCADES
         light_contrib = shadows::cascade_debug_visualization(light_contrib, i, view_z);
@@ -696,7 +724,7 @@ fn apply_pbr_lighting(
         }
 
         let transmitted_light_contrib =
-            lighting::directional_light(i, &transmissive_lighting_input, enable_diffuse);
+            lighting::directional_light(i, &transmissive_lighting_input, enable_diffuse, false);
         transmitted_light += transmitted_light_contrib * transmitted_shadow;
 #endif
     }

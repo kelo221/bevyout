@@ -502,6 +502,17 @@ pub(crate) struct PreparedPlacement {
     pub(crate) ao_mode: String,
 }
 
+/// Record kinds that represent world-loot items rather than scenery. Keep
+/// this shared by irradiance and point-shadow preparation so a pickup cannot
+/// leak into one baked lighting path while being excluded from the other.
+pub(crate) fn is_pickup_record_kind(kind: &str) -> bool {
+    [
+        "WEAP", "AMMO", "ARMO", "ALCH", "MISC", "BOOK", "NOTE", "KEYM",
+    ]
+    .iter()
+    .any(|candidate| kind.eq_ignore_ascii_case(candidate))
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum PreparedPhysicsClassification {
     #[default]

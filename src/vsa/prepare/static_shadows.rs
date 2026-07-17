@@ -17,9 +17,10 @@ use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
+use super::super::manifest::is_pickup_record_kind;
 use super::{
-    Diagnostic, PreparedLight, PreparedPlacement, PreparedSemantic, PreparedStaticPointShadowLight,
-    PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
+    Diagnostic, PreparedLight, PreparedPhysicsClassification, PreparedPlacement, PreparedSemantic,
+    PreparedStaticPointShadowLight, PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
 };
 use crate::vsa::bake::{
     find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
@@ -195,7 +196,15 @@ fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlace
 fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
     placement.initially_enabled
         && placement.asset_path.is_some()
-        && !matches!(placement.semantic, PreparedSemantic::Door(_))
+        // Movable bodies must not leave a baked silhouette behind when they
+        // are pushed. Their current pose is handled by the runtime shadow
+        // pass instead.
+        && placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        && !matches!(
+            placement.semantic,
+            PreparedSemantic::Door(_) | PreparedSemantic::Pickup(_)
+        )
+        && !is_pickup_record_kind(&placement.base_kind)
         && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
 }
 
@@ -845,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_includes_every_enabled_resolved_non_door_semantic_and_physics_class() {
+    fn caster_filter_excludes_dynamic_physics_objects() {
         let semantics = [
             PreparedSemantic::Static,
             PreparedSemantic::Pickup(PreparedPickup {
@@ -883,23 +892,46 @@ mod tests {
         }
 
         let casters = sorted_shadow_casters(&placements);
-        assert_eq!(casters.len(), placements.len());
+        // Three pickup semantics and the seven non-pickup dynamic bodies are
+        // excluded; the dynamic pickup is counted only once.
+        assert_eq!(casters.len(), 14);
+        assert!(
+            casters
+                .iter()
+                .all(|placement| !matches!(placement.semantic, PreparedSemantic::Pickup(_)))
+        );
         assert!(
             casters
                 .iter()
                 .any(|placement| placement.physics_classification
                     == PreparedPhysicsClassification::Kinematic)
         );
-        assert!(
-            casters
-                .iter()
-                .any(|placement| placement.physics_classification
-                    == PreparedPhysicsClassification::Dynamic)
-        );
+        assert!(casters.iter().all(|placement| {
+            placement.physics_classification != PreparedPhysicsClassification::Dynamic
+        }));
     }
 
     #[test]
-    fn caster_filter_excludes_only_doors_disabled_placements_and_unresolved_assets() {
+    fn caster_filter_excludes_item_record_kinds_even_when_semantic_is_static() {
+        let mut placements = Vec::new();
+        for (index, kind) in [
+            "WEAP", "AMMO", "ARMO", "ALCH", "MISC", "BOOK", "NOTE", "KEYM",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut candidate = placement(&format!("item-{index}.glb"));
+            candidate.reference_form_id = index as u32 + 1;
+            candidate.base_kind = kind.into();
+            candidate.semantic = PreparedSemantic::Static;
+            placements.push(candidate);
+        }
+
+        assert!(sorted_shadow_casters(&placements).is_empty());
+    }
+
+    #[test]
+    fn caster_filter_excludes_doors_dynamic_bodies_disabled_placements_and_unresolved_assets() {
         let eligible = placement("eligible.glb");
         let mut disabled = placement("disabled.glb");
         disabled.initially_enabled = false;
@@ -925,7 +957,9 @@ mod tests {
             doors.push(door);
         }
 
-        let mut placements = vec![eligible, disabled, unresolved];
+        let mut dynamic = placement("dynamic.glb");
+        dynamic.physics_classification = PreparedPhysicsClassification::Dynamic;
+        let mut placements = vec![eligible, disabled, unresolved, dynamic];
         placements.extend(doors);
         let casters = sorted_shadow_casters(&placements);
         assert_eq!(casters.len(), 1);
@@ -962,7 +996,7 @@ mod tests {
         let mut ordinary_activator = placement("ordinary-activator.glb");
         ordinary_activator.reference_form_id = 100;
         ordinary_activator.semantic = PreparedSemantic::Activator;
-        ordinary_activator.physics_classification = PreparedPhysicsClassification::Dynamic;
+        ordinary_activator.physics_classification = PreparedPhysicsClassification::Kinematic;
         placements.push(ordinary_activator);
 
         let casters = sorted_shadow_casters(&placements);
@@ -972,7 +1006,7 @@ mod tests {
         assert_eq!(casters[0].semantic, PreparedSemantic::Activator);
         assert_eq!(
             casters[0].physics_classification,
-            PreparedPhysicsClassification::Dynamic
+            PreparedPhysicsClassification::Kinematic
         );
     }
 
