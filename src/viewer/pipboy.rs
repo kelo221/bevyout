@@ -14,7 +14,7 @@ use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
-    PreparedSceneManifest, cell_label,
+    cell_label,
 };
 
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
@@ -148,7 +148,7 @@ struct ScreenSources<'w> {
     equipment: Res<'w, PlayerEquipment>,
     catalog: Res<'w, PreparedItemCatalog>,
     assets: Res<'w, AssetServer>,
-    manifest: Option<Res<'w, PreparedSceneManifest>>,
+    manifest: Option<Res<'w, crate::viewer::LoadedSceneManifest>>,
     time: Res<'w, Time>,
 }
 

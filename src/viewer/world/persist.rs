@@ -766,7 +766,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         }
     }
 
-    let Some(manifest) = world.get_resource::<PreparedSceneManifest>() else {
+    let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() else {
         anyhow::bail!("no prepared scene manifest loaded");
     };
     let header = SaveGameHeader {
@@ -1224,7 +1224,7 @@ mod tests {
         let mut world = test_world();
         world.init_resource::<super::super::preload::ResidentCells>();
         world.insert_resource(ActiveCell(0xC0DE));
-        world.insert_resource(minimal_manifest(0xC0DE));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xC0DE)));
         world.insert_resource(SaveDirectory(save_dir.clone()));
         world.insert_resource(interaction::PlayerInventory::from_stacks([(0x42, 2)]));
         world
@@ -1284,7 +1284,7 @@ mod tests {
         let mut world = test_world();
         world.init_resource::<super::super::preload::ResidentCells>();
         world.insert_resource(ActiveCell(0xC0DE));
-        world.insert_resource(minimal_manifest(0xC0DE));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xC0DE)));
         world.insert_resource(SaveDirectory(save_dir.clone()));
         world.insert_resource(interaction::PlayerInventory::from_stacks([(0x99, 99)]));
 
@@ -1358,7 +1358,7 @@ mod tests {
         let mut world = test_world();
         world.init_resource::<super::super::preload::ResidentCells>();
         world.insert_resource(ActiveCell(0xC0DE));
-        world.insert_resource(minimal_manifest(0xC0DE));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xC0DE)));
         world.insert_resource(SaveDirectory(save_dir.clone()));
         world.insert_resource(interaction::PlayerInventory::from_stacks([(0x99, 99)]));
 

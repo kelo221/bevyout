@@ -39,11 +39,13 @@ use crate::vsa::{
     find_cached_manifest, fingerprint, is_bake_static, prepare, resolve_cached_manifest,
 };
 
+/// Bevy-owned wrapper around the engine-independent prepared-scene contract.
+#[derive(Resource, Clone, Debug, Deref, DerefMut)]
+pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
+
 mod animation;
 mod audio;
-// `pub(crate)` so `vsa::prepare::items` can reach the shared
-// `interaction::item_rules` quest-flag decode (issue #81).
-pub(crate) mod interaction;
+mod interaction;
 mod inventory;
 mod openmw_player;
 mod pipboy;

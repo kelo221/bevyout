@@ -228,7 +228,7 @@ pub(crate) fn advance_pending_collider_builds(
 pub(crate) fn build_prepared_colliders(
     mut commands: Commands,
     physics_disabled: Res<PhysicsDisabled>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     physics_assets: Res<PreparedPhysicsAssets>,
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<CollisionRuntimeStats>,
@@ -340,7 +340,7 @@ pub(crate) fn build_prepared_colliders(
     stats.sleeping_dynamic_bodies = 0;
     stats.dynamic_transform_updates = 0;
     pending.0 = Some(PendingColliderBuildState {
-        manifest: Arc::new((*manifest).clone()),
+        manifest: Arc::new((**manifest).clone()),
         static_queue: super::super::world::ColliderBuildQueue::new(Vec::new()),
         dynamic_queue: super::super::world::ColliderBuildQueue::new(dynamic_indices),
         static_ready: true,
@@ -524,7 +524,7 @@ fn build_colliders_for_placement(
 pub(crate) fn process_ragdoll_toggles(
     mut commands: Commands,
     physics_assets: Res<PreparedPhysicsAssets>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut collision: ResMut<PreparedCollisionWorld>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     query: Query<(

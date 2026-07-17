@@ -1,0 +1,12 @@
+[package]
+name = "bevyout-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = { version = "=0.32.1", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.6"
+ron = "0.8"

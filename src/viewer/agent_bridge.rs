@@ -18,8 +18,6 @@ use super::interaction::PlacementRoot;
 use super::player::FpsPlayer;
 use super::{RenderReportBuffer, diagnostics};
 use crate::console::{ConsoleExecutor, ConsoleRegistry, ConsoleRequest, ConsoleSessionId};
-use crate::vsa::PreparedSceneManifest;
-
 const DEFAULT_SNAPSHOT_LIMIT: usize = 100;
 const MAX_SNAPSHOT_LIMIT: usize = 1_000;
 const DEFAULT_FRAME_BUDGET_MS: f64 = 16.667;
@@ -298,7 +296,7 @@ fn schedule_snapshot(In(params): In<Option<Value>>, world: &World) -> BrpResult 
 fn session(
     In(_params): In<Option<Value>>,
     info: Res<AgentBridgeInfo>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
 ) -> BrpResult {
     Ok(json!({
         "session_id": info.session_id,

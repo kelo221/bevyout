@@ -86,7 +86,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
         world.resource::<Assets<Image>>().len(),
     );
     let (manifest_placements, manifest_lights) = {
-        let manifest = world.resource::<PreparedSceneManifest>();
+        let manifest = world.resource::<crate::viewer::LoadedSceneManifest>();
         (manifest.placements.len(), manifest.lights.len())
     };
     let camera_mode = format!("{:?}", world.resource::<player::CameraModeState>().mode);

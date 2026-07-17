@@ -27,3 +27,8 @@ and as comments on the issues; the PR closes the issues.
 | M3 wave 5 — canonical item instances, atomic holders, save v3, static merchant | [M3_WAVE5_PROMPT.md](M3_WAVE5_PROMPT.md) | [M3_WAVE5_PLAN.md](M3_WAVE5_PLAN.md) | in progress (#95) |
 | M3 wave 6 — equipment, consumable use and reading, Pip-Boy Data views | [M3_WAVE6_PROMPT.md](M3_WAVE6_PROMPT.md) | [M3_WAVE6_PLAN.md](M3_WAVE6_PLAN.md) | PR #122 (#98, #99, #100; combined with wave 7); manual script [M3_WAVE6_MANUAL.md](M3_WAVE6_MANUAL.md) |
 | M3 wave 7 — recipe preparation and corpse loot | [M3_WAVE7_PROMPT.md](M3_WAVE7_PROMPT.md) | [M3_WAVE7_PLAN.md](M3_WAVE7_PLAN.md) — see "Shipped amendments" (A10) | PR #122 (#117, #118; combined with wave 6); follow-up #120; manual script [M3_WAVE7_MANUAL.md](M3_WAVE7_MANUAL.md) |
+| Architecture wave 1 — pure core contracts and policies | [ARCH_WAVE1_PROMPT.md](ARCH_WAVE1_PROMPT.md) | [ARCH_WAVE1_PLAN.md](ARCH_WAVE1_PLAN.md) | In progress (#143; epic #142) |
+| Architecture wave 2 — typed viewer composition | [ARCH_WAVE2_PROMPT.md](ARCH_WAVE2_PROMPT.md) | [ARCH_WAVE2_PLAN.md](ARCH_WAVE2_PLAN.md) | Planned (#144; epic #142) |
+| Architecture wave 3 — interaction capability modules | [ARCH_WAVE3_PROMPT.md](ARCH_WAVE3_PROMPT.md) | [ARCH_WAVE3_PLAN.md](ARCH_WAVE3_PLAN.md) | Planned (#145; epic #142) |
+| Architecture wave 4 — viewer console capability modules | [ARCH_WAVE4_PROMPT.md](ARCH_WAVE4_PROMPT.md) | [ARCH_WAVE4_PLAN.md](ARCH_WAVE4_PLAN.md) | Planned (#146; epic #142) |
+| Architecture wave 5 — production-backed extension traits | [ARCH_WAVE5_PROMPT.md](ARCH_WAVE5_PROMPT.md) | [ARCH_WAVE5_PLAN.md](ARCH_WAVE5_PLAN.md) | Planned (#147; epic #142) |

@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, bail};
+use bevyout_core::form_id::FormIdResolver;
 use sha2::{Digest, Sha256};
 
 use crate::vsa::openmw_esm4::{
@@ -52,9 +53,9 @@ pub(super) fn build(sources: &[PluginSource<'_>]) -> Result<ContentIndex> {
                     .unwrap_or(index) as u8
             })
             .collect();
-        let current_index = index as u8;
+        let resolver = FormIdResolver::new(index as u8, master_indices);
 
-        walk_plugin(source.bytes, current_index, &master_indices, |event| {
+        walk_plugin(source.bytes, &resolver, |event| {
             *type_counts
                 .entry((source.name.to_string(), event.record_type.clone()))
                 .or_insert(0) += 1;
@@ -137,26 +138,17 @@ fn validate_load_order(sources: &[PluginSource<'_>]) -> Result<()> {
 
 fn walk_plugin(
     bytes: &[u8],
-    current_index: u8,
-    master_indices: &[u8],
+    resolver: &FormIdResolver,
     mut on_record: impl FnMut(RawRecordEvent),
 ) -> Result<()> {
-    walk_range(
-        bytes,
-        0,
-        bytes.len(),
-        current_index,
-        master_indices,
-        &mut on_record,
-    )
+    walk_range(bytes, 0, bytes.len(), resolver, &mut on_record)
 }
 
 fn walk_range(
     bytes: &[u8],
     mut offset: usize,
     end: usize,
-    current_index: u8,
-    master_indices: &[u8],
+    resolver: &FormIdResolver,
     on_record: &mut impl FnMut(RawRecordEvent),
 ) -> Result<()> {
     while offset + 4 <= end {
@@ -169,14 +161,7 @@ fn walk_range(
             if size < 24 || offset + size > end {
                 bail!("invalid GRUP size")
             }
-            walk_range(
-                bytes,
-                offset + 24,
-                offset + size,
-                current_index,
-                master_indices,
-                on_record,
-            )?;
+            walk_range(bytes, offset + 24, offset + size, resolver, on_record)?;
             offset += size;
             continue;
         }
@@ -193,7 +178,7 @@ fn walk_range(
         }
         let record_type = String::from_utf8_lossy(signature).to_string();
         if record_type != "TES4" {
-            let form_id = resolve_form_id(raw_form_id, current_index, master_indices);
+            let form_id = resolver.adjust(raw_form_id);
             let editor_id = record_payload(
                 &bytes[offset + 24..record_end],
                 flags,
@@ -213,20 +198,6 @@ fn walk_range(
         offset = record_end;
     }
     Ok(())
-}
-
-/// Mirrors `openmw_esm4::FormIdResolver::adjust`; duplicated here (five
-/// lines) because that resolver's fields and method are private to the
-/// reader module, and this slice must not reach into ESM4 parser internals
-/// to get at them.
-fn resolve_form_id(raw: u32, current_index: u8, master_indices: &[u8]) -> u32 {
-    let local_file_index = (raw >> 24) as usize;
-    let object_index = raw & 0x00ff_ffff;
-    let global_file_index = master_indices
-        .get(local_file_index)
-        .copied()
-        .unwrap_or(current_index);
-    (u32::from(global_file_index) << 24) | object_index
 }
 
 fn is_well_formed_signature(signature: &str) -> bool {

@@ -1,0 +1,10 @@
+//! Engine-independent contracts and deterministic policy for bevyout.
+//!
+//! This crate deliberately excludes Bevy, filesystem access, and process
+//! execution. The application crate adapts these values at its preparation
+//! and runtime boundaries.
+
+pub mod form_id;
+pub mod item_transaction;
+pub mod items;
+pub mod manifest;

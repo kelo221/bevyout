@@ -3,10 +3,9 @@
 //!
 //! This reuses the attributed ESM4 byte-decoding primitives already tested
 //! in `vsa::openmw_esm4` (subrecord/record/GRUP layout parsing, `EDID`
-//! extraction, master-name reading) rather than writing a new parser. The
-//! FormID master-index remap arithmetic is duplicated in `builder` in
-//! miniature because `openmw_esm4::FormIdResolver`'s fields are private to
-//! its own module; see the comment there.
+//! extraction and master-name reading) rather than writing a new parser.
+//! FormID identity/remapping comes from `bevyout-core`, shared with the ESM
+//! reader.
 //!
 //! Only `ContentIndex`, `FormId`, and `IndexedRecord` are exposed. No
 //! `openmw_esm4` parser type leaves this module.
@@ -18,9 +17,9 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 
 use anyhow::Result;
+pub(crate) use bevyout_core::form_id::FormId;
 
 pub(crate) use super::plugin::PluginSource;
 
@@ -29,29 +28,6 @@ mod builder;
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
-
-/// A resolved FormID: the load-order-wide, master-remapped 32-bit
-/// identifier shared by every plugin that references the same record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct FormId(pub(crate) u32);
-
-impl FormId {
-    pub(crate) fn value(self) -> u32 {
-        self.0
-    }
-}
-
-impl From<u32> for FormId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl fmt::Display for FormId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:08x}", self.0)
-    }
-}
 
 /// One record's resolved state after winning-override resolution, plus the
 /// full provenance chain of plugins that contributed a version of it.

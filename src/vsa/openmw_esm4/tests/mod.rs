@@ -19,10 +19,7 @@ fn direct_subrecord(signature: &str, data: Vec<u8>) -> Subrecord {
 }
 
 fn direct_resolver() -> FormIdResolver {
-    FormIdResolver {
-        current_index: 0,
-        master_indices: Vec::new(),
-    }
+    FormIdResolver::new(0, Vec::new())
 }
 
 #[test]
@@ -330,10 +327,7 @@ fn compressed_records_are_validated_and_decoded() {
 
 #[test]
 fn parses_audio_cell_and_enable_parent_metadata() {
-    let resolver = FormIdResolver {
-        current_index: 0,
-        master_indices: Vec::new(),
-    };
+    let resolver = FormIdResolver::new(0, Vec::new());
     let sound = parse_sound(
         &[
             Subrecord {
@@ -847,10 +841,7 @@ fn xclc_parses_grid_coordinates_and_tolerates_short_or_legacy_payloads() {
             data,
         }],
         0x200,
-        &FormIdResolver {
-            current_index: 0,
-            master_indices: Vec::new(),
-        },
+        &FormIdResolver::new(0, Vec::new()),
     )
     .unwrap();
     assert_eq!(cell.grid, Some((-2, 5)));
@@ -1100,10 +1091,7 @@ fn lvlo8(level: i16, item: u32, count: i16) -> Vec<u8> {
 }
 
 fn no_masters_resolver() -> FormIdResolver {
-    FormIdResolver {
-        current_index: 0,
-        master_indices: Vec::new(),
-    }
+    FormIdResolver::new(0, Vec::new())
 }
 
 #[test]

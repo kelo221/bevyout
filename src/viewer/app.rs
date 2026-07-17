@@ -274,7 +274,7 @@ pub(crate) fn run_view(
         app.insert_resource(world::ActiveSaveState(save.world));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
     }
-    app.insert_resource(manifest)
+    app.insert_resource(crate::viewer::LoadedSceneManifest(manifest))
         .insert_resource(UnlitMode(false))
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))
         .insert_resource(IrradianceIntensity(1.0))

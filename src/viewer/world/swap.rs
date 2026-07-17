@@ -36,6 +36,7 @@ use bevy::prelude::*;
 
 use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::RefRegistry;
+#[cfg(test)]
 use crate::vsa::PreparedSceneManifest;
 
 use super::super::{audio, interaction, nav, player, scene};
@@ -186,7 +187,7 @@ fn evaluate_door_travel_requests(
     mut requests: MessageReader<interaction::DoorTravelRequested>,
     active_cell: Res<ActiveCell>,
     resident_cells: Res<ResidentCells>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     modal: Res<State<GameplayModal>>,
     mut pending_instant: ResMut<PendingInstantSwap>,
     mut pending_fallback: ResMut<PendingFallbackSwap>,
@@ -380,7 +381,7 @@ fn apply_fallback_resolution(world: &mut World) {
                 "swap {source_cell:08x}->{destination_cell:08x} fallback load failed; returning to source cell"
             );
             let source_label = world
-                .get_resource::<PreparedSceneManifest>()
+                .get_resource::<crate::viewer::LoadedSceneManifest>()
                 .filter(|manifest| manifest.cell.form_id == source_cell)
                 .and_then(|manifest| {
                     manifest
@@ -465,7 +466,9 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     player::teleport_active_player(world, translation, rotation_xyzw);
 
     world.insert_resource(ActiveCell(destination_cell));
-    world.insert_resource((*destination_manifest).clone());
+    world.insert_resource(crate::viewer::LoadedSceneManifest(
+        (*destination_manifest).clone(),
+    ));
     scene::refresh_environment_for_active_cell(world);
 
     swap_refs(world, source_root, destination_root);
@@ -789,7 +792,7 @@ mod tests {
         let mut manifest = fixture_manifest();
         let source_cell = manifest.cell.form_id;
         manifest.cell.name = Some("Vault 101 Atrium".into());
-        world.insert_resource(manifest);
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
         world.insert_resource(PendingFallbackResolution(Some(
             FallbackResolution::ReturnToSource {
                 source_cell,
@@ -869,7 +872,7 @@ mod tests {
         app.init_resource::<ResidentCells>();
         app.insert_resource(PendingInstantSwap::default());
         app.insert_resource(PendingFallbackSwap::default());
-        app.insert_resource(fixture_manifest());
+        app.insert_resource(crate::viewer::LoadedSceneManifest(fixture_manifest()));
         app.add_systems(Update, evaluate_door_travel_requests);
         drive_to_in_game(&mut app);
 
