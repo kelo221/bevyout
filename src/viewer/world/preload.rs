@@ -372,6 +372,8 @@ fn poll_preload_parse_tasks(
 fn advance_pending_cell_spawns(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut resident_cells: ResMut<ResidentCells>,
     mut pending_spawns: ResMut<PendingCellSpawns>,
 ) {
@@ -390,6 +392,8 @@ fn advance_pending_cell_spawns(
     let (content, next_index) = spawn_cell_placements_chunk(
         &mut commands,
         &asset_server,
+        &mut meshes,
+        &mut materials,
         &manifest,
         pending.root,
         None,
