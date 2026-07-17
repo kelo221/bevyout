@@ -18,6 +18,7 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 pub(crate) mod agent;
 pub(crate) mod door_link;
 pub(crate) mod landmass_graph;
+pub(crate) mod repath;
 
 pub(crate) fn install(app: &mut App) {
     agent::install(app);
@@ -75,6 +76,44 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
                     door_reference_form_id: door.door_reference_form_id,
                 })
                 .collect(),
+        })
+        .collect()
+}
+
+/// Boundary conversion: `PreparedNavGraph::mesh_merges` (prepare-time
+/// spatial cross-mesh connections, issue #113 feature 2) -> plain
+/// `landmass_graph::MergeInput`s. Same split rationale as `mesh_inputs`.
+pub(crate) fn merge_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MergeInput> {
+    graph
+        .mesh_merges
+        .iter()
+        .map(|merge| landmass_graph::MergeInput {
+            mesh_a_form_id: merge.mesh_a_form_id,
+            triangle_a: merge.triangle_a,
+            mesh_b_form_id: merge.mesh_b_form_id,
+            triangle_b: merge.triangle_b,
+        })
+        .collect()
+}
+
+/// Door reference FormID -> destination cell FormID, for every placement in
+/// `manifest` whose semantic is a travel door (issue #113 feature 3). Reuses
+/// the existing world-transition door-destination data (`PreparedDoor`,
+/// #51/#52) rather than a new lookup -- a placement's `reference_form_id` is
+/// exactly the FormID the prepared nav graph's door array keys triangle
+/// associations by (`PreparedNavDoor::door_reference_form_id`).
+pub(crate) fn travel_door_destinations(
+    manifest: &PreparedSceneManifest,
+) -> std::collections::HashMap<u32, u32> {
+    manifest
+        .placements
+        .iter()
+        .filter_map(|placement| match &placement.semantic {
+            crate::vsa::PreparedSemantic::Door(door) => door
+                .destination
+                .as_ref()
+                .map(|destination| (placement.reference_form_id, destination.cell_form_id)),
+            _ => None,
         })
         .collect()
 }

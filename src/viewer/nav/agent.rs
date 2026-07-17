@@ -24,7 +24,7 @@ use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 use crate::vsa::PreparedSceneManifest;
 
 use super::super::{interaction, player};
-use super::{door_link, landmass_graph};
+use super::{door_link, landmass_graph, repath};
 
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
@@ -35,6 +35,11 @@ const AGENT_TARGET_REACHED_DISTANCE: f32 = 0.5;
 /// simplification -- #113 can derive this from the link's real length and
 /// the agent's desired speed instead).
 const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
+/// How close (metres) the agent must get to a travel door's triangle
+/// midpoint before the door lifecycle starts (issue #113 feature 3).
+/// Slightly wider than `AGENT_TARGET_REACHED_DISTANCE` so landmass's own
+/// target-reached stop always lands inside it.
+const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 
 /// Marks the one test agent this console command family drives.
 #[derive(Component)]
@@ -50,6 +55,40 @@ struct DoorTraversal {
     elapsed: f32,
 }
 
+/// What an off-mesh animation-link entity represents (issue #113): a
+/// same-cell cross-mesh merge seam (always open, crossed without any door
+/// interaction) or an intra-cell two-sided door link (wave 3's pause ->
+/// open -> traverse lifecycle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    Merge,
+    Door { form_id: u32 },
+}
+
+/// A two-sided intra-cell door link currently excluded from route planning
+/// because its door is locked (issue #113 feature 3: "blocked until
+/// usable"). The geometry is retained so `door_availability_system` can
+/// spawn the real animation link the moment the door becomes usable.
+#[derive(Debug, Clone, Copy)]
+struct BlockedDoorLink {
+    door_form_id: u32,
+    start: Vec3,
+    end: Vec3,
+}
+
+/// A travel door reachable from this cell's nav mesh (issue #113 feature
+/// 3): its single-sided triangle midpoint (the routing target), the door
+/// placement's own position (the traversal end point -- the agent walks
+/// *to* the door, never through into the unloaded destination cell), and
+/// the destination cell the existing world-transition metadata (#51/#52)
+/// resolves it to.
+#[derive(Debug, Clone, Copy)]
+struct TravelDoorLink {
+    triangle_midpoint: Vec3,
+    door_position: Vec3,
+    destination_cell_form_id: u32,
+}
+
 /// One archipelago + its islands/links for the currently loaded cell,
 /// built lazily by `ensure_archipelago` and torn down by
 /// `despawn_stale_navmesh_archipelago` on cell swap (mirrors
@@ -60,10 +99,28 @@ struct NavArchipelagoState {
     archipelago: Option<Entity>,
     islands: Vec<Entity>,
     links: Vec<Entity>,
-    /// Animation-link entity -> the door FormID it represents, so
-    /// `door_link_system` can map a `ReachedAnimationLink3d.link_entity`
-    /// back to a door reference to activate.
-    link_doors: HashMap<Entity, u32>,
+    /// Animation-link entity -> what it represents, so `door_link_system`
+    /// can map a `ReachedAnimationLink3d.link_entity` back to either a door
+    /// reference to activate or a merge seam to cross directly.
+    link_kinds: HashMap<Entity, LinkKind>,
+    /// Two-sided door links currently excluded as blocked (locked door).
+    blocked_door_links: Vec<BlockedDoorLink>,
+    /// Door reference FormID -> terminal travel-link data.
+    travel_doors: HashMap<u32, TravelDoorLink>,
+    /// Last observed per-door usability (open, or not locked), for
+    /// `door_availability_system`'s change detection -- exactly one repath
+    /// per actual flip.
+    door_usable: HashMap<u32, bool>,
+    /// Doors' prepared lock/key data + placement entity resolution inputs,
+    /// captured from the manifest at build time so the availability poll
+    /// does not re-borrow the manifest every frame.
+    door_lock_info: HashMap<u32, DoorLockInfo>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoorLockInfo {
+    lock_level: Option<i8>,
+    key_form_id: Option<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -73,6 +130,14 @@ struct TestNavAgentState {
     /// Set by `door_link_system` when a link is first reached, consumed by
     /// the same system once the door opens to start the `DoorTraversal`.
     pending_traversal: Option<(Vec3, Vec3)>,
+    /// The link the agent is currently interacting with (for `tna status`'s
+    /// `link=` report and for `door_traversal_system` to know whether a
+    /// finished crossing should drive the door state machine).
+    active_link: Option<LinkKind>,
+    /// A pending travel-door route (issue #113 feature 3): the agent is
+    /// heading to this door's triangle; arrival starts the door lifecycle
+    /// with a `Travel` destination. Consumed by #134's `tna travel`.
+    travel_intent: Option<u32>,
     /// `Time::elapsed_secs()` when the last `tna goto` ran, for the
     /// path-latency log line.
     goto_started_at: Option<f32>,
@@ -93,6 +158,7 @@ impl Plugin for NavBackendPlugin {
                 Update,
                 (
                     despawn_stale_navmesh_archipelago,
+                    door_availability_system,
                     door_link_system,
                     sync_velocity_from_desired,
                     apply_kinematic_velocity,
@@ -131,12 +197,36 @@ fn teardown_archipelago(world: &mut World) {
 /// islands, and door-link entities for the active cell's prepared nav
 /// graph. Lazy: only called from `tna spawn`, never eagerly per cell swap.
 fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
-    let (current_cell, path) = {
+    let (current_cell, path, travel_destinations, door_lock_info, door_positions) = {
         let manifest = world
             .get_resource::<PreparedSceneManifest>()
             .ok_or_else(no_nav_graph_error)?;
         let path = super::nav_graph_path(manifest).ok_or_else(no_nav_graph_error)?;
-        (manifest.cell.form_id, path)
+        let travel_destinations = super::travel_door_destinations(manifest);
+        let mut door_lock_info = HashMap::new();
+        let mut door_positions = HashMap::new();
+        for placement in &manifest.placements {
+            if let crate::vsa::PreparedSemantic::Door(door) = &placement.semantic {
+                door_lock_info.insert(
+                    placement.reference_form_id,
+                    DoorLockInfo {
+                        lock_level: door.lock_level,
+                        key_form_id: door.key_form_id,
+                    },
+                );
+                door_positions.insert(
+                    placement.reference_form_id,
+                    Vec3::from_array(placement.translation),
+                );
+            }
+        }
+        (
+            manifest.cell.form_id,
+            path,
+            travel_destinations,
+            door_lock_info,
+            door_positions,
+        )
     };
 
     let already_current = {
@@ -153,6 +243,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         no_nav_graph_error()
     })?;
     let mesh_inputs = super::mesh_inputs(&graph);
+    let merge_inputs = super::merge_inputs(&graph);
 
     // `from_agent_radius(0.35)` alone gives a 0.07 m horizontal / 0.35 m
     // below sampling envelope -- far too tight for FO3 data, where the
@@ -208,24 +299,87 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     }
 
     let mut links = Vec::new();
-    let mut link_doors = HashMap::new();
+    let mut link_kinds = HashMap::new();
+    let mut blocked_door_links = Vec::new();
+    let mut door_usable = HashMap::new();
+
+    // Same-cell cross-mesh merge links (issue #113 feature 2). Real FO3
+    // meshes never share seam vertex positions, so landmass's native island
+    // boundary linking cannot connect them (it needs coincident boundary
+    // vertices); generated walk-through animation links across the matched
+    // boundary edges are the path real data takes.
+    for descriptor in landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs) {
+        let start = Vec3::from_array(descriptor.side_a.midpoint);
+        let end = Vec3::from_array(descriptor.side_b.midpoint);
+        for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+            link_kinds.insert(link_entity, LinkKind::Merge);
+            links.push(link_entity);
+        }
+    }
+
+    // Two-sided intra-cell door links (wave 3). A locked door is excluded
+    // from route planning as blocked until usable (issue #113 feature 3);
+    // `door_availability_system` spawns the link when the door becomes
+    // usable and triggers a repath.
     for descriptor in landmass_graph::door_link_descriptors(&mesh_inputs) {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
-        let link_entity = world
-            .spawn(AnimationLink3dBundle {
-                link: AnimationLink3d {
-                    start_edge: (start, start),
-                    end_edge: (end, end),
-                    kind: 0,
-                    cost: 1.0,
-                    bidirectional: true,
-                },
-                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
-            })
-            .id();
-        link_doors.insert(link_entity, descriptor.door_form_id);
-        links.push(link_entity);
+        let usable = door_usable_now(world, descriptor.door_form_id, &door_lock_info);
+        door_usable.insert(descriptor.door_form_id, usable);
+        if usable {
+            for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+                link_kinds.insert(
+                    link_entity,
+                    LinkKind::Door {
+                        form_id: descriptor.door_form_id,
+                    },
+                );
+                links.push(link_entity);
+            }
+        } else {
+            info!(
+                "nav agent door link {:08x} blocked: locked",
+                descriptor.door_form_id
+            );
+            blocked_door_links.push(BlockedDoorLink {
+                door_form_id: descriptor.door_form_id,
+                start,
+                end,
+            });
+        }
+    }
+
+    // Single-sided door triangles whose reference resolves to a travel door
+    // (issue #113 feature 3): terminal travel links. No landmass animation
+    // link is spawned -- the far side lives in another cell's NAVM, so there
+    // is nothing on-mesh to link to; the agent routes *to* the triangle and
+    // the door lifecycle runs there.
+    let mut travel_doors = HashMap::new();
+    for door in landmass_graph::single_sided_doors(&mesh_inputs) {
+        let Some(&destination_cell_form_id) = travel_destinations.get(&door.door_form_id) else {
+            continue;
+        };
+        let triangle_midpoint = Vec3::from_array(door.side.midpoint);
+        let door_position = door_positions
+            .get(&door.door_form_id)
+            .copied()
+            .unwrap_or(triangle_midpoint);
+        door_usable.insert(
+            door.door_form_id,
+            door_usable_now(world, door.door_form_id, &door_lock_info),
+        );
+        info!(
+            "nav agent travel door {:08x} -> cell {destination_cell_form_id:08x}",
+            door.door_form_id
+        );
+        travel_doors.insert(
+            door.door_form_id,
+            TravelDoorLink {
+                triangle_midpoint,
+                door_position,
+                destination_cell_form_id,
+            },
+        );
     }
 
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
@@ -233,9 +387,86 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         archipelago: Some(archipelago_entity),
         islands,
         links,
-        link_doors,
+        link_kinds,
+        blocked_door_links,
+        travel_doors,
+        door_usable,
+        door_lock_info,
     };
     Ok(())
+}
+
+/// Spawns one logical off-mesh link as *two* unidirectional
+/// `AnimationLink3d`s (start -> end and end -> start) rather than one
+/// `bidirectional: true` link: landmass 0.9.1's bidirectional path
+/// (`nav_data.rs`'s reverse `OffMeshLink` insert) indexes the *start*
+/// island's polygon array with the *end* portal's polygon index when
+/// computing `destination_type_index`, which panics ("index out of bounds")
+/// the moment the two ends sit on different islands -- exactly the
+/// cross-mesh case every link this module spawns is for. Confirmed on real
+/// FranklinMetro02 data (end polygon 260 vs start island's 72 polygons);
+/// two unidirectional links take the correctly-indexed non-bidirectional
+/// path and are semantically identical.
+fn spawn_link_pair(
+    world: &mut World,
+    archipelago_entity: Entity,
+    start: Vec3,
+    end: Vec3,
+) -> [Entity; 2] {
+    let mut spawn_one = |from: Vec3, to: Vec3| {
+        world
+            .spawn(AnimationLink3dBundle {
+                link: AnimationLink3d {
+                    start_edge: (from, from),
+                    end_edge: (to, to),
+                    kind: 0,
+                    cost: 1.0,
+                    bidirectional: false,
+                },
+                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+            })
+            .id()
+    };
+    [spawn_one(start, end), spawn_one(end, start)]
+}
+
+/// Whether `door_form_id` is currently usable for route planning: already
+/// open (runtime `InteractionState.open`), or not locked per its prepared
+/// lock/key data and the player's inventory (the same
+/// `interaction::door_is_locked` check the activation prompt uses -- never a
+/// second lock model). A door with no prepared lock info is usable.
+fn door_usable_now(
+    world: &World,
+    door_form_id: u32,
+    door_lock_info: &HashMap<u32, DoorLockInfo>,
+) -> bool {
+    // `resolve_reference` panics without a `RefRegistry` resource, which
+    // minimal test worlds may not have -- guard the open-set lookup on it.
+    let open = world
+        .get_resource::<crate::console::RefRegistry>()
+        .is_some()
+        && crate::console::resolve_reference(world, &format!("{door_form_id:08x}"))
+            .ok()
+            .is_some_and(|entity| {
+                world
+                    .get_resource::<interaction::InteractionState>()
+                    .is_some_and(|state| state.open.contains(&entity))
+            });
+    let locked = door_lock_info.get(&door_form_id).is_some_and(|info| {
+        let door = crate::vsa::PreparedDoor {
+            lock_level: info.lock_level,
+            key_form_id: info.key_form_id,
+            destination: None,
+        };
+        match world.get_resource::<interaction::PlayerInventory>() {
+            Some(inventory) => interaction::door_is_locked(&door, inventory),
+            // No inventory resource (minimal test worlds): key
+            // possession can't help, so locked is decided by the lock
+            // level alone.
+            None => door.lock_level.is_some_and(|level| level > 0),
+        }
+    });
+    repath::door_usable(repath::DoorObservation { locked, open })
 }
 
 fn player_transform_query(world: &mut World) -> Option<Vec3> {
@@ -417,13 +648,16 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
         .get::<AgentState>(agent_entity)
         .copied()
         .unwrap_or_default();
-    let door_link_state = world.resource::<TestNavAgentState>().door_link;
+    let (door_link_state, link_desc) = {
+        let state = world.resource::<TestNavAgentState>();
+        (state.door_link, active_link_description(state))
+    };
     let status = resolve_status(landmass_state, door_link_state);
     let target_desc = world
         .get::<AgentTarget3d>(agent_entity)
         .map(describe_target)
         .unwrap_or_else(|| "none".to_string());
-    let line = format!(
+    let mut line = format!(
         "nav agent status={} position=({:.2},{:.2},{:.2}) target={}",
         status.as_str(),
         position.x,
@@ -431,11 +665,15 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
         position.z,
         target_desc
     );
+    if let Some(link) = &link_desc {
+        line.push_str(&format!(" link={link}"));
+    }
     Ok(ConsoleCommandResult::new(
         json!({
             "status": status.as_str(),
             "position": [position.x, position.y, position.z],
             "target": target_desc,
+            "link": link_desc,
         }),
         vec![line],
     ))
@@ -445,10 +683,32 @@ fn resolve_status(
     landmass_state: AgentState,
     door_link_state: door_link::DoorLinkState,
 ) -> landmass_graph::NavAgentStatus {
+    if door_link::is_travel_reached(door_link_state) {
+        return landmass_graph::NavAgentStatus::TravelReached;
+    }
     if door_link::is_paused(door_link_state) || door_link::is_failed(door_link_state) {
         return landmass_graph::NavAgentStatus::Paused;
     }
     landmass_graph::map_agent_state(landmass_state)
+}
+
+/// The `link=` suffix for `tna status` (issue #113 feature 5): the active
+/// link kind while interacting with one (`merge` while crossing a merge
+/// seam, `door <formid>` through a door lifecycle), else `None`.
+fn active_link_description(state: &TestNavAgentState) -> Option<String> {
+    match state.active_link {
+        Some(LinkKind::Merge) => Some("merge".to_string()),
+        Some(LinkKind::Door { form_id }) => Some(format!("door {form_id:08x}")),
+        None => match state.door_link {
+            door_link::DoorLinkState::TravelReached {
+                door_form_id,
+                destination_cell_form_id,
+            } => Some(format!(
+                "door {door_form_id:08x} cell {destination_cell_form_id:08x}"
+            )),
+            _ => None,
+        },
+    }
 }
 
 fn describe_target(target: &AgentTarget3d) -> String {
@@ -559,19 +819,80 @@ fn door_traversal_system(
                 .entity(entity)
                 .remove::<DoorTraversal>()
                 .remove::<UsingAnimationLink>();
-            state.door_link =
-                door_link::transition(state.door_link, door_link::DoorLinkEvent::TraversalComplete);
+            match state.active_link {
+                // A merge-seam crossing involves no door: the state machine
+                // never left Idle, so completion only clears the link.
+                Some(LinkKind::Merge) | None => {}
+                Some(LinkKind::Door { .. }) => {
+                    let new_state = door_link::transition(
+                        state.door_link,
+                        door_link::DoorLinkEvent::TraversalComplete,
+                    );
+                    if let door_link::DoorLinkState::TravelReached {
+                        door_form_id,
+                        destination_cell_form_id,
+                    } = new_state
+                    {
+                        // Issue #113's terminal travel seam: the agent stops
+                        // at the traversed door with a distinct status; #134
+                        // consumes this to hand the agent off to the
+                        // destination cell.
+                        info!(
+                            "nav agent travel reached {door_form_id:08x} -> cell {destination_cell_form_id:08x}"
+                        );
+                        commands.entity(entity).remove::<AgentTarget3d>();
+                        state.travel_intent = None;
+                    }
+                    state.door_link = new_state;
+                }
+            }
+            state.active_link = None;
+        }
+    }
+}
+
+/// Requests the door `door_form_id` open through the same boundary the
+/// `activate` console command uses. A door that is currently locked is
+/// deliberately *not* scripted open (issue #113 feature 3: no teleporting
+/// through closed doors, and a locked door resolves to the deterministic
+/// `Failed` outcome via the wait bound) -- `scripted_door_open` bypasses
+/// locks by design (dev tooling), so the lock gate lives here.
+fn request_door_open(world: &mut World, door_form_id: u32) {
+    let lock_info = world
+        .resource::<NavArchipelagoState>()
+        .door_lock_info
+        .clone();
+    if !door_usable_now(world, door_form_id, &lock_info) {
+        info!("nav agent door {door_form_id:08x} locked; waiting");
+        return;
+    }
+    if world
+        .get_resource::<crate::console::RefRegistry>()
+        .is_none()
+    {
+        warn!("nav agent door {door_form_id:08x}: reference not resolvable");
+        return;
+    }
+    match crate::console::resolve_reference(world, &format!("{door_form_id:08x}")) {
+        Ok(door_entity) => {
+            interaction::scripted_door_open(world, door_entity);
+        }
+        Err(_) => {
+            warn!("nav agent door {door_form_id:08x}: reference not resolvable");
         }
     }
 }
 
 /// Drives the door-link lifecycle: detects the agent reaching an off-mesh
-/// link, requests the door open through the same boundary the `activate`
-/// console command uses (`interaction::scripted_door_open`), polls
-/// `InteractionState.open`, and starts the kinematic crossing once the door
-/// is open. An exclusive (`&mut World`) system since it needs to both query
-/// components and call into `interaction`'s `&mut World`-based scripted
-/// door boundary in the same step.
+/// link (a merge seam is crossed directly; a door link runs the pause ->
+/// scripted-open -> wait -> traverse lifecycle) or arriving at a travel
+/// door's triangle (issue #113 feature 3), requests the door open through
+/// the same boundary the `activate` console command uses
+/// (`interaction::scripted_door_open`), polls `InteractionState.open`, and
+/// starts the kinematic crossing once the door is open. An exclusive
+/// (`&mut World`) system since it needs to both query components and call
+/// into `interaction`'s `&mut World`-based scripted door boundary in the
+/// same step.
 fn door_link_system(world: &mut World) {
     let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
         return;
@@ -582,41 +903,98 @@ fn door_link_system(world: &mut World) {
     let current_state = world.resource::<TestNavAgentState>().door_link;
 
     match current_state {
-        door_link::DoorLinkState::Idle | door_link::DoorLinkState::Failed { .. } => {
+        door_link::DoorLinkState::Idle
+        | door_link::DoorLinkState::Failed { .. }
+        | door_link::DoorLinkState::TravelReached { .. } => {
+            // Travel arrival (issue #113 feature 3): a pending travel
+            // intent whose door triangle the agent has reached starts the
+            // door lifecycle with a Travel destination.
+            let travel_arrival = world
+                .resource::<TestNavAgentState>()
+                .travel_intent
+                .and_then(|door_form_id| {
+                    let link = world
+                        .resource::<NavArchipelagoState>()
+                        .travel_doors
+                        .get(&door_form_id)
+                        .copied()?;
+                    let position = world.get::<Transform>(agent_entity)?.translation;
+                    (position.distance(link.triangle_midpoint) <= TRAVEL_ARRIVAL_DISTANCE)
+                        .then_some((door_form_id, link))
+                });
+            if let Some((door_form_id, link)) = travel_arrival {
+                let new_state = door_link::transition(
+                    current_state,
+                    door_link::DoorLinkEvent::LinkReached {
+                        door_form_id,
+                        destination: door_link::LinkDestination::Travel {
+                            destination_cell_form_id: link.destination_cell_form_id,
+                        },
+                    },
+                );
+                world.entity_mut(agent_entity).insert(PauseAgent);
+                request_door_open(world, door_form_id);
+                info!("nav agent door wait {door_form_id:08x}");
+                let mut state = world.resource_mut::<TestNavAgentState>();
+                state.door_link = new_state;
+                state.active_link = Some(LinkKind::Door {
+                    form_id: door_form_id,
+                });
+                state.pending_traversal = Some((link.triangle_midpoint, link.door_position));
+                return;
+            }
+
             let Some(reached) = world.get::<ReachedAnimationLink3d>(agent_entity) else {
                 return;
             };
             let link_entity = reached.link_entity;
             let start_point = reached.start_point;
             let end_point = reached.end_point;
-            let Some(&door_form_id) = world
+            let Some(&link_kind) = world
                 .resource::<NavArchipelagoState>()
-                .link_doors
+                .link_kinds
                 .get(&link_entity)
             else {
                 return;
             };
-            let new_state = door_link::transition(
-                current_state,
-                door_link::DoorLinkEvent::LinkReached { door_form_id },
-            );
-            world.entity_mut(agent_entity).insert(PauseAgent);
-            match crate::console::resolve_reference(world, &format!("{door_form_id:08x}")) {
-                Ok(door_entity) => {
-                    interaction::scripted_door_open(world, door_entity);
+            match link_kind {
+                LinkKind::Merge => {
+                    // A merge seam has no door: cross it immediately.
+                    world.entity_mut(agent_entity).insert((
+                        UsingAnimationLink,
+                        DoorTraversal {
+                            start: start_point,
+                            end: end_point,
+                            elapsed: 0.0,
+                        },
+                    ));
+                    world.resource_mut::<TestNavAgentState>().active_link = Some(LinkKind::Merge);
                 }
-                Err(_) => {
-                    warn!("nav agent door {door_form_id:08x}: reference not resolvable");
+                LinkKind::Door {
+                    form_id: door_form_id,
+                } => {
+                    let new_state = door_link::transition(
+                        current_state,
+                        door_link::DoorLinkEvent::LinkReached {
+                            door_form_id,
+                            destination: door_link::LinkDestination::IntraCell,
+                        },
+                    );
+                    world.entity_mut(agent_entity).insert(PauseAgent);
+                    request_door_open(world, door_form_id);
+                    info!("nav agent door wait {door_form_id:08x}");
+                    let mut state = world.resource_mut::<TestNavAgentState>();
+                    state.door_link = new_state;
+                    state.active_link = Some(link_kind);
+                    state.pending_traversal = Some((start_point, end_point));
                 }
             }
-            info!("nav agent door wait {door_form_id:08x}");
-            let mut state = world.resource_mut::<TestNavAgentState>();
-            state.door_link = new_state;
-            state.pending_traversal = Some((start_point, end_point));
         }
         door_link::DoorLinkState::Paused { door_form_id, .. } => {
-            let door_open =
-                crate::console::resolve_reference(world, &format!("{door_form_id:08x}"))
+            let door_open = world
+                .get_resource::<crate::console::RefRegistry>()
+                .is_some()
+                && crate::console::resolve_reference(world, &format!("{door_form_id:08x}"))
                     .ok()
                     .is_some_and(|door_entity| {
                         world
@@ -648,6 +1026,9 @@ fn door_link_system(world: &mut World) {
                     "nav agent door {door_form_id:08x}: gave up waiting for it to open; agent stopped at the link"
                 );
                 info!("nav agent unreachable");
+                let mut state = world.resource_mut::<TestNavAgentState>();
+                state.active_link = None;
+                state.travel_intent = None;
             }
             world.resource_mut::<TestNavAgentState>().door_link = new_state;
         }
@@ -656,6 +1037,188 @@ fn door_link_system(world: &mut World) {
             // `TraversalComplete` once it finishes.
         }
     }
+}
+
+/// Polls every tracked door's usability once per frame and reacts to
+/// *changes* only (issue #113 feature 4): the pure `repath::decide` table
+/// turns a flip into a repath, applied here as (a) spawning/despawning the
+/// affected two-sided door link so route planning includes/excludes it, (b)
+/// re-inserting the agent's current target so landmass replans, and (c)
+/// while paused at that very door, requesting the (now unlocked) door open.
+/// Exactly one repath per actual state change -- the cached `door_usable`
+/// map is the change detector.
+fn door_availability_system(world: &mut World) {
+    let tracked: Vec<(u32, bool)> = world
+        .resource::<NavArchipelagoState>()
+        .door_usable
+        .iter()
+        .map(|(&form_id, &usable)| (form_id, usable))
+        .collect();
+    if tracked.is_empty() {
+        return;
+    }
+    let lock_info = world
+        .resource::<NavArchipelagoState>()
+        .door_lock_info
+        .clone();
+    for (door_form_id, was_usable) in tracked {
+        let now_usable = door_usable_now(world, door_form_id, &lock_info);
+        if now_usable == was_usable {
+            continue;
+        }
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .door_usable
+            .insert(door_form_id, now_usable);
+
+        let observation = repath::RepathObservation {
+            door_became_blocked: !now_usable,
+            door_became_unblocked: now_usable,
+            ..Default::default()
+        };
+        if repath::decide(observation) != repath::RepathDecision::Repath {
+            continue;
+        }
+
+        // Structural link update for two-sided door links.
+        if now_usable {
+            let blocked = {
+                let mut state = world.resource_mut::<NavArchipelagoState>();
+                let index = state
+                    .blocked_door_links
+                    .iter()
+                    .position(|link| link.door_form_id == door_form_id);
+                index.map(|index| state.blocked_door_links.remove(index))
+            };
+            if let Some(link) = blocked {
+                let archipelago_entity = world
+                    .resource::<NavArchipelagoState>()
+                    .archipelago
+                    .expect("availability tracking implies a built archipelago");
+                for link_entity in spawn_link_pair(world, archipelago_entity, link.start, link.end)
+                {
+                    let mut state = world.resource_mut::<NavArchipelagoState>();
+                    state.link_kinds.insert(
+                        link_entity,
+                        LinkKind::Door {
+                            form_id: door_form_id,
+                        },
+                    );
+                    state.links.push(link_entity);
+                }
+            }
+        } else {
+            let removed: Vec<Entity> = {
+                let state = world.resource::<NavArchipelagoState>();
+                state
+                    .link_kinds
+                    .iter()
+                    .filter(|(_, kind)| {
+                        matches!(kind, LinkKind::Door { form_id } if *form_id == door_form_id)
+                    })
+                    .map(|(&entity, _)| entity)
+                    .collect()
+            };
+            // The door's link is spawned as a unidirectional pair (see
+            // `spawn_link_pair`); despawn every entity but record only one
+            // blocked entry, from the first entity's own orientation, so a
+            // later unblock respawns exactly one pair.
+            let mut recorded = false;
+            for link_entity in removed {
+                let (start, end) = world
+                    .get::<AnimationLink3d>(link_entity)
+                    .map(|link| (link.start_edge.0, link.end_edge.0))
+                    .unwrap_or_default();
+                if let Ok(entity) = world.get_entity_mut(link_entity) {
+                    entity.despawn();
+                }
+                let mut state = world.resource_mut::<NavArchipelagoState>();
+                state.link_kinds.remove(&link_entity);
+                state.links.retain(|entity| *entity != link_entity);
+                if !recorded {
+                    state.blocked_door_links.push(BlockedDoorLink {
+                        door_form_id,
+                        start,
+                        end,
+                    });
+                    recorded = true;
+                }
+            }
+        }
+
+        // Route refresh: re-insert the agent's current target so landmass
+        // replans with the updated link set. `AgentTarget3d` is not `Clone`;
+        // rebuild the equivalent value by matching its variants.
+        let agent = world.resource::<TestNavAgentState>().entity;
+        if let Some(agent_entity) = agent {
+            let target = world
+                .get::<AgentTarget3d>(agent_entity)
+                .and_then(|target| match target {
+                    AgentTarget3d::None => None,
+                    AgentTarget3d::Point(point) => Some(AgentTarget3d::Point(*point)),
+                    AgentTarget3d::Entity(entity) => Some(AgentTarget3d::Entity(*entity)),
+                });
+            if let Some(target) = target {
+                world.entity_mut(agent_entity).insert(target);
+            }
+        }
+
+        // A paused wait on this exact door can now proceed.
+        if now_usable
+            && matches!(
+                world.resource::<TestNavAgentState>().door_link,
+                door_link::DoorLinkState::Paused { door_form_id: paused, .. } if paused == door_form_id
+            )
+        {
+            request_door_open(world, door_form_id);
+        }
+
+        info!(
+            "nav agent repath door {door_form_id:08x} {}",
+            if now_usable { "unblocked" } else { "blocked" }
+        );
+    }
+}
+
+/// Routes the test agent to `door_form_id`'s travel-door triangle and arms
+/// the travel lifecycle (issue #113 feature 3). The traversal terminates at
+/// the door with the `TravelReached` status -- #134's `tna travel` console
+/// surface consumes this seam and adds the actual cell handoff.
+#[allow(dead_code)] // consumed by #134's `tna travel` console surface
+pub(crate) fn request_travel(world: &mut World, door_form_id: u32) -> Result<(), ConsoleError> {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+        return Err(ConsoleError::new(
+            "no_agent",
+            "no test nav agent is spawned; use tna spawn first",
+        ));
+    };
+    if world
+        .resource::<TestNavAgentState>()
+        .travel_intent
+        .is_some()
+    {
+        return Err(ConsoleError::new(
+            "travel_in_progress",
+            "a travel request is already in progress",
+        ));
+    }
+    let Some(link) = world
+        .resource::<NavArchipelagoState>()
+        .travel_doors
+        .get(&door_form_id)
+        .copied()
+    else {
+        return Err(ConsoleError::new(
+            "unknown_travel_door",
+            format!("no travel door {door_form_id:08x} is reachable from this cell's nav mesh"),
+        ));
+    };
+    world
+        .entity_mut(agent_entity)
+        .insert(AgentTarget3d::Point(link.triangle_midpoint));
+    world.resource_mut::<TestNavAgentState>().travel_intent = Some(door_form_id);
+    info!("nav agent travel start {door_form_id:08x}");
+    Ok(())
 }
 
 /// Logs the stable evidence lines exactly once per actual state change.
@@ -944,6 +1507,7 @@ mod tests {
         let paused = door_link::DoorLinkState::Paused {
             door_form_id: 0x99,
             waited_ticks: 1,
+            destination: door_link::LinkDestination::IntraCell,
         };
         assert_eq!(
             resolve_status(AgentState::Moving, paused),
@@ -952,6 +1516,340 @@ mod tests {
         assert_eq!(
             resolve_status(AgentState::Idle, door_link::DoorLinkState::Idle),
             landmass_graph::NavAgentStatus::Idle
+        );
+    }
+
+    #[test]
+    fn resolve_status_reports_travel_reached_as_its_own_status() {
+        let reached = door_link::DoorLinkState::TravelReached {
+            door_form_id: 0x99,
+            destination_cell_form_id: 0xC0DE,
+        };
+        assert_eq!(
+            resolve_status(AgentState::Idle, reached),
+            landmass_graph::NavAgentStatus::TravelReached
+        );
+        assert_eq!(
+            landmass_graph::NavAgentStatus::TravelReached.as_str(),
+            "travel-reached"
+        );
+    }
+
+    /// Plan #113 minimal-App test: a travel-door request routes the agent
+    /// to the door triangle and, on arrival, drives the existing
+    /// `DoorLinkState` lifecycle (pause -> scripted-open boundary -> wait
+    /// -> traverse) to the `TravelReached` terminal seam.
+    #[test]
+    fn travel_request_routes_to_the_door_and_completes_the_lifecycle() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        // `scripted_door_open` requires the resolved entity to carry a
+        // `PlacementRoot` (the same invariant the `activate` command has).
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((TestNavAgentMarker, Transform::from_xyz(0.0, 0.0, 0.0)))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .travel_doors
+            .insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                },
+            );
+
+        request_travel(&mut world, 0x99).expect("travel request succeeds");
+        assert!(matches!(
+            world.get::<AgentTarget3d>(agent),
+            Some(AgentTarget3d::Point(point)) if *point == Vec3::new(5.0, 0.0, 0.0)
+        ));
+
+        // Not yet at the door: the lifecycle must not start.
+        door_link_system(&mut world);
+        assert_eq!(
+            world.resource::<TestNavAgentState>().door_link,
+            door_link::DoorLinkState::Idle
+        );
+
+        // Arrive at the triangle midpoint: pause + door-open request.
+        world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.0, 0.0);
+        door_link_system(&mut world);
+        assert!(is_paused(&world));
+        assert!(world.get::<PauseAgent>(agent).is_some());
+
+        // The unlocked door was scripted open through the interaction
+        // boundary by the arrival itself (same code path as `activate`).
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "arrival must scripted-open the unlocked door"
+        );
+
+        // The open door resumes into the kinematic crossing.
+        door_link_system(&mut world);
+        assert!(door_link::is_traversing(
+            world.resource::<TestNavAgentState>().door_link
+        ));
+        assert!(world.get::<DoorTraversal>(agent).is_some());
+
+        // Complete the crossing (elapsed already past the fixed duration).
+        use bevy::ecs::system::RunSystemOnce;
+        world.get_mut::<DoorTraversal>(agent).unwrap().elapsed = 10.0;
+        world
+            .run_system_once(door_traversal_system)
+            .expect("traversal system runs");
+        assert_eq!(
+            world.resource::<TestNavAgentState>().door_link,
+            door_link::DoorLinkState::TravelReached {
+                door_form_id: 0x99,
+                destination_cell_form_id: 0xC0DE,
+            }
+        );
+        assert!(
+            world.get::<AgentTarget3d>(agent).is_none(),
+            "the agent stops at the traversed door (issue #134 owns the handoff)"
+        );
+        assert!(
+            world
+                .resource::<TestNavAgentState>()
+                .travel_intent
+                .is_none()
+        );
+    }
+
+    fn is_paused(world: &World) -> bool {
+        door_link::is_paused(world.resource::<TestNavAgentState>().door_link)
+    }
+
+    /// Minimal travel-door placement for the lifecycle tests.
+    fn door_placement(reference_form_id: u32) -> crate::vsa::PreparedPlacement {
+        crate::vsa::PreparedPlacement {
+            reference_form_id,
+            base_form_id: 1,
+            asset_path: None,
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: Default::default(),
+            step_support: false,
+            mutability: Default::default(),
+            mutability_root_form_id: None,
+            reference_kind: "REFR".into(),
+            base_kind: "DOOR".into(),
+            editor_id: None,
+            display_name: None,
+            count: 1,
+            semantic: crate::vsa::PreparedSemantic::Door(crate::vsa::PreparedDoor {
+                lock_level: None,
+                key_form_id: None,
+                destination: None,
+            }),
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory: Vec::new(),
+            audio: Default::default(),
+            ao_mode: "ao-none".into(),
+        }
+    }
+
+    /// Plan #113 minimal-App test: a locked travel door never scripted-opens
+    /// (no teleporting through closed doors) and resolves to the existing
+    /// deterministic `Failed` status via the wait bound.
+    #[test]
+    fn locked_travel_door_fails_deterministically_without_opening() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((TestNavAgentMarker, Transform::from_xyz(5.0, 0.0, 0.0)))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                },
+            );
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(50),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        request_travel(&mut world, 0x99).expect("routing to a locked door is allowed");
+        door_link_system(&mut world);
+        assert!(is_paused(&world));
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a locked door must never be scripted open by the nav agent"
+        );
+
+        for _ in 0..door_link::MAX_WAIT_TICKS {
+            door_link_system(&mut world);
+        }
+        assert_eq!(
+            world.resource::<TestNavAgentState>().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 }
+        );
+    }
+
+    /// Plan #113 minimal-App test: a door state change triggers exactly one
+    /// repath -- the blocked two-sided link spawns once when the door
+    /// becomes usable, and repeated polls with no further change do
+    /// nothing.
+    #[test]
+    fn a_door_state_change_triggers_exactly_one_repath() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let archipelago = world.spawn_empty().id();
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.archipelago = Some(archipelago);
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(50),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+            state.blocked_door_links.push(BlockedDoorLink {
+                door_form_id: 0x99,
+                start: Vec3::ZERO,
+                end: Vec3::new(1.0, 0.0, 0.0),
+            });
+        }
+
+        // No change: locked stays locked, nothing spawns.
+        door_availability_system(&mut world);
+        assert!(world.resource::<NavArchipelagoState>().links.is_empty());
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .len(),
+            1
+        );
+
+        // The door opens (e.g. the player activates it): one flip, one
+        // repath -- the link spawns (one unidirectional pair, see
+        // `spawn_link_pair`) and the blocked entry is consumed.
+        world
+            .resource_mut::<interaction::InteractionState>()
+            .open
+            .insert(door_entity);
+        door_availability_system(&mut world);
+        assert_eq!(world.resource::<NavArchipelagoState>().links.len(), 2);
+        assert!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .is_empty()
+        );
+
+        // Steady state: repeated polls never spawn another link pair.
+        door_availability_system(&mut world);
+        door_availability_system(&mut world);
+        assert_eq!(world.resource::<NavArchipelagoState>().links.len(), 2);
+    }
+
+    /// Plan #113 minimal-App test: never two concurrent travel requests.
+    #[test]
+    fn concurrent_travel_requests_are_rejected() {
+        let mut world = harness_world();
+        let agent = world.spawn(TestNavAgentMarker).id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .travel_doors
+            .insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::ZERO,
+                    door_position: Vec3::ZERO,
+                    destination_cell_form_id: 0xC0DE,
+                },
+            );
+        request_travel(&mut world, 0x99).expect("first request succeeds");
+        let error = request_travel(&mut world, 0x99).unwrap_err();
+        assert_eq!(error.code, "travel_in_progress");
+    }
+
+    #[test]
+    fn travel_request_errors_without_an_agent_or_a_known_door() {
+        let mut world = harness_world();
+        assert_eq!(
+            request_travel(&mut world, 0x99).unwrap_err().code,
+            "no_agent"
+        );
+        let agent = world.spawn(TestNavAgentMarker).id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        assert_eq!(
+            request_travel(&mut world, 0x99).unwrap_err().code,
+            "unknown_travel_door"
+        );
+    }
+
+    #[test]
+    fn active_link_description_reports_merge_door_and_travel_reached() {
+        let mut state = TestNavAgentState::default();
+        assert_eq!(active_link_description(&state), None);
+
+        state.active_link = Some(LinkKind::Merge);
+        assert_eq!(active_link_description(&state), Some("merge".to_string()));
+
+        state.active_link = Some(LinkKind::Door { form_id: 0x99 });
+        assert_eq!(
+            active_link_description(&state),
+            Some("door 00000099".to_string())
+        );
+
+        state.active_link = None;
+        state.door_link = door_link::DoorLinkState::TravelReached {
+            door_form_id: 0x99,
+            destination_cell_form_id: 0xC0DE,
+        };
+        assert_eq!(
+            active_link_description(&state),
+            Some("door 00000099 cell 0000c0de".to_string())
         );
     }
 

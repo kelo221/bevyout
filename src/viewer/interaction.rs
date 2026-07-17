@@ -1815,7 +1815,11 @@ fn placement_name(placement: &PreparedPlacement) -> String {
         .unwrap_or_else(|| format!("{:08x}", placement.base_form_id))
 }
 
-fn door_is_locked(door: &PreparedDoor, inventory: &PlayerInventory) -> bool {
+/// Whether `door` is currently locked and the player cannot bypass it with
+/// a held key. `pub(crate)` (not `fn`) so `viewer::nav` can reuse this exact
+/// check for excluding blocked door links from route planning (issue #113,
+/// M4 wave 4 feature 4) rather than re-deriving its own copy.
+pub(crate) fn door_is_locked(door: &PreparedDoor, inventory: &PlayerInventory) -> bool {
     if door.lock_level.is_none_or(|level| level <= 0) {
         return false;
     }
