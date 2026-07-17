@@ -24,12 +24,13 @@ pub(crate) fn stage_navmeshes(
     let graph_inputs = nav_graph_inputs(cell_form_id, navmeshes, navigation);
     let graph = build_nav_graph(&graph_inputs);
     let summary = format!(
-        "nav graph: meshes {}, polygons {}, vertices {}, doors {}, external {}, diagnostics warn {} error {}",
+        "nav graph: meshes {}, polygons {}, vertices {}, doors {}, external {}, merges {}, diagnostics warn {} error {}",
         graph.counters.meshes,
         graph.counters.polygons,
         graph.counters.vertices,
         graph.counters.doors,
         graph.counters.external_connections,
+        graph.counters.mesh_merges,
         graph.counters.diagnostics_warning,
         graph.counters.diagnostics_error
     );
@@ -95,6 +96,7 @@ pub(crate) fn stage_navmeshes(
         vertex_count: graph.counters.vertices,
         door_count: graph.counters.doors,
         external_connection_count: graph.counters.external_connections,
+        mesh_merge_count: graph.counters.mesh_merges,
         diagnostics_warning: graph.counters.diagnostics_warning,
         diagnostics_error: graph.counters.diagnostics_error,
     };

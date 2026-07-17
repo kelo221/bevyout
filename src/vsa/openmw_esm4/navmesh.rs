@@ -1,5 +1,6 @@
 //! Fallout 3/New Vegas `NAVM`/`NAVI` navigation-mesh subrecord decoding
-//! (issue #111, M4 wave 2).
+//! (issue #111, M4 wave 2; `NVMI`'s trailing island block decoded in issue
+//! #113, M4 wave 4 -- see `decode_navi_tail`'s doc comment).
 //!
 //! Field layouts are taken from the fopdoc FalloutNV pages
 //! (`Records/NAVM.html`, `Records/NAVI.html`) rather than ported from
@@ -389,10 +390,40 @@ fn check_count(
 // NAVI
 // ---------------------------------------------------------------------
 
-/// One `NVMI` entry (fixed 16-byte header; trailing bytes are `NVMI`'s
-/// undocumented `uint8[]` "Unknown" field, retained losslessly since fopdoc
-/// gives it no element count).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `NVMI`'s optional trailing island block (issue #113, M4 wave 4): an
+/// axis-aligned bounding box plus a small local vertex/triangle sub-mesh.
+/// Layout verified against real `Fallout3.esm` `NVMI` bytes (see
+/// `decode_navi_tail`'s doc comment for the byte-level evidence) -- fopdoc
+/// documents none of this (it labels the whole trailer "Unknown uint8[]")
+/// and OpenMW's `loadnavi.cpp` unconditionally skips `NVMI` decode for
+/// FO3/FNV, so there is no authoritative reference layout; this is a
+/// from-scratch, real-data-derived extension like the rest of this module.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct NaviBounds {
+    pub(crate) min: [f32; 3],
+    pub(crate) max: [f32; 3],
+}
+
+/// The island's own small local-space vertex/triangle sub-mesh, `u16`-indexed
+/// into `vertices` (verified: every real sample's triangle indices stay
+/// within `0..vertices.len()`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct NaviIsland {
+    pub(crate) vertices: Vec<[f32; 3]>,
+    pub(crate) triangles: Vec<[u16; 3]>,
+}
+
+/// One `NVMI` entry: a fixed 16-byte header (`unknown`/`navmesh_form_id`/
+/// `location_form_id`/`grid_x`/`grid_y`, decoded in `decode_navi_info`)
+/// followed by a variable-length tail (decoded in `decode_navi_tail`) --
+/// `center` (always present when the tail is well-formed), then an optional
+/// `bounds`+`island` block, then a final 4-byte `trailing` field of
+/// unconfirmed meaning (observed zero on every real sample gathered).
+/// `tail` retains only bytes `decode_navi_tail` could not place -- empty on
+/// every real sample gathered during verification; a truncated/malformed
+/// entry keeps its unparsed remainder here rather than panicking or
+/// discarding it.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct NaviInfoEntry {
     pub(crate) unknown: [u8; 4],
     pub(crate) navmesh_form_id: Option<u32>,
@@ -400,6 +431,10 @@ pub(crate) struct NaviInfoEntry {
     pub(crate) location_form_id: Option<u32>,
     pub(crate) grid_x: i16,
     pub(crate) grid_y: i16,
+    pub(crate) center: Option<[f32; 3]>,
+    pub(crate) bounds: Option<NaviBounds>,
+    pub(crate) island: Option<NaviIsland>,
+    pub(crate) trailing: [u8; 4],
     pub(crate) tail: Vec<u8>,
 }
 
@@ -430,10 +465,14 @@ pub(crate) fn parse_navi(
     let mut diagnostics = Vec::new();
     let version = sub(subs, "NVER").and_then(|data| u32_at(data, 0));
     let mut entries = Vec::new();
-    for subrecord in subs.iter().filter(|s| s.signature == "NVMI") {
-        match decode_navi_info(&subrecord.data, resolver) {
+    for (index, subrecord) in subs.iter().filter(|s| s.signature == "NVMI").enumerate() {
+        let mut tail_diagnostics = Vec::new();
+        match decode_navi_info(&subrecord.data, resolver, &mut tail_diagnostics) {
             Ok(entry) => entries.push(entry),
             Err(error) => diagnostics.push(format!("NVMI malformed: {error}")),
+        }
+        for message in tail_diagnostics {
+            diagnostics.push(format!("NVMI {index}: {message}"));
         }
     }
     for signature in ignored_signatures(subs, &["EDID", "NVER", "NVMI"]) {
@@ -452,7 +491,11 @@ pub(crate) fn parse_navi(
     )
 }
 
-fn decode_navi_info(data: &[u8], resolver: &FormIdResolver) -> Result<NaviInfoEntry, String> {
+fn decode_navi_info(
+    data: &[u8],
+    resolver: &FormIdResolver,
+    diagnostics: &mut Vec<String>,
+) -> Result<NaviInfoEntry, String> {
     const HEADER_LEN: usize = 16;
     if data.len() < HEADER_LEN {
         return Err(format!(
@@ -470,12 +513,200 @@ fn decode_navi_info(data: &[u8], resolver: &FormIdResolver) -> Result<NaviInfoEn
         .filter(|id| *id != 0);
     let grid_x = i16_at(data, 12).unwrap_or_default();
     let grid_y = i16_at(data, 14).unwrap_or_default();
+    let decoded = decode_navi_tail(&data[HEADER_LEN..], diagnostics);
     Ok(NaviInfoEntry {
         unknown,
         navmesh_form_id,
         location_form_id,
         grid_x,
         grid_y,
-        tail: data[HEADER_LEN..].to_vec(),
+        center: decoded.center,
+        bounds: decoded.bounds,
+        island: decoded.island,
+        trailing: decoded.trailing,
+        tail: decoded.tail,
     })
+}
+
+/// `decode_navi_tail`'s decoded pieces (see its doc comment for the byte
+/// layout each field comes from).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct DecodedNaviTail {
+    center: Option<[f32; 3]>,
+    bounds: Option<NaviBounds>,
+    island: Option<NaviIsland>,
+    trailing: [u8; 4],
+    tail: Vec<u8>,
+}
+
+/// Decodes `NVMI`'s trailing "Unknown uint8[]" field (fopdoc's name for it;
+/// see `NaviInfoEntry`'s doc comment for why there is no authoritative
+/// reference layout). This layout was reverse-engineered and cross-checked
+/// against real `Fallout3.esm` `NVMI` bytes across multiple entries/cells
+/// (interior single-mesh cells, FranklinMetro02's two-NAVM cell, and
+/// Capital-Wasteland exterior grid entries) before being trusted here, per
+/// this module's verification bar:
+///
+/// - `center: [f32; 3]` (12 bytes) -- always present when the tail is
+///   well-formed. Every sample's value falls inside (or very near) that
+///   entry's own navmesh bounds once converted through `FO3_SCALE`, so this
+///   is a mesh-space center point, not a world/cell-grid coordinate.
+/// - An entry with *exactly* 4 bytes left after `center` has no island block
+///   at all: those 4 bytes are `trailing` and decoding stops (this is the
+///   common case for a mesh with no recorded island, e.g. `0005429f` in
+///   FranklinMetro02, real tail length 16).
+/// - Otherwise, an island block follows: `bounds` (two `[f32; 3]` corners,
+///   24 bytes -- confirmed as a real min/max pair: every axis of `min` is
+///   `<=` the matching axis of `max` on every sample gathered), then two
+///   `u16` counts packed into one 4-byte word (`vertex_count`,
+///   `triangle_count`, in that order -- confirmed because the byte count of
+///   the array data that follows always matches `vertex_count * 12 +
+///   triangle_count * 6` exactly, and every triangle's vertex indices stay
+///   inside `0..vertex_count` on every sample), then `vertex_count` packed
+///   `[f32; 3]` vertices, then `triangle_count` packed `[u16; 3]` triangles
+///   (local indices into the vertices just read), then a final 4-byte
+///   `trailing` field (observed zero on every real sample gathered; kept
+///   raw, not claimed as a flag or count).
+///
+/// Real examples that pinned this layout exactly (byte-for-byte, with zero
+/// leftover): a FranklinMetro02 (`0001a273`) entry with tail length 284
+/// (`vertex_count = 14`, `triangle_count = 12`) and a Capital Wasteland
+/// exterior grid entry with tail length 194 (`vertex_count = 9`,
+/// `triangle_count = 7`); dozens of exterior grid entries with tail length
+/// 44 (`vertex_count = 0`, `triangle_count = 0`, i.e. `bounds` present with
+/// an empty island).
+///
+/// Never panics: every multi-byte read is bounds-checked first, and any
+/// length that does not cleanly fit the pattern above (truncated header,
+/// declared counts needing more bytes than remain, unexpected leftover
+/// bytes after a well-formed island) is diagnosed into `diagnostics` and the
+/// unparsed remainder is returned as `tail` rather than guessed at or
+/// dropped.
+fn decode_navi_tail(data: &[u8], diagnostics: &mut Vec<String>) -> DecodedNaviTail {
+    const CENTER_LEN: usize = 12;
+    const TRAILING_LEN: usize = 4;
+    const BOUNDS_LEN: usize = 24;
+    const COUNTS_LEN: usize = 4;
+
+    if data.is_empty() {
+        return DecodedNaviTail::default();
+    }
+    if data.len() < CENTER_LEN {
+        diagnostics.push(format!(
+            "tail truncated: {} byte(s), too short for the {CENTER_LEN}-byte center point",
+            data.len()
+        ));
+        return DecodedNaviTail {
+            tail: data.to_vec(),
+            ..DecodedNaviTail::default()
+        };
+    }
+    let center = [
+        f32_at(data, 0).unwrap_or_default(),
+        f32_at(data, 4).unwrap_or_default(),
+        f32_at(data, 8).unwrap_or_default(),
+    ];
+    let offset = CENTER_LEN;
+    let remaining = data.len() - offset;
+
+    if remaining == TRAILING_LEN {
+        let mut trailing = [0_u8; 4];
+        trailing.copy_from_slice(&data[offset..offset + TRAILING_LEN]);
+        return DecodedNaviTail {
+            center: Some(center),
+            trailing,
+            ..DecodedNaviTail::default()
+        };
+    }
+    if remaining == 0 {
+        return DecodedNaviTail {
+            center: Some(center),
+            ..DecodedNaviTail::default()
+        };
+    }
+    if remaining < BOUNDS_LEN + COUNTS_LEN + TRAILING_LEN {
+        diagnostics.push(format!(
+            "tail truncated: {remaining} byte(s) after the center point do not form a complete island block or a bare trailing field"
+        ));
+        return DecodedNaviTail {
+            center: Some(center),
+            tail: data[offset..].to_vec(),
+            ..DecodedNaviTail::default()
+        };
+    }
+
+    let bounds = NaviBounds {
+        min: [
+            f32_at(data, offset).unwrap_or_default(),
+            f32_at(data, offset + 4).unwrap_or_default(),
+            f32_at(data, offset + 8).unwrap_or_default(),
+        ],
+        max: [
+            f32_at(data, offset + 12).unwrap_or_default(),
+            f32_at(data, offset + 16).unwrap_or_default(),
+            f32_at(data, offset + 20).unwrap_or_default(),
+        ],
+    };
+    let offset = offset + BOUNDS_LEN;
+
+    let vertex_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+    let triangle_count =
+        u16::from_le_bytes(data[offset + 2..offset + 4].try_into().unwrap()) as usize;
+    let offset = offset + COUNTS_LEN;
+
+    let island_bytes = vertex_count * 12 + triangle_count * 6;
+    if data.len() < offset + island_bytes + TRAILING_LEN {
+        diagnostics.push(format!(
+            "island truncated: declares {vertex_count} vertex(es)/{triangle_count} triangle(s) needing {island_bytes} byte(s), only {} available",
+            data.len().saturating_sub(offset)
+        ));
+        return DecodedNaviTail {
+            center: Some(center),
+            bounds: Some(bounds),
+            tail: data[offset..].to_vec(),
+            ..DecodedNaviTail::default()
+        };
+    }
+
+    let mut vertices = Vec::with_capacity(vertex_count);
+    let mut cursor = offset;
+    for _ in 0..vertex_count {
+        vertices.push([
+            f32_at(data, cursor).unwrap_or_default(),
+            f32_at(data, cursor + 4).unwrap_or_default(),
+            f32_at(data, cursor + 8).unwrap_or_default(),
+        ]);
+        cursor += 12;
+    }
+    let mut triangles = Vec::with_capacity(triangle_count);
+    for _ in 0..triangle_count {
+        triangles.push([
+            u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()),
+            u16::from_le_bytes(data[cursor + 2..cursor + 4].try_into().unwrap()),
+            u16::from_le_bytes(data[cursor + 4..cursor + 6].try_into().unwrap()),
+        ]);
+        cursor += 6;
+    }
+
+    let mut trailing = [0_u8; 4];
+    trailing.copy_from_slice(&data[cursor..cursor + TRAILING_LEN]);
+    cursor += TRAILING_LEN;
+
+    let leftover = data[cursor..].to_vec();
+    if !leftover.is_empty() {
+        diagnostics.push(format!(
+            "{} unexpected trailing byte(s) after a well-formed island block",
+            leftover.len()
+        ));
+    }
+    DecodedNaviTail {
+        center: Some(center),
+        bounds: Some(bounds),
+        island: Some(NaviIsland {
+            vertices,
+            triangles,
+        }),
+        trailing,
+        tail: leftover,
+    }
 }

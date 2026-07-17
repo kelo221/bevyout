@@ -154,6 +154,18 @@ mod landmass_graph;
 #[allow(dead_code, unused_imports)]
 mod door_link;
 
+// `viewer::nav::repath` (issue #113, M4 wave 4) is std-only, same flat
+// top-level include rationale as `door_link` above.
+#[path = "../src/viewer/nav/repath.rs"]
+#[allow(dead_code, unused_imports)]
+mod repath;
+
+// `viewer::nav::ledger_policy` (issue #134, M4 wave 4) is std-only, same
+// flat top-level include rationale as `door_link`/`repath` above.
+#[path = "../src/viewer/nav/ledger_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod ledger_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -537,6 +549,24 @@ struct BevyoutWorld {
     nav_backend_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
     nav_backend_second_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
     nav_backend_door_link_state: door_link::DoorLinkState,
+
+    // -- nav_adapter.feature (issue #113, M4 wave 4) --
+    /// Raw bytes appended to the first NAVI fixture entry's 16-byte NVMI
+    /// header (the island tail under test).
+    nav_navi_first_tail: Vec<u8>,
+    nav_adapter_repath_observation: repath::RepathObservation,
+    nav_adapter_repath_decision: Option<repath::RepathDecision>,
+    nav_adapter_door_observation: repath::DoorObservation,
+    nav_adapter_second_graph: Option<nav_graph::PreparedNavGraph>,
+    nav_adapter_single_sided: Option<Vec<landmass_graph::SingleSidedDoor>>,
+    nav_adapter_merge_inputs: Vec<landmass_graph::MergeInput>,
+    nav_adapter_merge_links: Option<Vec<landmass_graph::MergeLinkDescriptor>>,
+
+    // -- nav_ledger.feature (issue #134, M4 wave 4) --
+    nav_ledger: ledger_policy::Ledger,
+    nav_ledger_claim_result: Option<ledger_policy::ClaimResult>,
+    nav_ledger_route_door: Option<u32>,
+    nav_ledger_eligibility: Option<ledger_policy::SwapEligibility>,
 }
 
 fn find_placement<'a>(
@@ -5041,11 +5071,13 @@ async fn when_nav_content_set_parsed(world: &mut BevyoutWorld, cell_hex: String)
         ));
     }
     if let Some(entry) = world.nav_navi_first {
+        // Issue #113: the adapter feature appends island-tail bytes to the
+        // first entry's NVMI subrecord; empty for the #111 scenarios.
         first.extend(nav_record(
             b"NAVI",
             0,
             entry.form_id,
-            &nav_navi_payload(entry),
+            &nav_navi_payload_with_tail(entry, &world.nav_navi_first_tail),
         ));
     }
 
@@ -5779,7 +5811,10 @@ async fn when_door_link_reaches(world: &mut BevyoutWorld, door_hex: String) {
     let door_form_id = parse_hex(&door_hex);
     world.nav_backend_door_link_state = door_link::transition(
         world.nav_backend_door_link_state,
-        door_link::DoorLinkEvent::LinkReached { door_form_id },
+        door_link::DoorLinkEvent::LinkReached {
+            door_form_id,
+            destination: door_link::LinkDestination::IntraCell,
+        },
     );
 }
 
@@ -5826,10 +5861,13 @@ async fn then_door_link_paused(world: &mut BevyoutWorld, door_hex: String) {
 #[then(regex = r"^the door-link state is traversing door 0x([0-9a-fA-F]+)$")]
 async fn then_door_link_traversing(world: &mut BevyoutWorld, door_hex: String) {
     let door_form_id = parse_hex(&door_hex);
-    assert_eq!(
-        world.nav_backend_door_link_state,
-        door_link::DoorLinkState::Traversing { door_form_id }
-    );
+    match world.nav_backend_door_link_state {
+        door_link::DoorLinkState::Traversing {
+            door_form_id: actual,
+            ..
+        } => assert_eq!(actual, door_form_id),
+        other => panic!("expected Traversing, got {other:?}"),
+    }
 }
 
 #[then("the door-link state is idle")]
@@ -5847,6 +5885,608 @@ async fn then_door_link_failed(world: &mut BevyoutWorld, door_hex: String) {
         world.nav_backend_door_link_state,
         door_link::DoorLinkState::Failed { door_form_id }
     );
+}
+
+// ---------------------------------------------------------------------
+// nav_adapter.feature (issue #113, M4 wave 4) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+/// Like `nav_navi_payload`, with `tail` bytes appended inside the NVMI
+/// subrecord after the fixed 16-byte header (the island tail under test).
+fn nav_navi_payload_with_tail(entry: NaviFixtureEntry, tail: &[u8]) -> Vec<u8> {
+    let mut nvmi = vec![0_u8; 4]; // leading undocumented "Unknown" field
+    nvmi.extend_from_slice(&entry.navmesh_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.location_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_x.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_y.to_le_bytes());
+    nvmi.extend_from_slice(tail);
+    [
+        nav_subrecord(b"NVER", &12_u32.to_le_bytes()),
+        nav_subrecord(b"NVMI", &nvmi),
+    ]
+    .concat()
+}
+
+fn nav_adapter_parse_f32_triple(list: &str) -> [f32; 3] {
+    let values = list
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<f32>()
+                .unwrap_or_else(|error| panic!("invalid f32 {value:?}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 3, "expected exactly three values in {list:?}");
+    [values[0], values[1], values[2]]
+}
+
+fn nav_adapter_push_f32_3(bytes: &mut Vec<u8>, value: [f32; 3]) {
+    for component in value {
+        bytes.extend_from_slice(&component.to_le_bytes());
+    }
+}
+
+fn nav_adapter_navigation_entry<'a>(
+    world: &'a BevyoutWorld,
+    navm_hex: &str,
+) -> &'a openmw_esm4::NaviInfoEntry {
+    let form_id = parse_hex(navm_hex);
+    world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first")
+        .navigation
+        .as_ref()
+        .expect("a navigation singleton must be captured")
+        .entries
+        .iter()
+        .find(|entry| entry.navmesh_form_id == Some(form_id))
+        .unwrap_or_else(|| panic!("no navigation entry for NAVM {navm_hex}"))
+}
+
+#[given(
+    regex = r#"^the NAVI entry has an island tail with center ([-\d.,\s]+) bounds ([-\d.,\s]+) to ([-\d.,\s]+) and vertices "([^"]*)" triangle ([\d,\s]+)$"#
+)]
+async fn given_navi_island_tail(
+    world: &mut BevyoutWorld,
+    center: String,
+    bounds_min: String,
+    bounds_max: String,
+    vertices: String,
+    triangle: String,
+) {
+    let mut tail = Vec::new();
+    nav_adapter_push_f32_3(&mut tail, nav_adapter_parse_f32_triple(&center));
+    nav_adapter_push_f32_3(&mut tail, nav_adapter_parse_f32_triple(&bounds_min));
+    nav_adapter_push_f32_3(&mut tail, nav_adapter_parse_f32_triple(&bounds_max));
+    let vertex_values: Vec<[f32; 3]> = vertices
+        .split(';')
+        .map(nav_adapter_parse_f32_triple)
+        .collect();
+    let triangle_indices: Vec<u16> = triangle
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u16>()
+                .unwrap_or_else(|error| panic!("invalid u16 {value:?}: {error}"))
+        })
+        .collect();
+    assert_eq!(triangle_indices.len(), 3);
+    tail.extend_from_slice(&(vertex_values.len() as u16).to_le_bytes());
+    tail.extend_from_slice(&1_u16.to_le_bytes()); // one triangle
+    for vertex in vertex_values {
+        nav_adapter_push_f32_3(&mut tail, vertex);
+    }
+    for index in triangle_indices {
+        tail.extend_from_slice(&index.to_le_bytes());
+    }
+    tail.extend_from_slice(&[0, 0, 0, 0]); // trailing field
+    world.nav_navi_first_tail = tail;
+}
+
+#[given(regex = r"^the NAVI entry has a bare tail with center ([-\d.,\s]+)$")]
+async fn given_navi_bare_tail(world: &mut BevyoutWorld, center: String) {
+    let mut tail = Vec::new();
+    nav_adapter_push_f32_3(&mut tail, nav_adapter_parse_f32_triple(&center));
+    tail.extend_from_slice(&[0, 0, 0, 0]); // trailing field
+    world.nav_navi_first_tail = tail;
+}
+
+#[given(regex = r"^the NAVI entry has a truncated island tail declaring (\d+) vertices$")]
+async fn given_navi_truncated_tail(world: &mut BevyoutWorld, declared: u16) {
+    let mut tail = Vec::new();
+    nav_adapter_push_f32_3(&mut tail, [0.0, 0.0, 0.0]); // center
+    nav_adapter_push_f32_3(&mut tail, [0.0, 0.0, 0.0]); // bounds min
+    nav_adapter_push_f32_3(&mut tail, [1.0, 1.0, 1.0]); // bounds max
+    tail.extend_from_slice(&declared.to_le_bytes());
+    tail.extend_from_slice(&0_u16.to_le_bytes());
+    nav_adapter_push_f32_3(&mut tail, [2.0, 2.0, 2.0]); // only one vertex present
+    world.nav_navi_first_tail = tail;
+}
+
+#[then(regex = r"^the navigation entry for NAVM 0x([0-9a-fA-F]+) has center ([-\d.,\s]+)$")]
+async fn then_navi_entry_center(world: &mut BevyoutWorld, navm_hex: String, center: String) {
+    let entry = nav_adapter_navigation_entry(world, &navm_hex);
+    assert_eq!(entry.center, Some(nav_adapter_parse_f32_triple(&center)));
+}
+
+#[then(
+    regex = r"^the navigation entry for NAVM 0x([0-9a-fA-F]+) has bounds ([-\d.,\s]+) to ([-\d.,\s]+)$"
+)]
+async fn then_navi_entry_bounds(
+    world: &mut BevyoutWorld,
+    navm_hex: String,
+    bounds_min: String,
+    bounds_max: String,
+) {
+    let entry = nav_adapter_navigation_entry(world, &navm_hex);
+    let bounds = entry.bounds.expect("entry must decode bounds");
+    assert_eq!(bounds.min, nav_adapter_parse_f32_triple(&bounds_min));
+    assert_eq!(bounds.max, nav_adapter_parse_f32_triple(&bounds_max));
+}
+
+#[then(
+    regex = r"^the navigation entry for NAVM 0x([0-9a-fA-F]+) has an island with (\d+) vertices and (\d+) triangles$"
+)]
+async fn then_navi_entry_island(
+    world: &mut BevyoutWorld,
+    navm_hex: String,
+    vertices: usize,
+    triangles: usize,
+) {
+    let entry = nav_adapter_navigation_entry(world, &navm_hex);
+    let island = entry.island.as_ref().expect("entry must decode an island");
+    assert_eq!(island.vertices.len(), vertices);
+    assert_eq!(island.triangles.len(), triangles);
+}
+
+#[then(regex = r"^the navigation entry for NAVM 0x([0-9a-fA-F]+) has no island$")]
+async fn then_navi_entry_no_island(world: &mut BevyoutWorld, navm_hex: String) {
+    let entry = nav_adapter_navigation_entry(world, &navm_hex);
+    assert!(entry.island.is_none(), "{:?}", entry.island);
+    assert!(entry.bounds.is_none(), "{:?}", entry.bounds);
+}
+
+#[then(
+    regex = r"^the navigation entry for NAVM 0x([0-9a-fA-F]+) retains (no )?undecoded tail bytes$"
+)]
+async fn then_navi_entry_tail_retention(
+    world: &mut BevyoutWorld,
+    navm_hex: String,
+    no_retention: String,
+) {
+    let entry = nav_adapter_navigation_entry(world, &navm_hex);
+    if no_retention.is_empty() {
+        assert!(!entry.tail.is_empty(), "expected retained tail bytes");
+    } else {
+        assert!(
+            entry.tail.is_empty(),
+            "unexpected tail bytes {:?}",
+            entry.tail
+        );
+    }
+}
+
+#[then(regex = r"^the nav graph has (\d+) cross-mesh merges?$")]
+async fn then_nav_graph_merge_count(world: &mut BevyoutWorld, count: usize) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert_eq!(graph.mesh_merges.len(), count, "{:?}", graph.mesh_merges);
+    assert_eq!(graph.counters.mesh_merges, count);
+}
+
+#[then(
+    regex = r"^cross-mesh merge (\d+) connects mesh 0x([0-9a-fA-F]+) polygon (\d+) to mesh 0x([0-9a-fA-F]+) polygon (\d+)$"
+)]
+async fn then_nav_graph_merge_connects(
+    world: &mut BevyoutWorld,
+    index: usize,
+    mesh_a_hex: String,
+    triangle_a: u32,
+    mesh_b_hex: String,
+    triangle_b: u32,
+) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let merge = graph.mesh_merges[index];
+    assert_eq!(merge.mesh_a_form_id, parse_hex(&mesh_a_hex));
+    assert_eq!(merge.triangle_a, triangle_a);
+    assert_eq!(merge.mesh_b_form_id, parse_hex(&mesh_b_hex));
+    assert_eq!(merge.triangle_b, triangle_b);
+}
+
+#[then("building the nav graph again yields identical cross-mesh merges")]
+async fn then_nav_graph_merges_deterministic(world: &mut BevyoutWorld) {
+    let second = nav_graph::build_nav_graph(&world.nav_graph_inputs);
+    let first = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert_eq!(first.mesh_merges, second.mesh_merges);
+    world.nav_adapter_second_graph = Some(second);
+}
+
+#[given("no repath observations")]
+async fn given_no_repath_observations(world: &mut BevyoutWorld) {
+    world.nav_adapter_repath_observation = repath::RepathObservation::default();
+    world.nav_adapter_repath_decision = None;
+}
+
+#[given(regex = r"^the repath observation ([a-z-]+)$")]
+async fn given_repath_observation(world: &mut BevyoutWorld, observation: String) {
+    let target = &mut world.nav_adapter_repath_observation;
+    match observation.as_str() {
+        "none" => {}
+        "door-became-blocked" => target.door_became_blocked = true,
+        "door-became-unblocked" => target.door_became_unblocked = true,
+        "target-moved" => target.target_moved_beyond_tolerance = true,
+        "agent-off-link" => target.agent_off_link = true,
+        "destination-cell-unloaded" => target.destination_cell_unloaded = true,
+        other => panic!("unknown repath observation {other:?}"),
+    }
+}
+
+#[when("the repath decision is made")]
+async fn when_repath_decision(world: &mut BevyoutWorld) {
+    world.nav_adapter_repath_decision = Some(repath::decide(world.nav_adapter_repath_observation));
+}
+
+#[then(regex = r"^the repath decision is ([a-z-]+)$")]
+async fn then_repath_decision(world: &mut BevyoutWorld, decision: String) {
+    let expected = match decision.as_str() {
+        "keep-route" => repath::RepathDecision::KeepRoute,
+        "repath" => repath::RepathDecision::Repath,
+        "fail" => repath::RepathDecision::Fail,
+        other => panic!("unknown repath decision {other:?}"),
+    };
+    assert_eq!(world.nav_adapter_repath_decision, Some(expected));
+}
+
+#[given(regex = r"^a door that is (locked|unlocked) and (open|closed)$")]
+async fn given_door_observation(world: &mut BevyoutWorld, locked: String, open: String) {
+    world.nav_adapter_door_observation = repath::DoorObservation {
+        locked: locked == "locked",
+        open: open == "open",
+    };
+}
+
+#[then(regex = r"^the door is (usable|not usable) for route planning$")]
+async fn then_door_usability(world: &mut BevyoutWorld, usability: String) {
+    let usable = repath::door_usable(world.nav_adapter_door_observation);
+    assert_eq!(usable, usability == "usable");
+}
+
+#[when(regex = r"^the door-link reaches travel door 0x([0-9a-fA-F]+) to cell 0x([0-9a-fA-F]+)$")]
+async fn when_door_link_reaches_travel(
+    world: &mut BevyoutWorld,
+    door_hex: String,
+    cell_hex: String,
+) {
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::LinkReached {
+            door_form_id: parse_hex(&door_hex),
+            destination: door_link::LinkDestination::Travel {
+                destination_cell_form_id: parse_hex(&cell_hex),
+            },
+        },
+    );
+}
+
+#[then(
+    regex = r"^the door-link state is travel-reached for door 0x([0-9a-fA-F]+) to cell 0x([0-9a-fA-F]+)$"
+)]
+async fn then_door_link_travel_reached(
+    world: &mut BevyoutWorld,
+    door_hex: String,
+    cell_hex: String,
+) {
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::TravelReached {
+            door_form_id: parse_hex(&door_hex),
+            destination_cell_form_id: parse_hex(&cell_hex),
+        }
+    );
+}
+
+#[when("the single-sided doors are extracted")]
+async fn when_single_sided_doors_extracted(world: &mut BevyoutWorld) {
+    world.nav_adapter_single_sided = Some(landmass_graph::single_sided_doors(
+        &world.nav_backend_meshes,
+    ));
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) single-sided doors?$")]
+async fn then_single_sided_door_count(world: &mut BevyoutWorld, count: usize) {
+    let doors = world
+        .nav_adapter_single_sided
+        .as_ref()
+        .expect("single-sided doors must be extracted first");
+    assert_eq!(doors.len(), count, "{doors:?}");
+}
+
+#[then(regex = r"^single-sided door (\d+) is door 0x([0-9a-fA-F]+) on mesh 0x([0-9a-fA-F]+)$")]
+async fn then_single_sided_door(
+    world: &mut BevyoutWorld,
+    index: usize,
+    door_hex: String,
+    mesh_hex: String,
+) {
+    let doors = world
+        .nav_adapter_single_sided
+        .as_ref()
+        .expect("single-sided doors must be extracted first");
+    let door = doors[index];
+    assert_eq!(door.door_form_id, parse_hex(&door_hex));
+    assert_eq!(door.side.mesh_form_id, parse_hex(&mesh_hex));
+}
+
+#[given(
+    regex = r"^a prepared merge connects mesh 0x([0-9a-fA-F]+) triangle (\d+) to mesh 0x([0-9a-fA-F]+) triangle (\d+)$"
+)]
+async fn given_prepared_merge(
+    world: &mut BevyoutWorld,
+    mesh_a_hex: String,
+    triangle_a: u32,
+    mesh_b_hex: String,
+    triangle_b: u32,
+) {
+    world
+        .nav_adapter_merge_inputs
+        .push(landmass_graph::MergeInput {
+            mesh_a_form_id: parse_hex(&mesh_a_hex),
+            triangle_a,
+            mesh_b_form_id: parse_hex(&mesh_b_hex),
+            triangle_b,
+        });
+}
+
+#[when("the merge-link descriptors are resolved")]
+async fn when_merge_links_resolved(world: &mut BevyoutWorld) {
+    world.nav_adapter_merge_links = Some(landmass_graph::merge_link_descriptors(
+        &world.nav_backend_meshes,
+        &world.nav_adapter_merge_inputs,
+    ));
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) merge-link descriptors?$")]
+async fn then_merge_link_count(world: &mut BevyoutWorld, count: usize) {
+    let links = world
+        .nav_adapter_merge_links
+        .as_ref()
+        .expect("merge links must be resolved first");
+    assert_eq!(links.len(), count, "{links:?}");
+}
+
+#[then(
+    regex = r"^merge-link descriptor (\d+) links mesh 0x([0-9a-fA-F]+) polygon (\d+) to mesh 0x([0-9a-fA-F]+) polygon (\d+)$"
+)]
+async fn then_merge_link_descriptor(
+    world: &mut BevyoutWorld,
+    index: usize,
+    mesh_a_hex: String,
+    polygon_a: u32,
+    mesh_b_hex: String,
+    polygon_b: u32,
+) {
+    let links = world
+        .nav_adapter_merge_links
+        .as_ref()
+        .expect("merge links must be resolved first");
+    let link = links[index];
+    assert_eq!(link.side_a.mesh_form_id, parse_hex(&mesh_a_hex));
+    assert_eq!(link.side_a.polygon_index, polygon_a);
+    assert_eq!(link.side_b.mesh_form_id, parse_hex(&mesh_b_hex));
+    assert_eq!(link.side_b.polygon_index, polygon_b);
+}
+
+// ---------------------------------------------------------------------
+// nav_ledger.feature (issue #134, M4 wave 4) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn nav_ledger_parse_f32_triple(x: &str, y: &str, z: &str) -> [f32; 3] {
+    let parse = |value: &str| {
+        value
+            .trim()
+            .parse::<f32>()
+            .unwrap_or_else(|error| panic!("invalid f32 {value:?}: {error}"))
+    };
+    [parse(x), parse(y), parse(z)]
+}
+
+/// Parses `known doors`'s argument: the literal `none`, or a comma-
+/// separated list of `0x`-prefixed hex FormIDs.
+fn nav_ledger_parse_known_doors(list: &str) -> std::collections::HashSet<u32> {
+    if list.trim() == "none" {
+        return std::collections::HashSet::new();
+    }
+    list.split(',')
+        .map(|value| {
+            let digits = value
+                .trim()
+                .strip_prefix("0x")
+                .unwrap_or_else(|| panic!("expected a 0x-prefixed hex FormID, got {value:?}"));
+            parse_hex(digits)
+        })
+        .collect()
+}
+
+#[given(
+    regex = r"^a ledger entry for agent (\d+) in cell 0x([0-9a-fA-F]+) frozen at ([-\d.]+), ([-\d.]+), ([-\d.]+)$"
+)]
+async fn given_ledger_entry_frozen(
+    world: &mut BevyoutWorld,
+    agent_id: u32,
+    cell_hex: String,
+    x: String,
+    y: String,
+    z: String,
+) {
+    world.nav_ledger.record(ledger_policy::LedgerEntry {
+        agent_id,
+        cell_form_id: parse_hex(&cell_hex),
+        spawn_kind: ledger_policy::SpawnKind::FrozenPosition {
+            position: nav_ledger_parse_f32_triple(&x, &y, &z),
+        },
+        remaining_target: None,
+    });
+}
+
+#[given(
+    regex = r"^a ledger entry for agent (\d+) in cell 0x([0-9a-fA-F]+) with door marker 0x([0-9a-fA-F]+)$"
+)]
+async fn given_ledger_entry_door_marker(
+    world: &mut BevyoutWorld,
+    agent_id: u32,
+    cell_hex: String,
+    door_hex: String,
+) {
+    world.nav_ledger.record(ledger_policy::LedgerEntry {
+        agent_id,
+        cell_form_id: parse_hex(&cell_hex),
+        spawn_kind: ledger_policy::SpawnKind::DoorMarker {
+            destination_door_form_id: parse_hex(&door_hex),
+        },
+        remaining_target: None,
+    });
+}
+
+#[when(regex = r"^the ledger is claimed for cell 0x([0-9a-fA-F]+) with known doors (.+)$")]
+async fn when_ledger_claimed(world: &mut BevyoutWorld, cell_hex: String, doors: String) {
+    let known = nav_ledger_parse_known_doors(&doors);
+    let result = world
+        .nav_ledger
+        .claim_for_activation(parse_hex(&cell_hex), &known);
+    world.nav_ledger_claim_result = Some(result);
+}
+
+#[then(regex = r"^(\d+) entr(?:y|ies) (?:is|are) restored$")]
+async fn then_entries_restored(world: &mut BevyoutWorld, count: usize) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    assert_eq!(result.restored.len(), count);
+}
+
+#[then(regex = r"^(\d+) entr(?:y|ies) (?:is|are) stale$")]
+async fn then_entries_stale(world: &mut BevyoutWorld, count: usize) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    assert_eq!(result.stale.len(), count);
+}
+
+#[then(regex = r"^restored entry (\d+) is agent (\d+) frozen at ([-\d.]+), ([-\d.]+), ([-\d.]+)$")]
+async fn then_restored_entry_frozen(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    x: String,
+    y: String,
+    z: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.restored[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(
+        entry.spawn_kind,
+        ledger_policy::SpawnKind::FrozenPosition {
+            position: nav_ledger_parse_f32_triple(&x, &y, &z),
+        }
+    );
+}
+
+#[then(regex = r"^restored entry (\d+) is agent (\d+) with door marker 0x([0-9a-fA-F]+)$")]
+async fn then_restored_entry_door_marker(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    door_hex: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.restored[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(
+        entry.spawn_kind,
+        ledger_policy::SpawnKind::DoorMarker {
+            destination_door_form_id: parse_hex(&door_hex),
+        }
+    );
+}
+
+#[then(
+    regex = r"^stale entry (\d+) is agent (\d+) cell 0x([0-9a-fA-F]+) missing door 0x([0-9a-fA-F]+)$"
+)]
+async fn then_stale_entry(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    cell_hex: String,
+    door_hex: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.stale[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(entry.cell_form_id, parse_hex(&cell_hex));
+    assert_eq!(entry.missing_door_form_id, parse_hex(&door_hex));
+}
+
+#[then(regex = r"^the ledger still holds an entry for agent (\d+)$")]
+async fn then_ledger_still_holds(world: &mut BevyoutWorld, agent_id: u32) {
+    assert!(
+        world.nav_ledger.entry_for(agent_id).is_some(),
+        "expected agent {agent_id} to remain ledgered"
+    );
+}
+
+#[given(regex = r"^the agent's active route door is (none|0x[0-9a-fA-F]+)$")]
+async fn given_agent_active_route_door(world: &mut BevyoutWorld, door: String) {
+    world.nav_ledger_route_door = if door == "none" {
+        None
+    } else {
+        Some(parse_hex(
+            door.strip_prefix("0x").expect("checked by regex"),
+        ))
+    };
+}
+
+#[when(regex = r"^the swap eligibility is decided for door 0x([0-9a-fA-F]+)$")]
+async fn when_swap_eligibility_decided(world: &mut BevyoutWorld, door_hex: String) {
+    let used_door = parse_hex(&door_hex);
+    world.nav_ledger_eligibility = Some(ledger_policy::decide_swap_eligibility(
+        world.nav_ledger_route_door,
+        used_door,
+    ));
+}
+
+#[then(regex = r"^the swap eligibility is (follow-through|freeze)$")]
+async fn then_swap_eligibility(world: &mut BevyoutWorld, expected: String) {
+    let expected = match expected.as_str() {
+        "follow-through" => ledger_policy::SwapEligibility::FollowThrough,
+        "freeze" => ledger_policy::SwapEligibility::Freeze,
+        other => panic!("unknown eligibility {other:?}"),
+    };
+    assert_eq!(world.nav_ledger_eligibility, Some(expected));
 }
 
 fn main() {

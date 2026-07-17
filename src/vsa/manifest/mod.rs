@@ -696,6 +696,10 @@ pub(crate) struct PreparedNavGraphSource {
     pub(crate) vertex_count: usize,
     pub(crate) door_count: usize,
     pub(crate) external_connection_count: usize,
+    /// Same-cell cross-mesh connections derived from boundary geometry
+    /// (issue #113, M4 wave 4); see `PreparedNavMeshMerge`.
+    #[serde(default)]
+    pub(crate) mesh_merge_count: usize,
     pub(crate) diagnostics_warning: usize,
     pub(crate) diagnostics_error: usize,
 }

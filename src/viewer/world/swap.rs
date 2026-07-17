@@ -38,7 +38,7 @@ use crate::app_state::{AppState, GameplayModal, RequestStateTransition};
 use crate::console::RefRegistry;
 use crate::vsa::PreparedSceneManifest;
 
-use super::super::{audio, interaction, player, scene};
+use super::super::{audio, interaction, nav, player, scene};
 use super::preload::{
     ActiveCell, PreloadParseFailed, ResidentCells, ResidentState, scene_manifest_path,
     spawn_preload_parse_task,
@@ -52,6 +52,11 @@ struct SwapRequest {
     destination_cell: u32,
     translation: Vec3,
     rotation_xyzw: [f32; 4],
+    /// Issue #134: the origin door reference the player used, threaded
+    /// through to `nav::agent::note_player_swap_door` so the intercell
+    /// agent ledger's swap-eligibility policy can tell a follow-through
+    /// from a freeze.
+    door_form_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +233,7 @@ fn evaluate_door_travel_requests(
             destination_cell: destination,
             translation: request.translation,
             rotation_xyzw: request.rotation_xyzw,
+            door_form_id: request.door_form_id,
         };
         match swap_policy::swap_decision(manifest_exists, residency) {
             swap_policy::SwapDecision::Instant => {
@@ -409,6 +415,7 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
         destination_cell,
         translation,
         rotation_xyzw,
+        door_form_id,
     } = request;
 
     let Some(destination_root) = world
@@ -422,6 +429,14 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
         );
         return;
     };
+
+    // Issue #134: note which door the player used now that the swap is
+    // definitely proceeding -- `despawn_stale_navmesh_archipelago`
+    // consumes this the next time it detects the resulting stale
+    // archipelago, to decide follow-through vs. freeze for any live nav
+    // agent still in the departing cell.
+    nav::agent::note_player_swap_door(world, door_form_id);
+
     let destination_manifest = world
         .resource::<ResidentCells>()
         .0
@@ -815,6 +830,7 @@ mod tests {
             destination_cell: 0xB,
             translation: Vec3::ZERO,
             rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            door_form_id: 0x99,
         });
 
         app.world_mut()
@@ -862,6 +878,7 @@ mod tests {
                 destination_cell_form_id: 0xB,
                 translation: Vec3::ZERO,
                 rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                door_form_id: 0x99,
             });
         app.update();
         app.update();
@@ -879,6 +896,7 @@ mod tests {
                 destination_cell_form_id: 0xC,
                 translation: Vec3::ZERO,
                 rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                door_form_id: 0x99,
             });
         app.update();
         app.update();

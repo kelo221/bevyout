@@ -273,15 +273,13 @@ fn polygon_centroid(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[f32; 3]
     Some([sum[0] / 3.0, sum[1] / 3.0, sum[2] / 3.0])
 }
 
-/// Deterministic door-link descriptor list (issue #112 feature 4): a door
-/// FormID becomes a descriptor only when it is associated with *exactly*
-/// two triangles across the graph's meshes -- "both sides resolve to
-/// polygons in the loaded cell's graph" per the wave plan. A door
-/// associated with zero, one, or more than two triangles (a travel door
-/// touching only this cell's side, a decode oddity) is skipped rather than
-/// guessed at. Ordered by `(door_form_id, mesh_form_id, polygon_index)` so
-/// repeated calls on the same graph produce byte-identical output.
-pub(crate) fn door_link_descriptors(meshes: &[MeshInput]) -> Vec<DoorLinkDescriptor> {
+/// Builds `(door_form_id, side)` for every door-triangle association across
+/// `meshes`, ordered by `(door_form_id, mesh_form_id, polygon_index)` --
+/// the shared grouping key `door_link_descriptors` and `single_sided_doors`
+/// both partition, so a door's real FO3 triangle count (usually exactly 1;
+/// see wave 3's finding that every real door triangle is single-sided) only
+/// needs computing once.
+fn door_sides(meshes: &[MeshInput]) -> Vec<(u32, DoorLinkSide)> {
     let mut sides: Vec<(u32, DoorLinkSide)> = Vec::new();
     for mesh in meshes {
         for door in &mesh.doors {
@@ -310,7 +308,19 @@ pub(crate) fn door_link_descriptors(meshes: &[MeshInput]) -> Vec<DoorLinkDescrip
     }
     sides
         .sort_by_key(|(door_form_id, side)| (*door_form_id, side.mesh_form_id, side.polygon_index));
+    sides
+}
 
+/// Deterministic door-link descriptor list (issue #112 feature 4): a door
+/// FormID becomes a descriptor only when it is associated with *exactly*
+/// two triangles across the graph's meshes -- "both sides resolve to
+/// polygons in the loaded cell's graph" per the wave plan. A door
+/// associated with zero, one, or more than two triangles (a travel door
+/// touching only this cell's side, a decode oddity) is skipped rather than
+/// guessed at. Ordered by `(door_form_id, mesh_form_id, polygon_index)` so
+/// repeated calls on the same graph produce byte-identical output.
+pub(crate) fn door_link_descriptors(meshes: &[MeshInput]) -> Vec<DoorLinkDescriptor> {
+    let sides = door_sides(meshes);
     let mut descriptors = Vec::new();
     let mut index = 0;
     while index < sides.len() {
@@ -331,6 +341,128 @@ pub(crate) fn door_link_descriptors(meshes: &[MeshInput]) -> Vec<DoorLinkDescrip
     descriptors
 }
 
+/// One door associated with exactly one triangle across the graph's meshes
+/// -- the shape every real FO3 door triangle takes (wave 3's finding).
+/// Distinct from `door_link_descriptors`'s two-sided group: `nav/agent.rs`
+/// treats a single-sided door as a travel-door candidate when the manifest
+/// resolves it to a destination cell (issue #113 feature 3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SingleSidedDoor {
+    pub(crate) door_form_id: u32,
+    pub(crate) side: DoorLinkSide,
+}
+
+/// Deterministic single-sided-door list, ordered by `(door_form_id,
+/// mesh_form_id, polygon_index)`. A door with more than one triangle
+/// association is not single-sided and is left to `door_link_descriptors`
+/// (exactly two) or skipped entirely (three or more, a decode oddity).
+pub(crate) fn single_sided_doors(meshes: &[MeshInput]) -> Vec<SingleSidedDoor> {
+    let sides = door_sides(meshes);
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < sides.len() {
+        let door_form_id = sides[index].0;
+        let mut group_end = index + 1;
+        while group_end < sides.len() && sides[group_end].0 == door_form_id {
+            group_end += 1;
+        }
+        if group_end - index == 1 {
+            result.push(SingleSidedDoor {
+                door_form_id,
+                side: sides[index].1,
+            });
+        }
+        index = group_end;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------
+// Same-cell cross-mesh merge links (issue #113, M4 wave 4 feature 2)
+// ---------------------------------------------------------------------
+
+/// One same-cell cross-mesh connection (boundary conversion from
+/// `vsa::prepare::nav_graph::PreparedNavMeshMerge`, done in `nav/mod.rs`
+/// per this module's usual `vsa`-free boundary-conversion split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MergeInput {
+    pub(crate) mesh_a_form_id: u32,
+    pub(crate) triangle_a: u32,
+    pub(crate) mesh_b_form_id: u32,
+    pub(crate) triangle_b: u32,
+}
+
+/// A resolved cross-mesh merge link, the same two-sided shape as
+/// [`DoorLinkDescriptor`] minus the door FormID (a merge link is always
+/// open -- there is no door to activate).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MergeLinkDescriptor {
+    pub(crate) side_a: DoorLinkSide,
+    pub(crate) side_b: DoorLinkSide,
+}
+
+/// Resolves each `MergeInput` (mesh/triangle pairs from the prepared graph)
+/// against the loaded `meshes` into world-space link endpoints. A merge
+/// referencing a mesh or triangle no longer present in `meshes` is skipped
+/// (never panics) -- the prepared graph and the loaded manifest are
+/// expected to agree, but this stays defensive the same way
+/// `door_link_descriptors` is. Order follows `merges`' own order, which
+/// `vsa::prepare::nav_graph::compute_mesh_merges` already produces
+/// deterministically.
+pub(crate) fn merge_link_descriptors(
+    meshes: &[MeshInput],
+    merges: &[MergeInput],
+) -> Vec<MergeLinkDescriptor> {
+    let mut descriptors = Vec::new();
+    for merge in merges {
+        let Some(mesh_a) = meshes
+            .iter()
+            .find(|mesh| mesh.form_id == merge.mesh_a_form_id)
+        else {
+            continue;
+        };
+        let Some(mesh_b) = meshes
+            .iter()
+            .find(|mesh| mesh.form_id == merge.mesh_b_form_id)
+        else {
+            continue;
+        };
+        let Some(polygon_a) = mesh_a
+            .polygons
+            .iter()
+            .find(|polygon| polygon.index == merge.triangle_a)
+        else {
+            continue;
+        };
+        let Some(polygon_b) = mesh_b
+            .polygons
+            .iter()
+            .find(|polygon| polygon.index == merge.triangle_b)
+        else {
+            continue;
+        };
+        let (Some(midpoint_a), Some(midpoint_b)) = (
+            polygon_centroid(mesh_a, polygon_a),
+            polygon_centroid(mesh_b, polygon_b),
+        ) else {
+            continue;
+        };
+        descriptors.push(MergeLinkDescriptor {
+            side_a: DoorLinkSide {
+                mesh_form_id: mesh_a.form_id,
+                polygon_index: polygon_a.index,
+                midpoint: midpoint_a,
+            },
+            side_b: DoorLinkSide {
+                mesh_form_id: mesh_b.form_id,
+                polygon_index: polygon_b.index,
+                midpoint: midpoint_b,
+            },
+        });
+    }
+    descriptors
+}
+
 // ---------------------------------------------------------------------
 // Agent-state mapping
 // ---------------------------------------------------------------------
@@ -345,6 +477,10 @@ pub(crate) enum NavAgentStatus {
     Reached,
     Unreachable,
     Paused,
+    /// A travel-door traversal completed (issue #113 feature 3): the agent
+    /// stopped at the traversed door; the destination cell is unloaded.
+    /// #134 turns this terminal status into an actual cell handoff.
+    TravelReached,
 }
 
 impl NavAgentStatus {
@@ -355,6 +491,7 @@ impl NavAgentStatus {
             NavAgentStatus::Reached => "reached",
             NavAgentStatus::Unreachable => "unreachable",
             NavAgentStatus::Paused => "paused",
+            NavAgentStatus::TravelReached => "travel-reached",
         }
     }
 }
@@ -550,6 +687,78 @@ mod tests {
         let mesh_b = mesh_with_door(0x20, 0, 0x99);
         let mesh_c = mesh_with_door(0x30, 0, 0x99);
         let descriptors = door_link_descriptors(&[mesh_a, mesh_b, mesh_c]);
+        assert!(descriptors.is_empty());
+    }
+
+    #[test]
+    fn a_door_with_one_side_is_single_sided() {
+        // Wave 3's real-data finding: every real FO3 door triangle is
+        // single-sided.
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let doors = single_sided_doors(&[mesh_a]);
+        assert_eq!(doors.len(), 1);
+        assert_eq!(doors[0].door_form_id, 0x99);
+        assert_eq!(doors[0].side.mesh_form_id, 0x10);
+    }
+
+    #[test]
+    fn a_door_with_two_sides_is_not_single_sided() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x99);
+        let doors = single_sided_doors(&[mesh_a, mesh_b]);
+        assert!(doors.is_empty());
+    }
+
+    #[test]
+    fn single_sided_doors_are_deterministic_and_ordered() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x50);
+        let first = single_sided_doors(&[mesh_a.clone(), mesh_b.clone()]);
+        let second = single_sided_doors(&[mesh_a, mesh_b]);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.iter().map(|d| d.door_form_id).collect::<Vec<_>>(),
+            vec![0x50, 0x99]
+        );
+    }
+
+    #[test]
+    fn merge_link_descriptor_resolves_both_sides_from_the_prepared_connection() {
+        let mesh_a = square_mesh([0, 1, 2], [1, 3, 2]);
+        let mut mesh_b = square_mesh([0, 1, 2], [1, 3, 2]);
+        mesh_b.form_id = 0x20;
+        let merges = vec![MergeInput {
+            mesh_a_form_id: 0x10,
+            triangle_a: 0,
+            mesh_b_form_id: 0x20,
+            triangle_b: 1,
+        }];
+        let descriptors = merge_link_descriptors(&[mesh_a, mesh_b], &merges);
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].side_a.mesh_form_id, 0x10);
+        assert_eq!(descriptors[0].side_a.polygon_index, 0);
+        assert_eq!(descriptors[0].side_b.mesh_form_id, 0x20);
+        assert_eq!(descriptors[0].side_b.polygon_index, 1);
+    }
+
+    #[test]
+    fn merge_referencing_a_missing_mesh_or_triangle_is_skipped_not_panicked() {
+        let mesh_a = square_mesh([0, 1, 2], [1, 3, 2]);
+        let merges = vec![
+            MergeInput {
+                mesh_a_form_id: 0x10,
+                triangle_a: 0,
+                mesh_b_form_id: 0x9999, // no such mesh
+                triangle_b: 0,
+            },
+            MergeInput {
+                mesh_a_form_id: 0x10,
+                triangle_a: 999, // no such triangle
+                mesh_b_form_id: 0x10,
+                triangle_b: 1,
+            },
+        ];
+        let descriptors = merge_link_descriptors(&[mesh_a], &merges);
         assert!(descriptors.is_empty());
     }
 
