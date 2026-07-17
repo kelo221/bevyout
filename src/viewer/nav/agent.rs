@@ -1,18 +1,36 @@
 //! `bevy_landmass` runtime plugin + `tna` (test nav agent) console command
-//! family (issue #112, M4 wave 3). Owns one `Archipelago3d` per active cell
-//! (one `Island3dBundle` per prepared nav mesh within it, one
-//! `AnimationLink3dBundle` per intra-cell door-link descriptor), built
-//! lazily from `PreparedSceneManifest::nav_graph` on the first `tna spawn`,
-//! torn down on cell swap. Movement is kinematic for the spike: the
-//! landmass-computed desired velocity is applied to the agent's `Transform`
-//! each frame and fed back as the agent's own velocity (mirrors
-//! `bevy_landmass`'s own `basic.rs` example) -- no `bevy_boxddd` physics, no
-//! stepping/slopes; #114 owns grounded movement.
+//! family (issue #112, M4 wave 3; reworked #114, M4 wave 5). Owns one
+//! `Archipelago3d` per active cell (one `Island3dBundle` per prepared nav
+//! mesh within it, one `AnimationLink3dBundle` per intra-cell door-link
+//! descriptor), built lazily from `PreparedSceneManifest::nav_graph` on the
+//! first `tna spawn`, torn down on cell swap.
+//!
+//! Movement is physics-authoritative (#114): each nav agent carries its own
+//! `bevy_boxddd` capsule KCC, mirroring `player/movement.rs`'s controller
+//! (same free `move_mover`/`try_step_up`/`try_step_down`/
+//! `try_forward_step_support` sweep functions, same collision filters). The
+//! landmass-computed desired velocity is the KCC's *input*; the KCC resolves
+//! collision/steps/slopes/gravity and moves the `Transform`, and the actual
+//! post-collision velocity is what gets fed back to landmass's
+//! `Velocity3d` -- navigation proposes, physics disposes. The navmesh
+//! `sample_point` Y-snap from wave 3's kinematic spike is gone; landmass's
+//! own `AgentState::AgentNotOnNavMesh` is the off-navmesh diagnostic now.
+//! Deterministic grounded/collision/stuck decisions live in the pure
+//! `movement_policy` module; this file only feeds it observations.
+//!
+//! Up to [`MAX_TEST_AGENTS`] agents can be spawned at once (bounded local
+//! avoidance is otherwise unobservable with a single test agent): `tna`
+//! subcommands take an optional leading agent index, with every
+//! previously-single-agent command form left unchanged and defaulting to
+//! agent 0.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::math::Vec2;
 use bevy::prelude::*;
+use bevy_boxddd::boxddd;
+use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::prelude::*;
 use bevy_landmass::{
@@ -23,8 +41,10 @@ use serde_json::json;
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 use crate::vsa::PreparedSceneManifest;
 
+use super::super::openmw_player::GRAVITY;
+use super::super::player::{CellPhysicsReadiness, PhysicsDisabled};
 use super::super::{interaction, player};
-use super::{door_link, landmass_graph, ledger_policy, repath};
+use super::{door_link, landmass_graph, ledger_policy, movement_policy, repath};
 
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
@@ -41,11 +61,11 @@ const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
 /// target-reached stop always lands inside it.
 const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 
-/// The one point-sampling envelope shared by the archipelago options
-/// (`ensure_archipelago`) and the per-frame ground snap
-/// (`apply_kinematic_velocity`): the snap must never find ground the
-/// pathing layer itself would not, or the agent could stand somewhere
-/// landmass considers off-mesh, so both sites read this single constant.
+/// The point-sampling envelope for the archipelago options
+/// (`ensure_archipelago`): how far landmass itself may look for the navmesh
+/// around an agent/target point when deciding on/off-mesh state
+/// (`AgentState::AgentNotOnNavMesh`) -- the off-navmesh diagnostic input
+/// now that physics (#114), not this sampling, is ground authority.
 ///
 /// `from_agent_radius(0.35)` alone gives a 0.07 m horizontal / 0.35 m
 /// below sampling envelope -- far too tight for FO3 data, where the NAVM
@@ -62,27 +82,59 @@ const AGENT_POINT_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d
     animation_link_max_vertical_distance: 1.0,
 };
 
-/// Synthetic ledger identity for the one test nav agent this console
-/// command family drives (issue #134). The ledger/eligibility policy
-/// (`ledger_policy`) is written generically against an `agent_id` (a real
-/// multi-agent future would mint one per actor), but this spike only ever
-/// has the one -- wiring always passes this constant. Formatted like a
-/// FormID (`{:08x}`) in tracing lines, consistent with every other
-/// identifier this module logs.
-const TEST_AGENT_ID: u32 = 1;
+/// Bounded multi-agent cap (issue #114 feature 4): small and fixed so local
+/// avoidance among same-cell test agents is observable without an
+/// unbounded actor budget. Every previously single-agent `tna` command form
+/// still works unchanged, addressing agent index 0.
+pub(crate) const MAX_TEST_AGENTS: usize = 4;
 
-/// Marks the one test agent this console command family drives.
+/// The ledger/tracing identity for agent `index` (`0..MAX_TEST_AGENTS`):
+/// stable, 1-based so it never collides with the "no id" sentinel `0`,
+/// consistent with wave 3/4's single `TEST_AGENT_ID = 1`. Formatted as a
+/// small decimal in tracing lines (it identifies a spawn slot, not a
+/// FormID), but still handed to `ledger_policy` as a plain `u32`.
+fn agent_ledger_id(index: usize) -> u32 {
+    index as u32 + 1
+}
+
+/// Marks a test nav agent this console command family drives. `Entity`
+/// identity plus `TestNavAgentState::index_of` recovers which of the
+/// bounded `MAX_TEST_AGENTS` slots an entity belongs to.
 #[derive(Component)]
 struct TestNavAgentMarker;
 
 /// Present on the agent entity while it is kinematically crossing a
-/// door-link edge (`start` -> `end`), holding `apply_kinematic_velocity`
+/// door-link edge (`start` -> `end`), holding `apply_agent_physics_movement`
 /// off the transform until the crossing completes.
 #[derive(Component)]
 struct DoorTraversal {
     start: Vec3,
     end: Vec3,
     elapsed: f32,
+}
+
+/// Per-agent physics-authoritative KCC state (issue #114): the capsule
+/// mover's own velocity (landmass's desired velocity is only ever this
+/// tick's *input*), grounded state, and the deterministic stuck-tracking
+/// counters `movement_policy::decide_stuck` consumes. One per agent entity,
+/// inserted at spawn (`spawn_test_agent`) alongside `TestNavAgentMarker`.
+#[derive(Component, Default, Clone, Copy)]
+struct AgentKcc {
+    velocity: Vec3,
+    grounded: bool,
+    /// Smallest distance-to-target observed so far along the current route
+    /// (reset whenever a new `tna goto`/`tna travel` target is set).
+    best_distance: f32,
+    ticks_without_progress: u32,
+    recovery_active: bool,
+    /// This tick's `movement_policy::decide_collision_outcome` classification
+    /// (`tna status`'s `blocked=` field; the stable `nav agent
+    /// collision-blocked <id>` line fires on the rising edge only).
+    collision_blocked: bool,
+    /// Latched by `movement_policy::decide_stuck`'s `Stuck` outcome; cleared
+    /// by the next `tna goto`/`tna travel` (`tna status`'s `stuck=` field;
+    /// the stable `nav agent stuck <id>` line fires on the rising edge).
+    stuck: bool,
 }
 
 /// What an off-mesh animation-link entity represents (issue #113): a
@@ -158,9 +210,12 @@ struct DoorLockInfo {
     key_form_id: Option<u32>,
 }
 
-#[derive(Resource, Default)]
-struct TestNavAgentState {
-    entity: Option<Entity>,
+/// Per-agent bookkeeping that used to live in the single-agent
+/// `TestNavAgentState` (waves 3/4), now a `Component` on each agent entity
+/// so `MAX_TEST_AGENTS` agents can each carry their own door-link/travel/
+/// diagnostics state without a parallel resource-side index.
+#[derive(Component, Default)]
+struct AgentRuntime {
     door_link: door_link::DoorLinkState,
     /// Set by `door_link_system` when a link is first reached, consumed by
     /// the same system once the door opens to start the `DoorTraversal`.
@@ -180,6 +235,38 @@ struct TestNavAgentState {
     /// Last `AgentState` `log_agent_state_changes` reported, so the stable
     /// evidence lines fire once per actual change instead of every frame.
     last_logged_state: Option<AgentState>,
+}
+
+/// The bounded roster of spawned test-agent entities, indexed by agent
+/// index (`0..MAX_TEST_AGENTS`). All other per-agent state
+/// (`AgentRuntime`, `AgentKcc`, door-link/traversal components) lives on
+/// the entity itself; this resource only answers "which entity is agent
+/// N" and its inverse.
+#[derive(Resource)]
+struct TestNavAgentState {
+    entities: [Option<Entity>; MAX_TEST_AGENTS],
+}
+
+impl Default for TestNavAgentState {
+    fn default() -> Self {
+        Self {
+            entities: [None; MAX_TEST_AGENTS],
+        }
+    }
+}
+
+impl TestNavAgentState {
+    fn index_of(&self, entity: Entity) -> Option<usize> {
+        self.entities.iter().position(|slot| *slot == Some(entity))
+    }
+
+    /// Every currently-spawned `(index, entity)` pair, in index order.
+    fn active(&self) -> impl Iterator<Item = (usize, Entity)> + '_ {
+        self.entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.map(|entity| (index, entity)))
+    }
 }
 
 /// Intercell nav-agent ledger (issue #134): survives cell-swap teardown
@@ -216,8 +303,7 @@ impl Plugin for NavBackendPlugin {
                     restore_ledgered_agents_system,
                     door_availability_system,
                     door_link_system,
-                    sync_velocity_from_desired,
-                    apply_kinematic_velocity,
+                    apply_agent_physics_movement,
                     door_traversal_system,
                     log_agent_state_changes,
                     log_path_latency,
@@ -563,14 +649,32 @@ pub(crate) fn tna_command(
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn|goto <x> <y> <z>|goto player|travel <door-formid>|status|despawn";
+    let usage = "usage: tna spawn [<index>]|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
 }
 
+/// Parses an agent index argument, bounded to `0..MAX_TEST_AGENTS`. Every
+/// `tna` subcommand that used to address the single spike agent now takes
+/// this as an optional leading token; omitting it defaults to agent 0
+/// (issue #114 feature 4's back-compat requirement).
+fn parse_agent_index(value: &str) -> Result<usize, ConsoleError> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|&index| index < MAX_TEST_AGENTS)
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "bad_agent_index",
+                format!("agent index must be an integer 0..{}", MAX_TEST_AGENTS - 1),
+            )
+        })
+}
+
 /// Spawns the capsule mesh + `bevy_landmass` agent entity at `position` in
-/// the already-current archipelago (`ensure_archipelago` must have run).
-/// Shared by `spawn_agent` (the `tna spawn` console command, positioned at
-/// the player) and `restore_ledgered_agent` (issue #134, positioned at a
+/// the already-current archipelago (`ensure_archipelago` must have run),
+/// with its `AgentRuntime`/`AgentKcc` components at their defaults. Shared
+/// by `spawn_agent` (the `tna spawn` console command, positioned at the
+/// player) and `restore_ledgered_agent` (issue #134, positioned at a
 /// resolved ledger spawn point) -- neither sets `TestNavAgentState` itself,
 /// so callers own that and its accompanying log line.
 fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
@@ -593,6 +697,8 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
     let agent_entity = world
         .spawn((
             TestNavAgentMarker,
+            AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_translation(position),
             Visibility::Inherited,
             Agent3dBundle {
@@ -619,35 +725,35 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
 }
 
 fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    if !rest.is_empty() {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "tna spawn does not accept arguments",
-        ));
-    }
+    let index = match rest {
+        [] => 0,
+        [index] => parse_agent_index(index)?,
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna spawn accepts at most one agent index",
+            ));
+        }
+    };
     ensure_archipelago(world)?;
-    if world.resource::<TestNavAgentState>().entity.is_some() {
+    if world.resource::<TestNavAgentState>().entities[index].is_some() {
         return Err(ConsoleError::new(
             "already_spawned",
-            "a test nav agent is already spawned; use tna despawn first",
+            "a test nav agent is already spawned at this index; use tna despawn first",
         ));
     }
     let position = player_transform_query(world)
         .ok_or_else(|| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
     let agent_entity = spawn_test_agent(world, position);
-
-    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState {
-        entity: Some(agent_entity),
-        ..default()
-    };
+    world.resource_mut::<TestNavAgentState>().entities[index] = Some(agent_entity);
     info!(
-        "nav agent spawn position=({:.2},{:.2},{:.2})",
+        "nav agent {index} spawn position=({:.2},{:.2},{:.2})",
         position.x, position.y, position.z
     );
     Ok(ConsoleCommandResult::new(
-        json!({ "position": [position.x, position.y, position.z] }),
+        json!({ "index": index, "position": [position.x, position.y, position.z] }),
         vec![format!(
-            "nav agent spawned at ({:.2}, {:.2}, {:.2})",
+            "nav agent {index} spawned at ({:.2}, {:.2}, {:.2})",
             position.x, position.y, position.z
         )],
     ))
@@ -668,48 +774,70 @@ fn parse_form_id(value: &str) -> Option<u32> {
         .flatten()
 }
 
-/// `tna travel <door-formid>` (issue #134): routes the test agent through
-/// the given travel door end-to-end, wiring up `request_travel`.
+/// `tna travel [<index>] <door-formid>` (issue #134; indexed #114): routes
+/// the given agent through the given travel door end-to-end, wiring up
+/// `request_travel`.
 fn travel_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    let [door] = rest else {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "tna travel requires exactly one door FormID",
-        ));
+    let (index, door) = match rest {
+        [door] => (0, door),
+        [index, door] => (parse_agent_index(index)?, door),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna travel requires [<index>] <door-formid>",
+            ));
+        }
     };
     let door_form_id = parse_form_id(door)
         .ok_or_else(|| ConsoleError::new("bad_type", "tna travel door FormID must be hex"))?;
-    request_travel(world, door_form_id)?;
+    request_travel(world, index, door_form_id)?;
     Ok(ConsoleCommandResult::new(
-        json!({ "door_form_id": door_form_id }),
+        json!({ "index": index, "door_form_id": door_form_id }),
         vec![format!(
-            "nav agent travel requested to door {door_form_id:08x}"
+            "nav agent {index} travel requested to door {door_form_id:08x}"
         )],
     ))
 }
 
-fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
-        return Err(ConsoleError::new(
-            "no_agent",
-            "no test nav agent is spawned; use tna spawn first",
-        ));
+fn parse_goto_point(x: &str, y: &str, z: &str) -> Result<Vec3, ConsoleError> {
+    let parse = |value: &str| {
+        value.parse::<f32>().map_err(|_| {
+            ConsoleError::new("bad_type", "tna goto coordinates must be finite numbers")
+        })
     };
-    let (target, description) = match rest {
-        [value] if value == "player" => {
-            let player_entity = player_entity_query(world).ok_or_else(|| {
-                ConsoleError::new("player_unavailable", "the FPS player does not exist")
-            })?;
-            (AgentTarget3d::Entity(player_entity), "player".to_string())
-        }
+    Ok(Vec3::new(parse(x)?, parse(y)?, parse(z)?))
+}
+
+fn goto_player_target(world: &mut World) -> Result<AgentTarget3d, ConsoleError> {
+    let player_entity = player_entity_query(world)
+        .ok_or_else(|| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
+    Ok(AgentTarget3d::Entity(player_entity))
+}
+
+/// `tna goto [<index>] <x> <y> <z>|player` (indexed #114): the leading
+/// index token is optional and distinguished purely by argument count, so
+/// every previously single-agent form (`goto <x> <y> <z>`, `goto player`)
+/// is unchanged and still addresses agent 0.
+fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (index, target, description) = match rest {
+        [value] if value == "player" => (0, goto_player_target(world)?, "player".to_string()),
+        [index, value] if value == "player" => (
+            parse_agent_index(index)?,
+            goto_player_target(world)?,
+            "player".to_string(),
+        ),
         [x, y, z] => {
-            let parse = |value: &String| {
-                value.parse::<f32>().map_err(|_| {
-                    ConsoleError::new("bad_type", "tna goto coordinates must be finite numbers")
-                })
-            };
-            let point = Vec3::new(parse(x)?, parse(y)?, parse(z)?);
+            let point = parse_goto_point(x, y, z)?;
             (
+                0,
+                AgentTarget3d::Point(point),
+                format!("({:.2}, {:.2}, {:.2})", point.x, point.y, point.z),
+            )
+        }
+        [index, x, y, z] => {
+            let point = parse_goto_point(x, y, z)?;
+            (
+                parse_agent_index(index)?,
                 AgentTarget3d::Point(point),
                 format!("({:.2}, {:.2}, {:.2})", point.x, point.y, point.z),
             )
@@ -717,48 +845,68 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
         _ => {
             return Err(ConsoleError::new(
                 "bad_arity",
-                "tna goto requires <x> <y> <z> or the literal 'player'",
+                "tna goto requires [<index>] <x> <y> <z> or [<index>] player",
             ));
         }
     };
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
+        return Err(ConsoleError::new(
+            "no_agent",
+            "no test nav agent is spawned at this index; use tna spawn first",
+        ));
+    };
     world.entity_mut(agent_entity).insert(target);
     let elapsed = world.resource::<Time>().elapsed_secs();
-    {
-        let mut state = world.resource_mut::<TestNavAgentState>();
-        state.goto_started_at = Some(elapsed);
-        state.latency_logged = false;
+    if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
+        runtime.goto_started_at = Some(elapsed);
+        runtime.latency_logged = false;
+    }
+    // A fresh target resets the pure stuck-tracking window (movement_policy)
+    // -- the agent gets a clean run at the new waypoint.
+    if let Some(mut kcc) = world.get_mut::<AgentKcc>(agent_entity) {
+        kcc.best_distance = f32::MAX;
+        kcc.ticks_without_progress = 0;
+        kcc.recovery_active = false;
+        kcc.stuck = false;
     }
     Ok(ConsoleCommandResult::new(
-        json!({ "target": description }),
-        vec![format!("nav agent target set to {description}")],
+        json!({ "index": index, "target": description }),
+        vec![format!("nav agent {index} target set to {description}")],
     ))
 }
 
 fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    if !rest.is_empty() {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "tna status does not accept arguments",
-        ));
-    }
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+    let index = match rest {
+        [] => 0,
+        [index] => parse_agent_index(index)?,
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna status accepts at most one agent index",
+            ));
+        }
+    };
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
         // Issue #134: a handed-off or frozen agent has no live entity but
         // still exists in the ledger -- report that instead of the "no
         // agent" error `tna spawn` would otherwise imply is needed.
         if let Some(entry) = world
             .resource::<NavAgentLedger>()
             .0
-            .entry_for(TEST_AGENT_ID)
+            .entry_for(agent_ledger_id(index))
         {
-            let line = format!("nav agent handed off to cell {:08x}", entry.cell_form_id);
+            let line = format!(
+                "nav agent {index} handed off to cell {:08x}",
+                entry.cell_form_id
+            );
             return Ok(ConsoleCommandResult::new(
-                json!({ "status": "handed-off", "cell": entry.cell_form_id }),
+                json!({ "index": index, "status": "handed-off", "cell": entry.cell_form_id }),
                 vec![line],
             ));
         }
         return Err(ConsoleError::new(
             "no_agent",
-            "no test nav agent is spawned; use tna spawn first",
+            "no test nav agent is spawned at this index; use tna spawn first",
         ));
     };
     let position = world
@@ -769,17 +917,21 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
         .get::<AgentState>(agent_entity)
         .copied()
         .unwrap_or_default();
-    let (door_link_state, link_desc) = {
-        let state = world.resource::<TestNavAgentState>();
-        (state.door_link, active_link_description(state))
+    let (door_link_state, link_desc) = match world.get::<AgentRuntime>(agent_entity) {
+        Some(runtime) => (runtime.door_link, active_link_description(runtime)),
+        None => (door_link::DoorLinkState::default(), None),
     };
+    let (grounded, stuck, collision_blocked) = world
+        .get::<AgentKcc>(agent_entity)
+        .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
+        .unwrap_or_default();
     let status = resolve_status(landmass_state, door_link_state);
     let target_desc = world
         .get::<AgentTarget3d>(agent_entity)
         .map(describe_target)
         .unwrap_or_else(|| "none".to_string());
     let mut line = format!(
-        "nav agent status={} position=({:.2},{:.2},{:.2}) target={}",
+        "nav agent {index} status={} position=({:.2},{:.2},{:.2}) target={} grounded={grounded} stuck={stuck} blocked={collision_blocked}",
         status.as_str(),
         position.x,
         position.y,
@@ -791,10 +943,14 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
     }
     Ok(ConsoleCommandResult::new(
         json!({
+            "index": index,
             "status": status.as_str(),
             "position": [position.x, position.y, position.z],
             "target": target_desc,
             "link": link_desc,
+            "grounded": grounded,
+            "stuck": stuck,
+            "blocked": collision_blocked,
         }),
         vec![line],
     ))
@@ -816,11 +972,11 @@ fn resolve_status(
 /// The `link=` suffix for `tna status` (issue #113 feature 5): the active
 /// link kind while interacting with one (`merge` while crossing a merge
 /// seam, `door <formid>` through a door lifecycle), else `None`.
-fn active_link_description(state: &TestNavAgentState) -> Option<String> {
-    match state.active_link {
+fn active_link_description(runtime: &AgentRuntime) -> Option<String> {
+    match runtime.active_link {
         Some(LinkKind::Merge) => Some("merge".to_string()),
         Some(LinkKind::Door { form_id }) => Some(format!("door {form_id:08x}")),
-        None => match state.door_link {
+        None => match runtime.door_link {
             door_link::DoorLinkState::TravelReached {
                 door_form_id,
                 destination_cell_form_id,
@@ -841,25 +997,29 @@ fn describe_target(target: &AgentTarget3d) -> String {
 }
 
 fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    if !rest.is_empty() {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "tna despawn does not accept arguments",
-        ));
-    }
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+    let index = match rest {
+        [] => 0,
+        [index] => parse_agent_index(index)?,
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna despawn accepts at most one agent index",
+            ));
+        }
+    };
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
         return Err(ConsoleError::new(
             "no_agent",
-            "no test nav agent is spawned; use tna spawn first",
+            "no test nav agent is spawned at this index; use tna spawn first",
         ));
     };
     if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
-    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState::default();
+    world.resource_mut::<TestNavAgentState>().entities[index] = None;
     Ok(ConsoleCommandResult::new(
-        json!({ "despawned": true }),
-        vec!["nav agent despawned".to_string()],
+        json!({ "index": index, "despawned": true }),
+        vec![format!("nav agent {index} despawned")],
     ))
 }
 
@@ -867,60 +1027,278 @@ fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandRes
 // Runtime systems
 // ---------------------------------------------------------------------
 
-fn sync_velocity_from_desired(
-    mut agents: Query<(&mut Velocity3d, &AgentDesiredVelocity3d), With<TestNavAgentMarker>>,
-) {
-    for (mut velocity, desired) in &mut agents {
-        velocity.velocity = desired.velocity();
+/// One tick of the physics-authoritative agent KCC (issue #114): sweeps
+/// `mover` through the real `boxddd::World` using the same free
+/// `move_mover`/step-support helpers the player capsule controller uses
+/// (`player/movement.rs`), taking landmass's desired horizontal velocity as
+/// this tick's input and integrating gravity exactly like the player when
+/// airborne. Grounded/step decisions are `movement_policy::decide_grounded`
+/// calls, not inline logic. Pulled out of the Bevy system so it is directly
+/// testable against a real `boxddd::World` fixture (`#[cfg(test)]`, mirrors
+/// `player/tests/mod.rs`'s own `move_mover` fixtures) without a Bevy `App`.
+/// Returns the new world position, the new KCC velocity to remember for
+/// next tick, and the new grounded state.
+#[allow(clippy::too_many_arguments)]
+fn step_agent_kcc(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    origin: Vec3,
+    kcc_velocity_in: Vec3,
+    grounded_in: bool,
+    desired_horizontal: Vec2,
+    dt: f32,
+) -> (Vec3, Vec3, bool) {
+    let box_origin = player::to_box_vec3(origin);
+    let initial_planes = world
+        .collide_mover(box_origin, mover, collision_filter)
+        .unwrap_or_default();
+    // Preserve support for one solve while crossing a tread edge, exactly
+    // like the player controller -- the final sweep below decides whether
+    // that support still exists.
+    let mut grounded = grounded_in
+        || movement_policy::decide_grounded(movement_policy::GroundedObservation {
+            has_walkable_plane: player::has_walkable_plane(&initial_planes),
+            stepped_up: false,
+        });
+
+    let mut velocity = kcc_velocity_in;
+    velocity.x = desired_horizontal.x;
+    velocity.z = desired_horizontal.y;
+    if grounded {
+        if velocity.y < 0.0 {
+            velocity.y = 0.0;
+        }
+    } else {
+        velocity.y -= GRAVITY * dt;
     }
+
+    let desired_delta = player::to_box_vec3(velocity * dt);
+    let intentional_horizontal_motion = desired_horizontal.length_squared() > f32::EPSILON;
+    let (mut position, planes, stepped_up, _attempted) = player::move_mover(
+        world,
+        box_origin,
+        mover,
+        desired_delta,
+        collision_filter,
+        support_filter,
+        grounded && intentional_horizontal_motion,
+        false,
+    );
+    grounded = movement_policy::decide_grounded(movement_policy::GroundedObservation {
+        has_walkable_plane: player::has_walkable_plane(&planes),
+        stepped_up,
+    });
+    if !grounded && velocity.y <= 0.0 {
+        if intentional_horizontal_motion
+            && let Some(supported) =
+                player::try_forward_step_support(world, position, desired_delta, support_filter)
+        {
+            position = supported;
+            grounded = true;
+        } else if let Some(snapped) = player::try_step_down(
+            world,
+            position,
+            mover,
+            desired_delta,
+            collision_filter,
+            support_filter,
+        ) {
+            position = snapped;
+            grounded = true;
+        }
+    }
+    if grounded && velocity.y < 0.0 {
+        velocity.y = 0.0;
+    }
+    (player::from_box_vec3(position), velocity, grounded)
 }
 
-type KinematicAgentQuery<'w, 's> = Query<
+type AgentPhysicsQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static mut Transform, &'static Velocity3d),
+    (
+        Entity,
+        &'static mut Transform,
+        &'static mut Velocity3d,
+        &'static AgentDesiredVelocity3d,
+        &'static mut AgentKcc,
+        Option<&'static AgentTarget3d>,
+    ),
     (With<TestNavAgentMarker>, Without<DoorTraversal>),
 >;
 
-/// Applies the landmass desired velocity kinematically, then snaps the
-/// agent's y to the nav-mesh surface under its new x/z
-/// (`Archipelago3d::sample_point`). Without the snap a sloped/stair path
-/// (FranklinMetro02's descending floor, mesh y spanning ~94-105 m) leaves y
-/// frozen at spawn height until the agent exits the vertical sampling
-/// envelope and flips to `AgentNotOnNavMesh` mid-route. A miss (agent
-/// momentarily outside the envelope, e.g. pushed off-mesh by avoidance)
-/// leaves y unchanged rather than teleporting; landmass then reports the
-/// off-mesh state through the normal status path. Door-link crossings
-/// (`DoorTraversal`) are excluded -- the lerp owns the transform there.
-fn apply_kinematic_velocity(
+/// Physics-authoritative agent movement (issue #114): landmass's desired
+/// velocity (`AgentDesiredVelocity3d`) is this tick's *input*, not the
+/// final motion. Each agent's own capsule KCC (`step_agent_kcc`, mirroring
+/// `player/movement.rs`'s controller against the same shared `bevy_boxddd`
+/// world) resolves collision/steps/slopes/gravity and moves the
+/// `Transform`; the actual achieved velocity is what gets written back to
+/// `Velocity3d` for landmass to plan against next tick -- navigation
+/// proposes, physics disposes. Gated on `CellPhysicsReadiness` exactly like
+/// the player (`player/movement.rs::apply_player_controls`): an agent must
+/// not move through geometry that has not finished building. Door-link
+/// crossings (`DoorTraversal`) are excluded; the lerp owns the transform
+/// there. Feeds `movement_policy::decide_collision_outcome`/`decide_stuck`
+/// per agent and emits the stable `nav agent collision-blocked <id>`/`nav
+/// agent stuck <id>` lines on the rising edge, plus one forced repath
+/// (re-inserting the current target) the first time an agent's route stops
+/// making progress.
+#[allow(clippy::too_many_arguments)]
+fn apply_agent_physics_movement(
     time: Res<Time>,
-    state: Res<NavArchipelagoState>,
-    archipelagos: Query<&Archipelago3d>,
-    mut agents: KinematicAgentQuery<'_, '_>,
+    physics_disabled: Res<PhysicsDisabled>,
+    cell_physics: Res<CellPhysicsReadiness>,
+    roster: Res<TestNavAgentState>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    mut agents: AgentPhysicsQuery<'_, '_>,
+    targets: Query<&GlobalTransform>,
+    mut commands: Commands,
 ) {
-    let archipelago = state
-        .archipelago
-        .and_then(|entity| archipelagos.get(entity).ok());
-    for (mut transform, velocity) in &mut agents {
-        transform.translation += velocity.velocity * time.delta_secs();
-        if let Some(archipelago) = archipelago
-            && let Ok(sampled) =
-                archipelago.sample_point(transform.translation, &AGENT_POINT_SAMPLE_DISTANCE)
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    if physics_disabled.0 || !cell_physics.static_collision_ready() {
+        for (_, _, mut velocity, _, mut kcc, _) in &mut agents {
+            velocity.velocity = Vec3::ZERO;
+            kcc.velocity = Vec3::ZERO;
+            kcc.grounded = false;
+        }
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let mover = boxddd::Capsule::new(
+        [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+        [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+        AGENT_RADIUS,
+    );
+    // Same collision categories the player capsule queries against -- one
+    // shared static/dynamic world, no separate agent-only layer.
+    let collision_filter = player::player_collision_filter();
+    let support_filter = player::stair_support_filter();
+
+    for (entity, mut transform, mut velocity, desired, mut kcc, target) in &mut agents {
+        let desired_velocity = desired.velocity();
+        let desired_horizontal = Vec2::new(desired_velocity.x, desired_velocity.z);
+        let (new_position, new_kcc_velocity, grounded) = step_agent_kcc(
+            world,
+            &mover,
+            collision_filter,
+            support_filter,
+            transform.translation,
+            kcc.velocity,
+            kcc.grounded,
+            desired_horizontal,
+            dt,
+        );
+        let achieved = (new_position - transform.translation) / dt;
+        transform.translation = new_position;
+        kcc.velocity = new_kcc_velocity;
+        kcc.grounded = grounded;
+        velocity.velocity = achieved;
+
+        let outcome =
+            movement_policy::decide_collision_outcome(movement_policy::VelocityObservation {
+                desired_horizontal_speed: desired_horizontal.length(),
+                achieved_horizontal_speed: Vec2::new(achieved.x, achieved.z).length(),
+            });
+        let was_blocked = kcc.collision_blocked;
+        kcc.collision_blocked = matches!(outcome, movement_policy::CollisionOutcome::Blocked);
+        if kcc.collision_blocked
+            && !was_blocked
+            && let Some(index) = roster.index_of(entity)
         {
-            transform.translation.y = sampled.point().y;
+            info!("nav agent collision-blocked {index}");
+        }
+
+        // Stuck detection needs a live target distance -- an agent with no
+        // active point/entity target is never stuck (nothing to make
+        // progress toward).
+        let target_point = match target {
+            Some(AgentTarget3d::Point(point)) => Some(*point),
+            Some(AgentTarget3d::Entity(target_entity)) => targets
+                .get(*target_entity)
+                .ok()
+                .map(GlobalTransform::translation),
+            _ => None,
+        };
+        let Some(target_point) = target_point else {
+            continue;
+        };
+        let distance = new_position.distance(target_point);
+        if kcc.best_distance == f32::MAX {
+            kcc.best_distance = distance;
+        }
+        let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
+            distance_to_target: distance,
+            best_distance_so_far: kcc.best_distance,
+            ticks_without_progress: kcc.ticks_without_progress,
+            recovery_active: kcc.recovery_active,
+        });
+        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < kcc.best_distance;
+        if progressed {
+            kcc.best_distance = distance;
+            kcc.ticks_without_progress = 0;
+            kcc.recovery_active = false;
+        } else {
+            kcc.ticks_without_progress = kcc.ticks_without_progress.saturating_add(1);
+        }
+        match decision {
+            movement_policy::StuckDecision::Progressing => {}
+            movement_policy::StuckDecision::StartRecovery => {
+                kcc.recovery_active = true;
+                // Force a landmass repath by re-inserting the current
+                // target -- the same technique `door_availability_system`
+                // uses on a door-usability flip. `AgentTarget3d` is not
+                // `Clone`; rebuild the equivalent value by matching its
+                // variants.
+                let rebuilt = match target {
+                    Some(AgentTarget3d::Point(point)) => Some(AgentTarget3d::Point(*point)),
+                    Some(AgentTarget3d::Entity(target_entity)) => {
+                        Some(AgentTarget3d::Entity(*target_entity))
+                    }
+                    _ => None,
+                };
+                if let Some(rebuilt) = rebuilt {
+                    commands.entity(entity).insert(rebuilt);
+                }
+                if let Some(index) = roster.index_of(entity) {
+                    info!("nav agent stuck-recovery {index}");
+                }
+            }
+            movement_policy::StuckDecision::RecoveryPending => {}
+            movement_policy::StuckDecision::Stuck => {
+                let was_stuck = kcc.stuck;
+                kcc.stuck = true;
+                if !was_stuck && let Some(index) = roster.index_of(entity) {
+                    info!("nav agent stuck {index}");
+                }
+            }
         }
     }
 }
 
 fn door_traversal_system(
     time: Res<Time>,
-    mut agents: Query<(Entity, &mut Transform, &mut DoorTraversal), With<TestNavAgentMarker>>,
-    mut state: ResMut<TestNavAgentState>,
+    mut agents: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut DoorTraversal,
+            &mut AgentRuntime,
+        ),
+        With<TestNavAgentMarker>,
+    >,
+    mut roster: ResMut<TestNavAgentState>,
     archipelago_state: Res<NavArchipelagoState>,
     mut ledger: ResMut<NavAgentLedger>,
     mut commands: Commands,
 ) {
-    for (entity, mut transform, mut traversal) in &mut agents {
+    for (entity, mut transform, mut traversal, mut runtime) in &mut agents {
         traversal.elapsed += time.delta_secs();
         let t = (traversal.elapsed / DOOR_TRAVERSAL_SECONDS).clamp(0.0, 1.0);
         transform.translation = traversal.start.lerp(traversal.end, t);
@@ -929,15 +1307,15 @@ fn door_traversal_system(
                 .entity(entity)
                 .remove::<DoorTraversal>()
                 .remove::<UsingAnimationLink>();
-            match state.active_link {
+            match runtime.active_link {
                 // A merge-seam crossing involves no door: the state machine
                 // never left Idle, so completion only clears the link.
                 Some(LinkKind::Merge) | None => {
-                    state.active_link = None;
+                    runtime.active_link = None;
                 }
                 Some(LinkKind::Door { .. }) => {
                     let new_state = door_link::transition(
-                        state.door_link,
+                        runtime.door_link,
                         door_link::DoorLinkEvent::TraversalComplete,
                     );
                     let Some((door_form_id, destination_cell_form_id)) = (match new_state {
@@ -947,10 +1325,14 @@ fn door_traversal_system(
                         } => Some((door_form_id, destination_cell_form_id)),
                         _ => None,
                     }) else {
-                        state.door_link = new_state;
-                        state.active_link = None;
+                        runtime.door_link = new_state;
+                        runtime.active_link = None;
                         continue;
                     };
+                    let Some(index) = roster.index_of(entity) else {
+                        continue;
+                    };
+                    let agent_id = agent_ledger_id(index);
                     // Issue #113's terminal travel seam: the agent stopped at
                     // the traversed door. Issue #134 owns what happens next:
                     // the agent leaves the active cell entirely, ledgered for
@@ -965,7 +1347,7 @@ fn door_traversal_system(
                     match destination_door_form_id {
                         Some(destination_door_form_id) => {
                             ledger.0.record(ledger_policy::LedgerEntry {
-                                agent_id: TEST_AGENT_ID,
+                                agent_id,
                                 cell_form_id: destination_cell_form_id,
                                 spawn_kind: ledger_policy::SpawnKind::DoorMarker {
                                     destination_door_form_id,
@@ -973,10 +1355,10 @@ fn door_traversal_system(
                                 remaining_target: None,
                             });
                             info!(
-                                "nav agent handoff {TEST_AGENT_ID:08x} -> cell {destination_cell_form_id:08x}"
+                                "nav agent handoff {agent_id:08x} -> cell {destination_cell_form_id:08x}"
                             );
                             commands.entity(entity).despawn();
-                            *state = TestNavAgentState::default();
+                            roster.entities[index] = None;
                         }
                         None => {
                             // Defensive fallback (should not happen:
@@ -988,9 +1370,9 @@ fn door_traversal_system(
                                 "nav agent handoff {door_form_id:08x}: no destination door metadata; agent left at the travel door"
                             );
                             commands.entity(entity).remove::<AgentTarget3d>();
-                            state.travel_intent = None;
-                            state.door_link = new_state;
-                            state.active_link = None;
+                            runtime.travel_intent = None;
+                            runtime.door_link = new_state;
+                            runtime.active_link = None;
                         }
                     }
                 }
@@ -1031,24 +1413,34 @@ fn request_door_open(world: &mut World, door_form_id: u32) {
     }
 }
 
-/// Drives the door-link lifecycle: detects the agent reaching an off-mesh
-/// link (a merge seam is crossed directly; a door link runs the pause ->
-/// scripted-open -> wait -> traverse lifecycle) or arriving at a travel
-/// door's triangle (issue #113 feature 3), requests the door open through
-/// the same boundary the `activate` console command uses
-/// (`interaction::scripted_door_open`), polls `InteractionState.open`, and
-/// starts the kinematic crossing once the door is open. An exclusive
-/// (`&mut World`) system since it needs to both query components and call
-/// into `interaction`'s `&mut World`-based scripted door boundary in the
-/// same step.
+/// Drives the door-link lifecycle for every currently-spawned agent:
+/// detects each reaching an off-mesh link (a merge seam is crossed
+/// directly; a door link runs the pause -> scripted-open -> wait ->
+/// traverse lifecycle) or arriving at a travel door's triangle (issue #113
+/// feature 3), requests the door open through the same boundary the
+/// `activate` console command uses (`interaction::scripted_door_open`),
+/// polls `InteractionState.open`, and starts the kinematic crossing once
+/// the door is open. An exclusive (`&mut World`) system since it needs to
+/// both query components and call into `interaction`'s `&mut World`-based
+/// scripted door boundary in the same step.
 fn door_link_system(world: &mut World) {
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+    let active: Vec<Entity> = world
+        .resource::<TestNavAgentState>()
+        .active()
+        .map(|(_, entity)| entity)
+        .collect();
+    for agent_entity in active {
+        if world.get_entity(agent_entity).is_err() {
+            continue;
+        }
+        drive_door_link_for_agent(world, agent_entity);
+    }
+}
+
+fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
+    let Some(current_state) = world.get::<AgentRuntime>(agent_entity).map(|r| r.door_link) else {
         return;
     };
-    if world.get_entity(agent_entity).is_err() {
-        return;
-    }
-    let current_state = world.resource::<TestNavAgentState>().door_link;
 
     match current_state {
         door_link::DoorLinkState::Idle
@@ -1058,8 +1450,8 @@ fn door_link_system(world: &mut World) {
             // intent whose door triangle the agent has reached starts the
             // door lifecycle with a Travel destination.
             let travel_arrival = world
-                .resource::<TestNavAgentState>()
-                .travel_intent
+                .get::<AgentRuntime>(agent_entity)
+                .and_then(|runtime| runtime.travel_intent)
                 .and_then(|door_form_id| {
                     let link = world
                         .resource::<NavArchipelagoState>()
@@ -1083,12 +1475,12 @@ fn door_link_system(world: &mut World) {
                 world.entity_mut(agent_entity).insert(PauseAgent);
                 request_door_open(world, door_form_id);
                 info!("nav agent door wait {door_form_id:08x}");
-                let mut state = world.resource_mut::<TestNavAgentState>();
-                state.door_link = new_state;
-                state.active_link = Some(LinkKind::Door {
+                let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
+                runtime.door_link = new_state;
+                runtime.active_link = Some(LinkKind::Door {
                     form_id: door_form_id,
                 });
-                state.pending_traversal = Some((link.triangle_midpoint, link.door_position));
+                runtime.pending_traversal = Some((link.triangle_midpoint, link.door_position));
                 return;
             }
 
@@ -1116,7 +1508,10 @@ fn door_link_system(world: &mut World) {
                             elapsed: 0.0,
                         },
                     ));
-                    world.resource_mut::<TestNavAgentState>().active_link = Some(LinkKind::Merge);
+                    world
+                        .get_mut::<AgentRuntime>(agent_entity)
+                        .unwrap()
+                        .active_link = Some(LinkKind::Merge);
                 }
                 LinkKind::Door {
                     form_id: door_form_id,
@@ -1131,10 +1526,10 @@ fn door_link_system(world: &mut World) {
                     world.entity_mut(agent_entity).insert(PauseAgent);
                     request_door_open(world, door_form_id);
                     info!("nav agent door wait {door_form_id:08x}");
-                    let mut state = world.resource_mut::<TestNavAgentState>();
-                    state.door_link = new_state;
-                    state.active_link = Some(link_kind);
-                    state.pending_traversal = Some((start_point, end_point));
+                    let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
+                    runtime.door_link = new_state;
+                    runtime.active_link = Some(link_kind);
+                    runtime.pending_traversal = Some((start_point, end_point));
                 }
             }
         }
@@ -1155,7 +1550,8 @@ fn door_link_system(world: &mut World) {
             if door_link::is_traversing(new_state) {
                 world.entity_mut(agent_entity).remove::<PauseAgent>();
                 let pending = world
-                    .resource_mut::<TestNavAgentState>()
+                    .get_mut::<AgentRuntime>(agent_entity)
+                    .unwrap()
                     .pending_traversal
                     .take();
                 if let Some((start, end)) = pending {
@@ -1174,11 +1570,14 @@ fn door_link_system(world: &mut World) {
                     "nav agent door {door_form_id:08x}: gave up waiting for it to open; agent stopped at the link"
                 );
                 info!("nav agent unreachable");
-                let mut state = world.resource_mut::<TestNavAgentState>();
-                state.active_link = None;
-                state.travel_intent = None;
+                let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
+                runtime.active_link = None;
+                runtime.travel_intent = None;
             }
-            world.resource_mut::<TestNavAgentState>().door_link = new_state;
+            world
+                .get_mut::<AgentRuntime>(agent_entity)
+                .unwrap()
+                .door_link = new_state;
         }
         door_link::DoorLinkState::Traversing { .. } => {
             // `door_traversal_system` owns the crossing and emits
@@ -1294,31 +1693,39 @@ fn door_availability_system(world: &mut World) {
             }
         }
 
-        // Route refresh: re-insert the agent's current target so landmass
-        // replans with the updated link set. `AgentTarget3d` is not `Clone`;
-        // rebuild the equivalent value by matching its variants.
-        let agent = world.resource::<TestNavAgentState>().entity;
-        if let Some(agent_entity) = agent {
-            let target = world
-                .get::<AgentTarget3d>(agent_entity)
-                .and_then(|target| match target {
-                    AgentTarget3d::None => None,
-                    AgentTarget3d::Point(point) => Some(AgentTarget3d::Point(*point)),
-                    AgentTarget3d::Entity(entity) => Some(AgentTarget3d::Entity(*entity)),
-                });
+        // Route refresh: re-insert every active agent's current target so
+        // landmass replans with the updated link set. `AgentTarget3d` is not
+        // `Clone`; rebuild the equivalent value by matching its variants.
+        let active_agents: Vec<Entity> = world
+            .resource::<TestNavAgentState>()
+            .active()
+            .map(|(_, entity)| entity)
+            .collect();
+        for agent_entity in &active_agents {
+            let target =
+                world
+                    .get::<AgentTarget3d>(*agent_entity)
+                    .and_then(|target| match target {
+                        AgentTarget3d::None => None,
+                        AgentTarget3d::Point(point) => Some(AgentTarget3d::Point(*point)),
+                        AgentTarget3d::Entity(entity) => Some(AgentTarget3d::Entity(*entity)),
+                    });
             if let Some(target) = target {
-                world.entity_mut(agent_entity).insert(target);
+                world.entity_mut(*agent_entity).insert(target);
             }
         }
 
-        // A paused wait on this exact door can now proceed.
-        if now_usable
-            && matches!(
-                world.resource::<TestNavAgentState>().door_link,
-                door_link::DoorLinkState::Paused { door_form_id: paused, .. } if paused == door_form_id
-            )
-        {
-            request_door_open(world, door_form_id);
+        // Any agent paused waiting on this exact door can now proceed.
+        if now_usable {
+            let paused_on_this_door = active_agents.iter().copied().any(|agent_entity| {
+                matches!(
+                    world.get::<AgentRuntime>(agent_entity).map(|r| r.door_link),
+                    Some(door_link::DoorLinkState::Paused { door_form_id: paused, .. }) if paused == door_form_id
+                )
+            });
+            if paused_on_this_door {
+                request_door_open(world, door_form_id);
+            }
         }
 
         info!(
@@ -1328,22 +1735,26 @@ fn door_availability_system(world: &mut World) {
     }
 }
 
-/// Routes the test agent to `door_form_id`'s travel-door triangle and arms
-/// the travel lifecycle (issue #113 feature 3). The traversal terminates at
-/// the door with the `TravelReached` status; `door_traversal_system` (issue
-/// #134) consumes that seam and hands the agent off to the destination
-/// cell. Wired to the console as `tna travel <door-formid>`.
-pub(crate) fn request_travel(world: &mut World, door_form_id: u32) -> Result<(), ConsoleError> {
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+/// Routes agent `index` to `door_form_id`'s travel-door triangle and arms
+/// the travel lifecycle (issue #113 feature 3; indexed #114). The traversal
+/// terminates at the door with the `TravelReached` status;
+/// `door_traversal_system` (issue #134) consumes that seam and hands the
+/// agent off to the destination cell. Wired to the console as `tna travel
+/// [<index>] <door-formid>`.
+pub(crate) fn request_travel(
+    world: &mut World,
+    index: usize,
+    door_form_id: u32,
+) -> Result<(), ConsoleError> {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
         return Err(ConsoleError::new(
             "no_agent",
-            "no test nav agent is spawned; use tna spawn first",
+            "no test nav agent is spawned at this index; use tna spawn first",
         ));
     };
     if world
-        .resource::<TestNavAgentState>()
-        .travel_intent
-        .is_some()
+        .get::<AgentRuntime>(agent_entity)
+        .is_some_and(|runtime| runtime.travel_intent.is_some())
     {
         return Err(ConsoleError::new(
             "travel_in_progress",
@@ -1364,54 +1775,64 @@ pub(crate) fn request_travel(world: &mut World, door_form_id: u32) -> Result<(),
     world
         .entity_mut(agent_entity)
         .insert(AgentTarget3d::Point(link.triangle_midpoint));
-    world.resource_mut::<TestNavAgentState>().travel_intent = Some(door_form_id);
-    info!("nav agent travel start {door_form_id:08x}");
+    if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
+        runtime.travel_intent = Some(door_form_id);
+    }
+    info!("nav agent {index} travel start {door_form_id:08x}");
     Ok(())
 }
 
-/// Logs the stable evidence lines exactly once per actual state change.
-/// `bevy_landmass`'s `sync_agent_state` rewrites `AgentState` every frame
-/// (Bevy change detection triggers on the write, not the value), so a
-/// `Changed<AgentState>` filter would re-log every frame; the previous value
-/// is tracked in `TestNavAgentState` instead.
+/// Logs the stable evidence lines exactly once per actual state change, for
+/// every currently-spawned agent. `bevy_landmass`'s `sync_agent_state`
+/// rewrites `AgentState` every frame (Bevy change detection triggers on the
+/// write, not the value), so a `Changed<AgentState>` filter would re-log
+/// every frame; the previous value is tracked per agent in `AgentRuntime`
+/// instead. `AgentState::AgentNotOnNavMesh` is the off-navmesh diagnostic
+/// now that physics (#114), not navmesh sampling, is ground authority --
+/// its own stable `nav agent off-navmesh <id>` line.
 fn log_agent_state_changes(
-    agents: Query<&AgentState, With<TestNavAgentMarker>>,
-    mut state: ResMut<TestNavAgentState>,
+    mut agents: Query<(Entity, &AgentState, &mut AgentRuntime), With<TestNavAgentMarker>>,
+    roster: Res<TestNavAgentState>,
 ) {
-    let Ok(agent_state) = agents.single() else {
-        return;
-    };
-    if state.last_logged_state == Some(*agent_state) {
-        return;
-    }
-    state.last_logged_state = Some(*agent_state);
-    match agent_state {
-        AgentState::ReachedTarget => info!("nav agent reached"),
-        AgentState::AgentNotOnNavMesh | AgentState::TargetNotOnNavMesh | AgentState::NoPath => {
-            info!("nav agent unreachable state={agent_state:?}");
+    for (entity, agent_state, mut runtime) in &mut agents {
+        if runtime.last_logged_state == Some(*agent_state) {
+            continue;
         }
-        _ => {}
+        runtime.last_logged_state = Some(*agent_state);
+        let Some(index) = roster.index_of(entity) else {
+            continue;
+        };
+        match agent_state {
+            AgentState::ReachedTarget => info!("nav agent {index} reached"),
+            AgentState::AgentNotOnNavMesh => info!("nav agent off-navmesh {index}"),
+            AgentState::TargetNotOnNavMesh | AgentState::NoPath => {
+                info!("nav agent {index} unreachable state={agent_state:?}");
+            }
+            _ => {}
+        }
     }
 }
 
 fn log_path_latency(
     time: Res<Time>,
-    agents: Query<&AgentState, With<TestNavAgentMarker>>,
-    mut state: ResMut<TestNavAgentState>,
+    mut agents: Query<(Entity, &AgentState, &mut AgentRuntime), With<TestNavAgentMarker>>,
+    roster: Res<TestNavAgentState>,
 ) {
-    if state.latency_logged {
-        return;
-    }
-    let Some(started_at) = state.goto_started_at else {
-        return;
-    };
-    let Ok(agent_state) = agents.single() else {
-        return;
-    };
-    if matches!(agent_state, AgentState::Moving | AgentState::ReachedTarget) {
-        let latency_ms = (time.elapsed_secs() - started_at) * 1000.0;
-        info!("nav agent path latency_ms={latency_ms:.1}");
-        state.latency_logged = true;
+    for (entity, agent_state, mut runtime) in &mut agents {
+        if runtime.latency_logged {
+            continue;
+        }
+        let Some(started_at) = runtime.goto_started_at else {
+            continue;
+        };
+        if matches!(agent_state, AgentState::Moving | AgentState::ReachedTarget) {
+            let Some(index) = roster.index_of(entity) else {
+                continue;
+            };
+            let latency_ms = (time.elapsed_secs() - started_at) * 1000.0;
+            info!("nav agent {index} path latency_ms={latency_ms:.1}");
+            runtime.latency_logged = true;
+        }
     }
 }
 
@@ -1458,16 +1879,31 @@ fn point_target(target: &AgentTarget3d) -> Option<[f32; 3]> {
     }
 }
 
-/// Issue #134's player-initiated-swap ledgering: despawns the live test
-/// agent (if any) into `NavAgentLedger`, deciding follow-through vs. freeze
-/// via `ledger_policy::decide_swap_eligibility`. Must run before
+/// Issue #134's player-initiated-swap ledgering (multi-agent since #114):
+/// despawns every live test agent into `NavAgentLedger`, deciding
+/// follow-through vs. freeze per agent via
+/// `ledger_policy::decide_swap_eligibility`. Must run before
 /// `teardown_archipelago` clears `NavArchipelagoState.travel_doors`, the
 /// source of a follow-through's destination-door metadata.
 fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option<u32>) {
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
-        return;
-    };
-    let route_door = world.resource::<TestNavAgentState>().travel_intent;
+    let active: Vec<(usize, Entity)> = world.resource::<TestNavAgentState>().active().collect();
+    for (index, agent_entity) in active {
+        ledger_departing_one_agent(world, index, agent_entity, source_cell, used_door);
+    }
+    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState::default();
+}
+
+fn ledger_departing_one_agent(
+    world: &mut World,
+    index: usize,
+    agent_entity: Entity,
+    source_cell: u32,
+    used_door: Option<u32>,
+) {
+    let agent_id = agent_ledger_id(index);
+    let route_door = world
+        .get::<AgentRuntime>(agent_entity)
+        .and_then(|runtime| runtime.travel_intent);
     let position = world
         .get::<Transform>(agent_entity)
         .map(|transform| transform.translation.to_array())
@@ -1495,7 +1931,7 @@ fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option
             .resource_mut::<NavAgentLedger>()
             .0
             .record(ledger_policy::LedgerEntry {
-                agent_id: TEST_AGENT_ID,
+                agent_id,
                 cell_form_id: link.destination_cell_form_id,
                 spawn_kind: ledger_policy::SpawnKind::DoorMarker {
                     destination_door_form_id: link.destination_door_form_id,
@@ -1503,7 +1939,7 @@ fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option
                 remaining_target: None,
             });
         info!(
-            "nav agent handoff {TEST_AGENT_ID:08x} -> cell {:08x}",
+            "nav agent handoff {agent_id:08x} -> cell {:08x}",
             link.destination_cell_form_id
         );
     } else {
@@ -1511,18 +1947,17 @@ fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option
             .resource_mut::<NavAgentLedger>()
             .0
             .record(ledger_policy::LedgerEntry {
-                agent_id: TEST_AGENT_ID,
+                agent_id,
                 cell_form_id: source_cell,
                 spawn_kind: ledger_policy::SpawnKind::FrozenPosition { position },
                 remaining_target,
             });
-        info!("nav agent freeze {TEST_AGENT_ID:08x} cell {source_cell:08x}");
+        info!("nav agent freeze {agent_id:08x} cell {source_cell:08x}");
     }
 
     if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
-    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState::default();
 }
 
 /// The placed position of the door reference `door_form_id` in the
@@ -1551,19 +1986,14 @@ fn restore_ledgered_agents_system(world: &mut World) {
     else {
         return;
     };
-    let has_pending = world
-        .resource::<NavAgentLedger>()
-        .0
-        .entry_for(TEST_AGENT_ID)
-        .is_some_and(|entry| entry.cell_form_id == current_cell);
+    let has_pending = (0..MAX_TEST_AGENTS).any(|index| {
+        world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(agent_ledger_id(index))
+            .is_some_and(|entry| entry.cell_form_id == current_cell)
+    });
     if !has_pending {
-        return;
-    }
-    // Only ever the one test agent: an entry is only ever ledgered while no
-    // entity exists, so a live entity here means restoration already
-    // happened this activation (or `tna spawn` ran first) -- do not
-    // double-spawn.
-    if world.resource::<TestNavAgentState>().entity.is_some() {
         return;
     }
 
@@ -1588,11 +2018,29 @@ fn restore_ledgered_agents_system(world: &mut World) {
     }
 
     for entry in claim.restored {
-        restore_ledgered_agent(world, entry);
+        let Some(index) = entry
+            .agent_id
+            .checked_sub(1)
+            .map(|zero_based| zero_based as usize)
+            .filter(|&index| index < MAX_TEST_AGENTS)
+        else {
+            warn!(
+                "nav agent restore {:08x} cell {:08x}: agent id outside the bounded roster; entry dropped",
+                entry.agent_id, entry.cell_form_id
+            );
+            continue;
+        };
+        // An entry is only ever ledgered while no entity exists at that
+        // index, so a live entity here means restoration already happened
+        // this activation (or `tna spawn` ran first) -- do not double-spawn.
+        if world.resource::<TestNavAgentState>().entities[index].is_some() {
+            continue;
+        }
+        restore_ledgered_agent(world, index, entry);
     }
 }
 
-fn restore_ledgered_agent(world: &mut World, entry: ledger_policy::LedgerEntry) {
+fn restore_ledgered_agent(world: &mut World, index: usize, entry: ledger_policy::LedgerEntry) {
     if ensure_archipelago(world).is_err() {
         warn!(
             "nav agent restore {:08x} cell {:08x}: no nav graph for this cell; ledger entry dropped",
@@ -1625,10 +2073,7 @@ fn restore_ledgered_agent(world: &mut World, entry: ledger_policy::LedgerEntry) 
             .entity_mut(agent_entity)
             .insert(AgentTarget3d::Point(Vec3::from_array(target)));
     }
-    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState {
-        entity: Some(agent_entity),
-        ..default()
-    };
+    world.resource_mut::<TestNavAgentState>().entities[index] = Some(agent_entity);
     info!(
         "nav agent restore {:08x} cell {:08x}",
         entry.agent_id, entry.cell_form_id
@@ -1639,6 +2084,7 @@ fn restore_ledgered_agent(world: &mut World, entry: ledger_policy::LedgerEntry) 
 mod tests {
     use super::*;
     use crate::console::ConsoleSessionId;
+    use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
 
     fn invocation(args: &[&str]) -> ConsoleInvocation {
         ConsoleInvocation {
@@ -1660,100 +2106,211 @@ mod tests {
         world
     }
 
-    /// Real-data acceptance defect on FranklinMetro02 (0001a273): a sloped
-    /// route froze the agent's y at spawn height until it left the vertical
-    /// sampling envelope and flipped to `AgentNotOnNavMesh`. This drives the
-    /// real `Landmass3dPlugin` island sync (one flat square island at
-    /// y = 2.0), places the agent 0.5 m above the surface, runs the kinematic
-    /// system once, and asserts the ground snap pulled y onto the mesh.
+    /// A permissive `boxddd` collision filter/shape pairing scoped to these
+    /// tests: `step_agent_kcc` takes its filters as parameters, so a fixture
+    /// world only needs *a* consistent category/mask pair, not the real
+    /// player categories (those are private to `player/mod.rs`).
+    fn fixture_filter() -> boxddd::QueryFilter {
+        boxddd::QueryFilter::new().category_bits(1).mask_bits(1)
+    }
+
+    fn fixture_shape_def() -> ShapeDef {
+        ShapeDef::builder()
+            .filter(Filter {
+                category_bits: 1,
+                mask_bits: 1,
+                group_index: 0,
+            })
+            .build()
+    }
+
+    fn fixture_capsule() -> boxddd::Capsule {
+        boxddd::Capsule::new(
+            [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+            [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+            AGENT_RADIUS,
+        )
+    }
+
+    fn add_fixture_box(
+        world: &mut boxddd::World,
+        center: boxddd::Vec3,
+        half_extents: boxddd::Vec3,
+    ) {
+        let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        world.create_hull_shape(
+            body,
+            &fixture_shape_def(),
+            &BoxHull::transformed(
+                half_extents.x,
+                half_extents.y,
+                half_extents.z,
+                boxddd::Transform::new(center, boxddd::Quat::IDENTITY),
+            ),
+        );
+    }
+
+    /// Issue #114: the navmesh `sample_point` Y-snap from wave 3's kinematic
+    /// spike is gone -- physics is ground authority now. Drops the agent
+    /// capsule from above a flat floor collider through `step_agent_kcc`
+    /// (the same free helper `apply_agent_physics_movement` calls) with no
+    /// landmass/App involved at all, and asserts it settles to rest on the
+    /// floor via real `boxddd` collision.
     #[test]
-    fn kinematic_velocity_snaps_agent_y_to_the_sampled_navmesh_surface() {
-        use bevy::app::App;
-        use bevy::ecs::system::RunSystemOnce;
-        use std::sync::Arc;
+    fn agent_kcc_settles_onto_a_flat_floor_via_physics_collision() {
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        // Floor top face at y = 0.0.
+        add_fixture_box(
+            &mut world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        let mover = fixture_capsule();
+        let filter = fixture_filter();
 
-        let mut app = App::new();
-        app.add_plugins((
-            bevy::MinimalPlugins,
-            bevy::asset::AssetPlugin::default(),
-            Landmass3dPlugin::default(),
-        ));
-        app.init_resource::<NavArchipelagoState>();
-        app.init_resource::<TestNavAgentState>();
+        let mut position = Vec3::new(0.0, 3.0, 0.0);
+        let mut velocity = Vec3::ZERO;
+        let mut grounded = false;
+        for _ in 0..300 {
+            let (new_position, new_velocity, new_grounded) = step_agent_kcc(
+                &mut world,
+                &mover,
+                filter,
+                filter,
+                position,
+                velocity,
+                grounded,
+                Vec2::ZERO,
+                1.0 / 60.0,
+            );
+            position = new_position;
+            velocity = new_velocity;
+            grounded = new_grounded;
+            if grounded {
+                break;
+            }
+        }
+        assert!(grounded, "agent must come to rest on the floor via physics");
+        let expected_y = AGENT_HEIGHT / 2.0;
+        assert!(
+            (position.y - expected_y).abs() < 0.05,
+            "agent y should settle near the floor (expected {expected_y}), got {}",
+            position.y
+        );
+        assert_eq!(
+            velocity.y, 0.0,
+            "vertical velocity is cleared once grounded"
+        );
+    }
 
-        // Flat square at y = 2.0 through the same pure conversion the
-        // runtime uses.
-        let mesh = landmass_graph::MeshInput {
-            form_id: 0x10,
-            vertices: vec![
-                [0.0, 2.0, 0.0],
-                [4.0, 2.0, 0.0],
-                [0.0, 2.0, 4.0],
-                [4.0, 2.0, 4.0],
-            ],
-            polygons: vec![
-                landmass_graph::PolygonInput {
-                    index: 0,
-                    vertex_indices: [0, 1, 2],
-                    is_water: false,
-                },
-                landmass_graph::PolygonInput {
-                    index: 1,
-                    vertex_indices: [1, 3, 2],
-                    is_water: false,
-                },
-            ],
-            doors: Vec::new(),
-        };
-        let valid = landmass_graph::build_navigation_mesh(&mesh)
-            .nav_mesh
-            .expect("synthetic square validates");
-        let handle = app
-            .world_mut()
-            .resource_mut::<Assets<NavMesh3d>>()
-            .add(NavMesh3d {
-                nav_mesh: Arc::new(valid),
+    /// Issue #114 minimal-World test: desired vs. actual velocity feedback.
+    /// A wall square in front of a grounded agent means the KCC sweep
+    /// achieves (near-)zero horizontal displacement no matter what landmass
+    /// desired -- `movement_policy::decide_collision_outcome` must classify
+    /// that as `Blocked`, and the achieved velocity handed back to landmass
+    /// is the real, near-zero one, not the desired one.
+    #[test]
+    fn a_blocked_agent_reports_its_real_near_zero_velocity() {
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_fixture_box(
+            &mut world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        // A wall immediately in front (+X) of the agent's start position.
+        add_fixture_box(
+            &mut world,
+            boxddd::Vec3::new(1.0, 1.0, 0.0),
+            boxddd::Vec3::new(0.1, 2.0, 5.0),
+        );
+        let mover = fixture_capsule();
+        let filter = fixture_filter();
+        let desired_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
+
+        // Walk toward the wall for two seconds -- plenty of time to close
+        // the ~0.55 m gap and press into it -- then look at the final
+        // tick's achieved displacement, once the agent is pinned.
+        let mut position = Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0);
+        let mut velocity = Vec3::ZERO;
+        let mut grounded = true;
+        let mut achieved = Vec3::ZERO;
+        for _ in 0..120 {
+            let (new_position, new_velocity, new_grounded) = step_agent_kcc(
+                &mut world,
+                &mover,
+                filter,
+                filter,
+                position,
+                velocity,
+                grounded,
+                desired_horizontal,
+                1.0 / 60.0,
+            );
+            achieved = (new_position - position) / (1.0 / 60.0);
+            position = new_position;
+            velocity = new_velocity;
+            grounded = new_grounded;
+        }
+        assert!(grounded, "agent stays grounded while blocked by a wall");
+        assert!(
+            Vec2::new(achieved.x, achieved.z).length() < 0.2,
+            "achieved horizontal speed should be near zero pinned against a wall, got {achieved:?}"
+        );
+        let outcome =
+            movement_policy::decide_collision_outcome(movement_policy::VelocityObservation {
+                desired_horizontal_speed: desired_horizontal.length(),
+                achieved_horizontal_speed: Vec2::new(achieved.x, achieved.z).length(),
             });
+        assert_eq!(outcome, movement_policy::CollisionOutcome::Blocked);
+        assert_eq!(
+            velocity.x, desired_horizontal.x,
+            "the KCC's own remembered velocity still reflects the input -- it is the *achieved transform delta*, not this, that gets fed back to landmass"
+        );
+    }
 
-        let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
-        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
-        app.world_mut().spawn(Island3dBundle {
-            island: Island,
-            archipelago_ref: ArchipelagoRef3d::new(archipelago),
-            nav_mesh: NavMeshHandle::<ThreeD>(handle),
-        });
-        app.world_mut()
-            .resource_mut::<NavArchipelagoState>()
-            .archipelago = Some(archipelago);
+    /// Issue #114 minimal-World test: grounded gating on
+    /// `CellPhysicsReadiness`, mirroring the player controller's own guard
+    /// (`player/movement.rs::apply_player_controls`). While the destination
+    /// cell's static collision has not finished building, the agent must
+    /// not move through geometry that is not there yet -- velocity and
+    /// grounded state are forced to zero/false every tick.
+    #[test]
+    fn physics_movement_zeroes_velocity_while_cell_physics_is_building() {
+        use bevy::ecs::system::RunSystemOnce;
 
-        // Run the plugin's own sync systems (FixedPreUpdate) so the island
-        // lands in the archipelago.
-        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::BuildingStatic);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        world.insert_non_send(BoxdddPhysicsContext::disabled());
 
-        let agent = app
-            .world_mut()
+        let agent = world
             .spawn((
                 TestNavAgentMarker,
-                Transform::from_xyz(2.0, 2.5, 2.0),
+                AgentKcc {
+                    velocity: Vec3::splat(3.0),
+                    grounded: true,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 0.0, 0.0),
                 Velocity3d::default(),
+                AgentDesiredVelocity3d::default(),
             ))
             .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
 
-        app.world_mut()
-            .run_system_once(apply_kinematic_velocity)
-            .expect("kinematic system runs");
+        world
+            .run_system_once(apply_agent_physics_movement)
+            .expect("system runs");
 
-        let y = app
-            .world()
-            .get::<Transform>(agent)
-            .expect("agent has a transform")
-            .translation
-            .y;
-        assert!(
-            (y - 2.0).abs() < 1e-4,
-            "agent y should snap to the mesh surface (2.0), got {y}"
-        );
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert_eq!(kcc.velocity, Vec3::ZERO);
+        assert!(!kcc.grounded);
+        assert_eq!(world.get::<Velocity3d>(agent).unwrap().velocity, Vec3::ZERO);
     }
 
     #[test]
@@ -1789,7 +2346,7 @@ mod tests {
     #[test]
     fn goto_bad_arity_is_rejected() {
         let mut world = harness_world();
-        world.resource_mut::<TestNavAgentState>().entity = Some(Entity::PLACEHOLDER);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(Entity::PLACEHOLDER);
         let error = tna_command(&mut world, &invocation(&["goto", "1", "2"])).unwrap_err();
         assert_eq!(error.code, "bad_arity");
     }
@@ -1812,10 +2369,10 @@ mod tests {
     fn despawn_round_trip_clears_state() {
         let mut world = harness_world();
         let entity = world.spawn(TestNavAgentMarker).id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(entity);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(entity);
         let result = tna_command(&mut world, &invocation(&["despawn"])).expect("despawn succeeds");
-        assert_eq!(result.log, ["nav agent despawned"]);
-        assert!(world.resource::<TestNavAgentState>().entity.is_none());
+        assert_eq!(result.log, ["nav agent 0 despawned"]);
+        assert!(world.resource::<TestNavAgentState>().entities[0].is_none());
         assert!(world.get_entity(entity).is_err());
     }
 
@@ -1834,9 +2391,13 @@ mod tests {
         world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
         world.resource_mut::<NavArchipelagoState>().islands = vec![island];
         let agent = world
-            .spawn((TestNavAgentMarker, Transform::from_xyz(1.0, 2.0, 3.0)))
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(1.0, 2.0, 3.0),
+            ))
             .id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
 
         world.insert_resource(minimal_manifest(0xBEEF));
         despawn_stale_navmesh_archipelago(&mut world);
@@ -1850,12 +2411,12 @@ mod tests {
                 .cell_form_id
                 .is_none()
         );
-        assert!(world.resource::<TestNavAgentState>().entity.is_none());
+        assert!(world.resource::<TestNavAgentState>().entities[0].is_none());
 
         let entry = world
             .resource::<NavAgentLedger>()
             .0
-            .entry_for(TEST_AGENT_ID)
+            .entry_for(agent_ledger_id(0))
             .expect("the agent must be ledgered, not lost");
         assert_eq!(entry.cell_form_id, 0xC0DE, "frozen in the departing cell");
         assert_eq!(
@@ -1887,10 +2448,16 @@ mod tests {
                 },
             );
         let agent = world
-            .spawn((TestNavAgentMarker, Transform::from_xyz(5.0, 0.0, 0.0)))
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime {
+                    travel_intent: Some(0x99),
+                    ..default()
+                },
+                Transform::from_xyz(5.0, 0.0, 0.0),
+            ))
             .id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
-        world.resource_mut::<TestNavAgentState>().travel_intent = Some(0x99);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
 
         world.insert_resource(minimal_manifest(0xBEEF));
@@ -1900,7 +2467,7 @@ mod tests {
         let entry = world
             .resource::<NavAgentLedger>()
             .0
-            .entry_for(TEST_AGENT_ID)
+            .entry_for(agent_ledger_id(0))
             .expect("the agent must be ledgered");
         assert_eq!(
             entry.cell_form_id, 0xBEEF,
@@ -1923,12 +2490,18 @@ mod tests {
         world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xC0DE);
         world.resource_mut::<NavArchipelagoState>().archipelago = Some(world.spawn_empty().id());
         let agent = world
-            .spawn((TestNavAgentMarker, Transform::from_xyz(7.0, 0.0, 0.0)))
+            .spawn((
+                TestNavAgentMarker,
+                // The agent is routed to a different travel door than the
+                // one the player used.
+                AgentRuntime {
+                    travel_intent: Some(0x50),
+                    ..default()
+                },
+                Transform::from_xyz(7.0, 0.0, 0.0),
+            ))
             .id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
-        // The agent is routed to a different travel door than the one the
-        // player used.
-        world.resource_mut::<TestNavAgentState>().travel_intent = Some(0x50);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
 
         world.insert_resource(minimal_manifest(0xBEEF));
@@ -1938,7 +2511,7 @@ mod tests {
         let entry = world
             .resource::<NavAgentLedger>()
             .0
-            .entry_for(TEST_AGENT_ID)
+            .entry_for(agent_ledger_id(0))
             .expect("the agent must be ledgered, not lost");
         assert_eq!(entry.cell_form_id, 0xC0DE, "frozen in the departing cell");
         assert_eq!(
@@ -1960,7 +2533,7 @@ mod tests {
             .resource_mut::<NavAgentLedger>()
             .0
             .record(ledger_policy::LedgerEntry {
-                agent_id: TEST_AGENT_ID,
+                agent_id: agent_ledger_id(0),
                 cell_form_id: 0xBEEF,
                 spawn_kind: ledger_policy::SpawnKind::DoorMarker {
                     destination_door_form_id: 0x1234,
@@ -1995,7 +2568,7 @@ mod tests {
             world
                 .resource::<NavAgentLedger>()
                 .0
-                .entry_for(TEST_AGENT_ID)
+                .entry_for(agent_ledger_id(0))
                 .is_none(),
             "the claimed entry must be consumed"
         );
@@ -2007,7 +2580,7 @@ mod tests {
             "spawned at the door marker"
         );
         assert_eq!(
-            world.resource::<TestNavAgentState>().entity,
+            world.resource::<TestNavAgentState>().entities[0],
             Some(agent_entity)
         );
     }
@@ -2064,9 +2637,13 @@ mod tests {
         world.insert_resource(registry);
 
         let agent = world
-            .spawn((TestNavAgentMarker, Transform::from_xyz(0.0, 0.0, 0.0)))
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
             .id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world
             .resource_mut::<NavArchipelagoState>()
             .travel_doors
@@ -2080,7 +2657,7 @@ mod tests {
                 },
             );
 
-        request_travel(&mut world, 0x99).expect("travel request succeeds");
+        request_travel(&mut world, 0, 0x99).expect("travel request succeeds");
         assert!(matches!(
             world.get::<AgentTarget3d>(agent),
             Some(AgentTarget3d::Point(point)) if *point == Vec3::new(5.0, 0.0, 0.0)
@@ -2089,14 +2666,14 @@ mod tests {
         // Not yet at the door: the lifecycle must not start.
         door_link_system(&mut world);
         assert_eq!(
-            world.resource::<TestNavAgentState>().door_link,
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
             door_link::DoorLinkState::Idle
         );
 
         // Arrive at the triangle midpoint: pause + door-open request.
         world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.0, 0.0);
         door_link_system(&mut world);
-        assert!(is_paused(&world));
+        assert!(is_paused(&world, agent));
         assert!(world.get::<PauseAgent>(agent).is_some());
 
         // The unlocked door was scripted open through the interaction
@@ -2112,7 +2689,7 @@ mod tests {
         // The open door resumes into the kinematic crossing.
         door_link_system(&mut world);
         assert!(door_link::is_traversing(
-            world.resource::<TestNavAgentState>().door_link
+            world.get::<AgentRuntime>(agent).unwrap().door_link
         ));
         assert!(world.get::<DoorTraversal>(agent).is_some());
 
@@ -2130,16 +2707,11 @@ mod tests {
             world.get_entity(agent).is_err(),
             "the agent must leave the active cell entirely on handoff"
         );
-        assert!(world.resource::<TestNavAgentState>().entity.is_none());
-        assert_eq!(
-            world.resource::<TestNavAgentState>().door_link,
-            door_link::DoorLinkState::Idle,
-            "state is fully reset, not left in TravelReached"
-        );
+        assert!(world.resource::<TestNavAgentState>().entities[0].is_none());
         let entry = world
             .resource::<NavAgentLedger>()
             .0
-            .entry_for(TEST_AGENT_ID)
+            .entry_for(agent_ledger_id(0))
             .expect("the agent must be ledgered on handoff");
         assert_eq!(entry.cell_form_id, 0xC0DE);
         assert_eq!(
@@ -2150,8 +2722,13 @@ mod tests {
         );
     }
 
-    fn is_paused(world: &World) -> bool {
-        door_link::is_paused(world.resource::<TestNavAgentState>().door_link)
+    fn is_paused(world: &World, agent: Entity) -> bool {
+        door_link::is_paused(
+            world
+                .get::<AgentRuntime>(agent)
+                .map(|runtime| runtime.door_link)
+                .unwrap_or_default(),
+        )
     }
 
     /// Minimal travel-door placement for the lifecycle tests.
@@ -2215,9 +2792,13 @@ mod tests {
         world.insert_resource(registry);
 
         let agent = world
-            .spawn((TestNavAgentMarker, Transform::from_xyz(5.0, 0.0, 0.0)))
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+            ))
             .id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         {
             let mut state = world.resource_mut::<NavArchipelagoState>();
             state.travel_doors.insert(
@@ -2239,9 +2820,9 @@ mod tests {
             state.door_usable.insert(0x99, false);
         }
 
-        request_travel(&mut world, 0x99).expect("routing to a locked door is allowed");
+        request_travel(&mut world, 0, 0x99).expect("routing to a locked door is allowed");
         door_link_system(&mut world);
-        assert!(is_paused(&world));
+        assert!(is_paused(&world, agent));
         assert!(
             !world
                 .resource::<interaction::InteractionState>()
@@ -2254,7 +2835,7 @@ mod tests {
             door_link_system(&mut world);
         }
         assert_eq!(
-            world.resource::<TestNavAgentState>().door_link,
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
             door_link::DoorLinkState::Failed { door_form_id: 0x99 }
         );
     }
@@ -2328,8 +2909,10 @@ mod tests {
     #[test]
     fn concurrent_travel_requests_are_rejected() {
         let mut world = harness_world();
-        let agent = world.spawn(TestNavAgentMarker).id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        let agent = world
+            .spawn((TestNavAgentMarker, AgentRuntime::default()))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world
             .resource_mut::<NavArchipelagoState>()
             .travel_doors
@@ -2342,8 +2925,8 @@ mod tests {
                     destination_door_form_id: 0x1234,
                 },
             );
-        request_travel(&mut world, 0x99).expect("first request succeeds");
-        let error = request_travel(&mut world, 0x99).unwrap_err();
+        request_travel(&mut world, 0, 0x99).expect("first request succeeds");
+        let error = request_travel(&mut world, 0, 0x99).unwrap_err();
         assert_eq!(error.code, "travel_in_progress");
     }
 
@@ -2351,39 +2934,113 @@ mod tests {
     fn travel_request_errors_without_an_agent_or_a_known_door() {
         let mut world = harness_world();
         assert_eq!(
-            request_travel(&mut world, 0x99).unwrap_err().code,
+            request_travel(&mut world, 0, 0x99).unwrap_err().code,
             "no_agent"
         );
-        let agent = world.spawn(TestNavAgentMarker).id();
-        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        let agent = world
+            .spawn((TestNavAgentMarker, AgentRuntime::default()))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         assert_eq!(
-            request_travel(&mut world, 0x99).unwrap_err().code,
+            request_travel(&mut world, 0, 0x99).unwrap_err().code,
             "unknown_travel_door"
         );
     }
 
     #[test]
     fn active_link_description_reports_merge_door_and_travel_reached() {
-        let mut state = TestNavAgentState::default();
-        assert_eq!(active_link_description(&state), None);
+        let mut runtime = AgentRuntime::default();
+        assert_eq!(active_link_description(&runtime), None);
 
-        state.active_link = Some(LinkKind::Merge);
-        assert_eq!(active_link_description(&state), Some("merge".to_string()));
+        runtime.active_link = Some(LinkKind::Merge);
+        assert_eq!(active_link_description(&runtime), Some("merge".to_string()));
 
-        state.active_link = Some(LinkKind::Door { form_id: 0x99 });
+        runtime.active_link = Some(LinkKind::Door { form_id: 0x99 });
         assert_eq!(
-            active_link_description(&state),
+            active_link_description(&runtime),
             Some("door 00000099".to_string())
         );
 
-        state.active_link = None;
-        state.door_link = door_link::DoorLinkState::TravelReached {
+        runtime.active_link = None;
+        runtime.door_link = door_link::DoorLinkState::TravelReached {
             door_form_id: 0x99,
             destination_cell_form_id: 0xC0DE,
         };
         assert_eq!(
-            active_link_description(&state),
+            active_link_description(&runtime),
             Some("door 00000099 cell 0000c0de".to_string())
+        );
+    }
+
+    /// Issue #114 feature 4: `tna spawn`'s index is a bounded, independent
+    /// slot -- occupying index 0 does not block index 1, and an index at or
+    /// past `MAX_TEST_AGENTS` is rejected before anything else runs.
+    #[test]
+    fn spawn_indices_are_independent_slots_bounded_by_the_cap() {
+        let mut world = harness_world();
+        // Pre-seed the archipelago as already current so `ensure_archipelago`
+        // (which `spawn_agent` always calls first, same as wave 3/4) returns
+        // immediately without needing a real manifest/nav-graph file --
+        // this test is about the index/occupancy contract, not archipelago
+        // building.
+        let mut manifest = minimal_manifest(0xBEEF);
+        manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource::default());
+        world.insert_resource(manifest);
+        world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xBEEF);
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(world.spawn_empty().id());
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(Entity::PLACEHOLDER);
+
+        let error = tna_command(&mut world, &invocation(&["spawn", "0"])).unwrap_err();
+        assert_eq!(error.code, "already_spawned");
+
+        // A different index is an independent slot -- it gets past the
+        // occupancy check to the next requirement (a live FPS player),
+        // proving index 0's occupancy did not block it.
+        let error = tna_command(&mut world, &invocation(&["spawn", "1"])).unwrap_err();
+        assert_eq!(error.code, "player_unavailable");
+
+        let out_of_range = MAX_TEST_AGENTS.to_string();
+        let error = tna_command(&mut world, &invocation(&["spawn", &out_of_range])).unwrap_err();
+        assert_eq!(error.code, "bad_agent_index");
+    }
+
+    /// Issue #114 feature 4: an indexed `tna goto` addresses exactly the
+    /// named agent slot, leaving every other slot's target untouched --
+    /// the back-compat bare form (no index) still defaults to agent 0.
+    #[test]
+    fn indexed_goto_addresses_only_the_named_agent_slot() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        let agent0 = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                AgentKcc::default(),
+            ))
+            .id();
+        let agent1 = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                AgentKcc::default(),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent0);
+        world.resource_mut::<TestNavAgentState>().entities[1] = Some(agent1);
+
+        tna_command(&mut world, &invocation(&["goto", "1", "5", "6", "7"]))
+            .expect("indexed goto succeeds");
+
+        assert!(
+            matches!(
+                world.get::<AgentTarget3d>(agent1),
+                Some(AgentTarget3d::Point(point)) if *point == Vec3::new(5.0, 6.0, 7.0)
+            ),
+            "agent 1 got the target"
+        );
+        assert!(
+            world.get::<AgentTarget3d>(agent0).is_none(),
+            "agent 0 is untouched by an indexed goto for a different agent"
         );
     }
 
