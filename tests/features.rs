@@ -582,6 +582,9 @@ struct BevyoutWorld {
     nav_movement_collision_outcome: Option<movement_policy::CollisionOutcome>,
     nav_movement_stuck_observation: Option<movement_policy::StuckObservation>,
     nav_movement_stuck_decision: Option<movement_policy::StuckDecision>,
+
+    // -- nav_door_gate.feature (issue #137, M4 wave 5) --
+    nav_door_gate_observation: door_link::CrossingObservation,
 }
 
 fn find_placement<'a>(
@@ -6605,6 +6608,31 @@ async fn then_stuck_decision(world: &mut BevyoutWorld, expected: String) {
         other => panic!("unknown stuck decision {other:?}"),
     };
     assert_eq!(world.nav_movement_stuck_decision, Some(expected));
+}
+
+// ---------------------------------------------------------------------
+// nav_door_gate.feature (issue #137, M4 wave 5) -- appended section, do
+// not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a mid-route door that is (open|closed) and (unlocked|locked)$")]
+async fn given_mid_route_door_observation(world: &mut BevyoutWorld, open: String, locked: String) {
+    world.nav_door_gate_observation = door_link::CrossingObservation {
+        door_open: open == "open",
+        door_locked: locked == "locked",
+    };
+}
+
+#[then(regex = r"^the crossing gate is (pass|wait|blocked)$")]
+async fn then_crossing_gate(world: &mut BevyoutWorld, expected: String) {
+    let gate = door_link::crossing_gate(world.nav_door_gate_observation);
+    let expected = match expected.as_str() {
+        "pass" => door_link::CrossingGate::Pass,
+        "wait" => door_link::CrossingGate::Wait,
+        "blocked" => door_link::CrossingGate::Blocked,
+        other => panic!("unknown crossing gate {other:?}"),
+    };
+    assert_eq!(gate, expected);
 }
 
 fn main() {

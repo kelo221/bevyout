@@ -171,6 +171,55 @@ pub(crate) fn is_travel_reached(state: DoorLinkState) -> bool {
     matches!(state, DoorLinkState::TravelReached { .. })
 }
 
+// ---------------------------------------------------------------------
+// Mid-route crossing gate (issue #137)
+// ---------------------------------------------------------------------
+
+/// Whether an agent approaching a door-flagged NAVM triangle *mid-route*
+/// (not an existing #113 link endpoint -- see `nav/agent.rs`'s module doc
+/// for why this case needs its own trigger) should proceed, or be gated
+/// into this module's pause -> scripted-open -> resume lifecycle. The
+/// triangle itself is never removed from the walkable mesh (it is
+/// ordinary contiguous ground, not a seam between two islands like the
+/// #113 door links) -- this table only decides whether `nav/agent.rs`
+/// should fire a `DoorLinkEvent::LinkReached` for it this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrossingGate {
+    /// The door is already open: this is plain walkable ground, proceed
+    /// without pausing.
+    Pass,
+    /// The door is closed and not locked: gate through the normal
+    /// lifecycle -- it is expected to open once requested.
+    Wait,
+    /// The door is closed *and* locked: the caller still gates
+    /// identically to `Wait` (the agent must not clip through), but this
+    /// distinct value lets it log the locked case immediately rather than
+    /// only after `MAX_WAIT_TICKS` -- the same eventual `Failed` outcome
+    /// either way, since a locked door never opens through the scripted
+    /// activation boundary (see `MAX_WAIT_TICKS`'s doc comment).
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CrossingObservation {
+    pub(crate) door_open: bool,
+    pub(crate) door_locked: bool,
+}
+
+/// Deterministic table: an open door always passes (mirrors
+/// `repath::door_usable`'s "already open is passable regardless of lock"
+/// rule); otherwise closed-and-locked is `Blocked`, closed-and-unlocked is
+/// `Wait`.
+pub(crate) fn crossing_gate(observation: CrossingObservation) -> CrossingGate {
+    if observation.door_open {
+        CrossingGate::Pass
+    } else if observation.door_locked {
+        CrossingGate::Blocked
+    } else {
+        CrossingGate::Wait
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +379,55 @@ mod tests {
         };
         let state = transition(reached, DoorLinkEvent::Tick { door_open: true });
         assert_eq!(state, reached);
+    }
+
+    // -------------------------------------------------------------
+    // Mid-route crossing gate (issue #137)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn an_open_door_passes() {
+        assert_eq!(
+            crossing_gate(CrossingObservation {
+                door_open: true,
+                door_locked: false,
+            }),
+            CrossingGate::Pass
+        );
+    }
+
+    #[test]
+    fn an_open_door_passes_even_if_its_lock_record_is_still_locked() {
+        // Mirrors `repath::door_usable`'s rule: an already-open door is
+        // passable regardless of its lock record.
+        assert_eq!(
+            crossing_gate(CrossingObservation {
+                door_open: true,
+                door_locked: true,
+            }),
+            CrossingGate::Pass
+        );
+    }
+
+    #[test]
+    fn a_closed_unlocked_door_waits() {
+        assert_eq!(
+            crossing_gate(CrossingObservation {
+                door_open: false,
+                door_locked: false,
+            }),
+            CrossingGate::Wait
+        );
+    }
+
+    #[test]
+    fn a_closed_locked_door_is_blocked() {
+        assert_eq!(
+            crossing_gate(CrossingObservation {
+                door_open: false,
+                door_locked: true,
+            }),
+            CrossingGate::Blocked
+        );
     }
 }
