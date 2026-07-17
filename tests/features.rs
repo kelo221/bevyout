@@ -6955,8 +6955,11 @@ const NOTE_TEXT_NOTE_FORM_ID: u32 = 0x0090_0101;
 async fn given_note_text_type(world: &mut BevyoutWorld, note_type: u8, text: String) {
     let mut tnam = text.into_bytes();
     tnam.push(0);
-    world.note_record_data =
-        [nav_subrecord(b"DATA", &[note_type]), nav_subrecord(b"TNAM", &tnam)].concat();
+    world.note_record_data = [
+        nav_subrecord(b"DATA", &[note_type]),
+        nav_subrecord(b"TNAM", &tnam),
+    ]
+    .concat();
 }
 
 #[given(regex = r"^a synthetic NOTE record with DATA type (\d+) and TNAM formid 0x([0-9A-Fa-f]+)$")]
