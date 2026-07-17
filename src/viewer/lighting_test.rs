@@ -373,12 +373,7 @@ fn setup_lighting_test(
     if let Some(options) = acceptance.filter(|options| options.custom_only) {
         let camera_transform =
             Transform::from_xyz(14.0, 13.0, 19.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
-        spawn_gpu_acceptance_targets(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            camera_transform,
-        );
+        spawn_gpu_acceptance_targets(&mut commands, &mut meshes, &mut materials, camera_transform);
         let projection = if options.orthographic {
             Projection::Orthographic(OrthographicProjection {
                 scale: 0.012,

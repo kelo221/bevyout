@@ -51,10 +51,15 @@ shimmer, transparency, and source illumination modes beyond direct lighting
 are not public authoring options yet; their ABI slots stay at inert sentinels.
 `DynamicLightLayerMask` is a light-side authoring filter, not a per-camera view
 mask, so every marked camera currently consumes the same extracted light list.
+The same boundary applies to volumetric sources: each view performs its own
+depth-limited shape rejection, but the compact GPU source buffer is global.
+Per-view CPU compaction is a deferred multi-camera performance optimization.
 
-`cargo test-dev --test dynamic_lighting_gpu -- --nocapture` launches the real
-test scene, hides ordinary Bevy lights and shadow proxies, captures the
-production render target with the committed WGSL enabled and disabled, and
-checks both perspective and orthographic cameras. The custom shadow pass uses
-Bevy's finalized cubemap allocation, per-proxy bias values, near plane, and
-deferred `NotShadowReceiver` flag.
+On Windows, `cargo test-dev --test dynamic_lighting_gpu -- --nocapture`
+launches a deterministic production-render target scene with no ordinary Bevy
+lights or shadow proxies. It waits for both custom passes to draw, freezes the
+scene, then captures enabled/control images in one DX12 process. Region checks
+cover every spatial mode and clear-background Sphere/ConeZ fog under both
+perspective and orthographic cameras. The custom shadow pass uses Bevy's
+finalized cubemap allocation, per-proxy bias values, near plane, and deferred
+`NotShadowReceiver` flag.

@@ -261,3 +261,14 @@ shadow behavior is unchanged, and the live pass is error-free.
   The marked view now receives its required prepasses automatically, the
   1,024-light cap is diagnostic, and shadow sampling consumes Bevy's finalized
   cubemap allocation and per-proxy bias/near metadata.
+- A5: Second-review remediation made direct specular and fog rays projection
+  aware, retained fog over reverse-Z clear-background pixels, shared invalid
+  Spot/Discoball rejection across direct and volumetric extraction, and
+  clamped the Unity `Mathf.Lerp` cone multiplier. The expanded Unity fixture is
+  now compared numerically for ray opacity, source blending, and overlap.
+  Windows GPU acceptance uses a dedicated startup scene, waits for confirmed
+  surface and volumetric draws, freezes it, and captures enabled/control images
+  in one DX12 process. It checks every spatial-mode region plus Sphere and
+  ConeZ fog against clear background under perspective and orthographic views.
+  Per-camera volumetric buffer compaction remains the documented multi-camera
+  performance follow-up from A2; it is not a correctness dependency.

@@ -4,7 +4,7 @@ use bevy::pbr::{ShadowSamplers, ViewShadowBindings};
 use bevy::{
     asset::load_embedded_asset,
     core_pipeline::{FullscreenShader, prepass::ViewPrepassTextures},
-    ecs::error::BevyError,
+    ecs::{error::BevyError, system::SystemParam},
     prelude::*,
     render::{
         render_resource::{
@@ -205,6 +205,12 @@ pub(super) fn prepare_dynamic_lighting_volumetric_pipelines(
     }
 }
 
+#[derive(SystemParam)]
+pub(super) struct DynamicLightingPassSideInputs<'w> {
+    shadow_samplers: Res<'w, ShadowSamplers>,
+    diagnostics: Res<'w, super::super::bevy_bridge::DynamicLightingDiagnostics>,
+}
+
 pub(super) fn dynamic_lighting_pass(
     view: ViewQuery<(
         &ViewTarget,
@@ -218,8 +224,7 @@ pub(super) fn dynamic_lighting_pass(
     pipeline: Res<DynamicLightingPipeline>,
     buffers: Res<DynamicLightGpuBuffers>,
     view_uniforms: Res<ViewUniforms>,
-    shadow_samplers: Res<ShadowSamplers>,
-    diagnostics: Res<super::super::bevy_bridge::DynamicLightingDiagnostics>,
+    side_inputs: DynamicLightingPassSideInputs,
     mut ctx: RenderContext,
 ) -> Result<(), BevyError> {
     let (view_target, prepass, view_offset, pipeline_id, _, shadow_bindings) = view.into_inner();
@@ -258,7 +263,7 @@ pub(super) fn dynamic_lighting_pass(
             light_binding,
             meta_binding,
             &shadow_bindings.point_light_depth_texture_view,
-            &shadow_samplers.point_light_comparison_sampler,
+            &side_inputs.shadow_samplers.point_light_comparison_sampler,
             shadow_metadata_binding,
         )),
     );
@@ -279,7 +284,7 @@ pub(super) fn dynamic_lighting_pass(
     pass.set_render_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
-    diagnostics.set_surface_pass_ready();
+    side_inputs.diagnostics.set_surface_pass_ready();
     Ok(())
 }
 
