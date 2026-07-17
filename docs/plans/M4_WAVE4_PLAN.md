@@ -82,10 +82,17 @@ Wave 3 (#112, PR #129) left three documented gaps this wave closes:
 ### 1. Ledger policy (pure)
 
 - New std/serde-only module (pattern: `src/viewer/world/policy.rs`):
-  ledger entries {agent id, destination cell FormID, destination door
-  reference, remaining target}; operations record, claim-on-activate
-  (only entries matching the newly active cell, deterministic order),
-  stale-entry diagnosis (destination door absent from the active cell).
+  ledger entries {agent id, cell FormID, spawn kind (door marker |
+  frozen position), destination door reference, remaining target};
+  operations record, claim-on-activate (only entries matching the newly
+  active cell, deterministic order), stale-entry diagnosis (destination
+  door absent from the active cell).
+- Swap-eligibility policy (pure, same module): given the door the
+  player used and each live agent's route state, decide
+  **follow-through** (agent's active route ends at that exact door →
+  ledgered to the destination cell, door-marker spawn) vs **freeze**
+  (any other state → ledgered to the origin cell at its current
+  position). Strict eligibility; no offscreen pathfinding.
 
 ### 2. Runtime handoff
 
@@ -93,10 +100,17 @@ Wave 3 (#112, PR #129) left three documented gaps this wave closes:
   despawns from the active cell and is recorded in the ledger resource
   (which survives the existing cell-swap teardown). Stable line:
   `nav agent handoff <formid> -> cell <cellid>`.
-- After a cell swap, ledgered agents for the new cell spawn at the
-  destination door's marker position and resume toward any remaining
-  target, else idle. Stable line: `nav agent restore <formid> cell
-  <cellid>`.
+- After a cell swap, ledgered agents for the new cell spawn per their
+  entry's spawn kind (door marker or frozen position) and resume toward
+  any remaining target, else idle. Stable line: `nav agent restore
+  <formid> cell <cellid>`.
+- Player-initiated swap: the cell teardown ledgers every live agent via
+  the swap-eligibility policy instead of despawning it (wave 3's
+  teardown deletes agents — that behavior is removed). Stable lines:
+  `nav agent freeze <formid> cell <cellid>` and the existing handoff
+  line for follow-through. Returning to the origin cell restores frozen
+  agents where they stood; using a door an agent was routed to means it
+  followed the player and is at the destination marker.
 
 ### 3. Console surface
 
@@ -122,9 +136,12 @@ unit tests → implement until green.
 - #113 minimal-App: travel-door link routes to the door and drives the
   existing `DoorLinkState` lifecycle; a door state change triggers one
   repath; never two concurrent travel requests.
-- #134 cucumber: ledger record/claim/stale rules, deterministic ordering.
+- #134 cucumber: ledger record/claim/stale rules, deterministic ordering,
+  freeze-vs-follow-through eligibility table.
 - #134 minimal-App: traversal despawns agent + populates ledger; matching
-  cell activation spawns exactly one agent.
+  cell activation spawns exactly one agent; player-initiated swap
+  ledgers a mid-route agent as frozen and a door-routed agent as
+  follow-through — neither silently despawned.
 - `tests/features.rs`: each issue appends World fields at the end of the
   struct and a delimited step section at the end of the file.
 
