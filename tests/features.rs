@@ -7231,7 +7231,6 @@ async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form
     );
 }
 
-
 #[then("the erosion relax passes is greater than 0")]
 async fn then_erosion_relax_passes_positive(world: &mut BevyoutWorld) {
     let result = world
