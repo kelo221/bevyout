@@ -585,6 +585,18 @@ struct BevyoutWorld {
 
     // -- nav_door_gate.feature (issue #137, M4 wave 5) --
     nav_door_gate_observation: door_link::CrossingObservation,
+
+    // -- nav_movement.feature (issue #114 added scope, M4 wave 5): solve-rate
+    // divisor gating `LandmassSystems::Update`.
+    nav_solve_step: u64,
+    nav_solve_interval: u32,
+    nav_solve_decision: Option<bool>,
+
+    // -- nav_movement.feature (issue #114 added scope, M4 wave 5): solve-
+    // output interpolation fraction.
+    nav_solve_steps_since_solve: u32,
+    nav_solve_blend_interval: u32,
+    nav_solve_blend_fraction: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -6633,6 +6645,54 @@ async fn then_crossing_gate(world: &mut BevyoutWorld, expected: String) {
         other => panic!("unknown crossing gate {other:?}"),
     };
     assert_eq!(gate, expected);
+}
+
+// ---------------------------------------------------------------------
+// nav_movement.feature (issue #114 added scope, M4 wave 5) -- solve-rate
+// divisor. Appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a solve step count of (\d+) and an interval of (\d+)$")]
+async fn given_solve_step_and_interval(world: &mut BevyoutWorld, step_count: u64, interval: u32) {
+    world.nav_solve_step = step_count;
+    world.nav_solve_interval = interval;
+}
+
+#[when("the solve decision is made")]
+async fn when_solve_decision_made(world: &mut BevyoutWorld) {
+    world.nav_solve_decision = Some(movement_policy::should_solve(
+        world.nav_solve_step,
+        world.nav_solve_interval,
+    ));
+}
+
+#[then(regex = r"^the solve decision is (solve|skip)$")]
+async fn then_solve_decision(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected == "solve";
+    assert_eq!(world.nav_solve_decision, Some(expected));
+}
+
+#[given(regex = r"^(\d+) steps since the last solve and an interval of (\d+)$")]
+async fn given_steps_since_solve_and_interval(
+    world: &mut BevyoutWorld,
+    steps_since_solve: u32,
+    interval: u32,
+) {
+    world.nav_solve_steps_since_solve = steps_since_solve;
+    world.nav_solve_blend_interval = interval;
+}
+
+#[when("the solve blend fraction is computed")]
+async fn when_solve_blend_fraction_computed(world: &mut BevyoutWorld) {
+    world.nav_solve_blend_fraction = Some(movement_policy::solve_blend_fraction(
+        world.nav_solve_steps_since_solve,
+        world.nav_solve_blend_interval,
+    ));
+}
+
+#[then(regex = r"^the solve blend fraction is ([\d.]+)$")]
+async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.nav_solve_blend_fraction, Some(expected));
 }
 
 fn main() {

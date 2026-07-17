@@ -22,6 +22,68 @@ pub(crate) const STUCK_PROGRESS_EPSILON: f32 = 0.05;
 /// wall at reduced but non-trivial speed stays `Clear`).
 pub(crate) const COLLISION_BLOCK_RATIO: f32 = 0.15;
 
+/// Default nav-solve interval (issue #114 added scope, M4 wave 5): solve
+/// every fixed tick. `tna solverate [<n>]` is the console knob that changes
+/// it at runtime.
+pub(crate) const DEFAULT_NAV_SOLVE_INTERVAL: u32 = 1;
+
+/// How many fixed ticks have elapsed since the last tick that actually ran
+/// the solve, given the current step counter and the configured `interval`:
+/// `0` on a solve tick itself, climbing toward `interval - 1` on the ticks
+/// in between before resetting to `0` at the next solve. `interval` is
+/// clamped to at least `1` so a misconfigured `0` can never divide by zero
+/// or, worse, be read as "never solve at all". The same modulo both
+/// `should_solve` and `solve_blend_fraction` need, exposed once so callers
+/// needing both cannot compute it two different (and possibly
+/// inconsistent) ways.
+pub(crate) fn steps_since_solve(step: u64, interval: u32) -> u32 {
+    let interval = u64::from(interval.max(1));
+    (step % interval) as u32
+}
+
+/// Whether `LandmassSystems::Update` (the pathfinding+avoidance solve)
+/// should run on fixed-tick `step`, given the configured `interval` (solve
+/// on every `interval`-th tick; `1` solves every tick).
+///
+/// Movement (`apply_agent_physics_movement`) is *not* gated by this
+/// decision -- it always runs every fixed tick and blends between the
+/// previous and latest solved desired velocities via
+/// `solve_blend_fraction` rather than snapping straight to a stale-until-
+/// the-next-solve constant; only the (comparatively expensive) path/
+/// avoidance solve itself is throttled.
+pub(crate) fn should_solve(step: u64, interval: u32) -> bool {
+    steps_since_solve(step, interval) == 0
+}
+
+/// The lerp fraction `apply_agent_physics_movement` blends an agent's
+/// previous and latest solved desired velocities by, given
+/// `steps_since_solve` (see above) and the configured solve `interval`.
+///
+/// At `interval <= 1` every tick solves, so there is nothing to
+/// interpolate -- this always returns `1.0` (fully the latest, freshly
+/// solved value) regardless of `steps_since_solve`, an exact no-op even
+/// though whatever "previous" happens to hold is never consulted.
+///
+/// At `interval > 1` the fraction is `steps_since_solve / interval`,
+/// climbing `0 -> (interval - 1) / interval` across the ticks between two
+/// solves. Paired with the caller's own shift-on-solve bookkeeping
+/// (`previous <- old latest`, `latest <- new solve`, applied only on a tick
+/// that actually solved), this makes the blend *one interval behind*: on
+/// the solve tick itself the fraction is `0`, so the newly landed value is
+/// not applied immediately -- movement keeps sliding from the previous pair
+/// toward it, only fully catching up by the time the *next* solve lands
+/// (whose own fraction-`0` tick then applies exactly that value). This
+/// trades one interval of extra latency for a genuinely continuous signal
+/// with no snap at the solve boundary; extrapolating toward a solve that
+/// has not happened yet is not causally possible, so this -- interpolating
+/// within the last *completed* interval -- is the option available.
+pub(crate) fn solve_blend_fraction(steps_since_solve: u32, interval: u32) -> f32 {
+    if interval <= 1 {
+        return 1.0;
+    }
+    (steps_since_solve.min(interval) as f32) / interval as f32
+}
+
 /// Observation feeding `decide_grounded`: whether this tick's KCC sweep
 /// found a walkable support plane directly, or reached one via a step-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -242,5 +304,58 @@ mod tests {
             }),
             StuckDecision::Stuck
         );
+    }
+
+    #[test]
+    fn an_interval_of_one_solves_every_step() {
+        assert!(should_solve(1, 1));
+        assert!(should_solve(2, 1));
+        assert!(should_solve(3, 1));
+    }
+
+    #[test]
+    fn an_interval_of_two_solves_on_even_steps_only() {
+        assert!(!should_solve(1, 2));
+        assert!(should_solve(2, 2));
+        assert!(!should_solve(3, 2));
+        assert!(should_solve(4, 2));
+    }
+
+    #[test]
+    fn an_interval_of_zero_is_clamped_to_one_and_never_skips() {
+        assert!(should_solve(1, 0));
+        assert!(should_solve(2, 0));
+        assert!(should_solve(3, 0));
+    }
+
+    #[test]
+    fn steps_since_solve_resets_to_zero_on_a_solve_tick_and_climbs_between() {
+        assert_eq!(steps_since_solve(1, 2), 1);
+        assert_eq!(steps_since_solve(2, 2), 0);
+        assert_eq!(steps_since_solve(3, 2), 1);
+        assert_eq!(steps_since_solve(4, 2), 0);
+    }
+
+    #[test]
+    fn an_interval_of_one_never_interpolates() {
+        assert_eq!(solve_blend_fraction(0, 1), 1.0);
+        // Even a nonsensical non-zero `steps_since_solve` at interval 1 (it
+        // should never occur in practice -- `steps_since_solve(_, 1)` is
+        // always `0`) still fully resolves to the latest value.
+        assert_eq!(solve_blend_fraction(5, 1), 1.0);
+    }
+
+    #[test]
+    fn an_interval_of_two_blends_halfway_on_the_in_between_step() {
+        assert_eq!(solve_blend_fraction(0, 2), 0.0);
+        assert_eq!(solve_blend_fraction(1, 2), 0.5);
+    }
+
+    #[test]
+    fn a_wider_interval_blends_in_even_fractions() {
+        assert_eq!(solve_blend_fraction(0, 4), 0.0);
+        assert_eq!(solve_blend_fraction(1, 4), 0.25);
+        assert_eq!(solve_blend_fraction(2, 4), 0.5);
+        assert_eq!(solve_blend_fraction(3, 4), 0.75);
     }
 }

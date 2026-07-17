@@ -64,3 +64,62 @@ Feature: Physics-authoritative nav agent movement policy
     Given a stuck observation with distance 5.0, best distance 5.0, ticks without progress 120, recovery active true
     When the stuck decision is made
     Then the stuck decision is stuck
+
+  # Wave 5 added scope -- configurable nav-solve interval: a step counter
+  # incremented every fixed tick gates `LandmassSystems::Update` (the
+  # path/avoidance solve) so it can run less often than movement, which
+  # always integrates whichever desired velocity the last solve produced.
+
+  Scenario: An interval of 1 solves on every step
+    Given a solve step count of 1 and an interval of 1
+    When the solve decision is made
+    Then the solve decision is solve
+
+  Scenario: An interval of 2 skips the first step
+    Given a solve step count of 1 and an interval of 2
+    When the solve decision is made
+    Then the solve decision is skip
+
+  Scenario: An interval of 2 solves on the second step
+    Given a solve step count of 2 and an interval of 2
+    When the solve decision is made
+    Then the solve decision is solve
+
+  Scenario: An interval of 2 skips the third step
+    Given a solve step count of 3 and an interval of 2
+    When the solve decision is made
+    Then the solve decision is skip
+
+  Scenario: An interval of 2 solves on the fourth step
+    Given a solve step count of 4 and an interval of 2
+    When the solve decision is made
+    Then the solve decision is solve
+
+  Scenario: An interval of zero is treated as one and never skips
+    Given a solve step count of 3 and an interval of 0
+    When the solve decision is made
+    Then the solve decision is solve
+
+  # Wave 5 added scope -- solve-output interpolation: between solves, the
+  # applied desired velocity is a lerp of the previous and latest solve
+  # outputs by this fraction, rather than a flat held constant.
+
+  Scenario: An interval of 1 never interpolates
+    Given 0 steps since the last solve and an interval of 1
+    When the solve blend fraction is computed
+    Then the solve blend fraction is 1.0
+
+  Scenario: An interval of 2 is exactly halfway on the one in-between step
+    Given 0 steps since the last solve and an interval of 2
+    When the solve blend fraction is computed
+    Then the solve blend fraction is 0.0
+
+  Scenario: An interval of 2 reaches halfway one step later
+    Given 1 steps since the last solve and an interval of 2
+    When the solve blend fraction is computed
+    Then the solve blend fraction is 0.5
+
+  Scenario: A wider interval blends in even fractions
+    Given 2 steps since the last solve and an interval of 4
+    When the solve blend fraction is computed
+    Then the solve blend fraction is 0.5
