@@ -45,6 +45,7 @@ fn render_recovery_rebakes_stale_bakes_and_accepts_current_ones() {
             resolution: [1; 3],
             intensity: 1.0,
         }),
+        dynamic_lighting: None,
     });
     assert_eq!(
         next_render_cache_action(&manifest),

@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
 use bevy::camera::{Exposure, Hdr};
-use bevy::core_pipeline::prepass::{DeferredPrepass, DepthPrepass};
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::light::{NotShadowCaster, NotShadowReceiver, PointLightShadowMap, ShadowFilteringMethod};
@@ -22,10 +22,11 @@ use super::agent_bridge;
 use super::lighting_demo_policy::DemoOrbit;
 use crate::cli::LightingTestArgs;
 use crate::vsa::{
-    DynamicLight, DynamicLightEffect, DynamicLightShadowProxy, DynamicLightType,
-    DynamicLightVolumetricParameters, DynamicLightVolumetricType, DynamicLightingDiagnostics,
-    DynamicLightingPlugin, DynamicLightingSettings, DynamicLightingView,
-    STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight, bake_static_point_shadow_bytes,
+    DynamicLight, DynamicLightEffect, DynamicLightIlluminationMode, DynamicLightShadowProxy,
+    DynamicLightType, DynamicLightVolumetricParameters, DynamicLightVolumetricType,
+    DynamicLightingDiagnostics, DynamicLightingPlugin, DynamicLightingSettings,
+    DynamicLightingView, STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight,
+    bake_static_point_shadow_bytes,
 };
 
 const STATIC_PILLAR_CENTER: [f32; 3] = [-2.0, 1.25, 0.0];
@@ -77,7 +78,7 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
         DynamicLightingPlugin,
     ));
     app.insert_resource(ClearColor(Color::srgb(0.015, 0.018, 0.025)))
-        .insert_resource(DefaultOpaqueRendererMethod::deferred())
+        .insert_resource(DefaultOpaqueRendererMethod::forward())
         .insert_resource(PointLightShadowMap { size: 256 })
         .insert_resource(PointLightShadowSamples(1))
         .insert_resource(BakedPointShadowMap {
@@ -389,7 +390,6 @@ fn setup_lighting_test(
             Hdr,
             Msaa::Off,
             DepthPrepass,
-            DeferredPrepass,
             DynamicLightingView,
             ShadowFilteringMethod::Hardware2x2,
             Tonemapping::AcesFitted,
@@ -666,7 +666,6 @@ fn setup_lighting_test(
         Hdr,
         Msaa::Off,
         DepthPrepass,
-        DeferredPrepass,
         DynamicLightingView,
         ShadowFilteringMethod::Hardware2x2,
         Tonemapping::AcesFitted,
@@ -684,7 +683,7 @@ fn setup_lighting_test(
             "Near grid: all 15 temporal effects on isolated receivers\n",
             "Far grid: Point, Spot, Discoball, Wave / Interference, Rotor, Shock, Disco\n",
             "Fog: strobing Sphere, scaled Box, rotated ConeZ and ConeY\n",
-            "1: toggle baked static shadow | 2: toggle realtime shadow\n",
+            "1: toggle baked static shadow | 2: toggle realtime shadow | B: direct/bounce\n",
             "3: custom pass | 4: Bevy lights | 5: shadow proxy | 6: fog | F: freeze | Space: motion"
         )),
         TextFont {
@@ -731,6 +730,7 @@ fn setup_lighting_test(
 fn toggle_dynamic_lighting(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut settings: ResMut<DynamicLightingSettings>,
+    mut dynamic_lights: Query<&mut DynamicLight>,
 ) {
     if keyboard.just_pressed(KeyCode::Digit3) {
         settings.enabled = !settings.enabled;
@@ -751,6 +751,26 @@ fn toggle_dynamic_lighting(
                 "frozen"
             } else {
                 "running"
+            }
+        );
+    }
+    if keyboard.just_pressed(KeyCode::KeyB) {
+        let enable_bounce = dynamic_lights.iter().next().is_none_or(|light| {
+            light.config.illumination_mode != DynamicLightIlluminationMode::SingleBounce
+        });
+        for mut light in &mut dynamic_lights {
+            light.config.illumination_mode = if enable_bounce {
+                DynamicLightIlluminationMode::SingleBounce
+            } else {
+                DynamicLightIlluminationMode::DirectIllumination
+            };
+        }
+        info!(
+            "lighting test: DynamicLighting {}",
+            if enable_bounce {
+                "single-bounce illumination"
+            } else {
+                "direct-only illumination"
             }
         );
     }

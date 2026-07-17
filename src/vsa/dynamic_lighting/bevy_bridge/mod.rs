@@ -7,18 +7,41 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use bevy::core_pipeline::prepass::{DeferredPrepass, DepthPrepass};
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::render::extract_resource::ExtractResource;
 
 use super::core::{
-    DynamicLightConfig, DynamicLightEffect, DynamicLightEffectParameters, DynamicLightType,
-    DynamicLightVolumetricParameters, LightEffectRuntime, UnityRandom, advance_effect,
+    DynamicLightConfig, DynamicLightEffect, DynamicLightEffectParameters,
+    DynamicLightIlluminationMode, DynamicLightType, DynamicLightVolumetricParameters,
+    LightEffectRuntime, UnityRandom, advance_effect,
 };
 use super::render::{DynamicLightingRenderPlugin, DynamicLightingView};
 pub(crate) use shadow_proxy::{
     DynamicLightPreparedShadow, DynamicLightPreparedSource, DynamicLightShadowProxy,
 };
+
+/// Main-world copy of a validated Henry artifact.  The render bridge uploads
+/// the packed words from this resource; keeping it in the scene world also
+/// lets agent diagnostics report exactly which bake is active.
+#[allow(dead_code)]
+#[derive(Resource, Clone, Debug, Default, ExtractResource)]
+pub(crate) struct DynamicLightingBakeRuntime {
+    pub(crate) revision: Option<String>,
+    pub(crate) artifact_path: Option<String>,
+    pub(crate) artifact_sha256: Option<String>,
+    pub(crate) mesh_count: u32,
+    pub(crate) triangle_count: u32,
+    pub(crate) light_count: u32,
+    pub(crate) compressed_bytes: u64,
+    pub(crate) bounce_bytes: u64,
+    pub(crate) bounce_compression_bits: u32,
+    pub(crate) light_form_ids: Arc<[u32]>,
+    pub(crate) mesh_table: Arc<[u32]>,
+    pub(crate) words: Arc<[u32]>,
+    pub(crate) bounce_words: Arc<[u32]>,
+}
 
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct DynamicLight {
@@ -58,7 +81,11 @@ impl DynamicLight {
     }
 
     pub(crate) fn with_bounce_approximation(mut self, enabled: bool) -> Self {
-        self.config.bounce.enabled = enabled;
+        self.config.illumination_mode = if enabled {
+            DynamicLightIlluminationMode::SingleBounce
+        } else {
+            DynamicLightIlluminationMode::DirectIllumination
+        };
         self
     }
 
@@ -252,13 +279,11 @@ impl Plugin for DynamicLightingPlugin {
 
 fn ensure_dynamic_lighting_view_requirements(
     mut commands: Commands,
-    views: Query<(Entity, Has<DepthPrepass>, Has<DeferredPrepass>), With<DynamicLightingView>>,
+    views: Query<(Entity, Has<DepthPrepass>), With<DynamicLightingView>>,
 ) {
-    for (entity, has_depth, has_deferred) in &views {
-        if !has_depth || !has_deferred {
-            commands
-                .entity(entity)
-                .insert((DepthPrepass, DeferredPrepass));
+    for (entity, has_depth) in &views {
+        if !has_depth {
+            commands.entity(entity).insert(DepthPrepass);
         }
     }
 }
@@ -353,7 +378,6 @@ mod tests {
         app.update();
         let view = app.world().entity(entity);
         assert!(view.contains::<DepthPrepass>());
-        assert!(view.contains::<DeferredPrepass>());
     }
 
     #[test]

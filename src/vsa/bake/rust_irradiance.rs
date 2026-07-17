@@ -726,6 +726,7 @@ mod tests {
                 ..Default::default()
             }];
             let lights = [JobLight {
+                reference_form_id: 1,
                 translation: [0.0, 1.0, 0.0],
                 rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
                 color_rgba: [1.0; 4],
@@ -733,6 +734,11 @@ mod tests {
                 intensity_lumens: 0.0,
                 kind: "point".into(),
                 bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
+                shadow_mode: crate::vsa::dynamic_lighting::DynamicLightShadowMode::RaytracedShadows,
+                illumination_mode:
+                    crate::vsa::dynamic_lighting::DynamicLightIlluminationMode::SingleBounce,
+                transparency_mode:
+                    crate::vsa::dynamic_lighting::DynamicLightTransparencyMode::Disabled,
             }];
             trace_radiance(
                 &bvh,

@@ -1,4 +1,7 @@
 use super::*;
+use crate::vsa::dynamic_lighting::{
+    DynamicLightIlluminationMode, DynamicLightShadowMode, DynamicLightTransparencyMode,
+};
 
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
 
@@ -21,6 +24,10 @@ pub(crate) struct BakeJob {
     pub(crate) irradiance_blend: String,
     pub(crate) irradiance_spacing_meters: f32,
     pub(crate) irradiance_samples: u32,
+    pub(crate) dynamic_lighting_texels_per_meter: u32,
+    pub(crate) dynamic_lighting_max_lightmap_size: u32,
+    pub(crate) dynamic_lighting_bounce_samples: u32,
+    pub(crate) dynamic_lighting_bounce_compression: u8,
     pub(crate) preview_only: bool,
     pub(crate) static_batch_chunk_meters: f32,
     pub(crate) emission_scale: f32,
@@ -45,6 +52,7 @@ pub(crate) struct JobPlacement {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct JobLight {
+    pub(crate) reference_form_id: u32,
     pub(crate) translation: [f32; 3],
     pub(crate) rotation_xyzw: [f32; 4],
     pub(crate) color_rgba: [f32; 4],
@@ -53,6 +61,9 @@ pub(crate) struct JobLight {
     pub(crate) kind: String,
     /// Default-on indirect contribution for this light's irradiance bake.
     pub(crate) bounce_multiplier: f32,
+    pub(crate) shadow_mode: DynamicLightShadowMode,
+    pub(crate) illumination_mode: DynamicLightIlluminationMode,
+    pub(crate) transparency_mode: DynamicLightTransparencyMode,
 }
 
 #[derive(Debug, Clone, Copy)]

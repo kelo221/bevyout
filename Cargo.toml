@@ -24,6 +24,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
+xatlas-rs-v2 = { version = "0.1.4", optional = true }
+
+[features]
+# The pinned native xatlas exporter is opt-in because its bindgen build needs
+# libclang on the host. The deterministic CPU unwrap remains the default and
+# keeps the normal CLI/editor build self-contained.
+xatlas = ["dep:xatlas-rs-v2"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

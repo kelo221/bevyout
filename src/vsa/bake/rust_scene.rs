@@ -318,6 +318,26 @@ impl RustBakeScene {
                 &primitive.uvs,
                 Some(34962),
             );
+            let uv1 = crate::vsa::dynamic_lighting::baker::generate_uv1(
+                &primitive
+                    .positions
+                    .iter()
+                    .map(|value| value.to_array())
+                    .collect::<Vec<_>>(),
+                &primitive
+                    .normals
+                    .iter()
+                    .map(|value| value.to_array())
+                    .collect::<Vec<_>>(),
+            );
+            let uv1_accessor = push_vec2_accessor(
+                &mut self.resources,
+                &mut accessors,
+                &uv1.iter()
+                    .map(|value| Vec2::from_array(*value))
+                    .collect::<Vec<_>>(),
+                Some(34962),
+            );
             let color_accessor = push_vec4_accessor(
                 &mut self.resources,
                 &mut accessors,
@@ -334,6 +354,7 @@ impl RustBakeScene {
                         "POSITION": position_accessor,
                         "NORMAL": normal_accessor,
                         "TEXCOORD_0": uv_accessor,
+                        "TEXCOORD_1": uv1_accessor,
                         "COLOR_0": color_accessor
                     },
                     "indices": index_accessor,
@@ -347,6 +368,7 @@ impl RustBakeScene {
                 "extras": {
                     "bevyout_reference_form_ids": primitive.reference_form_ids,
                     "bevyout_batch_size": primitive.reference_form_ids.len()
+                    ,"bevyout_dynamic_lighting_mesh_tag": mesh_index + 1
                 }
             }));
         }

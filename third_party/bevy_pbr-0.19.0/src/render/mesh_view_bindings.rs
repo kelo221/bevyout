@@ -370,6 +370,13 @@ fn layout_entries(
                 ))]
                 texture_cube(TextureSampleType::Depth),
             ),
+            // Henry DynamicLighting packed source/lightmap data.  These are
+            // always present so forward and prepass layouts remain stable;
+            // the renderer supplies one-word fallbacks for unbaked scenes.
+            (40, storage_buffer_read_only_sized(false, None)),
+            (41, storage_buffer_read_only_sized(false, None)),
+            (42, storage_buffer_read_only_sized(false, None)),
+            (43, storage_buffer_read_only_sized(false, None)),
         ),
     );
 
@@ -590,6 +597,19 @@ pub fn init_mesh_pipeline_view_layouts(
     };
 
     commands.insert_resource(res);
+    let fallback = |label: &'static str| {
+        render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(&[0_u32]),
+            usage: BufferUsages::STORAGE,
+        })
+    };
+    commands.insert_resource(DynamicLightingForwardBindings {
+        lights: fallback("dynamic_lighting_forward_fallback_lights"),
+        mesh_table: fallback("dynamic_lighting_forward_fallback_mesh_table"),
+        triangle_words: fallback("dynamic_lighting_forward_fallback_triangles"),
+        bounce_words: fallback("dynamic_lighting_forward_fallback_bounce"),
+    });
 }
 
 impl MeshPipelineViewLayouts {
@@ -643,6 +663,17 @@ pub struct MeshViewBindGroup {
     pub empty: BindGroup,
 }
 
+/// GPU buffers shared by the forward PBR hook and the isolated DynamicLighting
+/// plugin.  The type lives in the local Bevy patch to keep the shader binding
+/// seam narrow and avoid a dependency from Bevy back into the game crate.
+#[derive(Resource, Clone)]
+pub struct DynamicLightingForwardBindings {
+    pub lights: Buffer,
+    pub mesh_table: Buffer,
+    pub triangle_words: Buffer,
+    pub bounce_words: Buffer,
+}
+
 pub fn prepare_mesh_view_bind_groups(
     mut commands: Commands,
     (render_device, pipeline_cache, render_adapter): (
@@ -693,6 +724,7 @@ pub fn prepare_mesh_view_bind_groups(
     tonemapping_luts: Res<TonemappingLuts>,
     light_probes_buffer: Res<LightProbesBuffer>,
     visibility_ranges: Res<RenderVisibilityRanges>,
+    forward_bindings: Res<DynamicLightingForwardBindings>,
     (ssr_buffer, contact_shadows_buffer, oit_buffers): (
         Res<ScreenSpaceReflectionsBuffer>,
         Res<ContactShadowsBuffer>,
@@ -811,6 +843,10 @@ pub fn prepare_mesh_view_bind_groups(
                 (11, globals.clone()),
                 (12, light_probes_binding.clone()),
                 (14, visibility_ranges_buffer.as_entire_binding()),
+                (40, forward_bindings.lights.as_entire_binding()),
+                (41, forward_bindings.mesh_table.as_entire_binding()),
+                (42, forward_bindings.triangle_words.as_entire_binding()),
+                (43, forward_bindings.bounce_words.as_entire_binding()),
             ));
 
             if let Some(view_fog_offset) = view_fog_offset {

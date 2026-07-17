@@ -1,7 +1,10 @@
+enable primitive_index;
+
 #import bevy_pbr::{
     pbr_types,
     pbr_functions::alpha_discard,
-    pbr_fragment::pbr_input_from_standard_material,
+    pbr_fragment::{dynamic_lighting_forward_contribution, pbr_input_from_standard_material},
+    mesh_functions::get_tag,
     decal::clustered::apply_decals,
 }
 
@@ -42,6 +45,7 @@ fn fragment(
     vertex_output: VertexOutput,
     @builtin(front_facing) is_front: bool,
 #endif
+    @builtin(primitive_index) primitive_index: u32,
 ) -> FragmentOutput {
 #ifdef MESHLET_MESH_MATERIAL_PASS
     let vertex_output = resolve_vertex_output(frag_coord);
@@ -83,6 +87,24 @@ fn fragment(
     } else {
         out.color = pbr_input.material.base_color;
     }
+    // Henry's baked triangle path is evaluated after the normal Bevy PBR
+    // lighting and before distance/volumetric fog and bloom.
+    #ifdef MESHLET_MESH_MATERIAL_PASS
+    let dynamic_mesh_tag = 0u;
+    #else
+    let dynamic_mesh_tag = get_tag(vertex_output.instance_index);
+    #endif
+    #ifdef VERTEX_UVS_B
+    let dynamic_uv1 = vertex_output.uv_b;
+    #else
+    let dynamic_uv1 = vec2<f32>(0.5);
+    #endif
+    out.color.rgb += dynamic_lighting_forward_contribution(
+        dynamic_mesh_tag,
+        primitive_index,
+        dynamic_uv1,
+        pbr_input,
+    );
 
     // apply in-shader post processing (fog, alpha-premultiply, and also tonemapping, debanding if the camera is non-hdr)
     // note this does not include fullscreen postprocessing effects like bloom.

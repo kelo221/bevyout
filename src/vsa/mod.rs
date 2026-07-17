@@ -21,9 +21,10 @@ pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
 pub(crate) use dynamic_lighting::{
-    DynamicLight, DynamicLightEffect, DynamicLightPreparedShadow, DynamicLightPreparedSource,
-    DynamicLightShadowProxy, DynamicLightType, DynamicLightVolumetricParameters,
-    DynamicLightVolumetricType, DynamicLightingDiagnostics, DynamicLightingPlugin,
+    DynamicLight, DynamicLightEffect, DynamicLightIlluminationMode, DynamicLightPreparedShadow,
+    DynamicLightPreparedSource, DynamicLightShadowProxy, DynamicLightType,
+    DynamicLightVolumetricParameters, DynamicLightVolumetricType, DynamicLightingBake,
+    DynamicLightingBakeRuntime, DynamicLightingDiagnostics, DynamicLightingPlugin,
     DynamicLightingSettings, DynamicLightingView,
 };
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph

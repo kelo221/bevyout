@@ -18,7 +18,9 @@ use super::interaction::PlacementRoot;
 use super::player::FpsPlayer;
 use super::{RenderReportBuffer, diagnostics};
 use crate::console::{ConsoleExecutor, ConsoleRegistry, ConsoleRequest, ConsoleSessionId};
-use crate::vsa::{DynamicLight, DynamicLightingDiagnostics, PreparedSceneManifest};
+use crate::vsa::{
+    DynamicLight, DynamicLightingBakeRuntime, DynamicLightingDiagnostics, PreparedSceneManifest,
+};
 
 const DEFAULT_SNAPSHOT_LIMIT: usize = 100;
 const MAX_SNAPSHOT_LIMIT: usize = 1_000;
@@ -146,6 +148,22 @@ fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> Brp
             0,
             DynamicLightingDiagnostics::extracted_volumetric_light_count,
         );
+    let dynamic_lighting_bake = world
+        .get_resource::<DynamicLightingBakeRuntime>()
+        .map(|bake| {
+            json!({
+                "revision": bake.revision,
+                "artifact_path": bake.artifact_path,
+                "artifact_sha256": bake.artifact_sha256,
+                "mesh_count": bake.mesh_count,
+                "triangle_count": bake.triangle_count,
+                "light_count": bake.light_count,
+                "compressed_bytes": bake.compressed_bytes,
+                "bounce_bytes": bake.bounce_bytes,
+                "bounce_compression_bits": bake.bounce_compression_bits,
+                "active_realtime_lights": dynamic_light_count,
+            })
+        });
 
     Ok(json!({
         "latest_sample": latest_sample,
@@ -158,7 +176,9 @@ fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> Brp
             "point_lights": point_light_count,
             "directional_lights": directional_light_count,
             "dynamic_lights": dynamic_light_count,
+            "active_realtime_lights": dynamic_light_count,
             "volumetric_lights": extracted_volumetric_light_count,
+            "dynamic_lighting_bake": dynamic_lighting_bake,
         },
     }))
 }

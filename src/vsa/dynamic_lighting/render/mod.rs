@@ -10,6 +10,7 @@ use bevy::{
     render::{
         ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
+        extract_resource::ExtractResourcePlugin,
     },
     shader::load_shader_library,
 };
@@ -44,6 +45,7 @@ impl Plugin for DynamicLightingRenderPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<DynamicLightingView>::default(),
             ExtractComponentPlugin::<DynamicLightShadowProxy>::default(),
+            ExtractResourcePlugin::<super::bevy_bridge::DynamicLightingBakeRuntime>::default(),
         ));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

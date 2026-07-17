@@ -127,6 +127,7 @@ mod tests {
             source_fingerprint: job_fingerprint.into(),
             scene_path: "scenes/00000001/baked/scene.glb".into(),
             irradiance_volume: None,
+            dynamic_lighting: None,
         }
     }
 

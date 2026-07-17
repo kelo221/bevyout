@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
+use super::types::{
+    DynamicBounceCompression, DynamicLightEffect, DynamicLightIlluminationMode,
+    DynamicLightShadowMode, DynamicLightTransparencyMode, DynamicLightType,
+    DynamicLightVolumetricType,
+};
 
 pub(crate) const DEFAULT_BOUNCE_MULTIPLIER: f32 = 1.0;
 
@@ -53,9 +57,18 @@ pub(crate) struct DynamicLightBounceParameters {
     pub(crate) color_rgba: [f32; 4],
     pub(crate) modifier: f32,
     pub(crate) intensity: f32,
-    /// Optional bevyout approximation. The upstream default illumination mode
-    /// is direct-only, so this stays disabled unless explicitly requested.
+    #[serde(default = "default_bounce_samples")]
+    pub(crate) samples: u32,
+    #[serde(default)]
+    pub(crate) compression: DynamicBounceCompression,
+    /// Kept as a serde/source-compatibility alias for old scene configs. New
+    /// callers should select `DynamicLightConfig::illumination_mode`.
+    #[serde(default, skip_serializing)]
     pub(crate) enabled: bool,
+}
+
+const fn default_bounce_samples() -> u32 {
+    32
 }
 
 impl Default for DynamicLightBounceParameters {
@@ -64,6 +77,8 @@ impl Default for DynamicLightBounceParameters {
             color_rgba: [1.0, 1.0, 1.0, 0.0],
             modifier: 1.0,
             intensity: DEFAULT_BOUNCE_MULTIPLIER,
+            samples: default_bounce_samples(),
+            compression: DynamicBounceCompression::Bits8,
             enabled: false,
         }
     }
@@ -101,6 +116,12 @@ pub(crate) struct DynamicLightConfig {
     pub(crate) effect_parameters: DynamicLightEffectParameters,
     pub(crate) spatial: DynamicLightSpatialParameters,
     pub(crate) bounce: DynamicLightBounceParameters,
+    #[serde(default)]
+    pub(crate) shadow_mode: DynamicLightShadowMode,
+    #[serde(default)]
+    pub(crate) illumination_mode: DynamicLightIlluminationMode,
+    #[serde(default)]
+    pub(crate) transparency_mode: DynamicLightTransparencyMode,
     pub(crate) volumetric: DynamicLightVolumetricParameters,
     /// Light-side authoring layers. This is not a per-camera view mask.
     pub(crate) layer_mask: u32,
@@ -119,6 +140,9 @@ impl Default for DynamicLightConfig {
             effect_parameters: DynamicLightEffectParameters::default(),
             spatial: DynamicLightSpatialParameters::default(),
             bounce: DynamicLightBounceParameters::default(),
+            shadow_mode: DynamicLightShadowMode::RaytracedShadows,
+            illumination_mode: DynamicLightIlluminationMode::DirectIllumination,
+            transparency_mode: DynamicLightTransparencyMode::Disabled,
             volumetric: DynamicLightVolumetricParameters::default(),
             layer_mask: u32::MAX,
             shadow_enabled: true,
@@ -162,6 +186,8 @@ mod tests {
         assert_eq!(config.effect_parameters.pulse_modifier, 0.25);
         assert_eq!(config.effect_parameters.timestep_seconds, 1.0 / 30.0);
         assert_eq!(config.bounce.intensity, DEFAULT_BOUNCE_MULTIPLIER);
+        assert_eq!(config.bounce.samples, 32);
+        assert_eq!(config.bounce.compression.bits(), 8);
         assert!(!config.bounce.enabled);
         assert!(config.shadow_enabled);
         assert_eq!(fixture.shadow_mode, 0, "RaytracedShadows");

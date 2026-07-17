@@ -82,6 +82,56 @@ pub(crate) enum DynamicLightVolumetricType {
     ConeY = 4,
 }
 
+/// How a light's visibility is obtained.  The numeric values intentionally
+/// match Henry's DynamicLighting authoring data so prepared catalogs can be
+/// exchanged without a translation table.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) enum DynamicLightShadowMode {
+    #[default]
+    RaytracedShadows = 0,
+    RealtimeShadows = 1,
+    Disabled = 2,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) enum DynamicLightIlluminationMode {
+    #[default]
+    DirectIllumination = 0,
+    SingleBounce = 1,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) enum DynamicLightTransparencyMode {
+    #[default]
+    Disabled = 0,
+    AlphaTest = 1,
+    AlphaBlend = 2,
+}
+
+/// Quantization used for the per-texel single-bounce payload.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) enum DynamicBounceCompression {
+    #[default]
+    Bits8,
+    Bits6,
+    Bits5,
+    Bits4,
+}
+
+impl DynamicBounceCompression {
+    pub(crate) const fn bits(self) -> u8 {
+        match self {
+            Self::Bits8 => 8,
+            Self::Bits6 => 6,
+            Self::Bits5 => 5,
+            Self::Bits4 => 4,
+        }
+    }
+}
+
 impl DynamicLightVolumetricType {
     #[cfg(test)]
     pub(crate) const ALL: [Self; 5] = [

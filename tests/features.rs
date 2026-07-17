@@ -188,7 +188,10 @@ mod dynamic_lighting_core {
     };
     pub(crate) use runtime::{LightEffectRuntime, advance_effect};
     pub(crate) use spatial::spatial_parameters;
-    pub(crate) use types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
+    pub(crate) use types::{
+        DynamicBounceCompression, DynamicLightEffect, DynamicLightIlluminationMode,
+        DynamicLightShadowMode, DynamicLightType, DynamicLightVolumetricType,
+    };
     pub(crate) use unity_random::UnityRandom;
     pub(crate) use volumetric::{pack_volumetric_parameters, volumetric_is_active};
 }
@@ -2323,6 +2326,7 @@ async fn given_bake_recorded(
             source_fingerprint: job_fingerprint,
             scene_path: "scenes/00000001/baked/scene.glb".into(),
             irradiance_volume: None,
+            dynamic_lighting: None,
         }),
     );
 }
@@ -2349,6 +2353,7 @@ async fn given_bake_validity(world: &mut BevyoutWorld, hex: String, validity: St
         source_fingerprint: BAKE_CURRENT_JOB_FINGERPRINT.into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
         irradiance_volume: None,
+        dynamic_lighting: None,
     };
     let valid = bake_plan::bake_is_valid(
         Some(&recorded),
@@ -3027,6 +3032,18 @@ async fn then_dynamic_light_source_defaults(world: &mut BevyoutWorld) {
     assert!(world.dynamic_light_config.shadow_enabled);
 }
 
+#[then("its illumination mode is DirectIllumination and its shadow mode is RaytracedShadows")]
+async fn then_dynamic_light_bake_mode_defaults(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.dynamic_light_config.illumination_mode,
+        dynamic_lighting_core::DynamicLightIlluminationMode::DirectIllumination
+    );
+    assert_eq!(
+        world.dynamic_light_config.shadow_mode,
+        dynamic_lighting_core::DynamicLightShadowMode::RaytracedShadows
+    );
+}
+
 #[then(
     regex = r"^its volumetric type is None radius is ([\d.]+) thickness is ([\d.]+) intensity is ([\d.]+) and visibility is ([\d.]+)$"
 )]
@@ -3069,6 +3086,19 @@ async fn given_dynamic_lighting_catalogs(world: &mut BevyoutWorld) {
 #[then("all DynamicLighting enum discriminants match upstream")]
 async fn then_dynamic_lighting_catalogs_match(world: &mut BevyoutWorld) {
     assert_eq!(world.dynamic_light_catalogs_valid, Some(true));
+}
+
+#[then("the bounce compression bit widths are 8, 6, 5, and 4")]
+async fn then_dynamic_lighting_bounce_compression_widths(_world: &mut BevyoutWorld) {
+    assert_eq!(
+        [
+            dynamic_lighting_core::DynamicBounceCompression::Bits8.bits(),
+            dynamic_lighting_core::DynamicBounceCompression::Bits6.bits(),
+            dynamic_lighting_core::DynamicBounceCompression::Bits5.bits(),
+            dynamic_lighting_core::DynamicBounceCompression::Bits4.bits(),
+        ],
+        [8, 6, 5, 4]
+    );
 }
 
 #[given("a source-compatible strobe light")]

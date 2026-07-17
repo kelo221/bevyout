@@ -9,7 +9,7 @@ use super::physics::PreparedPhysicsSource;
 
 pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 15;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-dynamic-lighting-v1";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 
 mod compatibility;
@@ -236,6 +236,45 @@ pub(crate) struct PreparedBake {
     pub(crate) scene_path: String,
     #[serde(default)]
     pub(crate) irradiance_volume: Option<PreparedIrradianceVolume>,
+    #[serde(default)]
+    pub(crate) dynamic_lighting: Option<PreparedDynamicLightingBake>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PreparedDynamicLightingBake {
+    pub(crate) revision: String,
+    pub(crate) source_fingerprint: String,
+    pub(crate) artifact_path: String,
+    pub(crate) artifact_sha256: String,
+    pub(crate) settings: PreparedDynamicLightingSettings,
+    pub(crate) lights: Vec<PreparedDynamicLightingLight>,
+    pub(crate) mesh_count: u32,
+    pub(crate) triangle_count: u32,
+    pub(crate) compressed_bytes: u64,
+    pub(crate) bounce_bytes: u64,
+    #[serde(default)]
+    pub(crate) candidate_associations: u32,
+    #[serde(default)]
+    pub(crate) retained_associations: u32,
+    #[serde(default)]
+    pub(crate) occluded_samples: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PreparedDynamicLightingSettings {
+    pub(crate) texels_per_meter: u32,
+    pub(crate) max_lightmap_size: u32,
+    pub(crate) bounce_samples: u32,
+    pub(crate) bounce_compression_bits: u8,
+    pub(crate) shadow_mode: u8,
+    pub(crate) illumination_mode: u8,
+    pub(crate) transparency_mode: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PreparedDynamicLightingLight {
+    pub(crate) reference_form_id: u32,
+    pub(crate) slot: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

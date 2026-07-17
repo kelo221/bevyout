@@ -6,6 +6,14 @@ Feature: Source-compatible DynamicLighting core
     And bounce approximation is disabled and source shadows are enabled
     And its volumetric type is None radius is 4 thickness is 1 intensity is 0.75 and visibility is 2
 
+  Scenario: Standalone authoring stays direct-only while exposing the static bake modes
+    Given the default dynamic light configuration
+    Then its illumination mode is DirectIllumination and its shadow mode is RaytracedShadows
+
+  Scenario: Every Henry bounce compression width is represented
+    Given the imported DynamicLighting catalogs
+    Then the bounce compression bit widths are 8, 6, 5, and 4
+
   Scenario: Effect and spatial discriminants match upstream
     Given the imported DynamicLighting catalogs
     Then all DynamicLighting enum discriminants match upstream

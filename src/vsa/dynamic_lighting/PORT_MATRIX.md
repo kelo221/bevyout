@@ -50,8 +50,8 @@ covered by an automated test.
 | pulse speed `1`, modifier `0.25`, offset `0` | `DynamicLight.cs` | effect parameters | temporal runtime |
 | fixed step `1/30 s` | `DynamicLightCache.cs`, `MathEx.FixedTimestep` | `FixedTimestep` | temporal runtime |
 | global `Time.time` sampled once per update | `DynamicLightManager.cs` | `DynamicLightingAnimationClock` | shared temporal/spatial phase tests |
-| direct illumination, raytraced shadows | `DynamicLight.cs` | bounce off, custom shadows on | Unity defaults fixture |
-| bounce color `white/alpha 0`, modifier `1`, intensity `1` | `DynamicLight.cs` | optional approximation parameters | `bounce_color`; disabled by default |
+| direct illumination, raytraced shadows | `DynamicLight.cs` | standalone default remains direct-only; prepared Fallout lights use single bounce | Unity defaults fixture and bake tests |
+| bounce color `white/alpha 0`, modifier `1`, intensity `1` | `DynamicLight.cs` | live runtime bounce parameters over compressed static samples | `bounce_color`; prepared-scene bake tests |
 | type bits `type << 6` | `DynamicLighting.cginc` | `packed_channel` | ABI/channel tests |
 | realtime bit `1 << 5` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
 | shadow bit `1 << 15` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
@@ -84,15 +84,26 @@ meshes that receive shadows. A proxy which receives no allocation uploads the
 invalid-layer sentinel, restoring visibility to 1.0 while leaving the custom
 light active.
 
+## Static-bake boundary
+
+`baker.rs` owns the deterministic triangle artifact. `bake` runs it after
+static batching and writes `dynamic_lighting.bytes.gz`; the manifest records
+its revision, fingerprint, SHA-256, settings, catalog, and diagnostics. The
+local Bevy forward PBR shader selects a one-based mesh record through
+`MeshTag`, uses `primitive_index` and `TEXCOORD_1` for the prepared visibility
+sample, and applies the current runtime light color/intensity/effect to both
+direct and bounce contributions. The legacy D32 point cubemap is loaded only
+when a manifest has no validated DynamicLighting artifact.
+
 ## Explicitly incomplete source features
 
 | Source feature | Current status |
 | --- | --- |
-| baked triangle/photon-data bounce and compression | not ported; optional local diffuse approximation is labeled and default-off |
+| photon-cube angular transport | static single-bounce sampling and 8/6/5/4-bit compression are ported; the CPU implementation uses deterministic hemisphere samples rather than Unity render-camera captures |
 | cookie texture array and cookie sampling | not ported; no public inert cookie option |
 | shimmer | not ported; ABI values remain zero |
-| transparency-specific lighting | not ported |
-| non-direct source illumination modes | not ported |
+| transparency texture sampling | modes participate in artifacts/fingerprints; CPU alpha texture sampling is not yet connected |
+| non-direct source illumination modes | `DirectIllumination` and `SingleBounce` are public and wired |
 | per-camera light masks | not claimed; `DynamicLightLayerMask` filters the global extracted list |
 
 The production-GPU gate is

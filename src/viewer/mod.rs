@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bevy::asset::AssetId;
 use bevy::camera::{Exposure, Hdr};
-use bevy::core_pipeline::prepass::{DeferredPrepass, DepthPrepass};
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
@@ -319,6 +319,10 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
         quality: BakeQuality::Irradiance,
         irradiance_spacing_meters: 8.0,
         irradiance_samples: 64,
+        dynamic_lighting_texels_per_meter: 128,
+        dynamic_lighting_max_lightmap_size: 2048,
+        dynamic_lighting_bounce_samples: 32,
+        dynamic_lighting_bounce_compression: 8,
         static_batch_chunk_meters: 64.0,
         blender: args.blender.clone(),
         irradiance_blender: args.irradiance_blender.clone(),

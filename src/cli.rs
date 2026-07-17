@@ -294,6 +294,18 @@ pub struct BakeArgs {
         value_parser = parse_irradiance_samples
     )]
     pub(crate) irradiance_samples: u32,
+    /// Henry DynamicLighting atlas density in texels per square metre.
+    #[arg(long, default_value_t = 128, value_parser = parse_dynamic_lighting_texels_per_meter)]
+    pub(crate) dynamic_lighting_texels_per_meter: u32,
+    /// Maximum side length of an individual DynamicLighting lightmap.
+    #[arg(long, default_value_t = 2048, value_parser = parse_dynamic_lighting_max_lightmap_size)]
+    pub(crate) dynamic_lighting_max_lightmap_size: u32,
+    /// Number of deterministic single-bounce samples per triangle/light.
+    #[arg(long, default_value_t = 32, value_parser = parse_dynamic_lighting_bounce_samples)]
+    pub(crate) dynamic_lighting_bounce_samples: u32,
+    /// Quantisation width for single-bounce samples (4, 5, 6, or 8 bits).
+    #[arg(long, default_value_t = 8, value_parser = parse_dynamic_lighting_bounce_compression)]
+    pub(crate) dynamic_lighting_bounce_compression: u8,
     /// World-space size of material-compatible static geometry batches, in metres.
     #[arg(
         long,
@@ -394,6 +406,50 @@ fn parse_irradiance_samples(value: &str) -> Result<u32, String> {
         Ok(value)
     } else {
         Err("irradiance samples must be between 1 and 512".into())
+    }
+}
+
+fn parse_dynamic_lighting_texels_per_meter(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid dynamic-lighting texel density: {error}"))?;
+    if (1..=1024).contains(&value) {
+        Ok(value)
+    } else {
+        Err("dynamic-lighting texel density must be between 1 and 1024".into())
+    }
+}
+
+fn parse_dynamic_lighting_max_lightmap_size(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid dynamic-lighting lightmap size: {error}"))?;
+    if (64..=8192).contains(&value) {
+        Ok(value)
+    } else {
+        Err("dynamic-lighting lightmap size must be between 64 and 8192".into())
+    }
+}
+
+fn parse_dynamic_lighting_bounce_samples(value: &str) -> Result<u32, String> {
+    let value = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid dynamic-lighting bounce samples: {error}"))?;
+    if (1..=256).contains(&value) {
+        Ok(value)
+    } else {
+        Err("dynamic-lighting bounce samples must be between 1 and 256".into())
+    }
+}
+
+fn parse_dynamic_lighting_bounce_compression(value: &str) -> Result<u8, String> {
+    let value = value
+        .parse::<u8>()
+        .map_err(|error| format!("invalid dynamic-lighting compression: {error}"))?;
+    if matches!(value, 4 | 5 | 6 | 8) {
+        Ok(value)
+    } else {
+        Err("dynamic-lighting compression must be 4, 5, 6, or 8 bits".into())
     }
 }
 

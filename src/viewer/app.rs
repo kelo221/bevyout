@@ -101,7 +101,7 @@ pub(crate) fn run_view(
         AutoExposurePlugin,
         DynamicLightingPlugin,
     ));
-    app.insert_resource(DefaultOpaqueRendererMethod::deferred());
+    app.insert_resource(DefaultOpaqueRendererMethod::forward());
     // Realtime point shadows are a short-range quality/performance aid for
     // the strongest light. Keep the prepared cubemap artifacts at their
     // independent resolution; this only lowers the runtime shadow target.

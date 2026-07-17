@@ -24,12 +24,19 @@ pub(crate) use tools::*;
 use crate::cli::{BakeArgs, BakeQuality};
 
 use super::assets::{NIF_CONVERTER_REVISION, find_blender};
-use super::dynamic_lighting::DEFAULT_BOUNCE_MULTIPLIER;
+use super::dynamic_lighting::{
+    DEFAULT_BOUNCE_MULTIPLIER, DynamicBounceCompression, DynamicLightIlluminationMode,
+    DynamicLightShadowMode, DynamicLightTransparencyMode,
+    baker::{
+        DynamicLightingBakeSettings, DynamicLightingLightInput, DynamicLightingMeshInput,
+        build_dynamic_lighting_bake, generate_uv1,
+    },
+};
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_prepared_manifest_compatible,
-    is_pickup_record_kind,
+    is_pickup_record_kind, placement_never_casts_shadow,
 };
 use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
 use super::scenes::resolve_cached_manifest;
@@ -100,6 +107,7 @@ pub(crate) struct BakeOutputs {
     pub(crate) result_json: PathBuf,
     pub(crate) irradiance_blend: PathBuf,
     pub(crate) irradiance_raw: PathBuf,
+    pub(crate) dynamic_lighting_artifact: PathBuf,
     pub(crate) job_file: PathBuf,
 }
 
@@ -116,6 +124,7 @@ pub(crate) fn bake_outputs(manifest: &PreparedSceneManifest) -> Result<BakeOutpu
         result_json: output_dir.join("result.json"),
         irradiance_blend: output_dir.join("irradiance.blend"),
         irradiance_raw: output_dir.join("irradiance.raw"),
+        dynamic_lighting_artifact: output_dir.join("dynamic_lighting.bytes.gz"),
         job_file: output_dir.join("job.json"),
         asset_root,
         output_dir,
@@ -149,6 +158,10 @@ pub(crate) fn build_bake_job(
         irradiance_blend: blender_path(&outputs.irradiance_blend),
         irradiance_spacing_meters: args.irradiance_spacing_meters,
         irradiance_samples: args.irradiance_samples,
+        dynamic_lighting_texels_per_meter: args.dynamic_lighting_texels_per_meter,
+        dynamic_lighting_max_lightmap_size: args.dynamic_lighting_max_lightmap_size,
+        dynamic_lighting_bounce_samples: args.dynamic_lighting_bounce_samples,
+        dynamic_lighting_bounce_compression: args.dynamic_lighting_bounce_compression,
         preview_only: matches!(args.quality, BakeQuality::Preview),
         static_batch_chunk_meters: args.static_batch_chunk_meters,
         // Runtime glow maps are intentionally much brighter than their physical
@@ -179,6 +192,7 @@ pub(crate) fn build_bake_job(
             .iter()
             .filter(|light| light.initially_enabled)
             .map(|light| JobLight {
+                reference_form_id: light.reference_form_id,
                 translation: light.translation,
                 rotation_xyzw: light.rotation_xyzw,
                 color_rgba: light.color_rgba,
@@ -194,6 +208,9 @@ pub(crate) fn build_bake_job(
                     light.kind.clone()
                 },
                 bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
+                shadow_mode: DynamicLightShadowMode::RaytracedShadows,
+                illumination_mode: DynamicLightIlluminationMode::SingleBounce,
+                transparency_mode: DynamicLightTransparencyMode::Disabled,
             })
             .collect(),
     }
@@ -245,6 +262,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         result_json,
         irradiance_blend,
         irradiance_raw,
+        dynamic_lighting_artifact,
         job_file,
     } = &outputs;
     let mut job = build_bake_job(&manifest, args, &outputs);
@@ -292,7 +310,12 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     let temporary_scene = output_dir.join("scene.rust.tmp.glb");
     let ktx2_path = output_dir.join("irradiance.ktx2");
     let temporary_ktx = output_dir.join("irradiance.rust.tmp.ktx2");
-    for path in [&temporary_scene, &temporary_ktx] {
+    let temporary_dynamic_lighting = output_dir.join("dynamic_lighting.bytes.gz.tmp");
+    for path in [
+        &temporary_scene,
+        &temporary_ktx,
+        &temporary_dynamic_lighting,
+    ] {
         let _ = fs::remove_file(path);
     }
     println!(
@@ -308,9 +331,115 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         composed_elapsed.as_secs_f64()
     );
     rust_scene.write_glb(&temporary_scene)?;
+    let excluded_casters = manifest
+        .placements
+        .iter()
+        .filter(|placement| placement_never_casts_shadow(placement))
+        .map(|placement| placement.reference_form_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let compression = match args.dynamic_lighting_bounce_compression {
+        4 => DynamicBounceCompression::Bits4,
+        5 => DynamicBounceCompression::Bits5,
+        6 => DynamicBounceCompression::Bits6,
+        8 => DynamicBounceCompression::Bits8,
+        value => bail!("unsupported dynamic-lighting bounce compression {value}"),
+    };
+    let dynamic_settings = DynamicLightingBakeSettings {
+        texels_per_meter: args.dynamic_lighting_texels_per_meter,
+        max_lightmap_size: args.dynamic_lighting_max_lightmap_size,
+        bounce_samples: args.dynamic_lighting_bounce_samples,
+        bounce_compression: compression,
+        ..Default::default()
+    };
+    let dynamic_inputs = rust_scene
+        .primitives
+        .iter()
+        .map(|primitive| {
+            let positions = primitive
+                .positions
+                .iter()
+                .map(|value| value.to_array())
+                .collect::<Vec<_>>();
+            let normals = primitive
+                .normals
+                .iter()
+                .map(|value| value.to_array())
+                .collect::<Vec<_>>();
+            DynamicLightingMeshInput {
+                reference_form_ids: primitive.reference_form_ids.clone(),
+                uv1: Some(generate_uv1(&positions, &normals)),
+                positions,
+                normals,
+                indices: primitive.indices.clone(),
+                casts_static_shadow: !primitive
+                    .reference_form_ids
+                    .iter()
+                    .any(|id| excluded_casters.contains(id)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let dynamic_lights = job
+        .lights
+        .iter()
+        .map(|light| DynamicLightingLightInput {
+            reference_form_id: light.reference_form_id,
+            position: light.translation,
+            radius: light.radius,
+            shadow_mode: light.shadow_mode,
+            illumination_mode: light.illumination_mode,
+            transparency_mode: light.transparency_mode,
+        })
+        .collect::<Vec<_>>();
+    let dynamic_bake = build_dynamic_lighting_bake(
+        &dynamic_inputs,
+        &dynamic_lights,
+        dynamic_settings,
+        "henry-dynamic-lighting-v1",
+    )?;
+    let dynamic_artifact_sha256 = dynamic_bake.write_gzip(&temporary_dynamic_lighting)?;
+    let dynamic_lighting_metadata = super::manifest::PreparedDynamicLightingBake {
+        revision: dynamic_bake.revision.clone(),
+        source_fingerprint: dynamic_lighting_fingerprint(
+            &dynamic_inputs,
+            &dynamic_lights,
+            dynamic_settings,
+        ),
+        artifact_path: relative_asset_path(asset_root, dynamic_lighting_artifact)?,
+        artifact_sha256: dynamic_artifact_sha256,
+        settings: super::manifest::PreparedDynamicLightingSettings {
+            texels_per_meter: dynamic_settings.texels_per_meter,
+            max_lightmap_size: dynamic_settings.max_lightmap_size,
+            bounce_samples: dynamic_settings.bounce_samples,
+            bounce_compression_bits: dynamic_settings.bounce_compression.bits(),
+            shadow_mode: dynamic_settings.shadow_mode as u8,
+            illumination_mode: dynamic_settings.illumination_mode as u8,
+            transparency_mode: dynamic_settings.transparency_mode as u8,
+        },
+        lights: dynamic_bake
+            .lights
+            .iter()
+            .enumerate()
+            .map(
+                |(slot, light)| super::manifest::PreparedDynamicLightingLight {
+                    reference_form_id: light.reference_form_id,
+                    slot: slot as u32,
+                },
+            )
+            .collect(),
+        mesh_count: dynamic_bake.meshes.len() as u32,
+        triangle_count: dynamic_bake.diagnostics.triangle_count,
+        compressed_bytes: fs::metadata(&temporary_dynamic_lighting)?.len(),
+        bounce_bytes: (dynamic_bake.bounce_words.len() * 4) as u64,
+        candidate_associations: dynamic_bake.diagnostics.candidate_associations,
+        retained_associations: dynamic_bake.diagnostics.retained_associations,
+        occluded_samples: dynamic_bake.diagnostics.occluded_samples,
+    };
     let irradiance = rust_irradiance::bake_irradiance(
         &rust_scene,
-        &job.lights,
+        // Managed point lights remain live in DynamicLighting. Baking them
+        // into the cell irradiance volume would duplicate both their direct
+        // term and their temporal single-bounce contribution.
+        &[],
         &rust_irradiance::DirectionalBakeLight {
             color_rgba: job.cell_directional_rgba,
             rotation_xyzw: job.cell_directional_rotation_xyzw,
@@ -409,6 +538,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     );
     replace_output(&temporary_scene, output_scene)?;
     replace_output(&temporary_ktx, &ktx2_path)?;
+    replace_output(&temporary_dynamic_lighting, dynamic_lighting_artifact)?;
     let scene_path = relative_asset_path(asset_root, output_scene)?;
     let irradiance_path = relative_asset_path(asset_root, &ktx2_path)?;
     let source_fingerprint = bake_job_fingerprint(&manifest, &job)?;
@@ -425,6 +555,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
             resolution: irradiance.resolution,
             intensity: 1.0,
         }),
+        dynamic_lighting: Some(dynamic_lighting_metadata),
     });
     fs::write(
         manifest_path,
@@ -451,6 +582,59 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         ktx2_path.display()
     );
     Ok(())
+}
+
+fn dynamic_lighting_fingerprint(
+    meshes: &[DynamicLightingMeshInput],
+    lights: &[DynamicLightingLightInput],
+    settings: DynamicLightingBakeSettings,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"henry-dynamic-lighting-fingerprint-v1");
+    hash.update(settings.texels_per_meter.to_le_bytes());
+    hash.update(settings.max_lightmap_size.to_le_bytes());
+    hash.update(settings.bounce_samples.to_le_bytes());
+    hash.update([settings.bounce_compression.bits()]);
+    hash.update((settings.shadow_mode as u32).to_le_bytes());
+    hash.update((settings.illumination_mode as u32).to_le_bytes());
+    hash.update((settings.transparency_mode as u32).to_le_bytes());
+    for mesh in meshes {
+        hash.update([mesh.casts_static_shadow as u8]);
+        for id in &mesh.reference_form_ids {
+            hash.update(id.to_le_bytes());
+        }
+        for position in &mesh.positions {
+            for value in position {
+                hash.update(value.to_le_bytes());
+            }
+        }
+        for normal in &mesh.normals {
+            for value in normal {
+                hash.update(value.to_le_bytes());
+            }
+        }
+        for index in &mesh.indices {
+            hash.update(index.to_le_bytes());
+        }
+        if let Some(uv1) = &mesh.uv1 {
+            for uv in uv1 {
+                for value in uv {
+                    hash.update(value.to_le_bytes());
+                }
+            }
+        }
+    }
+    for light in lights {
+        hash.update(light.reference_form_id.to_le_bytes());
+        for value in light.position {
+            hash.update(value.to_le_bytes());
+        }
+        hash.update(light.radius.to_le_bytes());
+        hash.update((light.shadow_mode as u32).to_le_bytes());
+        hash.update((light.illumination_mode as u32).to_le_bytes());
+        hash.update((light.transparency_mode as u32).to_le_bytes());
+    }
+    format!("{:x}", hash.finalize())
 }
 
 fn replace_output(temporary: &Path, final_path: &Path) -> Result<()> {

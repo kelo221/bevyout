@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bevy::pbr::GlobalClusterableObjectMeta;
+use bevy::pbr::{DynamicLightingForwardBindings, GlobalClusterableObjectMeta};
 use bevy::{
     math::Vec3,
     prelude::{GlobalTransform, Resource},
@@ -14,6 +14,7 @@ use bytemuck::{Pod, Zeroable};
 use super::super::{
     bevy_bridge::{
         DynamicLight, DynamicLightPreparedShadow, DynamicLightRuntime, DynamicLightShadowProxy,
+        DynamicLightingBakeRuntime,
     },
     core::{
         DynamicLightType, DynamicLightVolumetricType, pack_volumetric_parameters, source_is_valid,
@@ -110,7 +111,11 @@ impl GpuDynamicLight {
             config.bounce.color_rgba[1],
             config.bounce.color_rgba[2],
         );
-        let bounce = if config.bounce.enabled {
+        let bounce = if matches!(
+            config.illumination_mode,
+            super::super::core::DynamicLightIlluminationMode::SingleBounce
+        ) || config.bounce.enabled
+        {
             color.lerp(authored_bounce, config.bounce.color_rgba[3])
                 * config.bounce.modifier
                 * config.bounce.intensity
@@ -224,6 +229,7 @@ pub(super) struct ExtractedDynamicLights {
 
 pub(super) struct ExtractedDynamicLight {
     pub(super) main_entity: bevy::prelude::Entity,
+    pub(super) prepared_reference_form_id: Option<u32>,
     pub(super) light: GpuDynamicLight,
     pub(super) prepared_shadow: GpuDynamicShadow,
 }
@@ -246,6 +252,11 @@ pub(super) struct DynamicLightGpuBuffers {
     pub(super) volumetric_meta: UniformBuffer<GpuDynamicLightMeta>,
     pub(super) volumetric_count: u32,
     pub(super) volumetric_enabled: bool,
+    pub(super) dynamic_triangles: RawBufferVec<u32>,
+    pub(super) dynamic_mesh_table: RawBufferVec<u32>,
+    pub(super) dynamic_bounce: RawBufferVec<u32>,
+    pub(super) dynamic_mesh_count: u32,
+    pub(super) dynamic_triangle_count: u32,
 }
 
 impl Default for DynamicLightGpuBuffers {
@@ -267,22 +278,57 @@ impl Default for DynamicLightGpuBuffers {
             volumetric_meta: UniformBuffer::from(GpuDynamicLightMeta::default()),
             volumetric_count: 0,
             volumetric_enabled: false,
+            dynamic_triangles: RawBufferVec::new(BufferUsages::STORAGE),
+            dynamic_mesh_table: RawBufferVec::new(BufferUsages::STORAGE),
+            dynamic_bounce: RawBufferVec::new(BufferUsages::STORAGE),
+            dynamic_mesh_count: 0,
+            dynamic_triangle_count: 0,
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_dynamic_light_buffers(
     extracted: Option<bevy::prelude::Res<ExtractedDynamicLights>>,
     proxies: bevy::prelude::Query<(bevy::prelude::Entity, &DynamicLightShadowProxy)>,
     clusterable_objects: bevy::prelude::Res<GlobalClusterableObjectMeta>,
     mut buffers: bevy::prelude::ResMut<DynamicLightGpuBuffers>,
+    artifact: Option<bevy::prelude::Res<DynamicLightingBakeRuntime>>,
     render_device: bevy::prelude::Res<RenderDevice>,
     render_queue: bevy::prelude::Res<RenderQueue>,
+    mut forward_bindings: bevy::prelude::ResMut<DynamicLightingForwardBindings>,
 ) {
     buffers.lights.clear();
     buffers.realtime_shadows.clear();
     buffers.prepared_shadows.clear();
     buffers.volumetric_lights.clear();
+    buffers.dynamic_triangles.clear();
+    buffers.dynamic_mesh_table.clear();
+    buffers.dynamic_bounce.clear();
+    if let Some(artifact) = artifact.as_ref() {
+        buffers
+            .dynamic_triangles
+            .extend(artifact.words.iter().copied());
+        buffers
+            .dynamic_bounce
+            .extend(artifact.bounce_words.iter().copied());
+        buffers.dynamic_mesh_table.push(artifact.mesh_count);
+        buffers
+            .dynamic_mesh_table
+            .push(artifact.bounce_compression_bits);
+        buffers
+            .dynamic_mesh_table
+            .extend(artifact.mesh_table.iter().copied());
+        buffers.dynamic_mesh_count = artifact.mesh_count;
+        buffers.dynamic_triangle_count = artifact.triangle_count;
+    } else {
+        buffers.dynamic_triangles.push(0);
+        buffers.dynamic_bounce.push(0);
+        buffers.dynamic_mesh_table.push(0);
+        buffers.dynamic_mesh_table.push(8);
+        buffers.dynamic_mesh_count = 0;
+        buffers.dynamic_triangle_count = 0;
+    }
     let proxy_shadows = proxies
         .iter()
         .filter_map(|(proxy_entity, proxy)| {
@@ -293,7 +339,38 @@ pub(super) fn prepare_dynamic_light_buffers(
         .collect::<HashMap<_, _>>();
     let (count, enabled, volumetric_count, volumetric_enabled) = if let Some(extracted) = extracted
     {
-        for extracted_light in &extracted.values {
+        let mut ordered = Vec::new();
+        if let Some(artifact) = artifact.as_ref() {
+            let mut prepared = extracted
+                .values
+                .iter()
+                .filter_map(|light| {
+                    light
+                        .prepared_reference_form_id
+                        .map(|form_id| (form_id, light))
+                })
+                .collect::<HashMap<_, _>>();
+            for form_id in artifact.light_form_ids.iter() {
+                ordered.push(prepared.remove(form_id));
+            }
+            ordered.extend(
+                extracted
+                    .values
+                    .iter()
+                    .filter(|light| light.prepared_reference_form_id.is_none())
+                    .map(Some),
+            );
+        } else {
+            ordered.extend(extracted.values.iter().map(Some));
+        }
+        let ordered_count = ordered.len() as u32;
+        for extracted_light in ordered {
+            let Some(extracted_light) = extracted_light else {
+                buffers.lights.push(GpuDynamicLight::zeroed());
+                buffers.realtime_shadows.push(GpuDynamicShadow::default());
+                buffers.prepared_shadows.push(GpuDynamicShadow::default());
+                continue;
+            };
             let mut light = extracted_light.light;
             let shadow = proxy_shadows.get(&extracted_light.main_entity).map_or_else(
                 GpuDynamicShadow::default,
@@ -315,7 +392,7 @@ pub(super) fn prepare_dynamic_light_buffers(
             buffers.volumetric_lights.push(*light);
         }
         (
-            extracted.values.len() as u32,
+            ordered_count,
             extracted.enabled as u32,
             extracted.volumetric_values.len() as u32,
             extracted.volumetric_enabled,
@@ -345,6 +422,26 @@ pub(super) fn prepare_dynamic_light_buffers(
     buffers
         .volumetric_lights
         .write_buffer(&render_device, &render_queue);
+    buffers
+        .dynamic_triangles
+        .write_buffer(&render_device, &render_queue);
+    buffers
+        .dynamic_bounce
+        .write_buffer(&render_device, &render_queue);
+    buffers
+        .dynamic_mesh_table
+        .write_buffer(&render_device, &render_queue);
+    if let (Some(lights), Some(mesh_table), Some(triangle_words), Some(bounce_words)) = (
+        buffers.lights.buffer(),
+        buffers.dynamic_mesh_table.buffer(),
+        buffers.dynamic_triangles.buffer(),
+        buffers.dynamic_bounce.buffer(),
+    ) {
+        forward_bindings.lights = lights.clone();
+        forward_bindings.mesh_table = mesh_table.clone();
+        forward_bindings.triangle_words = triangle_words.clone();
+        forward_bindings.bounce_words = bounce_words.clone();
+    }
     buffers.meta.set(GpuDynamicLightMeta {
         count,
         enabled,

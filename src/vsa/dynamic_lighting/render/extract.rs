@@ -84,6 +84,7 @@ pub(super) fn extract_dynamic_lights(
                 (
                     ordinal.0,
                     entity,
+                    prepared.map(|source| source.reference_form_id),
                     GpuDynamicLight::from_main_world(light, runtime, transform, prepared.is_some()),
                     volumetric,
                     volumetric_influence,
@@ -94,7 +95,7 @@ pub(super) fn extract_dynamic_lights(
             },
         )
         .collect::<Vec<_>>();
-    sorted.sort_unstable_by_key(|(ordinal, _, _, _, _, _)| *ordinal);
+    sorted.sort_unstable_by_key(|(ordinal, _, _, _, _, _, _)| *ordinal);
     let source_count = sorted.len();
     let truncated_count = source_count.saturating_sub(MAX_DYNAMIC_LIGHTS);
     let truncation_changed = diagnostics.set_truncated_light_count(truncated_count);
@@ -107,7 +108,7 @@ pub(super) fn extract_dynamic_lights(
     diagnostics.set_extracted_light_count(sorted.len());
     let mut volumetric_values = sorted
         .iter()
-        .filter_map(|(ordinal, _, _, light, influence, _)| {
+        .filter_map(|(ordinal, _, _, _, light, influence, _)| {
             light.map(|light| (*influence, *ordinal, light))
         })
         .collect::<Vec<_>>();
@@ -128,10 +129,13 @@ pub(super) fn extract_dynamic_lights(
         values: sorted
             .into_iter()
             .map(
-                |(_, main_entity, light, _, _, prepared_shadow)| ExtractedDynamicLight {
-                    main_entity,
-                    light,
-                    prepared_shadow,
+                |(_, main_entity, prepared_reference_form_id, light, _, _, prepared_shadow)| {
+                    ExtractedDynamicLight {
+                        main_entity,
+                        prepared_reference_form_id,
+                        light,
+                        prepared_shadow,
+                    }
                 },
             )
             .collect(),

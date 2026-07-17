@@ -79,6 +79,7 @@ fn prepared_artifact_versions_require_exact_pipeline_identity() {
         source_fingerprint: "fingerprint".into(),
         scene_path: "scenes/00000001/baked/scene.glb".into(),
         irradiance_volume: None,
+        dynamic_lighting: None,
     });
     let error = ensure_baked_scene_compatible(&stale_bake)
         .unwrap_err()

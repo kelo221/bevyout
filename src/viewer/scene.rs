@@ -10,11 +10,15 @@ use super::lighting_policy::{
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use crate::vsa::placement_never_casts_shadow;
+use crate::vsa::{DynamicLightingBake, DynamicLightingBakeRuntime};
 use bevy::asset::RenderAssetUsages;
+use bevy::gltf::GltfExtras;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::light::NotShadowCaster;
+use bevy::mesh::MeshTag;
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
+use sha2::{Digest, Sha256};
 
 #[derive(Component)]
 pub(crate) struct BakedStaticSceneRoot;
@@ -26,19 +30,30 @@ pub(crate) struct PreparedPointShadowReceiverRoot;
 /// async GLB scene instances appear. Combined baked geometry is also removed
 /// from Bevy's per-frame shadow pass; interactive/moving placements keep
 /// casting there, so the shader can combine both sources.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mark_prepared_shadow_meshes(
     mut commands: Commands,
     roots: Query<(Entity, Has<BakedStaticSceneRoot>), With<PreparedPointShadowReceiverRoot>>,
     placement_roots: Query<&interaction::PlacementRoot>,
+    gltf_extras: Query<&GltfExtras>,
     parents: Query<&ChildOf>,
     meshes: Query<Entity, Added<Mesh3d>>,
+    bake_runtime: Option<Res<DynamicLightingBakeRuntime>>,
+    mut next_mesh_tag: Local<u32>,
 ) {
     let roots = roots.iter().collect::<HashMap<_, _>>();
     for mesh in &meshes {
         let mut ancestor = mesh;
         let mut root_kind = None;
         let mut never_casts_shadow = false;
+        let mut authored_mesh_tag = None;
         loop {
+            if authored_mesh_tag.is_none() {
+                authored_mesh_tag = gltf_extras
+                    .get(ancestor)
+                    .ok()
+                    .and_then(dynamic_lighting_mesh_tag);
+            }
             if let Ok(placement_root) = placement_roots.get(ancestor) {
                 never_casts_shadow |= placement_never_casts_shadow(placement_root.placement());
             }
@@ -58,7 +73,31 @@ pub(crate) fn mark_prepared_shadow_meshes(
         if root_kind == Some(true) || never_casts_shadow {
             entity.insert(NotShadowCaster);
         }
+        if root_kind == Some(true)
+            && let Some(runtime) = bake_runtime
+                .as_ref()
+                .filter(|runtime| runtime.mesh_count > 0)
+        {
+            let tag = authored_mesh_tag
+                .filter(|tag| (1..=runtime.mesh_count).contains(tag))
+                .or_else(|| {
+                    *next_mesh_tag = (*next_mesh_tag).saturating_add(1);
+                    (*next_mesh_tag <= runtime.mesh_count).then_some(*next_mesh_tag)
+                });
+            if let Some(tag) = tag {
+                entity.insert(MeshTag(tag));
+            }
+        }
     }
+}
+
+fn dynamic_lighting_mesh_tag(extras: &GltfExtras) -> Option<u32> {
+    serde_json::from_str::<serde_json::Value>(&extras.value)
+        .ok()?
+        .get("bevyout_dynamic_lighting_mesh_tag")?
+        .as_u64()?
+        .try_into()
+        .ok()
 }
 
 pub(super) fn fallout_bloom() -> Bloom {
@@ -102,7 +141,6 @@ pub(crate) fn spawn_prepared_scene(
         HorizontalFov::default(),
         ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
-        DeferredPrepass,
         DynamicLightingView,
         OcclusionCulling,
         fallout_bloom(),
@@ -172,81 +210,90 @@ pub(crate) fn spawn_prepared_scene(
         ));
     }
     let mut prepared_shadow_records = HashMap::new();
-    let prepared_shadow_runtime = if let Some(shadows) = manifest.static_point_shadows.as_ref() {
-        prepared_shadow_records.extend(
-            shadows
-                .lights
-                .iter()
-                .map(|light| (light.reference_form_id, light)),
-        );
-        let artifact_path = PathBuf::from(&manifest.asset_root).join(
-            shadows
-                .asset_path
-                .replace('/', std::path::MAIN_SEPARATOR_STR),
-        );
-        let depth_data = (|| -> Result<Arc<[u8]>> {
-            let bytes = fs::read(&artifact_path).with_context(|| {
-                format!(
-                    "could not read prepared point-shadow artifact {}",
-                    artifact_path.display()
+    let legacy_static_shadows = manifest
+        .bake
+        .as_ref()
+        .is_none_or(|bake| bake.dynamic_lighting.is_none());
+    let prepared_shadow_runtime = if legacy_static_shadows {
+        if let Some(shadows) = manifest.static_point_shadows.as_ref() {
+            prepared_shadow_records.extend(
+                shadows
+                    .lights
+                    .iter()
+                    .map(|light| (light.reference_form_id, light)),
+            );
+            let artifact_path = PathBuf::from(&manifest.asset_root).join(
+                shadows
+                    .asset_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            let depth_data = (|| -> Result<Arc<[u8]>> {
+                let bytes = fs::read(&artifact_path).with_context(|| {
+                    format!(
+                        "could not read prepared point-shadow artifact {}",
+                        artifact_path.display()
+                    )
+                })?;
+                let image = Image::from_buffer(
+                    &bytes,
+                    ImageType::Extension("ktx2"),
+                    CompressedImageFormats::NONE,
+                    false,
+                    ImageSampler::Default,
+                    RenderAssetUsages::MAIN_WORLD,
                 )
-            })?;
-            let image = Image::from_buffer(
-                &bytes,
-                ImageType::Extension("ktx2"),
-                CompressedImageFormats::NONE,
-                false,
-                ImageSampler::Default,
-                RenderAssetUsages::MAIN_WORLD,
-            )
-            .with_context(|| {
-                format!(
-                    "could not decode prepared point-shadow artifact {}",
-                    artifact_path.display()
-                )
-            })?;
-            let expected_layers = shadows.lights.len() as u32 * 6;
-            if image.texture_descriptor.format != TextureFormat::Depth32Float
-                || image.texture_descriptor.size.width != shadows.resolution
-                || image.texture_descriptor.size.height != shadows.resolution
-                || image.texture_descriptor.size.depth_or_array_layers != expected_layers
-            {
-                anyhow::bail!(
-                    "prepared point-shadow artifact {} does not match D32_SFLOAT {}x{} with {} array layers",
-                    artifact_path.display(),
-                    shadows.resolution,
-                    shadows.resolution,
-                    expected_layers,
-                );
+                .with_context(|| {
+                    format!(
+                        "could not decode prepared point-shadow artifact {}",
+                        artifact_path.display()
+                    )
+                })?;
+                let expected_layers = shadows.lights.len() as u32 * 6;
+                if image.texture_descriptor.format != TextureFormat::Depth32Float
+                    || image.texture_descriptor.size.width != shadows.resolution
+                    || image.texture_descriptor.size.height != shadows.resolution
+                    || image.texture_descriptor.size.depth_or_array_layers != expected_layers
+                {
+                    anyhow::bail!(
+                        "prepared point-shadow artifact {} does not match D32_SFLOAT {}x{} with {} array layers",
+                        artifact_path.display(),
+                        shadows.resolution,
+                        shadows.resolution,
+                        expected_layers,
+                    );
+                }
+                image
+                    .data
+                    .map(Arc::from)
+                    .context("prepared point-shadow artifact decoded without depth data")
+            })();
+            let (depth_data, load_error) = match depth_data {
+                Ok(data) => (Some(data), None),
+                Err(error) => {
+                    error!("{error:#}");
+                    (None, Some(format!("{error:#}")))
+                }
+            };
+            commands.insert_resource(BakedPointShadowMap {
+                data: depth_data.clone(),
+                fingerprint: Some(shadows.source_fingerprint.clone()),
+                resolution: shadows.resolution,
+                layers: shadows.lights.len() as u32,
+            });
+            PreparedPointShadowRuntime {
+                revision: Some(shadows.revision.clone()),
+                fingerprint: Some(shadows.source_fingerprint.clone()),
+                asset_path: Some(shadows.asset_path.clone()),
+                resolution: shadows.resolution,
+                near_z: shadows.near_z,
+                layers: shadows.lights.len() as u32,
+                attached_lights: 0,
+                cpu_loaded: depth_data.is_some(),
+                load_error,
             }
-            image
-                .data
-                .map(Arc::from)
-                .context("prepared point-shadow artifact decoded without depth data")
-        })();
-        let (depth_data, load_error) = match depth_data {
-            Ok(data) => (Some(data), None),
-            Err(error) => {
-                error!("{error:#}");
-                (None, Some(format!("{error:#}")))
-            }
-        };
-        commands.insert_resource(BakedPointShadowMap {
-            data: depth_data.clone(),
-            fingerprint: Some(shadows.source_fingerprint.clone()),
-            resolution: shadows.resolution,
-            layers: shadows.lights.len() as u32,
-        });
-        PreparedPointShadowRuntime {
-            revision: Some(shadows.revision.clone()),
-            fingerprint: Some(shadows.source_fingerprint.clone()),
-            asset_path: Some(shadows.asset_path.clone()),
-            resolution: shadows.resolution,
-            near_z: shadows.near_z,
-            layers: shadows.lights.len() as u32,
-            attached_lights: 0,
-            cpu_loaded: depth_data.is_some(),
-            load_error,
+        } else {
+            commands.insert_resource(BakedPointShadowMap::default());
+            PreparedPointShadowRuntime::default()
         }
     } else {
         commands.insert_resource(BakedPointShadowMap::default());
@@ -254,14 +301,128 @@ pub(crate) fn spawn_prepared_scene(
     };
     let prepared_shadow_available = prepared_shadow_runtime.cpu_loaded;
     let mut attached_shadow_lights = 0_u32;
+    let mut dynamic_lighting_available = false;
     if let Some(bake) = &manifest.bake {
+        if let Some(dynamic) = &bake.dynamic_lighting {
+            let artifact_path = PathBuf::from(&manifest.asset_root).join(
+                dynamic
+                    .artifact_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            );
+            let loaded = (|| -> anyhow::Result<DynamicLightingBakeRuntime> {
+                let artifact_bytes = fs::read(&artifact_path).with_context(|| {
+                    format!(
+                        "could not read dynamic-lighting artifact {}",
+                        artifact_path.display()
+                    )
+                })?;
+                let mut hash = Sha256::new();
+                hash.update(&artifact_bytes);
+                let actual_sha = format!("{:x}", hash.finalize());
+                if actual_sha != dynamic.artifact_sha256 {
+                    anyhow::bail!(
+                        "dynamic-lighting artifact {} failed SHA-256 validation; run `bake {}`",
+                        artifact_path.display(),
+                        cell_label(&manifest.cell)
+                    );
+                }
+                let artifact =
+                    DynamicLightingBake::read_gzip(&artifact_path).with_context(|| {
+                        format!(
+                            "invalid dynamic-lighting artifact {}; run `bake {}`",
+                            artifact_path.display(),
+                            cell_label(&manifest.cell)
+                        )
+                    })?;
+                if artifact.revision != dynamic.revision
+                    || artifact.meshes.len() as u32 != dynamic.mesh_count
+                    || artifact.lights.len() as u32 != dynamic.lights.len() as u32
+                {
+                    anyhow::bail!(
+                        "dynamic-lighting artifact {} does not match its manifest metadata; run `bake {}`",
+                        artifact_path.display(),
+                        cell_label(&manifest.cell)
+                    );
+                }
+                let artifact_light_form_ids = artifact
+                    .lights
+                    .iter()
+                    .map(|light| light.reference_form_id)
+                    .collect::<Vec<_>>();
+                let mut manifest_lights = dynamic.lights.clone();
+                manifest_lights.sort_by_key(|light| light.slot);
+                if artifact_light_form_ids
+                    != manifest_lights
+                        .iter()
+                        .map(|light| light.reference_form_id)
+                        .collect::<Vec<_>>()
+                {
+                    anyhow::bail!(
+                        "dynamic-lighting artifact {} light catalog does not match its manifest; run `bake {}`",
+                        artifact_path.display(),
+                        cell_label(&manifest.cell)
+                    );
+                }
+                Ok(DynamicLightingBakeRuntime {
+                    revision: Some(dynamic.revision.clone()),
+                    artifact_path: Some(dynamic.artifact_path.clone()),
+                    artifact_sha256: Some(dynamic.artifact_sha256.clone()),
+                    mesh_count: dynamic.mesh_count,
+                    triangle_count: dynamic.triangle_count,
+                    light_count: dynamic.lights.len() as u32,
+                    compressed_bytes: dynamic.compressed_bytes,
+                    bounce_bytes: dynamic.bounce_bytes,
+                    bounce_compression_bits: dynamic.settings.bounce_compression_bits as u32,
+                    light_form_ids: Arc::from(artifact_light_form_ids),
+                    mesh_table: Arc::from(
+                        artifact
+                            .meshes
+                            .iter()
+                            .flat_map(|mesh| {
+                                [
+                                    mesh.tag,
+                                    mesh.triangle_count,
+                                    mesh.lightmap_resolution,
+                                    mesh.triangle_word_offset,
+                                    mesh.triangle_word_count,
+                                    mesh.bounce_word_offset,
+                                    mesh.bounce_word_count,
+                                ]
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    words: Arc::from(artifact.words),
+                    bounce_words: Arc::from(artifact.bounce_words),
+                })
+            })();
+            match loaded {
+                Ok(runtime) => {
+                    dynamic_lighting_available = runtime.mesh_count > 0;
+                    info!(
+                        "dynamic lighting bake {}: {} meshes, {} triangles, {} lights, {} bytes",
+                        dynamic.revision,
+                        dynamic.mesh_count,
+                        dynamic.triangle_count,
+                        dynamic.lights.len(),
+                        dynamic.compressed_bytes
+                    );
+                    commands.insert_resource(runtime);
+                }
+                Err(error) => {
+                    error!("{error:#}");
+                    commands.insert_resource(DynamicLightingBakeRuntime::default());
+                }
+            }
+        } else {
+            commands.insert_resource(DynamicLightingBakeRuntime::default());
+        }
         let mut root = commands.spawn((
             WorldAssetRoot(
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
             ),
             BakedStaticSceneRoot,
         ));
-        if prepared_shadow_available {
+        if prepared_shadow_available || dynamic_lighting_available {
             root.insert(PreparedPointShadowReceiverRoot);
         }
         if let Some(volume) = &bake.irradiance_volume {
@@ -360,6 +521,7 @@ pub(crate) fn spawn_prepared_scene(
                         light.color_rgba[2],
                     ))
                     .with_radius(source.radius)
+                    .with_bounce_approximation(true)
                     .with_volumetric(dynamic_volumetric_parameters(source.volumetric))
                     .with_shadows(prepared_shadow.is_some() || source.realtime_shadow_proxy),
                 DynamicLightPreparedSource {

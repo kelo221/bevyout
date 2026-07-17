@@ -32,6 +32,72 @@
 #import bevy_pbr::pbr_bindings::material_indices
 #endif  // BINDLESS
 
+@group(0) @binding(40) var<storage, read> dynamic_lighting_forward_lights: array<vec4<f32>>;
+@group(0) @binding(41) var<storage, read> dynamic_lighting_forward_meshes: array<u32>;
+@group(0) @binding(42) var<storage, read> dynamic_lighting_forward_triangles: array<u32>;
+@group(0) @binding(43) var<storage, read> dynamic_lighting_forward_bounce: array<u32>;
+
+fn dynamic_lighting_forward_contribution(
+    mesh_tag: u32,
+    primitive_index: u32,
+    uv1: vec2<f32>,
+    pbr_input: pbr_types::PbrInput,
+) -> vec3<f32> {
+    if mesh_tag == 0u || dynamic_lighting_forward_meshes[0] == 0u {
+        return vec3<f32>(0.0);
+    }
+    let mesh_record = 2u + (mesh_tag - 1u) * 7u;
+    let triangle_count = dynamic_lighting_forward_meshes[mesh_record + 1u];
+    if primitive_index >= triangle_count {
+        return vec3<f32>(0.0);
+    }
+    let triangle_offset = dynamic_lighting_forward_meshes[mesh_record + 3u] + primitive_index * 4u;
+    let light_data_offset = dynamic_lighting_forward_triangles[triangle_offset];
+    let light_count = min(dynamic_lighting_forward_triangles[light_data_offset], 32u);
+    let resolution = max(dynamic_lighting_forward_meshes[mesh_record + 2u], 1u);
+    let uv = clamp(uv1, vec2<f32>(0.0), vec2<f32>(0.999999));
+    let texel_x = min(resolution - 1u, u32(uv.x * f32(resolution)));
+    let texel_y = min(resolution - 1u, u32(uv.y * f32(resolution)));
+    let min_x = dynamic_lighting_forward_triangles[triangle_offset + 1u];
+    let min_y = dynamic_lighting_forward_triangles[triangle_offset + 2u];
+    let size = max(dynamic_lighting_forward_triangles[triangle_offset + 3u], 1u);
+    let local_x = min(size - 1u, select(0u, texel_x - min_x, texel_x >= min_x));
+    let local_y = min(size - 1u, select(0u, texel_y - min_y, texel_y >= min_y));
+    let texel_index = local_y * size + local_x;
+    var total = vec3<f32>(0.0);
+    for (var local_index = 0u; local_index < light_count; local_index += 1u) {
+        let entry = light_data_offset + 1u + local_index * 3u;
+        let light_index = dynamic_lighting_forward_triangles[entry] * 7u;
+        let light_position = dynamic_lighting_forward_lights[light_index].xyz;
+        let light_radius_sqr = dynamic_lighting_forward_lights[light_index].w;
+        let light_intensity = dynamic_lighting_forward_lights[light_index + 1u].x;
+        let light_color = dynamic_lighting_forward_lights[light_index + 2u].xyz;
+        let to_light = light_position - pbr_input.world_position.xyz;
+        let distance_sqr = max(dot(to_light, to_light), 0.0001);
+        let radius_sqr = max(light_radius_sqr, 0.0001);
+        let attenuation = max(0.0, 1.0 - distance_sqr / radius_sqr);
+        let direct = max(dot(pbr_input.N, normalize(to_light)), 0.0) * attenuation;
+        let shadow_offset = dynamic_lighting_forward_triangles[entry + 1u];
+        let shadow_word = dynamic_lighting_forward_triangles[shadow_offset + texel_index / 32u];
+        let shadow_bit = (shadow_word >> (texel_index & 31u)) & 1u;
+        let visibility = select(1.0, 0.0, shadow_bit != 0u);
+        var bounce = 0.0;
+        var bounce_color = light_color;
+        let bounce_offset = dynamic_lighting_forward_triangles[entry + 2u];
+        if bounce_offset != 0xffffffffu {
+            let bits = dynamic_lighting_forward_meshes[1u];
+            let mask = (1u << bits) - 1u;
+            let sample = dynamic_lighting_forward_bounce[bounce_offset] & mask;
+            bounce = f32(sample) / f32(mask);
+            let packed_bounce_color = dynamic_lighting_forward_lights[light_index + 6u];
+            bounce_color = packed_bounce_color.yzw;
+        }
+        total += light_color * light_intensity * (direct * visibility)
+            + bounce_color * light_intensity * (bounce * 0.5);
+    }
+    return total * pbr_input.material.base_color.rgb * 0.01;
+}
+
 // prepare a basic PbrInput from the vertex stage output, mesh binding and view binding
 fn pbr_input_from_vertex_output(
     in: VertexOutput,
