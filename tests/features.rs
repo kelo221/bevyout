@@ -626,6 +626,16 @@ struct BevyoutWorld {
     // -- nav_erosion.feature (issue #136, M4 wave 6) --
     erosion_mesh: erosion_policy::ErosionMeshInput,
     erosion_result: Option<erosion_policy::ErosionResult>,
+
+    // -- note_text.feature (issue #123) --
+    // Raw concatenated subrecord bytes (built with `nav_subrecord`) for the
+    // synthetic NOTE record's body: `openmw_esm4::Subrecord`'s fields are
+    // module-private, so this suite drives the real byte-level ESM4 decode
+    // the same way `nav_graph.feature`'s steps do rather than constructing
+    // decoded types directly.
+    note_record_data: Vec<u8>,
+    note_base: Option<openmw_esm4::BaseRecord>,
+    note_prepared_stats: Option<manifest::PreparedItemStats>,
 }
 
 fn find_placement<'a>(
@@ -6910,6 +6920,138 @@ async fn then_every_eroded_polygon_keeps_winding_sign(world: &mut BevyoutWorld) 
             eroded.abs() > 1.0e-6,
             "polygon {poly_index} degenerated: eroded area {eroded}"
         );
+    }
+}
+
+// --- #123 note text steps ---
+//
+// `openmw_esm4::Subrecord`/`FormIdResolver` fields are module-private, so
+// (unlike a `#[cfg(test)]` module living inside `openmw_esm4` itself) this
+// suite cannot construct them directly. It instead builds a minimal
+// synthetic plugin (a `CELL` plus one `NOTE` base record) out of raw ESM4
+// bytes -- the same `nav_subrecord`/`nav_record`/`nav_tes4` byte-level
+// helpers `nav_graph.feature`'s steps already use -- and drives the real
+// `openmw_esm4::parse_content_set` decode path end to end. The final
+// scenario mirrors `vsa::prepare::items::prepared_stats`'s `Note` arm
+// inline rather than calling it directly: `vsa::prepare::items` pulls in
+// the full prepare-module dependency graph (`PreparedPlacement`, physics
+// assets, …), which this suite does not otherwise include (see the module
+// doc comment at the top of this file for the narrow-inclusion rationale).
+// The real `prepared_stats` mapping is covered by
+// `vsa::prepare::items::tests::note_text_carries_into_prepared_stats`.
+
+const NOTE_TEXT_CELL_FORM_ID: u32 = 0x0090_0100;
+const NOTE_TEXT_NOTE_FORM_ID: u32 = 0x0090_0101;
+
+#[given(regex = r#"^a synthetic NOTE record with DATA type (\d+) and TNAM text "(.*)"$"#)]
+async fn given_note_text_type(world: &mut BevyoutWorld, note_type: u8, text: String) {
+    let mut tnam = text.into_bytes();
+    tnam.push(0);
+    world.note_record_data =
+        [nav_subrecord(b"DATA", &[note_type]), nav_subrecord(b"TNAM", &tnam)].concat();
+}
+
+#[given(regex = r"^a synthetic NOTE record with DATA type (\d+) and TNAM formid 0x([0-9A-Fa-f]+)$")]
+async fn given_note_formid_type(world: &mut BevyoutWorld, note_type: u8, form_id_hex: String) {
+    let form_id = u32::from_str_radix(&form_id_hex, 16).expect("hex form id");
+    world.note_record_data = [
+        nav_subrecord(b"DATA", &[note_type]),
+        nav_subrecord(b"TNAM", &form_id.to_le_bytes()),
+    ]
+    .concat();
+}
+
+#[given(regex = r#"^a synthetic NOTE record with no DATA subrecord and TNAM text "(.*)"$"#)]
+async fn given_note_no_data(world: &mut BevyoutWorld, text: String) {
+    let mut tnam = text.into_bytes();
+    tnam.push(0);
+    world.note_record_data = nav_subrecord(b"TNAM", &tnam);
+}
+
+#[when("the NOTE record is decoded")]
+async fn when_note_decoded(world: &mut BevyoutWorld) {
+    let mut plugin = nav_tes4(&[]);
+    plugin.extend(nav_record(
+        b"CELL",
+        0,
+        NOTE_TEXT_CELL_FORM_ID,
+        &[
+            nav_subrecord(b"EDID", b"NoteTextCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(nav_record(
+        b"NOTE",
+        0,
+        NOTE_TEXT_NOTE_FORM_ID,
+        &world.note_record_data,
+    ));
+    let sources = vec![openmw_esm4::PluginSource {
+        name: "Fallout3.esm",
+        bytes: &plugin,
+    }];
+    let parsed =
+        openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(NOTE_TEXT_CELL_FORM_ID))
+            .expect("synthetic NOTE plugin must parse");
+    world.note_base = parsed.bases.get(&NOTE_TEXT_NOTE_FORM_ID).cloned();
+}
+
+#[then(regex = r#"^the decoded note text is "(.*)"$"#)]
+async fn then_note_text_is(world: &mut BevyoutWorld, expected: String) {
+    match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => {
+            assert_eq!(text.as_deref(), Some(expected.as_str()));
+        }
+        other => panic!("expected Note item stats, got {other:?}"),
+    }
+}
+
+#[then("the decoded note text is absent")]
+async fn then_note_text_absent(world: &mut BevyoutWorld) {
+    match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => assert!(text.is_none()),
+        other => panic!("expected Note item stats, got {other:?}"),
+    }
+}
+
+#[when("the decoded base record is prepared into item catalog stats")]
+async fn when_note_prepared_into_catalog_stats(world: &mut BevyoutWorld) {
+    let stats = match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => {
+            manifest::PreparedItemStats::Note { text: text.clone() }
+        }
+        other => panic!("expected Note item stats, got {other:?}"),
+    };
+    world.note_prepared_stats = Some(stats);
+}
+
+#[then(regex = r#"^the prepared catalog note text is "(.*)"$"#)]
+async fn then_prepared_catalog_note_text_is(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .note_prepared_stats
+        .as_ref()
+        .expect("catalog stats must be prepared")
+    {
+        manifest::PreparedItemStats::Note { text } => {
+            assert_eq!(text.as_deref(), Some(expected.as_str()));
+        }
+        other => panic!("expected Note prepared stats, got {other:?}"),
     }
 }
 
