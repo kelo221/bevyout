@@ -643,6 +643,12 @@ struct BevyoutWorld {
     /// starts-dead), assembled into one synthetic plugin byte stream by the
     /// When step.
     corpse_achr_entries: Vec<(u32, u32, bool)>,
+    /// Pending synthetic `NPC_` base-record fixtures (base FormID,
+    /// starts-dead), assembled into the same synthetic plugin byte stream
+    /// by the When step (issue #120 rework: the real FO3 starts-dead
+    /// signal lives on the base record's header flags, not the ACHR
+    /// reference's).
+    corpse_npc_bases: Vec<(u32, bool)>,
     corpse_parsed: Option<openmw_esm4::ParsedPlugin>,
 }
 
@@ -7095,6 +7101,20 @@ async fn given_corpse_achr_living(
         .push((parse_hex(&reference_hex), parse_hex(&base_hex), false));
 }
 
+// Issue #120 rework: the real FO3 starts-dead signal lives on the base
+// `NPC_` record's own header flags, not the ACHR reference's (see
+// features/real_corpses.feature's header comment for the real-data
+// survey).
+#[given(regex = r"^an NPC_ base 0x([0-9a-fA-F]+) that starts dead$")]
+async fn given_corpse_npc_base_dead(world: &mut BevyoutWorld, base_hex: String) {
+    world.corpse_npc_bases.push((parse_hex(&base_hex), true));
+}
+
+#[given(regex = r"^a living NPC_ base 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_npc_base_living(world: &mut BevyoutWorld, base_hex: String) {
+    world.corpse_npc_bases.push((parse_hex(&base_hex), false));
+}
+
 #[when("the real-corpses content set is parsed")]
 async fn when_corpse_content_set_parsed(world: &mut BevyoutWorld) {
     let mut bytes = nav_tes4(&[]);
@@ -7108,16 +7128,33 @@ async fn when_corpse_content_set_parsed(world: &mut BevyoutWorld) {
         ]
         .concat(),
     ));
+    // `NPC_` base records are content-set-wide, not cell-scoped (unlike
+    // ACHR/ACRE/REFR references), so they are emitted top-level here --
+    // same as `fabricated_content`'s STAT/MISC/etc. bases in
+    // `src/vsa/prepare/tests/mod.rs`, no GRUP wrapping needed.
+    for (base_form_id, starts_dead) in &world.corpse_npc_bases {
+        // 0x00080000 is the FO3-specific NPC_ record-header "starts dead"
+        // bit (vsa::prepare::placements::NPC_STARTS_DEAD -- see that
+        // constant's doc comment for the real-data survey against
+        // Fallout3.esm) -- same inline-literal convention
+        // `when_nav_content_set_parsed` above uses for `RECORD_DELETED`.
+        let flags = if *starts_dead { 0x0008_0000 } else { 0 };
+        let edid = nav_subrecord(b"EDID", b"CorpseFixture\0");
+        bytes.extend(nav_record(b"NPC_", flags, *base_form_id, &edid));
+    }
     let mut children = Vec::new();
     for (reference_form_id, base_form_id, starts_dead) in &world.corpse_achr_entries {
         // ACHR `DATA`: position (3x f32) + rotation (3x f32), 24 bytes --
         // `parse_reference` requires at least that length.
         let mut data = nav_subrecord(b"NAME", &base_form_id.to_le_bytes());
         data.extend(nav_subrecord(b"DATA", &[0_u8; 24]));
-        // 0x00000200 is the ESM4 record-header "starts dead" flag for ACHR
-        // (openmw_esm4::RECORD_STARTS_DEAD / OpenMW's `Rec_StartDead`,
-        // `components/esm4/common.hpp`) -- same inline-literal convention
-        // `when_nav_content_set_parsed` above uses for `RECORD_DELETED`.
+        // 0x00000200 is the ESM4 record-header bit OpenMW documents as
+        // "starts dead" for ACHR (openmw_esm4's `RECORD_STARTS_DEAD` /
+        // `Rec_StartDead`, `components/esm4/common.hpp`) -- kept here as
+        // the secondary/harmless path's own round-trip coverage (real FO3
+        // data never sets it; see `NPC_STARTS_DEAD`'s doc comment) -- same
+        // inline-literal convention `when_nav_content_set_parsed` above
+        // uses for `RECORD_DELETED`.
         let flags = if *starts_dead { 0x0000_0200 } else { 0 };
         children.extend(nav_record(b"ACHR", flags, *reference_form_id, &data));
     }
@@ -7144,6 +7181,16 @@ fn corpse_parsed_reference(world: &BevyoutWorld, form_id: u32) -> &openmw_esm4::
         .unwrap_or_else(|| panic!("reference {form_id:08x} was not parsed"))
 }
 
+fn corpse_parsed_base(world: &BevyoutWorld, form_id: u32) -> &openmw_esm4::BaseRecord {
+    world
+        .corpse_parsed
+        .as_ref()
+        .expect("the real-corpses content set must be parsed first")
+        .bases
+        .get(&form_id)
+        .unwrap_or_else(|| panic!("NPC_ base {form_id:08x} was not parsed"))
+}
+
 #[then(regex = r"^the parsed reference 0x([0-9a-fA-F]+) starts dead$")]
 async fn then_parsed_reference_starts_dead(world: &mut BevyoutWorld, form_hex: String) {
     let reference = corpse_parsed_reference(world, parse_hex(&form_hex));
@@ -7161,6 +7208,26 @@ async fn then_parsed_reference_does_not_start_dead(world: &mut BevyoutWorld, for
         reference.flags & 0x0000_0200,
         0,
         "reference {form_hex} unexpectedly decoded the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed NPC_ base 0x([0-9a-fA-F]+) starts dead$")]
+async fn then_parsed_npc_base_starts_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let base = corpse_parsed_base(world, parse_hex(&form_hex));
+    assert_ne!(
+        base.record_flags & 0x0008_0000,
+        0,
+        "NPC_ base {form_hex} did not decode the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed NPC_ base 0x([0-9a-fA-F]+) does not start dead$")]
+async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let base = corpse_parsed_base(world, parse_hex(&form_hex));
+    assert_eq!(
+        base.record_flags & 0x0008_0000,
+        0,
+        "NPC_ base {form_hex} unexpectedly decoded the starts-dead flag"
     );
 }
 
