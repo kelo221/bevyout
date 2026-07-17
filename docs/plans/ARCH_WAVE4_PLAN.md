@@ -27,4 +27,7 @@ Focused console/script/bridge tests, Cucumber, then the full Rust gate.
 
 ## Shipped amendments
 
-None yet.
+- Navigation registration is its own adapter module even though execution
+  remains owned by `nav_overlay` and `nav::agent`; this keeps a single nav
+  authority while making console ownership discoverable. The console root is
+  capped at 150 lines and the shared test harness moved to `console/tests.rs`.

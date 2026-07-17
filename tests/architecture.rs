@@ -71,3 +71,31 @@ fn interaction_coordinator_stays_small_and_delegates_by_behavior() {
         );
     }
 }
+
+#[test]
+fn viewer_console_coordinator_stays_small_and_delegates_by_command_family() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer");
+    let coordinator =
+        fs::read_to_string(root.join("console.rs")).expect("read viewer console coordinator");
+    assert!(
+        coordinator.lines().count() <= 150,
+        "viewer/console.rs must remain a thin Bevy plugin and registration boundary"
+    );
+
+    for module in [
+        "common.rs",
+        "item_commands.rs",
+        "navigation_commands.rs",
+        "persistence_commands.rs",
+        "player_commands.rs",
+        "render_commands.rs",
+        "ui_commands.rs",
+        "world_commands.rs",
+        "tests.rs",
+    ] {
+        assert!(
+            root.join("console").join(module).is_file(),
+            "missing viewer console capability module {module}"
+        );
+    }
+}
