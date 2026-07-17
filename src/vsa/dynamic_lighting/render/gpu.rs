@@ -297,6 +297,7 @@ pub(super) fn prepare_dynamic_light_buffers(
     render_device: bevy::prelude::Res<RenderDevice>,
     render_queue: bevy::prelude::Res<RenderQueue>,
     mut forward_bindings: bevy::prelude::ResMut<DynamicLightingForwardBindings>,
+    diagnostics: bevy::prelude::Res<super::super::bevy_bridge::DynamicLightingDiagnostics>,
 ) {
     buffers.lights.clear();
     buffers.realtime_shadows.clear();
@@ -316,6 +317,7 @@ pub(super) fn prepare_dynamic_light_buffers(
         buffers
             .dynamic_mesh_table
             .push(artifact.bounce_compression_bits);
+        buffers.dynamic_mesh_table.push(0);
         buffers
             .dynamic_mesh_table
             .extend(artifact.mesh_table.iter().copied());
@@ -326,6 +328,7 @@ pub(super) fn prepare_dynamic_light_buffers(
         buffers.dynamic_bounce.push(0);
         buffers.dynamic_mesh_table.push(0);
         buffers.dynamic_mesh_table.push(8);
+        buffers.dynamic_mesh_table.push(0);
         buffers.dynamic_mesh_count = 0;
         buffers.dynamic_triangle_count = 0;
     }
@@ -400,6 +403,7 @@ pub(super) fn prepare_dynamic_light_buffers(
     } else {
         (0, 0, 0, false)
     };
+    buffers.dynamic_mesh_table.values_mut()[2] = if enabled != 0 { count } else { 0 };
     if buffers.lights.is_empty() {
         buffers.lights.push(GpuDynamicLight::zeroed());
     }
@@ -441,6 +445,7 @@ pub(super) fn prepare_dynamic_light_buffers(
         forward_bindings.mesh_table = mesh_table.clone();
         forward_bindings.triangle_words = triangle_words.clone();
         forward_bindings.bounce_words = bounce_words.clone();
+        diagnostics.set_surface_pass_ready();
     }
     buffers.meta.set(GpuDynamicLightMeta {
         count,

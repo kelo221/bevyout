@@ -14,6 +14,10 @@
     parallax_mapping::parallaxed_uv,
     lightmap::lightmap,
 }
+#import bevyout_dynamic_lighting::{
+    spatial::spatial_multiplier,
+    types::{DynamicLight, attenuation},
+}
 
 #ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
 #import bevy_pbr::mesh_view_bindings::screen_space_ambient_occlusion_texture
@@ -37,16 +41,77 @@
 @group(0) @binding(42) var<storage, read> dynamic_lighting_forward_triangles: array<u32>;
 @group(0) @binding(43) var<storage, read> dynamic_lighting_forward_bounce: array<u32>;
 
+fn dynamic_lighting_forward_light(light_slot: u32) -> DynamicLight {
+    let offset = light_slot * 7u;
+    let block0 = dynamic_lighting_forward_lights[offset];
+    let block1 = dynamic_lighting_forward_lights[offset + 1u];
+    let block2 = dynamic_lighting_forward_lights[offset + 2u];
+    let block3 = dynamic_lighting_forward_lights[offset + 3u];
+    let block4 = dynamic_lighting_forward_lights[offset + 4u];
+    let block5 = dynamic_lighting_forward_lights[offset + 5u];
+    let block6 = dynamic_lighting_forward_lights[offset + 6u];
+    return DynamicLight(
+        block0.xyz,
+        block0.w,
+        bitcast<u32>(block1.x),
+        block1.y,
+        block1.z,
+        block1.w,
+        block2.xyz,
+        block2.w,
+        block3.xyz,
+        block3.w,
+        block4.xyz,
+        block4.w,
+        block5.x,
+        block5.y,
+        bitcast<u32>(block5.z),
+        bitcast<u32>(block5.w),
+        block6,
+    );
+}
+
+fn dynamic_lighting_forward_direct(
+    light: DynamicLight,
+    pbr_input: pbr_types::PbrInput,
+) -> vec3<f32> {
+    if light.radius_sqr <= 0.0 || light.intensity <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let to_light = light.position - pbr_input.world_position.xyz;
+    let distance_sqr = max(dot(to_light, to_light), 0.0001);
+    if distance_sqr >= light.radius_sqr {
+        return vec3<f32>(0.0);
+    }
+    let direction = normalize(to_light);
+    let diffuse = max(dot(pbr_input.N, direction), 0.0);
+    // Henry's light direction is source-to-surface; the PBR normal term uses
+    // the opposite surface-to-source direction.
+    let spatial = spatial_multiplier(light, pbr_input.world_position.xyz, to_light, -direction);
+    return light.color * diffuse * spatial * attenuation(light, distance_sqr);
+}
+
 fn dynamic_lighting_forward_contribution(
     mesh_tag: u32,
     primitive_index: u32,
     uv1: vec2<f32>,
     pbr_input: pbr_types::PbrInput,
 ) -> vec3<f32> {
-    if mesh_tag == 0u || dynamic_lighting_forward_meshes[0] == 0u {
+    let runtime_light_count = min(dynamic_lighting_forward_meshes[2u], 1024u);
+    if runtime_light_count == 0u {
         return vec3<f32>(0.0);
     }
-    let mesh_record = 2u + (mesh_tag - 1u) * 7u;
+    if mesh_tag == 0u || dynamic_lighting_forward_meshes[0] == 0u {
+        var unbaked_total = vec3<f32>(0.0);
+        for (var light_slot = 0u; light_slot < runtime_light_count; light_slot += 1u) {
+            unbaked_total += dynamic_lighting_forward_direct(
+                dynamic_lighting_forward_light(light_slot),
+                pbr_input,
+            );
+        }
+        return unbaked_total * pbr_input.material.base_color.rgb * 0.01;
+    }
+    let mesh_record = 3u + (mesh_tag - 1u) * 7u;
     let triangle_count = dynamic_lighting_forward_meshes[mesh_record + 1u];
     if primitive_index >= triangle_count {
         return vec3<f32>(0.0);
@@ -67,33 +132,27 @@ fn dynamic_lighting_forward_contribution(
     var total = vec3<f32>(0.0);
     for (var local_index = 0u; local_index < light_count; local_index += 1u) {
         let entry = light_data_offset + 1u + local_index * 3u;
-        let light_index = dynamic_lighting_forward_triangles[entry] * 7u;
-        let light_position = dynamic_lighting_forward_lights[light_index].xyz;
-        let light_radius_sqr = dynamic_lighting_forward_lights[light_index].w;
-        let light_intensity = dynamic_lighting_forward_lights[light_index + 1u].x;
-        let light_color = dynamic_lighting_forward_lights[light_index + 2u].xyz;
-        let to_light = light_position - pbr_input.world_position.xyz;
-        let distance_sqr = max(dot(to_light, to_light), 0.0001);
-        let radius_sqr = max(light_radius_sqr, 0.0001);
-        let attenuation = max(0.0, 1.0 - distance_sqr / radius_sqr);
-        let direct = max(dot(pbr_input.N, normalize(to_light)), 0.0) * attenuation;
+        let light_slot = dynamic_lighting_forward_triangles[entry];
+        if light_slot >= runtime_light_count {
+            continue;
+        }
+        let light = dynamic_lighting_forward_light(light_slot);
         let shadow_offset = dynamic_lighting_forward_triangles[entry + 1u];
         let shadow_word = dynamic_lighting_forward_triangles[shadow_offset + texel_index / 32u];
         let shadow_bit = (shadow_word >> (texel_index & 31u)) & 1u;
         let visibility = select(1.0, 0.0, shadow_bit != 0u);
         var bounce = 0.0;
-        var bounce_color = light_color;
+        var bounce_color = light.color;
         let bounce_offset = dynamic_lighting_forward_triangles[entry + 2u];
         if bounce_offset != 0xffffffffu {
             let bits = dynamic_lighting_forward_meshes[1u];
             let mask = (1u << bits) - 1u;
             let sample = dynamic_lighting_forward_bounce[bounce_offset] & mask;
             bounce = f32(sample) / f32(mask);
-            let packed_bounce_color = dynamic_lighting_forward_lights[light_index + 6u];
-            bounce_color = packed_bounce_color.yzw;
+            bounce_color = light.falloff_and_bounce.yzw;
         }
-        total += light_color * light_intensity * (direct * visibility)
-            + bounce_color * light_intensity * (bounce * 0.5);
+        total += dynamic_lighting_forward_direct(light, pbr_input) * visibility
+            + bounce_color * light.intensity * (bounce * 0.5);
     }
     return total * pbr_input.material.base_color.rgb * 0.01;
 }

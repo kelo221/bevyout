@@ -320,7 +320,11 @@ fn capture_gpu_acceptance(
         }
         1 => {
             state.waited_frames += 1;
-            if state.waited_frames < 4 {
+            // The forward PBR pipeline may still be compiling after the
+            // artifact buffers become ready, especially on a cold DX12 run.
+            // Give it enough presented frames before the enabled capture so
+            // the comparison cannot accidentally record the fallback frame.
+            if state.waited_frames < 24 {
                 return;
             }
             commands
