@@ -1072,12 +1072,21 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
             TargetReachedCondition::Distance(Some(AGENT_TARGET_REACHED_DISTANCE)),
         ))
         .id();
+    // Zero offset (issue #114 real-data regression fix, M4 wave 5): the
+    // parent `agent_entity`'s `Transform` is already the capsule *centre*
+    // (physics-authoritative movement positions it there, mirroring the
+    // player's own capsule-centre convention -- see `spawn_bare_agent`'s
+    // doc comment and the horizontal-distance regression fix a few commits
+    // back), not feet level like the wave-3/4 navmesh-Y-snapped kinematic
+    // agent this `AGENT_HEIGHT / 2.0` offset used to compensate for. Lifting
+    // the visual child by another half-height on top of an already-centred
+    // parent double-counts that offset, floating the rendered capsule a
+    // full half-height above the floor even though the physics capsule
+    // (steps/slopes) sits correctly. `Capsule3d`'s mesh is centred at its
+    // own local origin, so a zero-offset child renders centred exactly on
+    // the parent -- the capsule bottom lands on the feet/floor.
     let visual = world
-        .spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
-        ))
+        .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::IDENTITY))
         .id();
     world.entity_mut(agent_entity).add_child(visual);
     agent_entity
@@ -2880,6 +2889,54 @@ mod tests {
         assert!(
             !kcc.stuck,
             "a target directly above/below the agent must never latch `stuck` via the horizontal-only distance check"
+        );
+    }
+
+    /// Regression test (issue #114 added scope, M4 wave 5 real-data
+    /// acceptance finding): `spawn_test_agent`'s visual child must sit
+    /// exactly centred on its parent (zero local offset), never raised.
+    /// Physics-authoritative movement's parent `Transform` is already the
+    /// capsule *centre* -- the wave-3/4 kinematic agent's `AGENT_HEIGHT /
+    /// 2.0` visual-lift compensated for that agent's `Transform` instead
+    /// sitting at feet level (navmesh-Y-snapped every tick); reintroducing
+    /// that lift on a now-already-centred parent double-counts it and
+    /// floats the rendered capsule a full half-height above the floor even
+    /// though the physics capsule (steps/slopes) sits correctly. Tied
+    /// explicitly to the centre-based parent so this can't silently
+    /// regress if someone reintroduces a feet-level assumption for either
+    /// side of the parent/child pair.
+    #[test]
+    fn the_visual_capsule_is_centred_on_the_agent_parent_not_raised_above_it() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<NavArchipelagoState>();
+        let archipelago_entity = world.spawn_empty().id();
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago_entity);
+
+        // A parent position with a nonzero, non-round Y so an accidental
+        // absolute (rather than relative-to-parent) offset would also be
+        // caught.
+        let parent_position = Vec3::new(1.0, 2.0, 3.0);
+        let agent = spawn_test_agent(&mut world, parent_position);
+
+        let children = world
+            .get::<Children>(agent)
+            .expect("spawn_test_agent adds exactly one visual child");
+        assert_eq!(children.len(), 1, "exactly one visual child");
+        let visual = children[0];
+
+        // A zero local offset is exactly the "world Y equals the parent's
+        // world Y" statement for a child with no rotation/scale on the
+        // parent (`spawn_test_agent`'s agent entity carries neither) --
+        // asserted directly on the local `Transform` rather than via
+        // `GlobalTransform`, which this bare `World` never propagates.
+        let visual_local = world.get::<Transform>(visual).unwrap();
+        assert_eq!(
+            visual_local.translation,
+            Vec3::ZERO,
+            "the visual child must be centred on the agent parent (zero local offset) -- \
+             the parent transform is already the capsule centre post-#114, not feet level"
         );
     }
 
