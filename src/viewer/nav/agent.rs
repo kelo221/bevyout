@@ -26,10 +26,15 @@
 //!
 //! Mid-route door gating (issue #137): a closed door does not always sit at
 //! a #113 link boundary. Real FO3 doors are single-sided NAVM triangles
-//! (`landmass_graph::single_sided_doors`), and one that does *not* resolve
-//! to a travel-cell destination is just an ordinary interior door in the
-//! middle of an otherwise-contiguous walkable mesh -- there is no seam to
-//! hang an off-mesh link off. Two mechanisms were weighed:
+//! (`landmass_graph::single_sided_doors`) -- **every real door triangle
+//! sampled across the prepared catalog resolves to a travel destination**
+//! (an earlier revision of this module gated only the non-travel subset,
+//! which is empty on real data and so never fired at all; see the git
+//! history for that dead end). Several travel-door triangles also have 2-3
+//! walkable neighbors, so the mesh continues right through them: an
+//! ordinary `tna goto` past a closed travel door crosses its triangle as
+//! plain ground, with nothing pausing the agent for the door to open.
+//! Two mechanisms were weighed for gating that crossing:
 //!
 //! - **Off-mesh links across the door triangle** (excluding the polygon and
 //!   bridging it with an `AnimationLink3d`, the same shape the two-sided
@@ -41,26 +46,37 @@
 //!   "other side" point to link to without new edge-adjacency geometry, and
 //!   excluding the polygon without a working bridge would just replace
 //!   "clips through" with "always unreachable", locked or not.
-//! - **Route-crossing proximity check** (the one implemented): the
-//!   triangle stays walkable at all times, exactly mirroring how
-//!   `TRAVEL_ARRIVAL_DISTANCE` already gates travel-door arrival --
-//!   proximity to the door's triangle midpoint, checked inside
+//! - **Route-crossing proximity check** (the one implemented): every
+//!   single-sided door's triangle -- travel-door candidate or not -- stays
+//!   walkable at all times and is a crossing-gate candidate
+//!   (`NavArchipelagoState::mid_route_doors`), exactly mirroring how
+//!   `TRAVEL_ARRIVAL_DISTANCE` already gates travel-door *arrival*.
+//!   Proximity to a candidate's triangle midpoint, checked inside
 //!   `drive_door_link_for_agent`'s existing `Idle`/`Failed`/`TravelReached`
-//!   arm, fires the *same* `DoorLinkEvent::LinkReached` the off-mesh link
-//!   case fires. A closed-unlocked door resolves through the ordinary
-//!   `Paused` -> `Traversing` -> `Idle` path; a locked door never opens
+//!   arm right after the travel-arrival check, fires the *same*
+//!   `DoorLinkEvent::LinkReached` the off-mesh link case fires -- but
+//!   always with an `IntraCell` destination, never `Travel`: crossing a
+//!   travel door's triangle mid-route (a `goto`, or a `tna travel` to a
+//!   *different* door) is not the agent's own travel terminal, so it must
+//!   not hand off to another cell. The one door a candidate is deliberately
+//!   *not* gated for is the agent's own `travel_intent` target -- the
+//!   travel-arrival check just above already owns that door's full
+//!   pause -> open -> traverse -> `TravelReached` -> handoff lifecycle, and
+//!   double-gating the same door for the same agent would fight it.
+//!   A closed-unlocked crossing resolves through the ordinary
+//!   `Paused` -> `Traversing` -> `Idle` path; a locked one never opens
 //!   through the scripted boundary and reaches the *existing* `Failed`
 //!   terminal via `MAX_WAIT_TICKS`, deterministically stopping the agent
 //!   instead of letting it clip through. No off-mesh gap exists to cross,
 //!   so resuming completes the crossing in the same tick instead of
 //!   spawning a `DoorTraversal` (see the `Paused` arm's `None` case).
 //!   Reuses `door_link.rs`'s FSM and `door_availability_system`'s existing
-//!   generic per-door-form-ID tracking unchanged -- mid-route doors are
-//!   just more entries in the same `door_usable`/`door_lock_info` maps two-
-//!   sided and travel doors already populate, so an unlock flips usability
-//!   and triggers the same one repath (target re-insertion, and a
-//!   `request_door_open` retry for any agent paused on that exact door)
-//!   with zero new structural-update code.
+//!   generic per-door-form-ID tracking unchanged -- crossing-gate
+//!   candidates are just more entries in the same `door_usable`/
+//!   `door_lock_info` maps two-sided and travel doors already populate, so
+//!   an unlock flips usability and triggers the same one repath (target
+//!   re-insertion, and a `request_door_open` retry for any agent paused on
+//!   that exact door) with zero new structural-update code.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -239,8 +255,13 @@ struct NavArchipelagoState {
     blocked_door_links: Vec<BlockedDoorLink>,
     /// Door reference FormID -> terminal travel-link data.
     travel_doors: HashMap<u32, TravelDoorLink>,
-    /// Ordinary interior doors mid-route (issue #137), ordered the same way
-    /// `landmass_graph::single_sided_doors` returns them (deterministic).
+    /// Every single-sided door's triangle (issue #137) -- a crossing-gate
+    /// candidate regardless of whether it also resolves to a travel
+    /// destination (real data: nearly all of them do; see the module doc),
+    /// ordered the same way `landmass_graph::single_sided_doors` returns
+    /// them (deterministic). `drive_door_link_for_agent` excludes an
+    /// agent's own active `travel_intent` door from this set at check time
+    /// -- that one door stays owned by the travel-arrival lifecycle.
     mid_route_doors: Vec<MidRouteDoor>,
     /// Last observed per-door usability (open, or not locked), for
     /// `door_availability_system`'s change detection -- exactly one repath
@@ -258,11 +279,14 @@ struct DoorLockInfo {
     key_form_id: Option<u32>,
 }
 
-/// An ordinary interior door mid-route (issue #137): a single-sided door
-/// triangle that is *not* also a travel-door candidate. Left part of the
-/// walkable island (see `nav/agent.rs`'s module doc for why); gated at
+/// A door crossable mid-route (issue #137): any single-sided door
+/// triangle, travel-door candidate or not -- real FO3 data shows nearly
+/// every door resolves to a travel destination, so restricting this set to
+/// non-travel doors left it empty and never gated anything. Left part of
+/// the walkable island (see `nav/agent.rs`'s module doc for why); gated at
 /// runtime by proximity to `midpoint`, the same way `TravelDoorLink`'s own
-/// arrival check works.
+/// arrival check works, *except* for the one door a given agent's own
+/// `travel_intent` currently targets.
 #[derive(Debug, Clone, Copy)]
 struct MidRouteDoor {
     door_form_id: u32,
@@ -549,14 +573,17 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         }
     }
 
-    // Single-sided door triangles whose reference resolves to a travel door
-    // (issue #113 feature 3): terminal travel links. No landmass animation
-    // link is spawned -- the far side lives in another cell's NAVM, so there
-    // is nothing on-mesh to link to; the agent routes *to* the triangle and
-    // the door lifecycle runs there. Every other single-sided door (issue
-    // #137) is an ordinary interior door mid-route: still part of the
-    // walkable island, gated at runtime instead -- see this file's module
-    // doc for why.
+    // Single-sided door triangles (issue #113 feature 3 / #137). Every one
+    // is a crossing-gate candidate (issue #137: real data shows nearly all
+    // of them also resolve to a travel destination, so the candidate set
+    // cannot be limited to the non-travel subset -- see this file's module
+    // doc). One whose reference *does* resolve to a travel door additionally
+    // gets a terminal travel link: no landmass animation link is spawned
+    // for it -- the far side lives in another cell's NAVM, so there is
+    // nothing on-mesh to link to; the agent routes *to* the triangle and
+    // the travel-arrival lifecycle runs there when it is the agent's own
+    // `travel_intent` target, or the crossing gate runs when it is merely
+    // on the way to somewhere else.
     let mut travel_doors = HashMap::new();
     let mut mid_route_doors = Vec::new();
     for door in landmass_graph::single_sided_doors(&mesh_inputs) {
@@ -565,32 +592,28 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
             door.door_form_id,
             door_usable_now(world, door.door_form_id, &door_lock_info),
         );
-        match travel_destinations.get(&door.door_form_id) {
-            Some(&destination) => {
-                let door_position = door_positions
-                    .get(&door.door_form_id)
-                    .copied()
-                    .unwrap_or(triangle_midpoint);
-                info!(
-                    "nav agent travel door {:08x} -> cell {:08x}",
-                    door.door_form_id, destination.cell_form_id
-                );
-                travel_doors.insert(
-                    door.door_form_id,
-                    TravelDoorLink {
-                        triangle_midpoint,
-                        door_position,
-                        destination_cell_form_id: destination.cell_form_id,
-                        destination_door_form_id: destination.door_reference_form_id,
-                    },
-                );
-            }
-            None => {
-                mid_route_doors.push(MidRouteDoor {
-                    door_form_id: door.door_form_id,
-                    midpoint: triangle_midpoint,
-                });
-            }
+        mid_route_doors.push(MidRouteDoor {
+            door_form_id: door.door_form_id,
+            midpoint: triangle_midpoint,
+        });
+        if let Some(&destination) = travel_destinations.get(&door.door_form_id) {
+            let door_position = door_positions
+                .get(&door.door_form_id)
+                .copied()
+                .unwrap_or(triangle_midpoint);
+            info!(
+                "nav agent travel door {:08x} -> cell {:08x}",
+                door.door_form_id, destination.cell_form_id
+            );
+            travel_doors.insert(
+                door.door_form_id,
+                TravelDoorLink {
+                    triangle_midpoint,
+                    door_position,
+                    destination_cell_form_id: destination.cell_form_id,
+                    destination_door_form_id: destination.door_reference_form_id,
+                },
+            );
         }
     }
 
@@ -1567,18 +1590,30 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 return;
             }
 
-            // Mid-route door crossing (issue #137): an ordinary interior
-            // door's triangle isn't a #113 link endpoint, so there is no
-            // `ReachedAnimationLink3d` event for it -- proximity to its
-            // midpoint is the trigger, mirroring the travel-door arrival
-            // check just above. Only considered while the agent is
-            // actually routed somewhere: an idle agent standing near a
-            // closed door should not be paused. Skipped in the same tick a
-            // travel arrival already fired (that already `return`ed above).
+            // Mid-route door crossing (issue #137): a door's triangle
+            // reached by ordinary walking -- not a #113 link endpoint, and
+            // not (see the exclusion below) the agent's own active travel
+            // terminal -- has no `ReachedAnimationLink3d` event to trigger
+            // on. Proximity to its midpoint is the trigger instead,
+            // mirroring the travel-door arrival check just above. Only
+            // considered while the agent is actually routed somewhere: an
+            // idle agent standing near a closed door should not be paused.
+            // Skipped in the same tick a travel arrival already fired (that
+            // already `return`ed above).
             let has_target = !matches!(
                 world.get::<AgentTarget3d>(agent_entity),
                 None | Some(AgentTarget3d::None)
             );
+            // The agent's own travel terminal (if any) is excluded from the
+            // candidate set: that door's full pause -> open -> traverse ->
+            // handoff lifecycle is the travel-arrival check's job, not this
+            // one's -- double-gating the same door for the same agent would
+            // fight it. A *different* agent's travel intent, or this
+            // agent's `goto` merely crossing someone else's travel door, is
+            // not excluded.
+            let travel_target_door = world
+                .get::<AgentRuntime>(agent_entity)
+                .and_then(|runtime| runtime.travel_intent);
             let mid_route_crossing = has_target
                 .then(|| world.get::<Transform>(agent_entity).map(|t| t.translation))
                 .flatten()
@@ -1588,7 +1623,8 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         .mid_route_doors
                         .iter()
                         .find(|door| {
-                            position.distance(door.midpoint) <= MID_ROUTE_DOOR_GATE_DISTANCE
+                            Some(door.door_form_id) != travel_target_door
+                                && position.distance(door.midpoint) <= MID_ROUTE_DOOR_GATE_DISTANCE
                         })
                         .copied()
                 });
@@ -3074,14 +3110,20 @@ mod tests {
         assert_eq!(world.resource::<NavArchipelagoState>().links.len(), 2);
     }
 
-    /// Plan #137 minimal-App test: a closed unlocked door mid-route (not a
-    /// #113 link endpoint) drives the existing `DoorLinkState` lifecycle
-    /// exactly once via the crossing-check trigger, then returns to `Idle`
-    /// in the same cell -- an ordinary interior door, not a travel door,
-    /// so there is no handoff and no `DoorTraversal` (there is no off-mesh
-    /// gap to lerp across).
+    /// Plan #137 minimal-App test (real-data-corrected): a `goto` past a
+    /// closed unlocked door mid-route drives the existing `DoorLinkState`
+    /// lifecycle exactly once via the crossing-check trigger, then returns
+    /// to `Idle` in the same cell. The door is *also* registered as a
+    /// travel door (`travel_doors`) -- real FO3 data shows nearly every
+    /// single-sided door resolves to a travel destination, and this is the
+    /// exact case the orchestrator's real-data review found ungated: an
+    /// agent with no `travel_intent` for this door must not be handed off
+    /// (no ledger entry, no despawn, no `DoorTraversal` -- there is no
+    /// off-mesh gap to lerp across since it merely crosses the triangle on
+    /// the way to a farther point).
     #[test]
-    fn a_closed_unlocked_mid_route_door_drives_the_lifecycle_once() {
+    fn a_goto_crossing_a_closed_unlocked_travel_door_mid_route_drives_the_lifecycle_once_with_no_handoff()
+     {
         let mut world = harness_world();
         world.init_resource::<Time>();
         world.init_resource::<interaction::InteractionState>();
@@ -3097,17 +3139,31 @@ mod tests {
                 TestNavAgentMarker,
                 AgentRuntime::default(),
                 Transform::from_xyz(0.0, 0.0, 0.0),
+                // A plain `goto` well beyond the door -- no `travel_intent`
+                // for this (or any) door.
                 AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
             ))
             .id();
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
-        world
-            .resource_mut::<NavArchipelagoState>()
-            .mid_route_doors
-            .push(MidRouteDoor {
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.mid_route_doors.push(MidRouteDoor {
                 door_form_id: 0x99,
                 midpoint: Vec3::new(5.0, 0.0, 0.0),
             });
+            // The same door is also a travel-door candidate -- this is the
+            // real-data shape (see this file's module doc): the crossing
+            // gate must still apply, and must still not hand off.
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(5.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+        }
 
         // Not yet at the door: the lifecycle must not start.
         door_link_system(&mut world);
@@ -3150,14 +3206,116 @@ mod tests {
             world.get_entity(agent).is_ok(),
             "the agent stays in the active cell"
         );
+        assert!(
+            world
+                .resource::<NavAgentLedger>()
+                .0
+                .entry_for(agent_ledger_id(0))
+                .is_none(),
+            "crossing a travel door's triangle mid-route (not the agent's own travel_intent) must not ledger a handoff"
+        );
     }
 
-    /// Plan #137 minimal-App test: a locked mid-route door never
+    /// Plan #137 minimal-App test (real-data-corrected): a `tna travel`
+    /// request to a door still produces the full travel lifecycle and
+    /// handoff, even though the very same door is also a crossing-gate
+    /// candidate (`mid_route_doors`) -- the agent's own `travel_intent`
+    /// must exclude that door from the crossing check, or the two paths
+    /// would fight over the same arrival.
+    #[test]
+    fn a_travel_request_to_a_door_still_hands_off_even_though_it_is_also_a_crossing_gate_candidate()
+    {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+            // The crossing-gate candidate set also carries this door (the
+            // real-data shape) -- it must not hijack the travel-arrival
+            // check once `travel_intent` targets it.
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                midpoint: Vec3::new(5.0, 0.0, 0.0),
+            });
+        }
+
+        request_travel(&mut world, 0, 0x99).expect("travel request succeeds");
+        assert!(matches!(
+            world.get::<AgentTarget3d>(agent),
+            Some(AgentTarget3d::Point(point)) if *point == Vec3::new(5.0, 0.0, 0.0)
+        ));
+
+        world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.0, 0.0);
+        door_link_system(&mut world);
+        assert!(is_paused(&world, agent));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "arrival must scripted-open the unlocked door"
+        );
+
+        door_link_system(&mut world);
+        assert!(
+            door_link::is_traversing(world.get::<AgentRuntime>(agent).unwrap().door_link),
+            "the travel-arrival check, not the crossing gate, must own this door once travel_intent targets it"
+        );
+        assert!(
+            world.get::<DoorTraversal>(agent).is_some(),
+            "a real travel handoff crosses through a DoorTraversal lerp, unlike the gap-less crossing-gate case"
+        );
+
+        use bevy::ecs::system::RunSystemOnce;
+        world.get_mut::<DoorTraversal>(agent).unwrap().elapsed = 10.0;
+        world
+            .run_system_once(door_traversal_system)
+            .expect("traversal system runs");
+
+        assert!(
+            world.get_entity(agent).is_err(),
+            "a real travel_intent arrival must still hand the agent off to the destination cell"
+        );
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(agent_ledger_id(0))
+            .expect("the agent must be ledgered on handoff");
+        assert_eq!(entry.cell_form_id, 0xC0DE);
+    }
+
+    /// Plan #137 minimal-App test (real-data-corrected): a locked door
+    /// crossed mid-route -- again also registered as a travel door, the
+    /// real-data shape -- by an agent with no `travel_intent` for it never
     /// scripted-opens and resolves to the existing deterministic `Failed`
     /// outcome via the wait bound, instead of letting the agent clip
     /// through.
     #[test]
-    fn a_locked_mid_route_door_fails_deterministically_without_opening() {
+    fn a_goto_crossing_a_locked_travel_door_mid_route_fails_deterministically_without_opening() {
         let mut world = harness_world();
         world.init_resource::<interaction::InteractionState>();
         let mut registry = crate::console::RefRegistry::default();
@@ -3180,6 +3338,15 @@ mod tests {
                 door_form_id: 0x99,
                 midpoint: Vec3::new(5.0, 0.0, 0.0),
             });
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(5.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
             state.door_lock_info.insert(
                 0x99,
                 DoorLockInfo {
