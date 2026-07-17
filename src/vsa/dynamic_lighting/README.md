@@ -2,8 +2,8 @@
 
 This directory is the complete boundary for the port of Henry de Jongh's
 Unity DynamicLighting package. `mod.rs` exposes only the Bevy plugin, custom
-light component, authoring enums, view marker, settings, and the shared default
-bounce multiplier used by the existing irradiance baker.
+light component, authoring enums, light-layer component, view marker, settings,
+and diagnostics.
 
 - `core/`: Bevy-free authoring values, Unity-compatible random/Perlin/fixed
   timestep behavior, all 15 temporal effects, CPU spatial references, and
@@ -31,10 +31,30 @@ realtime moving-object shadows; 3 toggles the custom GPU pass; 4 hides ordinary
 Bevy lights; 5 removes custom shadow visibility by hiding the shadow-only
 proxy; 6 toggles Henry-style volumetric fog; F freezes temporal effects; Space
 pauses the moving caster. The HUD reports both render-world custom-light and
-active volumetric counts.
+active volumetric counts, plus any sources clipped by the 1,024-light safety
+limit. Marking a camera with `DynamicLightingView` automatically installs the
+required depth and deferred prepasses.
 
 Volumetric fog stays inside this slice. It does not attach Bevy
 `VolumetricLight` to the black shadow proxy or translate sources into Bevy
 `FogVolume`; those components implement a different scattering model. The
 custom fullscreen node executes after DynamicLighting surface accumulation and
 before tonemapping/UI, and skips its draw when no active volumes are present.
+
+## Deliberate compatibility boundary
+
+The source-compatible defaults are direct illumination with raytraced shadows.
+The test rack explicitly enables bevyout's local `0.08` diffuse-bounce
+approximation for visibility, but that approximation is disabled by default and
+is not Henry's baked triangle/photon-data bounce path. Cookie textures,
+shimmer, transparency, and source illumination modes beyond direct lighting
+are not public authoring options yet; their ABI slots stay at inert sentinels.
+`DynamicLightLayerMask` is a light-side authoring filter, not a per-camera view
+mask, so every marked camera currently consumes the same extracted light list.
+
+`cargo test-dev --test dynamic_lighting_gpu -- --nocapture` launches the real
+test scene, hides ordinary Bevy lights and shadow proxies, captures the
+production render target with the committed WGSL enabled and disabled, and
+checks both perspective and orthographic cameras. The custom shadow pass uses
+Bevy's finalized cubemap allocation, per-proxy bias values, near plane, and
+deferred `NotShadowReceiver` flag.

@@ -14,13 +14,14 @@ use bytemuck::{Pod, Zeroable};
 use super::super::{
     bevy_bridge::{DynamicLight, DynamicLightRuntime, DynamicLightShadowProxy},
     core::{
-        DynamicLightVolumetricType, pack_volumetric_parameters, spatial_parameters,
-        volumetric_is_active,
+        DynamicLightType, DynamicLightVolumetricType, pack_volumetric_parameters,
+        spatial_parameters, volumetric_is_active,
     },
 };
 
 pub(super) const MAX_DYNAMIC_LIGHTS: usize = 1024;
 pub(super) const GPU_DYNAMIC_LIGHT_SIZE: usize = 112;
+pub(super) const GPU_DYNAMIC_SHADOW_SIZE: usize = 16;
 
 /// Exact seven-block mirror of upstream `ShaderDynamicLight`.
 #[repr(C, align(16))]
@@ -46,6 +47,27 @@ pub(super) struct GpuDynamicLight {
     pub(super) bounce_color: [f32; 3],
 }
 
+/// Per-light runtime shadow data copied from Bevy after shadow allocation.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub(super) struct GpuDynamicShadow {
+    pub(super) cubemap_index: u32,
+    pub(super) depth_bias: f32,
+    pub(super) normal_bias: f32,
+    pub(super) near_z: f32,
+}
+
+impl Default for GpuDynamicShadow {
+    fn default() -> Self {
+        Self {
+            cubemap_index: u32::MAX,
+            depth_bias: 0.0,
+            normal_bias: 0.0,
+            near_z: 0.0,
+        }
+    }
+}
+
 impl GpuDynamicLight {
     pub(super) fn from_main_world(
         light: &DynamicLight,
@@ -59,13 +81,10 @@ impl GpuDynamicLight {
         } else {
             channel |= 32;
         }
-        if config.cookie_index.is_some() {
-            channel |= 65_536;
-        }
 
         let [gp_float_1, gp_float_2, gp_float_3] = spatial_parameters(
             config.light_type,
-            runtime.state.elapsed_seconds,
+            runtime.state.animation_time_seconds,
             config.spatial,
         );
         let color = Vec3::from_array(config.color);
@@ -81,10 +100,30 @@ impl GpuDynamicLight {
         } else {
             Vec3::ZERO
         };
+        let source_forward = match config.light_type {
+            DynamicLightType::Discoball
+            | DynamicLightType::Interference
+            | DynamicLightType::Rotor
+            | DynamicLightType::Disco => transform.back(),
+            DynamicLightType::Point
+            | DynamicLightType::Spot
+            | DynamicLightType::Wave
+            | DynamicLightType::Shock => transform.forward(),
+        };
+        let invalid_cutoff = matches!(
+            config.light_type,
+            DynamicLightType::Spot | DynamicLightType::Discoball
+        ) && (config.spatial.outer_cutoff_degrees
+            < config.spatial.inner_cutoff_degrees
+            || config.spatial.outer_cutoff_degrees == 0.0);
 
         Self {
             position: transform.translation().to_array(),
-            radius_sqr: config.radius * config.radius,
+            radius_sqr: if invalid_cutoff {
+                -1.0
+            } else {
+                config.radius * config.radius
+            },
             channel,
             intensity: config.intensity * runtime.state.intensity,
             gp_float_1,
@@ -93,11 +132,13 @@ impl GpuDynamicLight {
             gp_float_3,
             up: transform.up().as_vec3().to_array(),
             shimmer_scale: 0.0,
-            forward: transform.forward().as_vec3().to_array(),
+            forward: source_forward.as_vec3().to_array(),
             shimmer_modifier: 0.0,
             volumetric_intensity: 0.0,
             volumetric_visibility: 0.0,
-            cookie_index: config.cookie_index.unwrap_or(u32::MAX),
+            // Cookie textures are not exposed until the texture-array path is
+            // implemented. Preserve the upstream ABI sentinel meanwhile.
+            cookie_index: u32::MAX,
             shadow_cubemap_index: u32::MAX,
             falloff: config.radius * config.falloff * config.falloff,
             bounce_color: bounce.to_array(),
@@ -122,7 +163,10 @@ impl GpuDynamicLight {
         );
         let forward = match packed.volumetric_type {
             DynamicLightVolumetricType::ConeY => transform.up().as_vec3(),
-            _ => transform.forward().as_vec3(),
+            DynamicLightVolumetricType::ConeZ => transform.back().as_vec3(),
+            DynamicLightVolumetricType::None
+            | DynamicLightVolumetricType::Sphere
+            | DynamicLightVolumetricType::Box => transform.forward().as_vec3(),
         };
         let (gp_float_2, gp_float_3, shimmer_scale) = match packed.volumetric_type {
             DynamicLightVolumetricType::Box => (packed.scale[0], packed.scale[1], packed.scale[2]),
@@ -164,7 +208,6 @@ pub(super) struct ExtractedDynamicLights {
     pub(super) enabled: bool,
     pub(super) volumetric_values: Vec<GpuDynamicLight>,
     pub(super) volumetric_enabled: bool,
-    pub(super) shadow_texel_size: f32,
 }
 
 pub(super) struct ExtractedDynamicLight {
@@ -176,13 +219,14 @@ pub(super) struct ExtractedDynamicLight {
 pub(super) struct GpuDynamicLightMeta {
     pub(super) count: u32,
     pub(super) enabled: u32,
-    pub(super) shadow_texel_size: f32,
-    pub(super) shadow_near_z: f32,
+    pub(super) padding_a: f32,
+    pub(super) padding_b: f32,
 }
 
 #[derive(Resource)]
 pub(super) struct DynamicLightGpuBuffers {
     pub(super) lights: RawBufferVec<GpuDynamicLight>,
+    pub(super) shadows: RawBufferVec<GpuDynamicShadow>,
     pub(super) meta: UniformBuffer<GpuDynamicLightMeta>,
     pub(super) volumetric_lights: RawBufferVec<GpuDynamicLight>,
     pub(super) volumetric_meta: UniformBuffer<GpuDynamicLightMeta>,
@@ -194,10 +238,13 @@ impl Default for DynamicLightGpuBuffers {
     fn default() -> Self {
         let mut lights = RawBufferVec::new(BufferUsages::STORAGE);
         lights.set_label(Some("dynamic_lighting_gpu_lights"));
+        let mut shadows = RawBufferVec::new(BufferUsages::STORAGE);
+        shadows.set_label(Some("dynamic_lighting_gpu_shadows"));
         let mut volumetric_lights = RawBufferVec::new(BufferUsages::STORAGE);
         volumetric_lights.set_label(Some("dynamic_lighting_gpu_volumetric_lights"));
         Self {
             lights,
+            shadows,
             meta: UniformBuffer::from(GpuDynamicLightMeta::default()),
             volumetric_lights,
             volumetric_meta: UniformBuffer::from(GpuDynamicLightMeta::default()),
@@ -216,61 +263,71 @@ pub(super) fn prepare_dynamic_light_buffers(
     render_queue: bevy::prelude::Res<RenderQueue>,
 ) {
     buffers.lights.clear();
+    buffers.shadows.clear();
     buffers.volumetric_lights.clear();
-    let proxy_indices = proxies
+    let proxy_shadows = proxies
         .iter()
         .filter_map(|(proxy_entity, proxy)| {
             clusterable_objects
-                .entity_to_index
-                .get(&proxy_entity)
-                .map(|index| (proxy.dynamic_light, *index as u32))
+                .point_shadow_metadata(proxy_entity)
+                .map(|metadata| (proxy.dynamic_light, metadata))
         })
         .collect::<HashMap<_, _>>();
-    let (count, enabled, shadow_texel_size, volumetric_count, volumetric_enabled) =
-        if let Some(extracted) = extracted {
-            for extracted_light in &extracted.values {
-                let mut light = extracted_light.light;
-                light.shadow_cubemap_index = proxy_indices
-                    .get(&extracted_light.main_entity)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                buffers.lights.push(light);
-            }
-            for light in &extracted.volumetric_values {
-                buffers.volumetric_lights.push(*light);
-            }
-            (
-                extracted.values.len() as u32,
-                extracted.enabled as u32,
-                extracted.shadow_texel_size,
-                extracted.volumetric_values.len() as u32,
-                extracted.volumetric_enabled,
-            )
-        } else {
-            (0, 0, 0.0, 0, false)
-        };
+    let (count, enabled, volumetric_count, volumetric_enabled) = if let Some(extracted) = extracted
+    {
+        for extracted_light in &extracted.values {
+            let mut light = extracted_light.light;
+            let shadow = proxy_shadows.get(&extracted_light.main_entity).map_or_else(
+                GpuDynamicShadow::default,
+                |metadata| GpuDynamicShadow {
+                    cubemap_index: metadata.cubemap_index,
+                    depth_bias: metadata.depth_bias,
+                    normal_bias: metadata.normal_bias,
+                    near_z: metadata.near_z,
+                },
+            );
+            light.shadow_cubemap_index = shadow.cubemap_index;
+            buffers.lights.push(light);
+            buffers.shadows.push(shadow);
+        }
+        for light in &extracted.volumetric_values {
+            buffers.volumetric_lights.push(*light);
+        }
+        (
+            extracted.values.len() as u32,
+            extracted.enabled as u32,
+            extracted.volumetric_values.len() as u32,
+            extracted.volumetric_enabled,
+        )
+    } else {
+        (0, 0, 0, false)
+    };
     if buffers.lights.is_empty() {
         buffers.lights.push(GpuDynamicLight::zeroed());
+    }
+    if buffers.shadows.is_empty() {
+        buffers.shadows.push(GpuDynamicShadow::default());
     }
     if buffers.volumetric_lights.is_empty() {
         buffers.volumetric_lights.push(GpuDynamicLight::zeroed());
     }
     buffers.lights.write_buffer(&render_device, &render_queue);
+    buffers.shadows.write_buffer(&render_device, &render_queue);
     buffers
         .volumetric_lights
         .write_buffer(&render_device, &render_queue);
     buffers.meta.set(GpuDynamicLightMeta {
         count,
         enabled,
-        shadow_texel_size,
-        shadow_near_z: bevy::light::PointLight::DEFAULT_SHADOW_MAP_NEAR_Z,
+        padding_a: 0.0,
+        padding_b: 0.0,
     });
     buffers.meta.write_buffer(&render_device, &render_queue);
     buffers.volumetric_meta.set(GpuDynamicLightMeta {
         count: volumetric_count,
         enabled: volumetric_enabled as u32,
-        shadow_texel_size: 0.0,
-        shadow_near_z: 0.0,
+        padding_a: 0.0,
+        padding_b: 0.0,
     });
     buffers
         .volumetric_meta
@@ -282,10 +339,14 @@ pub(super) fn prepare_dynamic_light_buffers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::{math::Quat, prelude::Transform};
+    use bevy::{
+        math::{EulerRot, Quat},
+        prelude::Transform,
+    };
 
     use crate::vsa::dynamic_lighting::core::{
-        DynamicLightConfig, DynamicLightEffect, DynamicLightType, DynamicLightVolumetricParameters,
+        DynamicLightBounceParameters, DynamicLightConfig, DynamicLightEffect,
+        DynamicLightSpatialParameters, DynamicLightType, DynamicLightVolumetricParameters,
         DynamicLightVolumetricType, LightEffectRuntime,
     };
 
@@ -323,6 +384,18 @@ mod tests {
     }
 
     #[test]
+    fn gpu_shadow_metadata_is_one_exact_block_with_an_invalid_default() {
+        let shadow = GpuDynamicShadow::default();
+
+        assert_eq!(size_of::<GpuDynamicShadow>(), GPU_DYNAMIC_SHADOW_SIZE);
+        assert_eq!(align_of::<GpuDynamicShadow>(), 16);
+        assert_eq!(shadow.cubemap_index, u32::MAX);
+        assert_eq!(shadow.depth_bias, 0.0);
+        assert_eq!(shadow.normal_bias, 0.0);
+        assert_eq!(shadow.near_z, 0.0);
+    }
+
+    #[test]
     fn extraction_maps_source_fields_and_feature_bits_exactly() {
         let config = DynamicLightConfig {
             color: [0.2, 0.4, 0.8],
@@ -332,16 +405,20 @@ mod tests {
             light_type: DynamicLightType::Rotor,
             effect: DynamicLightEffect::Pulse,
             shadow_enabled: true,
-            cookie_index: Some(7),
+            bounce: DynamicLightBounceParameters {
+                enabled: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let light = DynamicLight { config };
         let runtime = DynamicLightRuntime {
             state: LightEffectRuntime {
                 intensity: 0.4,
-                elapsed_seconds: 0.75,
+                animation_time_seconds: 0.75,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let transform = GlobalTransform::from(
             Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.6)),
@@ -350,13 +427,13 @@ mod tests {
 
         assert_eq!(gpu.position, [1.0, 2.0, 3.0]);
         assert_eq!(gpu.radius_sqr, 49.0);
-        assert_eq!(gpu.channel, (5 << 6) | 32_768 | 65_536);
+        assert_eq!(gpu.channel, (5 << 6) | 32_768);
         assert!((gpu.intensity - 1.2).abs() <= f32::EPSILON);
         assert_eq!(gpu.color, config.color);
-        assert_eq!(gpu.cookie_index, 7);
+        assert_eq!(gpu.cookie_index, u32::MAX);
         assert_eq!(gpu.shadow_cubemap_index, u32::MAX);
         assert_eq!(gpu.falloff, 7.0 * 0.5 * 0.5);
-        assert_eq!(gpu.forward, transform.forward().as_vec3().to_array());
+        assert_eq!(gpu.forward, transform.back().as_vec3().to_array());
         assert_eq!(gpu.up, transform.up().as_vec3().to_array());
         assert_eq!(gpu.bounce_color, config.color);
     }
@@ -375,9 +452,10 @@ mod tests {
             let runtime = DynamicLightRuntime {
                 state: LightEffectRuntime {
                     intensity: 1.0,
-                    elapsed_seconds: 0.625,
+                    animation_time_seconds: 0.625,
                     ..Default::default()
                 },
+                ..Default::default()
             };
             let gpu =
                 GpuDynamicLight::from_main_world(&light, &runtime, &GlobalTransform::IDENTITY);
@@ -388,6 +466,62 @@ mod tests {
                 "{light_type:?}",
             );
             assert_eq!(gpu.channel & (15 << 6), (light_type as u32) << 6);
+        }
+    }
+
+    #[test]
+    fn rotated_source_axes_match_unity_per_light_type() {
+        let transform = GlobalTransform::from(Transform::from_rotation(Quat::from_euler(
+            EulerRot::YXZ,
+            0.61,
+            -0.37,
+            0.22,
+        )));
+        for light_type in DynamicLightType::ALL {
+            let light = DynamicLight {
+                config: DynamicLightConfig {
+                    light_type,
+                    ..Default::default()
+                },
+            };
+            let gpu = GpuDynamicLight::from_main_world(
+                &light,
+                &DynamicLightRuntime::default(),
+                &transform,
+            );
+            let expected = match light_type {
+                DynamicLightType::Discoball
+                | DynamicLightType::Interference
+                | DynamicLightType::Rotor
+                | DynamicLightType::Disco => transform.back(),
+                _ => transform.forward(),
+            };
+            assert_eq!(gpu.forward, expected.as_vec3().to_array(), "{light_type:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_spot_and_discoball_cutoffs_disable_the_gpu_light() {
+        for light_type in [DynamicLightType::Spot, DynamicLightType::Discoball] {
+            for (inner, outer) in [(26.0, 20.0), (0.0, 0.0)] {
+                let light = DynamicLight {
+                    config: DynamicLightConfig {
+                        light_type,
+                        spatial: DynamicLightSpatialParameters {
+                            inner_cutoff_degrees: inner,
+                            outer_cutoff_degrees: outer,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                };
+                let gpu = GpuDynamicLight::from_main_world(
+                    &light,
+                    &DynamicLightRuntime::default(),
+                    &GlobalTransform::IDENTITY,
+                );
+                assert_eq!(gpu.radius_sqr, -1.0, "{light_type:?} {inner}/{outer}");
+            }
         }
     }
 
@@ -415,6 +549,7 @@ mod tests {
                 intensity: 0.25,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let transform = GlobalTransform::from(
             Transform::from_xyz(1.0, 2.0, 3.0).with_scale(Vec3::new(1.0, 2.0, 3.0)),
@@ -444,6 +579,7 @@ mod tests {
                 intensity: 1.0,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let transform =
             GlobalTransform::from(Transform::IDENTITY.with_rotation(Quat::from_rotation_z(0.4)));
@@ -462,5 +598,26 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn cone_z_uses_unitys_positive_local_z_axis() {
+        let mut config = DynamicLightConfig::default();
+        config.volumetric.volumetric_type = DynamicLightVolumetricType::ConeZ;
+        let transform =
+            GlobalTransform::from(Transform::IDENTITY.with_rotation(Quat::from_rotation_y(0.73)));
+        let gpu = GpuDynamicLight::from_volumetric_main_world(
+            &DynamicLight { config },
+            &DynamicLightRuntime {
+                state: LightEffectRuntime {
+                    intensity: 1.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &transform,
+        )
+        .expect("active cone Z volume");
+        assert_eq!(gpu.forward, transform.back().as_vec3().to_array());
     }
 }

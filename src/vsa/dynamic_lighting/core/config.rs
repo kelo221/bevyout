@@ -53,7 +53,8 @@ pub(crate) struct DynamicLightBounceParameters {
     pub(crate) color_rgba: [f32; 4],
     pub(crate) modifier: f32,
     pub(crate) intensity: f32,
-    /// User-requested port policy: a single diffuse bounce is enabled by default.
+    /// Optional bevyout approximation. The upstream default illumination mode
+    /// is direct-only, so this stays disabled unless explicitly requested.
     pub(crate) enabled: bool,
 }
 
@@ -63,7 +64,7 @@ impl Default for DynamicLightBounceParameters {
             color_rgba: [1.0, 1.0, 1.0, 0.0],
             modifier: 1.0,
             intensity: DEFAULT_BOUNCE_MULTIPLIER,
-            enabled: true,
+            enabled: false,
         }
     }
 }
@@ -101,9 +102,9 @@ pub(crate) struct DynamicLightConfig {
     pub(crate) spatial: DynamicLightSpatialParameters,
     pub(crate) bounce: DynamicLightBounceParameters,
     pub(crate) volumetric: DynamicLightVolumetricParameters,
-    pub(crate) view_mask: u32,
+    /// Light-side authoring layers. This is not a per-camera view mask.
+    pub(crate) layer_mask: u32,
     pub(crate) shadow_enabled: bool,
-    pub(crate) cookie_index: Option<u32>,
 }
 
 impl Default for DynamicLightConfig {
@@ -119,9 +120,8 @@ impl Default for DynamicLightConfig {
             spatial: DynamicLightSpatialParameters::default(),
             bounce: DynamicLightBounceParameters::default(),
             volumetric: DynamicLightVolumetricParameters::default(),
-            view_mask: u32::MAX,
-            shadow_enabled: false,
-            cookie_index: None,
+            layer_mask: u32::MAX,
+            shadow_enabled: true,
         }
     }
 }
@@ -130,8 +130,17 @@ impl Default for DynamicLightConfig {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DefaultsFixture {
+        shadow_mode: u32,
+        illumination_mode: u32,
+    }
+
     #[test]
-    fn defaults_match_upstream_and_default_bounce_policy() {
+    fn defaults_match_upstream() {
+        let fixture: DefaultsFixture =
+            serde_json::from_str(include_str!("../tests/golden/unity_defaults_v1.json")).unwrap();
         let config = DynamicLightConfig::default();
         assert_eq!(config.color, [1.0; 3]);
         assert_eq!(config.intensity, 2.0);
@@ -142,7 +151,10 @@ mod tests {
         assert_eq!(config.effect_parameters.pulse_modifier, 0.25);
         assert_eq!(config.effect_parameters.timestep_seconds, 1.0 / 30.0);
         assert_eq!(config.bounce.intensity, DEFAULT_BOUNCE_MULTIPLIER);
-        assert!(config.bounce.enabled);
+        assert!(!config.bounce.enabled);
+        assert!(config.shadow_enabled);
+        assert_eq!(fixture.shadow_mode, 0, "RaytracedShadows");
+        assert_eq!(fixture.illumination_mode, 0, "DirectIllumination");
         assert_eq!(
             config.volumetric.volumetric_type,
             DynamicLightVolumetricType::None
@@ -162,9 +174,8 @@ mod tests {
             falloff: 0.75,
             light_type: DynamicLightType::Disco,
             effect: DynamicLightEffect::FluorescentRandom,
-            view_mask: 0x1234,
+            layer_mask: 0x1234,
             shadow_enabled: true,
-            cookie_index: Some(9),
             ..Default::default()
         };
         config.effect_parameters.pulse_speed = 2.5;

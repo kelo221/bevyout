@@ -16,6 +16,9 @@ const TAU: f32 = 6.283185307179586;
 fn spotlight(light: DynamicLight, light_direction: vec3<f32>) -> f32 {
     let theta = dot(light_direction, light.forward);
     let epsilon = light.parameter_a - light.parameter_b;
+    if abs(epsilon) <= 0.000001 {
+        return select(0.0, 1.0, theta >= light.parameter_a);
+    }
     return saturate((theta - light.parameter_b) / epsilon);
 }
 
@@ -23,6 +26,9 @@ fn discoball(light: DynamicLight, light_direction: vec3<f32>) -> f32 {
     let rotated = to_light_space(light_direction, light.forward, light.up);
     let theta = dot(snap_direction(rotated), rotated);
     let epsilon = light.parameter_a - light.parameter_b;
+    if abs(epsilon) <= 0.000001 {
+        return select(0.0, 1.0, theta >= light.parameter_a);
+    }
     return saturate((theta - light.parameter_b) / epsilon);
 }
 

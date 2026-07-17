@@ -1,6 +1,7 @@
 #define_import_path bevyout_dynamic_lighting::surface
 
 #import bevy_pbr::{
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     pbr_deferred_types as deferred_types,
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
     utils::octahedral_decode,
@@ -20,6 +21,7 @@ struct DynamicLightingSurface {
     perceptual_roughness: f32,
     metallic: f32,
     reflectance: f32,
+    mesh_flags: u32,
     material_flags: u32,
 }
 
@@ -30,7 +32,7 @@ fn reconstruct_surface(
     view: View,
 ) -> DynamicLightingSurface {
     let flags = deferred_types::unpack_flags(deferred.a);
-    let material_flags = deferred_types::mesh_material_flags_from_deferred_flags(flags).y;
+    let mesh_material_flags = deferred_types::mesh_material_flags_from_deferred_flags(flags);
     let base_roughness = deferred_types::unpack_unorm4x8_(deferred.r);
     let properties = deferred_types::unpack_unorm4x8_(deferred.b);
     let encoded_normal = deferred_types::unpack_24bit_normal(deferred.a);
@@ -48,7 +50,8 @@ fn reconstruct_surface(
         base_roughness.a,
         properties.g,
         properties.r,
-        material_flags,
+        mesh_material_flags.x,
+        mesh_material_flags.y,
     );
 }
 
@@ -108,8 +111,8 @@ fn material_light_contribution(
     let diffuse = diffuse_weight * surface.base_color / PI;
     let direct = (diffuse + specular) * radiance * ndotl;
 
-    // The standalone port has no Unity photon texture. Keep the requested
-    // default one-bounce response deterministic and material-aware.
+    // The standalone port has no Unity photon texture. This optional local
+    // response is an explicitly authored approximation, disabled by default.
     let bounce = surface.base_color
         * (1.0 - surface.metallic)
         * bounce_color(light)
@@ -120,4 +123,8 @@ fn material_light_contribution(
 
 fn surface_is_unlit(surface: DynamicLightingSurface) -> bool {
     return (surface.material_flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) != 0u;
+}
+
+fn surface_receives_shadows(surface: DynamicLightingSurface) -> bool {
+    return (surface.mesh_flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
 }

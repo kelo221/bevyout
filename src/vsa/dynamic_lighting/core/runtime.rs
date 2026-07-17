@@ -16,7 +16,10 @@ pub(crate) struct LightEffectRuntime {
     pub(crate) strobe_active: bool,
     pub(crate) fluorescent_random_state: i32,
     pub(crate) fluorescent_random_time: f32,
-    pub(crate) elapsed_seconds: f32,
+    /// One manager-wide animation sample, equivalent to Unity's cached
+    /// `Time.time`. This is copied into every light before both temporal and
+    /// spatial evaluation; it is not a per-light age.
+    pub(crate) animation_time_seconds: f32,
 }
 
 impl Default for LightEffectRuntime {
@@ -28,7 +31,7 @@ impl Default for LightEffectRuntime {
             strobe_active: false,
             fluorescent_random_state: 0,
             fluorescent_random_time: 0.0,
-            elapsed_seconds: 0.0,
+            animation_time_seconds: 0.0,
         }
     }
 }
@@ -40,11 +43,13 @@ pub(crate) fn advance_effect(
     runtime: &mut LightEffectRuntime,
     random: &mut UnityRandom,
     delta_seconds: f32,
+    animation_time_seconds: f32,
 ) {
     runtime.fixed_timestep.time_per_step = config.effect_parameters.timestep_seconds;
     runtime.fixed_timestep.update(delta_seconds);
 
-    let time = runtime.elapsed_seconds;
+    runtime.animation_time_seconds = animation_time_seconds;
+    let time = animation_time_seconds;
     let parameters = config.effect_parameters;
     let modifier = parameters.pulse_modifier;
 
@@ -218,8 +223,6 @@ pub(crate) fn advance_effect(
             _ => {}
         }
     }
-
-    runtime.elapsed_seconds += delta_seconds;
 }
 
 fn lightning_layer(
@@ -285,9 +288,9 @@ mod tests {
         };
         let mut runtime = LightEffectRuntime::default();
         let mut random = UnityRandom::from_seed(12345);
-        advance_effect(&config, &mut runtime, &mut random, 1.0 / 60.0);
+        advance_effect(&config, &mut runtime, &mut random, 1.0 / 60.0, 0.0);
         assert_eq!(runtime.intensity, 1.0);
-        advance_effect(&config, &mut runtime, &mut random, 1.0 / 60.0);
+        advance_effect(&config, &mut runtime, &mut random, 1.0 / 60.0, 1.0 / 60.0);
         assert_eq!(runtime.intensity, 0.25);
     }
 
@@ -300,8 +303,14 @@ mod tests {
         let mut runtime = LightEffectRuntime::default();
         let mut random = UnityRandom::from_seed(12345);
         let expected = [0.690_138_04, 0.924_670_46, 0.924_670_46, 0.649_387_3];
-        for expected in expected {
-            advance_effect(&config, &mut runtime, &mut random, 1.0 / 60.0);
+        for (frame, expected) in expected.into_iter().enumerate() {
+            advance_effect(
+                &config,
+                &mut runtime,
+                &mut random,
+                1.0 / 60.0,
+                frame as f32 / 60.0,
+            );
             assert!((runtime.intensity - expected).abs() <= 1.0e-6);
         }
     }
@@ -318,6 +327,7 @@ mod tests {
             };
             let mut runtime = LightEffectRuntime::default();
             let mut random = UnityRandom::from_seed(trace.seed);
+            let mut elapsed = 0.0;
             let last_frame = trace.samples.last().unwrap().frame;
             let mut samples = trace.samples.into_iter().peekable();
             for frame in 0..=last_frame {
@@ -332,7 +342,7 @@ mod tests {
                     "jitter" => [1.0 / 53.0, 1.0 / 71.0, 1.0 / 44.0, 1.0 / 97.0][frame % 4],
                     schedule => panic!("unexpected Unity schedule {schedule}"),
                 });
-                advance_effect(&config, &mut runtime, &mut random, delta);
+                advance_effect(&config, &mut runtime, &mut random, delta, elapsed);
                 if samples.peek().is_some_and(|sample| sample.frame == frame) {
                     let sample = samples.next().unwrap();
                     assert!(
@@ -345,6 +355,7 @@ mod tests {
                         sample.intensity,
                     );
                 }
+                elapsed += delta;
             }
         }
     }
@@ -365,13 +376,15 @@ mod tests {
             .collect::<Vec<_>>();
         let mut runtimes = vec![LightEffectRuntime::default(); configs.len()];
         let mut random = UnityRandom::from_seed(fixture.seed);
+        let mut elapsed = 0.0;
         let last_frame = fixture.frames.last().unwrap().frame;
         let mut frames = fixture.frames.into_iter().peekable();
 
         for frame in 0..=last_frame {
             for (config, runtime) in configs.iter().zip(&mut runtimes) {
-                advance_effect(config, runtime, &mut random, 1.0 / 60.0);
+                advance_effect(config, runtime, &mut random, 1.0 / 60.0, elapsed);
             }
+            elapsed += 1.0 / 60.0;
             if frames.peek().is_some_and(|sample| sample.frame == frame) {
                 let sample = frames.next().unwrap();
                 for (index, (runtime, expected)) in
@@ -400,13 +413,31 @@ mod tests {
         let mut random_b = UnityRandom::from_seed(17);
         let mut random_c = UnityRandom::from_seed(18);
         let mut diverged = false;
-        for _ in 0..32 {
-            advance_effect(&config, &mut runtime_a, &mut random_a, 1.0 / 30.0);
-            advance_effect(&config, &mut runtime_b, &mut random_b, 1.0 / 30.0);
-            advance_effect(&config, &mut runtime_c, &mut random_c, 1.0 / 30.0);
+        for frame in 0..32 {
+            let time = frame as f32 / 30.0;
+            advance_effect(&config, &mut runtime_a, &mut random_a, 1.0 / 30.0, time);
+            advance_effect(&config, &mut runtime_b, &mut random_b, 1.0 / 30.0, time);
+            advance_effect(&config, &mut runtime_c, &mut random_c, 1.0 / 30.0, time);
             assert_eq!(runtime_a.intensity, runtime_b.intensity);
             diverged |= runtime_a.intensity != runtime_c.intensity;
         }
         assert!(diverged);
+    }
+
+    #[test]
+    fn late_spawn_and_runtime_reset_keep_the_global_phase() {
+        let config = DynamicLightConfig {
+            effect: DynamicLightEffect::Pulse,
+            ..Default::default()
+        };
+        let mut late = LightEffectRuntime::default();
+        let mut reset = LightEffectRuntime::default();
+        let mut random_late = UnityRandom::from_seed(17);
+        let mut random_reset = UnityRandom::from_seed(17);
+        advance_effect(&config, &mut late, &mut random_late, 1.0 / 60.0, 5.0);
+        advance_effect(&config, &mut reset, &mut random_reset, 1.0 / 60.0, 5.0);
+        assert_eq!(late.animation_time_seconds, 5.0);
+        assert_eq!(reset.animation_time_seconds, 5.0);
+        assert_eq!(late.intensity, reset.intensity);
     }
 }

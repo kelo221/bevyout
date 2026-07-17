@@ -254,3 +254,10 @@ shadow behavior is unchanged, and the live pass is error-free.
   ConeZ, and ConeY sources. This keeps fog shapes readable without adding
   unrelated direct light, while still proving shared temporal state on the
   strobe.
+- A4: Review remediation added a global Unity-compatible animation clock,
+  corrected type-specific axes and invalid cutoff handling, restored source
+  direct/shadow defaults, labeled the test rack's bounce approximation, and
+  added production-WGSL readback under perspective and orthographic cameras.
+  The marked view now receives its required prepasses automatically, the
+  1,024-light cap is diagnostic, and shadow sampling consumes Bevy's finalized
+  cubemap allocation and per-proxy bias/near metadata.

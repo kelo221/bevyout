@@ -68,12 +68,12 @@ pub(crate) fn evaluate_spatial(
         DynamicLightType::Point => 1.0,
         DynamicLightType::Spot => {
             let theta = dot(light_direction, forward);
-            ((theta - parameter_b) / (parameter_a - parameter_b)).clamp(0.0, 1.0)
+            safe_cutoff(theta, parameter_a, parameter_b)
         }
         DynamicLightType::Discoball => {
             let rotated = to_light_space(light_direction, forward, up);
             let theta = dot(snap_direction(rotated), rotated);
-            ((theta - parameter_b) / (parameter_a - parameter_b)).clamp(0.0, 1.0)
+            safe_cutoff(theta, parameter_a, parameter_b)
         }
         DynamicLightType::Wave => {
             0.7 + 0.3 * ((length(light_minus_world) - parameter_a) * parameter_b).sin()
@@ -127,6 +127,16 @@ pub(crate) fn evaluate_spatial(
             }
             1.0 - scale
         }
+    }
+}
+
+#[cfg(test)]
+fn safe_cutoff(theta: f32, inner: f32, outer: f32) -> f32 {
+    let epsilon = inner - outer;
+    if epsilon.abs() <= 1.0e-6 {
+        if theta >= inner { 1.0 } else { 0.0 }
+    } else {
+        ((theta - outer) / epsilon).clamp(0.0, 1.0)
     }
 }
 

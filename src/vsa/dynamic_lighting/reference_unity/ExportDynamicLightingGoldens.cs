@@ -57,6 +57,8 @@ namespace AlpacaIT.DynamicLighting
             public float timestepSeconds = 1.0f / 30.0f;
             public float bounceModifier = 1.0f;
             public float bounceIntensity = 1.0f;
+            public int shadowMode;
+            public int illuminationMode;
             public int volumetricType = 0;
             public float volumetricRadius = 4.0f;
             public float volumetricThickness = 1.0f;
@@ -192,11 +194,7 @@ namespace AlpacaIT.DynamicLighting
             }
 
             WriteJson(Path.Combine(outputDirectory, "unity_effects_v1.json"), fixture);
-            WriteJson(Path.Combine(outputDirectory, "unity_defaults_v1.json"), new DefaultsFixture
-            {
-                upstreamCommit = UpstreamCommit,
-                unityVersion = Application.unityVersion,
-            });
+            WriteJson(Path.Combine(outputDirectory, "unity_defaults_v1.json"), CaptureDefaults());
             WriteJson(Path.Combine(outputDirectory, "unity_perlin_v1.json"), CapturePerlin());
             WriteJson(
                 Path.Combine(outputDirectory, "unity_multilight_random_v1.json"),
@@ -211,6 +209,39 @@ namespace AlpacaIT.DynamicLighting
                 "bevyout DynamicLighting goldens exported: {0} traces to {1}",
                 fixture.traces.Count,
                 outputDirectory));
+        }
+
+        private static DefaultsFixture CaptureDefaults()
+        {
+            var light = new DynamicLight();
+            return new DefaultsFixture
+            {
+                upstreamCommit = UpstreamCommit,
+                unityVersion = Application.unityVersion,
+                intensity = light.lightIntensity,
+                radius = light.lightRadius,
+                falloff = light.lightFalloff,
+                innerCutoffDegrees = light.lightCutoff,
+                outerCutoffDegrees = light.lightOuterCutoff,
+                waveSpeed = light.lightWaveSpeed,
+                waveFrequency = light.lightWaveFrequency,
+                waveOffset = light.lightWaveOffset,
+                rotorCenter = light.lightRotorCenter,
+                discoVerticalSpeed = light.lightDiscoVerticalSpeed,
+                pulseSpeed = light.lightEffectPulseSpeed,
+                pulseModifier = light.lightEffectPulseModifier,
+                pulseOffset = light.lightEffectPulseOffset,
+                timestepSeconds = light.lightEffectTimestepFrequency,
+                bounceModifier = light.lightBounceModifier,
+                bounceIntensity = light.lightBounceIntensity,
+                shadowMode = (int)light.lightShadows,
+                illuminationMode = (int)light.lightIllumination,
+                volumetricType = (int)light.lightVolumetricType,
+                volumetricRadius = light.lightVolumetricRadius,
+                volumetricThickness = light.lightVolumetricThickness,
+                volumetricIntensity = light.lightVolumetricIntensity,
+                volumetricVisibility = light.lightVolumetricVisibility,
+            };
         }
 
         private static PerlinFixture CapturePerlin()

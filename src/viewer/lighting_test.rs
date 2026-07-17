@@ -1,6 +1,6 @@
 //! Hermetic visual proof for prepared static plus realtime moving shadows.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
 use bevy::camera::{Exposure, Hdr};
@@ -14,6 +14,7 @@ use bevy::pbr::{
 };
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::WindowPlugin;
 
 use super::RenderReportBuffer;
@@ -105,6 +106,18 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
         app.insert_resource(DemoExitTimer(seconds))
             .add_systems(Update, stop_after_trace_window);
     }
+    if let Some(path) = args.gpu_acceptance_capture {
+        app.insert_resource(GpuAcceptanceCapture {
+            path,
+            custom_only: args.gpu_acceptance_custom_only,
+            disable_custom: args.gpu_acceptance_disable_custom,
+            orthographic: args.gpu_acceptance_orthographic,
+        })
+        .add_systems(
+            Update,
+            (configure_gpu_acceptance, capture_gpu_acceptance).chain(),
+        );
+    }
     if args.agent_bridge {
         agent_bridge::install(&mut app, args.agent_port);
     }
@@ -121,6 +134,60 @@ struct HybridPointLight;
 
 #[derive(Component)]
 struct DynamicLightingStatusText;
+
+#[derive(Resource)]
+struct GpuAcceptanceCapture {
+    path: PathBuf,
+    custom_only: bool,
+    disable_custom: bool,
+    orthographic: bool,
+}
+
+fn configure_gpu_acceptance(
+    options: Res<GpuAcceptanceCapture>,
+    mut configured: Local<bool>,
+    mut settings: ResMut<DynamicLightingSettings>,
+    mut bevy_lights: Query<&mut Visibility, With<HybridPointLight>>,
+    mut proxies: Query<&mut Visibility, (With<DynamicLightShadowProxy>, Without<HybridPointLight>)>,
+    mut views: Query<&mut Projection, With<DynamicLightingView>>,
+) {
+    if *configured {
+        return;
+    }
+    settings.enabled = !options.disable_custom;
+    if options.orthographic {
+        for mut projection in &mut views {
+            *projection = Projection::Orthographic(OrthographicProjection {
+                scale: 0.035,
+                ..OrthographicProjection::default_3d()
+            });
+        }
+    }
+    if options.custom_only {
+        settings.shadow_proxies_enabled = false;
+        for mut visibility in &mut bevy_lights {
+            *visibility = Visibility::Hidden;
+        }
+        for mut visibility in &mut proxies {
+            *visibility = Visibility::Hidden;
+        }
+    }
+    *configured = true;
+}
+
+fn capture_gpu_acceptance(
+    mut commands: Commands,
+    time: Res<Time>,
+    options: Res<GpuAcceptanceCapture>,
+    mut captured: Local<bool>,
+) {
+    if !*captured && time.elapsed_secs() >= 1.25 {
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(options.path.clone()));
+        *captured = true;
+    }
+}
 
 #[derive(Resource, Default)]
 struct DemoMotion {
@@ -249,6 +316,7 @@ fn setup_lighting_test(
             DynamicLight::strobe(strobe_intensity)
                 .with_color(strobe_color)
                 .with_radius(2.4)
+                .with_bounce_approximation(true)
                 .with_shadows(true)
                 .with_volumetric(DynamicLightVolumetricParameters {
                     volumetric_type: DynamicLightVolumetricType::Sphere,
@@ -313,6 +381,7 @@ fn setup_lighting_test(
             Name::new(format!("DynamicLighting effect {effect:?}")),
             DynamicLight::with_effect(80.0, effect)
                 .with_color(effect_colors[index])
+                .with_bounce_approximation(true)
                 .with_radius(1.65),
             Transform::from_translation(receiver_position + Vec3::Y * 1.0),
             GlobalTransform::default(),
@@ -352,6 +421,7 @@ fn setup_lighting_test(
             DynamicLight::with_effect(160.0, DynamicLightEffect::Steady)
                 .with_type(light_type)
                 .with_color(spatial_colors[index])
+                .with_bounce_approximation(true)
                 .with_radius(3.1),
             Transform::from_translation(receiver_position + Vec3::Z * 1.8).with_rotation(
                 Quat::from_rotation_y(core::f32::consts::PI)
@@ -534,8 +604,9 @@ fn update_dynamic_lighting_status(
         .filter(|visibility| **visibility != Visibility::Hidden)
         .count();
     text.0 = format!(
-        "Custom extracted {} | pass {} | effects {} | fog {} | volumes {}\nBevy lights {} | shadow proxies {}",
+        "Custom extracted {} | clipped {} | pass {} | effects {} | fog {} | volumes {}\nBevy lights {} | shadow proxies {}",
         diagnostics.extracted_light_count(),
+        diagnostics.truncated_light_count(),
         if settings.enabled { "ON" } else { "OFF" },
         if settings.freeze_effect_time {
             "FROZEN"

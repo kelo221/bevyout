@@ -189,6 +189,18 @@ pub struct LightingTestArgs {
     /// Loopback HTTP port used by the agent bridge.
     #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
     pub(crate) agent_port: u16,
+    /// Internal GPU acceptance output. Captures the real production render target.
+    #[arg(long, hide = true, value_name = "PNG")]
+    pub(crate) gpu_acceptance_capture: Option<PathBuf>,
+    /// Hide every ordinary Bevy light and shadow proxy during GPU acceptance.
+    #[arg(long, hide = true, requires = "gpu_acceptance_capture")]
+    pub(crate) gpu_acceptance_custom_only: bool,
+    /// Disable only the custom pass for the GPU acceptance control image.
+    #[arg(long, hide = true, requires = "gpu_acceptance_capture")]
+    pub(crate) gpu_acceptance_disable_custom: bool,
+    /// Exercise world reconstruction through a 3D orthographic projection.
+    #[arg(long, hide = true, requires = "gpu_acceptance_capture")]
+    pub(crate) gpu_acceptance_orthographic: bool,
 }
 
 #[derive(Parser, Debug)]

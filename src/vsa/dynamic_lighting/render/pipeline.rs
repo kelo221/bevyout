@@ -26,7 +26,10 @@ use bevy::{
 
 use super::{
     DynamicLightingView,
-    gpu::{DynamicLightGpuBuffers, GPU_DYNAMIC_LIGHT_SIZE, GpuDynamicLightMeta},
+    gpu::{
+        DynamicLightGpuBuffers, GPU_DYNAMIC_LIGHT_SIZE, GPU_DYNAMIC_SHADOW_SIZE,
+        GpuDynamicLightMeta,
+    },
 };
 
 #[derive(Resource)]
@@ -120,6 +123,10 @@ pub(super) fn init_dynamic_lighting_pipeline(
                 uniform_buffer::<GpuDynamicLightMeta>(false),
                 texture_cube_array(TextureSampleType::Depth),
                 sampler(SamplerBindingType::Comparison),
+                storage_buffer_read_only_sized(
+                    false,
+                    NonZeroU64::new(GPU_DYNAMIC_SHADOW_SIZE as u64),
+                ),
             ),
         ),
     );
@@ -218,13 +225,22 @@ pub(super) fn dynamic_lighting_pass(
     let Some(render_pipeline) = pipeline_cache.get_render_pipeline(pipeline_id.0) else {
         return Ok(());
     };
-    let (Some(depth), Some(deferred), Some(view_binding), Some(light_binding), Some(meta_binding)) = (
+    let (
+        Some(depth),
+        Some(deferred),
+        Some(view_binding),
+        Some(light_binding),
+        Some(meta_binding),
+        Some(shadow_metadata_binding),
+    ) = (
         prepass.depth_view(),
         prepass.deferred_view(),
         view_uniforms.uniforms.binding(),
         buffers.lights.binding(),
         buffers.meta.binding(),
-    ) else {
+        buffers.shadows.binding(),
+    )
+    else {
         return Ok(());
     };
 
@@ -242,6 +258,7 @@ pub(super) fn dynamic_lighting_pass(
             meta_binding,
             &shadow_bindings.point_light_depth_texture_view,
             &shadow_samplers.point_light_comparison_sampler,
+            shadow_metadata_binding,
         )),
     );
 

@@ -1,7 +1,7 @@
 #import bevy_render::view::View
 #import bevyout_dynamic_lighting::{
-    surface::{DynamicLightingSurface, material_light_contribution, reconstruct_surface, surface_is_unlit},
-    types::{DynamicLight, DynamicLightMeta, INVALID_LIGHT_INDEX, LIGHT_FLAG_SHADOW},
+    surface::{DynamicLightingSurface, material_light_contribution, reconstruct_surface, surface_is_unlit, surface_receives_shadows},
+    types::{DynamicLight, DynamicLightMeta, DynamicLightShadow, INVALID_LIGHT_INDEX, LIGHT_FLAG_SHADOW},
 }
 
 @group(0) @binding(0) var source_hdr: texture_2d<f32>;
@@ -13,26 +13,28 @@
 @group(0) @binding(6) var<uniform> dynamic_light_meta: DynamicLightMeta;
 @group(0) @binding(7) var point_shadow_textures: texture_depth_cube_array;
 @group(0) @binding(8) var point_shadow_sampler: sampler_comparison;
+@group(0) @binding(9) var<storage, read> dynamic_light_shadows: array<DynamicLightShadow>;
 
-fn shadow_visibility(surface: DynamicLightingSurface, light: DynamicLight) -> f32 {
-    if (light.channel & LIGHT_FLAG_SHADOW) == 0u ||
-            light.shadow_cubemap_index == INVALID_LIGHT_INDEX {
+fn shadow_visibility(surface: DynamicLightingSurface, light: DynamicLight, shadow: DynamicLightShadow) -> f32 {
+    if !surface_receives_shadows(surface) ||
+            (light.channel & LIGHT_FLAG_SHADOW) == 0u ||
+            shadow.cubemap_index == INVALID_LIGHT_INDEX {
         return 1.0;
     }
 
     let surface_to_light = light.position - surface.world_position;
     let distance_to_light = max(max(abs(surface_to_light.x), abs(surface_to_light.y)), abs(surface_to_light.z));
-    let normal_offset = 0.6 * dynamic_light_meta.shadow_texel_size * distance_to_light * surface.normal;
-    let depth_offset = 0.08 * normalize(surface_to_light);
+    let normal_offset = shadow.normal_bias * distance_to_light * surface.normal;
+    let depth_offset = shadow.depth_bias * normalize(surface_to_light);
     let offset_position = surface.world_position + normal_offset + depth_offset;
     let light_local = offset_position - light.position;
     let major_axis = max(max(abs(light_local.x), abs(light_local.y)), abs(light_local.z));
-    let comparison_depth = dynamic_light_meta.shadow_near_z / max(major_axis, dynamic_light_meta.shadow_near_z);
+    let comparison_depth = shadow.near_z / max(major_axis, shadow.near_z);
     return textureSampleCompareLevel(
         point_shadow_textures,
         point_shadow_sampler,
         light_local * vec3<f32>(1.0, 1.0, -1.0),
-        i32(light.shadow_cubemap_index),
+        i32(shadow.cubemap_index),
         comparison_depth,
     );
 }
@@ -41,7 +43,8 @@ fn shadow_visibility(surface: DynamicLightingSurface, light: DynamicLight) -> f3
 fn fragment(@builtin(position) frag_position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(frag_position.xy);
     let source = textureLoad(source_hdr, pixel, 0);
-    if dynamic_light_meta.enabled == 0u || dynamic_light_meta.count == 0u {
+    if dynamic_light_meta.enabled == 0u || dynamic_light_meta.count == 0u ||
+            dynamic_light_meta.padding_a != 0.0 || dynamic_light_meta.padding_b != 0.0 {
         return source;
     }
     let depth = textureLoad(depth_texture, pixel, 0);
@@ -61,7 +64,7 @@ fn fragment(@builtin(position) frag_position: vec4<f32>) -> @location(0) vec4<f3
             surface,
             light,
             view,
-            shadow_visibility(surface, light),
+            shadow_visibility(surface, light, dynamic_light_shadows[index]),
         );
     }
     return vec4<f32>(source.rgb + added_light, source.a);

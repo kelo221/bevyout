@@ -17,6 +17,8 @@
     "timestepSeconds": 0.03333333507180214,
     "bounceModifier": 1.0,
     "bounceIntensity": 1.0,
+    "shadowMode": 0,
+    "illuminationMode": 0,
     "volumetricType": 0,
     "volumetricRadius": 4.0,
     "volumetricThickness": 1.0,

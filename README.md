@@ -83,9 +83,11 @@ freeze or resume effect time. Press 4 to hide every ordinary Bevy point light
 and 5 to toggle the separately identified shadow-only proxy. The proxy is a
 black, fixed-intensity Bevy `PointLight`: Bevy owns its realtime cubemap, its
 built-in direct contribution is zero, and the custom pass samples that cubemap
-without driving the proxy from temporal effects. Prepared irradiance baking and custom-light
-authoring both keep one diffuse bounce enabled by default
-(`bounce_multiplier = 1.0`).
+without driving the proxy from temporal effects. Prepared irradiance baking
+keeps one diffuse bounce enabled by default (`bounce_multiplier = 1.0`). The
+custom `DynamicLight` authoring contract instead preserves Henry's default
+direct-illumination mode; its local diffuse-bounce approximation is off unless
+the scene explicitly opts in, as this test rack does.
 
 Henry-style volumetric fog is rendered by the same isolated custom path. The
 scene demonstrates a temporally modulated sphere, a non-uniformly scaled box,
@@ -93,6 +95,14 @@ and rotated `ConeZ`/`ConeY` volumes. Press 6 to toggle only the fog pass. Fog
 uses the shared effect runtime, reconstructs geometry from depth, and is
 composed in HDR before tonemapping and UI; it does not require Bevy
 `VolumetricLight` or `FogVolume` components.
+
+The automated GPU acceptance test runs this production WGSL path with ordinary
+Bevy lights and shadow proxies hidden, under both perspective and orthographic
+3D projections:
+
+```powershell
+cargo test-dev --test dynamic_lighting_gpu -- --nocapture
+```
 
 For a fast Blender preview that leaves the prepared manifest unchanged:
 

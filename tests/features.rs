@@ -159,6 +159,10 @@ mod dynamic_lighting_core {
     #[allow(dead_code, unused_imports)]
     pub(crate) mod runtime;
 
+    #[path = "../../src/vsa/dynamic_lighting/core/spatial.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod spatial;
+
     #[path = "../../src/vsa/dynamic_lighting/core/volumetric.rs"]
     #[allow(dead_code, unused_imports)]
     pub(crate) mod volumetric;
@@ -175,8 +179,11 @@ mod dynamic_lighting_core {
     #[allow(dead_code, unused_imports)]
     pub(crate) mod unity_random;
 
-    pub(crate) use config::{DynamicLightConfig, DynamicLightVolumetricParameters};
+    pub(crate) use config::{
+        DynamicLightConfig, DynamicLightSpatialParameters, DynamicLightVolumetricParameters,
+    };
     pub(crate) use runtime::{LightEffectRuntime, advance_effect};
+    pub(crate) use spatial::spatial_parameters;
     pub(crate) use types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
     pub(crate) use unity_random::UnityRandom;
     pub(crate) use volumetric::{pack_volumetric_parameters, volumetric_is_active};
@@ -425,6 +432,8 @@ struct BevyoutWorld {
     dynamic_light_catalogs_valid: Option<bool>,
     dynamic_light_volumetric_inactive: Option<bool>,
     dynamic_light_volumetric_intensity: Option<f32>,
+    dynamic_light_animation_time: f32,
+    dynamic_light_global_phase_valid: Option<bool>,
 
     // -- loading_fallback.feature (issue #59) --
     fallback_state: Option<swap_policy::FallbackState>,
@@ -3003,6 +3012,12 @@ async fn then_dynamic_light_defaults(
     );
 }
 
+#[then("bounce approximation is disabled and source shadows are enabled")]
+async fn then_dynamic_light_source_defaults(world: &mut BevyoutWorld) {
+    assert!(!world.dynamic_light_config.bounce.enabled);
+    assert!(world.dynamic_light_config.shadow_enabled);
+}
+
 #[then(
     regex = r"^its volumetric type is None radius is ([\d.]+) thickness is ([\d.]+) intensity is ([\d.]+) and visibility is ([\d.]+)$"
 )]
@@ -3059,12 +3074,18 @@ async fn given_source_compatible_strobe(world: &mut BevyoutWorld) {
 
 #[when("the dynamic light advances two frames at 60 Hz")]
 async fn when_dynamic_light_advances_two_frames(world: &mut BevyoutWorld) {
-    for _ in 0..2 {
+    for frame in 1..=2 {
+        let animation_time = if world.dynamic_light_animation_time > 0.0 {
+            world.dynamic_light_animation_time
+        } else {
+            frame as f32 / 60.0
+        };
         dynamic_lighting_core::advance_effect(
             &world.dynamic_light_config,
             &mut world.dynamic_light_runtime,
             &mut world.dynamic_light_random,
             1.0 / 60.0,
+            animation_time,
         );
     }
     world.dynamic_light_multiplier = Some(world.dynamic_light_runtime.intensity);
@@ -3092,12 +3113,13 @@ async fn when_effects_advance(world: &mut BevyoutWorld) {
                 };
                 let mut runtime = dynamic_lighting_core::LightEffectRuntime::default();
                 let mut random = dynamic_lighting_core::UnityRandom::from_seed(12345);
-                for _ in 0..2 {
+                for frame in 1..=2 {
                     dynamic_lighting_core::advance_effect(
                         &config,
                         &mut runtime,
                         &mut random,
                         1.0 / 60.0,
+                        frame as f32 / 60.0,
                     );
                 }
                 runtime.intensity
@@ -3109,6 +3131,121 @@ async fn when_effects_advance(world: &mut BevyoutWorld) {
 #[then("every dynamic light effect returns a finite multiplier")]
 async fn then_every_dynamic_light_effect_finite(world: &mut BevyoutWorld) {
     assert_eq!(world.dynamic_light_effects_finite, Some(true));
+}
+
+#[given(regex = r"^a source-compatible pulse light spawned at global animation time ([\d.]+)$")]
+async fn given_late_spawned_pulse(world: &mut BevyoutWorld, animation_time: f32) {
+    world.dynamic_light_config = dynamic_lighting_core::DynamicLightConfig {
+        effect: dynamic_lighting_core::DynamicLightEffect::Pulse,
+        ..Default::default()
+    };
+    world.dynamic_light_runtime = dynamic_lighting_core::LightEffectRuntime::default();
+    world.dynamic_light_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+    world.dynamic_light_animation_time = animation_time;
+}
+
+#[when("the dynamic light advances one frame at 60 Hz")]
+async fn when_dynamic_light_advances_one_frame(world: &mut BevyoutWorld) {
+    dynamic_lighting_core::advance_effect(
+        &world.dynamic_light_config,
+        &mut world.dynamic_light_runtime,
+        &mut world.dynamic_light_random,
+        1.0 / 60.0,
+        world.dynamic_light_animation_time,
+    );
+}
+
+#[then(regex = r"^temporal and spatial animation times are both ([\d.]+)$")]
+async fn then_temporal_and_spatial_use_same_time(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.dynamic_light_runtime.animation_time_seconds, expected);
+    let spatial = dynamic_lighting_core::spatial_parameters(
+        dynamic_lighting_core::DynamicLightType::Wave,
+        world.dynamic_light_runtime.animation_time_seconds,
+        world.dynamic_light_config.spatial,
+    );
+    let expected_spatial = dynamic_lighting_core::spatial_parameters(
+        dynamic_lighting_core::DynamicLightType::Wave,
+        expected,
+        world.dynamic_light_config.spatial,
+    );
+    assert_eq!(spatial, expected_spatial);
+}
+
+#[given(regex = r"^identical pulse lights initialized at global times ([\d.]+) and ([\d.]+)$")]
+async fn given_pulse_lights_initialized_at_different_times(
+    world: &mut BevyoutWorld,
+    first_time: f32,
+    second_time: f32,
+) {
+    let config = dynamic_lighting_core::DynamicLightConfig {
+        effect: dynamic_lighting_core::DynamicLightEffect::Pulse,
+        ..Default::default()
+    };
+    let mut first = dynamic_lighting_core::LightEffectRuntime::default();
+    let mut second = dynamic_lighting_core::LightEffectRuntime::default();
+    let mut first_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+    let mut second_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+    dynamic_lighting_core::advance_effect(
+        &config,
+        &mut first,
+        &mut first_random,
+        1.0 / 60.0,
+        first_time,
+    );
+    dynamic_lighting_core::advance_effect(
+        &config,
+        &mut second,
+        &mut second_random,
+        1.0 / 60.0,
+        second_time,
+    );
+    world.dynamic_light_config = config;
+    world.dynamic_light_runtime = first;
+    world.dynamic_light_random = first_random;
+    world.dynamic_light_animation_time = 5.0;
+    world.dynamic_light_multiplier = Some(second.intensity);
+}
+
+#[when(regex = r"^both advance at global animation time ([\d.]+)$")]
+async fn when_both_lights_advance_at_global_time(world: &mut BevyoutWorld, time: f32) {
+    let mut first = world.dynamic_light_runtime;
+    let mut second = dynamic_lighting_core::LightEffectRuntime {
+        intensity: world.dynamic_light_multiplier.unwrap(),
+        ..Default::default()
+    };
+    let mut first_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+    let mut second_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+    dynamic_lighting_core::advance_effect(
+        &world.dynamic_light_config,
+        &mut first,
+        &mut first_random,
+        1.0 / 60.0,
+        time,
+    );
+    dynamic_lighting_core::advance_effect(
+        &world.dynamic_light_config,
+        &mut second,
+        &mut second_random,
+        1.0 / 60.0,
+        time,
+    );
+    let first_spatial = dynamic_lighting_core::spatial_parameters(
+        dynamic_lighting_core::DynamicLightType::Wave,
+        first.animation_time_seconds,
+        world.dynamic_light_config.spatial,
+    );
+    let second_spatial = dynamic_lighting_core::spatial_parameters(
+        dynamic_lighting_core::DynamicLightType::Wave,
+        second.animation_time_seconds,
+        world.dynamic_light_config.spatial,
+    );
+    world.dynamic_light_global_phase_valid =
+        Some(first.intensity == second.intensity && first_spatial == second_spatial);
+}
+
+#[then("both use the same temporal and spatial phase")]
+async fn then_both_lights_use_same_global_phase(world: &mut BevyoutWorld) {
+    assert_eq!(world.dynamic_light_global_phase_valid, Some(true));
 }
 
 #[when("volumetric type None zero radius and zero intensity are checked")]

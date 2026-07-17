@@ -151,6 +151,18 @@ pub struct GlobalClusterableObjectMeta {
     pub entity_to_index: EntityHashMap<usize>,
 }
 
+/// Runtime point-shadow allocation data prepared by Bevy for one light.
+///
+/// This exposes the values needed by an external lighting pass without
+/// exposing Bevy's complete clustered-light buffer layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusteredPointShadowMetadata {
+    pub cubemap_index: u32,
+    pub depth_bias: f32,
+    pub normal_bias: f32,
+    pub near_z: f32,
+}
+
 /// GPU buffers that hold data about the clustered lights.
 ///
 /// This is only for lights. Data about other clusterable objects are stored in
@@ -270,6 +282,31 @@ impl GlobalClusterableObjectMeta {
             gpu_clustered_lights: GpuClusteredLights::new(buffer_binding_type),
             entity_to_index: EntityHashMap::default(),
         }
+    }
+
+    /// Returns the actual runtime cubemap allocation and prepared bias values
+    /// for a point light, or `None` when Bevy did not allocate a runtime shadow
+    /// map for it (including capacity truncation and spot lights).
+    pub fn point_shadow_metadata(
+        &self,
+        render_entity: Entity,
+    ) -> Option<ClusteredPointShadowMetadata> {
+        // Keep these in sync with `PointLightFlags` in `render/light.rs`.
+        const SPOT_LIGHT: u32 = 1 << 5;
+        const RUNTIME_SHADOWS_ENABLED: u32 = 1 << 6;
+
+        let clustered_index = u32::try_from(*self.entity_to_index.get(&render_entity)?).ok()?;
+        let light = self.gpu_clustered_lights.data.get(clustered_index)?;
+        if light.flags & RUNTIME_SHADOWS_ENABLED == 0 || light.flags & SPOT_LIGHT != 0 {
+            return None;
+        }
+
+        Some(ClusteredPointShadowMetadata {
+            cubemap_index: light.shadow_map_index_or_spot_light_tan_angle & 0xFFFF,
+            depth_bias: light.shadow_depth_bias,
+            normal_bias: light.shadow_normal_bias,
+            near_z: light.shadow_map_near_z,
+        })
     }
 }
 
@@ -868,5 +905,51 @@ impl Default for GpuClusterOffsetsAndCountsUniform {
         Self {
             data: Box::new([UVec4::ZERO; ViewClusterBindings::MAX_UNIFORM_ITEMS]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata_with_light(flags: u32) -> (GlobalClusterableObjectMeta, Entity) {
+        let mut metadata = GlobalClusterableObjectMeta::new(BufferBindingType::Storage {
+            read_only: true,
+        });
+        let entity = Entity::from_raw_u32(7).expect("valid test entity");
+        metadata.entity_to_index.insert(entity, 0);
+        metadata.gpu_clustered_lights.add(GpuClusteredLight {
+            flags,
+            shadow_depth_bias: 0.13,
+            shadow_normal_bias: 0.007,
+            shadow_map_index_or_spot_light_tan_angle: 0xA5A5_0017,
+            shadow_map_near_z: 0.42,
+            ..Default::default()
+        });
+        (metadata, entity)
+    }
+
+    #[test]
+    fn point_shadow_metadata_exposes_allocated_runtime_values() {
+        let (metadata, entity) = metadata_with_light(1 << 6);
+
+        assert_eq!(
+            metadata.point_shadow_metadata(entity),
+            Some(ClusteredPointShadowMetadata {
+                cubemap_index: 0x17,
+                depth_bias: 0.13,
+                normal_bias: 0.007,
+                near_z: 0.42,
+            })
+        );
+    }
+
+    #[test]
+    fn point_shadow_metadata_rejects_unallocated_and_spot_lights() {
+        let (unallocated, entity) = metadata_with_light(0);
+        assert_eq!(unallocated.point_shadow_metadata(entity), None);
+
+        let (spot, entity) = metadata_with_light((1 << 6) | (1 << 5));
+        assert_eq!(spot.point_shadow_metadata(entity), None);
     }
 }

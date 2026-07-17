@@ -188,7 +188,8 @@ fn shape_opacity(
 fn fragment(@builtin(position) frag_position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(frag_position.xy);
     let source = textureLoad(source_hdr, pixel, 0);
-    if volumetric_meta.enabled == 0u || volumetric_meta.count == 0u {
+    if volumetric_meta.enabled == 0u || volumetric_meta.count == 0u ||
+            volumetric_meta.padding_a != 0.0 || volumetric_meta.padding_b != 0.0 {
         return source;
     }
     let depth = textureLoad(depth_texture, pixel, 0);

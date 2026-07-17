@@ -49,10 +49,13 @@ covered by an automated test.
 | disco vertical speed `1` | `DynamicLight.cs` | spatial parameters | `gp_float_3` |
 | pulse speed `1`, modifier `0.25`, offset `0` | `DynamicLight.cs` | effect parameters | temporal runtime |
 | fixed step `1/30 s` | `DynamicLightCache.cs`, `MathEx.FixedTimestep` | `FixedTimestep` | temporal runtime |
-| bounce color `white/alpha 0`, modifier `1`, intensity `1` | `DynamicLight.cs` | bounce parameters | `bounce_color` |
+| global `Time.time` sampled once per update | `DynamicLightManager.cs` | `DynamicLightingAnimationClock` | shared temporal/spatial phase tests |
+| direct illumination, raytraced shadows | `DynamicLight.cs` | bounce off, custom shadows on | Unity defaults fixture |
+| bounce color `white/alpha 0`, modifier `1`, intensity `1` | `DynamicLight.cs` | optional approximation parameters | `bounce_color`; disabled by default |
 | type bits `type << 6` | `DynamicLighting.cginc` | `packed_channel` | ABI/channel tests |
 | realtime bit `1 << 5` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
-| shadow bit `1 << 15`, cookie bit `1 << 16` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
+| shadow bit `1 << 15` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
+| cookie bit `1 << 16` | `DynamicLighting.cginc` | not authored until texture-array sampling exists | inert `u32::MAX` sentinel |
 | seven 16-byte `ShaderDynamicLight` blocks | `ShaderDynamicLight.cs` | `render/gpu.rs` | size/alignment/offset tests |
 
 ## Volumetric fog
@@ -73,10 +76,31 @@ covered by an automated test.
 `bevy_bridge/shadow_proxy.rs` is the only DynamicLighting file allowed to
 mutate a Bevy `PointLight`. Its black proxy has constant intensity, so it
 contributes no built-in direct light while Bevy renders the realtime cubemap.
-`render/gpu.rs` maps that proxy's stable render-light index into
-`shadow_cubemap_index`, and `dynamic_lighting_pass.wgsl` performs the comparison
-sample before applying the custom surface contribution. Removing or hiding the
-proxy restores visibility to 1.0 and leaves the custom light active.
+After Bevy allocates shadow maps, the local `bevy_pbr` seam exposes the proxy's
+final runtime cubemap layer, depth bias, normal bias, and near plane.
+`render/gpu.rs` uploads those values in a parallel 16-byte-per-light buffer, and
+`dynamic_lighting_pass.wgsl` performs the comparison sample only for deferred
+meshes that receive shadows. A proxy which receives no allocation uploads the
+invalid-layer sentinel, restoring visibility to 1.0 while leaving the custom
+light active.
+
+## Explicitly incomplete source features
+
+| Source feature | Current status |
+| --- | --- |
+| baked triangle/photon-data bounce and compression | not ported; optional local diffuse approximation is labeled and default-off |
+| cookie texture array and cookie sampling | not ported; no public inert cookie option |
+| shimmer | not ported; ABI values remain zero |
+| transparency-specific lighting | not ported |
+| non-direct source illumination modes | not ported |
+| per-camera light masks | not claimed; `DynamicLightLayerMask` filters the global extracted list |
+
+The production-GPU gate is
+`cargo test-dev --test dynamic_lighting_gpu -- --nocapture`. It invokes the
+committed storage-buffer extraction and WGSL render pass with all eight types
+present, zero visible ordinary Bevy lights/proxies, multiple materials/normals,
+and perspective plus orthographic projections. CPU/Unity goldens remain the
+parameter-level reference for non-default and invalid cutoff cases.
 
 ## Source files executed or translated
 

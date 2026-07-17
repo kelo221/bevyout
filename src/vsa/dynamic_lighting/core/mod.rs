@@ -9,9 +9,11 @@ mod unity_math;
 mod unity_random;
 mod volumetric;
 
+#[cfg(test)]
+pub(crate) use config::DynamicLightBounceParameters;
 pub(crate) use config::{
-    DEFAULT_BOUNCE_MULTIPLIER, DynamicLightConfig, DynamicLightSpatialParameters,
-    DynamicLightVolumetricParameters,
+    DEFAULT_BOUNCE_MULTIPLIER, DynamicLightConfig, DynamicLightEffectParameters,
+    DynamicLightSpatialParameters, DynamicLightVolumetricParameters,
 };
 pub(crate) use runtime::{LightEffectRuntime, advance_effect};
 pub(crate) use spatial::spatial_parameters;

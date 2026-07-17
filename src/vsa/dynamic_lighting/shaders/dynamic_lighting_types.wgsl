@@ -23,8 +23,15 @@ struct DynamicLight {
 struct DynamicLightMeta {
     count: u32,
     enabled: u32,
-    shadow_texel_size: f32,
-    shadow_near_z: f32,
+    padding_a: f32,
+    padding_b: f32,
+}
+
+struct DynamicLightShadow {
+    cubemap_index: u32,
+    depth_bias: f32,
+    normal_bias: f32,
+    near_z: f32,
 }
 
 const LIGHT_TYPE_MASK: u32 = 960u;

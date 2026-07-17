@@ -1,9 +1,7 @@
-use bevy::{
-    ecs::system::lifetimeless::Read, light::PointLightShadowMap, prelude::*, render::Extract,
-};
+use bevy::{ecs::system::lifetimeless::Read, prelude::*, render::Extract};
 
 use super::super::bevy_bridge::{
-    DynamicLight, DynamicLightOrdinal, DynamicLightRuntime, DynamicLightViewMask,
+    DynamicLight, DynamicLightLayerMask, DynamicLightOrdinal, DynamicLightRuntime,
     DynamicLightingDiagnostics, DynamicLightingSettings,
 };
 use super::gpu::{ExtractedDynamicLights, GpuDynamicLight, MAX_DYNAMIC_LIGHTS};
@@ -13,7 +11,7 @@ type DynamicLightExtractQuery = (
     Read<DynamicLight>,
     Read<DynamicLightRuntime>,
     Read<DynamicLightOrdinal>,
-    Read<DynamicLightViewMask>,
+    Read<DynamicLightLayerMask>,
     Read<GlobalTransform>,
 );
 
@@ -21,12 +19,11 @@ pub(super) fn extract_dynamic_lights(
     mut commands: Commands,
     settings: Extract<Res<DynamicLightingSettings>>,
     diagnostics: Extract<Res<DynamicLightingDiagnostics>>,
-    point_shadow_map: Extract<Res<PointLightShadowMap>>,
     lights: Extract<Query<DynamicLightExtractQuery>>,
 ) {
     let mut sorted = lights
         .iter()
-        .filter(|(_, light, _, _, mask, _)| light.config.view_mask & mask.0 != 0)
+        .filter(|(_, light, _, _, layers, _)| light.config.layer_mask & layers.0 != 0)
         .map(|(entity, light, runtime, ordinal, _, transform)| {
             (
                 ordinal.0,
@@ -37,6 +34,14 @@ pub(super) fn extract_dynamic_lights(
         })
         .collect::<Vec<_>>();
     sorted.sort_unstable_by_key(|(ordinal, _, _, _)| *ordinal);
+    let source_count = sorted.len();
+    let truncated_count = source_count.saturating_sub(MAX_DYNAMIC_LIGHTS);
+    let truncation_changed = diagnostics.set_truncated_light_count(truncated_count);
+    if truncated_count > 0 && truncation_changed {
+        warn!(
+            "dynamic lighting truncated {truncated_count} source(s): {source_count} active exceeds GPU limit {MAX_DYNAMIC_LIGHTS}"
+        );
+    }
     sorted.truncate(MAX_DYNAMIC_LIGHTS);
     diagnostics.set_extracted_light_count(sorted.len());
     let volumetric_values = sorted
@@ -58,6 +63,5 @@ pub(super) fn extract_dynamic_lights(
         enabled: settings.enabled,
         volumetric_values,
         volumetric_enabled: settings.enabled && settings.volumetric_enabled,
-        shadow_texel_size: 2.0 / point_shadow_map.size as f32,
     });
 }
