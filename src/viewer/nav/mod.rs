@@ -19,6 +19,7 @@ pub(crate) mod agent;
 pub(crate) mod door_link;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
+pub(crate) mod movement_policy;
 pub(crate) mod repath;
 
 pub(crate) fn install(app: &mut App) {
