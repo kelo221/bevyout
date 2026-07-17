@@ -20,6 +20,33 @@
 //! Nav-mesh vertices are already Bevy metres (`vsa::prepare::nav_graph`'s
 //! `to_bevy_position` applies `FO3_SCALE` once, at prepare time) -- no
 //! coordinate conversion happens here.
+//!
+//! Issue #138 adds two things on top of the #128 triangle overlay:
+//!
+//! - The active test agent's current route, drawn as a bright white
+//!   `LineList` polyline child of the same overlay root (so it toggles and
+//!   despawns with the rest of the overlay). The route is read straight off
+//!   `bevy_landmass`'s own public debug-draw API
+//!   (`bevy_landmass::debug::draw_archipelago_debug` filtered down to
+//!   `LineType::AgentCorridor` lines for the lowest-`Entity` agent found --
+//!   "agent 0", per the issue's spec) rather than any hook into
+//!   `nav/agent.rs`'s private state, so this module stays fully decoupled
+//!   from that parallel-wave rewrite. `despawn_stale_nav_overlay` was
+//!   already polled every `Update` for cell swaps; it now also refreshes
+//!   this polyline in place (same `Mesh` handle, no entity churn) whenever
+//!   the collected corridor segments differ from last frame's -- i.e. on
+//!   repath, not on every frame, even though the check itself runs every
+//!   frame the overlay is visible.
+//! - `OVERLAY_ALPHA`/`TRIANGLE_LIGHTNESS` are both dimmed from their #128
+//!   values. The un-dimmed overlay (0.55 alpha, full HSL lightness) could
+//!   cover most of the screen with saturated, unlit color and was bright
+//!   enough to push the scene's `AutoExposure` histogram up, crushing a
+//!   dark interior to black the instant `tnm` was toggled on. `AutoExposure`
+//!   only offers a screen-space `metering_mask` (see `scene.rs`'s
+//!   `camera_post_processing`), which can't track a 3D overlay's
+//!   ever-changing screen footprint without a new per-frame render system --
+//!   so the smallest fix is dimming the overlay material itself rather than
+//!   trying to exclude it from metering.
 
 use std::path::Path;
 
@@ -28,6 +55,11 @@ use bevy::asset::RenderAssetUsages;
 use bevy::material::AlphaMode;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use bevy_landmass::coords::ThreeD;
+use bevy_landmass::debug::{
+    DebugDrawer, LineType, PointType, TriangleType, draw_archipelago_debug,
+};
+use bevy_landmass::{Agent3d, Archipelago3d};
 use serde_json::json;
 
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
@@ -39,15 +71,38 @@ use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedSceneManifest};
 /// sequentially.
 const HUE_STEP: f32 = 0.618_034;
 /// Some transparency so the geometry underneath the overlay stays readable.
-const OVERLAY_ALPHA: f32 = 0.55;
+/// Lowered from #128's 0.55 (issue #138 feature 2): see the module doc
+/// comment -- this, combined with `TRIANGLE_LIGHTNESS`, is what stops the
+/// overlay from crushing dark interiors via auto-exposure.
+const OVERLAY_ALPHA: f32 = 0.28;
+/// HSL lightness used for every triangle's hue (issue #138 feature 2,
+/// down from #128's fixed 0.5). Saturation stays at 1.0 so polygons remain
+/// visually distinct; only the overall brightness is dimmed.
+const TRIANGLE_LIGHTNESS: f32 = 0.22;
 /// Offset against z-fighting with the floor/nav-mesh-adjacent geometry.
 const OVERLAY_Y_OFFSET: f32 = 0.02;
+/// Additional height (relative to the triangle mesh, i.e. on top of
+/// `OVERLAY_Y_OFFSET`) the active-agent route polyline is drawn at, so it
+/// never z-fights with the triangle overlay sitting directly beneath it.
+const PATH_Y_OFFSET: f32 = 0.03;
+/// Fully opaque white (issue #138 feature 1): deliberately not routed
+/// through `triangle_color`'s hue wheel, so the route always reads as "the
+/// path" regardless of which polygon hue it happens to cross. Full opacity
+/// is fine here -- feature 2's auto-exposure concern is about the
+/// triangle overlay's large screen-covering area, not a handful of 1px
+/// line pixels.
+const PATH_LINE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Marks the overlay's root entity (and its per-mesh children) for the
 /// benefit of tests and any future diagnostics query; not otherwise queried
 /// at runtime.
 #[derive(Component)]
 pub(crate) struct NavMeshOverlayRoot;
+
+/// Marks the active-agent route polyline child (issue #138) for the same
+/// reason `NavMeshOverlayRoot` marks the root.
+#[derive(Component)]
+pub(crate) struct NavAgentPathOverlay;
 
 #[derive(Clone, Copy)]
 struct NavMeshOverlay {
@@ -58,9 +113,19 @@ struct NavMeshOverlay {
     visible: bool,
 }
 
+/// Rust-side bookkeeping for the route polyline (issue #138): the stable
+/// `Mesh` handle it's rebuilt in place under, and the last collected
+/// corridor segments (so `refresh_active_agent_path_overlay` only touches
+/// the `Assets<Mesh>` entry when a repath actually changed the route).
+struct NavAgentPathState {
+    mesh: Handle<Mesh>,
+    last_segments: Vec<[Vec3; 2]>,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct NavMeshOverlayState {
     overlay: Option<NavMeshOverlay>,
+    path: Option<NavAgentPathState>,
 }
 
 /// Deterministic per-polygon hue fraction in `[0, 1)` (issue #128's spec:
@@ -72,7 +137,8 @@ pub(crate) fn polygon_hue_fraction(polygon_index: u32) -> f32 {
 
 fn triangle_color(polygon_index: u32, alpha: f32) -> [f32; 4] {
     let hue_degrees = polygon_hue_fraction(polygon_index) * 360.0;
-    LinearRgba::from(Hsla::hsl(hue_degrees, 1.0, 0.5).with_alpha(alpha)).to_f32_array()
+    LinearRgba::from(Hsla::hsl(hue_degrees, 1.0, TRIANGLE_LIGHTNESS).with_alpha(alpha))
+        .to_f32_array()
 }
 
 /// Resolves `manifest.nav_graph`'s `asset_path` against `asset_root` and
@@ -127,9 +193,15 @@ fn build_triangle_mesh(mesh: &PreparedNavMesh) -> (Mesh, usize) {
 /// Spawns the overlay root (offset `+OVERLAY_Y_OFFSET` metres in Y) plus one
 /// child entity per non-empty `PreparedNavMesh`, sharing a single unlit,
 /// double-sided, alpha-blended material (vertex colors carry the actual
-/// per-triangle hue). Returns the root entity, the number of meshes built,
-/// and the total triangle count across them.
-fn spawn_nav_mesh_overlay(world: &mut World, graph: &PreparedNavGraph) -> (Entity, usize, usize) {
+/// per-triangle hue), plus one more child (issue #138) for the active
+/// agent's route polyline -- initially empty, filled in by the first
+/// `refresh_active_agent_path_overlay` call. Returns the root entity, the
+/// number of triangle meshes built, the total triangle count across them,
+/// and the route polyline's `Mesh` handle (for `NavAgentPathState`).
+fn spawn_nav_mesh_overlay(
+    world: &mut World,
+    graph: &PreparedNavGraph,
+) -> (Entity, usize, usize, Handle<Mesh>) {
     let root = world
         .spawn((
             NavMeshOverlayRoot,
@@ -172,7 +244,139 @@ fn spawn_nav_mesh_overlay(world: &mut World, graph: &PreparedNavGraph) -> (Entit
             .id();
         world.entity_mut(root).add_child(child);
     }
-    (root, mesh_count, triangle_count)
+
+    let path_material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Opaque,
+            ..default()
+        });
+    let path_mesh_handle = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(build_path_mesh(&[]));
+    let path_child = world
+        .spawn((
+            NavAgentPathOverlay,
+            Mesh3d(path_mesh_handle.clone()),
+            MeshMaterial3d(path_material),
+            Transform::from_xyz(0.0, PATH_Y_OFFSET, 0.0),
+        ))
+        .id();
+    world.entity_mut(root).add_child(path_child);
+
+    (root, mesh_count, triangle_count, path_mesh_handle)
+}
+
+/// Builds a `LineList` mesh from disconnected route segments (issue #138):
+/// every pair of positions is one independently-colored line, so segment
+/// order/connectivity from the debug-draw source doesn't need to form a
+/// single contiguous strip. An empty `segments` slice yields a valid,
+/// zero-vertex mesh (the initial state before the first repath).
+fn build_path_mesh(segments: &[[Vec3; 2]]) -> Mesh {
+    let mut positions = Vec::with_capacity(segments.len() * 2);
+    for [start, end] in segments {
+        positions.push(start.to_array());
+        positions.push(end.to_array());
+    }
+    let colors = vec![PATH_LINE_COLOR; positions.len()];
+    Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+}
+
+/// Filters `bevy_landmass`'s own public debug-draw output down to just the
+/// chosen agent's route: the `AgentCorridor` lines the corridor follows
+/// across polygon nodes (`bevy_landmass::debug::LineType`'s own doc: "the
+/// corridor follows the path along nodes, not the actual path the agent
+/// will travel" -- close enough for a debug overlay, and it's what makes
+/// the route visible crossing a mesh seam per the issue's acceptance).
+/// Everything else `draw_archipelago_debug` can report (boundary/
+/// connectivity edges, other agents/animation links, nav-mesh triangles) is
+/// dropped.
+struct AgentCorridorCollector {
+    agent: Entity,
+    segments: Vec<[Vec3; 2]>,
+}
+
+impl DebugDrawer<ThreeD> for AgentCorridorCollector {
+    fn add_point(&mut self, _point_type: PointType, _point: Vec3) {}
+
+    fn add_line(&mut self, line_type: LineType, line: [Vec3; 2]) {
+        if line_type == LineType::AgentCorridor(self.agent) {
+            self.segments.push(line);
+        }
+    }
+
+    fn add_triangle(&mut self, _triangle_type: TriangleType, _triangle: [Vec3; 3]) {}
+}
+
+/// The lowest-`Entity` `bevy_landmass` agent's current route ("agent 0" per
+/// issue #138's spec -- multi-agent support may land in parallel via #114,
+/// but drawing just one agent's path is sufficient for this wave), read
+/// straight off `bevy_landmass::debug::draw_archipelago_debug`'s public
+/// API. No agent or archipelago in the world yields an empty route rather
+/// than an error -- this is a best-effort debug overlay, not something
+/// that should ever panic or block `tnm`.
+fn active_agent_corridor(world: &mut World) -> Vec<[Vec3; 2]> {
+    let mut agents = world.query_filtered::<Entity, With<Agent3d>>();
+    let Some(agent) = agents.iter(world).min() else {
+        return Vec::new();
+    };
+    let mut archipelagos = world.query::<&Archipelago3d>();
+    let Some(archipelago) = archipelagos.iter(world).next() else {
+        return Vec::new();
+    };
+    let mut collector = AgentCorridorCollector {
+        agent,
+        segments: Vec::new(),
+    };
+    if let Err(error) = draw_archipelago_debug(archipelago, &mut collector) {
+        warn!("nav agent path overlay debug draw failed: {error}");
+        return Vec::new();
+    }
+    collector.segments
+}
+
+/// Rebuilds the route polyline's `Mesh` in place (same handle, no entity
+/// churn) when the collected corridor differs from last frame's -- i.e. on
+/// repath. A no-op (besides the cheap collection + comparison) on every
+/// other frame the overlay is visible, and entirely skipped by the caller
+/// while the overlay is absent or hidden.
+fn refresh_active_agent_path_overlay(world: &mut World) {
+    let Some(mesh_handle) = world
+        .resource::<NavMeshOverlayState>()
+        .path
+        .as_ref()
+        .map(|path| path.mesh.clone())
+    else {
+        return;
+    };
+    let segments = active_agent_corridor(world);
+    let unchanged = world
+        .resource::<NavMeshOverlayState>()
+        .path
+        .as_ref()
+        .is_some_and(|path| path.last_segments == segments);
+    if unchanged {
+        return;
+    }
+    let mesh = build_path_mesh(&segments);
+    // `insert` only errors on a stale/dead handle generation, which can't
+    // happen here -- `mesh_handle` was cloned from live `NavMeshOverlayState`
+    // moments ago and nothing else touches this handle's slot.
+    if let Err(error) = world
+        .resource_mut::<Assets<Mesh>>()
+        .insert(mesh_handle.id(), mesh)
+    {
+        warn!("nav agent path overlay mesh update failed: {error}");
+        return;
+    }
+    if let Some(path) = world.resource_mut::<NavMeshOverlayState>().path.as_mut() {
+        path.last_segments = segments;
+    }
 }
 
 fn no_nav_graph_error() -> ConsoleError {
@@ -247,7 +451,9 @@ pub(crate) fn toggle_nav_mesh(
         if let Ok(entity) = world.get_entity_mut(overlay.entity) {
             entity.despawn();
         }
-        world.resource_mut::<NavMeshOverlayState>().overlay = None;
+        let mut state = world.resource_mut::<NavMeshOverlayState>();
+        state.overlay = None;
+        state.path = None;
     }
 
     let Some(source) = nav_graph_source else {
@@ -266,41 +472,55 @@ pub(crate) fn toggle_nav_mesh(
         }
     };
 
-    let (entity, mesh_count, triangle_count) = spawn_nav_mesh_overlay(world, &graph);
-    world.resource_mut::<NavMeshOverlayState>().overlay = Some(NavMeshOverlay {
+    let (entity, mesh_count, triangle_count, path_mesh) = spawn_nav_mesh_overlay(world, &graph);
+    let mut state = world.resource_mut::<NavMeshOverlayState>();
+    state.overlay = Some(NavMeshOverlay {
         entity,
         cell_form_id: current_cell,
         mesh_count,
         triangle_count,
         visible: true,
     });
+    state.path = Some(NavAgentPathState {
+        mesh: path_mesh,
+        last_segments: Vec::new(),
+    });
     Ok(nav_mesh_toggle_reply(true, mesh_count, triangle_count))
 }
 
 /// Despawns the overlay the moment the active cell no longer matches the
 /// one it was built for (a door swap, instant or fallback, always
-/// repoints `PreparedSceneManifest` -- see `world::swap::activate_resident_cell`).
-/// A cheap integer compare every frame; does no mesh/material work, so it
-/// costs nothing while the overlay is absent or hidden. `PreparedSceneManifest`
-/// is `Option`-wrapped rather than required: this system is registered
-/// unconditionally alongside the console command (like `sync_ui_visibility`),
-/// and console-harness tests that never insert a manifest must not panic.
-pub(crate) fn despawn_stale_nav_overlay(
-    mut commands: Commands,
-    manifest: Option<Res<PreparedSceneManifest>>,
-    mut state: ResMut<NavMeshOverlayState>,
-) {
-    let Some(overlay) = state.overlay else {
+/// repoints `PreparedSceneManifest` -- see `world::swap::activate_resident_cell`),
+/// and (issue #138) otherwise refreshes the active agent's route polyline
+/// in place while the overlay is visible. Despawn is a cheap integer
+/// compare every frame; the route refresh is skipped entirely while the
+/// overlay is absent or hidden, and even while visible only touches
+/// `Assets<Mesh>` on an actual repath (`refresh_active_agent_path_overlay`).
+/// `PreparedSceneManifest` is read via `get_resource` rather than required:
+/// this system is registered unconditionally alongside the console command
+/// (like `sync_ui_visibility`), and console-harness tests that never insert
+/// a manifest must not panic. An exclusive `&mut World` system (rather than
+/// typed `Query`/`Res` params) so it can share `active_agent_corridor`'s
+/// `World`-based query construction without a second, parallel parameter
+/// list.
+pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
+    let Some(overlay) = world.resource::<NavMeshOverlayState>().overlay else {
         return;
     };
-    let Some(manifest) = manifest else {
-        return;
-    };
-    if overlay.cell_form_id == manifest.cell.form_id {
+    if let Some(manifest) = world.get_resource::<PreparedSceneManifest>()
+        && overlay.cell_form_id != manifest.cell.form_id
+    {
+        if let Ok(entity) = world.get_entity_mut(overlay.entity) {
+            entity.despawn();
+        }
+        let mut state = world.resource_mut::<NavMeshOverlayState>();
+        state.overlay = None;
+        state.path = None;
         return;
     }
-    commands.entity(overlay.entity).despawn();
-    state.overlay = None;
+    if overlay.visible {
+        refresh_active_agent_path_overlay(world);
+    }
 }
 
 #[cfg(test)]
@@ -610,5 +830,308 @@ mod tests {
                 index + 1
             );
         }
+    }
+
+    // Issue #138 feature 2: the triangle overlay's brightness constants
+    // must stay low enough that a floor-covering overlay doesn't push
+    // `AutoExposure`'s histogram bright enough to crush a dark interior --
+    // asserted directly on the constants (and the worst-case rendered
+    // color they produce) rather than requiring a real render to observe
+    // it, per the wave plan's testing section.
+    #[test]
+    fn overlay_material_constants_are_dimmed_to_avoid_driving_auto_exposure() {
+        // Both bounds are `const`, so clippy (rightly) flags a runtime
+        // `assert!` on them as dead weight -- a `const` block instead makes
+        // any regression a compile error, which is stronger than a test
+        // failure anyway.
+        const _: () = assert!(
+            OVERLAY_ALPHA <= 0.3,
+            "overlay alpha regressed toward #128's pre-#138 0.55"
+        );
+        const _: () = assert!(
+            TRIANGLE_LIGHTNESS <= 0.25,
+            "triangle HSL lightness regressed toward #128's pre-#138 0.5"
+        );
+
+        // The brightest a triangle can render at is hue-independent (full
+        // saturation, fixed lightness) -- Rec. 709 luma of that color,
+        // weighted by the blend alpha, bounds how much any single triangle
+        // can contribute to the metered scene brightness.
+        let brightest = triangle_color(0, OVERLAY_ALPHA);
+        let luma = 0.2126 * brightest[0] + 0.7152 * brightest[1] + 0.0722 * brightest[2];
+        let contribution = luma * brightest[3];
+        assert!(
+            contribution <= 0.2,
+            "dimmed overlay still contributes too much luminance ({contribution}) to be safe for auto-exposure metering"
+        );
+    }
+
+    // Issue #138 feature 1: the route polyline's color is fixed, opaque
+    // white -- never routed through `triangle_color`'s saturated hue wheel
+    // -- so it always reads as visually distinct from every triangle,
+    // regardless of which polygon hue the route happens to cross.
+    #[test]
+    fn path_line_color_is_opaque_white_and_never_produced_by_triangle_color() {
+        assert_eq!(PATH_LINE_COLOR, [1.0, 1.0, 1.0, 1.0]);
+        for index in 0..16_u32 {
+            assert_ne!(
+                triangle_color(index, OVERLAY_ALPHA),
+                PATH_LINE_COLOR,
+                "polygon {index}'s triangle color must never coincide with the route color"
+            );
+        }
+    }
+
+    // Issue #138 feature 1: `AgentCorridorCollector` keeps only the
+    // `AgentCorridor` lines belonging to the agent it was built for,
+    // dropping every other debug-draw kind `draw_archipelago_debug` can
+    // report (other agents' corridors, nav-mesh edges, targets, waypoints,
+    // triangles) -- driven directly against the `DebugDrawer` trait so this
+    // doesn't need a real archipelago.
+    #[test]
+    fn agent_corridor_collector_keeps_only_the_matching_agents_corridor_lines() {
+        let mut world = World::new();
+        let agent = world.spawn_empty().id();
+        let other_agent = world.spawn_empty().id();
+
+        let mut collector = AgentCorridorCollector {
+            agent,
+            segments: Vec::new(),
+        };
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        collector.add_line(LineType::AgentCorridor(agent), [a, b]);
+        collector.add_line(LineType::AgentCorridor(other_agent), [b, a]);
+        collector.add_line(LineType::BoundaryEdge, [a, b]);
+        collector.add_line(LineType::Target(agent), [a, b]);
+        collector.add_point(PointType::AgentPosition(agent), a);
+        collector.add_triangle(TriangleType::Node, [a, b, a]);
+
+        assert_eq!(collector.segments, vec![[a, b]]);
+    }
+
+    // Issue #138 feature 1: the route mesh is a `LineList` -- two vertices
+    // per segment, independently colored, positions carried through
+    // unchanged -- and an empty segment list yields a valid, zero-vertex
+    // mesh (the state before the first repath).
+    #[test]
+    fn build_path_mesh_emits_two_positions_per_segment() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(1.0, 0.0, 1.0);
+
+        let empty = build_path_mesh(&[]);
+        assert_eq!(empty.count_vertices(), 0);
+
+        let mesh = build_path_mesh(&[[a, b], [b, c]]);
+        assert_eq!(mesh.count_vertices(), 4);
+        let positions = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|attribute| attribute.as_float3())
+            .expect("path mesh always carries positions");
+        assert_eq!(
+            positions,
+            [a.to_array(), b.to_array(), b.to_array(), c.to_array()]
+        );
+    }
+
+    // Issue #138: `tnm` still reports the exact same triangle counts/log
+    // wording as #128 (the plan's "console test for unchanged tnm
+    // toggling") even though it now also spawns a route-polyline child and
+    // populates `NavMeshOverlayState::path` -- the new machinery is
+    // additive, not a behavior change to the existing surface.
+    #[test]
+    fn toggling_still_reports_the_same_counts_and_also_seeds_empty_path_state() {
+        let graph = two_triangle_graph();
+        let manifest = manifest_with_nav_graph(0xC0DE, &graph);
+        let mut world = test_world_with_manifest(manifest);
+
+        let on = toggle_nav_mesh(&mut world, &invocation()).expect("first toggle builds");
+        assert_eq!(
+            on.log,
+            ["nav mesh visualization on (1 meshes, 2 triangles)"]
+        );
+
+        let path = world
+            .resource::<NavMeshOverlayState>()
+            .path
+            .as_ref()
+            .map(|state| (state.mesh.clone(), state.last_segments.clone()));
+        let (path_mesh, last_segments) = path.expect("toggle seeds path state");
+        assert!(last_segments.is_empty());
+        assert_eq!(
+            world
+                .resource::<Assets<Mesh>>()
+                .get(&path_mesh)
+                .expect("path mesh handle resolves")
+                .count_vertices(),
+            0,
+            "no agent exists yet, so the route starts empty"
+        );
+
+        let off = toggle_nav_mesh(&mut world, &invocation()).expect("second toggle hides");
+        assert_eq!(off.log, ["nav mesh visualization off"]);
+    }
+
+    // Issue #138: a cell swap clears the route state alongside the overlay
+    // itself, so a `tnm` in the destination cell rebuilds a fresh route
+    // instead of reusing a stale mesh handle from the source cell.
+    #[test]
+    fn cell_swap_also_clears_the_path_state() {
+        let graph = two_triangle_graph();
+        let manifest = manifest_with_nav_graph(0xC0DE, &graph);
+        let mut world = test_world_with_manifest(manifest);
+        toggle_nav_mesh(&mut world, &invocation()).expect("builds for the source cell");
+        assert!(world.resource::<NavMeshOverlayState>().path.is_some());
+
+        world.insert_resource(minimal_manifest(0xBEEF, ".".into(), None));
+        world
+            .run_system_once(despawn_stale_nav_overlay)
+            .expect("teardown system runs");
+
+        assert!(world.resource::<NavMeshOverlayState>().path.is_none());
+    }
+
+    // Issue #138's core acceptance surface, driven against a real
+    // `bevy_landmass` archipelago rather than synthetic debug-draw calls
+    // (mirrors `agent.rs`'s own
+    // `kinematic_velocity_snaps_agent_y_to_the_sampled_navmesh_surface`
+    // harness): a target that forces the agent across both triangles of a
+    // two-triangle island produces a non-empty route (the corridor line
+    // between the two polygon nodes); clearing the target repaths the
+    // agent back to no path at all, collapsing the corridor to empty --
+    // driven purely through `bevy_landmass`'s own public API, with no hook
+    // into `nav/agent.rs`'s private state. (Retargeting to a different
+    // point *without* clearing first is not a valid way to force this:
+    // `landmass`'s own repath decision -- `does_agent_need_repath` --
+    // reuses the existing path whenever the new target's node is already
+    // part of it, which is true for any point in this 2-triangle island
+    // once a path has been found, so a bare retarget is a no-op here.)
+    #[test]
+    fn active_agent_corridor_reflects_a_real_path_and_updates_on_repath() {
+        use bevy::app::App;
+        use bevy_landmass::{
+            Agent3dBundle, AgentSettings, AgentTarget3d, ArchipelagoOptions, ArchipelagoRef3d,
+            FromAgentRadius, Island, Island3dBundle, Landmass3dPlugin, NavMesh3d, NavMeshHandle,
+        };
+        use std::sync::Arc;
+
+        use crate::viewer::nav::landmass_graph;
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            Landmass3dPlugin::default(),
+        ));
+
+        // Two adjoining flat triangles (a 4x4 square split along its
+        // diagonal), same shape as `agent.rs`'s own harness fixture.
+        let mesh_input = landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [0.0, 0.0, 4.0],
+                [4.0, 0.0, 4.0],
+            ],
+            polygons: vec![
+                landmass_graph::PolygonInput {
+                    index: 0,
+                    vertex_indices: [0, 1, 2],
+                    is_water: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 1,
+                    vertex_indices: [1, 3, 2],
+                    is_water: false,
+                },
+            ],
+            doors: Vec::new(),
+        };
+        let valid = landmass_graph::build_navigation_mesh(&mesh_input)
+            .nav_mesh
+            .expect("synthetic square validates");
+        let nav_mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+
+        let options = ArchipelagoOptions::from_agent_radius(0.35);
+        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(nav_mesh_handle),
+        });
+        // Island sync + agent existence/value/update/output all live in
+        // `FixedPreUpdate` by default (`LandmassPlugin::in_schedule`'s
+        // doc); running it directly (rather than `app.update()`) sidesteps
+        // the fixed-timestep accumulator never crossing its threshold
+        // across back-to-back calls with no real elapsed time, same as
+        // `agent.rs`'s own harness.
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let agent = app
+            .world_mut()
+            .spawn((
+                Agent3dBundle {
+                    agent: default(),
+                    settings: AgentSettings {
+                        radius: 0.35,
+                        desired_speed: 1.0,
+                        max_speed: 1.0,
+                    },
+                    archipelago_ref: ArchipelagoRef3d::new(archipelago),
+                },
+                Transform::from_xyz(0.5, 0.0, 0.5),
+            ))
+            .id();
+
+        app.world_mut()
+            .entity_mut(agent)
+            .insert(AgentTarget3d::Point(Vec3::new(3.5, 0.0, 3.5)));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let crossing_segments = active_agent_corridor(app.world_mut());
+        assert!(
+            !crossing_segments.is_empty(),
+            "a target across the shared edge must produce at least one AgentCorridor line"
+        );
+
+        // Clear the target entirely: `does_agent_need_repath` returns
+        // `ClearPathNoTarget`, dropping `agent.current_path` -- a genuine,
+        // unambiguous repath that the debug-drawn corridor must reflect.
+        app.world_mut()
+            .entity_mut(agent)
+            .insert(AgentTarget3d::None);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let cleared_segments = active_agent_corridor(app.world_mut());
+        assert!(
+            cleared_segments.is_empty(),
+            "clearing the target must drop the corridor entirely, got {cleared_segments:?}"
+        );
+
+        // Retarget across the seam again: a fresh path is found from
+        // scratch (`current_path` was `None`, so `does_agent_need_repath`
+        // unconditionally returns `NeedsRepath`), restoring a non-empty
+        // corridor -- the overlay's route recovers after a repath, not
+        // just collapses once.
+        app.world_mut()
+            .entity_mut(agent)
+            .insert(AgentTarget3d::Point(Vec3::new(3.5, 0.0, 3.5)));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let restored_segments = active_agent_corridor(app.world_mut());
+        assert!(
+            !restored_segments.is_empty(),
+            "retargeting from a cleared path must produce a fresh, non-empty corridor"
+        );
     }
 }
