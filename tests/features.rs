@@ -152,6 +152,21 @@ mod hybrid_shadow_policy;
 #[allow(dead_code, unused_imports)]
 mod container_policy;
 
+// `viewer::nav::landmass_graph`/`viewer::nav::door_link` (issue #112, M4
+// wave 3) are both dependency-free of `vsa`/Bevy (only `bevy_landmass`/
+// `glam`, real non-dev dependencies of the main crate, so already linked
+// into this test binary too) -- see `landmass_graph.rs`'s module doc comment
+// for why it cannot reuse `vsa::prepare::nav_graph`'s types directly here.
+// Flat top-level includes: neither file has a relative `super::` import to
+// line up against another `mod` in this tree.
+#[path = "../src/viewer/nav/landmass_graph.rs"]
+#[allow(dead_code, unused_imports)]
+mod landmass_graph;
+
+#[path = "../src/viewer/nav/door_link.rs"]
+#[allow(dead_code, unused_imports)]
+mod door_link;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -187,11 +202,33 @@ mod prepare {
     #[path = "../src/vsa/prepare/container_audio_policy.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod container_audio_policy;
+
+    // `vsa::prepare::actor_catalog` (issue #103, M4 wave 1 task C) reuses
+    // `vsa::manifest::PreparedInventoryEntry` (for the reused item-catalog
+    // inventory-entry contract) and `vsa::paths::fingerprint` via relative
+    // `super::super::...` imports, so it is nested here too -- same pattern
+    // as `selectors`/`batch_cache`/`fingerprints` above -- to land those
+    // paths on the `mod manifest`/`mod paths` includes near the top of this
+    // file.
+    #[path = "../src/vsa/prepare/actor_catalog.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod actor_catalog;
+
+    // `vsa::prepare::nav_graph` (issue #111, M4 wave 2) reuses
+    // `vsa::paths::{FO3_SCALE, fingerprint}` via relative `super::super::`
+    // imports, so it is nested here too -- same pattern as `actor_catalog`
+    // above -- to land those paths on the `mod paths` include near the top
+    // of this file.
+    #[path = "../src/vsa/prepare/nav_graph.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod nav_graph;
 }
+use prepare::actor_catalog;
 use prepare::batch_cache;
 use prepare::container_audio_policy;
 use prepare::fingerprints;
 use prepare::jobs;
+use prepare::nav_graph;
 use prepare::selectors;
 
 // `vsa::bake::plan` (issue #62) reuses the resumable job-manifest machinery
@@ -218,6 +255,27 @@ mod vsa_bake {
     }
 }
 use vsa_bake::bake::plan as bake_plan;
+
+// The attributed ESM4 reader (`vsa::openmw_esm4`, issue #111's NAVM/NAVI
+// decode seam) is anyhow/flate2/std-only apart from
+// `super::manifest::{CellInfo, ImageSpaceInfo}` and
+// `super::paths::CellSelector`, both already included verbatim above. It is
+// nested one module deep behind stand-in re-export modules -- the same trick
+// `vsa_bake` uses -- so nav_graph.feature can drive the real byte-level
+// NAVM/NAVI subrecord decode with synthetic in-memory plugin byte streams.
+#[path = "."]
+mod vsa_esm {
+    pub mod manifest {
+        pub(crate) use crate::manifest::{CellInfo, ImageSpaceInfo};
+    }
+    pub mod paths {
+        pub(crate) use crate::paths::CellSelector;
+    }
+    #[path = "../src/vsa/openmw_esm4/mod.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod openmw_esm4;
+}
+use vsa_esm::openmw_esm4;
 
 // `viewer::interaction::leveled` (issue #74) is dependency-free (std only,
 // no Bevy, no `vsa::manifest` import -- see its module doc comment for why
@@ -480,6 +538,31 @@ struct BevyoutWorld {
     hybrid_prepared_visibility: Option<f32>,
     hybrid_realtime_visibility: Option<f32>,
     hybrid_combined_visibility: Option<f32>,
+
+    // -- actor_catalog.feature (issue #103, M4 wave 1 task C) --
+    actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
+    actor_catalog_result: Option<actor_catalog::PreparedActorCatalog>,
+
+    // -- nav_graph.feature (issue #111, M4 wave 2) --
+    nav_cell_form_id: u32,
+    nav_navm_form_id: u32,
+    /// Pending NAVM subrecord payloads (signature, raw bytes), assembled
+    /// into one synthetic plugin byte stream by the When step.
+    nav_navm_parts: Vec<(String, Vec<u8>)>,
+    nav_navi_first: Option<NaviFixtureEntry>,
+    nav_navi_second: Option<NaviFixtureEntry>,
+    nav_navi_second_deleted: Option<u32>,
+    nav_parsed: Option<openmw_esm4::ParsedPlugin>,
+    nav_graph_inputs: nav_graph::NavGraphInputs,
+    nav_graph_result: Option<nav_graph::PreparedNavGraph>,
+
+    // -- nav_backend.feature (issue #112, M4 wave 3) --
+    nav_backend_meshes: Vec<landmass_graph::MeshInput>,
+    nav_backend_build_result: Option<landmass_graph::BuildResult>,
+    nav_backend_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
+    nav_backend_second_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
+    nav_backend_door_link_state: door_link::DoorLinkState,
+
 }
 
 fn find_placement<'a>(
@@ -4313,6 +4396,7 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
     );
 }
 
+
 // ---------------------------------------------------------------------
 // hybrid_lighting.feature -- appended section, do not interleave.
 // ---------------------------------------------------------------------
@@ -4341,6 +4425,1527 @@ async fn then_hybrid_visibility(world: &mut BevyoutWorld, expected: f32) {
         .hybrid_combined_visibility
         .expect("hybrid visibility was not evaluated");
     assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+
+// actor_catalog.feature (issue #103, M4 wave 1 task C) -- appended section,
+// do not interleave.
+// ---------------------------------------------------------------------
+
+fn actor_catalog_actor_mut(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+) -> &mut actor_catalog::ActorRecordInput {
+    world
+        .actor_catalog_inputs
+        .actors
+        .get_mut(&form_id)
+        .unwrap_or_else(|| panic!("actor {form_id:08x} was not created first"))
+}
+
+#[given(regex = r"^an NPC_ actor 0x([0-9a-fA-F]+) with race 0x([0-9a-fA-F]+)$")]
+async fn given_npc_actor(world: &mut BevyoutWorld, hex: String, race_hex: String) {
+    let form_id = parse_hex(&hex);
+    let mut actor = actor_catalog::ActorRecordInput {
+        form_id,
+        kind: actor_catalog::ActorRecordKind::Npc,
+        ..actor_catalog::ActorRecordInput::default()
+    };
+    actor.traits.race_form_id = Some(parse_hex(&race_hex));
+    world.actor_catalog_inputs.actors.insert(form_id, actor);
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has template 0x([0-9a-fA-F]+) using ([a-z_,]+)$")]
+async fn given_actor_template(
+    world: &mut BevyoutWorld,
+    hex: String,
+    template_hex: String,
+    groups: String,
+) {
+    let form_id = parse_hex(&hex);
+    let template = parse_hex(&template_hex);
+    let actor = actor_catalog_actor_mut(world, form_id);
+    actor.base_template_form_id = Some(template);
+    for group in groups.split(',') {
+        match group.trim() {
+            "traits" => actor.template_usage.traits = true,
+            "stats" => actor.template_usage.stats = true,
+            "factions" => actor.template_usage.factions = true,
+            "actor_effect_list" => actor.template_usage.actor_effect_list = true,
+            "ai_data" => actor.template_usage.ai_data = true,
+            "ai_packages" => actor.template_usage.ai_packages = true,
+            "model_animation" => actor.template_usage.model_animation = true,
+            "base_data" => actor.template_usage.base_data = true,
+            "inventory" => actor.template_usage.inventory = true,
+            "script" => actor.template_usage.script = true,
+            other => panic!("unknown template group {other:?}"),
+        }
+    }
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) class is 0x([0-9a-fA-F]+)$")]
+async fn given_actor_class(world: &mut BevyoutWorld, hex: String, class_hex: String) {
+    let form_id = parse_hex(&hex);
+    let class_form_id = parse_hex(&class_hex);
+    actor_catalog_actor_mut(world, form_id).class_form_id = Some(class_form_id);
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) rank (-?\d+)$")]
+async fn given_actor_faction(world: &mut BevyoutWorld, hex: String, faction_hex: String, rank: i8) {
+    let form_id = parse_hex(&hex);
+    let faction_form_id = parse_hex(&faction_hex);
+    actor_catalog_actor_mut(world, form_id)
+        .factions
+        .push(actor_catalog::ActorFactionInput {
+            faction_form_id,
+            rank,
+        });
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has package 0x([0-9a-fA-F]+)$")]
+async fn given_actor_package(world: &mut BevyoutWorld, hex: String, package_hex: String) {
+    let form_id = parse_hex(&hex);
+    let package_form_id = parse_hex(&package_hex);
+    actor_catalog_actor_mut(world, form_id)
+        .package_form_ids
+        .push(package_form_id);
+}
+
+#[given(regex = r#"^a leveled list 0x([0-9a-fA-F]+) with entries "([^"]*)"$"#)]
+async fn given_actor_catalog_leveled_list(world: &mut BevyoutWorld, hex: String, entries: String) {
+    let form_id = parse_hex(&hex);
+    world.actor_catalog_inputs.leveled.insert(
+        form_id,
+        actor_catalog::LeveledInput {
+            form_id,
+            entries: parse_hex_list(&entries),
+        },
+    );
+}
+
+#[given(
+    regex = r#"^faction 0x([0-9a-fA-F]+) is known with rank (-?\d+) male title "([^"]*)" female title "([^"]*)"$"#
+)]
+async fn given_faction_known(
+    world: &mut BevyoutWorld,
+    hex: String,
+    rank: i32,
+    male_title: String,
+    female_title: String,
+) {
+    let form_id = parse_hex(&hex);
+    world.actor_catalog_inputs.factions.insert(
+        form_id,
+        actor_catalog::FactionInput {
+            form_id,
+            ranks: vec![actor_catalog::FactionRankInput {
+                rank_number: rank,
+                male_title: Some(male_title),
+                female_title: Some(female_title),
+            }],
+        },
+    );
+}
+
+#[given(regex = r"^a placement 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) as (Npc|Creature)$")]
+async fn given_placement(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    kind: String,
+) {
+    let kind = match kind.as_str() {
+        "Npc" => actor_catalog::ActorRecordKind::Npc,
+        "Creature" => actor_catalog::ActorRecordKind::Creature,
+        other => panic!("unknown actor kind {other:?}"),
+    };
+    world
+        .actor_catalog_inputs
+        .placements
+        .push(actor_catalog::ActorPlacementInput {
+            reference_form_id: parse_hex(&reference_hex),
+            base_form_id: parse_hex(&base_hex),
+            kind,
+            ..actor_catalog::ActorPlacementInput::default()
+        });
+}
+
+#[when("the actor catalog is built")]
+async fn when_actor_catalog_built(world: &mut BevyoutWorld) {
+    world.actor_catalog_result = Some(actor_catalog::build_actor_catalog(
+        &world.actor_catalog_inputs,
+        "fixture-fingerprint",
+    ));
+}
+
+fn actor_catalog_blueprint<'a>(
+    world: &'a BevyoutWorld,
+    reference_hex: &str,
+) -> &'a actor_catalog::ActorBlueprint {
+    let reference_form_id = parse_hex(reference_hex);
+    world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first")
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            actor_catalog::ActorCatalogEntry::Prepared(blueprint)
+                if blueprint.reference_form_id == reference_form_id =>
+            {
+                Some(blueprint.as_ref())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no prepared blueprint for reference {reference_hex}"))
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) has race 0x([0-9a-fA-F]+)$")]
+async fn then_blueprint_race(world: &mut BevyoutWorld, reference_hex: String, race_hex: String) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert_eq!(blueprint.race_form_id, Some(parse_hex(&race_hex)));
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is inherited$")]
+async fn then_blueprint_inherited(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(actor_catalog_blueprint(world, &reference_hex).inherited);
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is not inherited$")]
+async fn then_blueprint_not_inherited(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(!actor_catalog_blueprint(world, &reference_hex).inherited);
+}
+
+#[then(regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has diagnostic "([^"]*)"$"#)]
+async fn then_blueprint_diagnostic(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(
+        blueprint.diagnostics.contains(&expected),
+        "expected diagnostic {expected:?} in {:?}",
+        blueprint.diagnostics
+    );
+}
+
+#[then(regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has diagnostic containing "([^"]*)"$"#)]
+async fn then_blueprint_diagnostic_containing(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(
+        blueprint
+            .diagnostics
+            .iter()
+            .any(|message| message.contains(expected.as_str())),
+        "expected a diagnostic containing {expected:?} in {:?}",
+        blueprint.diagnostics
+    );
+}
+
+#[then(
+    regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) is a leveled template with candidates "([^"]*)"$"#
+)]
+async fn then_blueprint_leveled_template(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    candidates: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert!(blueprint.is_leveled_template);
+    assert_eq!(blueprint.template_candidates, parse_hex_list(&candidates));
+}
+
+#[then(
+    regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) title "([^"]*)"$"#
+)]
+async fn then_blueprint_faction_title(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    faction_hex: String,
+    title: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    let faction_form_id = parse_hex(&faction_hex);
+    let membership = blueprint
+        .factions
+        .iter()
+        .find(|membership| membership.faction_form_id == faction_form_id)
+        .unwrap_or_else(|| panic!("no faction membership {faction_form_id:08x}"));
+    assert_eq!(membership.title.as_deref(), Some(title.as_str()));
+}
+
+fn assert_actor_catalog_entry_kind(world: &BevyoutWorld, reference_hex: &str, expected_kind: &str) {
+    let reference_form_id = parse_hex(reference_hex);
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let found = catalog
+        .entries
+        .iter()
+        .any(|entry| match (entry, expected_kind) {
+            (
+                actor_catalog::ActorCatalogEntry::Unresolved {
+                    reference_form_id: id,
+                    ..
+                },
+                "Unresolved",
+            ) => *id == reference_form_id,
+            (
+                actor_catalog::ActorCatalogEntry::Skipped {
+                    reference_form_id: id,
+                    ..
+                },
+                "Skipped",
+            ) => *id == reference_form_id,
+            (
+                actor_catalog::ActorCatalogEntry::Unsupported {
+                    reference_form_id: id,
+                    ..
+                },
+                "Unsupported",
+            ) => *id == reference_form_id,
+            _ => false,
+        });
+    assert!(
+        found,
+        "no {expected_kind} entry for reference {reference_hex}"
+    );
+}
+
+#[then(regex = r"^entry for reference 0x([0-9a-fA-F]+) is unresolved$")]
+async fn then_entry_unresolved(world: &mut BevyoutWorld, reference_hex: String) {
+    assert_actor_catalog_entry_kind(world, &reference_hex, "Unresolved");
+}
+
+#[then(regex = r"^entry for reference 0x([0-9a-fA-F]+) is skipped$")]
+async fn then_entry_skipped(world: &mut BevyoutWorld, reference_hex: String) {
+    assert_actor_catalog_entry_kind(world, &reference_hex, "Skipped");
+}
+
+#[then(
+    regex = r"^the actor catalog counts prepared (\d+) inherited (\d+) unresolved (\d+) unsupported (\d+) skipped (\d+)$"
+)]
+async fn then_actor_catalog_counts(
+    world: &mut BevyoutWorld,
+    prepared: usize,
+    inherited: usize,
+    unresolved: usize,
+    unsupported: usize,
+    skipped: usize,
+) {
+    let counters = &world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first")
+        .counters;
+    assert_eq!(counters.prepared, prepared);
+    assert_eq!(counters.inherited, inherited);
+    assert_eq!(counters.unresolved, unresolved);
+    assert_eq!(counters.unsupported, unsupported);
+    assert_eq!(counters.skipped, skipped);
+}
+
+#[then(regex = r#"^the actor catalog entries are ordered "([^"]*)"$"#)]
+async fn then_actor_catalog_ordered(world: &mut BevyoutWorld, expected: String) {
+    let expected_keys = expected
+        .split(',')
+        .map(|pair| {
+            let (base, reference) = pair
+                .trim()
+                .split_once('/')
+                .expect("expected a base/reference pair");
+            (parse_hex(base), parse_hex(reference))
+        })
+        .collect::<Vec<(u32, u32)>>();
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let actual_keys = catalog
+        .entries
+        .iter()
+        .map(|entry| match entry {
+            actor_catalog::ActorCatalogEntry::Prepared(blueprint) => {
+                (blueprint.base_form_id, blueprint.reference_form_id)
+            }
+            actor_catalog::ActorCatalogEntry::Unresolved {
+                base_form_id,
+                reference_form_id,
+                ..
+            }
+            | actor_catalog::ActorCatalogEntry::Unsupported {
+                base_form_id,
+                reference_form_id,
+                ..
+            }
+            | actor_catalog::ActorCatalogEntry::Skipped {
+                base_form_id,
+                reference_form_id,
+                ..
+            } => (*base_form_id, *reference_form_id),
+        })
+        .collect::<Vec<(u32, u32)>>();
+    assert_eq!(actual_keys, expected_keys);
+}
+
+#[then("serializing the actor catalog twice yields identical RON")]
+async fn then_actor_catalog_ron_deterministic(world: &mut BevyoutWorld) {
+    let catalog = world
+        .actor_catalog_result
+        .as_ref()
+        .expect("actor catalog must be built first");
+    let a = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
+    let b = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
+    assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------
+// nav_graph.feature (issue #111, M4 wave 2) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+/// One synthetic `NAVI` `NVMI` fixture entry (a plugin either carries one
+/// of these or a deleted-override record).
+#[derive(Debug, Clone, Copy)]
+struct NaviFixtureEntry {
+    form_id: u32,
+    navmesh_form_id: u32,
+    location_form_id: u32,
+    grid_x: i16,
+    grid_y: i16,
+}
+
+fn nav_subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut result = signature.to_vec();
+    result.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    result.extend_from_slice(data);
+    result
+}
+
+fn nav_record(signature: &[u8; 4], flags: u32, form_id: u32, data: &[u8]) -> Vec<u8> {
+    let mut result = signature.to_vec();
+    result.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    result.extend_from_slice(&flags.to_le_bytes());
+    result.extend_from_slice(&form_id.to_le_bytes());
+    result.extend_from_slice(&[0; 8]);
+    result.extend_from_slice(data);
+    result
+}
+
+fn nav_group(label: u32, group_type: i32, children: &[u8]) -> Vec<u8> {
+    let mut result = b"GRUP".to_vec();
+    result.extend_from_slice(&((children.len() + 24) as u32).to_le_bytes());
+    result.extend_from_slice(&label.to_le_bytes());
+    result.extend_from_slice(&group_type.to_le_bytes());
+    result.extend_from_slice(&[0; 8]);
+    result.extend_from_slice(children);
+    result
+}
+
+fn nav_tes4(masters: &[&str]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for master in masters {
+        data.extend(nav_subrecord(b"MAST", format!("{master}\0").as_bytes()));
+        data.extend(nav_subrecord(b"DATA", &[0; 8]));
+    }
+    nav_record(b"TES4", 0, 0, &data)
+}
+
+fn nav_navi_payload(entry: NaviFixtureEntry) -> Vec<u8> {
+    let mut nvmi = vec![0_u8; 4]; // leading undocumented "Unknown" field
+    nvmi.extend_from_slice(&entry.navmesh_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.location_form_id.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_x.to_le_bytes());
+    nvmi.extend_from_slice(&entry.grid_y.to_le_bytes());
+    [
+        nav_subrecord(b"NVER", &12_u32.to_le_bytes()),
+        nav_subrecord(b"NVMI", &nvmi),
+    ]
+    .concat()
+}
+
+fn nav_navm_part_mut<'a>(world: &'a mut BevyoutWorld, signature: &str) -> &'a mut Vec<u8> {
+    if !world
+        .nav_navm_parts
+        .iter()
+        .any(|(existing, _)| existing == signature)
+    {
+        world
+            .nav_navm_parts
+            .push((signature.to_string(), Vec::new()));
+    }
+    &mut world
+        .nav_navm_parts
+        .iter_mut()
+        .find(|(existing, _)| existing == signature)
+        .expect("part was just inserted")
+        .1
+}
+
+fn nav_parse_i16_triple(list: &str) -> [i16; 3] {
+    let values = list
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<i16>()
+                .unwrap_or_else(|error| panic!("invalid i16 {value:?}: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 3, "expected exactly three values in {list:?}");
+    [values[0], values[1], values[2]]
+}
+
+fn nav_parsed_navmesh<'a>(
+    world: &'a BevyoutWorld,
+    form_hex: &str,
+) -> &'a openmw_esm4::NavMeshRecord {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first")
+        .navmeshes
+        .iter()
+        .find(|navmesh| navmesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("no parsed NAVM {form_hex}"))
+}
+
+fn nav_graph_mesh_input_mut<'a>(
+    world: &'a mut BevyoutWorld,
+    form_hex: &str,
+) -> &'a mut nav_graph::NavGraphMeshInput {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_graph_inputs
+        .meshes
+        .iter_mut()
+        .find(|mesh| mesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("nav graph mesh {form_hex} was not created first"))
+}
+
+fn nav_graph_result_mesh<'a>(
+    world: &'a BevyoutWorld,
+    form_hex: &str,
+) -> &'a nav_graph::PreparedNavMesh {
+    let form_id = parse_hex(form_hex);
+    world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .meshes
+        .iter()
+        .find(|mesh| mesh.form_id == form_id)
+        .unwrap_or_else(|| panic!("no prepared nav mesh {form_hex}"))
+}
+
+#[given(regex = r"^a plugin cell 0x([0-9a-fA-F]+)$")]
+async fn given_nav_plugin_cell(world: &mut BevyoutWorld, hex: String) {
+    world.nav_cell_form_id = parse_hex(&hex);
+}
+
+#[given(regex = r"^a NAVM 0x([0-9a-fA-F]+) in the cell with version (\d+)$")]
+async fn given_navm_in_cell(world: &mut BevyoutWorld, hex: String, version: u32) {
+    world.nav_navm_form_id = parse_hex(&hex);
+    nav_navm_part_mut(world, "NVER").extend_from_slice(&version.to_le_bytes());
+}
+
+#[given(
+    regex = r"^the NAVM declares counts vertices (\d+) triangles (\d+) external (\d+) cover (\d+) doors (\d+)$"
+)]
+async fn given_navm_counts(
+    world: &mut BevyoutWorld,
+    vertices: u32,
+    triangles: u32,
+    external: u32,
+    cover: u32,
+    doors: u32,
+) {
+    let cell = world.nav_cell_form_id;
+    let data = nav_navm_part_mut(world, "DATA");
+    data.extend_from_slice(&cell.to_le_bytes());
+    for count in [vertices, triangles, external, cover, doors] {
+        data.extend_from_slice(&count.to_le_bytes());
+    }
+}
+
+#[given(regex = r#"^the NAVM has vertices "([^"]*)"$"#)]
+async fn given_navm_vertices(world: &mut BevyoutWorld, list: String) {
+    let mut payload = Vec::new();
+    for vertex in list.split(';') {
+        for value in vertex.split(',') {
+            let value = value
+                .trim()
+                .parse::<f32>()
+                .unwrap_or_else(|error| panic!("invalid f32 {value:?}: {error}"));
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    nav_navm_part_mut(world, "NVVX").extend_from_slice(&payload);
+}
+
+#[given(
+    regex = r"^the NAVM has triangle ([-\d,\s]+) with edges ([-\d,\s]+) and flags 0x([0-9a-fA-F]+)$"
+)]
+async fn given_navm_triangle(
+    world: &mut BevyoutWorld,
+    vertices: String,
+    edges: String,
+    flags_hex: String,
+) {
+    let mut payload = Vec::new();
+    for value in nav_parse_i16_triple(&vertices) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in nav_parse_i16_triple(&edges) {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload.extend_from_slice(&parse_hex(&flags_hex).to_le_bytes());
+    nav_navm_part_mut(world, "NVTR").extend_from_slice(&payload);
+}
+
+#[given(regex = r#"^the NAVM has cover ids "([^"]*)"$"#)]
+async fn given_navm_cover(world: &mut BevyoutWorld, list: String) {
+    let mut payload = Vec::new();
+    for value in list.split(',') {
+        let value = value
+            .trim()
+            .parse::<i16>()
+            .unwrap_or_else(|error| panic!("invalid i16 {value:?}: {error}"));
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    nav_navm_part_mut(world, "NVCA").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has door 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_navm_door(world: &mut BevyoutWorld, door_hex: String, triangle: u16) {
+    let door = parse_hex(&door_hex);
+    let payload = [
+        door.to_le_bytes().as_slice(),
+        triangle.to_le_bytes().as_slice(),
+        &[0, 0], // unused
+    ]
+    .concat();
+    nav_navm_part_mut(world, "NVDP").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has a grid with divisor (\d+)$")]
+async fn given_navm_grid(world: &mut BevyoutWorld, divisor: u32) {
+    let mut payload = divisor.to_le_bytes().to_vec();
+    for value in [140.0_f32, 140.0, -70.0, -70.0, 0.0, 70.0, 70.0, 0.0] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    nav_navm_part_mut(world, "NVGD").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_navm_external(world: &mut BevyoutWorld, target_hex: String, triangle: u16) {
+    let target = parse_hex(&target_hex);
+    let payload = [
+        [0_u8; 4].as_slice(), // leading undocumented "Unknown" field
+        target.to_le_bytes().as_slice(),
+        triangle.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    nav_navm_part_mut(world, "NVEX").extend_from_slice(&payload);
+}
+
+#[given(regex = r"^the NAVM NVTR payload is truncated by (\d+) bytes$")]
+async fn given_navm_truncated(world: &mut BevyoutWorld, bytes: usize) {
+    let part = nav_navm_part_mut(world, "NVTR");
+    let new_len = part.len().checked_sub(bytes).expect("NVTR too short");
+    part.truncate(new_len);
+}
+
+#[given(
+    regex = r"^the plugin has a NAVI 0x([0-9a-fA-F]+) entry linking NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_navi_first(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world.nav_navi_first = Some(NaviFixtureEntry {
+        form_id: parse_hex(&form_hex),
+        navmesh_form_id: parse_hex(&navm_hex),
+        location_form_id: parse_hex(&location_hex),
+        grid_x,
+        grid_y,
+    });
+}
+
+#[given(
+    regex = r"^a second plugin has a NAVI 0x([0-9a-fA-F]+) entry linking NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_navi_second(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world.nav_navi_second = Some(NaviFixtureEntry {
+        form_id: parse_hex(&form_hex),
+        navmesh_form_id: parse_hex(&navm_hex),
+        location_form_id: parse_hex(&location_hex),
+        grid_x,
+        grid_y,
+    });
+}
+
+#[given(regex = r"^a second plugin deletes the NAVI 0x([0-9a-fA-F]+) record$")]
+async fn given_navi_second_deleted(world: &mut BevyoutWorld, form_hex: String) {
+    world.nav_navi_second_deleted = Some(parse_hex(&form_hex));
+}
+
+#[when(regex = r"^the content set is parsed for cell 0x([0-9a-fA-F]+)$")]
+async fn when_nav_content_set_parsed(world: &mut BevyoutWorld, cell_hex: String) {
+    let cell = parse_hex(&cell_hex);
+    let mut first = nav_tes4(&[]);
+    first.extend(nav_record(
+        b"CELL",
+        0,
+        world.nav_cell_form_id,
+        &[
+            nav_subrecord(b"EDID", b"NavCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    if world.nav_navm_form_id != 0 {
+        let payload = world
+            .nav_navm_parts
+            .iter()
+            .map(|(signature, data)| {
+                let signature: [u8; 4] = signature
+                    .as_bytes()
+                    .try_into()
+                    .expect("subrecord signatures are 4 bytes");
+                nav_subrecord(&signature, data)
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        first.extend(nav_group(
+            world.nav_cell_form_id,
+            6,
+            &nav_record(b"NAVM", 0, world.nav_navm_form_id, &payload),
+        ));
+    }
+    if let Some(entry) = world.nav_navi_first {
+        first.extend(nav_record(
+            b"NAVI",
+            0,
+            entry.form_id,
+            &nav_navi_payload(entry),
+        ));
+    }
+
+    let mut second = None;
+    if let Some(entry) = world.nav_navi_second {
+        let mut bytes = nav_tes4(&["Fallout3.esm"]);
+        bytes.extend(nav_record(
+            b"NAVI",
+            0,
+            entry.form_id,
+            &nav_navi_payload(entry),
+        ));
+        second = Some(bytes);
+    } else if let Some(form_id) = world.nav_navi_second_deleted {
+        let mut bytes = nav_tes4(&["Fallout3.esm"]);
+        // 0x20 is the ESM4 record-header "deleted" flag
+        // (openmw_esm4::RECORD_DELETED).
+        bytes.extend(nav_record(b"NAVI", 0x20, form_id, &[]));
+        second = Some(bytes);
+    }
+
+    let mut sources = vec![openmw_esm4::PluginSource {
+        name: "Fallout3.esm",
+        bytes: &first,
+    }];
+    if let Some(bytes) = second.as_ref() {
+        sources.push(openmw_esm4::PluginSource {
+            name: "Update.esp",
+            bytes,
+        });
+    }
+    let parsed = openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(cell))
+        .expect("synthetic content set must parse");
+    world.nav_parsed = Some(parsed);
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has version (\d+) and owner cell 0x([0-9a-fA-F]+)$"
+)]
+async fn then_parsed_navmesh_version_owner(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    version: u32,
+    cell_hex: String,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.version, Some(version));
+    assert_eq!(navmesh.cell_form_id, Some(parse_hex(&cell_hex)));
+}
+
+#[then(regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has (\d+) vertices and (\d+) triangles$")]
+async fn then_parsed_navmesh_counts(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    vertices: usize,
+    triangles: usize,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.vertices.len(), vertices);
+    assert_eq!(navmesh.triangles.len(), triangles);
+}
+
+#[then(regex = r"^parsed navmesh 0x([0-9a-fA-F]+) triangle (\d+) has flags 0x([0-9a-fA-F]+)$")]
+async fn then_parsed_triangle_flags(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    flags_hex: String,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(navmesh.triangles[index].flags, parse_hex(&flags_hex));
+}
+
+#[then(regex = r#"^the parsed navmesh 0x([0-9a-fA-F]+) has cover ids "([^"]*)"$"#)]
+async fn then_parsed_cover(world: &mut BevyoutWorld, form_hex: String, list: String) {
+    let expected = list
+        .split(',')
+        .map(|value| value.trim().parse::<i16>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nav_parsed_navmesh(world, &form_hex).cover_triangle_ids,
+        expected
+    );
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has door 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn then_parsed_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle: u16,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    let door = parse_hex(&door_hex);
+    assert!(
+        navmesh
+            .doors
+            .iter()
+            .any(|entry| entry.door_reference_form_id == Some(door) && entry.triangle == triangle),
+        "no door {door_hex} at triangle {triangle} in {:?}",
+        navmesh.doors
+    );
+}
+
+#[then(regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has grid divisor (\d+)$")]
+async fn then_parsed_grid(world: &mut BevyoutWorld, form_hex: String, divisor: u32) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    assert_eq!(
+        navmesh.grid.as_ref().expect("grid must decode").divisor,
+        divisor
+    );
+}
+
+#[then(
+    regex = r"^the parsed navmesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn then_parsed_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    triangle: u16,
+) {
+    let navmesh = nav_parsed_navmesh(world, &form_hex);
+    let target = parse_hex(&target_hex);
+    assert!(
+        navmesh
+            .external_connections
+            .iter()
+            .any(|entry| entry.target_navmesh_form_id == Some(target)
+                && entry.triangle == triangle),
+        "no external connection to {target_hex} at triangle {triangle} in {:?}",
+        navmesh.external_connections
+    );
+}
+
+#[then("the content set has no NAVM diagnostics")]
+async fn then_no_navm_diagnostics(world: &mut BevyoutWorld) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    let navm_diagnostics = parsed
+        .diagnostics
+        .iter()
+        .filter(|message| message.contains("NAVM"))
+        .collect::<Vec<_>>();
+    assert!(
+        navm_diagnostics.is_empty(),
+        "unexpected NAVM diagnostics: {navm_diagnostics:?}"
+    );
+}
+
+#[then(regex = r#"^the content set diagnostics include "([^"]*)"$"#)]
+async fn then_content_set_diagnostics_include(world: &mut BevyoutWorld, expected: String) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    assert!(
+        parsed.diagnostics.contains(&expected),
+        "expected diagnostic {expected:?} in {:?}",
+        parsed.diagnostics
+    );
+}
+
+#[then(
+    regex = r"^the navigation singleton links NAVM 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn then_navigation_singleton(
+    world: &mut BevyoutWorld,
+    navm_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    let navigation = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first")
+        .navigation
+        .as_ref()
+        .expect("a navigation singleton must be captured");
+    assert_eq!(navigation.entries.len(), 1, "{:?}", navigation.entries);
+    let entry = &navigation.entries[0];
+    assert_eq!(entry.navmesh_form_id, Some(parse_hex(&navm_hex)));
+    assert_eq!(entry.location_form_id, Some(parse_hex(&location_hex)));
+    assert_eq!(entry.grid_x, grid_x);
+    assert_eq!(entry.grid_y, grid_y);
+}
+
+#[then("there is no navigation singleton")]
+async fn then_no_navigation_singleton(world: &mut BevyoutWorld) {
+    let parsed = world
+        .nav_parsed
+        .as_ref()
+        .expect("the content set must be parsed first");
+    assert!(parsed.navigation.is_none(), "{:?}", parsed.navigation);
+}
+
+#[given(regex = r"^a nav graph mesh 0x([0-9a-fA-F]+) for cell 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_mesh(world: &mut BevyoutWorld, form_hex: String, cell_hex: String) {
+    world
+        .nav_graph_inputs
+        .meshes
+        .push(nav_graph::NavGraphMeshInput {
+            form_id: parse_hex(&form_hex),
+            cell_form_id: Some(parse_hex(&cell_hex)),
+            ..nav_graph::NavGraphMeshInput::default()
+        });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has source vertex (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_nav_graph_vertex(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .vertices
+        .push(nav_graph::NavGraphVertexInput { source: [x, y, z] });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has triangle ([-\d,\s]+) with edges ([-\d,\s]+)$")]
+async fn given_nav_graph_triangle(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    vertices: String,
+    edges: String,
+) {
+    let vertex_indices = nav_parse_i16_triple(&vertices).map(i32::from);
+    let edge_neighbors = nav_parse_i16_triple(&edges).map(i32::from);
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .triangles
+        .push(nav_graph::NavGraphTriangleInput {
+            vertex_indices,
+            edge_neighbors,
+            flags: 0,
+        });
+}
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) has a door 0x([0-9a-fA-F]+) at triangle (\d+)$")]
+async fn given_nav_graph_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle: u32,
+) {
+    let door_reference_form_id = Some(parse_hex(&door_hex));
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .doors
+        .push(nav_graph::NavGraphDoorInput {
+            door_reference_form_id,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at triangle (\d+)$"
+)]
+async fn given_nav_graph_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    triangle: u32,
+) {
+    let target_navmesh_form_id = Some(parse_hex(&target_hex));
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .external_connections
+        .push(nav_graph::NavGraphExternalInput {
+            target_navmesh_form_id,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection with no target at triangle (\d+)$"
+)]
+async fn given_nav_graph_external_no_target(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    triangle: u32,
+) {
+    nav_graph_mesh_input_mut(world, &form_hex)
+        .external_connections
+        .push(nav_graph::NavGraphExternalInput {
+            target_navmesh_form_id: None,
+            triangle_index: triangle,
+        });
+}
+
+#[given(
+    regex = r"^a nav graph NAVI entry links mesh 0x([0-9a-fA-F]+) to location 0x([0-9a-fA-F]+) grid (-?\d+),(-?\d+)$"
+)]
+async fn given_nav_graph_navi_entry(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    location_hex: String,
+    grid_x: i16,
+    grid_y: i16,
+) {
+    world
+        .nav_graph_inputs
+        .navi_entries
+        .push(nav_graph::NavGraphNaviEntryInput {
+            navmesh_form_id: Some(parse_hex(&form_hex)),
+            location_form_id: Some(parse_hex(&location_hex)),
+            grid_x,
+            grid_y,
+        });
+}
+
+#[when(regex = r"^the nav graph is built for cell 0x([0-9a-fA-F]+)$")]
+async fn when_nav_graph_built(world: &mut BevyoutWorld, cell_hex: String) {
+    world.nav_graph_inputs.cell_form_id = parse_hex(&cell_hex);
+    world.nav_graph_result = Some(nav_graph::build_nav_graph(&world.nav_graph_inputs));
+}
+
+#[then(
+    regex = r"^mesh 0x([0-9a-fA-F]+) vertex (\d+) is (-?[\d.]+), (-?[\d.]+), (-?[\d.]+) in Bevy metres$"
+)]
+async fn then_nav_graph_vertex_bevy(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let vertex = nav_graph_result_mesh(world, &form_hex).vertices[index];
+    for (actual, expected) in vertex.iter().zip([x, y, z]) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "expected vertex {index} to be [{x}, {y}, {z}], got {vertex:?}"
+        );
+    }
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) neighbours polygon (\d+)$")]
+async fn then_nav_graph_adjacency(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+    neighbor: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert_eq!(mesh.polygons[polygon].adjacency[edge], Some(neighbor));
+}
+
+#[then("the nav graph has no diagnostics")]
+async fn then_nav_graph_no_diagnostics(world: &mut BevyoutWorld) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) has door 0x([0-9a-fA-F]+) at polygon (\d+)$")]
+async fn then_nav_graph_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    polygon: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    let door = parse_hex(&door_hex);
+    assert!(
+        mesh.doors
+            .iter()
+            .any(|entry| entry.door_reference_form_id == Some(door)
+                && entry.triangle_index == polygon),
+        "no door {door_hex} at polygon {polygon} in {:?}",
+        mesh.doors
+    );
+}
+
+#[then(
+    regex = r"^mesh 0x([0-9a-fA-F]+) has an external connection to 0x([0-9a-fA-F]+) at polygon (\d+)$"
+)]
+async fn then_nav_graph_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    target_hex: String,
+    polygon: u32,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    let target = parse_hex(&target_hex);
+    assert!(
+        mesh.external_connections
+            .iter()
+            .any(|entry| entry.target_navmesh_form_id == Some(target)
+                && entry.triangle_index == polygon),
+        "no external connection to {target_hex} at polygon {polygon} in {:?}",
+        mesh.external_connections
+    );
+}
+
+#[then(
+    regex = r"^the nav graph counters are meshes (\d+) polygons (\d+) vertices (\d+) doors (\d+) external (\d+)$"
+)]
+async fn then_nav_graph_counters(
+    world: &mut BevyoutWorld,
+    meshes: usize,
+    polygons: usize,
+    vertices: usize,
+    doors: usize,
+    external: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.meshes, meshes);
+    assert_eq!(counters.polygons, polygons);
+    assert_eq!(counters.vertices, vertices);
+    assert_eq!(counters.doors, doors);
+    assert_eq!(counters.external_connections, external);
+}
+
+#[then(regex = r#"^the nav graph has an? "(warning|error)" diagnostic containing "([^"]*)"$"#)]
+async fn then_nav_graph_diagnostic(world: &mut BevyoutWorld, severity: String, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(
+        graph
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == severity
+                && diagnostic.message.contains(expected.as_str())),
+        "expected a {severity} diagnostic containing {expected:?} in {:?}",
+        graph.diagnostics
+    );
+}
+
+#[then(regex = r#"^the nav graph meshes are ordered "([^"]*)"$"#)]
+async fn then_nav_graph_ordered(world: &mut BevyoutWorld, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let actual = graph
+        .meshes
+        .iter()
+        .map(|mesh| mesh.form_id)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, parse_hex_list(&expected));
+}
+
+#[then("serializing the nav graph twice yields identical RON")]
+async fn then_nav_graph_ron_deterministic(world: &mut BevyoutWorld) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let a = ron::ser::to_string_pretty(graph, ron::ser::PrettyConfig::default()).unwrap();
+    let b = ron::ser::to_string_pretty(graph, ron::ser::PrettyConfig::default()).unwrap();
+    assert_eq!(a, b);
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) grid is (-?\d+),(-?\d+)$")]
+async fn then_nav_graph_grid(world: &mut BevyoutWorld, form_hex: String, grid_x: i16, grid_y: i16) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert_eq!(
+        mesh.grid,
+        Some(nav_graph::PreparedNavGrid {
+            x: grid_x,
+            y: grid_y
+        })
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_backend.feature (issue #112, M4 wave 3) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn nav_backend_mesh_mut<'a>(
+    world: &'a mut BevyoutWorld,
+    form_hex: &str,
+) -> &'a mut landmass_graph::MeshInput {
+    let form_id = parse_hex(form_hex);
+    if !world
+        .nav_backend_meshes
+        .iter()
+        .any(|mesh| mesh.form_id == form_id)
+    {
+        world.nav_backend_meshes.push(landmass_graph::MeshInput {
+            form_id,
+            ..Default::default()
+        });
+    }
+    world
+        .nav_backend_meshes
+        .iter_mut()
+        .find(|mesh| mesh.form_id == form_id)
+        .expect("mesh was just inserted")
+}
+
+fn parse_bevy_landmass_agent_state(name: &str) -> bevy_landmass::AgentState {
+    use bevy_landmass::AgentState::*;
+    match name {
+        "Idle" => Idle,
+        "Moving" => Moving,
+        "ReachedTarget" => ReachedTarget,
+        "ReachedAnimationLink" => ReachedAnimationLink,
+        "UsingAnimationLink" => UsingAnimationLink,
+        "AgentNotOnNavMesh" => AgentNotOnNavMesh,
+        "TargetNotOnNavMesh" => TargetNotOnNavMesh,
+        "NoPath" => NoPath,
+        "Paused" => Paused,
+        other => panic!("unknown landmass agent state {other:?}"),
+    }
+}
+
+#[given(regex = r"^a landmass mesh 0x([0-9a-fA-F]+)$")]
+async fn given_landmass_mesh(world: &mut BevyoutWorld, form_hex: String) {
+    nav_backend_mesh_mut(world, &form_hex);
+}
+
+#[given(
+    regex = r"^landmass mesh 0x([0-9a-fA-F]+) has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$"
+)]
+async fn given_landmass_vertex(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    assert_eq!(
+        mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    mesh.vertices.push([x, y, z]);
+}
+
+#[given(
+    regex = r"^landmass mesh 0x([0-9a-fA-F]+) has polygon (\d+) with vertices (\d+),(\d+),(\d+)$"
+)]
+async fn given_landmass_polygon(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    mesh.polygons.push(landmass_graph::PolygonInput {
+        index,
+        vertex_indices: [a, b, c],
+        is_water: false,
+    });
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) polygon (\d+) is water$")]
+async fn given_landmass_polygon_water(world: &mut BevyoutWorld, form_hex: String, index: u32) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    let polygon = mesh
+        .polygons
+        .iter_mut()
+        .find(|polygon| polygon.index == index)
+        .expect("polygon must be given first");
+    polygon.is_water = true;
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) has a door 0x([0-9a-fA-F]+) at polygon (\d+)$")]
+async fn given_landmass_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle_index: u32,
+) {
+    let door_form_id = parse_hex(&door_hex);
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    mesh.doors.push(landmass_graph::DoorInput {
+        triangle_index,
+        door_reference_form_id: Some(door_form_id),
+    });
+}
+
+#[when("the mesh is converted to a landmass navigation mesh")]
+async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
+    let mesh = world
+        .nav_backend_meshes
+        .first()
+        .expect("a landmass mesh must be given first")
+        .clone();
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh));
+}
+
+#[then("the landmass conversion produces a navigation mesh")]
+async fn then_landmass_conversion_produces_mesh(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
+}
+
+#[then("the landmass conversion produces no navigation mesh")]
+async fn then_landmass_conversion_produces_no_mesh(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.nav_mesh.is_none());
+}
+
+#[then("the landmass conversion has no diagnostics")]
+async fn then_landmass_conversion_no_diagnostics(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[then(
+    regex = r#"^the landmass conversion has an? "(warning|error)" diagnostic containing "([^"]*)"$"#
+)]
+async fn then_landmass_conversion_diagnostic(
+    world: &mut BevyoutWorld,
+    severity: String,
+    needle: String,
+) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    let expected_severity = match severity.as_str() {
+        "warning" => landmass_graph::Severity::Warning,
+        "error" => landmass_graph::Severity::Error,
+        other => panic!("unknown severity {other:?}"),
+    };
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == expected_severity && d.message.contains(&needle)),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[when("the door-link descriptors are extracted")]
+async fn when_door_link_descriptors_extracted(world: &mut BevyoutWorld) {
+    world.nav_backend_descriptors = Some(landmass_graph::door_link_descriptors(
+        &world.nav_backend_meshes,
+    ));
+}
+
+#[when("the door-link descriptors are extracted again")]
+async fn when_door_link_descriptors_extracted_again(world: &mut BevyoutWorld) {
+    world.nav_backend_second_descriptors = Some(landmass_graph::door_link_descriptors(
+        &world.nav_backend_meshes,
+    ));
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) door-link descriptors?$")]
+async fn then_door_link_descriptor_count(world: &mut BevyoutWorld, count: usize) {
+    let descriptors = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("descriptors must be extracted first");
+    assert_eq!(descriptors.len(), count);
+}
+
+#[then(
+    regex = r"^door-link descriptor (\d+) links door 0x([0-9a-fA-F]+) between mesh 0x([0-9a-fA-F]+) and mesh 0x([0-9a-fA-F]+)$"
+)]
+async fn then_door_link_descriptor_links(
+    world: &mut BevyoutWorld,
+    index: usize,
+    door_hex: String,
+    mesh_a_hex: String,
+    mesh_b_hex: String,
+) {
+    let descriptors = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("descriptors must be extracted first");
+    let descriptor = &descriptors[index];
+    assert_eq!(descriptor.door_form_id, parse_hex(&door_hex));
+    assert_eq!(descriptor.side_a.mesh_form_id, parse_hex(&mesh_a_hex));
+    assert_eq!(descriptor.side_b.mesh_form_id, parse_hex(&mesh_b_hex));
+}
+
+#[then("both door-link descriptor extractions are identical")]
+async fn then_door_link_descriptor_extractions_identical(world: &mut BevyoutWorld) {
+    let first = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("first extraction must run first");
+    let second = world
+        .nav_backend_second_descriptors
+        .as_ref()
+        .expect("second extraction must run first");
+    assert_eq!(first, second);
+}
+
+#[then(regex = r#"^landmass agent state "([A-Za-z]+)" maps to nav agent status "([a-z]+)"$"#)]
+async fn then_landmass_agent_state_maps(
+    _world: &mut BevyoutWorld,
+    state_name: String,
+    status_name: String,
+) {
+    let state = parse_bevy_landmass_agent_state(&state_name);
+    let status = landmass_graph::map_agent_state(state);
+    assert_eq!(status.as_str(), status_name);
+}
+
+#[given("a fresh door-link state")]
+async fn given_fresh_door_link_state(world: &mut BevyoutWorld) {
+    world.nav_backend_door_link_state = door_link::DoorLinkState::Idle;
+}
+
+#[when(regex = r"^the door-link reaches door 0x([0-9a-fA-F]+)$")]
+async fn when_door_link_reaches(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::LinkReached { door_form_id },
+    );
+}
+
+#[when(regex = r"^the door-link ticks with the door (open|closed)$")]
+async fn when_door_link_ticks(world: &mut BevyoutWorld, door_open: String) {
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::Tick {
+            door_open: door_open == "open",
+        },
+    );
+}
+
+#[when(regex = r"^the door-link ticks (\d+) times with the door closed$")]
+async fn when_door_link_ticks_n(world: &mut BevyoutWorld, count: u32) {
+    for _ in 0..count {
+        world.nav_backend_door_link_state = door_link::transition(
+            world.nav_backend_door_link_state,
+            door_link::DoorLinkEvent::Tick { door_open: false },
+        );
+    }
+}
+
+#[when("the door-link traversal completes")]
+async fn when_door_link_traversal_completes(world: &mut BevyoutWorld) {
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::TraversalComplete,
+    );
+}
+
+#[then(regex = r"^the door-link state is paused for door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_paused(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    match world.nav_backend_door_link_state {
+        door_link::DoorLinkState::Paused {
+            door_form_id: actual,
+            ..
+        } => assert_eq!(actual, door_form_id),
+        other => panic!("expected Paused, got {other:?}"),
+    }
+}
+
+#[then(regex = r"^the door-link state is traversing door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_traversing(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Traversing { door_form_id }
+    );
+}
+
+#[then("the door-link state is idle")]
+async fn then_door_link_idle(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Idle
+    );
+}
+
+#[then(regex = r"^the door-link state is failed for door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_failed(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Failed { door_form_id }
+    );
 }
 
 fn main() {

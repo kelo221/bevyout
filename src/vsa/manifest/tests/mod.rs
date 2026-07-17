@@ -237,6 +237,9 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
         recipe_catalog_path: None,
         recipe_catalog_revision: None,
         recipe_catalog_hash: None,
+        actor_catalog_path: None,
+        actor_catalog_revision: None,
+        actor_catalog_hash: None,
         source_plugins: Vec::new(),
         cell: ron::de::from_str(
             r#"(
@@ -266,6 +269,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
             message: "review root".into(),
         }],
         navmeshes: Vec::new(),
+        nav_graph: None,
         cell_audio: PreparedCellAudio::default(),
         audio_clips: Vec::new(),
         footstep_sets: Vec::new(),
@@ -502,6 +506,7 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         diagnostics: Vec::new(),
         visual_issues: Vec::new(),
         navmeshes: Vec::new(),
+        nav_graph: None,
         cell_audio: PreparedCellAudio::default(),
         audio_clips: Vec::new(),
         footstep_sets: Vec::new(),
@@ -516,6 +521,9 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         recipe_catalog_path: None,
         recipe_catalog_revision: None,
         recipe_catalog_hash: None,
+        actor_catalog_path: None,
+        actor_catalog_revision: None,
+        actor_catalog_hash: None,
     };
 
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).unwrap();

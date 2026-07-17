@@ -28,7 +28,7 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::shadow_cache_status;
-use super::{diagnostics, interaction, player};
+use super::{diagnostics, interaction, nav, nav_overlay, player};
 
 #[derive(Component)]
 pub(crate) struct GameUi;
@@ -61,7 +61,11 @@ impl Default for DiagnosticUiState {
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<GameUiState>()
         .init_resource::<DiagnosticUiState>()
-        .add_systems(Update, sync_ui_visibility);
+        .init_resource::<nav_overlay::NavMeshOverlayState>()
+        .add_systems(
+            Update,
+            (sync_ui_visibility, nav_overlay::despawn_stale_nav_overlay),
+        );
     {
         let mut hooks = app.world_mut().resource_mut::<ConsoleEntityHooks>();
         hooks.register_transform_mutated(player::console_transform_mutated);
@@ -105,6 +109,21 @@ pub(crate) fn install(app: &mut App) {
             toggle_collision_geometry,
         )
         .aliases(&["togglecollisiongeometry"])
+        .mutating(),
+        ConsoleCommand::new(
+            "tnm",
+            "tnm",
+            "Toggle navigation-mesh triangle visualization.",
+            nav_overlay::toggle_nav_mesh,
+        )
+        .aliases(&["togglenavmesh"])
+        .mutating(),
+        ConsoleCommand::new(
+            "tna",
+            "tna spawn|goto <x> <y> <z>|goto player|status|despawn",
+            "Test nav agent (issue #112): spawn/goto/status/despawn a bevy_landmass-driven agent.",
+            nav::agent::tna_command,
+        )
         .mutating(),
         ConsoleCommand::new(
             "stairdebug",

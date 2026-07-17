@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+mod actor_catalog;
 mod audio;
 mod audio_resolve;
 mod batch_cache;
@@ -16,6 +17,7 @@ mod fingerprints;
 mod image_space;
 mod items;
 mod jobs;
+mod nav_graph;
 mod navmesh;
 mod placements;
 mod plugins;
@@ -25,6 +27,7 @@ mod session;
 mod static_shadows;
 mod visual;
 
+pub(crate) use actor_catalog::*;
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
 pub(crate) use batch_cache::*;
@@ -35,6 +38,7 @@ pub(crate) use fingerprints::*;
 pub(crate) use image_space::*;
 pub(crate) use items::*;
 pub(crate) use jobs::*;
+pub(crate) use nav_graph::*;
 pub(crate) use navmesh::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
@@ -61,10 +65,11 @@ use super::manifest::{
     PreparedDoorDestination, PreparedDropCollider, PreparedEnableParent, PreparedInventoryEntry,
     PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemEffect,
     PreparedItemStats, PreparedLight, PreparedLightingTemplate, PreparedMutabilitySummary,
-    PreparedNavMeshChunk, PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup,
-    PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource, PreparedRuntimeMutability,
-    PreparedSceneManifest, PreparedSemantic, PreparedStaticPointShadowLight,
-    PreparedStaticPointShadows, PreparedVisualIssue, STATIC_POINT_SHADOW_REVISION,
+    PreparedNavGraphSource, PreparedNavMeshChunk, PreparedNavMeshSource,
+    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
+    PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
+    PreparedStaticPointShadowLight, PreparedStaticPointShadows, PreparedVisualIssue,
+    STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::{LightingData, OpenMwItemStats};
 use super::paths::{
@@ -76,9 +81,9 @@ use super::physics::{
     dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
 use super::plugin::{
-    BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED, RecipeItemRecord,
-    RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord, SoundReferenceRecord,
-    parse_content_set, read_master_names,
+    ActorBaseConfig, BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED,
+    RecipeItemRecord, RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord,
+    SoundReferenceRecord, parse_content_set, read_master_names,
 };
 use crate::cli::PrepareArgs;
 

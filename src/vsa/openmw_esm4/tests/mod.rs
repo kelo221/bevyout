@@ -1511,3 +1511,9 @@ fn unknown_rcpe_subrecords_are_retained_as_diagnostics() {
             .any(|message| message.contains("RCPE 00000720") && message.contains("ZZZZ"))
     );
 }
+
+mod actor_support;
+
+mod actors;
+
+mod navmesh;

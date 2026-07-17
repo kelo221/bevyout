@@ -23,6 +23,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 toml = "0.8"
+# M4 wave 3 (#112): bevy_landmass navigation-backend spike. Pinned exact per
+# the wave plan. `glam` is pinned to the exact version `bevy_math` 0.19.0
+# resolves to (see Cargo.lock) so `src/viewer/nav/landmass_graph.rs`'s plain
+# `glam::Vec3` values are the literal same type as `bevy_landmass::coords`'s
+# `ThreeD::Coordinate` without that pure module depending on `bevy_math`/
+# `bevy` -- required because `bevy_landmass::NavigationMesh3d::vertices` is
+# `Vec<bevy_math::Vec3>`, not `Vec<landmass::Vec3>` (a different glam major
+# version landmass itself pins internally; see the module doc comment).
+bevy_landmass = "=0.12.0"
+glam = "=0.32.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

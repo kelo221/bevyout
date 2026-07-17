@@ -107,9 +107,10 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
 
 - Every task gets a GitHub sub-issue under the epic (labels `area/*`,
-  `enhancement` or `bug`, priority, milestone, assignee), linked via the
+  `enhancement` or `bug`, priority, milestone), linked via the
   sub-issue REST API (`POST /repos/{owner}/{repo}/issues/<epic>/sub_issues`
-  with the issue's database id). Amend the epic's checklist when scope is
+  with the issue's database id). Always assign the issue to the human
+  user (`--assignee @me`, the authenticated gh account) at creation. Amend the epic's checklist when scope is
   added; tick items only when the gate criteria hold on real data.
 - Each wave has a kickoff `*_PROMPT.md` (what was requested) and a
   `*_PLAN.md` (fixed feature lists → tests → implementation) in
@@ -133,6 +134,13 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   commands with real FormIDs from the prepared catalog, which keys to
   press, and the expected result of every step (including any one-time
   cache/prepare setup the wave requires).
+- The human must be able to *see* what a wave shipped. If the wave's
+  behavior has no player-visible runtime surface (prepare-side data,
+  decoded records, internal graphs), add the missing test surface as part
+  of the wave — typically a viewer console command or deterministic CLI
+  output — as its own small sub-issue, and drive it in the manual script.
+  Precedent: `tnm` (#128) visualizing the #111 nav graph, which would
+  otherwise only be inspectable as a RON file.
 - Model split: see "Model routing" below; it applies to every wave,
   including single-issue waves, in the Claude runtime. In the Codex runtime,
   the orchestrating session executes directly because subagents are slow.

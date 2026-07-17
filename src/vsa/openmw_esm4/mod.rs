@@ -11,15 +11,21 @@ use std::io::{Cursor, Read};
 use super::manifest::{CellInfo, ImageSpaceInfo};
 use super::paths::CellSelector;
 
+mod actor_support;
+mod actors;
 mod binary;
 mod enable;
 mod inventory;
+mod navmesh;
 mod reader;
 mod records;
 
+pub(crate) use actor_support::*;
+pub(crate) use actors::*;
 pub(crate) use binary::*;
 pub(crate) use enable::*;
 pub(crate) use inventory::*;
+pub(crate) use navmesh::*;
 pub(crate) use reader::*;
 pub(crate) use records::*;
 
@@ -66,6 +72,11 @@ pub(crate) struct BaseRecord {
     /// Present only for `LVLI`/`LVLN`/`LVLC` base records (issue #74). See
     /// `records::LeveledListData` for the parsed `LVLD`/`LVLF`/`LVLO` body.
     pub(crate) leveled: Option<LeveledListData>,
+    /// Present only for `NPC_`/`CREA` base records (issue #103, M4 wave 1
+    /// task A). See `actors::ActorData` for the parsed actor subrecords.
+    /// Consumed by task C's actor-catalog resolution
+    /// (`prepare::orchestrator::actor_record_input`).
+    pub(crate) actor: Option<ActorData>,
     ignored_subrecords: Vec<String>,
 }
 
@@ -271,21 +282,6 @@ pub(crate) struct DoorEdgeRecord {
     pub(crate) rotation: [f32; 3],
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct NavMeshRecord {
-    pub(crate) form_id: u32,
-    pub(crate) flags: u32,
-    pub(crate) version: Option<u32>,
-    pub(crate) payload: Vec<u8>,
-    pub(crate) chunks: Vec<NavMeshChunk>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NavMeshChunk {
-    pub(crate) signature: String,
-    pub(crate) byte_len: u32,
-}
-
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct SoundRecord {
@@ -479,6 +475,12 @@ pub(crate) struct CellMetadata {
 pub(crate) struct ParsedPlugin {
     pub(crate) bases: HashMap<u32, BaseRecord>,
     pub(crate) recipes: HashMap<u32, RecipeRecord>,
+    // M4 wave 1 task B (#103): decoded for the actor catalog resolver built
+    // in task C (`prepare::orchestrator::build_actor_catalog_inputs`).
+    pub(crate) races: HashMap<u32, RaceRecord>,
+    pub(crate) classes: HashMap<u32, ClassRecord>,
+    pub(crate) factions: HashMap<u32, FactionRecord>,
+    pub(crate) packages: HashMap<u32, PackageRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,
     pub(crate) sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -487,6 +489,10 @@ pub(crate) struct ParsedPlugin {
     pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
     pub(crate) references: Vec<ReferenceRecord>,
     pub(crate) navmeshes: Vec<NavMeshRecord>,
+    /// Content-set-wide `NAVI` singleton (issue #111, M4 wave 2):
+    /// last-loader-wins like `WRLD`/`IMGS`, independent of which cell is
+    /// selected.
+    pub(crate) navigation: Option<NaviRecord>,
     pub(crate) cell: Option<CellInfo>,
     pub(crate) cell_metadata: Option<CellMetadata>,
     pub(crate) diagnostics: Vec<String>,
@@ -656,6 +662,13 @@ impl ParsedContentSet {
                     .or_default() += 1;
             }
         }
+        let mut navmeshes = state
+            .navmeshes
+            .into_values()
+            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
+            .collect::<Vec<_>>();
+        navmeshes.sort_by_key(|navmesh| navmesh.form_id);
+
         let mut diagnostics = ignored
             .into_iter()
             .map(|((record, subrecord), count)| {
@@ -675,18 +688,22 @@ impl ParsedContentSet {
             })
             .collect::<Vec<_>>();
         diagnostics.extend(state.recipe_diagnostics);
+        diagnostics.extend(state.actor_support_diagnostics);
+        diagnostics.extend(state.navigation_diagnostics);
+        for navmesh in &navmeshes {
+            for message in &navmesh.diagnostics {
+                diagnostics.push(format!("NAVM {:08x}: {message}", navmesh.form_id));
+            }
+        }
         diagnostics.sort();
-
-        let mut navmeshes = state
-            .navmeshes
-            .into_values()
-            .filter_map(|(cell, navmesh)| (cell == target_cell).then_some(navmesh))
-            .collect::<Vec<_>>();
-        navmeshes.sort_by_key(|navmesh| navmesh.form_id);
 
         Ok(ParsedPlugin {
             bases: state.bases,
             recipes: state.recipes,
+            races: state.races,
+            classes: state.classes,
+            factions: state.factions,
+            packages: state.packages,
             image_spaces: state.image_spaces,
             sounds: state.sounds,
             sound_references: state.sound_references,
@@ -695,6 +712,7 @@ impl ParsedContentSet {
             lighting_templates: state.lighting_templates,
             references,
             navmeshes,
+            navigation: state.navigation,
             cell: state.cells.remove(&target_cell),
             cell_metadata: state.cell_metadata.remove(&target_cell),
             diagnostics,
@@ -712,6 +730,10 @@ pub(crate) struct PluginSource<'a> {
 pub(crate) struct ParsedState {
     bases: HashMap<u32, BaseRecord>,
     recipes: HashMap<u32, RecipeRecord>,
+    races: HashMap<u32, RaceRecord>,
+    classes: HashMap<u32, ClassRecord>,
+    factions: HashMap<u32, FactionRecord>,
+    packages: HashMap<u32, PackageRecord>,
     image_spaces: HashMap<u32, ImageSpaceInfo>,
     sounds: HashMap<u32, SoundRecord>,
     sound_references: HashMap<u32, SoundReferenceRecord>,
@@ -720,12 +742,15 @@ pub(crate) struct ParsedState {
     lighting_templates: HashMap<u32, LightingTemplateRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
+    navigation: Option<NaviRecord>,
     cells: HashMap<u32, CellInfo>,
     cell_metadata: HashMap<u32, CellMetadata>,
     cell_winning_plugins: HashMap<u32, String>,
     cell_provenance: HashMap<u32, Vec<String>>,
     worldspaces: HashMap<u32, WorldspaceRecord>,
     recipe_diagnostics: Vec<String>,
+    actor_support_diagnostics: Vec<String>,
+    navigation_diagnostics: Vec<String>,
 }
 
 #[derive(Debug)]

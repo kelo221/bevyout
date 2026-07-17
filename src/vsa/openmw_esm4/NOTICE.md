@@ -89,6 +89,7 @@ components/esm4/loadsndr.hpp: Copyright (C) 2020 cc9cii
 components/esm4/loadsndr.cpp: Copyright (C) 2020 cc9cii
 components/esm4/loadsoun.hpp: Copyright (C) 2016, 2018, 2020 cc9cii
 components/esm4/loadsoun.cpp: Copyright (C) 2016, 2018, 2020 cc9cii
+components/esm4/actor.hpp: Copyright (C) 2020 cc9cii
 ```
 
 `apps/openmw/mwworld/cellref.cpp` has no per-file header in this snapshot; its
@@ -156,6 +157,7 @@ components/esm4/loadsndr.cpp 9f96cfe667ddeda84310ac071b7821a01a91caf698374104f8d
 components/esm4/loadsoun.hpp 4bf8c12e8c786e36933b10d1cbcf3e96c0bb6882127e411c2da548ebc1b402cf
 components/esm4/loadsoun.cpp a86b6d2c16cf7a4a2dae22f6b09e9363b09940d6d88043eebde74d403477e880
 apps/openmw/mwworld/cellref.cpp 7c9e7857de758b40c93e0622d3256972fed478ec1b1c43b339a93f1afe343f98
+components/esm4/actor.hpp 0c0b76f589e3818356e3eaa98cd79f79fbb55f4dfd3a9212c39264c9af12c3af
 ```
 
 ## Adaptation notes
@@ -165,7 +167,17 @@ apps/openmw/mwworld/cellref.cpp 7c9e7857de758b40c93e0622d3256972fed478ec1b1c43b3
 - Unknown record and subrecord types are ignored or represented semantically;
   malformed size boundaries remain hard errors.
 - The original runtime object hierarchy was not copied.
-- FO3 NAVM chunks are catalogued and retained, not decoded.
+- FO3 `NAVM`/`NAVI` subrecord decoding (`navmesh.rs`, issue #111, M4 wave 2)
+  is a fopdoc-derived extension, not an OpenMW port: the supplied snapshot's
+  `loadnavm.cpp` explicitly skips the per-field FO3/FNV `NVER`/`DATA`/
+  `NVVX`/`NVTR`/`NVCA`/`NVDP`/`NVGD`/`NVEX` subrecords (decoding only the
+  newer combined `NVNM` chunk), and its `loadnavi.cpp` `NavMeshInfo::load`
+  targets the newer `NVMI` layout, which disagrees with the fopdoc FO3/FNV
+  16-byte `NVMI` header. The fopdoc layouts were verified against real
+  Fallout3.esm data (the decoded `NVMI` NAVM/location FormIDs match the
+  cell's actual NAVM and CELL records), which is the FO3-wins tie-break this
+  wave's brief calls for. The raw NAVM record payload continues to be
+  catalogued and retained alongside the decode.
 - Sound, sound-descriptor, acoustic-space, music, lighting-template, activator,
   terminal, and tactical-activator fields were ported as owned metadata for
   the audio/world-state milestone. Their source files are listed above; the
@@ -184,6 +196,48 @@ apps/openmw/mwworld/cellref.cpp 7c9e7857de758b40c93e0622d3256972fed478ec1b1c43b3
 - `lighting.hpp` supplies the FO3 40-byte `XCLL`/`LGTM.DATA` layout; the
   `loadcell` and `loadlgtm` adaptations preserve the nine named `LNAM`
   inheritance masks while leaving unresolved templates on CELL lighting.
+- The `actor_support.rs` RACE/CLAS/FACT/PACK adapters (M4 wave 1, issue
+  #103) draw on the OpenMW master-branch `components/esm4/loadrace.cpp`/
+  `loadrace.hpp`, `loadclas.cpp`/`loadclas.hpp`, and `loadpack.cpp`/
+  `loadpack.hpp` (fetched from gitlab.com/OpenMW/openmw at master commit
+  `c7830d9ee5367a750f70cb5e9b9f87c16634b079`; these six files are not part
+  of the 0.52.0 snapshot listed above). Adapted layouts: the RACE 36-byte
+  `DATA` (TES4/FO3/FONV branch of `ESM4::Race::load`), the
+  `NAM0`/`NAM1`/`MNAM`/`FNAM`/`INDX`/`MODL` head/body-part traversal state
+  machine, `DNAM` default hair, `HNAM`/`ENAM` FormID arrays,
+  `FGGS`/`FGGA`/`FGTS` per-sex FaceGen retention, and PACK's legacy 4-byte
+  "flags only" `PKDT` special case plus the `PLDT` type-5 "not a FormID"
+  gate. FO3-specific extensions beyond OpenMW (decoded from the fopdoc
+  Fallout3 pages where OpenMW skips or stubs the subrecord): RACE
+  `ONAM`/`YNAM`/`CNAM`, the CLAS 28-byte `DATA`, the PACK 12-byte FO3
+  `PKDT`, the FO3-sized `PSDT` (8 bytes) and `PTDT` (16 bytes, gated on
+  `PTDT`'s own type field rather than reproducing `loadpack.cpp`'s
+  `mLocation.type` check), and opaque `CTDA` retention. `FACT` has no
+  OpenMW ESM4 loader at all and is decoded purely from the fopdoc
+  Fallout3 FACT page.
+- `NPC_`/`CREA` actor decoding (issue #103, M4 wave 1 task A) adapts
+  `components/esm4/loadnpc.{hpp,cpp}`, `components/esm4/loadcrea.{hpp,cpp}`,
+  and the newly-added `components/esm4/actor.hpp` (the shared `ACBS_FO3`,
+  `AIData`-successor, and `ActorFaction` layouts). `actor.hpp` was not
+  previously part of this slice's tracked snapshot; its hash above and
+  `loadnpc.cpp`/`loadcrea.cpp`'s hashes were confirmed against the current
+  `openmw/openmw` `master` branch on 2026-07-16 (`loadnpc.cpp`/`loadcrea.cpp`
+  are byte-identical to the pinned 0.52.0 snapshot already tracked above;
+  their `.hpp` companions have since changed upstream in ways this task does
+  not depend on, so their existing recorded hashes are left as the 0.52.0
+  snapshot values). Fields OpenMW's reader recognizes by size but does not
+  decode for FO3 (`ACBS` 24 bytes, `AIDT` 20 bytes, `CREA.DATA` 17 bytes --
+  see the `if (subHdr.dataSize == ...)` branches in `loadnpc.cpp`/
+  `loadcrea.cpp`) are decoded here per the Fallout 3 fopdoc pages
+  (`Records/NPC_.html`, `Records/CREA.html`, and the linked
+  `Records/Subrecords/{ACBS,AIDT,SNAM (CREA, NPC_)}.html` pages), which is
+  the FO3-wins divergence this task's brief calls for. Two further FO3-only
+  divergences: `NPC_.DNAM` (skills) and `NPC_.DATA` are entirely unhandled by
+  the supplied OpenMW snapshot (`DNAM` is skipped outright; `DATA` is only
+  decoded for the older 33-byte TES4 layout) and are decoded here purely from
+  fopdoc's documented 11-byte/28-byte FO3 layouts; and `FGGS`/`FGGA`/`FGTS`
+  are kept as opaque bytes rather than OpenMW's TES4/TES5 fixed 50/30/50
+  `float32` arrays, because fopdoc documents the FO3 payload as `uint8[]`.
 
 ## Adapted File Contributors
 

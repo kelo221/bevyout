@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::physics::PreparedPhysicsSource;
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 15;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 16;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
@@ -44,6 +44,19 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) recipe_catalog_revision: Option<String>,
     #[serde(default)]
     pub(crate) recipe_catalog_hash: Option<String>,
+    /// Per-cell actor catalogue relative to `asset_root`
+    /// (`scenes/<cell>/actors.ron`, issue #103, M4 wave 1 task C). Unlike
+    /// the content-set-wide item/recipe catalogs it embeds this cell's
+    /// ACHR/ACRE placements, so it lives next to `scene.ron` rather than
+    /// under the shared fingerprint-keyed `catalogs/` directory. Serde
+    /// defaults keep manifests produced before actor-catalog preparation
+    /// readable.
+    #[serde(default)]
+    pub(crate) actor_catalog_path: Option<String>,
+    #[serde(default)]
+    pub(crate) actor_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub(crate) actor_catalog_hash: Option<String>,
     #[serde(default)]
     pub(crate) source_plugins: Vec<PreparedPluginSource>,
     pub(crate) cell: CellInfo,
@@ -54,6 +67,11 @@ pub(crate) struct PreparedSceneManifest {
     pub(crate) visual_issues: Vec<PreparedVisualIssue>,
     #[serde(default)]
     pub(crate) navmeshes: Vec<PreparedNavMeshSource>,
+    /// Decoded per-cell polygon navigation graph (issue #111, M4 wave 2).
+    /// `None` only for manifests prepared before this wave (serde default)
+    /// or when the cell has no NAVM records at all.
+    #[serde(default)]
+    pub(crate) nav_graph: Option<PreparedNavGraphSource>,
     #[serde(default)]
     pub(crate) cell_audio: PreparedCellAudio,
     #[serde(default)]
@@ -671,6 +689,26 @@ pub(crate) struct PreparedNavMeshSource {
     pub(crate) version: Option<u32>,
     pub(crate) asset_path: String,
     pub(crate) chunks: Vec<PreparedNavMeshChunk>,
+}
+
+/// Pointer to the decoded per-cell navigation-graph asset
+/// (`scenes/<cell>/navmesh/navgraph.ron`, issue #111, M4 wave 2). The
+/// viewer-side consumers (#112/#113) need only this asset -- never the raw
+/// ESM bytes -- so the counts/diagnostic summary here are QA metadata, not
+/// runtime inputs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PreparedNavGraphSource {
+    pub(crate) asset_path: String,
+    pub(crate) revision: String,
+    pub(crate) hash: String,
+    pub(crate) mesh_count: usize,
+    pub(crate) polygon_count: usize,
+    pub(crate) vertex_count: usize,
+    pub(crate) door_count: usize,
+    pub(crate) external_connection_count: usize,
+    pub(crate) diagnostics_warning: usize,
+    pub(crate) diagnostics_error: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

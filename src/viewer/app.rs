@@ -139,6 +139,10 @@ pub(crate) fn run_view(
     // use, defaulting to 4 when no config file is found.
     world::install(&mut app, crate::config::resident_cell_limit());
     world_items::install(&mut app);
+    // M4 wave 3 (#112): after `interaction::install` (the door-open
+    // boundary `nav::agent`'s door-link system calls into) and `world`
+    // (`PreparedSceneManifest`'s eventual home, inserted below).
+    nav::install(&mut app);
     if let Some(save) = loaded_save {
         info!(
             "save slot loaded: cell {:08x}, {} cell states",
@@ -286,6 +290,28 @@ pub(crate) fn run_view(
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
         // graph but the CLI never observes it (LoadingTarget is always set).
+        // Issue #131: release both the logical `ButtonInput<Key>` and
+        // physical `ButtonInput<KeyCode>` resources on any window focus
+        // change, not just `KeyboardFocusLost` -- a same-frame focus
+        // false/true bounce (e.g. macOS's Cmd+Shift+5 overlay) suppresses
+        // both Bevy's own key release and its `KeyboardFocusLost` message.
+        // See the doc comment on `release_stuck_keys_on_focus_change` for
+        // why.
+        .add_systems(
+            PreUpdate,
+            release_stuck_keys_on_focus_change.after(bevy::input::InputSystems),
+        )
+        // Issue #131 follow-up: on macOS, a Cmd+Shift+5 screen recording can
+        // leave the window unfocused forever -- mouse events keep reaching
+        // it but no `WindowFocused { focused: true }` ever arrives, so the
+        // console stays dead. `Update` (rather than `PreUpdate`) is fine
+        // here: this only needs to observe the click before the frame's
+        // `ButtonInput::clear()`, same timing as `capture_cursor_input`
+        // below, and unlike `release_stuck_keys_on_focus_change` it doesn't
+        // need to run relative to `InputSystems`. See the doc comment on
+        // `request_focus_on_click_while_unfocused` for the component-write
+        // vs. direct-winit-call trade-off.
+        .add_systems(Update, request_focus_on_click_while_unfocused)
         .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
             OnEnter(AppState::InGame),
