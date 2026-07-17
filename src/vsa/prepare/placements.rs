@@ -166,6 +166,20 @@ pub(crate) fn model_static_usage(
     usage
 }
 
+/// `ACHR` record-header flag bit for "starts dead" (issue #120, F119.1).
+/// `ReferenceRecord::flags` is the raw record-header `flags` DWORD read by
+/// `parse_reference` -- the same field `RECORD_DELETED`/`RECORD_DISABLED`
+/// already read from -- so this is a source-authored fact about the
+/// reference itself, not a heuristic over its editor ID or name. OpenMW's
+/// `components/esm4/common.hpp` documents this exact bit as
+/// `Rec_StartDead` for `ACHR`; the same bit means `MotionBlurCastsShadows`
+/// on a plain `REFR` object reference, so it is only meaningful for
+/// `ReferenceKind::Npc` and must never be read for `ReferenceKind::Object`.
+/// FO3 does not document an equivalent override for `ACRE` (creature)
+/// references, so dead creatures are intentionally out of this issue's
+/// scope (source-authored dead actors only).
+pub(crate) const RECORD_STARTS_DEAD: u32 = 0x0000_0200;
+
 pub(crate) fn prepared_semantic(
     reference: &ReferenceRecord,
     base: Option<&BaseRecord>,
@@ -174,6 +188,12 @@ pub(crate) fn prepared_semantic(
         base_template_form_id: base.and_then(|base| base.base_template_form_id),
     };
     match reference.kind {
+        // Issue #120 (F119.1): a source-authored dead NPC reference is a
+        // lootable corpse (#118's `PreparedSemantic::Corpse`), not a living
+        // `Npc` actor. Living actors (the flag unset) are unaffected.
+        ReferenceKind::Npc if reference.flags & RECORD_STARTS_DEAD != 0 => {
+            return PreparedSemantic::Corpse;
+        }
         ReferenceKind::Npc => return PreparedSemantic::Npc(actor),
         ReferenceKind::Creature => return PreparedSemantic::Creature(actor),
         ReferenceKind::Object => {}

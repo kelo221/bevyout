@@ -22,6 +22,14 @@ pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
+/// Test-only re-export (issue #120): `viewer::scene`'s spawn-path unit tests
+/// construct a `PreparedSemantic::Npc(PreparedActor { .. })` placement to
+/// prove living-actor placements stay unspawned exactly like before this
+/// issue; production code only ever matches on `PreparedSemantic::Npc`'s
+/// outer variant (never names `PreparedActor` itself), so a plain re-export
+/// would trip `unused_imports` on non-test builds.
+#[cfg(test)]
+pub(crate) use manifest::PreparedActor;
 /// Test-only re-export (issue #99): `viewer::pipboy`'s use-path unit tests
 /// construct `PreparedItemStats::Aid` effect labels; nothing outside tests
 /// names the type through `vsa`, so a plain re-export would trip
