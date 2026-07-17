@@ -120,8 +120,8 @@ pub(crate) fn install(app: &mut App) {
         .mutating(),
         ConsoleCommand::new(
             "tna",
-            "tna spawn|goto <x> <y> <z>|goto player|status|despawn",
-            "Test nav agent (issue #112): spawn/goto/status/despawn a bevy_landmass-driven agent.",
+            "tna spawn|goto <x> <y> <z>|goto player|travel <door-formid>|status|despawn",
+            "Test nav agent (issues #112/#134): spawn/goto/travel/status/despawn a bevy_landmass-driven agent with intercell handoff.",
             nav::agent::tna_command,
         )
         .mutating(),
@@ -387,6 +387,7 @@ fn activate_reference(
             destination_cell_form_id: destination.cell_form_id,
             translation: Vec3::from_array(destination.translation),
             rotation_xyzw: destination.rotation_xyzw,
+            door_form_id: placement.reference_form_id,
         },
     );
     Ok(ConsoleCommandResult::new(

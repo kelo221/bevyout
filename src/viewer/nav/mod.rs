@@ -18,6 +18,7 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 pub(crate) mod agent;
 pub(crate) mod door_link;
 pub(crate) mod landmass_graph;
+pub(crate) mod ledger_policy;
 pub(crate) mod repath;
 
 pub(crate) fn install(app: &mut App) {
@@ -96,23 +97,42 @@ pub(crate) fn merge_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::Merg
         .collect()
 }
 
-/// Door reference FormID -> destination cell FormID, for every placement in
-/// `manifest` whose semantic is a travel door (issue #113 feature 3). Reuses
-/// the existing world-transition door-destination data (`PreparedDoor`,
-/// #51/#52) rather than a new lookup -- a placement's `reference_form_id` is
-/// exactly the FormID the prepared nav graph's door array keys triangle
-/// associations by (`PreparedNavDoor::door_reference_form_id`).
+/// A travel door's resolved far side (issue #113 feature 3 / #134): the
+/// destination cell, and the door reference FormID *in that cell* the
+/// destination metadata pairs this door with (`PreparedDoorDestination::
+/// door_reference_form_id`) -- the same marker position the player's own
+/// teleport uses, and what #134's ledger keys a door-marker spawn on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TravelDestination {
+    pub(crate) cell_form_id: u32,
+    pub(crate) door_reference_form_id: u32,
+}
+
+/// Door reference FormID -> resolved travel destination, for every
+/// placement in `manifest` whose semantic is a travel door (issue #113
+/// feature 3). Reuses the existing world-transition door-destination data
+/// (`PreparedDoor`, #51/#52) rather than a new lookup -- a placement's
+/// `reference_form_id` is exactly the FormID the prepared nav graph's door
+/// array keys triangle associations by
+/// (`PreparedNavDoor::door_reference_form_id`).
 pub(crate) fn travel_door_destinations(
     manifest: &PreparedSceneManifest,
-) -> std::collections::HashMap<u32, u32> {
+) -> std::collections::HashMap<u32, TravelDestination> {
     manifest
         .placements
         .iter()
         .filter_map(|placement| match &placement.semantic {
-            crate::vsa::PreparedSemantic::Door(door) => door
-                .destination
-                .as_ref()
-                .map(|destination| (placement.reference_form_id, destination.cell_form_id)),
+            crate::vsa::PreparedSemantic::Door(door) => {
+                door.destination.as_ref().map(|destination| {
+                    (
+                        placement.reference_form_id,
+                        TravelDestination {
+                            cell_form_id: destination.cell_form_id,
+                            door_reference_form_id: destination.door_reference_form_id,
+                        },
+                    )
+                })
+            }
             _ => None,
         })
         .collect()

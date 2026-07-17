@@ -54,11 +54,18 @@ const MAX_PARENT_DEPTH: usize = 64;
 /// `world::swap`'s same-frame contract holds on the frame the lead expires.
 /// A door with no clip (zero lead) still writes it the same frame it
 /// activates, bit-for-bit wave-2's behavior.
+///
+/// Issue #134: `door_form_id` is the *origin* door reference the player
+/// activated (`PreparedPlacement::reference_form_id`) -- `world::swap`
+/// threads it through to `nav::agent::note_player_swap_door` so the
+/// intercell agent ledger can decide follow-through vs. freeze for any
+/// live nav agent still in the departing cell.
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct DoorTravelRequested {
     pub(crate) destination_cell_form_id: u32,
     pub(crate) translation: Vec3,
     pub(crate) rotation_xyzw: [f32; 4],
+    pub(crate) door_form_id: u32,
 }
 
 /// Ordering handle for `world::swap`'s door-travel systems: message readers
@@ -1700,6 +1707,7 @@ fn activate_focused_placement(
                     destination_cell_form_id: destination.cell_form_id,
                     translation: Vec3::from_array(destination.translation),
                     rotation_xyzw: destination.rotation_xyzw,
+                    door_form_id: placement.reference_form_id,
                 };
                 if lead_seconds <= 0.0 {
                     door_travel.write(request);

@@ -24,7 +24,7 @@ use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 use crate::vsa::PreparedSceneManifest;
 
 use super::super::{interaction, player};
-use super::{door_link, landmass_graph, repath};
+use super::{door_link, landmass_graph, ledger_policy, repath};
 
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
@@ -40,6 +40,15 @@ const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
 /// Slightly wider than `AGENT_TARGET_REACHED_DISTANCE` so landmass's own
 /// target-reached stop always lands inside it.
 const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
+
+/// Synthetic ledger identity for the one test nav agent this console
+/// command family drives (issue #134). The ledger/eligibility policy
+/// (`ledger_policy`) is written generically against an `agent_id` (a real
+/// multi-agent future would mint one per actor), but this spike only ever
+/// has the one -- wiring always passes this constant. Formatted like a
+/// FormID (`{:08x}`) in tracing lines, consistent with every other
+/// identifier this module logs.
+const TEST_AGENT_ID: u32 = 1;
 
 /// Marks the one test agent this console command family drives.
 #[derive(Component)]
@@ -87,6 +96,11 @@ struct TravelDoorLink {
     triangle_midpoint: Vec3,
     door_position: Vec3,
     destination_cell_form_id: u32,
+    /// The door reference FormID in the destination cell this travel door
+    /// pairs with (issue #134): the ledger's `DoorMarker` spawn kind
+    /// resolves the agent's restore position from this door's own placed
+    /// position once the destination cell is active.
+    destination_door_form_id: u32,
 }
 
 /// One archipelago + its islands/links for the currently loaded cell,
@@ -147,6 +161,24 @@ struct TestNavAgentState {
     last_logged_state: Option<AgentState>,
 }
 
+/// Intercell nav-agent ledger (issue #134): survives cell-swap teardown
+/// (an ordinary Bevy `Resource`, untouched by `teardown_archipelago`) so an
+/// agent handed off through a travel door, or frozen in place by a
+/// player-initiated swap, can be restored once its cell is active again.
+#[derive(Resource, Default)]
+struct NavAgentLedger(ledger_policy::Ledger);
+
+/// The origin door reference the player just used to trigger a cell swap
+/// (issue #134), noted by `note_player_swap_door` and consumed exactly
+/// once by `despawn_stale_navmesh_archipelago` the next time it detects
+/// the resulting stale archipelago. `None` when the swap-triggering cause
+/// carried no door (there is currently no such path at runtime, but the
+/// consumer treats an absent note as "no eligibility information" rather
+/// than assuming a door, so any future non-door cell change still freezes
+/// a live agent instead of losing it).
+#[derive(Resource, Default)]
+struct PendingPlayerSwapDoor(Option<u32>);
+
 pub(crate) struct NavBackendPlugin;
 
 impl Plugin for NavBackendPlugin {
@@ -154,10 +186,13 @@ impl Plugin for NavBackendPlugin {
         app.add_plugins(Landmass3dPlugin::default())
             .init_resource::<NavArchipelagoState>()
             .init_resource::<TestNavAgentState>()
+            .init_resource::<NavAgentLedger>()
+            .init_resource::<PendingPlayerSwapDoor>()
             .add_systems(
                 Update,
                 (
                     despawn_stale_navmesh_archipelago,
+                    restore_ledgered_agents_system,
                     door_availability_system,
                     door_link_system,
                     sync_velocity_from_desired,
@@ -173,6 +208,16 @@ impl Plugin for NavBackendPlugin {
 
 pub(crate) fn install(app: &mut App) {
     app.add_plugins(NavBackendPlugin);
+}
+
+/// Called from `world::swap::activate_resident_cell` (issue #134) once a
+/// player-initiated cell swap is definitely proceeding: records which
+/// origin door reference the player used so the next
+/// `despawn_stale_navmesh_archipelago` pass (whichever frame it detects
+/// the resulting stale archipelago) can decide follow-through vs. freeze
+/// for any live nav agent still in the departing cell.
+pub(crate) fn note_player_swap_door(world: &mut World, door_form_id: u32) {
+    world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(door_form_id);
 }
 
 fn no_nav_graph_error() -> ConsoleError {
@@ -356,7 +401,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // the door lifecycle runs there.
     let mut travel_doors = HashMap::new();
     for door in landmass_graph::single_sided_doors(&mesh_inputs) {
-        let Some(&destination_cell_form_id) = travel_destinations.get(&door.door_form_id) else {
+        let Some(&destination) = travel_destinations.get(&door.door_form_id) else {
             continue;
         };
         let triangle_midpoint = Vec3::from_array(door.side.midpoint);
@@ -369,15 +414,16 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
             door_usable_now(world, door.door_form_id, &door_lock_info),
         );
         info!(
-            "nav agent travel door {:08x} -> cell {destination_cell_form_id:08x}",
-            door.door_form_id
+            "nav agent travel door {:08x} -> cell {:08x}",
+            door.door_form_id, destination.cell_form_id
         );
         travel_doors.insert(
             door.door_form_id,
             TravelDoorLink {
                 triangle_midpoint,
                 door_position,
-                destination_cell_form_id,
+                destination_cell_form_id: destination.cell_form_id,
+                destination_door_form_id: destination.door_reference_form_id,
             },
         );
     }
@@ -406,7 +452,9 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 /// cross-mesh case every link this module spawns is for. Confirmed on real
 /// FranklinMetro02 data (end polygon 260 vs start island's 72 polygons);
 /// two unidirectional links take the correctly-indexed non-bidirectional
-/// path and are semantically identical.
+/// path and are semantically identical. Reported upstream as
+/// <https://github.com/andriyDev/landmass/issues/192>; collapse back to one
+/// `bidirectional: true` link once a fixed release is adopted.
 fn spawn_link_pair(
     world: &mut World,
     archipelago_entity: Entity,
@@ -492,36 +540,30 @@ pub(crate) fn tna_command(
     match subcommand.as_str() {
         "spawn" => spawn_agent(world, rest),
         "goto" => goto_agent(world, rest),
+        "travel" => travel_agent(world, rest),
         "status" => agent_status(world, rest),
         "despawn" => despawn_agent(world, rest),
         other => Err(ConsoleError::new(
             "unknown_subcommand",
-            format!("unknown tna subcommand '{other}'; expected spawn, goto, status, or despawn"),
+            format!(
+                "unknown tna subcommand '{other}'; expected spawn, goto, travel, status, or despawn"
+            ),
         )),
     }
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn|goto <x> <y> <z>|goto player|status|despawn";
+    let usage = "usage: tna spawn|goto <x> <y> <z>|goto player|travel <door-formid>|status|despawn";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
 }
 
-fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    if !rest.is_empty() {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "tna spawn does not accept arguments",
-        ));
-    }
-    ensure_archipelago(world)?;
-    if world.resource::<TestNavAgentState>().entity.is_some() {
-        return Err(ConsoleError::new(
-            "already_spawned",
-            "a test nav agent is already spawned; use tna despawn first",
-        ));
-    }
-    let position = player_transform_query(world)
-        .ok_or_else(|| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
+/// Spawns the capsule mesh + `bevy_landmass` agent entity at `position` in
+/// the already-current archipelago (`ensure_archipelago` must have run).
+/// Shared by `spawn_agent` (the `tna spawn` console command, positioned at
+/// the player) and `restore_ledgered_agent` (issue #134, positioned at a
+/// resolved ledger spawn point) -- neither sets `TestNavAgentState` itself,
+/// so callers own that and its accompanying log line.
+fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
     let archipelago_entity = world
         .resource::<NavArchipelagoState>()
         .archipelago
@@ -563,6 +605,26 @@ fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResul
         ))
         .id();
     world.entity_mut(agent_entity).add_child(visual);
+    agent_entity
+}
+
+fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !rest.is_empty() {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "tna spawn does not accept arguments",
+        ));
+    }
+    ensure_archipelago(world)?;
+    if world.resource::<TestNavAgentState>().entity.is_some() {
+        return Err(ConsoleError::new(
+            "already_spawned",
+            "a test nav agent is already spawned; use tna despawn first",
+        ));
+    }
+    let position = player_transform_query(world)
+        .ok_or_else(|| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
+    let agent_entity = spawn_test_agent(world, position);
 
     *world.resource_mut::<TestNavAgentState>() = TestNavAgentState {
         entity: Some(agent_entity),
@@ -577,6 +639,41 @@ fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResul
         vec![format!(
             "nav agent spawned at ({:.2}, {:.2}, {:.2})",
             position.x, position.y, position.z
+        )],
+    ))
+}
+
+/// Parses a bare or `0x`-prefixed hex FormID argument (`tna travel`'s door
+/// selector), mirroring `console::parse_item_form_id`'s grammar -- that
+/// helper is private to `console.rs`, outside this wave's file-ownership
+/// boundary, so this is a small intentional duplicate rather than a new
+/// cross-module dependency.
+fn parse_form_id(value: &str) -> Option<u32> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    ((1..=8).contains(&digits.len()) && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| u32::from_str_radix(digits, 16).ok())
+        .flatten()
+}
+
+/// `tna travel <door-formid>` (issue #134): routes the test agent through
+/// the given travel door end-to-end, wiring up `request_travel`.
+fn travel_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [door] = rest else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "tna travel requires exactly one door FormID",
+        ));
+    };
+    let door_form_id = parse_form_id(door)
+        .ok_or_else(|| ConsoleError::new("bad_type", "tna travel door FormID must be hex"))?;
+    request_travel(world, door_form_id)?;
+    Ok(ConsoleCommandResult::new(
+        json!({ "door_form_id": door_form_id }),
+        vec![format!(
+            "nav agent travel requested to door {door_form_id:08x}"
         )],
     ))
 }
@@ -635,6 +732,20 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
         ));
     }
     let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+        // Issue #134: a handed-off or frozen agent has no live entity but
+        // still exists in the ledger -- report that instead of the "no
+        // agent" error `tna spawn` would otherwise imply is needed.
+        if let Some(entry) = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(TEST_AGENT_ID)
+        {
+            let line = format!("nav agent handed off to cell {:08x}", entry.cell_form_id);
+            return Ok(ConsoleCommandResult::new(
+                json!({ "status": "handed-off", "cell": entry.cell_form_id }),
+                vec![line],
+            ));
+        }
         return Err(ConsoleError::new(
             "no_agent",
             "no test nav agent is spawned; use tna spawn first",
@@ -808,6 +919,8 @@ fn door_traversal_system(
     time: Res<Time>,
     mut agents: Query<(Entity, &mut Transform, &mut DoorTraversal), With<TestNavAgentMarker>>,
     mut state: ResMut<TestNavAgentState>,
+    archipelago_state: Res<NavArchipelagoState>,
+    mut ledger: ResMut<NavAgentLedger>,
     mut commands: Commands,
 ) {
     for (entity, mut transform, mut traversal) in &mut agents {
@@ -822,31 +935,69 @@ fn door_traversal_system(
             match state.active_link {
                 // A merge-seam crossing involves no door: the state machine
                 // never left Idle, so completion only clears the link.
-                Some(LinkKind::Merge) | None => {}
+                Some(LinkKind::Merge) | None => {
+                    state.active_link = None;
+                }
                 Some(LinkKind::Door { .. }) => {
                     let new_state = door_link::transition(
                         state.door_link,
                         door_link::DoorLinkEvent::TraversalComplete,
                     );
-                    if let door_link::DoorLinkState::TravelReached {
-                        door_form_id,
-                        destination_cell_form_id,
-                    } = new_state
-                    {
-                        // Issue #113's terminal travel seam: the agent stops
-                        // at the traversed door with a distinct status; #134
-                        // consumes this to hand the agent off to the
-                        // destination cell.
-                        info!(
-                            "nav agent travel reached {door_form_id:08x} -> cell {destination_cell_form_id:08x}"
-                        );
-                        commands.entity(entity).remove::<AgentTarget3d>();
-                        state.travel_intent = None;
+                    let Some((door_form_id, destination_cell_form_id)) = (match new_state {
+                        door_link::DoorLinkState::TravelReached {
+                            door_form_id,
+                            destination_cell_form_id,
+                        } => Some((door_form_id, destination_cell_form_id)),
+                        _ => None,
+                    }) else {
+                        state.door_link = new_state;
+                        state.active_link = None;
+                        continue;
+                    };
+                    // Issue #113's terminal travel seam: the agent stopped at
+                    // the traversed door. Issue #134 owns what happens next:
+                    // the agent leaves the active cell entirely, ledgered for
+                    // the destination cell at that door's own paired marker.
+                    info!(
+                        "nav agent travel reached {door_form_id:08x} -> cell {destination_cell_form_id:08x}"
+                    );
+                    let destination_door_form_id = archipelago_state
+                        .travel_doors
+                        .get(&door_form_id)
+                        .map(|link| link.destination_door_form_id);
+                    match destination_door_form_id {
+                        Some(destination_door_form_id) => {
+                            ledger.0.record(ledger_policy::LedgerEntry {
+                                agent_id: TEST_AGENT_ID,
+                                cell_form_id: destination_cell_form_id,
+                                spawn_kind: ledger_policy::SpawnKind::DoorMarker {
+                                    destination_door_form_id,
+                                },
+                                remaining_target: None,
+                            });
+                            info!(
+                                "nav agent handoff {TEST_AGENT_ID:08x} -> cell {destination_cell_form_id:08x}"
+                            );
+                            commands.entity(entity).despawn();
+                            *state = TestNavAgentState::default();
+                        }
+                        None => {
+                            // Defensive fallback (should not happen:
+                            // `travel_doors` always carries this once
+                            // `TravelReached` fired through it) -- keep
+                            // #113's original behaviour rather than losing
+                            // the agent silently.
+                            warn!(
+                                "nav agent handoff {door_form_id:08x}: no destination door metadata; agent left at the travel door"
+                            );
+                            commands.entity(entity).remove::<AgentTarget3d>();
+                            state.travel_intent = None;
+                            state.door_link = new_state;
+                            state.active_link = None;
+                        }
                     }
-                    state.door_link = new_state;
                 }
             }
-            state.active_link = None;
         }
     }
 }
@@ -1182,9 +1333,9 @@ fn door_availability_system(world: &mut World) {
 
 /// Routes the test agent to `door_form_id`'s travel-door triangle and arms
 /// the travel lifecycle (issue #113 feature 3). The traversal terminates at
-/// the door with the `TravelReached` status -- #134's `tna travel` console
-/// surface consumes this seam and adds the actual cell handoff.
-#[allow(dead_code)] // consumed by #134's `tna travel` console surface
+/// the door with the `TravelReached` status; `door_traversal_system` (issue
+/// #134) consumes that seam and hands the agent off to the destination
+/// cell. Wired to the console as `tna travel <door-formid>`.
 pub(crate) fn request_travel(world: &mut World, door_form_id: u32) -> Result<(), ConsoleError> {
     let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
         return Err(ConsoleError::new(
@@ -1268,9 +1419,18 @@ fn log_path_latency(
 }
 
 /// Mirrors `nav_overlay::despawn_stale_nav_overlay`'s pattern: the moment
-/// the active cell no longer matches the archipelago's cell, tear it (and
-/// the test agent) down. `PreparedSceneManifest` is optional so this system
-/// never panics in a console-harness test world that never inserted one.
+/// the active cell no longer matches the archipelago's cell, tear it down.
+/// `PreparedSceneManifest` is optional so this system never panics in a
+/// console-harness test world that never inserted one.
+///
+/// Issue #134 shipped amendment: wave 3's original behaviour despawned any
+/// live test agent along with the stale archipelago, silently losing it.
+/// That is replaced with `ledger_departing_agent`, which runs *before*
+/// `teardown_archipelago` (it needs `NavArchipelagoState.travel_doors`,
+/// still populated for the departing cell) and ledgers the agent instead --
+/// follow-through to the destination cell if `note_player_swap_door` noted
+/// the exact door the agent's active route was targeting, otherwise frozen
+/// in place in the departing cell.
 fn despawn_stale_navmesh_archipelago(world: &mut World) {
     let Some(current_cell) = world
         .get_resource::<PreparedSceneManifest>()
@@ -1278,20 +1438,204 @@ fn despawn_stale_navmesh_archipelago(world: &mut World) {
     else {
         return;
     };
-    let stale = world
+    let Some(source_cell) = world
         .resource::<NavArchipelagoState>()
         .cell_form_id
-        .is_some_and(|cell| cell != current_cell);
-    if !stale {
+        .filter(|&cell| cell != current_cell)
+    else {
         return;
-    }
+    };
+    let used_door = world.resource_mut::<PendingPlayerSwapDoor>().0.take();
+    ledger_departing_agent(world, source_cell, used_door);
     teardown_archipelago(world);
-    if let Some(agent_entity) = world.resource::<TestNavAgentState>().entity
-        && let Ok(entity) = world.get_entity_mut(agent_entity)
-    {
+}
+
+/// The point-target component of `AgentTarget3d`, if any -- an `Entity`
+/// target (e.g. `tna goto player`) cannot be meaningfully frozen, since the
+/// target entity will not exist once the agent is restored, so it is
+/// dropped rather than ledgered.
+fn point_target(target: &AgentTarget3d) -> Option<[f32; 3]> {
+    match target {
+        AgentTarget3d::Point(point) => Some(point.to_array()),
+        _ => None,
+    }
+}
+
+/// Issue #134's player-initiated-swap ledgering: despawns the live test
+/// agent (if any) into `NavAgentLedger`, deciding follow-through vs. freeze
+/// via `ledger_policy::decide_swap_eligibility`. Must run before
+/// `teardown_archipelago` clears `NavArchipelagoState.travel_doors`, the
+/// source of a follow-through's destination-door metadata.
+fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option<u32>) {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().entity else {
+        return;
+    };
+    let route_door = world.resource::<TestNavAgentState>().travel_intent;
+    let position = world
+        .get::<Transform>(agent_entity)
+        .map(|transform| transform.translation.to_array())
+        .unwrap_or_default();
+    let remaining_target = world
+        .get::<AgentTarget3d>(agent_entity)
+        .and_then(point_target);
+
+    let follow_through_link = used_door.and_then(|door| {
+        let eligible = ledger_policy::decide_swap_eligibility(route_door, door)
+            == ledger_policy::SwapEligibility::FollowThrough;
+        eligible
+            .then(|| {
+                world
+                    .resource::<NavArchipelagoState>()
+                    .travel_doors
+                    .get(&door)
+                    .copied()
+            })
+            .flatten()
+    });
+
+    if let Some(link) = follow_through_link {
+        world
+            .resource_mut::<NavAgentLedger>()
+            .0
+            .record(ledger_policy::LedgerEntry {
+                agent_id: TEST_AGENT_ID,
+                cell_form_id: link.destination_cell_form_id,
+                spawn_kind: ledger_policy::SpawnKind::DoorMarker {
+                    destination_door_form_id: link.destination_door_form_id,
+                },
+                remaining_target: None,
+            });
+        info!(
+            "nav agent handoff {TEST_AGENT_ID:08x} -> cell {:08x}",
+            link.destination_cell_form_id
+        );
+    } else {
+        world
+            .resource_mut::<NavAgentLedger>()
+            .0
+            .record(ledger_policy::LedgerEntry {
+                agent_id: TEST_AGENT_ID,
+                cell_form_id: source_cell,
+                spawn_kind: ledger_policy::SpawnKind::FrozenPosition { position },
+                remaining_target,
+            });
+        info!("nav agent freeze {TEST_AGENT_ID:08x} cell {source_cell:08x}");
+    }
+
+    if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
     *world.resource_mut::<TestNavAgentState>() = TestNavAgentState::default();
+}
+
+/// The placed position of the door reference `door_form_id` in the
+/// *active* cell's manifest, if it exists there (issue #134's `DoorMarker`
+/// spawn resolution).
+fn door_position_in_active_cell(world: &World, door_form_id: u32) -> Option<Vec3> {
+    world
+        .get_resource::<PreparedSceneManifest>()?
+        .placements
+        .iter()
+        .find(|placement| placement.reference_form_id == door_form_id)
+        .map(|placement| Vec3::from_array(placement.translation))
+}
+
+/// Issue #134's restore side: once a cell containing ledgered entries
+/// becomes active, claims them (`ledger_policy::Ledger::claim_for_
+/// activation`) and spawns each restored entry, or diagnoses a stale
+/// `DoorMarker` entry whose destination door is missing from this cell's
+/// manifest. Cheap no-op the overwhelming majority of frames: bails before
+/// touching the archipelago unless the ledger actually holds an entry for
+/// the active cell.
+fn restore_ledgered_agents_system(world: &mut World) {
+    let Some(current_cell) = world
+        .get_resource::<PreparedSceneManifest>()
+        .map(|manifest| manifest.cell.form_id)
+    else {
+        return;
+    };
+    let has_pending = world
+        .resource::<NavAgentLedger>()
+        .0
+        .entry_for(TEST_AGENT_ID)
+        .is_some_and(|entry| entry.cell_form_id == current_cell);
+    if !has_pending {
+        return;
+    }
+    // Only ever the one test agent: an entry is only ever ledgered while no
+    // entity exists, so a live entity here means restoration already
+    // happened this activation (or `tna spawn` ran first) -- do not
+    // double-spawn.
+    if world.resource::<TestNavAgentState>().entity.is_some() {
+        return;
+    }
+
+    let known_door_form_ids: std::collections::HashSet<u32> = world
+        .resource::<PreparedSceneManifest>()
+        .placements
+        .iter()
+        .filter(|placement| matches!(placement.semantic, crate::vsa::PreparedSemantic::Door(_)))
+        .map(|placement| placement.reference_form_id)
+        .collect();
+
+    let claim = world
+        .resource_mut::<NavAgentLedger>()
+        .0
+        .claim_for_activation(current_cell, &known_door_form_ids);
+
+    for stale in claim.stale {
+        warn!(
+            "nav agent ledger stale {:08x} cell {:08x}: destination door {:08x} absent from the active cell",
+            stale.agent_id, stale.cell_form_id, stale.missing_door_form_id
+        );
+    }
+
+    for entry in claim.restored {
+        restore_ledgered_agent(world, entry);
+    }
+}
+
+fn restore_ledgered_agent(world: &mut World, entry: ledger_policy::LedgerEntry) {
+    if ensure_archipelago(world).is_err() {
+        warn!(
+            "nav agent restore {:08x} cell {:08x}: no nav graph for this cell; ledger entry dropped",
+            entry.agent_id, entry.cell_form_id
+        );
+        return;
+    }
+    let position = match entry.spawn_kind {
+        ledger_policy::SpawnKind::FrozenPosition { position } => Vec3::from_array(position),
+        ledger_policy::SpawnKind::DoorMarker {
+            destination_door_form_id,
+        } => match door_position_in_active_cell(world, destination_door_form_id) {
+            Some(position) => position,
+            None => {
+                // `restore_ledgered_agents_system` already filtered stale
+                // entries against `known_door_form_ids` from the same
+                // manifest this reads, so this should not happen; guarded
+                // defensively rather than trusted.
+                warn!(
+                    "nav agent restore {:08x} cell {:08x}: destination door {destination_door_form_id:08x} placement missing; ledger entry dropped",
+                    entry.agent_id, entry.cell_form_id
+                );
+                return;
+            }
+        },
+    };
+    let agent_entity = spawn_test_agent(world, position);
+    if let Some(target) = entry.remaining_target {
+        world
+            .entity_mut(agent_entity)
+            .insert(AgentTarget3d::Point(Vec3::from_array(target)));
+    }
+    *world.resource_mut::<TestNavAgentState>() = TestNavAgentState {
+        entity: Some(agent_entity),
+        ..default()
+    };
+    info!(
+        "nav agent restore {:08x} cell {:08x}",
+        entry.agent_id, entry.cell_form_id
+    );
 }
 
 #[cfg(test)]
@@ -1314,6 +1658,8 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<NavArchipelagoState>();
         world.init_resource::<TestNavAgentState>();
+        world.init_resource::<NavAgentLedger>();
+        world.init_resource::<PendingPlayerSwapDoor>();
         world
     }
 
@@ -1476,15 +1822,23 @@ mod tests {
         assert!(world.get_entity(entity).is_err());
     }
 
+    /// Issue #134 shipped amendment: wave 3's teardown used to despawn a
+    /// live test agent along with the stale archipelago, losing it. It is
+    /// now ledgered instead -- here with no door noted
+    /// (`PendingPlayerSwapDoor` defaults to `None`), so the agent freezes
+    /// in the *departing* cell at its current position rather than being
+    /// silently dropped.
     #[test]
-    fn archipelago_teardown_on_cell_swap_clears_agent_too() {
+    fn archipelago_teardown_on_cell_swap_ledgers_the_agent_instead_of_losing_it() {
         let mut world = harness_world();
         let archipelago = world.spawn_empty().id();
         let island = world.spawn_empty().id();
         world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xC0DE);
         world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
         world.resource_mut::<NavArchipelagoState>().islands = vec![island];
-        let agent = world.spawn(TestNavAgentMarker).id();
+        let agent = world
+            .spawn((TestNavAgentMarker, Transform::from_xyz(1.0, 2.0, 3.0)))
+            .id();
         world.resource_mut::<TestNavAgentState>().entity = Some(agent);
 
         world.insert_resource(minimal_manifest(0xBEEF));
@@ -1492,7 +1846,7 @@ mod tests {
 
         assert!(world.get_entity(archipelago).is_err());
         assert!(world.get_entity(island).is_err());
-        assert!(world.get_entity(agent).is_err());
+        assert!(world.get_entity(agent).is_err(), "the live entity is gone");
         assert!(
             world
                 .resource::<NavArchipelagoState>()
@@ -1500,6 +1854,165 @@ mod tests {
                 .is_none()
         );
         assert!(world.resource::<TestNavAgentState>().entity.is_none());
+
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(TEST_AGENT_ID)
+            .expect("the agent must be ledgered, not lost");
+        assert_eq!(entry.cell_form_id, 0xC0DE, "frozen in the departing cell");
+        assert_eq!(
+            entry.spawn_kind,
+            ledger_policy::SpawnKind::FrozenPosition {
+                position: [1.0, 2.0, 3.0]
+            }
+        );
+    }
+
+    /// Issue #134: a player-initiated swap through the exact door a live
+    /// agent's active route was targeting hands it off to the destination
+    /// cell (follow-through) instead of freezing it in the departing cell.
+    #[test]
+    fn a_player_swap_through_the_agents_own_route_door_follows_through() {
+        let mut world = harness_world();
+        world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xC0DE);
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(world.spawn_empty().id());
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .travel_doors
+            .insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::ZERO,
+                    door_position: Vec3::ZERO,
+                    destination_cell_form_id: 0xBEEF,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+        let agent = world
+            .spawn((TestNavAgentMarker, Transform::from_xyz(5.0, 0.0, 0.0)))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        world.resource_mut::<TestNavAgentState>().travel_intent = Some(0x99);
+        world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
+
+        world.insert_resource(minimal_manifest(0xBEEF));
+        despawn_stale_navmesh_archipelago(&mut world);
+
+        assert!(world.get_entity(agent).is_err());
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(TEST_AGENT_ID)
+            .expect("the agent must be ledgered");
+        assert_eq!(
+            entry.cell_form_id, 0xBEEF,
+            "ledgered to the destination cell"
+        );
+        assert_eq!(
+            entry.spawn_kind,
+            ledger_policy::SpawnKind::DoorMarker {
+                destination_door_form_id: 0x1234
+            }
+        );
+    }
+
+    /// Issue #134: a player swap through a door the agent's route was *not*
+    /// targeting freezes it in the departing cell, same as an untargeted
+    /// idle agent -- strict eligibility, no offscreen pathfinding.
+    #[test]
+    fn a_player_swap_through_a_different_door_still_freezes_the_agent() {
+        let mut world = harness_world();
+        world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xC0DE);
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(world.spawn_empty().id());
+        let agent = world
+            .spawn((TestNavAgentMarker, Transform::from_xyz(7.0, 0.0, 0.0)))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entity = Some(agent);
+        // The agent is routed to a different travel door than the one the
+        // player used.
+        world.resource_mut::<TestNavAgentState>().travel_intent = Some(0x50);
+        world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
+
+        world.insert_resource(minimal_manifest(0xBEEF));
+        despawn_stale_navmesh_archipelago(&mut world);
+
+        assert!(world.get_entity(agent).is_err());
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(TEST_AGENT_ID)
+            .expect("the agent must be ledgered, not lost");
+        assert_eq!(entry.cell_form_id, 0xC0DE, "frozen in the departing cell");
+        assert_eq!(
+            entry.spawn_kind,
+            ledger_policy::SpawnKind::FrozenPosition {
+                position: [7.0, 0.0, 0.0]
+            }
+        );
+    }
+
+    /// Issue #134: a cell claimed by a ledgered entry spawns exactly one
+    /// agent on activation, at the destination door's own placed position.
+    #[test]
+    fn matching_cell_activation_restores_exactly_one_ledgered_agent() {
+        let mut world = harness_world();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world
+            .resource_mut::<NavAgentLedger>()
+            .0
+            .record(ledger_policy::LedgerEntry {
+                agent_id: TEST_AGENT_ID,
+                cell_form_id: 0xBEEF,
+                spawn_kind: ledger_policy::SpawnKind::DoorMarker {
+                    destination_door_form_id: 0x1234,
+                },
+                remaining_target: None,
+            });
+
+        let mut manifest = minimal_manifest(0xBEEF);
+        manifest
+            .placements
+            .push(door_placement_at(0x1234, [9.0, 1.0, 2.0]));
+        // `PreparedSceneManifest.nav_graph` only needs to be `Some` here --
+        // `ensure_archipelago` short-circuits on its `already_current`
+        // check (below) before it would ever read this path from disk.
+        manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource::default());
+        world.insert_resource(manifest);
+        // Pre-seed the archipelago as already current for 0xBEEF so
+        // `ensure_archipelago` returns immediately without any real
+        // `bevy_landmass`/file-I/O plumbing -- this test is about the
+        // ledger claim + spawn-count contract, not archipelago building
+        // (already covered by other tests/real-data acceptance).
+        let archipelago_entity = world.spawn_empty().id();
+        world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xBEEF);
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago_entity);
+
+        restore_ledgered_agents_system(&mut world);
+
+        let mut query = world.query_filtered::<Entity, With<TestNavAgentMarker>>();
+        let agents: Vec<Entity> = query.iter(&world).collect();
+        assert_eq!(agents.len(), 1, "exactly one agent must be spawned");
+        assert!(
+            world
+                .resource::<NavAgentLedger>()
+                .0
+                .entry_for(TEST_AGENT_ID)
+                .is_none(),
+            "the claimed entry must be consumed"
+        );
+        let agent_entity = agents[0];
+        let position = world.get::<Transform>(agent_entity).unwrap().translation;
+        assert_eq!(
+            position,
+            Vec3::new(9.0, 1.0, 2.0),
+            "spawned at the door marker"
+        );
+        assert_eq!(
+            world.resource::<TestNavAgentState>().entity,
+            Some(agent_entity)
+        );
     }
 
     #[test]
@@ -1566,6 +2079,7 @@ mod tests {
                     triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
                     door_position: Vec3::new(6.0, 0.0, 0.0),
                     destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
                 },
             );
 
@@ -1611,22 +2125,31 @@ mod tests {
         world
             .run_system_once(door_traversal_system)
             .expect("traversal system runs");
+
+        // Issue #134: the agent is handed off, not left standing at the
+        // door -- despawned from the active cell and ledgered for the
+        // destination cell at the paired door's marker.
+        assert!(
+            world.get_entity(agent).is_err(),
+            "the agent must leave the active cell entirely on handoff"
+        );
+        assert!(world.resource::<TestNavAgentState>().entity.is_none());
         assert_eq!(
             world.resource::<TestNavAgentState>().door_link,
-            door_link::DoorLinkState::TravelReached {
-                door_form_id: 0x99,
-                destination_cell_form_id: 0xC0DE,
+            door_link::DoorLinkState::Idle,
+            "state is fully reset, not left in TravelReached"
+        );
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(TEST_AGENT_ID)
+            .expect("the agent must be ledgered on handoff");
+        assert_eq!(entry.cell_form_id, 0xC0DE);
+        assert_eq!(
+            entry.spawn_kind,
+            ledger_policy::SpawnKind::DoorMarker {
+                destination_door_form_id: 0x1234
             }
-        );
-        assert!(
-            world.get::<AgentTarget3d>(agent).is_none(),
-            "the agent stops at the traversed door (issue #134 owns the handoff)"
-        );
-        assert!(
-            world
-                .resource::<TestNavAgentState>()
-                .travel_intent
-                .is_none()
         );
     }
 
@@ -1670,6 +2193,18 @@ mod tests {
         }
     }
 
+    /// A door placement at a specific position (issue #134's restore
+    /// tests, which spawn at a resolved door-marker position).
+    fn door_placement_at(
+        reference_form_id: u32,
+        translation: [f32; 3],
+    ) -> crate::vsa::PreparedPlacement {
+        crate::vsa::PreparedPlacement {
+            translation,
+            ..door_placement(reference_form_id)
+        }
+    }
+
     /// Plan #113 minimal-App test: a locked travel door never scripted-opens
     /// (no teleporting through closed doors) and resolves to the existing
     /// deterministic `Failed` status via the wait bound.
@@ -1694,6 +2229,7 @@ mod tests {
                     triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
                     door_position: Vec3::new(6.0, 0.0, 0.0),
                     destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
                 },
             );
             state.door_lock_info.insert(
@@ -1806,6 +2342,7 @@ mod tests {
                     triangle_midpoint: Vec3::ZERO,
                     door_position: Vec3::ZERO,
                     destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
                 },
             );
         request_travel(&mut world, 0x99).expect("first request succeeds");
