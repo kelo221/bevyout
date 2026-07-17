@@ -1919,6 +1919,7 @@ dependencies = [
  "bevy",
  "bevy_boxddd",
  "bvh",
+ "bytemuck",
  "clap",
  "cucumber",
  "esplugin",

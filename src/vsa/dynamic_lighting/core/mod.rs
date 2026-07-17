@@ -1,7 +1,17 @@
-//! Bevy-free DynamicLighting data and deterministic effect evaluation.
+//! Bevy-free DynamicLighting authoring data and source-compatible runtime.
 
-mod effects;
+mod config;
+mod fixed_timestep;
+mod runtime;
+mod spatial;
 mod types;
+mod unity_math;
+mod unity_random;
 
-pub(crate) use effects::intensity_multiplier;
-pub(crate) use types::{DEFAULT_BOUNCE_MULTIPLIER, LightEffect, LightEffectState};
+pub(crate) use config::{
+    DEFAULT_BOUNCE_MULTIPLIER, DynamicLightConfig, DynamicLightSpatialParameters,
+};
+pub(crate) use runtime::{LightEffectRuntime, advance_effect};
+pub(crate) use spatial::spatial_parameters;
+pub(crate) use types::{DynamicLightEffect, DynamicLightType};
+pub(crate) use unity_random::UnityRandom;

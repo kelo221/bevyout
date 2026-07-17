@@ -178,7 +178,7 @@ pub struct ViewArgs {
 #[derive(Parser, Debug)]
 pub struct LightingTestArgs {
     /// Face resolution for the hermetic CPU-baked static shadow cubemap.
-    #[arg(long, default_value_t = 128, value_parser = parse_shadow_resolution)]
+    #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
     pub(crate) shadow_resolution: u32,
     /// Exit after this many seconds; useful for automated captures.
     #[arg(long)]

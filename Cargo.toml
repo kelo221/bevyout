@@ -10,6 +10,7 @@ edition = "2024"
 bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "bevy_remote", "ktx2"] }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 bvh = "0.12"
+bytemuck = { version = "1.25", features = ["derive"] }
 esplugin = "6.1.4"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

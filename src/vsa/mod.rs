@@ -20,7 +20,11 @@ pub(crate) use assets::NIF_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
-pub(crate) use dynamic_lighting::{DynamicLight, LightEffect, update_dynamic_lights};
+pub(crate) use dynamic_lighting::{
+    DynamicLight, DynamicLightEffect, DynamicLightShadowProxy, DynamicLightType,
+    DynamicLightingDiagnostics, DynamicLightingPlugin, DynamicLightingSettings,
+    DynamicLightingView,
+};
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;

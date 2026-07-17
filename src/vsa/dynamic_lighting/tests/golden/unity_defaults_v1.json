@@ -1,0 +1,20 @@
+{
+    "upstreamCommit": "dd7c195cba2599a20bf1b662fa0f69366e0f74b5",
+    "unityVersion": "6000.3.17f1",
+    "intensity": 2.0,
+    "radius": 4.0,
+    "falloff": 0.0,
+    "innerCutoffDegrees": 26.0,
+    "outerCutoffDegrees": 30.0,
+    "waveSpeed": 1.0,
+    "waveFrequency": 1.0,
+    "waveOffset": 0.0,
+    "rotorCenter": 0.10000000149011612,
+    "discoVerticalSpeed": 1.0,
+    "pulseSpeed": 1.0,
+    "pulseModifier": 0.25,
+    "pulseOffset": 0.0,
+    "timestepSeconds": 0.03333333507180214,
+    "bounceModifier": 1.0,
+    "bounceIntensity": 1.0
+}

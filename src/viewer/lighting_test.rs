@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use bevy::camera::Exposure;
+use bevy::camera::{Exposure, Hdr};
+use bevy::core_pipeline::prepass::{DeferredPrepass, DepthPrepass};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::light::{NotShadowCaster, NotShadowReceiver, PointLightShadowMap, ShadowFilteringMethod};
 use bevy::pbr::{
-    BakedPointLightShadow, BakedPointShadowMap, BakedPointShadowReceiver, PointLightShadowSamples,
+    BakedPointLightShadow, BakedPointShadowMap, BakedPointShadowReceiver,
+    DefaultOpaqueRendererMethod, PointLightShadowSamples,
 };
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
@@ -19,8 +21,10 @@ use super::agent_bridge;
 use super::lighting_demo_policy::DemoOrbit;
 use crate::cli::LightingTestArgs;
 use crate::vsa::{
-    DynamicLight, LightEffect, STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight,
-    bake_static_point_shadow_bytes, update_dynamic_lights,
+    DynamicLight, DynamicLightEffect, DynamicLightShadowProxy, DynamicLightType,
+    DynamicLightingDiagnostics, DynamicLightingPlugin, DynamicLightingSettings,
+    DynamicLightingView, STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight,
+    bake_static_point_shadow_bytes,
 };
 
 const STATIC_PILLAR_CENTER: [f32; 3] = [-2.0, 1.25, 0.0];
@@ -69,8 +73,10 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
         }),
         FrameTimeDiagnosticsPlugin::new(DEMO_HISTORY),
         RenderDiagnosticsPlugin,
+        DynamicLightingPlugin,
     ));
     app.insert_resource(ClearColor(Color::srgb(0.015, 0.018, 0.025)))
+        .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(PointLightShadowMap { size: 256 })
         .insert_resource(PointLightShadowSamples(1))
         .insert_resource(BakedPointShadowMap {
@@ -86,8 +92,9 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
             Update,
             (
                 animate_moving_shadow_caster,
+                toggle_dynamic_lighting,
                 toggle_shadow_sources,
-                update_dynamic_lights,
+                update_dynamic_lighting_status,
                 super::record_render_sample,
                 super::update_fps_text,
             ),
@@ -111,6 +118,9 @@ struct MovingShadowCaster(DemoOrbit);
 
 #[derive(Component)]
 struct HybridPointLight;
+
+#[derive(Component)]
+struct DynamicLightingStatusText;
 
 #[derive(Resource, Default)]
 struct DemoMotion {
@@ -139,7 +149,7 @@ fn setup_lighting_test(
     });
     commands.spawn((
         Name::new("Hybrid shadow receiver floor"),
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(16.0, 16.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(24.0, 24.0))),
         MeshMaterial3d(floor_material),
         BakedPointShadowReceiver,
         NotShadowCaster,
@@ -215,18 +225,52 @@ fn setup_lighting_test(
         NotShadowReceiver,
     ));
 
-    let strobe_intensity = 18_000.0;
+    let receiver_mesh = meshes.add(Cuboid::new(1.7, 0.18, 1.7));
+    let receiver_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.24, 0.28),
+        perceptual_roughness: 0.82,
+        ..default()
+    });
+
+    let strobe_intensity = 120.0;
+    let strobe_color = Color::srgb(0.42, 0.18, 1.0);
+    let strobe_receiver = Vec3::new(7.0, 0.09, 0.0);
     commands.spawn((
-        Name::new("DynamicLighting purple strobe"),
-        PointLight {
-            color: Color::srgb(0.42, 0.18, 1.0),
-            intensity: strobe_intensity,
-            range: 9.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        DynamicLight::strobe(strobe_intensity, 4.0),
-        Transform::from_xyz(3.5, 2.5, -2.5),
+        Name::new("DynamicLighting purple strobe receiver"),
+        Mesh3d(receiver_mesh.clone()),
+        MeshMaterial3d(receiver_material.clone()),
+        Transform::from_translation(strobe_receiver),
+        NotShadowCaster,
+    ));
+    let strobe_transform = Transform::from_translation(strobe_receiver + Vec3::Y * 1.2);
+    let strobe_entity = commands
+        .spawn((
+            Name::new("DynamicLighting purple strobe"),
+            DynamicLight::strobe(strobe_intensity)
+                .with_color(strobe_color)
+                .with_radius(2.4)
+                .with_shadows(true),
+            strobe_transform,
+            GlobalTransform::default(),
+        ))
+        .id();
+    commands.spawn((
+        Name::new("DynamicLighting strobe shadow-only proxy"),
+        DynamicLightShadowProxy::shadow_only_point_light(2.4),
+        DynamicLightShadowProxy::realtime(strobe_entity),
+        strobe_transform,
+        Visibility::Visible,
+    ));
+    let strobe_blocker_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.12, 0.13, 0.16),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    commands.spawn((
+        Name::new("DynamicLighting strobe shadow blocker"),
+        Mesh3d(meshes.add(Cuboid::new(0.5, 0.9, 0.5))),
+        MeshMaterial3d(strobe_blocker_material),
+        Transform::from_translation(strobe_receiver + Vec3::Y * 0.54),
     ));
 
     let effect_colors = [
@@ -246,31 +290,82 @@ fn setup_lighting_test(
         Color::srgb(0.30, 1.0, 0.90),
         Color::srgb(0.38, 0.62, 1.0),
     ];
-    for (index, effect) in LightEffect::ALL.into_iter().enumerate() {
+    for (index, effect) in DynamicLightEffect::ALL.into_iter().enumerate() {
         let column = index % 5;
         let row = index / 5;
-        let position = Vec3::new(-5.5 + column as f32 * 2.75, 0.65, -5.0 + row as f32 * 2.2);
+        let receiver_position =
+            Vec3::new(-5.5 + column as f32 * 2.75, 0.09, -6.0 + row as f32 * 2.2);
+        commands.spawn((
+            Name::new(format!("DynamicLighting effect receiver {effect:?}")),
+            Mesh3d(receiver_mesh.clone()),
+            MeshMaterial3d(receiver_material.clone()),
+            Transform::from_translation(receiver_position),
+            NotShadowCaster,
+        ));
         commands.spawn((
             Name::new(format!("DynamicLighting effect {effect:?}")),
-            PointLight {
-                color: effect_colors[index],
-                intensity: 3_200.0,
-                range: 2.8,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            DynamicLight::with_effect(3_200.0, effect),
-            Transform::from_translation(position),
+            DynamicLight::with_effect(80.0, effect)
+                .with_color(effect_colors[index])
+                .with_radius(1.65),
+            Transform::from_translation(receiver_position + Vec3::Y * 1.0),
+            GlobalTransform::default(),
+        ));
+    }
+
+    let spatial_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.74, 0.78),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let spatial_mesh = meshes.add(Cuboid::new(2.5, 2.5, 0.14));
+    let spatial_colors = [
+        Color::srgb(1.0, 0.32, 0.24),
+        Color::srgb(1.0, 0.64, 0.18),
+        Color::srgb(0.82, 1.0, 0.22),
+        Color::srgb(0.20, 1.0, 0.48),
+        Color::srgb(0.16, 0.88, 1.0),
+        Color::srgb(0.24, 0.46, 1.0),
+        Color::srgb(0.62, 0.26, 1.0),
+        Color::srgb(1.0, 0.24, 0.72),
+    ];
+    for (index, light_type) in DynamicLightType::ALL.into_iter().enumerate() {
+        let column = index % 4;
+        let row = index / 4;
+        let receiver_x = [-7.5, -4.2, 4.2, 7.5][column];
+        let receiver_position = Vec3::new(receiver_x, 1.35, 4.2 + row as f32 * 3.6);
+        commands.spawn((
+            Name::new(format!("DynamicLighting spatial receiver {light_type:?}")),
+            Mesh3d(spatial_mesh.clone()),
+            MeshMaterial3d(spatial_material.clone()),
+            Transform::from_translation(receiver_position),
+            NotShadowCaster,
+        ));
+        commands.spawn((
+            Name::new(format!("DynamicLighting spatial {light_type:?}")),
+            DynamicLight::with_effect(160.0, DynamicLightEffect::Steady)
+                .with_type(light_type)
+                .with_color(spatial_colors[index])
+                .with_radius(3.1),
+            Transform::from_translation(receiver_position + Vec3::Z * 1.8).with_rotation(
+                Quat::from_rotation_y(core::f32::consts::PI)
+                    * Quat::from_rotation_z((index as f32 - 3.5) * 0.11),
+            ),
+            GlobalTransform::default(),
         ));
     }
 
     commands.spawn((
         Name::new("Lighting test camera"),
         Camera3d::default(),
+        Hdr,
+        Msaa::Off,
+        DepthPrepass,
+        DeferredPrepass,
+        DynamicLightingView,
         ShadowFilteringMethod::Hardware2x2,
         Tonemapping::AcesFitted,
         Exposure { ev100: 2.0 },
-        Transform::from_xyz(10.0, 7.5, 12.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        Transform::from_xyz(14.0, 13.0, 19.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
     ));
 
     commands.spawn((
@@ -280,9 +375,10 @@ fn setup_lighting_test(
             "Blue block: moves and casts a realtime shadow\n",
             "Floor: combines prepared + realtime visibility\n",
             "Purple point: isolated DynamicLighting Strobe effect\n",
-            "Far edge: all 15 imported intensity effects (color-coded)\n",
+            "Near grid: all 15 temporal effects on isolated receivers\n",
+            "Far grid: Point, Spot, Discoball, Wave / Interference, Rotor, Shock, Disco\n",
             "1: toggle baked static shadow | 2: toggle realtime shadow\n",
-            "Space: pause / resume motion"
+            "3: custom pass | 4: Bevy lights | 5: shadow proxy | F: freeze | Space: motion"
         )),
         TextFont {
             font_size: FontSize::Px(20.0),
@@ -293,6 +389,21 @@ fn setup_lighting_test(
             position_type: PositionType::Absolute,
             top: px(16),
             left: px(16),
+            ..default()
+        },
+    ));
+
+    commands.spawn((
+        Text::new("DynamicLighting extracted -- | Bevy lights -- | proxy --"),
+        DynamicLightingStatusText,
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(16),
+            right: px(16),
             ..default()
         },
     ));
@@ -310,10 +421,78 @@ fn setup_lighting_test(
     ));
 }
 
+fn toggle_dynamic_lighting(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<DynamicLightingSettings>,
+) {
+    if keyboard.just_pressed(KeyCode::Digit3) {
+        settings.enabled = !settings.enabled;
+        info!(
+            "lighting test: custom DynamicLighting {}",
+            if settings.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    if keyboard.just_pressed(KeyCode::KeyF) {
+        settings.freeze_effect_time = !settings.freeze_effect_time;
+        info!(
+            "lighting test: DynamicLighting effect time {}",
+            if settings.freeze_effect_time {
+                "frozen"
+            } else {
+                "running"
+            }
+        );
+    }
+    if keyboard.just_pressed(KeyCode::Digit5) {
+        settings.shadow_proxies_enabled = !settings.shadow_proxies_enabled;
+        info!(
+            "lighting test: DynamicLighting shadow proxies {}",
+            if settings.shadow_proxies_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+}
+
+fn update_dynamic_lighting_status(
+    settings: Res<DynamicLightingSettings>,
+    diagnostics: Res<DynamicLightingDiagnostics>,
+    bevy_lights: Query<&Visibility, (With<PointLight>, Without<DynamicLightShadowProxy>)>,
+    proxies: Query<&Visibility, With<DynamicLightShadowProxy>>,
+    mut text: Single<&mut Text, With<DynamicLightingStatusText>>,
+) {
+    let visible_bevy_lights = bevy_lights
+        .iter()
+        .filter(|visibility| **visibility != Visibility::Hidden)
+        .count();
+    let visible_proxies = proxies
+        .iter()
+        .filter(|visibility| **visibility != Visibility::Hidden)
+        .count();
+    text.0 = format!(
+        "Custom extracted {} | pass {} | effects {}\nBevy lights {} | shadow proxies {}",
+        diagnostics.extracted_light_count(),
+        if settings.enabled { "ON" } else { "OFF" },
+        if settings.freeze_effect_time {
+            "FROZEN"
+        } else {
+            "RUNNING"
+        },
+        visible_bevy_lights,
+        visible_proxies,
+    );
+}
+
 fn toggle_shadow_sources(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut prepared_samples: ResMut<PointLightShadowSamples>,
-    mut lights: Query<&mut PointLight, With<HybridPointLight>>,
+    mut lights: Query<(&mut PointLight, &mut Visibility), With<HybridPointLight>>,
 ) {
     if keyboard.just_pressed(KeyCode::Digit1) {
         let enable = prepared_samples.0 == 0;
@@ -328,7 +507,7 @@ fn toggle_shadow_sources(
         );
     }
     if keyboard.just_pressed(KeyCode::Digit2) {
-        for mut light in &mut lights {
+        for (mut light, _) in &mut lights {
             light.shadow_maps_enabled = !light.shadow_maps_enabled;
             info!(
                 "lighting test: realtime moving-object shadow {}",
@@ -336,6 +515,23 @@ fn toggle_shadow_sources(
                     "enabled"
                 } else {
                     "disabled"
+                }
+            );
+        }
+    }
+    if keyboard.just_pressed(KeyCode::Digit4) {
+        for (_, mut visibility) in &mut lights {
+            *visibility = if *visibility == Visibility::Hidden {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+            info!(
+                "lighting test: Bevy PointLights {}",
+                if *visibility == Visibility::Hidden {
+                    "disabled"
+                } else {
+                    "enabled"
                 }
             );
         }

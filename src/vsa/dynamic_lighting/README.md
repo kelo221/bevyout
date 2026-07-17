@@ -1,22 +1,31 @@
-# Isolated DynamicLighting slice
+# Isolated DynamicLighting port
 
-This module is the only home for the Henry00IS/AlpacaIT DynamicLighting port.
-It is intentionally split into:
+This directory is the complete boundary for the port of Henry de Jongh's
+Unity DynamicLighting package. `mod.rs` exposes only the Bevy plugin, custom
+light component, authoring enums, view marker, settings, and the shared default
+bounce multiplier used by the existing irradiance baker.
 
-- `core/`: deterministic effect curves and light parameters, with no Bevy
-  dependency;
-- `bevy_bridge/`: the narrow ECS bridge that updates runtime point lights.
+- `core/`: Bevy-free authoring values, Unity-compatible random/Perlin/fixed
+  timestep behavior, all 15 temporal effects, and CPU spatial references.
+- `bevy_bridge/`: main-world custom-light ECS state. It does not create or
+  mutate gameplay-facing Bevy `PointLight` components. The isolated
+  `shadow_proxy.rs` boundary may synchronize transform/range to an explicitly
+  authored black proxy; its intensity never follows an effect.
+- `render/` and `shaders/`: the 112-byte upstream GPU ABI and HDR deferred
+  fullscreen pass containing all eight spatial light functions.
+- `reference_unity/` and `tests/golden/`: reproducible Unity 6000.3 reference
+  exporter and generated parity fixtures.
+- `upstream/`: ignored frozen source checkout at the commit recorded in
+  `NOTICE.md`.
 
-The intensity effects ported into the core are `Steady`, `Pulse`, `Random`,
-`Strobe`, `Flicker`, `FluorescentStarter`, `FluorescentClicker`,
-`FluorescentRandom`, `Candle`, `Pulsar`, `Fire`, `Generator`, `Lightning`,
-`Cloudy`, and `Overcast`. Their noise is deterministic and seedable rather
-than relying on Unity's global random state. The source spatial types
-(`Point`, `Spot`, `Discoball`, `Wave`, `Interference`, `Rotor`, `Shock`, and
-`Disco`) are represented as data contracts; their projection shaders are the
-next bridge step.
+The hermetic proof scene is launched from the repository root with:
 
-`LightEffectState` also carries a default-on `bounce_multiplier` of `1.0`.
-The existing prepared irradiance volume remains the offline one-diffuse-bounce
-path; future iterations can move its channel/bounce payload into this slice
-without leaking Unity types into the viewer.
+```powershell
+cargo run-dev -- lighting-test
+```
+
+Controls are shown in the scene. Keys 1 and 2 isolate prepared-static and
+realtime moving-object shadows; 3 toggles the custom GPU pass; 4 hides ordinary
+Bevy lights; 5 removes custom shadow visibility by hiding the shadow-only
+proxy; F freezes temporal effects; Space pauses the moving caster. The HUD also
+reports the render-world extracted custom-light count.

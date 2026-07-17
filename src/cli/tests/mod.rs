@@ -280,3 +280,12 @@ fn lighting_test_exposes_a_hermetic_capture_contract() {
     assert!(args.agent_bridge);
     assert_eq!(args.agent_port, 15_703);
 }
+
+#[test]
+fn lighting_test_defaults_to_high_quality_static_shadows() {
+    let cli = Cli::try_parse_from(["bevyout", "lighting-test"]).unwrap();
+    let CommandLine::LightingTest(args) = cli.command else {
+        panic!("expected lighting-test command");
+    };
+    assert_eq!(args.shadow_resolution, 512);
+}

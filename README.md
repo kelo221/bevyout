@@ -68,14 +68,24 @@ cargo run-dev -- lighting-test
 The orange pillar is traced once by the same CPU static-shadow kernel used by
 `prepare`. The blue block moves every frame and casts through Bevy's realtime
 point-shadow pass. The floor combines both visibility sources, making the two
-paths directly observable in one view; press Space to pause or resume motion.
-Press 1 or 2 to toggle the baked-static and realtime sources independently.
+paths directly observable in one view. The hermetic bake uses the same
+high-quality 512 face resolution as `prepare` by default;
+`--shadow-resolution 128|256` remains available for faster checks. Press Space
+to pause or resume motion, and press 1 or 2 to toggle the baked-static and
+realtime sources independently.
 
 The test also includes a purple point light driven by the isolated
-`src/vsa/dynamic_lighting` slice, plus a color-coded rack containing all 15
-ported intensity effects. The purple point is a deterministic 4 Hz strobe;
-the rack makes the other curves observable on the floor. Prepared irradiance
-baking keeps one diffuse bounce enabled by default (`bounce_multiplier = 1.0`).
+`src/vsa/dynamic_lighting` slice, a color-coded rack containing all 15 temporal
+effects, and a second rack containing all eight spatial types. Each light has
+an isolated receiver so intensity and pattern changes stay readable beside the
+90,000-unit hybrid shadow light. Press 3 to toggle the custom HDR pass and F to
+freeze or resume effect time. Press 4 to hide every ordinary Bevy point light
+and 5 to toggle the separately identified shadow-only proxy. The proxy is a
+black, fixed-intensity Bevy `PointLight`: Bevy owns its realtime cubemap, its
+built-in direct contribution is zero, and the custom pass samples that cubemap
+without driving the proxy from temporal effects. Prepared irradiance baking and custom-light
+authoring both keep one diffuse bounce enabled by default
+(`bounce_multiplier = 1.0`).
 
 For a fast Blender preview that leaves the prepared manifest unchanged:
 

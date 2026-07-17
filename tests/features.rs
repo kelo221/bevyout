@@ -144,22 +144,37 @@ mod material_shading_policy;
 #[allow(dead_code, unused_imports)]
 mod lighting_demo_policy;
 
-// The DynamicLighting effect core is intentionally Bevy-free, so the
-// executable spec can drive the exact same deterministic curve implementation.
-// Keep the same `core::{effects,types}` module shape as the production slice
-// so the verbatim pure effect implementation is exercised by the feature
-// harness without widening the library's public API.
+// The DynamicLighting core is intentionally Bevy-free, so the executable spec
+// drives the same source-compatible runtime used by the ECS bridge.
 mod dynamic_lighting_core {
-    #[path = "../../src/vsa/dynamic_lighting/core/effects.rs"]
+    #[path = "../../src/vsa/dynamic_lighting/core/config.rs"]
     #[allow(dead_code, unused_imports)]
-    pub(crate) mod effects;
+    pub(crate) mod config;
+
+    #[path = "../../src/vsa/dynamic_lighting/core/fixed_timestep.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod fixed_timestep;
+
+    #[path = "../../src/vsa/dynamic_lighting/core/runtime.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod runtime;
 
     #[path = "../../src/vsa/dynamic_lighting/core/types.rs"]
     #[allow(dead_code, unused_imports)]
     pub(crate) mod types;
 
-    pub(crate) use effects::intensity_multiplier;
-    pub(crate) use types::{LightEffect, LightEffectState};
+    #[path = "../../src/vsa/dynamic_lighting/core/unity_math.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod unity_math;
+
+    #[path = "../../src/vsa/dynamic_lighting/core/unity_random.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod unity_random;
+
+    pub(crate) use config::DynamicLightConfig;
+    pub(crate) use runtime::{LightEffectRuntime, advance_effect};
+    pub(crate) use types::{DynamicLightEffect, DynamicLightType};
+    pub(crate) use unity_random::UnityRandom;
 }
 
 // `interaction::container_policy` (issue #75) is dependency-free too (std
@@ -397,9 +412,12 @@ struct BevyoutWorld {
     bake_primary_rays: usize,
 
     // -- dynamic_lighting.feature --
-    dynamic_light_state: dynamic_lighting_core::LightEffectState,
+    dynamic_light_config: dynamic_lighting_core::DynamicLightConfig,
+    dynamic_light_runtime: dynamic_lighting_core::LightEffectRuntime,
+    dynamic_light_random: dynamic_lighting_core::UnityRandom,
     dynamic_light_multiplier: Option<f32>,
     dynamic_light_effects_finite: Option<bool>,
+    dynamic_light_catalogs_valid: Option<bool>,
 
     // -- loading_fallback.feature (issue #59) --
     fallback_state: Option<swap_policy::FallbackState>,
@@ -2958,28 +2976,66 @@ async fn then_prepared_close_sound_absent(world: &mut BevyoutWorld) {
 // dynamic_lighting.feature
 // ---------------------------------------------------------------------
 
-#[given("the default dynamic light state")]
-async fn given_default_dynamic_light_state(world: &mut BevyoutWorld) {
-    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::default();
+#[given("the default dynamic light configuration")]
+async fn given_default_dynamic_light_configuration(world: &mut BevyoutWorld) {
+    world.dynamic_light_config = dynamic_lighting_core::DynamicLightConfig::default();
 }
 
-#[then(regex = r"^the dynamic light bounce multiplier is ([\d.]+)$")]
-async fn then_dynamic_light_bounce_multiplier(world: &mut BevyoutWorld, expected: f32) {
-    assert_eq!(world.dynamic_light_state.bounce_multiplier, expected,);
-}
-
-#[given(regex = r"^a strobe effect at ([\d.]+) Hz$")]
-async fn given_strobe_effect(world: &mut BevyoutWorld, frequency_hz: f32) {
-    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::strobe(frequency_hz);
-}
-
-#[when(regex = r"^the strobe is sampled at ([\d.]+) seconds$")]
-async fn when_strobe_sampled(world: &mut BevyoutWorld, elapsed_seconds: f32) {
-    world.dynamic_light_multiplier = Some(
-        world
-            .dynamic_light_state
-            .intensity_multiplier(elapsed_seconds),
+#[then(regex = r"^its intensity is ([\d.]+) radius is ([\d.]+) and bounce multiplier is ([\d.]+)$")]
+async fn then_dynamic_light_defaults(
+    world: &mut BevyoutWorld,
+    intensity: f32,
+    radius: f32,
+    bounce_multiplier: f32,
+) {
+    assert_eq!(world.dynamic_light_config.intensity, intensity);
+    assert_eq!(world.dynamic_light_config.radius, radius);
+    assert_eq!(
+        world.dynamic_light_config.bounce.intensity,
+        bounce_multiplier
     );
+}
+
+#[given("the imported DynamicLighting catalogs")]
+async fn given_dynamic_lighting_catalogs(world: &mut BevyoutWorld) {
+    world.dynamic_light_catalogs_valid = Some(
+        dynamic_lighting_core::DynamicLightEffect::ALL
+            .into_iter()
+            .map(|effect| effect as u32)
+            .eq(0..15)
+            && dynamic_lighting_core::DynamicLightType::ALL
+                .into_iter()
+                .map(|light_type| light_type as u32)
+                .eq(0..8),
+    );
+}
+
+#[then("all DynamicLighting enum discriminants match upstream")]
+async fn then_dynamic_lighting_catalogs_match(world: &mut BevyoutWorld) {
+    assert_eq!(world.dynamic_light_catalogs_valid, Some(true));
+}
+
+#[given("a source-compatible strobe light")]
+async fn given_source_compatible_strobe(world: &mut BevyoutWorld) {
+    world.dynamic_light_config = dynamic_lighting_core::DynamicLightConfig {
+        effect: dynamic_lighting_core::DynamicLightEffect::Strobe,
+        ..Default::default()
+    };
+    world.dynamic_light_runtime = dynamic_lighting_core::LightEffectRuntime::default();
+    world.dynamic_light_random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+}
+
+#[when("the dynamic light advances two frames at 60 Hz")]
+async fn when_dynamic_light_advances_two_frames(world: &mut BevyoutWorld) {
+    for _ in 0..2 {
+        dynamic_lighting_core::advance_effect(
+            &world.dynamic_light_config,
+            &mut world.dynamic_light_runtime,
+            &mut world.dynamic_light_random,
+            1.0 / 60.0,
+        );
+    }
+    world.dynamic_light_multiplier = Some(world.dynamic_light_runtime.intensity);
 }
 
 #[then(regex = r"^the dynamic light intensity multiplier is ([\d.]+)$")]
@@ -2989,19 +3045,30 @@ async fn then_dynamic_light_multiplier(world: &mut BevyoutWorld, expected: f32) 
 
 #[given("every imported dynamic light effect")]
 async fn given_every_dynamic_light_effect(world: &mut BevyoutWorld) {
-    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::default();
+    world.dynamic_light_config = dynamic_lighting_core::DynamicLightConfig::default();
 }
 
-#[when(regex = r"^the effects are sampled at ([\d.]+) seconds$")]
-async fn when_effects_sampled(world: &mut BevyoutWorld, elapsed_seconds: f32) {
+#[when("every effect advances two frames at 60 Hz")]
+async fn when_effects_advance(world: &mut BevyoutWorld) {
     world.dynamic_light_effects_finite = Some(
-        dynamic_lighting_core::LightEffect::ALL
+        dynamic_lighting_core::DynamicLightEffect::ALL
             .into_iter()
             .map(|effect| {
-                world
-                    .dynamic_light_state
-                    .with_effect(effect)
-                    .intensity_multiplier(elapsed_seconds)
+                let config = dynamic_lighting_core::DynamicLightConfig {
+                    effect,
+                    ..world.dynamic_light_config
+                };
+                let mut runtime = dynamic_lighting_core::LightEffectRuntime::default();
+                let mut random = dynamic_lighting_core::UnityRandom::from_seed(12345);
+                for _ in 0..2 {
+                    dynamic_lighting_core::advance_effect(
+                        &config,
+                        &mut runtime,
+                        &mut random,
+                        1.0 / 60.0,
+                    );
+                }
+                runtime.intensity
             })
             .all(f32::is_finite),
     );

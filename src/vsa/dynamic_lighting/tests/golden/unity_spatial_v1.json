@@ -1,0 +1,1854 @@
+{
+    "upstreamCommit": "dd7c195cba2599a20bf1b662fa0f69366e0f74b5",
+    "unityVersion": "6000.3.17f1",
+    "samples": [
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Point",
+            "discriminant": 0,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.20892305672168733
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.20892305672168733
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.20892305672168733
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Spot",
+            "discriminant": 1,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Discoball",
+            "discriminant": 2,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7000000476837158
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7372332811355591
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.8539865016937256
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.8539865016937256
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.9899617433547974
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.40041202306747439
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.3999999761581421
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.40231946110725405
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.957464873790741
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.957464873790741
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.7769559025764465
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.7000001072883606
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.7157177329063416
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.9976804852485657
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.4425351023674011
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.4425351023674011
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.6230441331863403
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.699999988079071
+        },
+        {
+            "type": "Wave",
+            "discriminant": 3,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.6842818856239319
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6102921962738037
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6102921962738037
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6102921962738037
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.71828293800354
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.8958314657211304
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.7707421779632568
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.9558701515197754
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.012316018342971802
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.012316018342971802
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.012316018342971802
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.9498361349105835
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.19452089071273805
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.07964456081390381
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.7053834199905396
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.9876839518547058
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.9876839518547058
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.9876839518547058
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.050163865089416507
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.8054790496826172
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.9203554391860962
+        },
+        {
+            "type": "Interference",
+            "discriminant": 4,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.2946164906024933
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.9901041388511658
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7797896265983582
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 1.0
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.9183420538902283
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.6015991568565369
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.9599921703338623
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.5551221370697022
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.46153756976127627
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.04891613498330116
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.5551221370697022
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.6015991568565369
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.00984786357730627
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.18527749180793763
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.5551221370697022
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6214768886566162
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7797894477844238
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.5551221370697022
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.13266396522521974
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.9183420538902283
+        },
+        {
+            "type": "Rotor",
+            "discriminant": 5,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.518308162689209
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.809999942779541
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.8257792592048645
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.5312096476554871
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.5312096476554871
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.7281374335289002
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.7862755656242371
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.6740887761116028
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7199999094009399
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7126675844192505
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6705580353736877
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.6705580353736877
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.6651604771614075
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.6634314060211182
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.8305961489677429
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7199999690055847
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7278560996055603
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.7870854139328003
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.7870854139328003
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.7788084149360657
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.7765684723854065
+        },
+        {
+            "type": "Shock",
+            "discriminant": 6,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.6205853223800659
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.5
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.482524573802948
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.0732232928276062
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.5
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.032152652740478519
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.15355181694030763
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.0,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.01968669891357422
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.5
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.48000001907348635
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.0
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.5366116762161255
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.003330528736114502
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.0029325485229492189
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.25,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.050953030586242679
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                0.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.75
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                0.20000000298023225,
+                0.0,
+                -1.0
+            ],
+            "value": 0.6890098452568054
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                1.0,
+                0.0,
+                -1.0
+            ],
+            "value": 0.14644670486450196
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                0.0,
+                1.0,
+                -1.0
+            ],
+            "value": 0.7133883237838745
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                -1.0,
+                0.5,
+                -2.0
+            ],
+            "value": 0.7148874402046204
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                2.0,
+                0.25,
+                -1.0
+            ],
+            "value": 0.052622973918914798
+        },
+        {
+            "type": "Disco",
+            "discriminant": 7,
+            "time": 0.75,
+            "world": [
+                1.0,
+                2.0,
+                -3.0
+            ],
+            "value": 0.31541627645492556
+        }
+    ]
+}
