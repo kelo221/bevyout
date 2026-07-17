@@ -65,6 +65,9 @@ pub(crate) fn parse_base(
         // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
         // WEAP/ARMO arms rather than falling through to diagnostics.
         "BMDT", "NAM0",
+        // Issue #123: NOTE.DATA's type enum and NOTE.TNAM's text-note
+        // content, decoded by `note_text` above.
+        "TNAM",
     ];
     supported_signatures.extend_from_slice(actor_supported_signatures(sig));
     let mut ignored_subrecords = ignored_signatures(subs, &supported_signatures);
@@ -328,12 +331,34 @@ pub(crate) fn parse_item_stats(
             flags: data.and_then(|data| data.first().copied()),
             text: sub(subs, "DESC").map(cstring),
         },
-        "NOTE" => OpenMwItemStats::Note {
-            text: sub(subs, "DESC").map(cstring),
-        },
+        "NOTE" => OpenMwItemStats::Note { text: note_text(subs) },
         "KEYM" => OpenMwItemStats::Key,
         _ => OpenMwItemStats::Misc,
     }
+}
+
+/// FO3 `NOTE.DATA`'s type enum value for a text note (0 Sound, 1 Text,
+/// 2 Image, 3 Voice -- fopdoc's Fallout3 `NOTE` page, `TES5Edit/fopdoc`).
+const NOTE_TYPE_TEXT: u8 = 1;
+
+/// Issue #123: the supplied OpenMW snapshot's `loadnote.cpp` explicitly
+/// `skipSubRecordData()`s every FO3/FNV `NOTE` field beyond `EDID`/`FULL`/
+/// `MODL`/`ICON`/`MODB`/`YNAM`/`ZNAM` -- `DATA`, `TNAM`, `XNAM`, `SNAM`, and
+/// `ONAM` are all unrecognized there, so this decode is a fopdoc-sourced
+/// extension, not an OpenMW port (see NOTICE.md). fopdoc documents `DATA`
+/// as a `uint8` type enum and `TNAM` as "a text string, or the FormID of a
+/// DIAL record" -- the two are read together: only a type-`Text` (`1`) note
+/// stores its content as a plain cstring in `TNAM`; other types (Sound,
+/// Image, Voice) use `TNAM` for a DIAL-topic FormID reference or leave it
+/// unused, and decoding those bytes as text would fabricate garbage. Notes
+/// with no `DATA` subrecord, or a non-text type, stay `None` rather than
+/// guessing.
+fn note_text(subs: &[Subrecord]) -> Option<String> {
+    let note_type = sub(subs, "DATA").and_then(|data| data.first().copied())?;
+    if note_type != NOTE_TYPE_TEXT {
+        return None;
+    }
+    sub(subs, "TNAM").map(cstring)
 }
 
 fn u16_at(data: &[u8], offset: usize) -> Option<u16> {

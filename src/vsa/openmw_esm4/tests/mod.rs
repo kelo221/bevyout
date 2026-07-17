@@ -185,6 +185,61 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
     assert_eq!(note.item_stats, OpenMwItemStats::Note { text: None });
 }
 
+// Issue #123: FO3 `NOTE` records carry their holotape/note text in `TNAM`,
+// gated by the `DATA` type-enum byte (0 Sound, 1 Text, 2 Image, 3 Voice --
+// fopdoc's Fallout3 `NOTE` page; the supplied OpenMW `loadnote.cpp` skips
+// all of `DATA`/`TNAM`/`XNAM`/`SNAM`/`ONAM` for every FO3/FNV note, so this
+// decode is a fopdoc-sourced extension, not an OpenMW port). Only type 1
+// ("Text") notes decode `TNAM` as their text.
+#[test]
+fn decodes_fo3_note_text_only_for_text_type_notes() {
+    let resolver = direct_resolver();
+
+    let text_note = parse_base(
+        "NOTE",
+        &[
+            direct_subrecord("DATA", vec![1]),
+            direct_subrecord("TNAM", b"Synthetic note text\0".to_vec()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(
+        text_note.item_stats,
+        OpenMwItemStats::Note {
+            text: Some("Synthetic note text".into()),
+        }
+    );
+    assert!(
+        !text_note.ignored_subrecords.contains(&"TNAM".to_string()),
+        "TNAM is now decoded, not merely ignored"
+    );
+
+    // A voice note's DATA type is 3; its TNAM is documented as a DIAL
+    // FormID reference, not text -- decoding those bytes as a cstring
+    // would fabricate garbage, so it must stay `None`.
+    let voice_note = parse_base(
+        "NOTE",
+        &[
+            direct_subrecord("DATA", vec![3]),
+            direct_subrecord("TNAM", 0x0001_2345_u32.to_le_bytes().to_vec()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(voice_note.item_stats, OpenMwItemStats::Note { text: None });
+
+    // No DATA subrecord at all: the type is unknown, so no text is decoded
+    // even though a stray TNAM is present.
+    let no_type_note = parse_base(
+        "NOTE",
+        &[direct_subrecord("TNAM", b"Should not surface\0".to_vec())],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(no_type_note.item_stats, OpenMwItemStats::Note { text: None });
+}
+
 #[test]
 fn parses_fo3_lighting_data_in_legacy_and_complete_lengths() {
     let mut data = vec![0_u8; 40];
