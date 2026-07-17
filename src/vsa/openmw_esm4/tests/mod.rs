@@ -237,7 +237,10 @@ fn decodes_fo3_note_text_only_for_text_type_notes() {
         &resolver,
     )
     .unwrap();
-    assert_eq!(no_type_note.item_stats, OpenMwItemStats::Note { text: None });
+    assert_eq!(
+        no_type_note.item_stats,
+        OpenMwItemStats::Note { text: None }
+    );
 }
 
 #[test]

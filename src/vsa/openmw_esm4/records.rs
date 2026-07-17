@@ -331,7 +331,9 @@ pub(crate) fn parse_item_stats(
             flags: data.and_then(|data| data.first().copied()),
             text: sub(subs, "DESC").map(cstring),
         },
-        "NOTE" => OpenMwItemStats::Note { text: note_text(subs) },
+        "NOTE" => OpenMwItemStats::Note {
+            text: note_text(subs),
+        },
         "KEYM" => OpenMwItemStats::Key,
         _ => OpenMwItemStats::Misc,
     }
