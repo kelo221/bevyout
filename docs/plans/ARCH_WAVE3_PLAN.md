@@ -27,4 +27,7 @@ Focused interaction/console/world tests, Cucumber, then the full Rust gate.
 
 ## Shipped amendments
 
-None yet.
+- The module root is held to a 250-line architecture gate (currently 144
+  lines). Shared authorities moved to `state.rs`, delayed travel to `door.rs`,
+  and scripted focus-bypassing operations to `scripted.rs`; this keeps the
+  console/BRP seam explicit without duplicating player activation state.

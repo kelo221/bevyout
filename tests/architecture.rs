@@ -44,3 +44,30 @@ fn preparation_does_not_depend_on_viewer() {
         "preparation/runtime dependency inversion in: {offenders:?}"
     );
 }
+
+#[test]
+fn interaction_coordinator_stays_small_and_delegates_by_behavior() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer");
+    let coordinator =
+        fs::read_to_string(root.join("interaction.rs")).expect("read interaction coordinator");
+    assert!(
+        coordinator.lines().count() <= 250,
+        "interaction.rs is a composition boundary, not a feature dumping ground"
+    );
+
+    for module in [
+        "activation.rs",
+        "door.rs",
+        "focus.rs",
+        "items.rs",
+        "presentation.rs",
+        "scripted.rs",
+        "state.rs",
+        "ui.rs",
+    ] {
+        assert!(
+            root.join("interaction").join(module).is_file(),
+            "missing interaction behavior module {module}"
+        );
+    }
+}
