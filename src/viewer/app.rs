@@ -289,6 +289,17 @@ pub(crate) fn run_view(
             PreUpdate,
             release_stuck_keys_on_focus_change.after(bevy::input::InputSystems),
         )
+        // Issue #131 follow-up: on macOS, a Cmd+Shift+5 screen recording can
+        // leave the window unfocused forever -- mouse events keep reaching
+        // it but no `WindowFocused { focused: true }` ever arrives, so the
+        // console stays dead. `Update` (rather than `PreUpdate`) is fine
+        // here: this only needs to observe the click before the frame's
+        // `ButtonInput::clear()`, same timing as `capture_cursor_input`
+        // below, and unlike `release_stuck_keys_on_focus_change` it doesn't
+        // need to run relative to `InputSystems`. See the doc comment on
+        // `request_focus_on_click_while_unfocused` for the component-write
+        // vs. direct-winit-call trade-off.
+        .add_systems(Update, request_focus_on_click_while_unfocused)
         .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
             OnEnter(AppState::InGame),
