@@ -160,6 +160,12 @@ mod door_link;
 #[allow(dead_code, unused_imports)]
 mod repath;
 
+// `viewer::nav::ledger_policy` (issue #134, M4 wave 4) is std-only, same
+// flat top-level include rationale as `door_link`/`repath` above.
+#[path = "../src/viewer/nav/ledger_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod ledger_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -555,6 +561,12 @@ struct BevyoutWorld {
     nav_adapter_single_sided: Option<Vec<landmass_graph::SingleSidedDoor>>,
     nav_adapter_merge_inputs: Vec<landmass_graph::MergeInput>,
     nav_adapter_merge_links: Option<Vec<landmass_graph::MergeLinkDescriptor>>,
+
+    // -- nav_ledger.feature (issue #134, M4 wave 4) --
+    nav_ledger: ledger_policy::Ledger,
+    nav_ledger_claim_result: Option<ledger_policy::ClaimResult>,
+    nav_ledger_route_door: Option<u32>,
+    nav_ledger_eligibility: Option<ledger_policy::SwapEligibility>,
 }
 
 fn find_placement<'a>(
@@ -6274,6 +6286,207 @@ async fn then_merge_link_descriptor(
     assert_eq!(link.side_a.polygon_index, polygon_a);
     assert_eq!(link.side_b.mesh_form_id, parse_hex(&mesh_b_hex));
     assert_eq!(link.side_b.polygon_index, polygon_b);
+}
+
+// ---------------------------------------------------------------------
+// nav_ledger.feature (issue #134, M4 wave 4) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn nav_ledger_parse_f32_triple(x: &str, y: &str, z: &str) -> [f32; 3] {
+    let parse = |value: &str| {
+        value
+            .trim()
+            .parse::<f32>()
+            .unwrap_or_else(|error| panic!("invalid f32 {value:?}: {error}"))
+    };
+    [parse(x), parse(y), parse(z)]
+}
+
+/// Parses `known doors`'s argument: the literal `none`, or a comma-
+/// separated list of `0x`-prefixed hex FormIDs.
+fn nav_ledger_parse_known_doors(list: &str) -> std::collections::HashSet<u32> {
+    if list.trim() == "none" {
+        return std::collections::HashSet::new();
+    }
+    list.split(',')
+        .map(|value| {
+            let digits = value
+                .trim()
+                .strip_prefix("0x")
+                .unwrap_or_else(|| panic!("expected a 0x-prefixed hex FormID, got {value:?}"));
+            parse_hex(digits)
+        })
+        .collect()
+}
+
+#[given(
+    regex = r"^a ledger entry for agent (\d+) in cell 0x([0-9a-fA-F]+) frozen at ([-\d.]+), ([-\d.]+), ([-\d.]+)$"
+)]
+async fn given_ledger_entry_frozen(
+    world: &mut BevyoutWorld,
+    agent_id: u32,
+    cell_hex: String,
+    x: String,
+    y: String,
+    z: String,
+) {
+    world.nav_ledger.record(ledger_policy::LedgerEntry {
+        agent_id,
+        cell_form_id: parse_hex(&cell_hex),
+        spawn_kind: ledger_policy::SpawnKind::FrozenPosition {
+            position: nav_ledger_parse_f32_triple(&x, &y, &z),
+        },
+        remaining_target: None,
+    });
+}
+
+#[given(
+    regex = r"^a ledger entry for agent (\d+) in cell 0x([0-9a-fA-F]+) with door marker 0x([0-9a-fA-F]+)$"
+)]
+async fn given_ledger_entry_door_marker(
+    world: &mut BevyoutWorld,
+    agent_id: u32,
+    cell_hex: String,
+    door_hex: String,
+) {
+    world.nav_ledger.record(ledger_policy::LedgerEntry {
+        agent_id,
+        cell_form_id: parse_hex(&cell_hex),
+        spawn_kind: ledger_policy::SpawnKind::DoorMarker {
+            destination_door_form_id: parse_hex(&door_hex),
+        },
+        remaining_target: None,
+    });
+}
+
+#[when(regex = r"^the ledger is claimed for cell 0x([0-9a-fA-F]+) with known doors (.+)$")]
+async fn when_ledger_claimed(world: &mut BevyoutWorld, cell_hex: String, doors: String) {
+    let known = nav_ledger_parse_known_doors(&doors);
+    let result = world
+        .nav_ledger
+        .claim_for_activation(parse_hex(&cell_hex), &known);
+    world.nav_ledger_claim_result = Some(result);
+}
+
+#[then(regex = r"^(\d+) entr(?:y|ies) (?:is|are) restored$")]
+async fn then_entries_restored(world: &mut BevyoutWorld, count: usize) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    assert_eq!(result.restored.len(), count);
+}
+
+#[then(regex = r"^(\d+) entr(?:y|ies) (?:is|are) stale$")]
+async fn then_entries_stale(world: &mut BevyoutWorld, count: usize) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    assert_eq!(result.stale.len(), count);
+}
+
+#[then(regex = r"^restored entry (\d+) is agent (\d+) frozen at ([-\d.]+), ([-\d.]+), ([-\d.]+)$")]
+async fn then_restored_entry_frozen(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    x: String,
+    y: String,
+    z: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.restored[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(
+        entry.spawn_kind,
+        ledger_policy::SpawnKind::FrozenPosition {
+            position: nav_ledger_parse_f32_triple(&x, &y, &z),
+        }
+    );
+}
+
+#[then(regex = r"^restored entry (\d+) is agent (\d+) with door marker 0x([0-9a-fA-F]+)$")]
+async fn then_restored_entry_door_marker(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    door_hex: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.restored[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(
+        entry.spawn_kind,
+        ledger_policy::SpawnKind::DoorMarker {
+            destination_door_form_id: parse_hex(&door_hex),
+        }
+    );
+}
+
+#[then(
+    regex = r"^stale entry (\d+) is agent (\d+) cell 0x([0-9a-fA-F]+) missing door 0x([0-9a-fA-F]+)$"
+)]
+async fn then_stale_entry(
+    world: &mut BevyoutWorld,
+    index: usize,
+    agent_id: u32,
+    cell_hex: String,
+    door_hex: String,
+) {
+    let result = world
+        .nav_ledger_claim_result
+        .as_ref()
+        .expect("the ledger must be claimed first");
+    let entry = result.stale[index];
+    assert_eq!(entry.agent_id, agent_id);
+    assert_eq!(entry.cell_form_id, parse_hex(&cell_hex));
+    assert_eq!(entry.missing_door_form_id, parse_hex(&door_hex));
+}
+
+#[then(regex = r"^the ledger still holds an entry for agent (\d+)$")]
+async fn then_ledger_still_holds(world: &mut BevyoutWorld, agent_id: u32) {
+    assert!(
+        world.nav_ledger.entry_for(agent_id).is_some(),
+        "expected agent {agent_id} to remain ledgered"
+    );
+}
+
+#[given(regex = r"^the agent's active route door is (none|0x[0-9a-fA-F]+)$")]
+async fn given_agent_active_route_door(world: &mut BevyoutWorld, door: String) {
+    world.nav_ledger_route_door = if door == "none" {
+        None
+    } else {
+        Some(parse_hex(
+            door.strip_prefix("0x").expect("checked by regex"),
+        ))
+    };
+}
+
+#[when(regex = r"^the swap eligibility is decided for door 0x([0-9a-fA-F]+)$")]
+async fn when_swap_eligibility_decided(world: &mut BevyoutWorld, door_hex: String) {
+    let used_door = parse_hex(&door_hex);
+    world.nav_ledger_eligibility = Some(ledger_policy::decide_swap_eligibility(
+        world.nav_ledger_route_door,
+        used_door,
+    ));
+}
+
+#[then(regex = r"^the swap eligibility is (follow-through|freeze)$")]
+async fn then_swap_eligibility(world: &mut BevyoutWorld, expected: String) {
+    let expected = match expected.as_str() {
+        "follow-through" => ledger_policy::SwapEligibility::FollowThrough,
+        "freeze" => ledger_policy::SwapEligibility::Freeze,
+        other => panic!("unknown eligibility {other:?}"),
+    };
+    assert_eq!(world.nav_ledger_eligibility, Some(expected));
 }
 
 fn main() {
