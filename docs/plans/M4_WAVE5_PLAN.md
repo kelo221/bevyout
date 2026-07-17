@@ -164,3 +164,24 @@ FranklinMetro02 (0001a273) and Vault 101 Entrance (00024512):
 
 Manual script `M4_WAVE5_MANUAL.md` before the PR; PR closes #114, #137,
 #138 (and #136 only if the measurement closes it).
+
+## Shipped amendments
+
+- **#137's "non-travel door" class is empty on real FO3 data.** An
+  orchestrator scan of every prepared cell's `navgraph.ron` (12+ cells)
+  found that *every* door-flagged NAVM triangle resolves to a travel
+  door — the issue's "ordinary interior door that is not a link
+  endpoint" has no witness. The wave-4 clip-through was a **travel door
+  crossed mid-route**: travel-door triangles with 2–3 walkable
+  neighbors are ordinary ground to a route passing through rather than
+  terminating there. The crossing gate therefore candidates *every*
+  single-sided door, excluding only the one door the agent's own
+  `travel_intent` currently targets (that door stays owned by the
+  travel-arrival handoff lifecycle); a mid-route crossing resolves
+  pause → open → resume with an `IntraCell` destination and no handoff.
+- **#114 avoidance budget:** landmass's `ArchipelagoOptions` defaults
+  already provide bounded local avoidance once ≥2 agents share the
+  archipelago; no new configuration was added.
+- **#114 stuck handling is diagnostic + one forced repath,** then a
+  latched `stuck` status; it does not halt movement (door-link `Failed`
+  owns hard-stop semantics).
