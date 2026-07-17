@@ -622,6 +622,14 @@ struct BevyoutWorld {
     nav_solve_steps_since_solve: u32,
     nav_solve_blend_interval: u32,
     nav_solve_blend_fraction: Option<f32>,
+
+    // -- real_corpses.feature (issue #120, M4 wave 6) --
+    corpse_cell_form_id: u32,
+    /// Pending synthetic ACHR fixtures (reference FormID, base FormID,
+    /// starts-dead), assembled into one synthetic plugin byte stream by the
+    /// When step.
+    corpse_achr_entries: Vec<(u32, u32, bool)>,
+    corpse_parsed: Option<openmw_esm4::ParsedPlugin>,
 }
 
 fn find_placement<'a>(
@@ -6791,6 +6799,104 @@ async fn when_solve_blend_fraction_computed(world: &mut BevyoutWorld) {
 #[then(regex = r"^the solve blend fraction is ([\d.]+)$")]
 async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
     assert_eq!(world.nav_solve_blend_fraction, Some(expected));
+}
+
+// ---------------------------------------------------------------------
+// real_corpses.feature (issue #120, M4 wave 6). Appended section, do not
+// interleave.
+// --- #120 real corpses steps ---
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a real-corpses cell 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_cell(world: &mut BevyoutWorld, cell_hex: String) {
+    world.corpse_cell_form_id = parse_hex(&cell_hex);
+}
+
+#[given(regex = r"^an ACHR reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) that starts dead$")]
+async fn given_corpse_achr_dead(world: &mut BevyoutWorld, reference_hex: String, base_hex: String) {
+    world
+        .corpse_achr_entries
+        .push((parse_hex(&reference_hex), parse_hex(&base_hex), true));
+}
+
+#[given(regex = r"^a living ACHR reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_achr_living(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+) {
+    world
+        .corpse_achr_entries
+        .push((parse_hex(&reference_hex), parse_hex(&base_hex), false));
+}
+
+#[when("the real-corpses content set is parsed")]
+async fn when_corpse_content_set_parsed(world: &mut BevyoutWorld) {
+    let mut bytes = nav_tes4(&[]);
+    bytes.extend(nav_record(
+        b"CELL",
+        0,
+        world.corpse_cell_form_id,
+        &[
+            nav_subrecord(b"EDID", b"RealCorpsesTestCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    let mut children = Vec::new();
+    for (reference_form_id, base_form_id, starts_dead) in &world.corpse_achr_entries {
+        // ACHR `DATA`: position (3x f32) + rotation (3x f32), 24 bytes --
+        // `parse_reference` requires at least that length.
+        let mut data = nav_subrecord(b"NAME", &base_form_id.to_le_bytes());
+        data.extend(nav_subrecord(b"DATA", &[0_u8; 24]));
+        // 0x00000200 is the ESM4 record-header "starts dead" flag for ACHR
+        // (openmw_esm4::RECORD_STARTS_DEAD / OpenMW's `Rec_StartDead`,
+        // `components/esm4/common.hpp`) -- same inline-literal convention
+        // `when_nav_content_set_parsed` above uses for `RECORD_DELETED`.
+        let flags = if *starts_dead { 0x0000_0200 } else { 0 };
+        children.extend(nav_record(b"ACHR", flags, *reference_form_id, &data));
+    }
+    bytes.extend(nav_group(world.corpse_cell_form_id, 6, &children));
+
+    let sources = [openmw_esm4::PluginSource {
+        name: "RealCorpses.esm",
+        bytes: &bytes,
+    }];
+    let parsed =
+        openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(world.corpse_cell_form_id))
+            .expect("synthetic real-corpses content set must parse");
+    world.corpse_parsed = Some(parsed);
+}
+
+fn corpse_parsed_reference(world: &BevyoutWorld, form_id: u32) -> &openmw_esm4::ReferenceRecord {
+    world
+        .corpse_parsed
+        .as_ref()
+        .expect("the real-corpses content set must be parsed first")
+        .references
+        .iter()
+        .find(|reference| reference.form_id == form_id)
+        .unwrap_or_else(|| panic!("reference {form_id:08x} was not parsed"))
+}
+
+#[then(regex = r"^the parsed reference 0x([0-9a-fA-F]+) starts dead$")]
+async fn then_parsed_reference_starts_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let reference = corpse_parsed_reference(world, parse_hex(&form_hex));
+    assert_ne!(
+        reference.flags & 0x0000_0200,
+        0,
+        "reference {form_hex} did not decode the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed reference 0x([0-9a-fA-F]+) does not start dead$")]
+async fn then_parsed_reference_does_not_start_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let reference = corpse_parsed_reference(world, parse_hex(&form_hex));
+    assert_eq!(
+        reference.flags & 0x0000_0200,
+        0,
+        "reference {form_hex} unexpectedly decoded the starts-dead flag"
+    );
 }
 
 fn main() {
