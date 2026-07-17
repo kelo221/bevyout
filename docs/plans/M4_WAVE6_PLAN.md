@@ -123,3 +123,53 @@ Per executor before reporting: `cargo fmt --check`,
 after merge: same gates on `m4-wave6`, then real-data acceptance above,
 then `docs/plans/M4_WAVE6_MANUAL.md` and one PR with `Closes` lines for
 all four issues.
+
+## Shipped amendments (real-data acceptance)
+
+- **A1 (#136) Shared-vertex relaxation.** The per-polygon pinch guard
+  couldn't see a neighboring triangle inverting through a shared
+  boundary vertex; Vault 101 Entrance failed landmass validation
+  entirely (`nav_mesh_invalid`, polygon 164). Replaced by a two-phase
+  global relaxation over the whole mesh (proportional factor-halving,
+  then hard zero-displacement fallback) with a termination guarantee.
+- **A2 (#136) Sliver pinning.** The same polygon 164 turned out to be a
+  source-data sliver (original XZ area −7.7e-6, four orders of magnitude
+  below any genuine triangle); erosion "resurrected" it with arbitrary
+  winding. Polygons whose original area is below
+  `MIN_RELIABLE_ORIGINAL_AREA` now pin to zero displacement.
+- **A3 (#136) Arrival resets stuck.** After erosion, a raw `tna goto`
+  target's reachable point can sit past the 0.5 m distance check even
+  though landmass reports `ReachedTarget`; the no-progress detector then
+  latched a false `stuck` on finished routes. Arrival (either signal)
+  now resets stuck detection.
+- **A4 (#136) Protected seam edges.** Cross-mesh connectivity uses
+  generated links between matched triangle midpoints (wave 4), so seam
+  edges look like walls to a single mesh; eroding both sides opened a
+  ~0.7 m gap and made cross-seam targets `unreachable` on
+  FranklinMetro02. Door-link and merge-triangle edges are now excluded
+  from erosion (`protected` count in the log line).
+- **A5 (#136) FranklinMetro02 corridor wedge is pre-existing.** With all
+  of the above, the metro seam route exists but the agent still
+  collision-blocks ~0.5 m from spawn — verified **identical on the
+  pre-wave master build**, so it is not an erosion regression; filed as
+  #148 (interior collider overlapping walkable navmesh) instead of
+  expanding the wave.
+- **A6 (#120) The FO3 starts-dead flag is on the base record.** OpenMW's
+  documented ACHR header bit 0x200 appears on 0 of 1454 ACHRs in
+  Fallout3.esm; the real marker is NPC_ record-header bit 0x80000
+  (174 bases, all corpse actors — survey in the constant's doc comment).
+  Classification reworked accordingly; the ACHR bit remains as a
+  documented secondary condition.
+- **A7 (#120) Corpse placeholder body.** Actor placements never spawn
+  scene entities (no asset path), so a prepared corpse was unreachable
+  by the MeshRayCast activation path. Corpse-semantic placements now
+  spawn a placeholder prone primitive (explicitly temporary until
+  #106–#108 actor bodies) carrying the #118 activation components.
+- **A8 (#120) Prepare revision bumps.** The classification change alters
+  what cached `scene.ron` placements mean without changing their shape;
+  `CURRENT_PREPARE_REVISION` → `prepare-corpse-v2` and
+  `PREPARE_PIPELINE_REVISION` → `prepare-corpse-v1` so both the viewer
+  staleness check and the batch-resume fingerprint reject stale scenes.
+- **A9 (#121) No cucumber feature.** The only pure logic is the one-row
+  `row_primary_action` decision, unit-tested directly; UI dispatch is
+  covered by App-level tests. A feature file would have added no value.
