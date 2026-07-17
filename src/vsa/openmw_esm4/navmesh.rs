@@ -465,11 +465,7 @@ pub(crate) fn parse_navi(
     let mut diagnostics = Vec::new();
     let version = sub(subs, "NVER").and_then(|data| u32_at(data, 0));
     let mut entries = Vec::new();
-    for (index, subrecord) in subs
-        .iter()
-        .filter(|s| s.signature == "NVMI")
-        .enumerate()
-    {
+    for (index, subrecord) in subs.iter().filter(|s| s.signature == "NVMI").enumerate() {
         let mut tail_diagnostics = Vec::new();
         match decode_navi_info(&subrecord.data, resolver, &mut tail_diagnostics) {
             Ok(entry) => entries.push(entry),
@@ -517,20 +513,30 @@ fn decode_navi_info(
         .filter(|id| *id != 0);
     let grid_x = i16_at(data, 12).unwrap_or_default();
     let grid_y = i16_at(data, 14).unwrap_or_default();
-    let (center, bounds, island, trailing, tail) =
-        decode_navi_tail(&data[HEADER_LEN..], diagnostics);
+    let decoded = decode_navi_tail(&data[HEADER_LEN..], diagnostics);
     Ok(NaviInfoEntry {
         unknown,
         navmesh_form_id,
         location_form_id,
         grid_x,
         grid_y,
-        center,
-        bounds,
-        island,
-        trailing,
-        tail,
+        center: decoded.center,
+        bounds: decoded.bounds,
+        island: decoded.island,
+        trailing: decoded.trailing,
+        tail: decoded.tail,
     })
+}
+
+/// `decode_navi_tail`'s decoded pieces (see its doc comment for the byte
+/// layout each field comes from).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct DecodedNaviTail {
+    center: Option<[f32; 3]>,
+    bounds: Option<NaviBounds>,
+    island: Option<NaviIsland>,
+    trailing: [u8; 4],
+    tail: Vec<u8>,
 }
 
 /// Decodes `NVMI`'s trailing "Unknown uint8[]" field (fopdoc's name for it;
@@ -576,30 +582,24 @@ fn decode_navi_info(
 /// bytes after a well-formed island) is diagnosed into `diagnostics` and the
 /// unparsed remainder is returned as `tail` rather than guessed at or
 /// dropped.
-fn decode_navi_tail(
-    data: &[u8],
-    diagnostics: &mut Vec<String>,
-) -> (
-    Option<[f32; 3]>,
-    Option<NaviBounds>,
-    Option<NaviIsland>,
-    [u8; 4],
-    Vec<u8>,
-) {
+fn decode_navi_tail(data: &[u8], diagnostics: &mut Vec<String>) -> DecodedNaviTail {
     const CENTER_LEN: usize = 12;
     const TRAILING_LEN: usize = 4;
     const BOUNDS_LEN: usize = 24;
     const COUNTS_LEN: usize = 4;
 
     if data.is_empty() {
-        return (None, None, None, [0; 4], Vec::new());
+        return DecodedNaviTail::default();
     }
     if data.len() < CENTER_LEN {
         diagnostics.push(format!(
             "tail truncated: {} byte(s), too short for the {CENTER_LEN}-byte center point",
             data.len()
         ));
-        return (None, None, None, [0; 4], data.to_vec());
+        return DecodedNaviTail {
+            tail: data.to_vec(),
+            ..DecodedNaviTail::default()
+        };
     }
     let center = [
         f32_at(data, 0).unwrap_or_default(),
@@ -612,16 +612,27 @@ fn decode_navi_tail(
     if remaining == TRAILING_LEN {
         let mut trailing = [0_u8; 4];
         trailing.copy_from_slice(&data[offset..offset + TRAILING_LEN]);
-        return (Some(center), None, None, trailing, Vec::new());
+        return DecodedNaviTail {
+            center: Some(center),
+            trailing,
+            ..DecodedNaviTail::default()
+        };
     }
     if remaining == 0 {
-        return (Some(center), None, None, [0; 4], Vec::new());
+        return DecodedNaviTail {
+            center: Some(center),
+            ..DecodedNaviTail::default()
+        };
     }
     if remaining < BOUNDS_LEN + COUNTS_LEN + TRAILING_LEN {
         diagnostics.push(format!(
             "tail truncated: {remaining} byte(s) after the center point do not form a complete island block or a bare trailing field"
         ));
-        return (Some(center), None, None, [0; 4], data[offset..].to_vec());
+        return DecodedNaviTail {
+            center: Some(center),
+            tail: data[offset..].to_vec(),
+            ..DecodedNaviTail::default()
+        };
     }
 
     let bounds = NaviBounds {
@@ -638,8 +649,7 @@ fn decode_navi_tail(
     };
     let offset = offset + BOUNDS_LEN;
 
-    let vertex_count =
-        u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+    let vertex_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
     let triangle_count =
         u16::from_le_bytes(data[offset + 2..offset + 4].try_into().unwrap()) as usize;
     let offset = offset + COUNTS_LEN;
@@ -650,7 +660,12 @@ fn decode_navi_tail(
             "island truncated: declares {vertex_count} vertex(es)/{triangle_count} triangle(s) needing {island_bytes} byte(s), only {} available",
             data.len().saturating_sub(offset)
         ));
-        return (Some(center), Some(bounds), None, [0; 4], data[offset..].to_vec());
+        return DecodedNaviTail {
+            center: Some(center),
+            bounds: Some(bounds),
+            tail: data[offset..].to_vec(),
+            ..DecodedNaviTail::default()
+        };
     }
 
     let mut vertices = Vec::with_capacity(vertex_count);
@@ -684,14 +699,14 @@ fn decode_navi_tail(
             leftover.len()
         ));
     }
-    (
-        Some(center),
-        Some(bounds),
-        Some(NaviIsland {
+    DecodedNaviTail {
+        center: Some(center),
+        bounds: Some(bounds),
+        island: Some(NaviIsland {
             vertices,
             triangles,
         }),
         trailing,
-        leftover,
-    )
+        tail: leftover,
+    }
 }

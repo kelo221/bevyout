@@ -280,7 +280,11 @@ fn navi_tail_truncation_is_diagnosed_never_panics_and_retains_the_remainder() {
         direct_subrecord("NVMI", truncated_island),
     ];
     let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
-    assert_eq!(navi.entries.len(), 3, "malformed tails never drop the entry");
+    assert_eq!(
+        navi.entries.len(),
+        3,
+        "malformed tails never drop the entry"
+    );
 
     assert_eq!(navi.entries[0].center, None);
     assert_eq!(navi.entries[0].tail, vec![1, 2, 3]);
@@ -294,22 +298,12 @@ fn navi_tail_truncation_is_diagnosed_never_panics_and_retains_the_remainder() {
     assert!(navi.entries[2].island.is_none());
     assert_eq!(navi.entries[2].tail.len(), 12);
 
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("NVMI 0:")
-                && message.contains("too short for the 12-byte center point"))
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|message| message.contains("NVMI 1:")
-                && message.contains("do not form a complete island block"))
-    );
-    assert!(
-        diagnostics.iter().any(|message| message.contains("NVMI 2:")
-            && message.contains("declares 5 vertex(es)/0 triangle(s) needing 60 byte(s)"))
-    );
+    assert!(diagnostics.iter().any(|message| message.contains("NVMI 0:")
+        && message.contains("too short for the 12-byte center point")));
+    assert!(diagnostics.iter().any(|message| message.contains("NVMI 1:")
+        && message.contains("do not form a complete island block")));
+    assert!(diagnostics.iter().any(|message| message.contains("NVMI 2:")
+        && message.contains("declares 5 vertex(es)/0 triangle(s) needing 60 byte(s)")));
 }
 
 #[test]
