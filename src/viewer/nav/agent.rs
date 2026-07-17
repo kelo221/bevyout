@@ -77,7 +77,45 @@
 //!   an unlock flips usability and triggers the same one repath (target
 //!   re-insertion, and a `request_door_open` retry for any agent paused on
 //!   that exact door) with zero new structural-update code.
-
+//!
+//! Wave 5 added scope (movement fidelity, user-directed): three changes to
+//! the same seam, landed together.
+//!
+//! 1. **Fixed-timestep movement.** `apply_agent_physics_movement` and every
+//!    per-agent system that must stay in lockstep with it (door-link
+//!    lifecycle, traversal lerp, availability polling, diagnostic logging)
+//!    moved from the variable-rate `Update` schedule to `FixedUpdate`,
+//!    driven by the same `Time<Fixed>` clock the player KCC and
+//!    `bevy_landmass` itself already use -- the whole chain keeps its
+//!    original relative ordering (`despawn_stale_navmesh_archipelago` ->
+//!    `restore_ledgered_agents_system` -> `door_availability_system` ->
+//!    `door_link_system` -> `apply_agent_physics_movement` ->
+//!    `door_traversal_system` -> `log_agent_state_changes` ->
+//!    `log_path_latency`), just under a deterministic fixed cadence instead
+//!    of one that varies with render frame time. Landmass's own systems stay
+//!    in `FixedPreUpdate` (`Landmass3dPlugin`'s default schedule), which
+//!    always runs before `FixedUpdate` within the same fixed tick, so
+//!    `AgentDesiredVelocity3d` is fresh by the time movement reads it.
+//! 2. **Player as a landmass `Character3d`.** A non-agent RVO obstacle
+//!    (`spawn_player_nav_character`) mirrors the FPS player's position and
+//!    *actual* post-collision KCC velocity every fixed tick
+//!    (`sync_player_nav_character`, running before `LandmassSystems::
+//!    SyncValues` reads it), so nav agents predict and avoid the moving
+//!    player the same way they already avoid each other. It lives exactly
+//!    as long as its archipelago -- spawned alongside the islands in
+//!    `ensure_archipelago`, torn down with everything else in
+//!    `teardown_archipelago` -- so a cell swap re-associates it with the
+//!    freshly rebuilt archipelago the same way agents themselves do, rather
+//!    than needing a separate lifecycle. Physics colliders remain the hard
+//!    collision backstop; this is soft steering only.
+//! 3. **Configurable nav-solve interval.** `NavSolveRate` (console-settable
+//!    via `tna solverate [<n>]`) gates `LandmassSystems::Update` (the
+//!    pathfinding+avoidance solve, the expensive part) behind
+//!    `movement_policy::should_solve` and a per-tick step counter
+//!    (`NavSolveStepCounter`, `advance_nav_solve_step_counter`), so the
+//!    solve can run less often than every fixed tick while movement itself
+//!    still runs every tick, integrating whichever desired velocity the
+//!    last solve produced.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -198,6 +236,24 @@ struct AgentKcc {
     stuck: bool,
 }
 
+/// The previous and latest solved desired velocities landmass has produced
+/// for this agent (issue #114 added scope, wave 5: configurable nav-solve
+/// interval). `update_agent_desired_velocity_blend` shifts this pair
+/// (`previous <- old latest`, `latest <- this tick's `AgentDesiredVelocity3d`)
+/// only on a fixed tick that actually solved (`movement_policy::
+/// should_solve`); `apply_agent_physics_movement` blends between them every
+/// tick via `movement_policy::solve_blend_fraction` rather than reading
+/// `AgentDesiredVelocity3d` directly, so a throttled solve rate (`tna
+/// solverate`) produces a continuously sliding steering direction instead of
+/// a value that snaps every `interval` ticks. Both default to zero, the same
+/// value a freshly spawned `AgentDesiredVelocity3d` starts at, so an agent
+/// with no solve yet simply has no desired motion either way.
+#[derive(Component, Default, Clone, Copy)]
+struct AgentDesiredVelocityBlend {
+    previous: Vec3,
+    latest: Vec3,
+}
+
 /// What an off-mesh animation-link entity represents (issue #113): a
 /// same-cell cross-mesh merge seam (always open, crossed without any door
 /// interaction) or an intra-cell two-sided door link (wave 3's pause ->
@@ -245,6 +301,14 @@ struct TravelDoorLink {
 struct NavArchipelagoState {
     cell_form_id: Option<u32>,
     archipelago: Option<Entity>,
+    /// The landmass `Character3d` mirroring the FPS player (issue #114
+    /// added scope, wave 5): a non-agent RVO obstacle agents steer around
+    /// but that landmass never moves. Lives exactly as long as
+    /// `archipelago` -- spawned alongside it in `ensure_archipelago`,
+    /// despawned with everything else in `teardown_archipelago` -- so a
+    /// cell swap re-associates it with the freshly rebuilt archipelago the
+    /// same way agents themselves do.
+    player_character: Option<Entity>,
     islands: Vec<Entity>,
     links: Vec<Entity>,
     /// Animation-link entity -> what it represents, so `door_link_system`
@@ -370,6 +434,68 @@ struct NavAgentLedger(ledger_policy::Ledger);
 #[derive(Resource, Default)]
 struct PendingPlayerSwapDoor(Option<u32>);
 
+/// Console-configurable nav-solve interval (issue #114 added scope, wave 5):
+/// `LandmassSystems::Update` (the pathfinding+avoidance solve) only runs
+/// every `NavSolveRate`-th fixed tick, gated by `nav_solve_gate` against
+/// `NavSolveStepCounter`; `apply_agent_physics_movement` still runs -- and
+/// moves the agent -- every fixed tick regardless, blending toward whichever
+/// desired velocity the last solve produced (`AgentDesiredVelocityBlend`).
+/// `tna solverate [<n>]` is the console knob.
+#[derive(Resource, Clone, Copy, Debug)]
+struct NavSolveRate(u32);
+
+impl Default for NavSolveRate {
+    fn default() -> Self {
+        Self(movement_policy::DEFAULT_NAV_SOLVE_INTERVAL)
+    }
+}
+
+/// Fixed-tick counter driving `NavSolveRate`'s gate: incremented once per
+/// `FixedPreUpdate` pass by `advance_nav_solve_step_counter`, before
+/// `LandmassSystems::SyncExistence` runs, so both `nav_solve_gate` (deciding
+/// whether `LandmassSystems::Update` runs this tick) and
+/// `apply_agent_physics_movement`/`update_agent_desired_velocity_blend`
+/// (reading it later in the same tick, in `FixedUpdate`/after
+/// `LandmassSystems::Output`) see the same stable value.
+#[derive(Resource, Default)]
+struct NavSolveStepCounter(u64);
+
+fn advance_nav_solve_step_counter(mut counter: ResMut<NavSolveStepCounter>) {
+    counter.0 = counter.0.wrapping_add(1);
+}
+
+/// Run condition gating `LandmassSystems::Update` -- the actual
+/// pathfinding+avoidance solve -- to `NavSolveRate`'s configured interval.
+fn nav_solve_gate(counter: Res<NavSolveStepCounter>, rate: Res<NavSolveRate>) -> bool {
+    movement_policy::should_solve(counter.0, rate.0)
+}
+
+/// Shifts each agent's `AgentDesiredVelocityBlend` on a fixed tick that
+/// actually solved (issue #114 added scope, wave 5): `previous <- old
+/// latest`, `latest <- this tick's freshly-synced `AgentDesiredVelocity3d``.
+/// Runs in `FixedPreUpdate` after `LandmassSystems::Output`, so
+/// `AgentDesiredVelocity3d` already reflects this tick's solve (or, on a
+/// gated-off tick, whatever value the last solve left it holding). A no-op
+/// on a gated-off tick -- the blend pair is left exactly as the last real
+/// solve set it, for `apply_agent_physics_movement` to keep interpolating
+/// toward.
+fn update_agent_desired_velocity_blend(
+    counter: Res<NavSolveStepCounter>,
+    rate: Res<NavSolveRate>,
+    mut agents: Query<
+        (&AgentDesiredVelocity3d, &mut AgentDesiredVelocityBlend),
+        With<TestNavAgentMarker>,
+    >,
+) {
+    if !movement_policy::should_solve(counter.0, rate.0) {
+        return;
+    }
+    for (desired, mut blend) in &mut agents {
+        blend.previous = blend.latest;
+        blend.latest = desired.velocity();
+    }
+}
+
 pub(crate) struct NavBackendPlugin;
 
 impl Plugin for NavBackendPlugin {
@@ -379,8 +505,26 @@ impl Plugin for NavBackendPlugin {
             .init_resource::<TestNavAgentState>()
             .init_resource::<NavAgentLedger>()
             .init_resource::<PendingPlayerSwapDoor>()
+            .init_resource::<NavSolveRate>()
+            .init_resource::<NavSolveStepCounter>()
+            .configure_sets(
+                FixedPreUpdate,
+                LandmassSystems::Update.run_if(nav_solve_gate),
+            )
             .add_systems(
-                Update,
+                FixedPreUpdate,
+                advance_nav_solve_step_counter.before(LandmassSystems::SyncExistence),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                sync_player_nav_character.before(LandmassSystems::SyncValues),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                update_agent_desired_velocity_blend.after(LandmassSystems::Output),
+            )
+            .add_systems(
+                FixedUpdate,
                 (
                     despawn_stale_navmesh_archipelago,
                     restore_ledgered_agents_system,
@@ -420,6 +564,7 @@ fn teardown_archipelago(world: &mut World) {
         .links
         .into_iter()
         .chain(state.islands)
+        .chain(state.player_character)
         .chain(state.archipelago)
     {
         if let Ok(entity) = world.get_entity_mut(entity) {
@@ -522,6 +667,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         ));
     }
 
+    // Issue #114 added scope: the player's mirrored landmass character
+    // lives exactly as long as this archipelago (see `NavArchipelagoState::
+    // player_character`'s doc comment).
+    let player_character = spawn_player_nav_character(world, archipelago_entity);
+
     let mut links = Vec::new();
     let mut link_kinds = HashMap::new();
     let mut blocked_door_links = Vec::new();
@@ -620,6 +770,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
         cell_form_id: Some(current_cell),
         archipelago: Some(archipelago_entity),
+        player_character: Some(player_character),
         islands,
         links,
         link_kinds,
@@ -666,6 +817,61 @@ fn spawn_link_pair(
             .id()
     };
     [spawn_one(start, end), spawn_one(end, start)]
+}
+
+/// Spawns the landmass `Character3d` mirroring the FPS player (issue #114
+/// added scope, wave 5): a non-agent RVO obstacle nav agents steer around
+/// but that landmass itself never moves. `Character<CS>` requires
+/// `Transform`/`Velocity3d` (`bevy_landmass`'s own `#[require(...)]`), so
+/// this only needs to seed the bundle plus a starting `Transform` -- an
+/// initial placement at the player's current position so the entity is
+/// never left at the origin for even one tick; `sync_player_nav_character`
+/// takes over every fixed tick after that, before `LandmassSystems::
+/// SyncValues` reads it. `player_transform_query` returning `None` (no FPS
+/// player yet -- e.g. before `initialize_default_fps` has run) is not an
+/// error here: the character still needs to exist so agents already routed
+/// have something to sync onto once the player does appear.
+fn spawn_player_nav_character(world: &mut World, archipelago_entity: Entity) -> Entity {
+    let position = player_transform_query(world).unwrap_or(Vec3::ZERO);
+    world
+        .spawn((
+            Character3dBundle {
+                character: default(),
+                settings: CharacterSettings {
+                    radius: player::CAPSULE_RADIUS,
+                },
+                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+            },
+            Transform::from_translation(position),
+        ))
+        .id()
+}
+
+/// Mirrors the FPS player onto its landmass character every fixed tick
+/// (issue #114 added scope, wave 5), before `LandmassSystems::SyncValues`
+/// reads `Transform`/`Velocity3d`: agents predict and avoid the player using
+/// its *actual* post-collision KCC velocity, matching
+/// `apply_agent_physics_movement`'s own physics-authoritative feedback
+/// convention rather than desired input. A no-op whenever no archipelago has
+/// ever been built (`tna spawn` never ran -- the common case) or the FPS
+/// player does not currently exist (startup, or a console-harness test
+/// world) -- never panics either way.
+fn sync_player_nav_character(
+    archipelago_state: Res<NavArchipelagoState>,
+    mut characters: Query<(&mut Transform, &mut Velocity3d)>,
+    players: Query<(&GlobalTransform, &player::KccState), With<player::FpsPlayer>>,
+) {
+    let Some(character_entity) = archipelago_state.player_character else {
+        return;
+    };
+    let Ok((player_transform, kcc)) = players.single() else {
+        return;
+    };
+    let Ok((mut transform, mut velocity)) = characters.get_mut(character_entity) else {
+        return;
+    };
+    transform.translation = player_transform.translation();
+    velocity.velocity = kcc.velocity;
 }
 
 /// The live `(open, locked)` observation for `door_form_id`: `open` reads
@@ -745,18 +951,63 @@ pub(crate) fn tna_command(
         "travel" => travel_agent(world, rest),
         "status" => agent_status(world, rest),
         "despawn" => despawn_agent(world, rest),
+        "solverate" => solve_rate_command(world, rest),
         other => Err(ConsoleError::new(
             "unknown_subcommand",
             format!(
-                "unknown tna subcommand '{other}'; expected spawn, goto, travel, status, or despawn"
+                "unknown tna subcommand '{other}'; expected spawn, goto, travel, status, despawn, or solverate"
             ),
         )),
     }
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn [<index>]|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]";
+    let usage = "usage: tna spawn [<index>]|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
+}
+
+/// `tna solverate [<n>]` (issue #114 added scope, wave 5): reports the
+/// current `NavSolveRate` divisor with no argument, following the
+/// `getrender`/`setrender` get-or-set convention; sets it with one. `n` must
+/// be a positive integer (`0` would mean "never solve", not "always solve";
+/// `movement_policy::should_solve`/`solve_blend_fraction` both clamp
+/// defensively too, but the console rejects it outright rather than
+/// silently reinterpreting it).
+fn solve_rate_command(
+    world: &mut World,
+    rest: &[String],
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match rest {
+        [] => {
+            let interval = world.resource::<NavSolveRate>().0;
+            Ok(ConsoleCommandResult::new(
+                json!({ "interval": interval }),
+                vec![format!("nav solve rate interval={interval}")],
+            ))
+        }
+        [value] => {
+            let interval = value
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or_else(|| {
+                    ConsoleError::new(
+                        "bad_type",
+                        "tna solverate interval must be a positive integer",
+                    )
+                })?;
+            world.resource_mut::<NavSolveRate>().0 = interval;
+            info!("nav solve rate interval={interval}");
+            Ok(ConsoleCommandResult::new(
+                json!({ "interval": interval }),
+                vec![format!("nav solve rate interval set to {interval}")],
+            ))
+        }
+        _ => Err(ConsoleError::new(
+            "bad_arity",
+            "tna solverate accepts at most one interval",
+        )),
+    }
 }
 
 /// Parses an agent index argument, bounded to `0..MAX_TEST_AGENTS`. Every
@@ -805,6 +1056,7 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
             TestNavAgentMarker,
             AgentRuntime::default(),
             AgentKcc::default(),
+            AgentDesiredVelocityBlend::default(),
             Transform::from_translation(position),
             Visibility::Inherited,
             Agent3dBundle {
@@ -1228,7 +1480,7 @@ type AgentPhysicsQuery<'w, 's> = Query<
         Entity,
         &'static mut Transform,
         &'static mut Velocity3d,
-        &'static AgentDesiredVelocity3d,
+        &'static AgentDesiredVelocityBlend,
         &'static mut AgentKcc,
         Option<&'static AgentTarget3d>,
     ),
@@ -1236,12 +1488,17 @@ type AgentPhysicsQuery<'w, 's> = Query<
 >;
 
 /// Physics-authoritative agent movement (issue #114): landmass's desired
-/// velocity (`AgentDesiredVelocity3d`) is this tick's *input*, not the
-/// final motion. Each agent's own capsule KCC (`step_agent_kcc`, mirroring
-/// `player/movement.rs`'s controller against the same shared `bevy_boxddd`
-/// world) resolves collision/steps/slopes/gravity and moves the
-/// `Transform`; the actual achieved velocity is what gets written back to
-/// `Velocity3d` for landmass to plan against next tick -- navigation
+/// velocity is this tick's *input*, not the final motion -- specifically
+/// the blend `movement_policy::solve_blend_fraction` produces between
+/// `AgentDesiredVelocityBlend`'s previous and latest solved values (issue
+/// #114 added scope, wave 5's configurable solve interval), not
+/// `AgentDesiredVelocity3d` directly; at the default interval of `1` this
+/// blend is always exactly the latest value, so behaviour is unchanged from
+/// a `1`-tick solve cadence. Each agent's own capsule KCC (`step_agent_kcc`,
+/// mirroring `player/movement.rs`'s controller against the same shared
+/// `bevy_boxddd` world) resolves collision/steps/slopes/gravity and moves
+/// the `Transform`; the actual achieved velocity is what gets written back
+/// to `Velocity3d` for landmass to plan against next solve -- navigation
 /// proposes, physics disposes. Gated on `CellPhysicsReadiness` exactly like
 /// the player (`player/movement.rs::apply_player_controls`): an agent must
 /// not move through geometry that has not finished building. Door-link
@@ -1257,6 +1514,8 @@ fn apply_agent_physics_movement(
     physics_disabled: Res<PhysicsDisabled>,
     cell_physics: Res<CellPhysicsReadiness>,
     roster: Res<TestNavAgentState>,
+    solve_counter: Res<NavSolveStepCounter>,
+    solve_rate: Res<NavSolveRate>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut agents: AgentPhysicsQuery<'_, '_>,
     targets: Query<&GlobalTransform>,
@@ -1286,9 +1545,15 @@ fn apply_agent_physics_movement(
     // shared static/dynamic world, no separate agent-only layer.
     let collision_filter = player::player_collision_filter();
     let support_filter = player::stair_support_filter();
+    // Same blend fraction for every agent this tick -- the solve gate is
+    // global, not per-agent.
+    let solve_blend_fraction = movement_policy::solve_blend_fraction(
+        movement_policy::steps_since_solve(solve_counter.0, solve_rate.0),
+        solve_rate.0,
+    );
 
-    for (entity, mut transform, mut velocity, desired, mut kcc, target) in &mut agents {
-        let desired_velocity = desired.velocity();
+    for (entity, mut transform, mut velocity, blend, mut kcc, target) in &mut agents {
+        let desired_velocity = blend.previous.lerp(blend.latest, solve_blend_fraction);
         let desired_horizontal = Vec2::new(desired_velocity.x, desired_velocity.z);
         let (new_position, new_kcc_velocity, grounded) = step_agent_kcc(
             world,
@@ -2492,6 +2757,8 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         world.insert_non_send(BoxdddPhysicsContext::disabled());
+        world.init_resource::<NavSolveStepCounter>();
+        world.init_resource::<NavSolveRate>();
 
         let agent = world
             .spawn((
@@ -2503,7 +2770,7 @@ mod tests {
                 },
                 Transform::from_xyz(0.0, 0.0, 0.0),
                 Velocity3d::default(),
-                AgentDesiredVelocity3d::default(),
+                AgentDesiredVelocityBlend::default(),
             ))
             .id();
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
@@ -3667,5 +3934,495 @@ mod tests {
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Wave 5 added scope (#114 movement fidelity): fixed-timestep movement,
+    // player-as-landmass-character avoidance, configurable solve interval.
+    // -----------------------------------------------------------------
+
+    /// A `boxddd` collision filter compatible with the *real* hardcoded
+    /// `player::player_collision_filter()`/`stair_support_filter()` queries
+    /// `apply_agent_physics_movement` uses (those category constants are
+    /// private to `player/mod.rs`, so this mirrors their known bit values --
+    /// `WORLD_STATIC = 1`, `STEP_SUPPORT = 16` -- directly): a floor shape
+    /// built with it is both an ordinary collision surface and a
+    /// step-support surface. `mask_bits` is maximally permissive since a
+    /// static, passive shape like a floor is only ever the *target* of a
+    /// query, never the querying side.
+    fn fixture_floor_filter() -> Filter {
+        Filter {
+            category_bits: 1 | 16,
+            mask_bits: u64::MAX,
+            group_index: 0,
+        }
+    }
+
+    /// A flat floor box (top face at `center.y + half_extents.y`) using
+    /// [`fixture_floor_filter`] rather than [`fixture_shape_def`]'s
+    /// self-consistent-but-arbitrary filter, so the real
+    /// `apply_agent_physics_movement` system (not just the pure
+    /// `step_agent_kcc`/`move_mover` helpers, which take their filter as a
+    /// parameter) actually collides with and stands on it.
+    fn add_player_compatible_floor(
+        world: &mut boxddd::World,
+        center: boxddd::Vec3,
+        half_extents: boxddd::Vec3,
+    ) {
+        let shape_def = ShapeDef::builder().filter(fixture_floor_filter()).build();
+        let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        world.create_hull_shape(
+            body,
+            &shape_def,
+            &BoxHull::transformed(
+                half_extents.x,
+                half_extents.y,
+                half_extents.z,
+                boxddd::Transform::new(center, boxddd::Quat::IDENTITY),
+            ),
+        );
+    }
+
+    /// Builds a minimal `App` with the full `NavBackendPlugin` wiring:
+    /// `Landmass3dPlugin` (in `FixedPreUpdate`) plus this file's own
+    /// `FixedUpdate` agent chain and the solve-rate gate on
+    /// `LandmassSystems::Update`, exactly as `install` wires it in the real
+    /// viewer -- plus `TransformPlugin` so `GlobalTransform` reflects
+    /// `Transform` without needing a full render/window stack. Physics
+    /// readiness resources (`PhysicsDisabled`, `CellPhysicsReadiness`) and a
+    /// `BoxdddPhysicsContext` holding a flat floor spanning
+    /// [`spawn_fixture_island`]'s 4x4 footprint (top face at `y = 0.0`,
+    /// matching the island mesh plane exactly) are inserted directly rather
+    /// than through `player::install`, which pulls in the full window/input/
+    /// asset surface these tests do not need. A real floor -- not just an
+    /// empty physics world -- matters here: without one the capsule free-
+    /// falls under gravity every tick and drifts outside the navmesh's
+    /// vertical sampling envelope within a couple dozen ticks, flipping the
+    /// agent to `AgentState::AgentNotOnNavMesh` and losing its desired
+    /// velocity entirely (confirmed the hard way while writing the
+    /// avoidance-deflection test below).
+    fn fixed_tick_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+            NavBackendPlugin,
+        ));
+        app.insert_resource(PhysicsDisabled(false));
+        app.insert_resource(CellPhysicsReadiness::Ready);
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(2.0, -0.1, 2.0),
+            boxddd::Vec3::new(4.0, 0.1, 4.0),
+        );
+        app.world_mut()
+            .insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+        app
+    }
+
+    /// Advances exactly one fixed tick by hand: advances `Time<Fixed>` by
+    /// its configured timestep, publishes that as the generic `Res<Time>`
+    /// clock the way the real fixed-main loop does
+    /// (`bevy_time::fixed::run_fixed_main_schedule`'s own per-expend body),
+    /// then runs `FixedPreUpdate` (landmass, the player-character sync, and
+    /// the solve-rate bookkeeping) followed by `FixedUpdate` (this file's
+    /// agent chain) directly by schedule label -- the same technique
+    /// `nav_overlay.rs`'s own landmass harness test uses for
+    /// `FixedPreUpdate` alone, extended across both schedules so a whole
+    /// tick is deterministic with no dependency on real wall-clock elapsed
+    /// time.
+    fn run_one_fixed_tick(world: &mut World) {
+        let timestep = world.resource::<Time<Fixed>>().timestep();
+        world.resource_mut::<Time<Fixed>>().advance_by(timestep);
+        let generic = world.resource::<Time<Fixed>>().as_generic();
+        *world.resource_mut::<Time>() = generic;
+        world.run_schedule(FixedPreUpdate);
+        world.run_schedule(FixedUpdate);
+    }
+
+    /// Spawns the same synthetic two-triangle 4x4 island fixture
+    /// `nav_overlay.rs`'s own landmass harness test uses, wired directly
+    /// into `NavArchipelagoState` (bypassing the manifest/
+    /// `ensure_archipelago` plumbing these unit tests do not need). Returns
+    /// the archipelago entity.
+    fn spawn_fixture_island(world: &mut World) -> Entity {
+        let mesh_input = landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [0.0, 0.0, 4.0],
+                [4.0, 0.0, 4.0],
+            ],
+            polygons: vec![
+                landmass_graph::PolygonInput {
+                    index: 0,
+                    vertex_indices: [0, 1, 2],
+                    is_water: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 1,
+                    vertex_indices: [1, 3, 2],
+                    is_water: false,
+                },
+            ],
+            doors: Vec::new(),
+        };
+        let valid = landmass_graph::build_navigation_mesh(&mesh_input)
+            .nav_mesh
+            .expect("synthetic square validates");
+        let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
+            nav_mesh: Arc::new(valid),
+        });
+        // Same widened envelope `ensure_archipelago` applies for real cells
+        // (see `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment): the physics
+        // capsule's `Transform` is centre-height above the mesh plane, well
+        // outside `from_agent_radius`'s own tight default.
+        let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+        options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
+        let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
+        world.spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+            nav_mesh: NavMeshHandle::<ThreeD>(nav_mesh_handle),
+        });
+        world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago_entity);
+        archipelago_entity
+    }
+
+    /// Spawns a bare nav agent (no console-tracked `TestNavAgentState` slot,
+    /// no visual mesh) directly into `archipelago_entity`, targeting `target`
+    /// from `start`. Mirrors the component set `spawn_test_agent` builds,
+    /// minus the roster bookkeeping and visuals these App-level movement
+    /// tests do not need.
+    fn spawn_bare_agent(
+        world: &mut World,
+        archipelago_entity: Entity,
+        start: Vec3,
+        target: Vec3,
+    ) -> Entity {
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc::default(),
+                AgentDesiredVelocityBlend::default(),
+                Transform::from_translation(start),
+                Agent3dBundle {
+                    agent: default(),
+                    settings: AgentSettings {
+                        radius: AGENT_RADIUS,
+                        desired_speed: AGENT_DESIRED_SPEED,
+                        max_speed: AGENT_MAX_SPEED,
+                    },
+                    archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+                },
+                TargetReachedCondition::Distance(Some(AGENT_TARGET_REACHED_DISTANCE)),
+            ))
+            .id();
+        world.entity_mut(agent).insert(AgentTarget3d::Point(target));
+        agent
+    }
+
+    /// Task 1 (fixed-timestep movement) + the solve-rate gate: the agent
+    /// keeps advancing horizontally toward its target on every fixed tick,
+    /// including a tick the solve is gated off on (`NavSolveRate(2)`).
+    /// Warms up over a few ticks first so both halves of the blend
+    /// (`AgentDesiredVelocityBlend`) hold real, nonzero solved values rather
+    /// than the zero-initialized default.
+    #[test]
+    fn movement_runs_every_fixed_tick_including_when_the_solve_is_gated_off() {
+        let mut app = fixed_tick_test_app();
+        let archipelago_entity = spawn_fixture_island(app.world_mut());
+        // `Transform.translation` is the capsule *centre* (mirrors
+        // production: `spawn_test_agent` places new agents at the player's
+        // own capsule-centre position), so standing on a floor whose top
+        // face is at `y = 0.0` means starting at `y = AGENT_HEIGHT / 2`, not
+        // `y = 0.0` -- the target's own Y does not matter to physics, only
+        // to which navmesh point it samples onto.
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago_entity,
+            Vec3::new(0.5, AGENT_HEIGHT / 2.0, 0.5),
+            Vec3::new(3.5, 0.0, 3.5),
+        );
+        app.world_mut().insert_resource(NavSolveRate(2));
+
+        for _ in 0..4 {
+            run_one_fixed_tick(app.world_mut());
+        }
+        let step = app.world().resource::<NavSolveStepCounter>().0;
+        assert_eq!(step, 4, "four ticks were driven by hand");
+        assert!(
+            movement_policy::should_solve(step, 2),
+            "tick 4 is a solve tick at interval 2 -- the warm-up assumption this test relies on"
+        );
+        let position_after_solve_tick = app.world().get::<Transform>(agent).unwrap().translation;
+
+        // Tick 5: a skip tick (5 % 2 = 1). Movement must still run.
+        run_one_fixed_tick(app.world_mut());
+        assert!(
+            !movement_policy::should_solve(5, 2),
+            "tick 5 is a skip tick at interval 2 -- the assertion below relies on this"
+        );
+        let position_after_skip_tick = app.world().get::<Transform>(agent).unwrap().translation;
+
+        assert_ne!(
+            Vec2::new(position_after_solve_tick.x, position_after_solve_tick.z),
+            Vec2::new(position_after_skip_tick.x, position_after_skip_tick.z),
+            "the agent must keep moving horizontally on a fixed tick the solve is gated off"
+        );
+    }
+
+    /// Task 2: a landmass character mirrors the FPS player's position and
+    /// actual KCC velocity every fixed tick, and is present in the same
+    /// archipelago the agent/island use (`ArchipelagoRef3d` points at it).
+    /// The player entity is spawned through the real production path
+    /// (`player::set_camera_mode`) rather than constructed by hand: both
+    /// `FpsPlayer` and the rest of `KccState`'s fields are private outside
+    /// `player`, and this wave's file-ownership boundary allows exactly one
+    /// accessor edit to `player/mod.rs` (`KccState::velocity`, made
+    /// `pub(crate)`), not a test-only constructor.
+    #[test]
+    fn a_landmass_character_mirrors_the_player_and_exists_in_the_archipelago() {
+        let mut app = fixed_tick_test_app();
+        let archipelago_entity = spawn_fixture_island(app.world_mut());
+        let character_entity = spawn_player_nav_character(app.world_mut(), archipelago_entity);
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .player_character = Some(character_entity);
+
+        app.world_mut().init_resource::<player::CameraModeState>();
+        app.world_mut().init_resource::<player::PlayerNoClip>();
+        app.world_mut()
+            .insert_resource(player::PhysicsDisabled(false));
+        app.world_mut()
+            .init_resource::<crate::console::RefRegistry>();
+        let camera_local_height = player::EYE_HEIGHT - player::CAPSULE_HEIGHT * 0.5;
+        let player_center = Vec3::new(1.0, 0.0, 1.0);
+        let camera_transform =
+            Transform::from_translation(player_center + Vec3::Y * camera_local_height);
+        app.world_mut().spawn((
+            Camera3d::default(),
+            camera_transform,
+            GlobalTransform::from(camera_transform),
+            crate::viewer::FlyCamera {
+                yaw: 0.0,
+                pitch: 0.0,
+                speed: 0.0,
+            },
+        ));
+        player::set_camera_mode(app.world_mut(), player::CameraMode::Fps)
+            .expect("an FPS player spawns from a fresh Free-mode camera");
+        let player_entity = app
+            .world()
+            .resource::<player::CameraModeState>()
+            .player
+            .expect("set_camera_mode recorded the new player entity");
+
+        let player_velocity = Vec3::new(1.5, 0.0, -0.5);
+        app.world_mut()
+            .get_mut::<player::KccState>(player_entity)
+            .expect("set_camera_mode spawned a KccState")
+            .velocity = player_velocity;
+
+        // Force transform propagation once so the player's `GlobalTransform`
+        // reflects the `Transform` `set_camera_mode` just set -- this
+        // minimal App has no render/window stack driving `app.update()`, so
+        // propagation is run directly by schedule label.
+        app.world_mut().run_schedule(PostUpdate);
+
+        run_one_fixed_tick(app.world_mut());
+
+        let character_transform = app.world().get::<Transform>(character_entity).unwrap();
+        assert!(
+            character_transform.translation.distance(player_center) < 1e-3,
+            "the character must mirror the player's position, got {:?}",
+            character_transform.translation
+        );
+        let character_velocity = app
+            .world()
+            .get::<Velocity3d>(character_entity)
+            .unwrap()
+            .velocity;
+        assert_eq!(
+            character_velocity, player_velocity,
+            "the character must mirror the player's actual KCC velocity"
+        );
+
+        let archipelago_ref = app
+            .world()
+            .get::<ArchipelagoRef3d>(character_entity)
+            .expect("the character carries an ArchipelagoRef3d");
+        assert_eq!(
+            archipelago_ref.entity, archipelago_entity,
+            "the character is present in the same archipelago the agent/island use"
+        );
+    }
+
+    /// Task 2 (continued): a landmass character standing directly on an
+    /// agent's straight-line path deflects the agent's desired velocity away
+    /// from that straight line -- RVO avoidance treating the character as a
+    /// non-agent obstacle, driven against a real archipelago (the same
+    /// pattern `nav_overlay.rs`'s own landmass harness test uses).
+    #[test]
+    fn a_landmass_character_in_the_agents_path_deflects_its_desired_velocity() {
+        let mut app = fixed_tick_test_app();
+        let archipelago_entity = spawn_fixture_island(app.world_mut());
+
+        // `start`/`target` are the logical navmesh-plane (`y = 0.0`) points
+        // the straight-line/character-placement math below works in;
+        // `spawn_bare_agent` gets a *capsule-centre* start position instead
+        // (`Transform.translation` is the capsule centre, mirroring
+        // production's `spawn_test_agent`) so it actually stands on
+        // `fixed_tick_test_app`'s floor rather than starting embedded in it.
+        let start = Vec3::new(0.5, 0.0, 0.5);
+        let target = Vec3::new(3.5, 0.0, 3.5);
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago_entity,
+            Vec3::new(start.x, AGENT_HEIGHT / 2.0, start.z),
+            target,
+        );
+
+        // A character close enough to the agent's straight-line path that a
+        // collision is predicted from the very first tick (RVO's avoidance
+        // only predicts a collision within its 0.5s time horizon --
+        // `ArchipelagoOptions::from_agent_radius`'s default -- so a
+        // character sitting far down the path would not yet register as a
+        // threat at the agent's initial, still-ramping-up speed), nudged a
+        // hair off the path's exact centreline. A perfectly centred,
+        // perfectly head-on approach is a degenerate case for RVO/ORCA --
+        // slowing straight down is exactly as valid a non-colliding
+        // solution as swerving either way when the geometry is perfectly
+        // symmetric, and dodgy_2d picks that (confirmed empirically: dead-
+        // centre placement here converges on a shrinking, undeflected
+        // desired velocity, not a sideways one). A small perpendicular
+        // offset breaks the symmetry the same way a real player almost
+        // never walks exactly down an agent's route centreline.
+        let direction = (target - start).normalize();
+        let perpendicular = Vec3::new(-direction.z, 0.0, direction.x);
+        let close_point = start + direction * 1.0 + perpendicular * 0.15;
+        app.world_mut().spawn((
+            Character3dBundle {
+                character: default(),
+                settings: CharacterSettings {
+                    radius: player::CAPSULE_RADIUS,
+                },
+                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+            },
+            Transform::from_translation(close_point),
+            Velocity3d::default(),
+        ));
+
+        // Default solve rate (every tick): let the solve settle over enough
+        // ticks for the agent to close in on the character and for RVO's
+        // avoidance response to actually deflect it.
+        for _ in 0..60 {
+            run_one_fixed_tick(app.world_mut());
+        }
+
+        let blend = app.world().get::<AgentDesiredVelocityBlend>(agent).unwrap();
+        let desired = blend.latest;
+        assert!(
+            desired.length() > 0.01,
+            "the agent must still have a nonzero desired velocity with the character present, got {desired:?}"
+        );
+
+        let straight_line = (target - start).normalize();
+        let desired_direction = desired.normalize();
+        let cos_angle = straight_line.dot(desired_direction);
+        assert!(
+            cos_angle < 0.99,
+            "a character blocking the straight-line path must deflect the agent's desired velocity away from it (cos={cos_angle}, desired={desired:?})"
+        );
+    }
+
+    /// Task 3 (solve-output interpolation, user-directed addendum): at
+    /// interval 2, on the in-between (skip) tick, the desired velocity
+    /// `apply_agent_physics_movement` actually applies is strictly between
+    /// the two most recently completed solve outputs -- not equal to
+    /// either. At interval 1, it is always exactly the latest solved value,
+    /// regardless of whatever `previous` holds -- confirming the
+    /// interpolation is an exact no-op at the default rate. Uses an empty
+    /// `boxddd::World` (no static geometry) so the achieved horizontal
+    /// velocity written back to `Velocity3d` is the *unobstructed* applied
+    /// input exactly -- a direct, physics-real assertion on the actual
+    /// consuming system, not just the pure `solve_blend_fraction` table.
+    #[test]
+    fn desired_velocity_blends_between_solves_and_is_exact_at_interval_one() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        fn blend_test_world(blend: AgentDesiredVelocityBlend) -> (World, Entity) {
+            let mut world = World::new();
+            world.init_resource::<TestNavAgentState>();
+            world.insert_resource(PhysicsDisabled(false));
+            world.insert_resource(CellPhysicsReadiness::Ready);
+            world.init_resource::<Time>();
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+            world.insert_non_send(BoxdddPhysicsContext::from_world(
+                boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world"),
+            ));
+            let agent = world
+                .spawn((
+                    TestNavAgentMarker,
+                    AgentKcc::default(),
+                    blend,
+                    Transform::from_xyz(0.0, 5.0, 0.0),
+                    Velocity3d::default(),
+                ))
+                .id();
+            (world, agent)
+        }
+
+        let previous = Vec3::new(2.5, 0.0, 0.0);
+        let latest = Vec3::new(0.0, 0.0, 2.5);
+        let blend = AgentDesiredVelocityBlend { previous, latest };
+
+        // Interval 2, on a skip tick (3 % 2 = 1, fraction 0.5): strictly
+        // between the two, not equal to either.
+        let (mut world, agent) = blend_test_world(blend);
+        world.insert_resource(NavSolveRate(2));
+        world.insert_resource(NavSolveStepCounter(3));
+        world
+            .run_system_once(apply_agent_physics_movement)
+            .expect("system runs");
+        let achieved = world.get::<Velocity3d>(agent).unwrap().velocity;
+        assert!(
+            achieved.x > 0.0 && achieved.x < previous.x,
+            "achieved.x={} must be strictly between 0.0 (latest.x) and {} (previous.x)",
+            achieved.x,
+            previous.x
+        );
+        assert!(
+            achieved.z > 0.0 && achieved.z < latest.z,
+            "achieved.z={} must be strictly between 0.0 (previous.z) and {} (latest.z)",
+            achieved.z,
+            latest.z
+        );
+
+        // Interval 1: always exactly the latest value, regardless of the
+        // step counter or of `previous`.
+        let (mut world, agent) = blend_test_world(blend);
+        world.insert_resource(NavSolveRate(1));
+        world.insert_resource(NavSolveStepCounter(7));
+        world
+            .run_system_once(apply_agent_physics_movement)
+            .expect("system runs");
+        let achieved = world.get::<Velocity3d>(agent).unwrap().velocity;
+        assert!(
+            (achieved.x - latest.x).abs() < 1e-3,
+            "at interval 1 the applied value must equal `latest` exactly, got achieved.x={}",
+            achieved.x
+        );
+        assert!(
+            (achieved.z - latest.z).abs() < 1e-3,
+            "at interval 1 the applied value must equal `latest` exactly, got achieved.z={}",
+            achieved.z
+        );
     }
 }
