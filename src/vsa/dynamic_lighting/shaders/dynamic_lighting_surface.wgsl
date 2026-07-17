@@ -1,6 +1,7 @@
 #define_import_path bevyout_dynamic_lighting::surface
 
 #import bevy_pbr::{
+    mesh_types::MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT,
     mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
     pbr_deferred_types as deferred_types,
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
@@ -83,7 +84,6 @@ fn material_light_contribution(
     surface: DynamicLightingSurface,
     light: DynamicLight,
     view: View,
-    shadow_visibility: f32,
 ) -> vec3<f32> {
     let light_minus_world = light.position - surface.world_position;
     let distance_sqr = dot(light_minus_world, light_minus_world);
@@ -132,7 +132,7 @@ fn material_light_contribution(
         * bounce_color(light)
         * light_scale
         * 0.08;
-    return (direct + bounce) * shadow_visibility;
+    return direct + bounce;
 }
 
 fn surface_is_unlit(surface: DynamicLightingSurface) -> bool {
@@ -141,4 +141,8 @@ fn surface_is_unlit(surface: DynamicLightingSurface) -> bool {
 
 fn surface_receives_shadows(surface: DynamicLightingSurface) -> bool {
     return (surface.mesh_flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u;
+}
+
+fn surface_receives_prepared_shadows(surface: DynamicLightingSurface) -> bool {
+    return (surface.mesh_flags & MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT) != 0u;
 }

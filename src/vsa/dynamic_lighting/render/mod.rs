@@ -77,15 +77,17 @@ impl Plugin for DynamicLightingRenderPlugin {
             .add_systems(
                 bevy::core_pipeline::schedule::Core3d,
                 dynamic_lighting_pass
-                    .in_set(bevy::core_pipeline::Core3dSystems::PostProcess)
-                    .before(bevy::core_pipeline::tonemapping::tonemapping),
+                    .after(bevy::core_pipeline::Core3dSystems::MainPass)
+                    .before(bevy::core_pipeline::Core3dSystems::EarlyPostProcess),
             );
         render_app.add_systems(
             bevy::core_pipeline::schedule::Core3d,
             pipeline::dynamic_lighting_volumetric_pass
-                .in_set(bevy::core_pipeline::Core3dSystems::PostProcess)
                 .after(dynamic_lighting_pass)
-                .before(bevy::core_pipeline::tonemapping::tonemapping),
+                // Fog belongs in HDR before bloom so emissive volumes can glow,
+                // but bloom must never be composited underneath the fog layer.
+                .before(bevy::post_process::bloom::bloom)
+                .before(bevy::core_pipeline::Core3dSystems::EarlyPostProcess),
         );
     }
 }

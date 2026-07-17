@@ -158,7 +158,7 @@ fn fallout_bloom_uses_explicit_old_school_baseline() {
     let bloom = super::scene::fallout_bloom();
 
     assert_eq!(bloom.intensity, 0.05);
-    assert_eq!(bloom.prefilter.threshold, 0.6);
+    assert_eq!(bloom.prefilter.threshold, 1.2);
     assert_eq!(bloom.prefilter.threshold_softness, 0.2);
     assert_eq!(bloom.composite_mode, BloomCompositeMode::Additive);
     assert!(bloom.prefilter.threshold > 0.0);
@@ -185,6 +185,18 @@ fn prepared_static_meshes_leave_the_runtime_shadow_pass_but_moving_meshes_do_not
         .world_mut()
         .spawn((PreparedPointShadowReceiverRoot, Transform::default()))
         .id();
+    let mut helper_placement = compatible_render_manifest().placements.remove(0);
+    helper_placement.reference_form_id = 0x0002_F32F;
+    helper_placement.base_form_id = 0x0003_54E8;
+    helper_placement.editor_id = Some("RCLightBox01".into());
+    let helper_root = app
+        .world_mut()
+        .spawn((
+            interaction::PlacementRoot::new(helper_placement),
+            Transform::default(),
+            ChildOf(moving_root),
+        ))
+        .id();
     let static_mesh = app
         .world_mut()
         .spawn((
@@ -199,6 +211,14 @@ fn prepared_static_meshes_leave_the_runtime_shadow_pass_but_moving_meshes_do_not
             Mesh3d::default(),
             Transform::default(),
             ChildOf(moving_root),
+        ))
+        .id();
+    let helper_mesh = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            Transform::default(),
+            ChildOf(helper_root),
         ))
         .id();
 
@@ -222,6 +242,11 @@ fn prepared_static_meshes_leave_the_runtime_shadow_pass_but_moving_meshes_do_not
     assert!(
         !app.world()
             .entity(moving_mesh)
+            .contains::<NotShadowCaster>()
+    );
+    assert!(
+        app.world()
+            .entity(helper_mesh)
             .contains::<NotShadowCaster>()
     );
 }

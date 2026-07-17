@@ -44,6 +44,7 @@ const LIGHT_TYPE_ROTOR: u32 = 5u << 6u;
 const LIGHT_TYPE_SHOCK: u32 = 6u << 6u;
 const LIGHT_TYPE_DISCO: u32 = 7u << 6u;
 const LIGHT_FLAG_SHADOW: u32 = 1u << 15u;
+const LIGHT_FLAG_PREPARED_INVERSE_SQUARE: u32 = 1u << 14u;
 const INVALID_LIGHT_INDEX: u32 = 0xffffffffu;
 
 fn light_type(light: DynamicLight) -> u32 {
@@ -52,6 +53,10 @@ fn light_type(light: DynamicLight) -> u32 {
 
 fn attenuation(light: DynamicLight, distance_sqr: f32) -> f32 {
     let s = saturate(distance_sqr / light.radius_sqr);
+    if (light.channel & LIGHT_FLAG_PREPARED_INVERSE_SQUARE) != 0u {
+        let smooth_factor = saturate(1.0 - s * s);
+        return light.intensity * smooth_factor * smooth_factor / max(distance_sqr, 0.0001);
+    }
     return light.intensity * pow(1.0 - s, 2.0) / (1.0 + light.falloff_and_bounce.x * s);
 }
 

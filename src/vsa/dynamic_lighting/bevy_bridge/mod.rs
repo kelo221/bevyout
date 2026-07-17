@@ -16,7 +16,9 @@ use super::core::{
     DynamicLightVolumetricParameters, LightEffectRuntime, UnityRandom, advance_effect,
 };
 use super::render::{DynamicLightingRenderPlugin, DynamicLightingView};
-pub(crate) use shadow_proxy::DynamicLightShadowProxy;
+pub(crate) use shadow_proxy::{
+    DynamicLightPreparedShadow, DynamicLightPreparedSource, DynamicLightShadowProxy,
+};
 
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct DynamicLight {

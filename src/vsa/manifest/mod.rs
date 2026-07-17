@@ -484,6 +484,19 @@ pub(crate) struct PreparedPlacement {
     pub(crate) ao_mode: String,
 }
 
+pub(crate) const RCLIGHTBOX01_BASE_FORM_ID: u32 = 0x0003_54E8;
+
+/// `RCLightBox01` is visible helper/emissive geometry, not an occluder. It is
+/// authored as an activator, so this policy must cover both prepared and
+/// realtime shadow paths.
+pub(crate) fn placement_never_casts_shadow(placement: &PreparedPlacement) -> bool {
+    placement.base_form_id == RCLIGHTBOX01_BASE_FORM_ID
+        || placement
+            .editor_id
+            .as_deref()
+            .is_some_and(|editor_id| editor_id.eq_ignore_ascii_case("RCLightBox01"))
+}
+
 /// Record kinds that represent world-loot items rather than scenery. Keep
 /// this shared by irradiance and point-shadow preparation so a pickup cannot
 /// leak into one baked lighting path while being excluded from the other.

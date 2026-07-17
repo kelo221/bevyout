@@ -25,9 +25,9 @@ use super::{
 use crate::vsa::bake::{
     find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
 };
+use crate::vsa::placement_never_casts_shadow;
 
 pub(crate) const STATIC_POINT_SHADOW_NEAR_Z: f32 = 0.1;
-const RCLIGHTBOX01_BASE_FORM_ID: u32 = 0x0003_54E8;
 const FACE_COUNT: usize = 6;
 static SHADOW_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -219,7 +219,7 @@ fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
         && placement.physics_classification == PreparedPhysicsClassification::Static
         && matches!(placement.semantic, PreparedSemantic::Static)
         && !is_pickup_record_kind(&placement.base_kind)
-        && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
+        && !placement_never_casts_shadow(placement)
 }
 
 fn sorted_shadow_lights(lights: &[PreparedLight]) -> Result<Vec<&PreparedLight>> {
@@ -1071,7 +1071,7 @@ mod tests {
                     placement(&format!("rclightbox-{semantic_index}-{physics_index}.glb"));
                 candidate.reference_form_id =
                     (semantic_index * physics_classes.len() + physics_index + 1) as u32;
-                candidate.base_form_id = RCLIGHTBOX01_BASE_FORM_ID;
+                candidate.base_form_id = crate::vsa::manifest::RCLIGHTBOX01_BASE_FORM_ID;
                 candidate.semantic = semantic.clone();
                 candidate.physics_classification = physics_classification;
                 placements.push(candidate);

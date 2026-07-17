@@ -3,8 +3,13 @@
 use std::sync::Arc;
 
 use super::controls::{AmbientScale, FogStrength, LightingScale};
+use super::lighting_policy::{
+    PreparedCellFogPlan, PreparedLightPlanInput, PreparedLightVolumetricPlan,
+    plan_prepared_light_migration,
+};
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
+use crate::vsa::placement_never_casts_shadow;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::light::NotShadowCaster;
@@ -24,6 +29,7 @@ pub(crate) struct PreparedPointShadowReceiverRoot;
 pub(crate) fn mark_prepared_shadow_meshes(
     mut commands: Commands,
     roots: Query<(Entity, Has<BakedStaticSceneRoot>), With<PreparedPointShadowReceiverRoot>>,
+    placement_roots: Query<&interaction::PlacementRoot>,
     parents: Query<&ChildOf>,
     meshes: Query<Entity, Added<Mesh3d>>,
 ) {
@@ -31,7 +37,11 @@ pub(crate) fn mark_prepared_shadow_meshes(
     for mesh in &meshes {
         let mut ancestor = mesh;
         let mut root_kind = None;
+        let mut never_casts_shadow = false;
         loop {
+            if let Ok(placement_root) = placement_roots.get(ancestor) {
+                never_casts_shadow |= placement_never_casts_shadow(placement_root.placement());
+            }
             if let Some(is_baked_static) = roots.get(&ancestor) {
                 root_kind = Some(*is_baked_static);
                 break;
@@ -41,13 +51,11 @@ pub(crate) fn mark_prepared_shadow_meshes(
             };
             ancestor = parent.parent();
         }
-        let Some(is_baked_static) = root_kind else {
-            continue;
-        };
-
         let mut entity = commands.entity(mesh);
-        entity.insert(bevy::pbr::BakedPointShadowReceiver);
-        if is_baked_static {
+        if root_kind.is_some() {
+            entity.insert(bevy::pbr::BakedPointShadowReceiver);
+        }
+        if root_kind == Some(true) || never_casts_shadow {
             entity.insert(NotShadowCaster);
         }
     }
@@ -57,7 +65,9 @@ pub(super) fn fallout_bloom() -> Bloom {
     Bloom {
         intensity: 0.05,
         prefilter: BloomPrefilter {
-            threshold: 0.6,
+            // Keep cell fog below bloom's HDR prefilter while preserving the
+            // deliberately hot emissive fixtures above it.
+            threshold: 1.2,
             threshold_softness: 0.2,
         },
         composite_mode: BloomCompositeMode::Additive,
@@ -92,6 +102,8 @@ pub(crate) fn spawn_prepared_scene(
         HorizontalFov::default(),
         ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
+        DeferredPrepass,
+        DynamicLightingView,
         OcclusionCulling,
         fallout_bloom(),
         Tonemapping::AcesFitted,
@@ -104,6 +116,7 @@ pub(crate) fn spawn_prepared_scene(
             speed: 8.0,
         },
     ));
+    camera.insert((Hdr, Msaa::Off));
     if let Some(auto_exposure) = auto_exposure {
         camera.insert(auto_exposure);
         if let Some(image_space) = manifest.cell.image_space.as_ref() {
@@ -296,40 +309,89 @@ pub(crate) fn spawn_prepared_scene(
         root_entity.insert(PreparedPointShadowReceiverRoot);
     }
     let root = root_entity.id();
-    for light in &manifest.lights {
-        if !light.initially_enabled {
-            continue;
-        }
-        let mut light_entity = commands.spawn((
-            PointLight {
-                intensity: light.radius * light.radius * 2.0 * lighting.0,
-                range: light.radius,
-                color: Color::srgb(
-                    light.color_rgba[0],
-                    light.color_rgba[1],
-                    light.color_rgba[2],
-                ),
-                affects_lightmapped_mesh_diffuse: true,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(Vec3::from_array(light.translation)),
-            RealtimeShadowCandidate,
-            ChildOf(root),
-        ));
-        if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {
-            light_entity.insert(BakedPointLightShadow {
-                layer: shadow.layer,
-                baked_translation: Vec3::from_array(shadow.translation),
-                baked_range: shadow.range,
-                near_z: manifest
-                    .static_point_shadows
-                    .as_ref()
-                    .map_or(0.1, |artifact| artifact.near_z),
-            });
+    let light_by_reference = manifest
+        .lights
+        .iter()
+        .map(|light| (light.reference_form_id, light))
+        .collect::<HashMap<_, _>>();
+    let migration = plan_prepared_light_migration(
+        manifest.lights.iter().map(|light| PreparedLightPlanInput {
+            reference_form_id: light.reference_form_id,
+            initially_enabled: light.initially_enabled,
+            radius: light.radius,
+            prepared_shadow_layer: prepared_shadow_available
+                .then(|| prepared_shadow_records.get(&light.reference_form_id))
+                .flatten()
+                .map(|shadow| shadow.layer),
+        }),
+        lighting.0,
+        prepared_cell_fog_plan(&cell_lighting, fog_strength.0),
+    );
+    let point_shadow_defaults = PointLight::default();
+    let prepared_normal_bias = if prepared_shadow_runtime.resolution > 0 {
+        point_shadow_defaults.shadow_normal_bias * 2.0 / prepared_shadow_runtime.resolution as f32
+            * std::f32::consts::SQRT_2
+    } else {
+        0.0
+    };
+    let mut realtime_shadow_proxy = None;
+    for source in migration.sources {
+        let light = light_by_reference[&source.reference_form_id];
+        let prepared_shadow = source.prepared_shadow_layer.map(|cubemap_index| {
             attached_shadow_lights += 1;
+            DynamicLightPreparedShadow {
+                cubemap_index,
+                depth_bias: point_shadow_defaults.shadow_depth_bias,
+                normal_bias: prepared_normal_bias,
+                near_z: prepared_shadow_runtime.near_z,
+            }
+        });
+        let transform = Transform::from_translation(Vec3::from_array(light.translation));
+        let dynamic_light = commands
+            .spawn((
+                Name::new(format!(
+                    "Prepared DynamicLight {:08x}",
+                    source.reference_form_id
+                )),
+                DynamicLight::with_effect(source.intensity, DynamicLightEffect::Steady)
+                    .with_color(Color::srgb(
+                        light.color_rgba[0],
+                        light.color_rgba[1],
+                        light.color_rgba[2],
+                    ))
+                    .with_radius(source.radius)
+                    .with_volumetric(dynamic_volumetric_parameters(source.volumetric))
+                    .with_shadows(prepared_shadow.is_some() || source.realtime_shadow_proxy),
+                DynamicLightPreparedSource {
+                    reference_form_id: source.reference_form_id,
+                    baked_shadow: prepared_shadow,
+                    volumetric_intensity_at_full_strength: source
+                        .volumetric
+                        .map_or(0.0, |volumetric| volumetric.intensity_at_full_strength),
+                },
+                transform,
+                Visibility::Visible,
+                ChildOf(root),
+            ))
+            .id();
+        if source.realtime_shadow_proxy {
+            let proxy = commands
+                .spawn((
+                    Name::new(format!(
+                        "Prepared DynamicLight realtime shadow proxy {:08x}",
+                        source.reference_form_id
+                    )),
+                    DynamicLightShadowProxy::shadow_only_point_light(source.radius),
+                    DynamicLightShadowProxy::realtime(dynamic_light),
+                    transform,
+                    Visibility::Visible,
+                    ChildOf(root),
+                ))
+                .id();
+            realtime_shadow_proxy = Some(proxy);
         }
     }
+    commands.insert_resource(RealtimeShadowLight(realtime_shadow_proxy));
     commands.insert_resource(PreparedPointShadowRuntime {
         attached_lights: attached_shadow_lights,
         ..prepared_shadow_runtime
@@ -512,14 +574,7 @@ pub(crate) fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Op
     {
         return None;
     }
-    let start = lighting.fog_near.max(0.0) * FO3_SCALE;
-    let mut end = lighting.fog_far.max(0.0) * FO3_SCALE;
-    if lighting.fog_clip_distance > 0.0 {
-        end = end.min(lighting.fog_clip_distance * FO3_SCALE);
-    }
-    if !start.is_finite() || !end.is_finite() || end <= start {
-        return None;
-    }
+    let (start, end) = cell_fog_range_metres(lighting)?;
     if !strength.is_finite() || strength < 0.0 {
         return None;
     }
@@ -543,13 +598,65 @@ pub(crate) fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Op
     })
 }
 
+fn cell_fog_range_metres(lighting: &PreparedCellLighting) -> Option<(f32, f32)> {
+    let start = lighting.fog_near.max(0.0) * FO3_SCALE;
+    let mut end = lighting.fog_far.max(0.0) * FO3_SCALE;
+    if lighting.fog_clip_distance > 0.0 {
+        end = end.min(lighting.fog_clip_distance * FO3_SCALE);
+    }
+    (start.is_finite() && end.is_finite() && end > start).then_some((start, end))
+}
+
+fn prepared_cell_fog_plan(
+    lighting: &PreparedCellLighting,
+    strength: f32,
+) -> Option<PreparedCellFogPlan> {
+    if lighting.fog_rgba.iter().any(|channel| !channel.is_finite())
+        || !lighting.fog_power.is_finite()
+        || !strength.is_finite()
+        || strength < 0.0
+    {
+        return None;
+    }
+    let (start_metres, end_metres) = cell_fog_range_metres(lighting)?;
+    Some(PreparedCellFogPlan {
+        start_metres,
+        end_metres,
+        power: lighting.fog_power,
+        strength: strength.clamp(0.0, 1.0),
+    })
+}
+
+fn dynamic_volumetric_parameters(
+    plan: Option<PreparedLightVolumetricPlan>,
+) -> DynamicLightVolumetricParameters {
+    plan.map_or_else(DynamicLightVolumetricParameters::default, |plan| {
+        DynamicLightVolumetricParameters {
+            volumetric_type: DynamicLightVolumetricType::Sphere,
+            radius: plan.radius,
+            thickness: plan.thickness,
+            intensity: plan.intensity,
+            visibility: plan.visibility,
+        }
+    })
+}
+
 pub(crate) fn apply_fog_strength(
     fog_strength: Res<FogStrength>,
     manifest: Res<PreparedSceneManifest>,
     mut cameras: Query<&mut DistanceFog, With<Camera3d>>,
+    mut prepared_lights: Query<(&DynamicLightPreparedSource, &mut DynamicLight)>,
 ) {
     if !fog_strength.is_changed() {
         return;
+    }
+    let strength = if fog_strength.0.is_finite() {
+        fog_strength.0.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    for (source, mut light) in &mut prepared_lights {
+        light.config.volumetric.intensity = source.volumetric_intensity_at_full_strength * strength;
     }
     let lighting = effective_lighting(&manifest.cell);
     let Some(fog) = distance_fog(&lighting, fog_strength.0) else {

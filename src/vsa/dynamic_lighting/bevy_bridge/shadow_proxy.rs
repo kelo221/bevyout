@@ -4,6 +4,28 @@ use bevy::{light::PointLight, prelude::*, render::extract_component::ExtractComp
 
 use super::{DynamicLight, DynamicLightingSettings};
 
+/// Prepared-scene adapter metadata. Its presence selects the same
+/// inverse-square/range attenuation used by the viewer's former Bevy
+/// `PointLight`; optional baked metadata lets the custom pass sample the
+/// prepared cubemap array without retaining a visible Bevy carrier light.
+#[derive(Clone, Component, Copy, Debug, PartialEq)]
+pub(crate) struct DynamicLightPreparedSource {
+    pub(crate) reference_form_id: u32,
+    pub(crate) baked_shadow: Option<DynamicLightPreparedShadow>,
+    /// Cell-authored fog density at `setrender fog 1`. Keeping this on the
+    /// source lets the global fog control scale lights from different resident
+    /// cells without replacing their per-cell density.
+    pub(crate) volumetric_intensity_at_full_strength: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DynamicLightPreparedShadow {
+    pub(crate) cubemap_index: u32,
+    pub(crate) depth_bias: f32,
+    pub(crate) normal_bias: f32,
+    pub(crate) near_z: f32,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum DynamicShadowMode {
     #[default]

@@ -99,7 +99,9 @@ pub(crate) fn run_view(
         FrameTimeDiagnosticsPlugin::new(RENDER_REPORT_HISTORY),
         RenderDiagnosticsPlugin,
         AutoExposurePlugin,
+        DynamicLightingPlugin,
     ));
+    app.insert_resource(DefaultOpaqueRendererMethod::deferred());
     // Realtime point shadows are a short-range quality/performance aid for
     // the strongest light. Keep the prepared cubemap artifacts at their
     // independent resolution; this only lowers the runtime shadow target.
@@ -304,7 +306,7 @@ pub(crate) fn run_view(
         .add_systems(Update, apply_lighting_scale)
         .add_systems(
             Update,
-            (apply_realtime_shadow_light, mark_prepared_shadow_meshes)
+            (retarget_realtime_shadow_proxy, mark_prepared_shadow_meshes)
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(

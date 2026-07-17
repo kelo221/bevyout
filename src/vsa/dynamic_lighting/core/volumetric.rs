@@ -288,8 +288,7 @@ fn normalize(value: [f32; 3]) -> [f32; 3] {
     mul(value, length(value).recip())
 }
 
-#[cfg(test)]
-fn volumetric_bounding_radius(
+pub(crate) fn volumetric_bounding_radius(
     parameters: DynamicLightVolumetricParameters,
     transform_scale: [f32; 3],
     outer_cutoff_degrees: f32,

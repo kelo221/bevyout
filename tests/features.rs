@@ -144,6 +144,10 @@ mod material_shading_policy;
 #[allow(dead_code, unused_imports)]
 mod lighting_demo_policy;
 
+#[path = "../src/viewer/lighting_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod lighting_policy;
+
 // The DynamicLighting core is intentionally Bevy-free, so the executable spec
 // drives the same source-compatible runtime used by the ECS bridge.
 mod dynamic_lighting_core {
@@ -538,6 +542,11 @@ struct BevyoutWorld {
     combined_shadow_visibility: Option<f32>,
     demo_orbit: Option<lighting_demo_policy::DemoOrbit>,
     demo_orbit_samples: [[f32; 3]; 2],
+
+    // -- dynamic_lighting prepared-scene migration -- appended fields.
+    prepared_light_inputs: Vec<lighting_policy::PreparedLightPlanInput>,
+    prepared_cell_fog: Option<lighting_policy::PreparedCellFogPlan>,
+    prepared_light_plan: Option<lighting_policy::PreparedLightMigrationPlan>,
 }
 
 fn find_placement<'a>(
@@ -4726,6 +4735,122 @@ async fn then_demo_caster_samples_have_height(world: &mut BevyoutWorld, expected
     for sample in world.demo_orbit_samples {
         assert!((sample[1] - expected).abs() < 1e-6);
     }
+}
+
+// ---------------------------------------------------------------------
+// dynamic_lighting.feature -- prepared-scene migration, appended section.
+// ---------------------------------------------------------------------
+
+#[given("three prepared lights with two enabled and two prepared shadow layers")]
+async fn given_prepared_lights_for_dynamic_migration(world: &mut BevyoutWorld) {
+    world.prepared_light_inputs = vec![
+        lighting_policy::PreparedLightPlanInput {
+            reference_form_id: 0x10,
+            initially_enabled: true,
+            radius: 4.0,
+            prepared_shadow_layer: Some(2),
+        },
+        lighting_policy::PreparedLightPlanInput {
+            reference_form_id: 0x20,
+            initially_enabled: true,
+            radius: 8.0,
+            prepared_shadow_layer: Some(5),
+        },
+        lighting_policy::PreparedLightPlanInput {
+            reference_form_id: 0x30,
+            initially_enabled: false,
+            radius: 16.0,
+            prepared_shadow_layer: None,
+        },
+    ];
+}
+
+#[given(regex = r"^the prepared cell fog spans ([\d.]+) to ([\d.]+) metres at strength ([\d.]+)$")]
+async fn given_prepared_cell_fog(
+    world: &mut BevyoutWorld,
+    start_metres: f32,
+    end_metres: f32,
+    strength: f32,
+) {
+    world.prepared_cell_fog = Some(lighting_policy::PreparedCellFogPlan {
+        start_metres,
+        end_metres,
+        power: 1.0,
+        strength,
+    });
+}
+
+#[when(regex = r"^the prepared lights migrate to DynamicLighting at scale ([\d.]+)$")]
+async fn when_prepared_lights_migrate(world: &mut BevyoutWorld, scale: f32) {
+    world.prepared_light_plan = Some(lighting_policy::plan_prepared_light_migration(
+        world.prepared_light_inputs.iter().copied(),
+        scale,
+        world.prepared_cell_fog,
+    ));
+}
+
+#[then(
+    regex = r"^two custom visible light sources are planned and zero visible Bevy point lights remain$"
+)]
+async fn then_custom_sources_replace_visible_bevy_lights(world: &mut BevyoutWorld) {
+    let plan = world
+        .prepared_light_plan
+        .as_ref()
+        .expect("migration must be planned first");
+    assert_eq!(plan.sources.len(), 2);
+    assert_eq!(plan.visible_bevy_point_light_count(), 0);
+}
+
+#[then("every enabled prepared shadow layer stays attached to its custom source")]
+async fn then_prepared_shadow_layers_stay_attached(world: &mut BevyoutWorld) {
+    let plan = world
+        .prepared_light_plan
+        .as_ref()
+        .expect("migration must be planned first");
+    assert_eq!(
+        plan.sources
+            .iter()
+            .filter_map(|source| source.prepared_shadow_layer)
+            .collect::<Vec<_>>(),
+        [2, 5]
+    );
+}
+
+#[then("exactly one strongest custom source owns the realtime shadow proxy")]
+async fn then_one_strongest_custom_source_owns_proxy(world: &mut BevyoutWorld) {
+    let plan = world
+        .prepared_light_plan
+        .as_ref()
+        .expect("migration must be planned first");
+    assert_eq!(plan.realtime_shadow_proxy_count(), 1);
+    let source = plan
+        .sources
+        .iter()
+        .find(|source| source.realtime_shadow_proxy)
+        .expect("one source must own the realtime proxy");
+    assert_eq!(source.reference_form_id, 0x20);
+}
+
+#[then("every custom source receives cell-density sphere fog")]
+async fn then_custom_sources_receive_cell_density_fog(world: &mut BevyoutWorld) {
+    let plan = world
+        .prepared_light_plan
+        .as_ref()
+        .expect("migration must be planned first");
+    let volumetrics = plan
+        .sources
+        .iter()
+        .map(|source| {
+            source
+                .volumetric
+                .expect("cell fog must enable every source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(volumetrics.len(), 2);
+    assert!((volumetrics[0].intensity - 0.04).abs() < f32::EPSILON);
+    assert!((volumetrics[1].intensity - 0.08).abs() < f32::EPSILON);
+    assert_eq!(volumetrics[0].visibility, 8.0);
+    assert_eq!(volumetrics[1].visibility, 16.0);
 }
 
 fn main() {

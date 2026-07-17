@@ -39,3 +39,12 @@ Feature: Source-compatible DynamicLighting core
     Given a source-compatible strobe light
     When the dynamic light advances two frames at 60 Hz
     Then the volumetric intensity is 0.1875
+
+  Scenario: Prepared scene lights migrate without losing either shadow path
+    Given three prepared lights with two enabled and two prepared shadow layers
+    And the prepared cell fog spans 1 to 101 metres at strength 0.5
+    When the prepared lights migrate to DynamicLighting at scale 128
+    Then two custom visible light sources are planned and zero visible Bevy point lights remain
+    And every enabled prepared shadow layer stays attached to its custom source
+    And exactly one strongest custom source owns the realtime shadow proxy
+    And every custom source receives cell-density sphere fog

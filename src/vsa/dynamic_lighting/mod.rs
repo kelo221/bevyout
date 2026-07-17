@@ -5,8 +5,8 @@ pub(crate) mod core;
 mod render;
 
 pub(crate) use bevy_bridge::{
-    DynamicLight, DynamicLightShadowProxy, DynamicLightingDiagnostics, DynamicLightingPlugin,
-    DynamicLightingSettings,
+    DynamicLight, DynamicLightPreparedShadow, DynamicLightPreparedSource, DynamicLightShadowProxy,
+    DynamicLightingDiagnostics, DynamicLightingPlugin, DynamicLightingSettings,
 };
 pub(crate) use core::{
     DEFAULT_BOUNCE_MULTIPLIER, DynamicLightEffect, DynamicLightType,

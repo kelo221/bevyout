@@ -21,9 +21,10 @@ pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
 pub(crate) use dynamic_lighting::{
-    DynamicLight, DynamicLightEffect, DynamicLightShadowProxy, DynamicLightType,
-    DynamicLightVolumetricParameters, DynamicLightVolumetricType, DynamicLightingDiagnostics,
-    DynamicLightingPlugin, DynamicLightingSettings, DynamicLightingView,
+    DynamicLight, DynamicLightEffect, DynamicLightPreparedShadow, DynamicLightPreparedSource,
+    DynamicLightShadowProxy, DynamicLightType, DynamicLightVolumetricParameters,
+    DynamicLightVolumetricType, DynamicLightingDiagnostics, DynamicLightingPlugin,
+    DynamicLightingSettings, DynamicLightingView,
 };
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
@@ -45,7 +46,7 @@ pub(crate) use manifest::{
     PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedLeveledList,
     PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedRuntimeMutability,
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
-    ensure_prepared_manifest_compatible,
+    ensure_prepared_manifest_compatible, placement_never_casts_shadow,
 };
 pub(crate) use paths::{FO3_SCALE, fingerprint};
 pub(crate) use physics::{

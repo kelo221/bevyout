@@ -127,6 +127,11 @@ pub(super) fn init_dynamic_lighting_pipeline(
                     false,
                     NonZeroU64::new(GPU_DYNAMIC_SHADOW_SIZE as u64),
                 ),
+                storage_buffer_read_only_sized(
+                    false,
+                    NonZeroU64::new(GPU_DYNAMIC_SHADOW_SIZE as u64),
+                ),
+                texture_cube_array(TextureSampleType::Depth),
             ),
         ),
     );
@@ -237,14 +242,16 @@ pub(super) fn dynamic_lighting_pass(
         Some(view_binding),
         Some(light_binding),
         Some(meta_binding),
-        Some(shadow_metadata_binding),
+        Some(realtime_shadow_metadata_binding),
+        Some(prepared_shadow_metadata_binding),
     ) = (
         prepass.depth_view(),
         prepass.deferred_view(),
         view_uniforms.uniforms.binding(),
         buffers.lights.binding(),
         buffers.meta.binding(),
-        buffers.shadows.binding(),
+        buffers.realtime_shadows.binding(),
+        buffers.prepared_shadows.binding(),
     )
     else {
         return Ok(());
@@ -264,7 +271,9 @@ pub(super) fn dynamic_lighting_pass(
             meta_binding,
             &shadow_bindings.point_light_depth_texture_view,
             &side_inputs.shadow_samplers.point_light_comparison_sampler,
-            shadow_metadata_binding,
+            realtime_shadow_metadata_binding,
+            prepared_shadow_metadata_binding,
+            &shadow_bindings.baked_point_light_depth_texture_view,
         )),
     );
 

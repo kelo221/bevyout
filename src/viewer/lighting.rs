@@ -1,54 +1,98 @@
 //! Runtime state and diagnostics for prepared point-shadow artifacts.
 
-use bevy::pbr::{BakedPointLightShadow, BakedPointShadowGpuStatus, PointLightShadowSamples};
+use bevy::pbr::{BakedPointShadowGpuStatus, PointLightShadowSamples};
 use bevy::prelude::*;
 use serde_json::json;
 
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub(crate) struct RealtimeShadowCandidate;
+use crate::vsa::DynamicLightPreparedSource;
+use crate::vsa::{DynamicLight, DynamicLightShadowProxy, DynamicLightingView};
 
 #[derive(Resource, Debug, Default)]
 pub(crate) struct RealtimeShadowLight(pub(crate) Option<Entity>);
 
-fn strongest_candidate<I>(candidates: I) -> Option<Entity>
+fn strongest_camera_source<I>(camera: Vec3, sources: I) -> Option<Entity>
 where
-    I: IntoIterator<Item = (Entity, f32)>,
+    I: IntoIterator<Item = (Entity, u32, Vec3, f32, f32)>,
 {
-    candidates
-        .into_iter()
-        .filter(|(_, intensity)| intensity.is_finite())
-        .max_by(
-            |(left_entity, left_intensity), (right_entity, right_intensity)| {
-                left_intensity
-                    .total_cmp(right_intensity)
-                    .then_with(|| right_entity.cmp(left_entity))
+    let mut strongest_containing = None;
+    let mut nearest_visible = None;
+    for (entity, reference_form_id, position, radius, intensity) in sources {
+        let distance_squared = position.distance_squared(camera);
+        let radius_squared = radius * radius;
+        if !distance_squared.is_finite()
+            || !radius_squared.is_finite()
+            || radius_squared <= 0.0
+            || !intensity.is_finite()
+        {
+            continue;
+        }
+        if distance_squared <= radius_squared {
+            let normalized = (distance_squared / radius_squared).clamp(0.0, 1.0);
+            let smooth_factor = (1.0 - normalized * normalized).clamp(0.0, 1.0);
+            let score = intensity * smooth_factor * smooth_factor / distance_squared.max(0.0001);
+            if strongest_containing.is_none_or(
+                |(_, incumbent_form, incumbent_score): (Entity, u32, f32)| {
+                    score > incumbent_score
+                        || (score == incumbent_score && reference_form_id < incumbent_form)
+                },
+            ) {
+                strongest_containing = Some((entity, reference_form_id, score));
+            }
+        }
+
+        // The camera can stand just outside a lamp's authored sphere while
+        // still seeing its lit receivers. Keep the one bounded cubemap on
+        // the nearest sphere in that case instead of leaving it pinned to
+        // an unrelated startup light.
+        let distance_to_sphere = distance_squared.sqrt() - radius;
+        if nearest_visible.is_none_or(
+            |(_, incumbent_form, incumbent_distance): (Entity, u32, f32)| {
+                distance_to_sphere < incumbent_distance
+                    || (distance_to_sphere == incumbent_distance
+                        && reference_form_id < incumbent_form)
             },
-        )
-        .map(|(entity, _)| entity)
+        ) {
+            nearest_visible = Some((entity, reference_form_id, distance_to_sphere));
+        }
+    }
+    strongest_containing
+        .or(nearest_visible)
+        .map(|(entity, _, _)| entity)
 }
 
-/// Enables runtime point shadows on exactly one strongest startup light.
-///
-/// The candidate marker is deliberately only added to startup-cell lights;
-/// preloaded neighbor-cell lights remain hard/unshadowed until the selection
-/// policy is expanded to follow cell activation.
-pub(crate) fn apply_realtime_shadow_light(
-    mut selected: ResMut<RealtimeShadowLight>,
-    mut lights: Query<(Entity, &mut PointLight), With<RealtimeShadowCandidate>>,
+/// Keeps the single realtime cubemap on the strongest prepared light that
+/// affects the current camera, or the nearest light sphere when the camera is
+/// just outside all of them. Equal-strength startup lights are common in
+/// Fallout interiors; selecting only by authored intensity can pin the shadow
+/// pass to an arbitrary lamp in a distant room.
+pub(crate) fn retarget_realtime_shadow_proxy(
+    camera: Single<&GlobalTransform, With<DynamicLightingView>>,
+    sources: Query<(
+        Entity,
+        &DynamicLightPreparedSource,
+        &DynamicLight,
+        &GlobalTransform,
+    )>,
+    mut proxies: Query<&mut DynamicLightShadowProxy>,
 ) {
-    let strongest = strongest_candidate(
-        lights
-            .iter()
-            .map(|(entity, light)| (entity, light.intensity)),
+    let selected = strongest_camera_source(
+        camera.translation(),
+        sources.iter().map(|(entity, prepared, light, transform)| {
+            (
+                entity,
+                prepared.reference_form_id,
+                transform.translation(),
+                light.config.radius,
+                light.config.intensity,
+            )
+        }),
     );
-    if selected.0 != strongest {
-        selected.0 = strongest;
-    }
-
-    for (entity, mut light) in &mut lights {
-        let should_enable = Some(entity) == strongest;
-        if light.shadow_maps_enabled != should_enable {
-            light.shadow_maps_enabled = should_enable;
+    let Some(selected) = selected else {
+        return;
+    };
+    for mut proxy in &mut proxies {
+        if proxy.dynamic_light != selected {
+            proxy.dynamic_light = selected;
         }
     }
 }
@@ -79,8 +123,11 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
         .map(BakedPointShadowGpuStatus::snapshot)
         .unwrap_or_default();
     let attached_now = {
-        let mut query = world.query::<&BakedPointLightShadow>();
-        query.iter(world).count() as u32
+        let mut query = world.query::<&DynamicLightPreparedSource>();
+        query
+            .iter(world)
+            .filter(|source| source.baked_shadow.is_some())
+            .count() as u32
     };
     let runtime_shadow_passes = world
         .get_resource::<RealtimeShadowLight>()
@@ -132,16 +179,52 @@ mod tests {
     }
 
     #[test]
-    fn strongest_candidate_uses_intensity_and_stable_entity_tie_breaking() {
-        let low = Entity::from_bits(1);
-        let high = Entity::from_bits(2);
-        assert_eq!(strongest_candidate([(low, 2.0), (high, 8.0)]), Some(high));
-        assert_eq!(strongest_candidate([(low, 8.0), (high, 8.0)]), Some(low));
+    fn realtime_source_selection_uses_camera_contribution_not_spawn_order() {
+        let far = Entity::from_bits(1);
+        let near = Entity::from_bits(2);
+        let outside = Entity::from_bits(3);
+        assert_eq!(
+            strongest_camera_source(
+                Vec3::ZERO,
+                [
+                    (far, 10, Vec3::new(0.0, 0.0, 3.0), 4.0, 8.0),
+                    (near, 20, Vec3::new(0.0, 0.0, 1.0), 4.0, 8.0),
+                    (outside, 5, Vec3::new(0.0, 0.0, 5.0), 4.0, 100.0),
+                ],
+            ),
+            Some(near)
+        );
     }
 
     #[test]
-    fn non_finite_candidate_intensities_are_ignored() {
-        let entity = Entity::from_bits(7);
-        assert_eq!(strongest_candidate([(entity, f32::NAN)]), None);
+    fn realtime_source_selection_is_stable_for_equal_contribution() {
+        let low_form = Entity::from_bits(7);
+        let high_form = Entity::from_bits(8);
+        assert_eq!(
+            strongest_camera_source(
+                Vec3::ZERO,
+                [
+                    (high_form, 20, Vec3::Z, 4.0, 8.0),
+                    (low_form, 10, Vec3::Z, 4.0, 8.0),
+                ],
+            ),
+            Some(low_form)
+        );
+    }
+
+    #[test]
+    fn realtime_source_selection_falls_back_to_nearest_light_sphere() {
+        let near = Entity::from_bits(9);
+        let far = Entity::from_bits(10);
+        assert_eq!(
+            strongest_camera_source(
+                Vec3::ZERO,
+                [
+                    (far, 10, Vec3::new(0.0, 0.0, 12.0), 2.0, 100.0),
+                    (near, 20, Vec3::new(0.0, 0.0, 5.0), 3.0, 1.0),
+                ],
+            ),
+            Some(near)
+        );
     }
 }

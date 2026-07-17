@@ -19,4 +19,6 @@ pub(crate) use runtime::{LightEffectRuntime, advance_effect};
 pub(crate) use spatial::spatial_parameters;
 pub(crate) use types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
 pub(crate) use unity_random::UnityRandom;
-pub(crate) use volumetric::{pack_volumetric_parameters, volumetric_is_active};
+pub(crate) use volumetric::{
+    pack_volumetric_parameters, volumetric_bounding_radius, volumetric_is_active,
+};

@@ -12,7 +12,9 @@ use bevy::{
 use bytemuck::{Pod, Zeroable};
 
 use super::super::{
-    bevy_bridge::{DynamicLight, DynamicLightRuntime, DynamicLightShadowProxy},
+    bevy_bridge::{
+        DynamicLight, DynamicLightPreparedShadow, DynamicLightRuntime, DynamicLightShadowProxy,
+    },
     core::{
         DynamicLightType, DynamicLightVolumetricType, pack_volumetric_parameters, source_is_valid,
         spatial_parameters, volumetric_is_active,
@@ -68,11 +70,23 @@ impl Default for GpuDynamicShadow {
     }
 }
 
+impl From<DynamicLightPreparedShadow> for GpuDynamicShadow {
+    fn from(shadow: DynamicLightPreparedShadow) -> Self {
+        Self {
+            cubemap_index: shadow.cubemap_index,
+            depth_bias: shadow.depth_bias,
+            normal_bias: shadow.normal_bias,
+            near_z: shadow.near_z,
+        }
+    }
+}
+
 impl GpuDynamicLight {
     pub(super) fn from_main_world(
         light: &DynamicLight,
         runtime: &DynamicLightRuntime,
         transform: &GlobalTransform,
+        prepared_source: bool,
     ) -> Self {
         let config = light.config;
         let mut channel = (config.light_type as u32) << 6;
@@ -80,6 +94,9 @@ impl GpuDynamicLight {
             channel |= 32_768;
         } else {
             channel |= 32;
+        }
+        if prepared_source {
+            channel |= 16_384;
         }
 
         let [gp_float_1, gp_float_2, gp_float_3] = spatial_parameters(
@@ -208,6 +225,7 @@ pub(super) struct ExtractedDynamicLights {
 pub(super) struct ExtractedDynamicLight {
     pub(super) main_entity: bevy::prelude::Entity,
     pub(super) light: GpuDynamicLight,
+    pub(super) prepared_shadow: GpuDynamicShadow,
 }
 
 #[derive(Clone, Copy, Debug, Default, ShaderType)]
@@ -221,7 +239,8 @@ pub(super) struct GpuDynamicLightMeta {
 #[derive(Resource)]
 pub(super) struct DynamicLightGpuBuffers {
     pub(super) lights: RawBufferVec<GpuDynamicLight>,
-    pub(super) shadows: RawBufferVec<GpuDynamicShadow>,
+    pub(super) realtime_shadows: RawBufferVec<GpuDynamicShadow>,
+    pub(super) prepared_shadows: RawBufferVec<GpuDynamicShadow>,
     pub(super) meta: UniformBuffer<GpuDynamicLightMeta>,
     pub(super) volumetric_lights: RawBufferVec<GpuDynamicLight>,
     pub(super) volumetric_meta: UniformBuffer<GpuDynamicLightMeta>,
@@ -233,13 +252,16 @@ impl Default for DynamicLightGpuBuffers {
     fn default() -> Self {
         let mut lights = RawBufferVec::new(BufferUsages::STORAGE);
         lights.set_label(Some("dynamic_lighting_gpu_lights"));
-        let mut shadows = RawBufferVec::new(BufferUsages::STORAGE);
-        shadows.set_label(Some("dynamic_lighting_gpu_shadows"));
+        let mut realtime_shadows = RawBufferVec::new(BufferUsages::STORAGE);
+        realtime_shadows.set_label(Some("dynamic_lighting_gpu_realtime_shadows"));
+        let mut prepared_shadows = RawBufferVec::new(BufferUsages::STORAGE);
+        prepared_shadows.set_label(Some("dynamic_lighting_gpu_prepared_shadows"));
         let mut volumetric_lights = RawBufferVec::new(BufferUsages::STORAGE);
         volumetric_lights.set_label(Some("dynamic_lighting_gpu_volumetric_lights"));
         Self {
             lights,
-            shadows,
+            realtime_shadows,
+            prepared_shadows,
             meta: UniformBuffer::from(GpuDynamicLightMeta::default()),
             volumetric_lights,
             volumetric_meta: UniformBuffer::from(GpuDynamicLightMeta::default()),
@@ -258,7 +280,8 @@ pub(super) fn prepare_dynamic_light_buffers(
     render_queue: bevy::prelude::Res<RenderQueue>,
 ) {
     buffers.lights.clear();
-    buffers.shadows.clear();
+    buffers.realtime_shadows.clear();
+    buffers.prepared_shadows.clear();
     buffers.volumetric_lights.clear();
     let proxy_shadows = proxies
         .iter()
@@ -283,7 +306,10 @@ pub(super) fn prepare_dynamic_light_buffers(
             );
             light.shadow_cubemap_index = shadow.cubemap_index;
             buffers.lights.push(light);
-            buffers.shadows.push(shadow);
+            buffers.realtime_shadows.push(shadow);
+            buffers
+                .prepared_shadows
+                .push(extracted_light.prepared_shadow);
         }
         for light in &extracted.volumetric_values {
             buffers.volumetric_lights.push(*light);
@@ -300,14 +326,22 @@ pub(super) fn prepare_dynamic_light_buffers(
     if buffers.lights.is_empty() {
         buffers.lights.push(GpuDynamicLight::zeroed());
     }
-    if buffers.shadows.is_empty() {
-        buffers.shadows.push(GpuDynamicShadow::default());
+    if buffers.realtime_shadows.is_empty() {
+        buffers.realtime_shadows.push(GpuDynamicShadow::default());
+    }
+    if buffers.prepared_shadows.is_empty() {
+        buffers.prepared_shadows.push(GpuDynamicShadow::default());
     }
     if buffers.volumetric_lights.is_empty() {
         buffers.volumetric_lights.push(GpuDynamicLight::zeroed());
     }
     buffers.lights.write_buffer(&render_device, &render_queue);
-    buffers.shadows.write_buffer(&render_device, &render_queue);
+    buffers
+        .realtime_shadows
+        .write_buffer(&render_device, &render_queue);
+    buffers
+        .prepared_shadows
+        .write_buffer(&render_device, &render_queue);
     buffers
         .volumetric_lights
         .write_buffer(&render_device, &render_queue);
@@ -418,7 +452,7 @@ mod tests {
         let transform = GlobalTransform::from(
             Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.6)),
         );
-        let gpu = GpuDynamicLight::from_main_world(&light, &runtime, &transform);
+        let gpu = GpuDynamicLight::from_main_world(&light, &runtime, &transform, false);
 
         assert_eq!(gpu.position, [1.0, 2.0, 3.0]);
         assert_eq!(gpu.radius_sqr, 49.0);
@@ -452,8 +486,12 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let gpu =
-                GpuDynamicLight::from_main_world(&light, &runtime, &GlobalTransform::IDENTITY);
+            let gpu = GpuDynamicLight::from_main_world(
+                &light,
+                &runtime,
+                &GlobalTransform::IDENTITY,
+                false,
+            );
             let expected = spatial_parameters(light_type, 0.625, spatial);
             assert_eq!(
                 [gpu.gp_float_1, gpu.gp_float_2, gpu.gp_float_3],
@@ -483,6 +521,7 @@ mod tests {
                 &light,
                 &DynamicLightRuntime::default(),
                 &transform,
+                false,
             );
             let expected = match light_type {
                 DynamicLightType::Discoball
@@ -514,6 +553,7 @@ mod tests {
                     &light,
                     &DynamicLightRuntime::default(),
                     &GlobalTransform::IDENTITY,
+                    false,
                 );
                 assert_eq!(gpu.radius_sqr, -1.0, "{light_type:?} {inner}/{outer}");
             }

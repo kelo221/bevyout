@@ -290,6 +290,7 @@ pub(crate) fn apply_lighting_scale(
     disabled: Res<LightsDisabled>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut points: Query<&mut PointLight>,
+    mut dynamic_points: Query<(&DynamicLightPreparedSource, &mut DynamicLight)>,
     mut directionals: Query<(&CellDirectionalLight, &mut DirectionalLight)>,
 ) {
     if !lighting.is_changed() && !ambient_scale.is_changed() && !disabled.is_changed() {
@@ -305,6 +306,14 @@ pub(crate) fn apply_lighting_scale(
             0.0
         } else {
             light.range * light.range * 2.0 * lighting.0
+        };
+    }
+    for (_, mut light) in &mut dynamic_points {
+        light.config.intensity = if disabled.0 {
+            0.0
+        } else {
+            light.config.radius * light.config.radius * 2.0 * lighting.0
+                / (4.0 * std::f32::consts::PI)
         };
     }
     for (cell_light, mut light) in &mut directionals {
