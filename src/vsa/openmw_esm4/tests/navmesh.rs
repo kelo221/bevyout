@@ -137,15 +137,32 @@ fn null_door_and_external_form_ids_decode_as_none() {
     assert_eq!(navmesh.external_connections[0].triangle, 7);
 }
 
-#[test]
-fn parses_navi_entries_with_undocumented_tail_retained() {
-    let resolver = direct_resolver();
+/// Builds one `NVMI` entry's 16-byte header (issue #111 layout, unchanged by
+/// #113).
+fn nvmi_header(navmesh: u32, location: u32, grid_x: i16, grid_y: i16) -> Vec<u8> {
     let mut nvmi = vec![9, 9, 9, 9];
-    nvmi.extend_from_slice(&0x500_u32.to_le_bytes());
-    nvmi.extend_from_slice(&0xc00_u32.to_le_bytes());
-    nvmi.extend_from_slice(&3_i16.to_le_bytes());
-    nvmi.extend_from_slice(&(-4_i16).to_le_bytes());
-    nvmi.extend_from_slice(&[1, 2, 3]); // undocumented uint8[] tail
+    nvmi.extend_from_slice(&navmesh.to_le_bytes());
+    nvmi.extend_from_slice(&location.to_le_bytes());
+    nvmi.extend_from_slice(&grid_x.to_le_bytes());
+    nvmi.extend_from_slice(&grid_y.to_le_bytes());
+    nvmi
+}
+
+fn push_f32_3(data: &mut Vec<u8>, value: [f32; 3]) {
+    for component in value {
+        data.extend_from_slice(&component.to_le_bytes());
+    }
+}
+
+#[test]
+fn parses_navi_header_fields_and_short_tail_with_no_island() {
+    // Real-data shape (issue #113): center point + a bare 4-byte trailing
+    // field, no bounds/island block -- e.g. FranklinMetro02's `0005429f`
+    // entry (real tail length 16).
+    let resolver = direct_resolver();
+    let mut nvmi = nvmi_header(0x500, 0xc00, 3, -4);
+    push_f32_3(&mut nvmi, [1.0, 2.0, 3.0]);
+    nvmi.extend_from_slice(&[0, 0, 0, 0]);
     let subs = vec![
         direct_subrecord("NVER", 12_u32.to_le_bytes().to_vec()),
         direct_subrecord("NVMI", nvmi),
@@ -160,7 +177,139 @@ fn parses_navi_entries_with_undocumented_tail_retained() {
     assert_eq!(entry.location_form_id, Some(0xc00));
     assert_eq!(entry.grid_x, 3);
     assert_eq!(entry.grid_y, -4);
-    assert_eq!(entry.tail, vec![1, 2, 3]);
+    assert_eq!(entry.center, Some([1.0, 2.0, 3.0]));
+    assert_eq!(entry.bounds, None);
+    assert!(entry.island.is_none());
+    assert_eq!(entry.trailing, [0, 0, 0, 0]);
+    assert!(entry.tail.is_empty());
+}
+
+#[test]
+fn parses_navi_tail_bounds_with_an_empty_island() {
+    // Real-data shape: center + bounds + zero vertex/triangle counts --
+    // e.g. the Capital Wasteland exterior grid entries sampled for issue
+    // #113 (real tail length 44).
+    let resolver = direct_resolver();
+    let mut nvmi = nvmi_header(0x510, 0x3c, 5, -6);
+    push_f32_3(&mut nvmi, [10.0, 20.0, 30.0]);
+    push_f32_3(&mut nvmi, [0.0, 0.0, 0.0]); // bounds min
+    push_f32_3(&mut nvmi, [1.0, 1.0, 1.0]); // bounds max
+    nvmi.extend_from_slice(&0_u16.to_le_bytes()); // vertex_count
+    nvmi.extend_from_slice(&0_u16.to_le_bytes()); // triangle_count
+    nvmi.extend_from_slice(&[0, 0, 0, 0]); // trailing
+    let subs = vec![direct_subrecord("NVMI", nvmi)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let entry = &navi.entries[0];
+    assert_eq!(
+        entry.bounds,
+        Some(NaviBounds {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        })
+    );
+    assert_eq!(
+        entry.island,
+        Some(NaviIsland {
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+        })
+    );
+    assert!(entry.tail.is_empty());
+}
+
+#[test]
+fn parses_navi_tail_island_vertices_and_triangles() {
+    // Real-data shape: center + bounds + a nonzero local vertex/triangle
+    // sub-mesh -- e.g. FranklinMetro02's `0005429e` entry (real tail length
+    // 284, 14 vertices/12 triangles). This fixture uses a small 3-vertex/
+    // 1-triangle island to keep the byte math legible.
+    let resolver = direct_resolver();
+    let mut nvmi = nvmi_header(0x520, 0x1a273, 0, 0);
+    push_f32_3(&mut nvmi, [5.0, 6.0, 7.0]); // center
+    push_f32_3(&mut nvmi, [0.0, 0.0, 0.0]); // bounds min
+    push_f32_3(&mut nvmi, [9.0, 9.0, 9.0]); // bounds max
+    nvmi.extend_from_slice(&3_u16.to_le_bytes()); // vertex_count
+    nvmi.extend_from_slice(&1_u16.to_le_bytes()); // triangle_count
+    push_f32_3(&mut nvmi, [0.0, 0.0, 0.0]);
+    push_f32_3(&mut nvmi, [1.0, 0.0, 0.0]);
+    push_f32_3(&mut nvmi, [0.0, 1.0, 0.0]);
+    for index in [0_u16, 1, 2] {
+        nvmi.extend_from_slice(&index.to_le_bytes());
+    }
+    nvmi.extend_from_slice(&[7, 0, 0, 0]); // trailing (non-zero to prove it's retained raw)
+    let subs = vec![direct_subrecord("NVMI", nvmi)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let entry = &navi.entries[0];
+    assert_eq!(
+        entry.island,
+        Some(NaviIsland {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            triangles: vec![[0, 1, 2]],
+        })
+    );
+    assert_eq!(entry.trailing, [7, 0, 0, 0]);
+    assert!(entry.tail.is_empty());
+}
+
+#[test]
+fn navi_tail_truncation_is_diagnosed_never_panics_and_retains_the_remainder() {
+    let resolver = direct_resolver();
+
+    // Fewer than 12 bytes: can't even hold the center point.
+    let mut short_center = nvmi_header(0x1, 0x2, 0, 0);
+    short_center.extend_from_slice(&[1, 2, 3]);
+    // Between a bare trailing field and a full island block (neither 0, 4,
+    // nor >= 28 bytes remain after the center point).
+    let mut partial_island = nvmi_header(0x3, 0x4, 0, 0);
+    push_f32_3(&mut partial_island, [0.0, 0.0, 0.0]);
+    partial_island.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    // Declares more vertices than the remaining bytes can hold.
+    let mut truncated_island = nvmi_header(0x5, 0x6, 0, 0);
+    push_f32_3(&mut truncated_island, [0.0, 0.0, 0.0]);
+    push_f32_3(&mut truncated_island, [0.0, 0.0, 0.0]);
+    push_f32_3(&mut truncated_island, [0.0, 0.0, 0.0]);
+    truncated_island.extend_from_slice(&5_u16.to_le_bytes()); // declares 5 vertices
+    truncated_island.extend_from_slice(&0_u16.to_le_bytes());
+    push_f32_3(&mut truncated_island, [1.0, 1.0, 1.0]); // only 1 actually present
+
+    let subs = vec![
+        direct_subrecord("NVMI", short_center),
+        direct_subrecord("NVMI", partial_island),
+        direct_subrecord("NVMI", truncated_island),
+    ];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert_eq!(navi.entries.len(), 3, "malformed tails never drop the entry");
+
+    assert_eq!(navi.entries[0].center, None);
+    assert_eq!(navi.entries[0].tail, vec![1, 2, 3]);
+
+    assert_eq!(navi.entries[1].center, Some([0.0, 0.0, 0.0]));
+    assert_eq!(navi.entries[1].bounds, None);
+    assert_eq!(navi.entries[1].tail, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+    assert_eq!(navi.entries[2].center, Some([0.0, 0.0, 0.0]));
+    assert!(navi.entries[2].bounds.is_some());
+    assert!(navi.entries[2].island.is_none());
+    assert_eq!(navi.entries[2].tail.len(), 12);
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("NVMI 0:")
+                && message.contains("too short for the 12-byte center point"))
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message.contains("NVMI 1:")
+                && message.contains("do not form a complete island block"))
+    );
+    assert!(
+        diagnostics.iter().any(|message| message.contains("NVMI 2:")
+            && message.contains("declares 5 vertex(es)/0 triangle(s) needing 60 byte(s)"))
+    );
 }
 
 #[test]

@@ -178,6 +178,29 @@ components/esm4/actor.hpp 0c0b76f589e3818356e3eaa98cd79f79fbb55f4dfd3a9212c39264
   cell's actual NAVM and CELL records), which is the FO3-wins tie-break this
   wave's brief calls for. The raw NAVM record payload continues to be
   catalogued and retained alongside the decode.
+- `NVMI`'s trailing "Unknown uint8[]" field (`decode_navi_tail`, issue #113,
+  M4 wave 4) is decoded from scratch, not adapted from either source: fopdoc
+  gives this field no layout at all, and OpenMW's `loadnavi.cpp`
+  unconditionally skips `NVMI` decode for FO3/FNV (`isFONV` in its version
+  gate), so there is no reference implementation for FO3's actual tail
+  shape -- OpenMW's own TES4/TES5 `NavMeshInfo` struct (`formIdMerged`/
+  `formIdPrefMerged`/`linkedDoors` FormID arrays) was consulted as a naming
+  hypothesis per this wave's brief but does **not** match real FO3 bytes:
+  an exhaustive byte-level search across two FranklinMetro02 (`0001a273`)
+  `NVMI` entries found zero occurrences of that cell's own door reference or
+  NAVM FormIDs anywhere in either tail. The layout actually shipped (a
+  center point, then an optional bounding box + local vertex/triangle
+  "island" sub-mesh, then a fixed trailing field) was reverse-engineered and
+  confirmed against real bytes from multiple cells: it reproduces every
+  sampled tail's exact byte length with zero leftover, every decoded
+  triangle index stays inside its own vertex array, and every decoded
+  bounding box has `min <= max` on all three axes. See `decode_navi_tail`'s
+  doc comment in `navmesh.rs` for the specific samples. Because this data
+  does not provide FormID-based cross-NAVM connectivity, `#113`'s cross-mesh
+  routing (`vsa::prepare::nav_graph`, `viewer::nav::landmass_graph`) derives
+  same-cell mesh-to-mesh connections from navmesh boundary-edge geometry
+  instead (spatial proximity of unconnected triangle edges across meshes in
+  the same prepared cell), not from `NVMI`.
 - Sound, sound-descriptor, acoustic-space, music, lighting-template, activator,
   terminal, and tactical-activator fields were ported as owned metadata for
   the audio/world-state milestone. Their source files are listed above; the
