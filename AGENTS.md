@@ -81,7 +81,9 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   depth array once with a GPU render pass. This upload pass must not enqueue
   scene meshes or become a per-frame shadow pass.
 - The viewer may enable exactly one camera-relevant startup-cell point light's
-  native runtime shadow cubemap. The combined prepared scene is marked
+  native runtime shadow cubemap with the explicit `--realtime-shadows` viewer
+  or render opt-in; it is disabled by default for performance. The console can
+  toggle it at runtime with `setrender realtime_shadows 0|1`. The combined prepared scene is marked
   `NotShadowCaster`, while individually spawned dynamic/interactive meshes
   remain runtime casters and prepared receivers.
 - Forward shading performs at most two cubemap lookups for one dominant point

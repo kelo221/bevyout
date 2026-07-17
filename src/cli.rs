@@ -158,6 +158,9 @@ pub struct ViewArgs {
     /// Skip BoxDDD collider construction for render-only performance testing.
     #[arg(long)]
     pub(crate) disable_physics: bool,
+    /// Enable the bounded native realtime point-shadow pass at startup.
+    #[arg(long)]
+    pub(crate) realtime_shadows: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
@@ -198,6 +201,9 @@ pub struct RenderArgs {
     /// Rebuild prepared point-shadow cubemaps if render refreshes the cell.
     #[arg(long)]
     pub(crate) rebuild_shadows: bool,
+    /// Enable the bounded native realtime point-shadow pass at startup.
+    #[arg(long)]
+    pub(crate) realtime_shadows: bool,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,

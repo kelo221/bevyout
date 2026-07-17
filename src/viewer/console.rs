@@ -27,7 +27,7 @@ use super::controls::{
 use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
-use super::lighting::shadow_cache_status;
+use super::lighting::{RealtimeShadowSettings, shadow_cache_status};
 use super::{diagnostics, interaction, nav, nav_overlay, player};
 
 #[derive(Component)]
@@ -61,6 +61,7 @@ impl Default for DiagnosticUiState {
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<GameUiState>()
         .init_resource::<DiagnosticUiState>()
+        .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
         .add_systems(
             Update,
@@ -1325,7 +1326,7 @@ fn sync_ui_visibility(
     }
 }
 
-const RENDER_SETTINGS: [&str; 9] = [
+const RENDER_SETTINGS: [&str; 10] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -1335,6 +1336,7 @@ const RENDER_SETTINGS: [&str; 9] = [
     "fog",
     "ao",
     "shadow_samples",
+    "realtime_shadows",
 ];
 
 const TONEMAPPER_NAMES: [&str; 9] = [
@@ -1501,6 +1503,10 @@ fn render_values(world: &mut World) -> Result<Map<String, Value>, ConsoleError> 
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
     );
+    values.insert(
+        "realtime_shadows".into(),
+        json!(world.resource::<RealtimeShadowSettings>().enabled as u8),
+    );
     Ok(values)
 }
 
@@ -1526,6 +1532,7 @@ fn render_setting_label(setting: &str) -> &'static str {
         "fog" => "Fog",
         "ao" => "Ambient occlusion",
         "shadow_samples" => "Point-shadow samples per pixel",
+        "realtime_shadows" => "Realtime point shadows",
         _ => "Render setting",
     }
 }
@@ -1590,6 +1597,7 @@ fn set_render(
         "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
+        "realtime_shadows" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
     if !valid {
@@ -1606,6 +1614,9 @@ fn set_render(
         "fog" => world.resource_mut::<FogStrength>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
+        "realtime_shadows" => {
+            world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
+        }
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
             let camera = {
                 let mut query = world.query_filtered::<Entity, (With<Camera3d>, With<Bloom>)>();
@@ -1951,6 +1962,15 @@ mod tests {
         assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 0);
         assert!(exec(&mut app, "setrender shadow_samples 1").ok);
         assert_eq!(app.world().resource::<PointLightShadowSamples>().0, 1);
+        assert!(!app.world().resource::<RealtimeShadowSettings>().enabled);
+        assert!(exec(&mut app, "setrender realtime_shadows 1").ok);
+        assert!(app.world().resource::<RealtimeShadowSettings>().enabled);
+        assert!(exec(&mut app, "setrender realtime_shadows 0").ok);
+        assert!(!app.world().resource::<RealtimeShadowSettings>().enabled);
+        assert_eq!(
+            exec(&mut app, "getrender realtime_shadows").value["value"],
+            0
+        );
         assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
         let before = app.world().resource::<LightingScale>().0;
         assert_eq!(
@@ -1981,7 +2001,7 @@ mod tests {
         );
         assert_eq!(
             exec(&mut app, "getrender").value.as_object().unwrap().len(),
-            9
+            10
         );
     }
 

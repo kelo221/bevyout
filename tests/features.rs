@@ -562,7 +562,6 @@ struct BevyoutWorld {
     nav_backend_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
     nav_backend_second_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
     nav_backend_door_link_state: door_link::DoorLinkState,
-
 }
 
 fn find_placement<'a>(
@@ -4396,7 +4395,6 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
     );
 }
 
-
 // ---------------------------------------------------------------------
 // hybrid_lighting.feature -- appended section, do not interleave.
 // ---------------------------------------------------------------------
@@ -4425,6 +4423,7 @@ async fn then_hybrid_visibility(world: &mut BevyoutWorld, expected: f32) {
         .hybrid_combined_visibility
         .expect("hybrid visibility was not evaluated");
     assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+}
 
 // actor_catalog.feature (issue #103, M4 wave 1 task C) -- appended section,
 // do not interleave.

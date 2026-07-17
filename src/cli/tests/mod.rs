@@ -89,6 +89,33 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         panic!("expected render command");
     };
     assert_eq!(args.selector, "SuperDuperMart");
+    assert!(!args.realtime_shadows);
+
+    let cli =
+        Cli::try_parse_from(["bevyout", "render", "SuperDuperMart", "--realtime-shadows"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert!(args.realtime_shadows);
+
+    let cli = Cli::try_parse_from(["bevyout", "view", "--manifest", "scene.ron"]).unwrap();
+    let CommandLine::View(args) = cli.command else {
+        panic!("expected view command");
+    };
+    assert!(!args.realtime_shadows);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "view",
+        "--manifest",
+        "scene.ron",
+        "--realtime-shadows",
+    ])
+    .unwrap();
+    let CommandLine::View(args) = cli.command else {
+        panic!("expected view command");
+    };
+    assert!(args.realtime_shadows);
 
     let cli = Cli::try_parse_from(["bevyout", "prepare", "--cell", "00017f37"]).unwrap();
     let CommandLine::Prepare(args) = cli.command else {

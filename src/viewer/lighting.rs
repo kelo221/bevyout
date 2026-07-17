@@ -15,6 +15,13 @@ pub(crate) struct RealtimeShadowCandidate {
 #[derive(Resource, Debug, Default)]
 pub(crate) struct RealtimeShadowLight(pub(crate) Option<Entity>);
 
+/// Runtime opt-in for the native point-shadow pass. Prepared point shadows
+/// remain available regardless of this setting.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct RealtimeShadowSettings {
+    pub(crate) enabled: bool,
+}
+
 fn strongest_camera_candidate<I>(camera: Vec3, candidates: I) -> Option<Entity>
 where
     I: IntoIterator<Item = (Entity, u32, Vec3, f32, f32)>,
@@ -68,6 +75,7 @@ where
 /// policy is expanded to follow cell activation.
 pub(crate) fn apply_realtime_shadow_light(
     camera: Single<&GlobalTransform, With<Camera3d>>,
+    settings: Res<RealtimeShadowSettings>,
     mut selected: ResMut<RealtimeShadowLight>,
     mut lights: Query<
         (
@@ -79,6 +87,14 @@ pub(crate) fn apply_realtime_shadow_light(
         With<RealtimeShadowCandidate>,
     >,
 ) {
+    if !settings.enabled {
+        selected.0 = None;
+        for (_, _, _, mut light) in &mut lights {
+            light.shadow_maps_enabled = false;
+        }
+        return;
+    }
+
     let strongest = strongest_camera_candidate(
         camera.translation(),
         lights.iter().map(|(entity, candidate, transform, light)| {
@@ -135,7 +151,15 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
     let runtime_shadow_passes = world
         .get_resource::<RealtimeShadowLight>()
         .and_then(|selected| selected.0)
+        .filter(|_| {
+            world
+                .get_resource::<RealtimeShadowSettings>()
+                .is_none_or(|settings| settings.enabled)
+        })
         .map_or(0, |_| 1);
+    let realtime_shadows_enabled = world
+        .get_resource::<RealtimeShadowSettings>()
+        .is_some_and(|settings| settings.enabled);
     let estimated_bytes = u64::from(runtime.resolution)
         .saturating_mul(u64::from(runtime.resolution))
         .saturating_mul(u64::from(runtime.layers))
@@ -158,6 +182,7 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
         "attached_lights": attached_now.max(runtime.attached_lights),
         "estimated_memory_bytes": estimated_bytes,
         "shadow_samples_per_pixel": samples,
+        "realtime_shadows_enabled": realtime_shadows_enabled,
         "runtime_shadow_passes": runtime_shadow_passes,
     })
 }
@@ -177,8 +202,41 @@ mod tests {
         world.insert_resource(PointLightShadowSamples(1));
 
         let status = shadow_cache_status(&mut world);
+        assert_eq!(status["realtime_shadows_enabled"], false);
         assert_eq!(status["estimated_memory_bytes"], 17_301_504_u64);
         assert_eq!(status["runtime_shadow_passes"], 0);
+    }
+
+    #[test]
+    fn disabled_realtime_shadows_turn_off_every_candidate() {
+        let mut app = App::new();
+        app.insert_resource(RealtimeShadowSettings::default())
+            .insert_resource(RealtimeShadowLight::default())
+            .add_systems(Update, apply_realtime_shadow_light);
+        app.world_mut()
+            .spawn((Camera3d::default(), GlobalTransform::default()));
+        let light = app
+            .world_mut()
+            .spawn((
+                RealtimeShadowCandidate {
+                    reference_form_id: 1,
+                },
+                PointLight {
+                    shadow_maps_enabled: true,
+                    ..default()
+                },
+                GlobalTransform::default(),
+            ))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<PointLight>(light)
+                .is_some_and(|light| { !light.shadow_maps_enabled })
+        );
+        assert_eq!(app.world().resource::<RealtimeShadowLight>().0, None);
     }
 
     #[test]

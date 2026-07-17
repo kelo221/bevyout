@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn run_view(
     manifest_path: PathBuf,
     disable_physics: bool,
+    realtime_shadows: bool,
     trace_seconds: Option<f32>,
     agent_port: Option<u16>,
     save_slot: Option<String>,
@@ -286,6 +287,9 @@ pub(crate) fn run_view(
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
         .insert_resource(RealtimeShadowLight::default())
+        .insert_resource(RealtimeShadowSettings {
+            enabled: realtime_shadows,
+        })
         .insert_resource(PointLightShadowSamples::default())
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state

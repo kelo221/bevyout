@@ -91,6 +91,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
     run_view(
         args.manifest,
         args.disable_physics,
+        args.realtime_shadows,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
         args.save_slot,
@@ -186,6 +187,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
     run_view(
         manifest_path,
         args.disable_physics,
+        args.realtime_shadows,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
         None,
