@@ -41,9 +41,21 @@ pub(crate) fn release_stuck_keys_on_focus_change(
     mut window_focused: MessageReader<WindowFocused>,
     mut focus_lost: MessageReader<KeyboardFocusLost>,
 ) {
-    let window_focus_changed = window_focused.read().next().is_some();
-    let keyboard_focus_lost = focus_lost.read().next().is_some();
-    if window_focus_changed || keyboard_focus_lost {
+    let mut window_focus_changed = 0usize;
+    for event in window_focused.read() {
+        window_focus_changed += 1;
+        info!(
+            "focus event focused={} window={:?}",
+            event.focused, event.window
+        );
+    }
+    let keyboard_focus_lost = focus_lost.read().count();
+    if window_focus_changed > 0 || keyboard_focus_lost > 0 {
+        let released_keys = key_input.get_pressed().count();
+        info!(
+            "focus release window_focused={window_focus_changed} \
+             keyboard_focus_lost={keyboard_focus_lost} released_keys={released_keys}"
+        );
         key_input.release_all();
         key_code_input.release_all();
     }
