@@ -159,6 +159,10 @@ mod dynamic_lighting_core {
     #[allow(dead_code, unused_imports)]
     pub(crate) mod runtime;
 
+    #[path = "../../src/vsa/dynamic_lighting/core/volumetric.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod volumetric;
+
     #[path = "../../src/vsa/dynamic_lighting/core/types.rs"]
     #[allow(dead_code, unused_imports)]
     pub(crate) mod types;
@@ -171,10 +175,11 @@ mod dynamic_lighting_core {
     #[allow(dead_code, unused_imports)]
     pub(crate) mod unity_random;
 
-    pub(crate) use config::DynamicLightConfig;
+    pub(crate) use config::{DynamicLightConfig, DynamicLightVolumetricParameters};
     pub(crate) use runtime::{LightEffectRuntime, advance_effect};
-    pub(crate) use types::{DynamicLightEffect, DynamicLightType};
+    pub(crate) use types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
     pub(crate) use unity_random::UnityRandom;
+    pub(crate) use volumetric::{pack_volumetric_parameters, volumetric_is_active};
 }
 
 // `interaction::container_policy` (issue #75) is dependency-free too (std
@@ -418,6 +423,8 @@ struct BevyoutWorld {
     dynamic_light_multiplier: Option<f32>,
     dynamic_light_effects_finite: Option<bool>,
     dynamic_light_catalogs_valid: Option<bool>,
+    dynamic_light_volumetric_inactive: Option<bool>,
+    dynamic_light_volumetric_intensity: Option<f32>,
 
     // -- loading_fallback.feature (issue #59) --
     fallback_state: Option<swap_policy::FallbackState>,
@@ -2996,6 +3003,27 @@ async fn then_dynamic_light_defaults(
     );
 }
 
+#[then(
+    regex = r"^its volumetric type is None radius is ([\d.]+) thickness is ([\d.]+) intensity is ([\d.]+) and visibility is ([\d.]+)$"
+)]
+async fn then_dynamic_light_volumetric_defaults(
+    world: &mut BevyoutWorld,
+    radius: f32,
+    thickness: f32,
+    intensity: f32,
+    visibility: f32,
+) {
+    let volumetric = world.dynamic_light_config.volumetric;
+    assert_eq!(
+        volumetric.volumetric_type,
+        dynamic_lighting_core::DynamicLightVolumetricType::None
+    );
+    assert_eq!(volumetric.radius, radius);
+    assert_eq!(volumetric.thickness, thickness);
+    assert_eq!(volumetric.intensity, intensity);
+    assert_eq!(volumetric.visibility, visibility);
+}
+
 #[given("the imported DynamicLighting catalogs")]
 async fn given_dynamic_lighting_catalogs(world: &mut BevyoutWorld) {
     world.dynamic_light_catalogs_valid = Some(
@@ -3006,7 +3034,11 @@ async fn given_dynamic_lighting_catalogs(world: &mut BevyoutWorld) {
             && dynamic_lighting_core::DynamicLightType::ALL
                 .into_iter()
                 .map(|light_type| light_type as u32)
-                .eq(0..8),
+                .eq(0..8)
+            && dynamic_lighting_core::DynamicLightVolumetricType::ALL
+                .into_iter()
+                .map(|volumetric_type| volumetric_type as u32)
+                .eq(0..5),
     );
 }
 
@@ -3077,6 +3109,39 @@ async fn when_effects_advance(world: &mut BevyoutWorld) {
 #[then("every dynamic light effect returns a finite multiplier")]
 async fn then_every_dynamic_light_effect_finite(world: &mut BevyoutWorld) {
     assert_eq!(world.dynamic_light_effects_finite, Some(true));
+}
+
+#[when("volumetric type None zero radius and zero intensity are checked")]
+async fn when_inactive_volumetric_sources_are_checked(world: &mut BevyoutWorld) {
+    let none = world.dynamic_light_config.volumetric;
+    let mut zero_radius = none;
+    zero_radius.volumetric_type = dynamic_lighting_core::DynamicLightVolumetricType::Sphere;
+    zero_radius.radius = 0.0;
+    let mut zero_intensity = zero_radius;
+    zero_intensity.radius = 4.0;
+    zero_intensity.intensity = 0.0;
+    world.dynamic_light_volumetric_inactive = Some(
+        !dynamic_lighting_core::volumetric_is_active(none, 1.0)
+            && !dynamic_lighting_core::volumetric_is_active(zero_radius, 1.0)
+            && !dynamic_lighting_core::volumetric_is_active(zero_intensity, 1.0),
+    );
+}
+
+#[then("every inactive volumetric source is excluded")]
+async fn then_inactive_volumetric_sources_are_excluded(world: &mut BevyoutWorld) {
+    assert_eq!(world.dynamic_light_volumetric_inactive, Some(true));
+}
+
+#[then(regex = r"^the volumetric intensity is ([\d.]+)$")]
+async fn then_dynamic_light_volumetric_intensity(world: &mut BevyoutWorld, expected: f32) {
+    let packed = dynamic_lighting_core::pack_volumetric_parameters(
+        world.dynamic_light_config.volumetric,
+        world.dynamic_light_runtime.intensity,
+        [1.0; 3],
+        world.dynamic_light_config.spatial.outer_cutoff_degrees,
+    );
+    world.dynamic_light_volumetric_intensity = Some(packed.intensity);
+    assert_eq!(world.dynamic_light_volumetric_intensity, Some(expected));
 }
 
 // ---------------------------------------------------------------------

@@ -22,9 +22,9 @@ use super::lighting_demo_policy::DemoOrbit;
 use crate::cli::LightingTestArgs;
 use crate::vsa::{
     DynamicLight, DynamicLightEffect, DynamicLightShadowProxy, DynamicLightType,
-    DynamicLightingDiagnostics, DynamicLightingPlugin, DynamicLightingSettings,
-    DynamicLightingView, STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight,
-    bake_static_point_shadow_bytes,
+    DynamicLightVolumetricParameters, DynamicLightVolumetricType, DynamicLightingDiagnostics,
+    DynamicLightingPlugin, DynamicLightingSettings, DynamicLightingView,
+    STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight, bake_static_point_shadow_bytes,
 };
 
 const STATIC_PILLAR_CENTER: [f32; 3] = [-2.0, 1.25, 0.0];
@@ -249,7 +249,14 @@ fn setup_lighting_test(
             DynamicLight::strobe(strobe_intensity)
                 .with_color(strobe_color)
                 .with_radius(2.4)
-                .with_shadows(true),
+                .with_shadows(true)
+                .with_volumetric(DynamicLightVolumetricParameters {
+                    volumetric_type: DynamicLightVolumetricType::Sphere,
+                    radius: 2.2,
+                    thickness: 2.0,
+                    intensity: 0.55,
+                    visibility: 2.0,
+                }),
             strobe_transform,
             GlobalTransform::default(),
         ))
@@ -354,6 +361,45 @@ fn setup_lighting_test(
         ));
     }
 
+    let volume_only = |volumetric_type, radius, thickness, intensity, visibility| {
+        DynamicLight::with_effect(0.0, DynamicLightEffect::Steady).with_volumetric(
+            DynamicLightVolumetricParameters {
+                volumetric_type,
+                radius,
+                thickness,
+                intensity,
+                visibility,
+            },
+        )
+    };
+    commands.spawn((
+        Name::new("DynamicLighting cyan scaled box fog"),
+        volume_only(DynamicLightVolumetricType::Box, 2.1, 2.8, 0.45, 2.5)
+            .with_color(Color::srgb(0.08, 0.75, 0.92)),
+        Transform::from_xyz(0.0, 1.0, 0.0).with_scale(Vec3::new(1.7, 0.55, 0.9)),
+        GlobalTransform::default(),
+    ));
+
+    let cone_z_position = Vec3::new(-6.0, 0.45, 5.5);
+    commands.spawn((
+        Name::new("DynamicLighting amber ConeZ fog"),
+        volume_only(DynamicLightVolumetricType::ConeZ, 6.5, 2.2, 0.52, 3.0)
+            .with_color(Color::srgb(1.0, 0.42, 0.08)),
+        Transform::from_translation(cone_z_position).looking_at(Vec3::new(-2.0, 2.0, 1.0), Vec3::Y),
+        GlobalTransform::default(),
+    ));
+
+    let cone_y_position = Vec3::new(5.5, 0.35, 5.0);
+    let cone_y_direction = (Vec3::new(2.0, 3.0, 0.0) - cone_y_position).normalize();
+    commands.spawn((
+        Name::new("DynamicLighting green ConeY fog"),
+        volume_only(DynamicLightVolumetricType::ConeY, 6.0, 2.2, 0.50, 3.0)
+            .with_color(Color::srgb(0.12, 1.0, 0.32)),
+        Transform::from_translation(cone_y_position)
+            .with_rotation(Quat::from_rotation_arc(Vec3::Y, cone_y_direction)),
+        GlobalTransform::default(),
+    ));
+
     commands.spawn((
         Name::new("Lighting test camera"),
         Camera3d::default(),
@@ -377,8 +423,9 @@ fn setup_lighting_test(
             "Purple point: isolated DynamicLighting Strobe effect\n",
             "Near grid: all 15 temporal effects on isolated receivers\n",
             "Far grid: Point, Spot, Discoball, Wave / Interference, Rotor, Shock, Disco\n",
+            "Fog: strobing Sphere, scaled Box, rotated ConeZ and ConeY\n",
             "1: toggle baked static shadow | 2: toggle realtime shadow\n",
-            "3: custom pass | 4: Bevy lights | 5: shadow proxy | F: freeze | Space: motion"
+            "3: custom pass | 4: Bevy lights | 5: shadow proxy | 6: fog | F: freeze | Space: motion"
         )),
         TextFont {
             font_size: FontSize::Px(20.0),
@@ -458,6 +505,17 @@ fn toggle_dynamic_lighting(
             }
         );
     }
+    if keyboard.just_pressed(KeyCode::Digit6) {
+        settings.volumetric_enabled = !settings.volumetric_enabled;
+        info!(
+            "lighting test: DynamicLighting volumetric fog {}",
+            if settings.volumetric_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
 }
 
 fn update_dynamic_lighting_status(
@@ -476,7 +534,7 @@ fn update_dynamic_lighting_status(
         .filter(|visibility| **visibility != Visibility::Hidden)
         .count();
     text.0 = format!(
-        "Custom extracted {} | pass {} | effects {}\nBevy lights {} | shadow proxies {}",
+        "Custom extracted {} | pass {} | effects {} | fog {} | volumes {}\nBevy lights {} | shadow proxies {}",
         diagnostics.extracted_light_count(),
         if settings.enabled { "ON" } else { "OFF" },
         if settings.freeze_effect_time {
@@ -484,6 +542,12 @@ fn update_dynamic_lighting_status(
         } else {
             "RUNNING"
         },
+        if settings.volumetric_enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
+        diagnostics.extracted_volumetric_light_count(),
         visible_bevy_lights,
         visible_proxies,
     );

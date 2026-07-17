@@ -57,6 +57,11 @@ namespace AlpacaIT.DynamicLighting
             public float timestepSeconds = 1.0f / 30.0f;
             public float bounceModifier = 1.0f;
             public float bounceIntensity = 1.0f;
+            public int volumetricType = 0;
+            public float volumetricRadius = 4.0f;
+            public float volumetricThickness = 1.0f;
+            public float volumetricIntensity = 0.75f;
+            public float volumetricVisibility = 2.0f;
         }
 
         [Serializable]
@@ -110,6 +115,34 @@ namespace AlpacaIT.DynamicLighting
             public string upstreamCommit;
             public string unityVersion;
             public List<SpatialSample> samples = new List<SpatialSample>();
+        }
+
+        [Serializable]
+        private sealed class VolumetricSample
+        {
+            public string type;
+            public int discriminant;
+            public float[] camera;
+            public float[] world;
+            public float[] center;
+            public float[] direction;
+            public float[] scale;
+            public float radius;
+            public float thickness;
+            public float intensity;
+            public float visibility;
+            public float temporalMultiplier;
+            public float coneAngle;
+            public float opacity;
+            public float[] outputRgb;
+        }
+
+        [Serializable]
+        private sealed class VolumetricFixture
+        {
+            public string upstreamCommit;
+            public string unityVersion;
+            public List<VolumetricSample> samples = new List<VolumetricSample>();
         }
 
         private const string UpstreamCommit = "dd7c195cba2599a20bf1b662fa0f69366e0f74b5";
@@ -169,6 +202,9 @@ namespace AlpacaIT.DynamicLighting
                 Path.Combine(outputDirectory, "unity_multilight_random_v1.json"),
                 CaptureMultiLightRandom());
             WriteJson(Path.Combine(outputDirectory, "unity_spatial_v1.json"), CaptureSpatial());
+            WriteJson(
+                Path.Combine(outputDirectory, "unity_volumetric_v1.json"),
+                CaptureVolumetric());
 
             Debug.Log(String.Format(
                 CultureInfo.InvariantCulture,
@@ -289,6 +325,221 @@ namespace AlpacaIT.DynamicLighting
                 });
             }
             return fixture;
+        }
+
+        private static VolumetricFixture CaptureVolumetric()
+        {
+            var fixture = new VolumetricFixture
+            {
+                upstreamCommit = UpstreamCommit,
+                unityVersion = Application.unityVersion,
+            };
+            Vector3 center = Vector3.zero;
+            Vector3 scale = new Vector3(1.0f, 2.0f, 0.5f);
+            Vector3 sourceColor = new Vector3(0.15f, 0.25f, 0.4f);
+            Vector3 fogColor = new Vector3(0.8f, 0.3f, 0.1f);
+            AddVolumetricSample(fixture, "None", 0, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, scale, 4, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, scale, 4, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(5, 0, -8), new Vector3(5, 0, 8), center, Vector3.forward, scale, 4, 2, 0.5f, 3, 0.25f, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Box", 2, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, scale, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Box", 2, new Vector3(6, 0, -8), new Vector3(6, 0, 8), center, Vector3.forward, scale, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeZ", 3, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeZ", 3, new Vector3(3, 0, -8), new Vector3(3, 0, 8), center, Vector3.forward, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeY", 4, new Vector3(0, -8, 0), new Vector3(0, 8, 0), center, Vector3.up, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeY", 4, new Vector3(0, -8, 3), new Vector3(0, 8, 3), center, Vector3.up, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            return fixture;
+        }
+
+        private static void AddVolumetricSample(
+            VolumetricFixture fixture,
+            string type,
+            int discriminant,
+            Vector3 camera,
+            Vector3 world,
+            Vector3 center,
+            Vector3 direction,
+            Vector3 scale,
+            float radius,
+            float thickness,
+            float intensity,
+            float visibility,
+            float temporalMultiplier,
+            float outerCutoff,
+            Vector3 sourceColor,
+            Vector3 fogColor)
+        {
+            float coneAngle = Mathf.Cos((Mathf.PI * 0.5f) + outerCutoff * Mathf.Deg2Rad)
+                * Mathf.Lerp(1.0f, 1.3f, outerCutoff / 90.0f);
+            float opacity = CalculateVolumetricOpacity(
+                discriminant,
+                camera,
+                world,
+                center,
+                direction,
+                scale,
+                radius,
+                thickness,
+                intensity * temporalMultiplier,
+                visibility,
+                coneAngle);
+            Vector3 fog = fogColor * opacity;
+            Vector3 screened = Vector3.one - Vector3.Scale(Vector3.one - fog, Vector3.one - sourceColor);
+            Vector3 output = Vector3.Lerp(screened, fog, Mathf.Clamp01(opacity));
+            fixture.samples.Add(new VolumetricSample
+            {
+                type = type,
+                discriminant = discriminant,
+                camera = ToArray(camera),
+                world = ToArray(world),
+                center = ToArray(center),
+                direction = ToArray(direction),
+                scale = ToArray(scale),
+                radius = radius,
+                thickness = thickness,
+                intensity = intensity,
+                visibility = visibility,
+                temporalMultiplier = temporalMultiplier,
+                coneAngle = coneAngle,
+                opacity = opacity,
+                outputRgb = ToArray(output),
+            });
+        }
+
+        private static float CalculateVolumetricOpacity(
+            int type,
+            Vector3 camera,
+            Vector3 world,
+            Vector3 center,
+            Vector3 direction,
+            Vector3 scale,
+            float radius,
+            float thickness,
+            float intensity,
+            float visibility,
+            float coneAngle)
+        {
+            if (type == 0 || radius <= 0.0f || intensity == 0.0f)
+                return 0.0f;
+            float t = 0.0f;
+            if (type == 1)
+            {
+                Vector3 line = world - camera;
+                float lineLengthSqr = Vector3.Dot(line, line);
+                float lineT = lineLengthSqr <= 0.000001f
+                    ? 0.0f
+                    : Mathf.Clamp01(Vector3.Dot(center - camera, line) / lineLengthSqr);
+                Vector3 closest = camera + line * lineT;
+                float distanceToCenter = Vector3.Distance(closest, center);
+                if (distanceToCenter < radius + 0.00001f)
+                    t = (radius - distanceToCenter) / radius;
+            }
+            else
+            {
+                Vector3 ray = world - camera;
+                float maxDepth = ray.magnitude;
+                if (maxDepth > 0.000001f)
+                {
+                    float tMin;
+                    float tMax;
+                    bool hit = type == 2
+                        ? RayBoxIntersection(camera, ray / maxDepth, center - radius * scale, center + radius * scale, maxDepth, out tMin, out tMax)
+                        : RayConeIntersection(camera, ray / maxDepth, center, direction.normalized, coneAngle, radius, maxDepth, out tMin, out tMax);
+                    if (hit)
+                    {
+                        float denominator = type == 2 ? (2.0f * radius * scale).magnitude : radius;
+                        t = (tMax - tMin) / denominator;
+                    }
+                }
+            }
+            t = Mathf.SmoothStep(0.0f, 1.0f, t);
+            t = Mathf.Clamp01(t * thickness);
+            float inverseVisibility = 1.0f / Mathf.Max(visibility, 0.00001f);
+            t = Mathf.Min(t, Vector3.Distance(camera, world) * inverseVisibility);
+            return t * intensity;
+        }
+
+        private static bool RayBoxIntersection(
+            Vector3 origin,
+            Vector3 direction,
+            Vector3 minimum,
+            Vector3 maximum,
+            float maxDepth,
+            out float tMin,
+            out float tMax)
+        {
+            Vector3 inverse = new Vector3(1.0f / direction.x, 1.0f / direction.y, 1.0f / direction.z);
+            Vector3 first = Vector3.Scale(minimum - origin, inverse);
+            Vector3 second = Vector3.Scale(maximum - origin, inverse);
+            Vector3 near = Vector3.Min(first, second);
+            Vector3 far = Vector3.Max(first, second);
+            tMin = Mathf.Max(0.0f, Mathf.Max(near.x, Mathf.Max(near.y, near.z)));
+            tMax = Mathf.Min(maxDepth, Mathf.Min(far.x, Mathf.Min(far.y, far.z)));
+            return tMax >= tMin;
+        }
+
+        private static bool RayConeIntersection(
+            Vector3 origin,
+            Vector3 direction,
+            Vector3 tip,
+            Vector3 coneDirection,
+            float coneAngle,
+            float coneDistance,
+            float maxDepth,
+            out float tMin,
+            out float tMax)
+        {
+            Vector3 w = origin - tip;
+            float cosine = Mathf.Cos(coneAngle);
+            float cosineSqr = cosine * cosine;
+            float sineSqr = 1.0f - cosineSqr;
+            float directionDotAxis = Vector3.Dot(direction, coneDirection);
+            float wDotAxis = Vector3.Dot(w, coneDirection);
+            float directionDotW = Vector3.Dot(direction, w);
+            float wDotW = Vector3.Dot(w, w);
+            float a = directionDotAxis * directionDotAxis - cosineSqr;
+            float b = 2.0f * (directionDotAxis * wDotAxis - cosineSqr * directionDotW);
+            float c = wDotAxis * wDotAxis - cosineSqr * wDotW;
+            float discriminant = b * b - 4.0f * a * c;
+            bool inside = wDotAxis >= 0.0f && wDotAxis <= coneDistance
+                && wDotW - wDotAxis * wDotAxis <= wDotAxis * wDotAxis * sineSqr / Mathf.Max(cosineSqr, 0.000001f);
+            var hits = new List<float>();
+            if (discriminant >= 0.0f && Mathf.Abs(a) > 0.000001f)
+            {
+                float root = Mathf.Sqrt(discriminant);
+                float first = (-b - root) / (2.0f * a);
+                float second = (-b + root) / (2.0f * a);
+                float firstHeight = wDotAxis + first * directionDotAxis;
+                float secondHeight = wDotAxis + second * directionDotAxis;
+                if (first >= 0.0f && firstHeight >= 0.0f && firstHeight <= coneDistance) hits.Add(first);
+                if (second >= 0.0f && secondHeight >= 0.0f && secondHeight <= coneDistance) hits.Add(second);
+            }
+            float capDenominator = Vector3.Dot(direction, coneDirection);
+            if (Mathf.Abs(capDenominator) > 0.0001f)
+            {
+                float cap = (coneDistance - wDotAxis) / capDenominator;
+                if (cap >= 0.0f)
+                {
+                    Vector3 point = w + cap * direction;
+                    float height = wDotAxis + cap * directionDotAxis;
+                    float radialSqr = Vector3.Dot(point, point) - height * height;
+                    float capRadiusSqr = coneDistance * coneDistance * sineSqr / Mathf.Max(cosineSqr, 0.000001f);
+                    if (radialSqr <= capRadiusSqr) hits.Add(cap);
+                }
+            }
+            if (!inside && hits.Count == 0)
+            {
+                tMin = tMax = 0.0f;
+                return false;
+            }
+            hits.Sort();
+            tMin = inside ? 0.0f : hits[0];
+            tMax = hits.Count == 0 ? 0.0f : Mathf.Min(hits[hits.Count - 1], maxDepth);
+            return tMax >= tMin;
+        }
+
+        private static float[] ToArray(Vector3 value)
+        {
+            return new[] { value.x, value.y, value.z };
         }
 
         // CPU transcription of the frozen DynamicLighting.cginc spatial

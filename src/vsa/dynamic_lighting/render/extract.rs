@@ -32,19 +32,32 @@ pub(super) fn extract_dynamic_lights(
                 ordinal.0,
                 entity,
                 GpuDynamicLight::from_main_world(light, runtime, transform),
+                GpuDynamicLight::from_volumetric_main_world(light, runtime, transform),
             )
         })
         .collect::<Vec<_>>();
-    sorted.sort_unstable_by_key(|(ordinal, _, _)| *ordinal);
+    sorted.sort_unstable_by_key(|(ordinal, _, _, _)| *ordinal);
     sorted.truncate(MAX_DYNAMIC_LIGHTS);
     diagnostics.set_extracted_light_count(sorted.len());
+    let volumetric_values = sorted
+        .iter()
+        .filter_map(|(_, _, _, light)| *light)
+        .collect::<Vec<_>>();
+    diagnostics.set_extracted_volumetric_light_count(volumetric_values.len());
 
     commands.insert_resource(ExtractedDynamicLights {
         values: sorted
             .into_iter()
-            .map(|(_, main_entity, light)| super::gpu::ExtractedDynamicLight { main_entity, light })
+            .map(
+                |(_, main_entity, light, _)| super::gpu::ExtractedDynamicLight {
+                    main_entity,
+                    light,
+                },
+            )
             .collect(),
         enabled: settings.enabled,
+        volumetric_values,
+        volumetric_enabled: settings.enabled && settings.volumetric_enabled,
         shadow_texel_size: 2.0 / point_shadow_map.size as f32,
     });
 }

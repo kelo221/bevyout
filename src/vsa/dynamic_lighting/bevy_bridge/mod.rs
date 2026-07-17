@@ -11,8 +11,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::core::{
-    DynamicLightConfig, DynamicLightEffect, DynamicLightType, LightEffectRuntime, UnityRandom,
-    advance_effect,
+    DynamicLightConfig, DynamicLightEffect, DynamicLightType, DynamicLightVolumetricParameters,
+    LightEffectRuntime, UnityRandom, advance_effect,
 };
 use super::render::DynamicLightingRenderPlugin;
 pub(crate) use shadow_proxy::DynamicLightShadowProxy;
@@ -54,6 +54,11 @@ impl DynamicLight {
         self
     }
 
+    pub(crate) fn with_volumetric(mut self, volumetric: DynamicLightVolumetricParameters) -> Self {
+        self.config.volumetric = volumetric;
+        self
+    }
+
     pub(crate) fn strobe(intensity: f32) -> Self {
         Self::with_effect(intensity, DynamicLightEffect::Strobe)
     }
@@ -80,21 +85,38 @@ impl Default for DynamicLightViewMask {
 #[reflect(Resource)]
 pub(crate) struct DynamicLightingSettings {
     pub(crate) enabled: bool,
+    pub(crate) volumetric_enabled: bool,
     pub(crate) freeze_effect_time: bool,
     pub(crate) shadow_proxies_enabled: bool,
     pub(crate) random_seed: i32,
 }
 
+#[derive(Default)]
+struct DynamicLightingDiagnosticCounters {
+    extracted_lights: AtomicUsize,
+    extracted_volumetric_lights: AtomicUsize,
+}
+
 #[derive(Resource, Clone, Default)]
-pub(crate) struct DynamicLightingDiagnostics(Arc<AtomicUsize>);
+pub(crate) struct DynamicLightingDiagnostics(Arc<DynamicLightingDiagnosticCounters>);
 
 impl DynamicLightingDiagnostics {
     pub(crate) fn extracted_light_count(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
+        self.0.extracted_lights.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn extracted_volumetric_light_count(&self) -> usize {
+        self.0.extracted_volumetric_lights.load(Ordering::Relaxed)
     }
 
     pub(super) fn set_extracted_light_count(&self, count: usize) {
-        self.0.store(count, Ordering::Relaxed);
+        self.0.extracted_lights.store(count, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_extracted_volumetric_light_count(&self, count: usize) {
+        self.0
+            .extracted_volumetric_lights
+            .store(count, Ordering::Relaxed);
     }
 }
 
@@ -102,6 +124,7 @@ impl Default for DynamicLightingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            volumetric_enabled: true,
             freeze_effect_time: false,
             shadow_proxies_enabled: true,
             random_seed: 12345,

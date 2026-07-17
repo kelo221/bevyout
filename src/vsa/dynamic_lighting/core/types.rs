@@ -70,6 +70,29 @@ impl DynamicLightType {
     ];
 }
 
+/// Numeric values are consumed directly by Henry's volumetric post-process.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub(crate) enum DynamicLightVolumetricType {
+    #[default]
+    None = 0,
+    Sphere = 1,
+    Box = 2,
+    ConeZ = 3,
+    ConeY = 4,
+}
+
+impl DynamicLightVolumetricType {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] = [
+        Self::None,
+        Self::Sphere,
+        Self::Box,
+        Self::ConeZ,
+        Self::ConeY,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +110,12 @@ mod tests {
                 .into_iter()
                 .map(|value| value as u32)
                 .eq(0..8)
+        );
+        assert!(
+            DynamicLightVolumetricType::ALL
+                .into_iter()
+                .map(|value| value as u32)
+                .eq(0..5)
         );
     }
 }

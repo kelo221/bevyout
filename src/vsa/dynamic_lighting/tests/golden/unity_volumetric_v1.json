@@ -1,0 +1,375 @@
+{
+    "upstreamCommit": "dd7c195cba2599a20bf1b662fa0f69366e0f74b5",
+    "unityVersion": "6000.3.17f1",
+    "samples": [
+        {
+            "type": "None",
+            "discriminant": 0,
+            "camera": [
+                0.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                0.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                2.0,
+                0.5
+            ],
+            "radius": 4.0,
+            "thickness": 1.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.0,
+            "outputRgb": [
+                0.1499999761581421,
+                0.25,
+                0.3999999761581421
+            ]
+        },
+        {
+            "type": "Sphere",
+            "discriminant": 1,
+            "camera": [
+                0.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                0.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                2.0,
+                0.5
+            ],
+            "radius": 4.0,
+            "thickness": 1.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.75,
+            "outputRgb": [
+                0.6150000095367432,
+                0.2734375298023224,
+                0.16750000417232514
+            ]
+        },
+        {
+            "type": "Sphere",
+            "discriminant": 1,
+            "camera": [
+                5.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                5.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                2.0,
+                0.5
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.5,
+            "visibility": 3.0,
+            "temporalMultiplier": 0.25,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.0,
+            "outputRgb": [
+                0.1499999761581421,
+                0.25,
+                0.3999999761581421
+            ]
+        },
+        {
+            "type": "Box",
+            "discriminant": 2,
+            "camera": [
+                0.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                0.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                2.0,
+                0.5
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.18311171233654023,
+            "outputRgb": [
+                0.2510727643966675,
+                0.2479369193315506,
+                0.339083194732666
+            ]
+        },
+        {
+            "type": "Box",
+            "discriminant": 2,
+            "camera": [
+                6.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                6.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                2.0,
+                0.5
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.0,
+            "outputRgb": [
+                0.1499999761581421,
+                0.25,
+                0.3999999761581421
+            ]
+        },
+        {
+            "type": "ConeZ",
+            "discriminant": 3,
+            "camera": [
+                0.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                0.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.75,
+            "outputRgb": [
+                0.6150000095367432,
+                0.2734375298023224,
+                0.16750000417232514
+            ]
+        },
+        {
+            "type": "ConeZ",
+            "discriminant": 3,
+            "camera": [
+                3.0,
+                0.0,
+                -8.0
+            ],
+            "world": [
+                3.0,
+                0.0,
+                8.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                0.0,
+                1.0
+            ],
+            "scale": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.0,
+            "outputRgb": [
+                0.1499999761581421,
+                0.25,
+                0.3999999761581421
+            ]
+        },
+        {
+            "type": "ConeY",
+            "discriminant": 4,
+            "camera": [
+                0.0,
+                -8.0,
+                0.0
+            ],
+            "world": [
+                0.0,
+                8.0,
+                0.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                1.0,
+                0.0
+            ],
+            "scale": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.75,
+            "outputRgb": [
+                0.6150000095367432,
+                0.2734375298023224,
+                0.16750000417232514
+            ]
+        },
+        {
+            "type": "ConeY",
+            "discriminant": 4,
+            "camera": [
+                0.0,
+                -8.0,
+                3.0
+            ],
+            "world": [
+                0.0,
+                8.0,
+                3.0
+            ],
+            "center": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "direction": [
+                0.0,
+                1.0,
+                0.0
+            ],
+            "scale": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "radius": 4.0,
+            "thickness": 2.0,
+            "intensity": 0.75,
+            "visibility": 2.0,
+            "temporalMultiplier": 1.0,
+            "coneAngle": -0.5500000715255737,
+            "opacity": 0.0,
+            "outputRgb": [
+                0.1499999761581421,
+                0.25,
+                0.3999999761581421
+            ]
+        }
+    ]
+}

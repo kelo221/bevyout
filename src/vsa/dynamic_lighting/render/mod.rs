@@ -40,6 +40,7 @@ impl Plugin for DynamicLightingRenderPlugin {
         load_shader_library!(app, "../shaders/dynamic_lighting_spatial.wgsl");
         load_shader_library!(app, "../shaders/dynamic_lighting_surface.wgsl");
         embedded_asset!(app, "../shaders/dynamic_lighting_pass.wgsl");
+        embedded_asset!(app, "../shaders/dynamic_lighting_volumetric.wgsl");
         app.add_plugins((
             ExtractComponentPlugin::<DynamicLightingView>::default(),
             ExtractComponentPlugin::<DynamicLightShadowProxy>::default(),
@@ -53,13 +54,24 @@ impl Plugin for DynamicLightingRenderPlugin {
             .init_resource::<bevy::render::render_resource::SpecializedRenderPipelines<
                 pipeline::DynamicLightingPipeline,
             >>()
+            .init_resource::<bevy::render::render_resource::SpecializedRenderPipelines<
+                pipeline::DynamicLightingVolumetricPipeline,
+            >>()
             .add_systems(ExtractSchedule, extract_dynamic_lights)
-            .add_systems(RenderStartup, init_dynamic_lighting_pipeline)
+            .add_systems(
+                RenderStartup,
+                (
+                    init_dynamic_lighting_pipeline,
+                    pipeline::init_dynamic_lighting_volumetric_pipeline,
+                ),
+            )
             .add_systems(
                 Render,
                 (
                     prepare_dynamic_light_buffers.in_set(RenderSystems::PrepareResources),
                     prepare_dynamic_lighting_pipelines.in_set(RenderSystems::Prepare),
+                    pipeline::prepare_dynamic_lighting_volumetric_pipelines
+                        .in_set(RenderSystems::Prepare),
                 ),
             )
             .add_systems(
@@ -68,5 +80,12 @@ impl Plugin for DynamicLightingRenderPlugin {
                     .in_set(bevy::core_pipeline::Core3dSystems::PostProcess)
                     .before(bevy::core_pipeline::tonemapping::tonemapping),
             );
+        render_app.add_systems(
+            bevy::core_pipeline::schedule::Core3d,
+            pipeline::dynamic_lighting_volumetric_pass
+                .in_set(bevy::core_pipeline::Core3dSystems::PostProcess)
+                .after(dynamic_lighting_pass)
+                .before(bevy::core_pipeline::tonemapping::tonemapping),
+        );
     }
 }

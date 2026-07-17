@@ -55,6 +55,19 @@ covered by an automated test.
 | shadow bit `1 << 15`, cookie bit `1 << 16` | `DynamicLighting.cginc` | feature flags | ABI/channel tests |
 | seven 16-byte `ShaderDynamicLight` blocks | `ShaderDynamicLight.cs` | `render/gpu.rs` | size/alignment/offset tests |
 
+## Volumetric fog
+
+| Original symbol | Upstream source | Rust destination | GPU destination / fixture |
+| --- | --- | --- | --- |
+| `None = 0` | `DynamicLightVolumetricType.cs` | `DynamicLightVolumetricType::None` | filtered before upload / `unity_volumetric_v1.json` |
+| `Sphere = 1` | `DynamicLightingPostProcessing.shader` | volumetric config/packing | sphere branch / `unity_volumetric_v1.json` |
+| `Box = 2` | `DynamicLightManager.PostProcessing.cs` | transform-scale packing | depth-limited ray/box branch / `unity_volumetric_v1.json` |
+| `ConeZ = 3` | `DynamicLightManager.PostProcessing.cs` | forward-axis packing | depth-limited ray/cone branch / `unity_volumetric_v1.json` |
+| `ConeY = 4` | `DynamicLightManager.PostProcessing.cs` | up-axis packing | depth-limited ray/cone branch / `unity_volumetric_v1.json` |
+| radius `4`, thickness `1`, intensity `0.75`, visibility `2` | `DynamicLight.cs` | `DynamicLightVolumetricParameters` | recycled 112-byte fields / defaults and packing tests |
+| temporal fog intensity | `DynamicLightManager.UpdateLightEffects` | shared `DynamicLightRuntime` multiplier | `volumetric_intensity` / strobe Cucumber scenario |
+| screen blend and maximum opacity | `DynamicLightingPostProcessing.shader` | Unity reference exporter | `dynamic_lighting_volumetric.wgsl` / live on/off capture |
+
 ## Shadow boundary
 
 `bevy_bridge/shadow_proxy.rs` is the only DynamicLighting file allowed to
@@ -74,5 +87,8 @@ proxy restores visibility to 1.0 and leaves the custom light active.
 - `AlpacaIT.DynamicLighting/Scripts/Lighting/DynamicLightCache.cs`
 - `AlpacaIT.DynamicLighting/Scripts/Lighting/DynamicLightEffect.cs`
 - `AlpacaIT.DynamicLighting/Scripts/Lighting/DynamicLightType.cs`
+- `AlpacaIT.DynamicLighting/Scripts/Lighting/DynamicLightVolumetricType.cs`
+- `AlpacaIT.DynamicLighting/Scripts/Core/DynamicLightManager.PostProcessing.cs`
 - `AlpacaIT.DynamicLighting/Scripts/Utilities/MathEx.cs` (`FixedTimestep`)
 - `AlpacaIT.DynamicLighting/Shaders/DynamicLighting.cginc`
+- `AlpacaIT.DynamicLighting/Shaders/DynamicLightingPostProcessing.shader`

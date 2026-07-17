@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::types::{DynamicLightEffect, DynamicLightType};
+use super::types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
 
 pub(crate) const DEFAULT_BOUNCE_MULTIPLIER: f32 = 1.0;
 
@@ -69,6 +69,27 @@ impl Default for DynamicLightBounceParameters {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub(crate) struct DynamicLightVolumetricParameters {
+    pub(crate) volumetric_type: DynamicLightVolumetricType,
+    pub(crate) radius: f32,
+    pub(crate) thickness: f32,
+    pub(crate) intensity: f32,
+    pub(crate) visibility: f32,
+}
+
+impl Default for DynamicLightVolumetricParameters {
+    fn default() -> Self {
+        Self {
+            volumetric_type: DynamicLightVolumetricType::None,
+            radius: 4.0,
+            thickness: 1.0,
+            intensity: 0.75,
+            visibility: 2.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct DynamicLightConfig {
     pub(crate) color: [f32; 3],
     pub(crate) intensity: f32,
@@ -79,6 +100,7 @@ pub(crate) struct DynamicLightConfig {
     pub(crate) effect_parameters: DynamicLightEffectParameters,
     pub(crate) spatial: DynamicLightSpatialParameters,
     pub(crate) bounce: DynamicLightBounceParameters,
+    pub(crate) volumetric: DynamicLightVolumetricParameters,
     pub(crate) view_mask: u32,
     pub(crate) shadow_enabled: bool,
     pub(crate) cookie_index: Option<u32>,
@@ -96,6 +118,7 @@ impl Default for DynamicLightConfig {
             effect_parameters: DynamicLightEffectParameters::default(),
             spatial: DynamicLightSpatialParameters::default(),
             bounce: DynamicLightBounceParameters::default(),
+            volumetric: DynamicLightVolumetricParameters::default(),
             view_mask: u32::MAX,
             shadow_enabled: false,
             cookie_index: None,
@@ -120,6 +143,14 @@ mod tests {
         assert_eq!(config.effect_parameters.timestep_seconds, 1.0 / 30.0);
         assert_eq!(config.bounce.intensity, DEFAULT_BOUNCE_MULTIPLIER);
         assert!(config.bounce.enabled);
+        assert_eq!(
+            config.volumetric.volumetric_type,
+            DynamicLightVolumetricType::None
+        );
+        assert_eq!(config.volumetric.radius, 4.0);
+        assert_eq!(config.volumetric.thickness, 1.0);
+        assert_eq!(config.volumetric.intensity, 0.75);
+        assert_eq!(config.volumetric.visibility, 2.0);
     }
 
     #[test]
@@ -139,6 +170,13 @@ mod tests {
         config.effect_parameters.pulse_speed = 2.5;
         config.spatial.wave_frequency = 4.0;
         config.bounce.color_rgba = [0.7, 0.3, 0.2, 0.6];
+        config.volumetric = DynamicLightVolumetricParameters {
+            volumetric_type: DynamicLightVolumetricType::ConeY,
+            radius: 8.0,
+            thickness: 2.5,
+            intensity: 0.6,
+            visibility: 3.0,
+        };
 
         let json = serde_json::to_string(&config).unwrap();
         let decoded: DynamicLightConfig = serde_json::from_str(&json).unwrap();

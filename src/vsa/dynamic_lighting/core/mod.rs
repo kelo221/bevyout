@@ -7,11 +7,14 @@ mod spatial;
 mod types;
 mod unity_math;
 mod unity_random;
+mod volumetric;
 
 pub(crate) use config::{
     DEFAULT_BOUNCE_MULTIPLIER, DynamicLightConfig, DynamicLightSpatialParameters,
+    DynamicLightVolumetricParameters,
 };
 pub(crate) use runtime::{LightEffectRuntime, advance_effect};
 pub(crate) use spatial::spatial_parameters;
-pub(crate) use types::{DynamicLightEffect, DynamicLightType};
+pub(crate) use types::{DynamicLightEffect, DynamicLightType, DynamicLightVolumetricType};
 pub(crate) use unity_random::UnityRandom;
+pub(crate) use volumetric::{pack_volumetric_parameters, volumetric_is_active};

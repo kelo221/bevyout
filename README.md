@@ -87,6 +87,13 @@ without driving the proxy from temporal effects. Prepared irradiance baking and 
 authoring both keep one diffuse bounce enabled by default
 (`bounce_multiplier = 1.0`).
 
+Henry-style volumetric fog is rendered by the same isolated custom path. The
+scene demonstrates a temporally modulated sphere, a non-uniformly scaled box,
+and rotated `ConeZ`/`ConeY` volumes. Press 6 to toggle only the fog pass. Fog
+uses the shared effect runtime, reconstructs geometry from depth, and is
+composed in HDR before tonemapping and UI; it does not require Bevy
+`VolumetricLight` or `FogVolume` components.
+
 For a fast Blender preview that leaves the prepared manifest unchanged:
 
 ```powershell
@@ -107,7 +114,8 @@ example, `SuperDuperMart` resolves internally to `00017f37`.
 The current slice supports interior-cell preparation and rendering, cached
 NIF-to-GLB conversion, deterministic Rust irradiance baking, hybrid prepared
 static/realtime point shadows, default-on one-bounce indirect lighting,
-an isolated DynamicLighting strobe bridge, first-person movement and physics, staged audio, and an initial
+an isolated DynamicLighting effects/spatial/volumetric bridge, first-person
+movement and physics, staged audio, and an initial
 pickup/container/door/activator interaction path.
 
 Exterior LAND and worldspace streaming, NPC assembly and AI, runtime NAVM

@@ -8,5 +8,8 @@ pub(crate) use bevy_bridge::{
     DynamicLight, DynamicLightShadowProxy, DynamicLightingDiagnostics, DynamicLightingPlugin,
     DynamicLightingSettings,
 };
-pub(crate) use core::{DEFAULT_BOUNCE_MULTIPLIER, DynamicLightEffect, DynamicLightType};
+pub(crate) use core::{
+    DEFAULT_BOUNCE_MULTIPLIER, DynamicLightEffect, DynamicLightType,
+    DynamicLightVolumetricParameters, DynamicLightVolumetricType,
+};
 pub(crate) use render::DynamicLightingView;
