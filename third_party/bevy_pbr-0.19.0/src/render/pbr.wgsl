@@ -99,11 +99,14 @@ fn fragment(
     #else
     let dynamic_uv1 = vec2<f32>(0.5);
     #endif
-    out.color.rgb += dynamic_lighting_forward_contribution(
-        dynamic_mesh_tag,
-        primitive_index,
-        dynamic_uv1,
-        pbr_input,
+    out.color = vec4<f32>(
+        out.color.rgb + dynamic_lighting_forward_contribution(
+            dynamic_mesh_tag,
+            primitive_index,
+            dynamic_uv1,
+            pbr_input,
+        ),
+        out.color.a,
     );
 
     // apply in-shader post processing (fog, alpha-premultiply, and also tonemapping, debanding if the camera is non-hdr)
