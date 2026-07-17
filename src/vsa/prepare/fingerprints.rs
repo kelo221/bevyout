@@ -31,8 +31,13 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// compatibility for the viewer). Bump whenever `prepare_cell`'s staging,
 /// lighting, or manifest-assembly logic changes in a way that should
 /// invalidate a previously prepared cell even though its plugin content,
-/// converter, and physics pipeline are unchanged.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-nav-graph-v1";
+/// converter, and physics pipeline are unchanged. Issue #120 (M4 wave 6)
+/// bumped this alongside `CURRENT_PREPARE_REVISION`: a source-dead NPC
+/// reference now classifies as `PreparedSemantic::Corpse` instead of
+/// `Npc`, changing what `prepare_cell`'s placement-classification step
+/// produces from the same source content, so a resumable *batch* prepare
+/// run must not skip a cell it had already completed under the old logic.
+pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-corpse-v1";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
