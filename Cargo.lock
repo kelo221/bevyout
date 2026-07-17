@@ -1957,6 +1957,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
