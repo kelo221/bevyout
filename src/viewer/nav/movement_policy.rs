@@ -22,6 +22,47 @@ pub(crate) const STUCK_PROGRESS_EPSILON: f32 = 0.05;
 /// wall at reduced but non-trivial speed stays `Clear`).
 pub(crate) const COLLISION_BLOCK_RATIO: f32 = 0.15;
 
+/// Horizontal (XZ-plane) distance between two points, ignoring Y entirely.
+///
+/// Regression fix (issue #114 added scope, M4 wave 5): every agent-vs-nav-
+/// point comparison in `nav/agent.rs` (travel-door arrival, the #137
+/// mid-route crossing gate, and stuck-vs-target progress) used to be a
+/// plain 3D distance back when the wave-3/4 kinematic agent Y-snapped its
+/// `Transform` onto the navmesh surface every tick. Physics-authoritative
+/// movement removed that snap -- `Transform.translation` is now the capsule
+/// *centre*, roughly half `AGENT_HEIGHT` above the feet-level points the
+/// nav graph's door midpoints and route targets sit at -- so a 3D distance
+/// against those points always overshoots by about that constant offset
+/// and every proximity gate silently stopped firing. Nav is fundamentally
+/// an on-surface concept (this also matches landmass's own
+/// `TargetReachedCondition::Distance`, which is horizontal too, and is why
+/// `AgentState::ReachedTarget` kept firing correctly through the same
+/// regression window while these checks did not): every site below compares
+/// on this plane instead of in 3D.
+pub(crate) fn horizontal_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dz = a[2] - b[2];
+    (dx * dx + dz * dz).sqrt()
+}
+
+/// Whether `agent` counts as having reached the horizontal-proximity nav
+/// point `point` (a travel-door or mid-route-crossing midpoint): within
+/// `radius` on the XZ plane, the same offset-tolerant frame
+/// `horizontal_distance` documents, *and* within `max_vertical_gap` of it
+/// vertically. The vertical guard is not about tolerating the agent's own
+/// capsule-centre-vs-feet offset (the horizontal check already ignores Y
+/// entirely) -- it rejects a different, unrelated point that merely shares
+/// X/Z, such as a door on another floor directly above or below the one the
+/// agent is actually walking on.
+pub(crate) fn nav_point_reached(
+    agent: [f32; 3],
+    point: [f32; 3],
+    radius: f32,
+    max_vertical_gap: f32,
+) -> bool {
+    (agent[1] - point[1]).abs() <= max_vertical_gap && horizontal_distance(agent, point) <= radius
+}
+
 /// Default nav-solve interval (issue #114 added scope, M4 wave 5): solve
 /// every fixed tick. `tna solverate [<n>]` is the console knob that changes
 /// it at runtime.
@@ -357,5 +398,48 @@ mod tests {
         assert_eq!(solve_blend_fraction(1, 4), 0.25);
         assert_eq!(solve_blend_fraction(2, 4), 0.5);
         assert_eq!(solve_blend_fraction(3, 4), 0.75);
+    }
+
+    #[test]
+    fn horizontal_distance_ignores_a_large_vertical_gap() {
+        // The exact regression: a capsule-centre agent ~0.9 m above a
+        // feet-level point with the same X/Z must read as zero apart.
+        assert_eq!(
+            horizontal_distance([154.66, 41.10, -108.22], [154.66, 40.20, -108.22]),
+            0.0
+        );
+    }
+
+    #[test]
+    fn horizontal_distance_is_plain_pythagoras_on_x_and_z() {
+        assert_eq!(horizontal_distance([0.0, 0.0, 0.0], [3.0, 99.0, 4.0]), 5.0);
+    }
+
+    #[test]
+    fn nav_point_reached_tolerates_the_capsule_centre_vs_feet_offset() {
+        // The exact Vault101a (00028579) travel-door-arrival numbers from
+        // the regression report: ~0.48 m horizontally away, ~0.9 m
+        // vertically (agent capsule centre above the feet-level door
+        // midpoint) -- ~1.0 m in 3D, which is why the old 3D `<= 0.75`
+        // check missed it.
+        let agent = [154.02, 37.47, -36.81];
+        let point = [154.13, 36.57, -36.34];
+        assert!(nav_point_reached(agent, point, 0.75, 1.8));
+    }
+
+    #[test]
+    fn nav_point_reached_still_rejects_a_point_too_far_horizontally() {
+        let agent = [0.0, 0.0, 0.0];
+        let point = [5.0, 0.0, 0.0];
+        assert!(!nav_point_reached(agent, point, 0.75, 1.8));
+    }
+
+    #[test]
+    fn nav_point_reached_rejects_a_point_on_a_different_floor() {
+        let agent = [0.0, 0.0, 0.0];
+        // Same X/Z, but 3 storeys away vertically -- an unrelated door, not
+        // the capsule-centre-vs-feet offset this whole fix tolerates.
+        let point = [0.0, 9.0, 0.0];
+        assert!(!nav_point_reached(agent, point, 0.75, 1.8));
     }
 }
