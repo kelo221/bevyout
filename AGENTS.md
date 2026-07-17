@@ -105,8 +105,11 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
   `enhancement` or `bug`, priority, milestone), linked via the
   sub-issue REST API (`POST /repos/{owner}/{repo}/issues/<epic>/sub_issues`
   with the issue's database id). Always assign the issue to the human
-  user (`--assignee @me`, the authenticated gh account) at creation. Amend the epic's checklist when scope is
-  added; tick items only when the gate criteria hold on real data.
+  user (`--assignee @me`, the authenticated gh account) at creation; when
+  a wave adopts a pre-existing issue, assign it the same way at wave
+  kickoff — every issue being worked on must be assigned. Amend the
+  epic's checklist when scope is added; tick items only when the gate
+  criteria hold on real data.
 - Each wave has a kickoff `*_PROMPT.md` (what was requested) and a
   `*_PLAN.md` (fixed feature lists → tests → implementation) in
   `docs/plans/` — see `docs/plans/README.md` for the traceability
