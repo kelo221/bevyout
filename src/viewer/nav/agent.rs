@@ -41,6 +41,27 @@ const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
 /// target-reached stop always lands inside it.
 const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 
+/// The one point-sampling envelope shared by the archipelago options
+/// (`ensure_archipelago`) and the per-frame ground snap
+/// (`apply_kinematic_velocity`): the snap must never find ground the
+/// pathing layer itself would not, or the agent could stand somewhere
+/// landmass considers off-mesh, so both sites read this single constant.
+///
+/// `from_agent_radius(0.35)` alone gives a 0.07 m horizontal / 0.35 m
+/// below sampling envelope -- far too tight for FO3 data, where the NAVM
+/// surface sits below the placed feet position and stairs/slopes put the
+/// agent well above the polygon plane (the landmass FAQ's
+/// vertical-sampling guidance; confirmed empirically: the default envelope
+/// reports `AgentNotOnNavMesh` for an agent standing on the
+/// MegatonPlayerHouse mesh). These are humanoid-scale distances instead.
+const AGENT_POINT_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d {
+    horizontal_distance: 1.0,
+    distance_above: 1.0,
+    distance_below: 2.0,
+    vertical_preference_ratio: 2.0,
+    animation_link_max_vertical_distance: 1.0,
+};
+
 /// Synthetic ledger identity for the one test nav agent this console
 /// command family drives (issue #134). The ledger/eligibility policy
 /// (`ledger_policy`) is written generically against an `agent_id` (a real
@@ -290,22 +311,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let mesh_inputs = super::mesh_inputs(&graph);
     let merge_inputs = super::merge_inputs(&graph);
 
-    // `from_agent_radius(0.35)` alone gives a 0.07 m horizontal / 0.35 m
-    // below sampling envelope -- far too tight for FO3 data, where the
-    // NAVM surface sits below the placed feet position and stairs/slopes
-    // put the agent well above the polygon plane (the landmass FAQ's
-    // vertical-sampling guidance; confirmed empirically: the default
-    // envelope reports `AgentNotOnNavMesh` for an agent standing on the
-    // MegatonPlayerHouse mesh). Widen the sample distances to humanoid
-    // scale; keep the rest of `from_agent_radius`'s avoidance defaults.
+    // Widen the sample distances to humanoid scale (see
+    // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
+    // evidence); keep the rest of `from_agent_radius`'s avoidance defaults.
     let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-    options.point_sample_distance = PointSampleDistance3d {
-        horizontal_distance: 1.0,
-        distance_above: 1.0,
-        distance_below: 2.0,
-        vertical_preference_ratio: 2.0,
-        animation_link_max_vertical_distance: 1.0,
-    };
+    options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
     let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
 
     let mut islands = Vec::new();
@@ -872,19 +882,6 @@ type KinematicAgentQuery<'w, 's> = Query<
     (With<TestNavAgentMarker>, Without<DoorTraversal>),
 >;
 
-/// Sampling envelope for the per-frame ground snap in
-/// [`apply_kinematic_velocity`]. Matches the archipelago's own
-/// `point_sample_distance` (see `ensure_archipelago`): the snap must never
-/// find ground the pathing layer itself would not, or the agent could stand
-/// somewhere landmass considers off-mesh.
-const GROUND_SNAP_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d {
-    horizontal_distance: 1.0,
-    distance_above: 1.0,
-    distance_below: 2.0,
-    vertical_preference_ratio: 2.0,
-    animation_link_max_vertical_distance: 1.0,
-};
-
 /// Applies the landmass desired velocity kinematically, then snaps the
 /// agent's y to the nav-mesh surface under its new x/z
 /// (`Archipelago3d::sample_point`). Without the snap a sloped/stair path
@@ -908,7 +905,7 @@ fn apply_kinematic_velocity(
         transform.translation += velocity.velocity * time.delta_secs();
         if let Some(archipelago) = archipelago
             && let Ok(sampled) =
-                archipelago.sample_point(transform.translation, &GROUND_SNAP_SAMPLE_DISTANCE)
+                archipelago.sample_point(transform.translation, &AGENT_POINT_SAMPLE_DISTANCE)
         {
             transform.translation.y = sampled.point().y;
         }
@@ -1719,7 +1716,7 @@ mod tests {
             });
 
         let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        options.point_sample_distance = GROUND_SNAP_SAMPLE_DISTANCE;
+        options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
         let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
         app.world_mut().spawn(Island3dBundle {
             island: Island,

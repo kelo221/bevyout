@@ -27,7 +27,7 @@ use super::super::paths::FO3_SCALE;
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
 /// precedent.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v1";
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v2";
 
 // ---------------------------------------------------------------------
 // Plain input types (boundary conversion happens in navmesh.rs)
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v1");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v2");
     }
 
     #[test]

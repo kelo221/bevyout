@@ -8,14 +8,20 @@
 //! decision table.
 //!
 //! Wired into the runtime narrowly for this wave (see `nav/agent.rs`'s
-//! `door_link_system`): a door that becomes locked while the agent is
-//! `Paused` waiting on it fails the wait immediately via this decision
-//! rather than exhausting `door_link::MAX_WAIT_TICKS`. A fully dynamic
-//! "any door state change mid-route triggers a live link rebuild" system
-//! (rebuilding the archipelago's links while an unrelated route is already
-//! in flight) is out of scope for this pass -- the decision table itself is
-//! complete and tested per the plan's "repath decision table" requirement,
-//! but only one concrete call site consumes it this wave.
+//! `door_availability_system`): a door-usability flip yields one `Repath`
+//! decision, applied as spawning/despawning the affected two-sided door
+//! links, re-inserting the agent's target so landmass replans, and -- when
+//! the agent is `Paused` at that very door and it became usable --
+//! requesting the door open. A door that becomes locked while the agent is
+//! already `Paused` waiting on it does *not* fail the wait early: the
+//! paused lifecycle keeps polling the open state and resolves through
+//! `door_link::MAX_WAIT_TICKS` to the deterministic `Failed` outcome. A
+//! fully dynamic "any door state change mid-route triggers a live link
+//! rebuild" system (rebuilding the archipelago's links while an unrelated
+//! route is already in flight) is out of scope for this pass -- the
+//! decision table itself is complete and tested per the plan's "repath
+//! decision table" requirement, but only one concrete call site consumes
+//! it this wave.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RepathObservation {
