@@ -1,3 +1,4 @@
+use super::super::dynamic_lighting::DEFAULT_BOUNCE_MULTIPLIER;
 use super::JobLight;
 use super::policy::{
     AMBIENT_CUBE_FACE_COUNT, atlas_dimensions, primary_ray_count, volume_resolution,
@@ -88,6 +89,7 @@ pub(crate) struct DirectionalBakeLight {
     pub(crate) color_rgba: [f32; 4],
     pub(crate) rotation_xyzw: [f32; 4],
     pub(crate) illuminance: f32,
+    pub(crate) bounce_multiplier: f32,
 }
 
 pub(crate) fn bake_irradiance(
@@ -384,7 +386,8 @@ fn surface_radiance(
         ])) * intensity
             * attenuation
             * n_dot_l
-            * visibility;
+            * visibility
+            * effective_bounce_multiplier(light.bounce_multiplier);
     }
     if directional.illuminance > 0.0 {
         let direction = Quat::from_array(directional.rotation_xyzw) * Vec3::Z;
@@ -404,7 +407,8 @@ fn surface_radiance(
                 directional.color_rgba[2],
             ])) * directional.illuminance
                 * n_dot_l
-                * visibility;
+                * visibility
+                * effective_bounce_multiplier(directional.bounce_multiplier);
         }
     }
     let emissive_sample = material
@@ -415,6 +419,14 @@ fn surface_radiance(
         * srgb_to_linear_vec3(emissive_sample.truncate())
         * EMISSION_SCALE;
     diffuse * irradiance / std::f32::consts::PI + emissive
+}
+
+fn effective_bounce_multiplier(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        DEFAULT_BOUNCE_MULTIPLIER
+    }
 }
 
 fn trace_visibility(
@@ -720,6 +732,7 @@ mod tests {
                 radius: 4.0,
                 intensity_lumens: 0.0,
                 kind: "point".into(),
+                bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
             }];
             trace_radiance(
                 &bvh,
@@ -730,6 +743,7 @@ mod tests {
                     color_rgba: [0.0; 4],
                     rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
                     illuminance: 0.0,
+                    bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
                 },
                 Vec3::new(0.0, 0.25, 0.0),
                 Vec3::NEG_Y,

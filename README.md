@@ -58,6 +58,25 @@ cargo run-dev -- bake SuperDuperMart
 cargo run-dev -- render SuperDuperMart
 ```
 
+To inspect the hybrid shadow path without Fallout data or KTX packaging, open
+the hermetic procedural scene:
+
+```powershell
+cargo run-dev -- lighting-test
+```
+
+The orange pillar is traced once by the same CPU static-shadow kernel used by
+`prepare`. The blue block moves every frame and casts through Bevy's realtime
+point-shadow pass. The floor combines both visibility sources, making the two
+paths directly observable in one view; press Space to pause or resume motion.
+Press 1 or 2 to toggle the baked-static and realtime sources independently.
+
+The test also includes a purple point light driven by the isolated
+`src/vsa/dynamic_lighting` slice, plus a color-coded rack containing all 15
+ported intensity effects. The purple point is a deterministic 4 Hz strobe;
+the rack makes the other curves observable on the floor. Prepared irradiance
+baking keeps one diffuse bounce enabled by default (`bounce_multiplier = 1.0`).
+
 For a fast Blender preview that leaves the prepared manifest unchanged:
 
 ```powershell
@@ -76,8 +95,9 @@ example, `SuperDuperMart` resolves internally to `00017f37`.
 ## Current scope
 
 The current slice supports interior-cell preparation and rendering, cached
-NIF-to-GLB conversion, deterministic Rust irradiance baking, prepared static
-point shadows, first-person movement and physics, staged audio, and an initial
+NIF-to-GLB conversion, deterministic Rust irradiance baking, hybrid prepared
+static/realtime point shadows, default-on one-bounce indirect lighting,
+an isolated DynamicLighting strobe bridge, first-person movement and physics, staged audio, and an initial
 pickup/container/door/activator interaction path.
 
 Exterior LAND and worldspace streaming, NPC assembly and AI, runtime NAVM

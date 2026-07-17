@@ -109,7 +109,7 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
-        CommandLine::View(_) | CommandLine::Script(_) => {}
+        CommandLine::View(_) | CommandLine::LightingTest(_) | CommandLine::Script(_) => {}
         CommandLine::Cells(args) => {
             if args.game_root.is_none() {
                 args.game_root = config.fallout3.game_root.clone();

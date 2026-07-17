@@ -24,6 +24,7 @@ pub(crate) use tools::*;
 use crate::cli::{BakeArgs, BakeQuality};
 
 use super::assets::{NIF_CONVERTER_REVISION, find_blender};
+use super::dynamic_lighting::DEFAULT_BOUNCE_MULTIPLIER;
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
@@ -192,6 +193,7 @@ pub(crate) fn build_bake_job(
                 } else {
                     light.kind.clone()
                 },
+                bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
             })
             .collect(),
     }
@@ -313,6 +315,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
             color_rgba: job.cell_directional_rgba,
             rotation_xyzw: job.cell_directional_rotation_xyzw,
             illuminance: job.cell_directional_illuminance,
+            bounce_multiplier: DEFAULT_BOUNCE_MULTIPLIER,
         },
         args.irradiance_spacing_meters,
         args.irradiance_samples,
@@ -471,7 +474,7 @@ fn replace_output(temporary: &Path, final_path: &Path) -> Result<()> {
 }
 
 pub(crate) fn is_bake_static(placement: &PreparedPlacement) -> bool {
-    placement.physics_classification != PreparedPhysicsClassification::Dynamic
+    placement.physics_classification == PreparedPhysicsClassification::Static
         && matches!(placement.semantic, PreparedSemantic::Static)
         && !is_pickup_record_kind(&placement.base_kind)
 }

@@ -71,6 +71,16 @@ pub(crate) struct StaticShadowPrepareOptions<'a> {
     pub(crate) ktx: Option<PathBuf>,
 }
 
+/// Minimal input contract for the shared CPU point-shadow tracer.
+///
+/// Production preparation supplies these from `PreparedLight`; the procedural
+/// lighting test supplies the same data without inventing a second baker.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StaticShadowBakeLight {
+    pub(crate) translation: Vec3,
+    pub(crate) range: f32,
+}
+
 pub(crate) fn prepare_static_point_shadows(
     options: StaticShadowPrepareOptions<'_>,
     placements: &[PreparedPlacement],
@@ -151,10 +161,17 @@ pub(crate) fn prepare_static_point_shadows(
         prepared_lights.len()
     );
     let bvh = Bvh::build_par(&mut triangles);
+    let bake_lights = prepared_lights
+        .iter()
+        .map(|light| StaticShadowBakeLight {
+            translation: Vec3::from_array(light.translation),
+            range: light.radius,
+        })
+        .collect::<Vec<_>>();
     let faces = trace_shadow_faces(
         &bvh,
         &triangles,
-        &prepared_lights,
+        &bake_lights,
         options.resolution,
         STATIC_POINT_SHADOW_NEAR_Z,
     );
@@ -196,14 +213,11 @@ fn sorted_shadow_casters(placements: &[PreparedPlacement]) -> Vec<&PreparedPlace
 fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
     placement.initially_enabled
         && placement.asset_path.is_some()
-        // Movable bodies must not leave a baked silhouette behind when they
-        // are pushed. Their current pose is handled by the runtime shadow
-        // pass instead.
-        && placement.physics_classification != PreparedPhysicsClassification::Dynamic
-        && !matches!(
-            placement.semantic,
-            PreparedSemantic::Door(_) | PreparedSemantic::Pickup(_)
-        )
+        // Only immobile static geometry may leave a prepared silhouette.
+        // Kinematic/dynamic and interactive placements stay in the runtime
+        // shadow pass so animation or physics cannot expose a stale shadow.
+        && placement.physics_classification == PreparedPhysicsClassification::Static
+        && matches!(placement.semantic, PreparedSemantic::Static)
         && !is_pickup_record_kind(&placement.base_kind)
         && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
 }
@@ -435,7 +449,7 @@ fn triangle_is_valid(vertices: [Vec3; 3]) -> bool {
 fn trace_shadow_faces(
     bvh: &Bvh<f32, 3>,
     triangles: &[ShadowTriangle],
-    lights: &[&PreparedLight],
+    lights: &[StaticShadowBakeLight],
     resolution: u32,
     near_z: f32,
 ) -> Vec<Vec<f32>> {
@@ -446,14 +460,14 @@ fn trace_shadow_faces(
         .map(|index| {
             let light = lights[index / FACE_COUNT];
             let face = index % FACE_COUNT;
-            let origin = point3(Vec3::from_array(light.translation));
+            let origin = point3(light.translation);
             let mut depths = Vec::with_capacity((resolution * resolution) as usize);
             for y in 0..resolution {
                 for x in 0..resolution {
                     let direction = cubemap_texel_direction(face, x, y, resolution);
                     let ray = Ray::new(origin, vector3(direction));
                     let hit =
-                        nearest_hit_distance(bvh, triangles, &ray, origin, direction, light.radius);
+                        nearest_hit_distance(bvh, triangles, &ray, origin, direction, light.range);
                     depths.push(if let Some(hit) = hit {
                         reverse_z_depth(direction, hit, near_z)
                     } else {
@@ -466,6 +480,61 @@ fn trace_shadow_faces(
             depths
         })
         .collect()
+}
+
+/// Runs the production BVH/raytracing kernel for procedural or hermetic scene
+/// geometry and returns face-major D32 bytes suitable for
+/// `BakedPointShadowMap`'s render-pass upload.
+pub(crate) fn bake_static_point_shadow_bytes(
+    triangles: &[[Vec3; 3]],
+    lights: &[StaticShadowBakeLight],
+    resolution: u32,
+    near_z: f32,
+) -> Result<Vec<u8>> {
+    if triangles.is_empty() {
+        bail!("static point-shadow bake requires at least one triangle");
+    }
+    if lights.is_empty() {
+        bail!("static point-shadow bake requires at least one light");
+    }
+    if resolution == 0 {
+        bail!("static point-shadow bake resolution must be greater than zero");
+    }
+    if !near_z.is_finite() || near_z <= 0.0 {
+        bail!("static point-shadow bake near plane must be finite and positive");
+    }
+    if triangles
+        .iter()
+        .any(|triangle| !triangle_is_valid(*triangle))
+    {
+        bail!("static point-shadow bake received an invalid triangle");
+    }
+    if lights.iter().any(|light| {
+        !light.translation.is_finite() || !light.range.is_finite() || light.range <= near_z
+    }) {
+        bail!("static point-shadow bake received an invalid light");
+    }
+
+    let mut shadow_triangles = triangles
+        .iter()
+        .map(|vertices| ShadowTriangle {
+            vertices: (*vertices).map(point3),
+            node_index: 0,
+        })
+        .collect::<Vec<_>>();
+    let bvh = Bvh::build_par(&mut shadow_triangles);
+    let faces = trace_shadow_faces(&bvh, &shadow_triangles, lights, resolution, near_z);
+    let mut bytes = Vec::with_capacity(
+        faces
+            .len()
+            .saturating_mul(resolution as usize)
+            .saturating_mul(resolution as usize)
+            .saturating_mul(size_of::<f32>()),
+    );
+    for depth in faces.iter().flatten() {
+        bytes.extend_from_slice(&depth.to_le_bytes());
+    }
+    Ok(bytes)
 }
 
 fn nearest_hit_distance(
@@ -854,7 +923,34 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_excludes_dynamic_physics_objects() {
+    fn procedural_bake_returns_face_major_d32_bytes() {
+        let triangles = [[
+            Vec3::new(-1.0, -1.0, -2.0),
+            Vec3::new(1.0, -1.0, -2.0),
+            Vec3::new(0.0, 1.0, -2.0),
+        ]];
+        let bytes = bake_static_point_shadow_bytes(
+            &triangles,
+            &[StaticShadowBakeLight {
+                translation: Vec3::ZERO,
+                range: 8.0,
+            }],
+            4,
+            STATIC_POINT_SHADOW_NEAR_Z,
+        )
+        .unwrap();
+
+        assert_eq!(bytes.len(), 4 * 4 * FACE_COUNT * size_of::<f32>());
+        assert!(
+            bytes
+                .chunks_exact(size_of::<f32>())
+                .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+                .any(|depth| depth > 0.0)
+        );
+    }
+
+    #[test]
+    fn caster_filter_keeps_only_static_semantic_with_static_physics() {
         let semantics = [
             PreparedSemantic::Static,
             PreparedSemantic::Pickup(PreparedPickup {
@@ -892,23 +988,12 @@ mod tests {
         }
 
         let casters = sorted_shadow_casters(&placements);
-        // Three pickup semantics and the seven non-pickup dynamic bodies are
-        // excluded; the dynamic pickup is counted only once.
-        assert_eq!(casters.len(), 14);
-        assert!(
-            casters
-                .iter()
-                .all(|placement| !matches!(placement.semantic, PreparedSemantic::Pickup(_)))
+        assert_eq!(casters.len(), 1);
+        assert!(matches!(casters[0].semantic, PreparedSemantic::Static));
+        assert_eq!(
+            casters[0].physics_classification,
+            PreparedPhysicsClassification::Static
         );
-        assert!(
-            casters
-                .iter()
-                .any(|placement| placement.physics_classification
-                    == PreparedPhysicsClassification::Kinematic)
-        );
-        assert!(casters.iter().all(|placement| {
-            placement.physics_classification != PreparedPhysicsClassification::Dynamic
-        }));
     }
 
     #[test]
@@ -967,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_excludes_rclightbox01_across_representative_classes() {
+    fn caster_filter_excludes_rclightbox01_and_non_static_representatives() {
         let semantics = [
             PreparedSemantic::Static,
             PreparedSemantic::Container,
@@ -993,20 +1078,18 @@ mod tests {
             }
         }
 
-        let mut ordinary_activator = placement("ordinary-activator.glb");
-        ordinary_activator.reference_form_id = 100;
-        ordinary_activator.semantic = PreparedSemantic::Activator;
-        ordinary_activator.physics_classification = PreparedPhysicsClassification::Kinematic;
-        placements.push(ordinary_activator);
+        let mut ordinary_static = placement("ordinary-static.glb");
+        ordinary_static.reference_form_id = 100;
+        placements.push(ordinary_static);
 
         let casters = sorted_shadow_casters(&placements);
         assert_eq!(casters.len(), 1);
         assert_eq!(casters[0].reference_form_id, 100);
         assert_eq!(casters[0].base_form_id, 10);
-        assert_eq!(casters[0].semantic, PreparedSemantic::Activator);
+        assert_eq!(casters[0].semantic, PreparedSemantic::Static);
         assert_eq!(
             casters[0].physics_classification,
-            PreparedPhysicsClassification::Kinematic
+            PreparedPhysicsClassification::Static
         );
     }
 

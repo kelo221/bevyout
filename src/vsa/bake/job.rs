@@ -51,6 +51,8 @@ pub(crate) struct JobLight {
     pub(crate) radius: f32,
     pub(crate) intensity_lumens: f32,
     pub(crate) kind: String,
+    /// Default-on indirect contribution for this light's irradiance bake.
+    pub(crate) bounce_multiplier: f32,
 }
 
 #[derive(Debug, Clone, Copy)]

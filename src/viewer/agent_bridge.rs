@@ -298,8 +298,18 @@ fn schedule_snapshot(In(params): In<Option<Value>>, world: &World) -> BrpResult 
 fn session(
     In(_params): In<Option<Value>>,
     info: Res<AgentBridgeInfo>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Option<Res<PreparedSceneManifest>>,
 ) -> BrpResult {
+    let Some(manifest) = manifest else {
+        return Ok(json!({
+            "session_id": info.session_id,
+            "port": info.port,
+            "persistence": "runtime_only",
+            "scene": "lighting-test",
+            "placement_count": 0,
+            "diagnostic_count": 0,
+        }));
+    };
     Ok(json!({
         "session_id": info.session_id,
         "port": info.port,

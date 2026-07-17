@@ -257,3 +257,26 @@ fn prepared_shadow_resolution_and_rebuild_contract_parse() {
         );
     }
 }
+
+#[test]
+fn lighting_test_exposes_a_hermetic_capture_contract() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "lighting-test",
+        "--shadow-resolution",
+        "256",
+        "--trace-seconds",
+        "5",
+        "--agent-bridge",
+        "--agent-port",
+        "15703",
+    ])
+    .unwrap();
+    let CommandLine::LightingTest(args) = cli.command else {
+        panic!("expected lighting-test command");
+    };
+    assert_eq!(args.shadow_resolution, 256);
+    assert_eq!(args.trace_seconds, Some(5.0));
+    assert!(args.agent_bridge);
+    assert_eq!(args.agent_port, 15_703);
+}

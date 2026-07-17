@@ -18,6 +18,11 @@ you're actually touching; `SuperDuperMart` is just a known-good default. It
 catches the class of bug the automated checks can't (Blender/ImageMagick/KTX
 tool detection, manifest/viewer drift) on your actual machine.
 
+For hybrid point-shadow changes, also run `cargo run-dev -- lighting-test` and
+confirm the stationary orange pillar and orbiting blue block both cast visible
+shadows onto the same floor. Toggle keys 1 and 2 should remove only the static
+or moving-object shadow respectively.
+
 CI (`.github/workflows/ci.yml`) runs the first three checks on Linux, macOS,
 and Windows when a push or PR changes Rust core paths, tests, feature files,
 build manifests, or the CI workflow itself. Documentation, plans, server-side

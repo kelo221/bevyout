@@ -469,14 +469,15 @@ fn apply_pbr_lighting(
 #endif
 
     // Point lights (direct). All clustered lights illuminate the surface, but
-    // only the strongest shadow-capable BRDF contribution performs a cubemap
-    // lookup. This bounds prepared point-shadow sampling to one fetch per
-    // pixel regardless of how many point lights overlap the cluster.
+    // only the strongest shadow-capable BRDF contribution performs cubemap
+    // lookups. That light may use one prepared-static source, one realtime
+    // source, or both; overlapping point lights never add more shadow work.
     var dominant_point_light_found = false;
     var dominant_point_light_id = 0u;
     var dominant_point_light_score = 0.0;
     var dominant_point_light_contrib = vec3<f32>(0.0);
-    var dominant_point_light_baked_receiver = false;
+    var dominant_point_light_uses_baked_shadow = false;
+    var dominant_point_light_uses_realtime_shadow = false;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
     var dominant_point_transmitted_contrib = vec3<f32>(0.0);
 #endif
@@ -520,11 +521,11 @@ fn apply_pbr_lighting(
         let baked_receiver =
             (in.flags & MESH_FLAGS_BAKED_POINT_SHADOW_RECEIVER_BIT) != 0u;
         let light_flags = view_bindings::clustered_lights.data[light_id].flags;
-        let shadow_capable = receives_shadow &&
-            ((baked_receiver &&
-                (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT) != 0u) ||
-            (!baked_receiver &&
-                (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_RUNTIME_SHADOWS_ENABLED_BIT) != 0u));
+        let uses_baked_shadow = baked_receiver &&
+            (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_BAKED_SHADOWS_ENABLED_BIT) != 0u;
+        let uses_realtime_shadow =
+            (light_flags & mesh_view_types::POINT_LIGHT_FLAGS_RUNTIME_SHADOWS_ENABLED_BIT) != 0u;
+        let shadow_capable = receives_shadow && (uses_baked_shadow || uses_realtime_shadow);
         let contribution_score = dot(
             max(light_contrib, vec3<f32>(0.0)),
             vec3<f32>(0.2126, 0.7152, 0.0722),
@@ -534,7 +535,8 @@ fn apply_pbr_lighting(
             dominant_point_light_id = light_id;
             dominant_point_light_score = contribution_score;
             dominant_point_light_contrib = light_contrib;
-            dominant_point_light_baked_receiver = baked_receiver;
+            dominant_point_light_uses_baked_shadow = uses_baked_shadow;
+            dominant_point_light_uses_realtime_shadow = uses_realtime_shadow;
 #ifdef STANDARD_MATERIAL_DIFFUSE_TRANSMISSION
             dominant_point_transmitted_contrib = transmitted_light_contrib;
 #endif
@@ -542,24 +544,26 @@ fn apply_pbr_lighting(
     }
 
     if dominant_point_light_found {
-        var dominant_shadow = shadows::fetch_point_shadow(
-            dominant_point_light_id,
-            in.world_position,
-            in.world_normal,
-            in.frag_coord.xy,
-            dominant_point_light_baked_receiver,
-        );
-
-        // Runtime shadows are only a local contact/detail pass. Fade their
-        // occlusion back to fully lit over the configured eight metre camera
-        // distance; baked receivers remain unaffected.
-        if (!dominant_point_light_baked_receiver) {
-            let realtime_shadow_fade = clamp(
-                1.0 - distance(in.world_position.xyz, view_bindings::view.world_position.xyz) / 8.0,
-                0.0,
-                1.0,
+        var dominant_shadow = 1.0;
+        if (dominant_point_light_uses_baked_shadow) {
+            dominant_shadow = shadows::fetch_point_shadow(
+                dominant_point_light_id,
+                in.world_position,
+                in.world_normal,
+                in.frag_coord.xy,
+                true,
             );
-            dominant_shadow = mix(1.0, dominant_shadow, realtime_shadow_fade);
+        }
+
+        if (dominant_point_light_uses_realtime_shadow) {
+            let realtime_shadow = shadows::fetch_point_shadow(
+                dominant_point_light_id,
+                in.world_position,
+                in.world_normal,
+                in.frag_coord.xy,
+                false,
+            );
+            dominant_shadow = min(dominant_shadow, realtime_shadow);
         }
 
 #ifdef CONTACT_SHADOWS

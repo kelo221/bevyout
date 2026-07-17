@@ -138,6 +138,30 @@ mod performance_policy;
 #[allow(dead_code, unused_imports)]
 mod material_shading_policy;
 
+// Hybrid point-shadow composition and demo motion are std-only policies used
+// by both the observable Bevy test scene and this executable specification.
+#[path = "../src/viewer/lighting_demo_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod lighting_demo_policy;
+
+// The DynamicLighting effect core is intentionally Bevy-free, so the
+// executable spec can drive the exact same deterministic curve implementation.
+// Keep the same `core::{effects,types}` module shape as the production slice
+// so the verbatim pure effect implementation is exercised by the feature
+// harness without widening the library's public API.
+mod dynamic_lighting_core {
+    #[path = "../../src/vsa/dynamic_lighting/core/effects.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod effects;
+
+    #[path = "../../src/vsa/dynamic_lighting/core/types.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub(crate) mod types;
+
+    pub(crate) use effects::intensity_multiplier;
+    pub(crate) use types::{LightEffect, LightEffectState};
+}
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -372,6 +396,11 @@ struct BevyoutWorld {
     bake_samples: u32,
     bake_primary_rays: usize,
 
+    // -- dynamic_lighting.feature --
+    dynamic_light_state: dynamic_lighting_core::LightEffectState,
+    dynamic_light_multiplier: Option<f32>,
+    dynamic_light_effects_finite: Option<bool>,
+
     // -- loading_fallback.feature (issue #59) --
     fallback_state: Option<swap_policy::FallbackState>,
     fallback_lifecycle_outcome: Option<swap_policy::FallbackLifecycleOutcome>,
@@ -468,6 +497,13 @@ struct BevyoutWorld {
     recipe_under_test: Option<recipe_policy::PreparedRecipe>,
     recipe_available_items: std::collections::BTreeSet<u32>,
     recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
+
+    // -- hybrid_lighting.feature --
+    prepared_shadow_visibility: Option<f32>,
+    realtime_shadow_visibility: Option<f32>,
+    combined_shadow_visibility: Option<f32>,
+    demo_orbit: Option<lighting_demo_policy::DemoOrbit>,
+    demo_orbit_samples: [[f32; 3]; 2],
 }
 
 fn find_placement<'a>(
@@ -2919,6 +2955,64 @@ async fn then_prepared_close_sound_absent(world: &mut BevyoutWorld) {
 }
 
 // ---------------------------------------------------------------------
+// dynamic_lighting.feature
+// ---------------------------------------------------------------------
+
+#[given("the default dynamic light state")]
+async fn given_default_dynamic_light_state(world: &mut BevyoutWorld) {
+    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::default();
+}
+
+#[then(regex = r"^the dynamic light bounce multiplier is ([\d.]+)$")]
+async fn then_dynamic_light_bounce_multiplier(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.dynamic_light_state.bounce_multiplier, expected,);
+}
+
+#[given(regex = r"^a strobe effect at ([\d.]+) Hz$")]
+async fn given_strobe_effect(world: &mut BevyoutWorld, frequency_hz: f32) {
+    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::strobe(frequency_hz);
+}
+
+#[when(regex = r"^the strobe is sampled at ([\d.]+) seconds$")]
+async fn when_strobe_sampled(world: &mut BevyoutWorld, elapsed_seconds: f32) {
+    world.dynamic_light_multiplier = Some(
+        world
+            .dynamic_light_state
+            .intensity_multiplier(elapsed_seconds),
+    );
+}
+
+#[then(regex = r"^the dynamic light intensity multiplier is ([\d.]+)$")]
+async fn then_dynamic_light_multiplier(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.dynamic_light_multiplier, Some(expected));
+}
+
+#[given("every imported dynamic light effect")]
+async fn given_every_dynamic_light_effect(world: &mut BevyoutWorld) {
+    world.dynamic_light_state = dynamic_lighting_core::LightEffectState::default();
+}
+
+#[when(regex = r"^the effects are sampled at ([\d.]+) seconds$")]
+async fn when_effects_sampled(world: &mut BevyoutWorld, elapsed_seconds: f32) {
+    world.dynamic_light_effects_finite = Some(
+        dynamic_lighting_core::LightEffect::ALL
+            .into_iter()
+            .map(|effect| {
+                world
+                    .dynamic_light_state
+                    .with_effect(effect)
+                    .intensity_multiplier(elapsed_seconds)
+            })
+            .all(f32::is_finite),
+    );
+}
+
+#[then("every dynamic light effect returns a finite multiplier")]
+async fn then_every_dynamic_light_effect_finite(world: &mut BevyoutWorld) {
+    assert_eq!(world.dynamic_light_effects_finite, Some(true));
+}
+
+// ---------------------------------------------------------------------
 // inventory.feature (M3 wave 1, issues #71/#72) -- appended section.
 // ---------------------------------------------------------------------
 
@@ -4299,6 +4393,70 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
             .quantity,
         expected
     );
+}
+
+// ---------------------------------------------------------------------
+// hybrid_lighting.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^prepared point-shadow visibility is ([\d.]+)$")]
+async fn given_prepared_shadow_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.prepared_shadow_visibility = Some(visibility);
+}
+
+#[given(regex = r"^realtime point-shadow visibility is ([\d.]+)$")]
+async fn given_realtime_shadow_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.realtime_shadow_visibility = Some(visibility);
+}
+
+#[when("hybrid point-shadow visibility is combined")]
+async fn when_hybrid_shadow_visibility_is_combined(world: &mut BevyoutWorld) {
+    world.combined_shadow_visibility = Some(lighting_demo_policy::hybrid_shadow_visibility(
+        world.prepared_shadow_visibility,
+        world.realtime_shadow_visibility,
+    ));
+}
+
+#[then(regex = r"^combined point-shadow visibility is ([\d.]+)$")]
+async fn then_combined_shadow_visibility(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .combined_shadow_visibility
+        .expect("hybrid visibility was not evaluated");
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+}
+
+#[given(
+    regex = r"^a demo shadow caster orbits at height ([\d.]+) with radius ([\d.]+) and speed ([\d.]+)$"
+)]
+async fn given_demo_shadow_caster_orbit(
+    world: &mut BevyoutWorld,
+    height: f32,
+    radius: f32,
+    speed: f32,
+) {
+    world.demo_orbit = Some(lighting_demo_policy::DemoOrbit {
+        center: [0.0, height, 0.0],
+        radius,
+        radians_per_second: speed,
+    });
+}
+
+#[when(regex = r"^the demo caster is sampled at ([\d.]+) and ([\d.]+) seconds$")]
+async fn when_demo_caster_is_sampled(world: &mut BevyoutWorld, first: f32, second: f32) {
+    let orbit = world.demo_orbit.expect("demo orbit was not configured");
+    world.demo_orbit_samples = [orbit.position(first), orbit.position(second)];
+}
+
+#[then("the demo caster positions differ")]
+async fn then_demo_caster_positions_differ(world: &mut BevyoutWorld) {
+    assert_ne!(world.demo_orbit_samples[0], world.demo_orbit_samples[1]);
+}
+
+#[then(regex = r"^both demo caster samples have height ([\d.]+)$")]
+async fn then_demo_caster_samples_have_height(world: &mut BevyoutWorld, expected: f32) {
+    for sample in world.demo_orbit_samples {
+        assert!((sample[1] - expected).abs() < 1e-6);
+    }
 }
 
 fn main() {

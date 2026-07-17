@@ -16,5 +16,5 @@ pub use save::{
     PersistentWorldState, SaveGame, SaveGameHeader, SaveLoadOutcome, SavePlugin, SaveSlotSource,
     SaveStore, SavedBodyState, SavedTransform, decode_save, encode_save,
 };
-pub use viewer::{render, view};
+pub use viewer::{lighting_test, render, view};
 pub use vsa::{bake, cells, prepare, report};

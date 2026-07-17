@@ -62,10 +62,10 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 - Point-shadow depth is generated automatically during `prepare`, after GLB
   conversion and physics classification. Do not add Blender shadow baking or
   runtime cubemap rendering back into this path.
-- Casters must be initially enabled placements with resolved GLBs. Every
-  semantic and physics classification contributes its prepared initial-pose
-  geometry except `PreparedSemantic::Door`; doors are intentionally
-  non-casters.
+- Casters must be initially enabled `PreparedSemantic::Static` placements with
+  resolved GLBs and `PreparedPhysicsClassification::Static`. Kinematic,
+  dynamic, interactive/item, and known `RCLightBox01` helper geometry is
+  excluded so movable objects cannot leave a baked silhouette.
 - The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
@@ -79,10 +79,17 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   `bevy_pbr` patch stages the decoded data through `R32Float` and writes the
   depth array once with a GPU render pass. This upload pass must not enqueue
   scene meshes or become a per-frame shadow pass.
-- Keep point-light runtime shadow rendering disabled. GPU light metadata uses
-  stable manifest layers, and forward shading performs at most one dominant
-  point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
+- The combined baked scene receives prepared shadows but carries
+  `NotShadowCaster`, so it never re-enters the per-frame cubemap pass. The
+  strongest startup point light may render one realtime cubemap containing
+  moving/interactive casters. Forward shading chooses one dominant point light
+  and combines its prepared and realtime visibility (at most one lookup per
+  source, two total). `setrender shadow_samples 0|1` remains the prepared-map
   benchmark switch; there is no gameplay shadow budget.
+- `cargo run-dev -- lighting-test` is the hermetic visual proof. It feeds a
+  procedural pillar through the production CPU tracer, moves a separate caster
+  through the realtime pass, and shows both results on one receiver without
+  reading Fallout data or invoking KTX-Software.
 
 ## Prepared container audio
 

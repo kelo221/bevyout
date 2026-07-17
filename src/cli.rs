@@ -28,6 +28,9 @@ pub enum CommandLine {
     /// Open a prepared scene manifest in the Bevy viewer.
     #[command(name = "view")]
     View(ViewArgs),
+    /// Open a procedural scene that demonstrates baked static and realtime moving shadows.
+    #[command(name = "lighting-test")]
+    LightingTest(LightingTestArgs),
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
@@ -170,6 +173,22 @@ pub struct ViewArgs {
     /// Load this save slot at startup and apply it to the launch cell.
     #[arg(long, value_name = "SLOT")]
     pub(crate) save_slot: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct LightingTestArgs {
+    /// Face resolution for the hermetic CPU-baked static shadow cubemap.
+    #[arg(long, default_value_t = 128, value_parser = parse_shadow_resolution)]
+    pub(crate) shadow_resolution: u32,
+    /// Exit after this many seconds; useful for automated captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
+    /// Expose the running test scene through the local Bevy Remote Protocol bridge.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]

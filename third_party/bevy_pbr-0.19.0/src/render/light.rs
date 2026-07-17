@@ -104,7 +104,7 @@ pub struct ExtractedPointLight {
 ///
 /// These maps are generated before the viewer starts. The component supplies
 /// the baked path; a separate viewer policy may also enable a runtime pass on
-/// the same light for non-baked receivers.
+/// the same light for moving casters.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct BakedPointLightShadow {
     /// Stable cubemap layer in [`BakedPointShadowMap`].
@@ -3439,10 +3439,13 @@ mod prepared_point_shadow_tests {
     }
 
     #[test]
-    fn forward_shader_has_exactly_one_point_shadow_fetch_site() {
+    fn forward_shader_has_one_dominant_light_and_two_hybrid_source_fetch_sites() {
         let shader = include_str!("pbr_functions.wgsl");
-        assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 1);
+        assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 2);
         assert!(shader.contains("dominant_point_light_score"));
+        assert!(shader.contains("dominant_point_light_uses_baked_shadow"));
+        assert!(shader.contains("dominant_point_light_uses_realtime_shadow"));
+        assert!(shader.contains("min(dominant_shadow, realtime_shadow)"));
         assert!(shader.contains("dominant_point_transmitted_contrib"));
         assert!(shader.contains("transmitted_light -= dominant_point_transmitted_contrib"));
     }

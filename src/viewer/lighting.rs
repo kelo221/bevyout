@@ -4,12 +4,6 @@ use bevy::pbr::{BakedPointLightShadow, BakedPointShadowGpuStatus, PointLightShad
 use bevy::prelude::*;
 use serde_json::json;
 
-/// Runtime shadows are intentionally limited to the strongest prepared-scene
-/// light for the first experiment.  The shader fades this shadow to zero over
-/// this camera-relative distance so it cannot compete with the baked scene
-/// lighting at longer ranges.
-pub(crate) const REALTIME_SHADOW_FADE_DISTANCE: f32 = 8.0;
-
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub(crate) struct RealtimeShadowCandidate;
 
@@ -115,7 +109,6 @@ pub(crate) fn shadow_cache_status(world: &mut World) -> serde_json::Value {
         "estimated_memory_bytes": estimated_bytes,
         "shadow_samples_per_pixel": samples,
         "runtime_shadow_passes": runtime_shadow_passes,
-        "runtime_shadow_fade_distance": REALTIME_SHADOW_FADE_DISTANCE,
     })
 }
 

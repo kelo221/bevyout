@@ -10,9 +10,10 @@ extern crate alloc;
 
 use bevy_ecs::component::Component;
 
-/// Marks a mesh in a prepared combined scene as a receiver of its baked
-/// point-light shadow cubemaps. Non-marked meshes use runtime point shadows
-/// when a runtime-shadow light is active.
+/// Marks a mesh as a receiver of prepared point-light shadow cubemaps. When
+/// the same light also has a runtime shadow map, forward shading combines the
+/// prepared static and realtime moving-object visibility. Non-marked meshes
+/// use the runtime source only.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct BakedPointShadowReceiver;
 

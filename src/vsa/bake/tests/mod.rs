@@ -56,6 +56,11 @@ fn only_static_semantics_are_batchable() {
     dynamic_placement.physics_classification = PreparedPhysicsClassification::Dynamic;
     assert!(!is_bake_static(&dynamic_placement));
     assert!(!is_batchable_static(&dynamic_placement));
+
+    let mut kinematic_placement = placement(PreparedSemantic::Static);
+    kinematic_placement.physics_classification = PreparedPhysicsClassification::Kinematic;
+    assert!(!is_bake_static(&kinematic_placement));
+    assert!(!is_batchable_static(&kinematic_placement));
 }
 
 #[test]

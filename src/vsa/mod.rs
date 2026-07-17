@@ -5,6 +5,7 @@ mod bsa;
 mod catalog;
 mod cell_map;
 mod content_index;
+mod dynamic_lighting;
 mod manifest;
 mod openmw_esm4;
 mod paths;
@@ -19,6 +20,7 @@ pub(crate) use assets::NIF_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
+pub(crate) use dynamic_lighting::{DynamicLight, LightEffect, update_dynamic_lights};
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
@@ -46,7 +48,10 @@ pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
-pub(crate) use prepare::ITEM_CATALOG_REVISION;
 pub use prepare::prepare;
+pub(crate) use prepare::{
+    ITEM_CATALOG_REVISION, STATIC_POINT_SHADOW_NEAR_Z, StaticShadowBakeLight,
+    bake_static_point_shadow_bytes,
+};
 pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

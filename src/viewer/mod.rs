@@ -60,6 +60,8 @@ mod console_ui;
 mod controls;
 mod diagnostics;
 mod lighting;
+mod lighting_demo_policy;
+mod lighting_test;
 mod material_shading;
 mod material_shading_policy;
 mod performance_policy;
@@ -69,6 +71,7 @@ pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
 pub(crate) use lighting::*;
+pub use lighting_test::lighting_test;
 pub(crate) use scene::*;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;

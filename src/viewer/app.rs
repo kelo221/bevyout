@@ -304,7 +304,7 @@ pub(crate) fn run_view(
         .add_systems(Update, apply_lighting_scale)
         .add_systems(
             Update,
-            (apply_realtime_shadow_light, mark_baked_scene_meshes)
+            (apply_realtime_shadow_light, mark_prepared_shadow_meshes)
                 .run_if(in_state(AppState::InGame)),
         )
         .add_systems(
