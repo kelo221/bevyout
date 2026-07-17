@@ -134,8 +134,22 @@ namespace AlpacaIT.DynamicLighting
             public float intensity;
             public float visibility;
             public float temporalMultiplier;
+            public float outerCutoffDegrees;
             public float coneAngle;
             public float opacity;
+            public float[] sourceColor;
+            public float[] fogColor;
+            public float[] outputRgb;
+        }
+
+        [Serializable]
+        private sealed class VolumetricCompositionSample
+        {
+            public float[] sourceColor;
+            public float[] fogColorA;
+            public float opacityA;
+            public float[] fogColorB;
+            public float opacityB;
             public float[] outputRgb;
         }
 
@@ -145,6 +159,7 @@ namespace AlpacaIT.DynamicLighting
             public string upstreamCommit;
             public string unityVersion;
             public List<VolumetricSample> samples = new List<VolumetricSample>();
+            public List<VolumetricCompositionSample> compositionSamples = new List<VolumetricCompositionSample>();
         }
 
         private const string UpstreamCommit = "dd7c195cba2599a20bf1b662fa0f69366e0f74b5";
@@ -378,7 +393,50 @@ namespace AlpacaIT.DynamicLighting
             AddVolumetricSample(fixture, "ConeZ", 3, new Vector3(3, 0, -8), new Vector3(3, 0, 8), center, Vector3.forward, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
             AddVolumetricSample(fixture, "ConeY", 4, new Vector3(0, -8, 0), new Vector3(0, 8, 0), center, Vector3.up, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
             AddVolumetricSample(fixture, "ConeY", 4, new Vector3(0, -8, 3), new Vector3(0, 8, 3), center, Vector3.up, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, center, new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -8), new Vector3(0, 0, -6), center, Vector3.forward, Vector3.one, 4, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 0.25f, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -0.1f), center, center, Vector3.forward, Vector3.one, 4, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Box", 2, center, new Vector3(0, 0, 8), center, Vector3.forward, scale, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeZ", 3, center, new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 2, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 0, 1, 0.75f, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "Sphere", 1, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 1, 0, 2, 1, 30, sourceColor, fogColor);
+            AddVolumetricSample(fixture, "ConeZ", 3, new Vector3(0, 0, -8), new Vector3(0, 0, 8), center, Vector3.forward, Vector3.one, 4, 2, 0.75f, 2, 1, 120, sourceColor, fogColor);
+            AddVolumetricCompositionSample(
+                fixture,
+                sourceColor,
+                new Vector3(0.9f, 0.1f, 0.2f),
+                0.25f,
+                new Vector3(0.1f, 0.6f, 0.9f),
+                0.65f);
             return fixture;
+        }
+
+        private static void AddVolumetricCompositionSample(
+            VolumetricFixture fixture,
+            Vector3 sourceColor,
+            Vector3 fogColorA,
+            float opacityA,
+            Vector3 fogColorB,
+            float opacityB)
+        {
+            Vector3 fog = Screen(fogColorA * opacityA, fogColorB * opacityB);
+            Vector3 screened = Screen(fog, sourceColor);
+            Vector3 output = Vector3.Lerp(screened, fog, Mathf.Max(opacityA, opacityB));
+            fixture.compositionSamples.Add(new VolumetricCompositionSample
+            {
+                sourceColor = ToArray(sourceColor),
+                fogColorA = ToArray(fogColorA),
+                opacityA = opacityA,
+                fogColorB = ToArray(fogColorB),
+                opacityB = opacityB,
+                outputRgb = ToArray(output),
+            });
+        }
+
+        private static Vector3 Screen(Vector3 first, Vector3 second)
+        {
+            return Vector3.one - Vector3.Scale(Vector3.one - first, Vector3.one - second);
         }
 
         private static void AddVolumetricSample(
@@ -430,8 +488,11 @@ namespace AlpacaIT.DynamicLighting
                 intensity = intensity,
                 visibility = visibility,
                 temporalMultiplier = temporalMultiplier,
+                outerCutoffDegrees = outerCutoff,
                 coneAngle = coneAngle,
                 opacity = opacity,
+                sourceColor = ToArray(sourceColor),
+                fogColor = ToArray(fogColor),
                 outputRgb = ToArray(output),
             });
         }

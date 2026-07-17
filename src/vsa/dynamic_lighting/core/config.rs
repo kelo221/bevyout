@@ -126,6 +126,17 @@ impl Default for DynamicLightConfig {
     }
 }
 
+/// Mirrors the upstream source-side rejection shared by direct and
+/// volumetric extraction. An invalid cone source must not leak through a
+/// second rendering path after direct illumination has disabled it.
+pub(crate) fn source_is_valid(config: &DynamicLightConfig) -> bool {
+    !matches!(
+        config.light_type,
+        DynamicLightType::Spot | DynamicLightType::Discoball
+    ) || (config.spatial.outer_cutoff_degrees >= config.spatial.inner_cutoff_degrees
+        && config.spatial.outer_cutoff_degrees != 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +203,22 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let decoded: DynamicLightConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn spot_like_source_validity_is_shared_by_every_render_path() {
+        for light_type in [DynamicLightType::Spot, DynamicLightType::Discoball] {
+            let mut config = DynamicLightConfig {
+                light_type,
+                ..Default::default()
+            };
+            assert!(source_is_valid(&config));
+            config.spatial.outer_cutoff_degrees = config.spatial.inner_cutoff_degrees - 1.0;
+            assert!(!source_is_valid(&config));
+            config.spatial.inner_cutoff_degrees = 0.0;
+            config.spatial.outer_cutoff_degrees = 0.0;
+            assert!(!source_is_valid(&config));
+        }
+        assert!(source_is_valid(&DynamicLightConfig::default()));
     }
 }

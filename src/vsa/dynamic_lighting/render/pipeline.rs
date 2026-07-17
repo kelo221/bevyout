@@ -219,6 +219,7 @@ pub(super) fn dynamic_lighting_pass(
     buffers: Res<DynamicLightGpuBuffers>,
     view_uniforms: Res<ViewUniforms>,
     shadow_samplers: Res<ShadowSamplers>,
+    diagnostics: Res<super::super::bevy_bridge::DynamicLightingDiagnostics>,
     mut ctx: RenderContext,
 ) -> Result<(), BevyError> {
     let (view_target, prepass, view_offset, pipeline_id, _, shadow_bindings) = view.into_inner();
@@ -278,6 +279,7 @@ pub(super) fn dynamic_lighting_pass(
     pass.set_render_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
+    diagnostics.set_surface_pass_ready();
     Ok(())
 }
 
@@ -293,6 +295,7 @@ pub(super) fn dynamic_lighting_volumetric_pass(
     pipeline: Res<DynamicLightingVolumetricPipeline>,
     buffers: Res<DynamicLightGpuBuffers>,
     view_uniforms: Res<ViewUniforms>,
+    diagnostics: Res<super::super::bevy_bridge::DynamicLightingDiagnostics>,
     mut ctx: RenderContext,
 ) -> Result<(), BevyError> {
     if !buffers.volumetric_enabled || buffers.volumetric_count == 0 {
@@ -340,5 +343,6 @@ pub(super) fn dynamic_lighting_volumetric_pass(
     pass.set_render_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
+    diagnostics.set_volumetric_pass_ready();
     Ok(())
 }

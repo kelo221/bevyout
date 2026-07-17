@@ -65,6 +65,20 @@ fn fresnel_schlick(cosine: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cosine, 5.0);
 }
 
+// Mirrors bevy_pbr::pbr_functions::calculate_view. Orthographic cameras have
+// a constant view direction; using camera position would fan specular
+// highlights across an otherwise parallel projection.
+fn view_direction_for_surface(surface: DynamicLightingSurface, view: View) -> vec3<f32> {
+    if view.clip_from_view[3].w == 1.0 {
+        return normalize(vec3<f32>(
+            view.clip_from_world[0].z,
+            view.clip_from_world[1].z,
+            view.clip_from_world[2].z,
+        ));
+    }
+    return normalize(view.world_position.xyz - surface.world_position);
+}
+
 fn material_light_contribution(
     surface: DynamicLightingSurface,
     light: DynamicLight,
@@ -91,7 +105,7 @@ fn material_light_contribution(
     let ndotl = max(dot(surface.normal, light_direction), 0.0);
     let light_scale = attenuation(light, distance_sqr) * spatial * view.exposure;
     let radiance = light.color * light_scale;
-    let view_direction = normalize(view.world_position - surface.world_position);
+    let view_direction = view_direction_for_surface(surface, view);
     let halfway = normalize(view_direction + light_direction);
     let ndotv = max(dot(surface.normal, view_direction), 0.0001);
     let ndoth = max(dot(surface.normal, halfway), 0.0);

@@ -21,6 +21,7 @@ pub(super) fn extract_dynamic_lights(
     diagnostics: Extract<Res<DynamicLightingDiagnostics>>,
     lights: Extract<Query<DynamicLightExtractQuery>>,
 ) {
+    commands.insert_resource((*diagnostics).clone());
     let mut sorted = lights
         .iter()
         .filter(|(_, light, _, _, layers, _)| light.config.layer_mask & layers.0 != 0)

@@ -13,6 +13,12 @@ const VOLUMETRIC_BOX: u32 = 2u;
 const VOLUMETRIC_CONE_Z: u32 = 3u;
 const VOLUMETRIC_CONE_Y: u32 = 4u;
 const NO_HIT: f32 = -1.0;
+const MAX_PERSPECTIVE_RAY_DISTANCE: f32 = 10000.0;
+
+struct VolumetricRay {
+    origin: vec3<f32>,
+    end: vec3<f32>,
+}
 
 fn screen_color(base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(1.0) - (vec3<f32>(1.0) - base) * (vec3<f32>(1.0) - blend);
@@ -26,6 +32,39 @@ fn nearest_point_on_finite_line(start: vec3<f32>, end: vec3<f32>, point: vec3<f3
     }
     let distance = clamp(dot(point - start, line) / length_sqr, 0.0, 1.0);
     return start + line * distance;
+}
+
+fn world_from_ndc(ndc: vec3<f32>) -> vec3<f32> {
+    let homogeneous_world = view.world_from_clip * vec4<f32>(ndc, 1.0);
+    return homogeneous_world.xyz / homogeneous_world.w;
+}
+
+fn volumetric_ray(ndc_xy: vec2<f32>, depth: f32) -> VolumetricRay {
+    let near = world_from_ndc(vec3<f32>(ndc_xy, 1.0));
+    let is_orthographic = view.clip_from_view[3].w == 1.0;
+    if is_orthographic {
+        let end = select(
+            world_from_ndc(vec3<f32>(ndc_xy, 0.0)),
+            world_from_ndc(vec3<f32>(ndc_xy, depth)),
+            depth > 0.0,
+        );
+        return VolumetricRay(near, end);
+    }
+
+    if depth > 0.0 {
+        return VolumetricRay(
+            view.world_position.xyz,
+            world_from_ndc(vec3<f32>(ndc_xy, depth)),
+        );
+    }
+
+    // Bevy's reverse-Z perspective projection has an infinite far plane, so
+    // clear-background pixels need a finite endpoint along their view ray.
+    let direction = normalize(near - view.world_position.xyz);
+    return VolumetricRay(
+        view.world_position.xyz,
+        view.world_position.xyz + direction * MAX_PERSPECTIVE_RAY_DISTANCE,
+    );
 }
 
 fn ray_box_intersection(
@@ -130,8 +169,8 @@ fn ray_cone_intersection(
 
 fn shape_opacity(
     light: DynamicLight,
-    camera_position: vec3<f32>,
-    world_position: vec3<f32>,
+    ray_start: vec3<f32>,
+    ray_end: vec3<f32>,
 ) -> f32 {
     let radius = light.radius_sqr;
     if radius <= 0.0 {
@@ -139,18 +178,18 @@ fn shape_opacity(
     }
     var opacity = 0.0;
     if light.channel == VOLUMETRIC_SPHERE {
-        let closest = nearest_point_on_finite_line(camera_position, world_position, light.position);
+        let closest = nearest_point_on_finite_line(ray_start, ray_end, light.position);
         let center_distance = distance(closest, light.position);
         if center_distance < radius + 0.00001 {
             opacity = (radius - center_distance) / radius;
         }
     } else if light.channel == VOLUMETRIC_BOX {
         let extent = radius * vec3<f32>(light.parameter_b, light.parameter_c, light.shimmer_scale);
-        let ray = world_position - camera_position;
+        let ray = ray_end - ray_start;
         let max_depth = length(ray);
         if max_depth > 0.000001 {
             let hit = ray_box_intersection(
-                camera_position,
+                ray_start,
                 ray / max_depth,
                 light.position - extent,
                 light.position + extent,
@@ -161,11 +200,11 @@ fn shape_opacity(
             }
         }
     } else if light.channel == VOLUMETRIC_CONE_Z || light.channel == VOLUMETRIC_CONE_Y {
-        let ray = world_position - camera_position;
+        let ray = ray_end - ray_start;
         let max_depth = length(ray);
         if max_depth > 0.000001 {
             let hit = ray_cone_intersection(
-                camera_position,
+                ray_start,
                 ray / max_depth,
                 light.position,
                 normalize(light.forward),
@@ -180,7 +219,7 @@ fn shape_opacity(
     }
     opacity = smoothstep(0.0, 1.0, opacity);
     opacity = clamp(opacity * light.parameter_a, 0.0, 1.0);
-    opacity = min(opacity, distance(camera_position, world_position) * light.volumetric_visibility);
+    opacity = min(opacity, distance(ray_start, ray_end) * light.volumetric_visibility);
     return opacity * light.volumetric_intensity;
 }
 
@@ -192,20 +231,16 @@ fn fragment(@builtin(position) frag_position: vec4<f32>) -> @location(0) vec4<f3
             volumetric_meta.padding_a != 0.0 || volumetric_meta.padding_b != 0.0 {
         return source;
     }
-    let depth = textureLoad(depth_texture, pixel, 0);
-    if depth <= 0.0 {
-        return source;
-    }
     let uv = (frag_position.xy - view.viewport.xy) / view.viewport.zw;
-    let ndc = vec3<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), depth);
-    let homogeneous_world = view.world_from_clip * vec4<f32>(ndc, 1.0);
-    let world_position = homogeneous_world.xyz / homogeneous_world.w;
+    let ndc_xy = uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    let depth = textureLoad(depth_texture, pixel, 0);
+    let ray = volumetric_ray(ndc_xy, depth);
 
     var fog_color = vec3<f32>(0.0);
     var maximum_opacity = 0.0;
     for (var index = 0u; index < volumetric_meta.count; index += 1u) {
         let light = volumetric_lights[index];
-        let opacity = shape_opacity(light, view.world_position, world_position);
+        let opacity = shape_opacity(light, ray.origin, ray.end);
         maximum_opacity = max(maximum_opacity, opacity);
         fog_color = screen_color(fog_color, light.color * opacity);
     }

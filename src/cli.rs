@@ -192,6 +192,14 @@ pub struct LightingTestArgs {
     /// Internal GPU acceptance output. Captures the real production render target.
     #[arg(long, hide = true, value_name = "PNG")]
     pub(crate) gpu_acceptance_capture: Option<PathBuf>,
+    /// Same-process control image captured after disabling the custom pass.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "PNG",
+        requires = "gpu_acceptance_capture"
+    )]
+    pub(crate) gpu_acceptance_control_capture: Option<PathBuf>,
     /// Hide every ordinary Bevy light and shadow proxy during GPU acceptance.
     #[arg(long, hide = true, requires = "gpu_acceptance_capture")]
     pub(crate) gpu_acceptance_custom_only: bool,

@@ -4,7 +4,7 @@ mod shadow_proxy;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use bevy::core_pipeline::prepass::{DeferredPrepass, DepthPrepass};
@@ -118,6 +118,8 @@ struct DynamicLightingDiagnosticCounters {
     extracted_lights: AtomicUsize,
     extracted_volumetric_lights: AtomicUsize,
     truncated_lights: AtomicUsize,
+    surface_pass_ready: AtomicBool,
+    volumetric_pass_ready: AtomicBool,
 }
 
 #[derive(Resource, Clone, Default)]
@@ -136,6 +138,14 @@ impl DynamicLightingDiagnostics {
         self.0.truncated_lights.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn surface_pass_ready(&self) -> bool {
+        self.0.surface_pass_ready.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn volumetric_pass_ready(&self) -> bool {
+        self.0.volumetric_pass_ready.load(Ordering::Relaxed)
+    }
+
     pub(super) fn set_extracted_light_count(&self, count: usize) {
         self.0.extracted_lights.store(count, Ordering::Relaxed);
     }
@@ -148,6 +158,14 @@ impl DynamicLightingDiagnostics {
 
     pub(super) fn set_truncated_light_count(&self, count: usize) -> bool {
         self.0.truncated_lights.swap(count, Ordering::Relaxed) != count
+    }
+
+    pub(super) fn set_surface_pass_ready(&self) {
+        self.0.surface_pass_ready.store(true, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_volumetric_pass_ready(&self) {
+        self.0.volumetric_pass_ready.store(true, Ordering::Relaxed);
     }
 }
 

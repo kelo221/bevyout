@@ -1,3 +1,5 @@
+#![cfg(target_os = "windows")]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -5,19 +7,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn capture(path: &Path, custom_enabled: bool, orthographic: bool) {
+fn capture(enabled_path: &Path, control_path: &Path, orthographic: bool) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bevyout"));
     command
         .arg("lighting-test")
         .args(["--shadow-resolution", "128"])
-        .args(["--trace-seconds", "3"])
+        .args(["--trace-seconds", "6"])
         .arg("--gpu-acceptance-capture")
-        .arg(path)
+        .arg(enabled_path)
+        .arg("--gpu-acceptance-control-capture")
+        .arg(control_path)
         .arg("--gpu-acceptance-custom-only")
         .env("WGPU_BACKEND", "dx12");
-    if !custom_enabled {
-        command.arg("--gpu-acceptance-disable-custom");
-    }
     if orthographic {
         command.arg("--gpu-acceptance-orthographic");
     }
@@ -37,9 +38,12 @@ fn capture(path: &Path, custom_enabled: bool, orthographic: bool) {
         "lighting-test logged a render error\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        path.is_file(),
-        "acceptance capture was not written: {}",
-        path.display()
+        enabled_path.is_file() && control_path.is_file(),
+        "same-process acceptance captures were not written: {} / {}\nstdout:\n{}\nstderr:\n{}",
+        enabled_path.display(),
+        control_path.display(),
+        stdout,
+        stderr,
     );
 }
 
@@ -59,39 +63,91 @@ fn assert_projection_changes_with_custom_lighting(directory: &Path, orthographic
     };
     let enabled_path = directory.join(format!("{projection}-custom-enabled.png"));
     let disabled_path = directory.join(format!("{projection}-custom-disabled.png"));
-    capture(&enabled_path, true, orthographic);
-    capture(&disabled_path, false, orthographic);
+    capture(&enabled_path, &disabled_path, orthographic);
 
     let enabled = image::open(&enabled_path).unwrap().to_rgb8();
     let disabled = image::open(&disabled_path).unwrap().to_rgb8();
     assert_eq!(enabled.dimensions(), disabled.dimensions());
 
-    let mut changed_pixels = 0usize;
-    let mut enabled_energy = 0u64;
-    let mut disabled_energy = 0u64;
-    for (on, off) in enabled.pixels().zip(disabled.pixels()) {
-        let difference =
-            on.0.into_iter()
-                .zip(off.0)
-                .map(|(left, right)| left.abs_diff(right) as u32)
-                .sum::<u32>();
-        changed_pixels += usize::from(difference >= 12);
-        enabled_energy += on.0.into_iter().map(u64::from).sum::<u64>();
-        disabled_energy += off.0.into_iter().map(u64::from).sum::<u64>();
+    let column_centers = if orthographic {
+        [0.207, 0.402, 0.598, 0.793]
+    } else {
+        [0.118, 0.373, 0.627, 0.882]
+    };
+    let row_centers = if orthographic {
+        [0.593, 0.766]
+    } else {
+        [0.621, 0.847]
+    };
+    let light_types = [
+        "Point",
+        "Spot",
+        "Discoball",
+        "Wave",
+        "Interference",
+        "Rotor",
+        "Shock",
+        "Disco",
+    ];
+    for (index, light_type) in light_types.into_iter().enumerate() {
+        let changed = changed_pixels_in_region(
+            &enabled,
+            &disabled,
+            column_centers[index % 4] - 0.04,
+            row_centers[index / 4] - 0.045,
+            column_centers[index % 4] + 0.04,
+            row_centers[index / 4] + 0.045,
+        );
+        assert!(
+            changed >= 120,
+            "{projection} {light_type} target changed only {changed} pixels"
+        );
     }
 
-    assert!(
-        changed_pixels >= 2_000,
-        "production WGSL changed only {changed_pixels} {projection} pixels"
-    );
-    assert!(
-        enabled_energy > disabled_energy,
-        "{projection} custom-light image energy {enabled_energy} did not exceed control {disabled_energy}"
-    );
+    for (label, bounds) in [
+        ("clear-background sphere fog", (0.24, 0.10, 0.44, 0.38)),
+        ("clear-background ConeZ fog", (0.63, 0.10, 0.84, 0.38)),
+    ] {
+        let changed =
+            changed_pixels_in_region(&enabled, &disabled, bounds.0, bounds.1, bounds.2, bounds.3);
+        assert!(
+            changed >= 500,
+            "{projection} {label} changed only {changed} background pixels"
+        );
+    }
+}
+
+fn changed_pixels_in_region(
+    enabled: &image::RgbImage,
+    disabled: &image::RgbImage,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> usize {
+    let (width, height) = enabled.dimensions();
+    let x0 = (left * width as f32).round() as u32;
+    let x1 = (right * width as f32).round() as u32;
+    let y0 = (top * height as f32).round() as u32;
+    let y1 = (bottom * height as f32).round() as u32;
+    let mut changed = 0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let on = enabled.get_pixel(x, y);
+            let off = disabled.get_pixel(x, y);
+            let difference =
+                on.0.into_iter()
+                    .zip(off.0)
+                    .map(|(left, right)| left.abs_diff(right) as u32)
+                    .sum::<u32>();
+            changed += usize::from(difference >= 12);
+        }
+    }
+    changed
 }
 
 #[test]
-fn production_wgsl_changes_perspective_and_orthographic_targets_with_zero_bevy_lights() {
+fn dx12_production_wgsl_covers_each_spatial_mode_fog_background_and_both_projections() {
     let directory = temp_capture_dir();
     fs::create_dir_all(&directory).unwrap();
     assert_projection_changes_with_custom_lighting(&directory, false);

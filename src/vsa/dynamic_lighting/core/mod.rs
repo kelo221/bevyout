@@ -13,7 +13,7 @@ mod volumetric;
 pub(crate) use config::DynamicLightBounceParameters;
 pub(crate) use config::{
     DEFAULT_BOUNCE_MULTIPLIER, DynamicLightConfig, DynamicLightEffectParameters,
-    DynamicLightSpatialParameters, DynamicLightVolumetricParameters,
+    DynamicLightSpatialParameters, DynamicLightVolumetricParameters, source_is_valid,
 };
 pub(crate) use runtime::{LightEffectRuntime, advance_effect};
 pub(crate) use spatial::spatial_parameters;

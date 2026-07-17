@@ -14,7 +14,7 @@ use bytemuck::{Pod, Zeroable};
 use super::super::{
     bevy_bridge::{DynamicLight, DynamicLightRuntime, DynamicLightShadowProxy},
     core::{
-        DynamicLightType, DynamicLightVolumetricType, pack_volumetric_parameters,
+        DynamicLightType, DynamicLightVolumetricType, pack_volumetric_parameters, source_is_valid,
         spatial_parameters, volumetric_is_active,
     },
 };
@@ -110,16 +110,9 @@ impl GpuDynamicLight {
             | DynamicLightType::Wave
             | DynamicLightType::Shock => transform.forward(),
         };
-        let invalid_cutoff = matches!(
-            config.light_type,
-            DynamicLightType::Spot | DynamicLightType::Discoball
-        ) && (config.spatial.outer_cutoff_degrees
-            < config.spatial.inner_cutoff_degrees
-            || config.spatial.outer_cutoff_degrees == 0.0);
-
         Self {
             position: transform.translation().to_array(),
-            radius_sqr: if invalid_cutoff {
+            radius_sqr: if !source_is_valid(&config) {
                 -1.0
             } else {
                 config.radius * config.radius
@@ -151,7 +144,9 @@ impl GpuDynamicLight {
         transform: &GlobalTransform,
     ) -> Option<Self> {
         let config = light.config;
-        if !volumetric_is_active(config.volumetric, runtime.state.intensity) {
+        if !source_is_valid(&config)
+            || !volumetric_is_active(config.volumetric, runtime.state.intensity)
+        {
             return None;
         }
         let (scale, _, _) = transform.to_scale_rotation_translation();
@@ -521,6 +516,47 @@ mod tests {
                     &GlobalTransform::IDENTITY,
                 );
                 assert_eq!(gpu.radius_sqr, -1.0, "{light_type:?} {inner}/{outer}");
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_spot_and_discoball_cutoffs_disable_every_volumetric_shape() {
+        for light_type in [DynamicLightType::Spot, DynamicLightType::Discoball] {
+            for volumetric_type in [
+                DynamicLightVolumetricType::Sphere,
+                DynamicLightVolumetricType::Box,
+                DynamicLightVolumetricType::ConeZ,
+                DynamicLightVolumetricType::ConeY,
+            ] {
+                for (inner, outer) in [(26.0, 20.0), (0.0, 0.0)] {
+                    let mut config = DynamicLightConfig {
+                        light_type,
+                        spatial: DynamicLightSpatialParameters {
+                            inner_cutoff_degrees: inner,
+                            outer_cutoff_degrees: outer,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    config.volumetric.volumetric_type = volumetric_type;
+                    let runtime = DynamicLightRuntime {
+                        state: LightEffectRuntime {
+                            intensity: 1.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    assert!(
+                        GpuDynamicLight::from_volumetric_main_world(
+                            &DynamicLight { config },
+                            &runtime,
+                            &GlobalTransform::IDENTITY,
+                        )
+                        .is_none(),
+                        "{light_type:?} {volumetric_type:?} {inner}/{outer}",
+                    );
+                }
             }
         }
     }

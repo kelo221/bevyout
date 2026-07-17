@@ -87,7 +87,10 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
             layers: 1,
         })
         .insert_resource(RenderReportBuffer::default())
-        .insert_resource(DemoMotion::default())
+        .insert_resource(DemoMotion {
+            paused: args.gpu_acceptance_capture.is_some(),
+            ..Default::default()
+        })
         .add_systems(Startup, setup_lighting_test)
         .add_systems(
             Update,
@@ -109,6 +112,7 @@ pub fn lighting_test(args: LightingTestArgs) -> Result<()> {
     if let Some(path) = args.gpu_acceptance_capture {
         app.insert_resource(GpuAcceptanceCapture {
             path,
+            control_path: args.gpu_acceptance_control_capture,
             custom_only: args.gpu_acceptance_custom_only,
             disable_custom: args.gpu_acceptance_disable_custom,
             orthographic: args.gpu_acceptance_orthographic,
@@ -138,6 +142,7 @@ struct DynamicLightingStatusText;
 #[derive(Resource)]
 struct GpuAcceptanceCapture {
     path: PathBuf,
+    control_path: Option<PathBuf>,
     custom_only: bool,
     disable_custom: bool,
     orthographic: bool,
@@ -147,21 +152,24 @@ fn configure_gpu_acceptance(
     options: Res<GpuAcceptanceCapture>,
     mut configured: Local<bool>,
     mut settings: ResMut<DynamicLightingSettings>,
+    mut motion: ResMut<DemoMotion>,
     mut bevy_lights: Query<&mut Visibility, With<HybridPointLight>>,
     mut proxies: Query<&mut Visibility, (With<DynamicLightShadowProxy>, Without<HybridPointLight>)>,
-    mut views: Query<&mut Projection, With<DynamicLightingView>>,
+    mut views: Query<(&Transform, &mut Projection), With<DynamicLightingView>>,
 ) {
     if *configured {
         return;
     }
     settings.enabled = !options.disable_custom;
+    motion.paused = true;
+    let Ok((_, mut projection)) = views.single_mut() else {
+        return;
+    };
     if options.orthographic {
-        for mut projection in &mut views {
-            *projection = Projection::Orthographic(OrthographicProjection {
-                scale: 0.035,
-                ..OrthographicProjection::default_3d()
-            });
-        }
+        *projection = Projection::Orthographic(OrthographicProjection {
+            scale: 0.012,
+            ..OrthographicProjection::default_3d()
+        });
     }
     if options.custom_only {
         settings.shadow_proxies_enabled = false;
@@ -175,17 +183,169 @@ fn configure_gpu_acceptance(
     *configured = true;
 }
 
+fn spawn_gpu_acceptance_targets(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    camera: Transform,
+) {
+    let forward = camera.forward().as_vec3();
+    let right = camera.right().as_vec3();
+    let up = camera.up().as_vec3();
+    let panel_mesh = meshes.add(Cuboid::new(1.5, 1.2, 0.1));
+    let panel_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.32, 0.36),
+        emissive: LinearRgba::rgb(0.01, 0.012, 0.016),
+        metallic: 0.15,
+        perceptual_roughness: 0.22,
+        ..default()
+    });
+    let colors = [
+        Color::srgb(1.0, 0.15, 0.08),
+        Color::srgb(1.0, 0.62, 0.08),
+        Color::srgb(0.75, 1.0, 0.12),
+        Color::srgb(0.12, 1.0, 0.38),
+        Color::srgb(0.08, 0.82, 1.0),
+        Color::srgb(0.18, 0.36, 1.0),
+        Color::srgb(0.62, 0.18, 1.0),
+        Color::srgb(1.0, 0.14, 0.68),
+    ];
+    let columns = [-4.5, -1.5, 1.5, 4.5];
+    let rows = [-0.8, -2.3];
+    for (index, light_type) in DynamicLightType::ALL.into_iter().enumerate() {
+        let center = camera.translation
+            + forward * 8.0
+            + right * columns[index % columns.len()]
+            + up * rows[index / columns.len()];
+        commands.spawn((
+            Name::new(format!("GPU acceptance receiver {light_type:?}")),
+            Mesh3d(panel_mesh.clone()),
+            MeshMaterial3d(panel_material.clone()),
+            Transform::from_translation(center).with_rotation(camera.rotation),
+            NotShadowCaster,
+        ));
+        let light_position = center - forward * 0.65;
+        let rotation = match light_type {
+            DynamicLightType::Discoball
+            | DynamicLightType::Interference
+            | DynamicLightType::Rotor
+            | DynamicLightType::Disco => Quat::from_rotation_arc(Vec3::Z, forward),
+            DynamicLightType::Point
+            | DynamicLightType::Spot
+            | DynamicLightType::Wave
+            | DynamicLightType::Shock => camera.rotation,
+        };
+        commands.spawn((
+            Name::new(format!("GPU acceptance light {light_type:?}")),
+            DynamicLight::with_effect(320.0, DynamicLightEffect::Steady)
+                .with_type(light_type)
+                .with_color(colors[index])
+                .with_radius(1.6)
+                .with_shadows(false),
+            Transform::from_translation(light_position).with_rotation(rotation),
+            GlobalTransform::default(),
+        ));
+    }
+
+    let volume_only = |volumetric_type, radius, thickness, intensity| {
+        DynamicLight::with_effect(0.0, DynamicLightEffect::Steady)
+            .with_color(Color::WHITE)
+            .with_volumetric(DynamicLightVolumetricParameters {
+                volumetric_type,
+                radius,
+                thickness,
+                intensity,
+                visibility: 2.0,
+            })
+    };
+    commands.spawn((
+        Name::new("GPU acceptance clear-background sphere fog"),
+        volume_only(DynamicLightVolumetricType::Sphere, 1.7, 2.4, 0.75)
+            .with_color(Color::srgb(0.05, 0.65, 1.0)),
+        Transform::from_translation(camera.translation + forward * 10.0 - right * 2.4 + up * 2.1),
+        GlobalTransform::default(),
+    ));
+    let mut cone = volume_only(DynamicLightVolumetricType::ConeZ, 8.0, 2.0, 0.65)
+        .with_color(Color::srgb(1.0, 0.28, 0.06));
+    cone.config.spatial.inner_cutoff_degrees = 4.0;
+    cone.config.spatial.outer_cutoff_degrees = 8.0;
+    commands.spawn((
+        Name::new("GPU acceptance clear-background ConeZ fog"),
+        cone,
+        Transform::from_translation(camera.translation + forward * 4.0 + right * 2.5 + up * 1.8)
+            .with_rotation(Quat::from_rotation_arc(Vec3::Z, forward)),
+        GlobalTransform::default(),
+    ));
+}
+
+#[derive(Default)]
+struct GpuCaptureState {
+    phase: u8,
+    waited_frames: u8,
+    reported_wait: bool,
+}
+
 fn capture_gpu_acceptance(
     mut commands: Commands,
     time: Res<Time>,
     options: Res<GpuAcceptanceCapture>,
-    mut captured: Local<bool>,
+    diagnostics: Res<DynamicLightingDiagnostics>,
+    mut settings: ResMut<DynamicLightingSettings>,
+    mut state: Local<GpuCaptureState>,
 ) {
-    if !*captured && time.elapsed_secs() >= 1.25 {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(options.path.clone()));
-        *captured = true;
+    if time.elapsed_secs() >= 5.0 && state.phase == 0 && !state.reported_wait {
+        warn!(
+            "gpu acceptance waiting: surface_ready={} volumetric_ready={} lights={} volumes={}",
+            diagnostics.surface_pass_ready(),
+            diagnostics.volumetric_pass_ready(),
+            diagnostics.extracted_light_count(),
+            diagnostics.extracted_volumetric_light_count(),
+        );
+        state.reported_wait = true;
+    }
+    if time.elapsed_secs() < 1.5
+        || !diagnostics.surface_pass_ready()
+        || !diagnostics.volumetric_pass_ready()
+        || (options.custom_only
+            && (diagnostics.extracted_light_count() != 10
+                || diagnostics.extracted_volumetric_light_count() != 2))
+    {
+        return;
+    }
+    match state.phase {
+        0 => {
+            settings.freeze_effect_time = true;
+            state.phase = 1;
+        }
+        1 => {
+            state.waited_frames += 1;
+            if state.waited_frames < 4 {
+                return;
+            }
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(options.path.clone()));
+            state.waited_frames = 0;
+            state.phase = 2;
+        }
+        2 if options.control_path.is_some() => {
+            state.waited_frames += 1;
+            if state.waited_frames >= 8 {
+                settings.enabled = false;
+                state.waited_frames = 0;
+                state.phase = 3;
+            }
+        }
+        3 => {
+            state.waited_frames += 1;
+            if state.waited_frames >= 4 {
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(options.control_path.clone().unwrap()));
+                state.phase = 4;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -202,12 +362,47 @@ fn setup_lighting_test(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    acceptance: Option<Res<GpuAcceptanceCapture>>,
 ) {
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.08, 0.10, 0.16),
         brightness: 90.0,
         affects_lightmapped_meshes: true,
     });
+
+    if let Some(options) = acceptance.filter(|options| options.custom_only) {
+        let camera_transform =
+            Transform::from_xyz(14.0, 13.0, 19.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
+        spawn_gpu_acceptance_targets(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            camera_transform,
+        );
+        let projection = if options.orthographic {
+            Projection::Orthographic(OrthographicProjection {
+                scale: 0.012,
+                ..OrthographicProjection::default_3d()
+            })
+        } else {
+            Projection::default()
+        };
+        commands.spawn((
+            Name::new("GPU acceptance camera"),
+            Camera3d::default(),
+            projection,
+            Hdr,
+            Msaa::Off,
+            DepthPrepass,
+            DeferredPrepass,
+            DynamicLightingView,
+            ShadowFilteringMethod::Hardware2x2,
+            Tonemapping::AcesFitted,
+            Exposure { ev100: 2.0 },
+            camera_transform,
+        ));
+        return;
+    }
 
     let floor_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.58, 0.61, 0.68),
