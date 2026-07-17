@@ -622,6 +622,10 @@ struct BevyoutWorld {
     nav_solve_steps_since_solve: u32,
     nav_solve_blend_interval: u32,
     nav_solve_blend_fraction: Option<f32>,
+
+    // -- nav_erosion.feature (issue #136, M4 wave 6) --
+    erosion_mesh: erosion_policy::ErosionMeshInput,
+    erosion_result: Option<erosion_policy::ErosionResult>,
 }
 
 fn find_placement<'a>(
@@ -6791,6 +6795,122 @@ async fn when_solve_blend_fraction_computed(world: &mut BevyoutWorld) {
 #[then(regex = r"^the solve blend fraction is ([\d.]+)$")]
 async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
     assert_eq!(world.nav_solve_blend_fraction, Some(expected));
+}
+
+// `viewer::nav::erosion_policy` (issue #136, M4 wave 6) is std-only, same
+// flat top-level include rationale as `door_link`/`repath`/`ledger_policy`/
+// `movement_policy` above -- declared down here rather than alongside that
+// block because this issue's `tests/features.rs` file ownership is
+// append-only (three other wave-6 executors merge into this same file), not
+// because nesting/order matters to the module resolution itself (a `mod`
+// declaration's position in the file does not affect what `super::` resolves
+// to for its siblings).
+#[path = "../src/viewer/nav/erosion_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod erosion_policy;
+
+// ---------------------------------------------------------------------
+// --- #136 nav erosion steps ---
+// nav_erosion.feature (issue #136, M4 wave 6) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn erosion_signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+    0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
+}
+
+#[given("an erosion mesh")]
+async fn given_erosion_mesh(world: &mut BevyoutWorld) {
+    world.erosion_mesh = erosion_policy::ErosionMeshInput::default();
+    world.erosion_result = None;
+}
+
+#[given(regex = r"^erosion mesh has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_erosion_vertex(world: &mut BevyoutWorld, index: usize, x: f32, y: f32, z: f32) {
+    assert_eq!(
+        world.erosion_mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    world.erosion_mesh.vertices.push([x, y, z]);
+}
+
+#[given(regex = r"^erosion mesh has polygon (\d+) with vertices (\d+),(\d+),(\d+)$")]
+async fn given_erosion_polygon(world: &mut BevyoutWorld, index: usize, a: u32, b: u32, c: u32) {
+    assert_eq!(
+        world.erosion_mesh.polygons.len(),
+        index,
+        "polygons must be given in order starting at 0"
+    );
+    world.erosion_mesh.polygons.push([a, b, c]);
+}
+
+#[when(regex = r"^the erosion mesh is eroded by radius ([\d.]+)$")]
+async fn when_erosion_mesh_eroded(world: &mut BevyoutWorld, radius: f32) {
+    world.erosion_result = Some(erosion_policy::erode(&world.erosion_mesh, radius));
+}
+
+#[then(regex = r"^eroded vertex (\d+) moved into the room on both the x and z axes$")]
+async fn then_eroded_vertex_moved_into_room(world: &mut BevyoutWorld, index: usize) {
+    let original = world.erosion_mesh.vertices[index];
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    let eroded = result.vertices[index];
+    assert!(
+        eroded[0] > original[0] && eroded[2] > original[2],
+        "expected vertex {index} to move into the room on both axes: {original:?} -> {eroded:?}"
+    );
+}
+
+#[then(regex = r"^the erosion pinch guard count is (\d+)$")]
+async fn then_erosion_pinch_guard_count(world: &mut BevyoutWorld, expected: usize) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert_eq!(result.pinch_guard_count, expected);
+}
+
+#[then("the erosion pinch guard count is greater than 0")]
+async fn then_erosion_pinch_guard_count_positive(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert!(
+        result.pinch_guard_count > 0,
+        "expected the pinch guard to engage, got {result:?}"
+    );
+}
+
+#[then("every eroded polygon keeps its original winding sign")]
+async fn then_every_eroded_polygon_keeps_winding_sign(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    for (poly_index, triangle) in world.erosion_mesh.polygons.iter().enumerate() {
+        let original = erosion_signed_area_xz(
+            world.erosion_mesh.vertices[triangle[0] as usize],
+            world.erosion_mesh.vertices[triangle[1] as usize],
+            world.erosion_mesh.vertices[triangle[2] as usize],
+        );
+        let eroded = erosion_signed_area_xz(
+            result.vertices[triangle[0] as usize],
+            result.vertices[triangle[1] as usize],
+            result.vertices[triangle[2] as usize],
+        );
+        assert!(
+            (eroded > 0.0) == (original > 0.0),
+            "polygon {poly_index} inverted: original area {original}, eroded area {eroded}"
+        );
+        assert!(
+            eroded.abs() > 1.0e-6,
+            "polygon {poly_index} degenerated: eroded area {eroded}"
+        );
+    }
 }
 
 fn main() {

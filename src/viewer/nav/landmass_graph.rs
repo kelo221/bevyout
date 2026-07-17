@@ -38,6 +38,8 @@
 use bevy_landmass::{AgentState, NavigationMesh3d, ValidNavigationMesh3d, ValidationError};
 use glam::Vec3;
 
+use super::erosion_policy;
+
 // ---------------------------------------------------------------------
 // Conversion inputs (boundary conversion from `PreparedNavGraph` happens in
 // `nav/mod.rs`)
@@ -133,6 +135,13 @@ pub(crate) struct BuildResult {
 /// requiring advance knowledge of which one the source data uses, fixed
 /// once per mesh (a mix of the two within one mesh would corrupt
 /// `validate()`'s doubly-connected-edge adjacency detection).
+///
+/// Erosion (issue #136): after the water/invalid/degenerate exclusions
+/// above, walkable-boundary vertices are moved inward by the agent radius
+/// via `erosion_policy::erode` before either winding attempt -- see that
+/// module's doc comment for why moving positions (not polygon topology)
+/// keeps this safe against disconnecting the mesh, and for the
+/// corridor-pinch fallback that keeps narrow corridors from inverting.
 pub(crate) fn build_navigation_mesh(mesh: &MeshInput) -> BuildResult {
     let mut diagnostics = Vec::new();
     let vertex_count = mesh.vertices.len();
@@ -175,7 +184,28 @@ pub(crate) fn build_navigation_mesh(mesh: &MeshInput) -> BuildResult {
         };
     }
 
-    let vertices: Vec<Vec3> = mesh
+    // Issue #136: erode the walkable boundary inward by the agent radius
+    // before handing vertices to `bevy_landmass`, so its path smoothing
+    // cannot string-pull a route within less than a capsule-width of a
+    // wall/prop collider. Runs once per mesh (not per winding attempt
+    // below) -- erosion only moves vertex *positions*, so it does not
+    // interact with which polygon vertex order validates.
+    let erosion_input = erosion_policy::ErosionMeshInput {
+        vertices: mesh.vertices.clone(),
+        polygons: included_polygons
+            .iter()
+            .map(|polygon| polygon.vertex_indices)
+            .collect(),
+    };
+    let erosion_result = erosion_policy::erode(&erosion_input, erosion_policy::AGENT_RADIUS);
+    tracing::info!(
+        "nav erosion: polys {} eroded {} pinch-guard {}",
+        erosion_result.polygon_count,
+        erosion_result.eroded_count,
+        erosion_result.pinch_guard_count,
+    );
+
+    let vertices: Vec<Vec3> = erosion_result
         .vertices
         .iter()
         .map(|v| Vec3::new(v[0], v[1], v[2]))
