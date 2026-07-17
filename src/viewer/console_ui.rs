@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::MouseWheel;
 use bevy::input_focus::{FocusCause, InputFocus};
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
@@ -77,6 +78,10 @@ pub(crate) fn install(app: &mut App) {
         )
             .chain()
             .run_if(in_state(GameplayModal::Console)),
+    )
+    .add_systems(
+        Update,
+        log_console_key_events.run_if(in_state(GameplayModal::Console)),
     )
     .add_systems(
         PostUpdate,
@@ -386,6 +391,23 @@ fn handle_console_input(
                 push_scrollback(&mut ui.scrollback, candidate);
             }
         }
+    }
+}
+
+/// Issue #131 diagnostic: while the console is open, log every raw
+/// `KeyboardInput` message at debug level. This is the console's own view of
+/// the same event stream `release_stuck_keys_on_focus_change` reacts to, so
+/// enabling `RUST_LOG=bevyout::viewer::console_ui=debug` during a macOS
+/// Cmd+Shift+5 screen recording shows whether keystrokes are even reaching
+/// the input system while typing appears stuck. Gated on
+/// `GameplayModal::Console` (the same `run_if` every other console system
+/// uses) so normal gameplay never pays for this.
+fn log_console_key_events(mut keys: MessageReader<KeyboardInput>) {
+    for event in keys.read() {
+        debug!(
+            "console key state={:?} logical={:?} text={:?}",
+            event.state, event.logical_key, event.text
+        );
     }
 }
 

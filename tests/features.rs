@@ -139,6 +139,21 @@ mod performance_policy;
 #[allow(dead_code, unused_imports)]
 mod container_policy;
 
+// `viewer::nav::landmass_graph`/`viewer::nav::door_link` (issue #112, M4
+// wave 3) are both dependency-free of `vsa`/Bevy (only `bevy_landmass`/
+// `glam`, real non-dev dependencies of the main crate, so already linked
+// into this test binary too) -- see `landmass_graph.rs`'s module doc comment
+// for why it cannot reuse `vsa::prepare::nav_graph`'s types directly here.
+// Flat top-level includes: neither file has a relative `super::` import to
+// line up against another `mod` in this tree.
+#[path = "../src/viewer/nav/landmass_graph.rs"]
+#[allow(dead_code, unused_imports)]
+mod landmass_graph;
+
+#[path = "../src/viewer/nav/door_link.rs"]
+#[allow(dead_code, unused_imports)]
+mod door_link;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -515,6 +530,13 @@ struct BevyoutWorld {
     nav_parsed: Option<openmw_esm4::ParsedPlugin>,
     nav_graph_inputs: nav_graph::NavGraphInputs,
     nav_graph_result: Option<nav_graph::PreparedNavGraph>,
+
+    // -- nav_backend.feature (issue #112, M4 wave 3) --
+    nav_backend_meshes: Vec<landmass_graph::MeshInput>,
+    nav_backend_build_result: Option<landmass_graph::BuildResult>,
+    nav_backend_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
+    nav_backend_second_descriptors: Option<Vec<landmass_graph::DoorLinkDescriptor>>,
+    nav_backend_door_link_state: door_link::DoorLinkState,
 }
 
 fn find_placement<'a>(
@@ -5500,6 +5522,330 @@ async fn then_nav_graph_grid(world: &mut BevyoutWorld, form_hex: String, grid_x:
             x: grid_x,
             y: grid_y
         })
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_backend.feature (issue #112, M4 wave 3) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn nav_backend_mesh_mut<'a>(
+    world: &'a mut BevyoutWorld,
+    form_hex: &str,
+) -> &'a mut landmass_graph::MeshInput {
+    let form_id = parse_hex(form_hex);
+    if !world
+        .nav_backend_meshes
+        .iter()
+        .any(|mesh| mesh.form_id == form_id)
+    {
+        world.nav_backend_meshes.push(landmass_graph::MeshInput {
+            form_id,
+            ..Default::default()
+        });
+    }
+    world
+        .nav_backend_meshes
+        .iter_mut()
+        .find(|mesh| mesh.form_id == form_id)
+        .expect("mesh was just inserted")
+}
+
+fn parse_bevy_landmass_agent_state(name: &str) -> bevy_landmass::AgentState {
+    use bevy_landmass::AgentState::*;
+    match name {
+        "Idle" => Idle,
+        "Moving" => Moving,
+        "ReachedTarget" => ReachedTarget,
+        "ReachedAnimationLink" => ReachedAnimationLink,
+        "UsingAnimationLink" => UsingAnimationLink,
+        "AgentNotOnNavMesh" => AgentNotOnNavMesh,
+        "TargetNotOnNavMesh" => TargetNotOnNavMesh,
+        "NoPath" => NoPath,
+        "Paused" => Paused,
+        other => panic!("unknown landmass agent state {other:?}"),
+    }
+}
+
+#[given(regex = r"^a landmass mesh 0x([0-9a-fA-F]+)$")]
+async fn given_landmass_mesh(world: &mut BevyoutWorld, form_hex: String) {
+    nav_backend_mesh_mut(world, &form_hex);
+}
+
+#[given(
+    regex = r"^landmass mesh 0x([0-9a-fA-F]+) has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$"
+)]
+async fn given_landmass_vertex(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    assert_eq!(
+        mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    mesh.vertices.push([x, y, z]);
+}
+
+#[given(
+    regex = r"^landmass mesh 0x([0-9a-fA-F]+) has polygon (\d+) with vertices (\d+),(\d+),(\d+)$"
+)]
+async fn given_landmass_polygon(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: u32,
+    a: u32,
+    b: u32,
+    c: u32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    mesh.polygons.push(landmass_graph::PolygonInput {
+        index,
+        vertex_indices: [a, b, c],
+        is_water: false,
+    });
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) polygon (\d+) is water$")]
+async fn given_landmass_polygon_water(world: &mut BevyoutWorld, form_hex: String, index: u32) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    let polygon = mesh
+        .polygons
+        .iter_mut()
+        .find(|polygon| polygon.index == index)
+        .expect("polygon must be given first");
+    polygon.is_water = true;
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) has a door 0x([0-9a-fA-F]+) at polygon (\d+)$")]
+async fn given_landmass_door(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    door_hex: String,
+    triangle_index: u32,
+) {
+    let door_form_id = parse_hex(&door_hex);
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    mesh.doors.push(landmass_graph::DoorInput {
+        triangle_index,
+        door_reference_form_id: Some(door_form_id),
+    });
+}
+
+#[when("the mesh is converted to a landmass navigation mesh")]
+async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
+    let mesh = world
+        .nav_backend_meshes
+        .first()
+        .expect("a landmass mesh must be given first")
+        .clone();
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh));
+}
+
+#[then("the landmass conversion produces a navigation mesh")]
+async fn then_landmass_conversion_produces_mesh(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
+}
+
+#[then("the landmass conversion produces no navigation mesh")]
+async fn then_landmass_conversion_produces_no_mesh(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.nav_mesh.is_none());
+}
+
+#[then("the landmass conversion has no diagnostics")]
+async fn then_landmass_conversion_no_diagnostics(world: &mut BevyoutWorld) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+}
+
+#[then(
+    regex = r#"^the landmass conversion has an? "(warning|error)" diagnostic containing "([^"]*)"$"#
+)]
+async fn then_landmass_conversion_diagnostic(
+    world: &mut BevyoutWorld,
+    severity: String,
+    needle: String,
+) {
+    let result = world
+        .nav_backend_build_result
+        .as_ref()
+        .expect("conversion must run first");
+    let expected_severity = match severity.as_str() {
+        "warning" => landmass_graph::Severity::Warning,
+        "error" => landmass_graph::Severity::Error,
+        other => panic!("unknown severity {other:?}"),
+    };
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == expected_severity && d.message.contains(&needle)),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[when("the door-link descriptors are extracted")]
+async fn when_door_link_descriptors_extracted(world: &mut BevyoutWorld) {
+    world.nav_backend_descriptors = Some(landmass_graph::door_link_descriptors(
+        &world.nav_backend_meshes,
+    ));
+}
+
+#[when("the door-link descriptors are extracted again")]
+async fn when_door_link_descriptors_extracted_again(world: &mut BevyoutWorld) {
+    world.nav_backend_second_descriptors = Some(landmass_graph::door_link_descriptors(
+        &world.nav_backend_meshes,
+    ));
+}
+
+#[then(regex = r"^there (?:is|are) (\d+) door-link descriptors?$")]
+async fn then_door_link_descriptor_count(world: &mut BevyoutWorld, count: usize) {
+    let descriptors = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("descriptors must be extracted first");
+    assert_eq!(descriptors.len(), count);
+}
+
+#[then(
+    regex = r"^door-link descriptor (\d+) links door 0x([0-9a-fA-F]+) between mesh 0x([0-9a-fA-F]+) and mesh 0x([0-9a-fA-F]+)$"
+)]
+async fn then_door_link_descriptor_links(
+    world: &mut BevyoutWorld,
+    index: usize,
+    door_hex: String,
+    mesh_a_hex: String,
+    mesh_b_hex: String,
+) {
+    let descriptors = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("descriptors must be extracted first");
+    let descriptor = &descriptors[index];
+    assert_eq!(descriptor.door_form_id, parse_hex(&door_hex));
+    assert_eq!(descriptor.side_a.mesh_form_id, parse_hex(&mesh_a_hex));
+    assert_eq!(descriptor.side_b.mesh_form_id, parse_hex(&mesh_b_hex));
+}
+
+#[then("both door-link descriptor extractions are identical")]
+async fn then_door_link_descriptor_extractions_identical(world: &mut BevyoutWorld) {
+    let first = world
+        .nav_backend_descriptors
+        .as_ref()
+        .expect("first extraction must run first");
+    let second = world
+        .nav_backend_second_descriptors
+        .as_ref()
+        .expect("second extraction must run first");
+    assert_eq!(first, second);
+}
+
+#[then(regex = r#"^landmass agent state "([A-Za-z]+)" maps to nav agent status "([a-z]+)"$"#)]
+async fn then_landmass_agent_state_maps(
+    _world: &mut BevyoutWorld,
+    state_name: String,
+    status_name: String,
+) {
+    let state = parse_bevy_landmass_agent_state(&state_name);
+    let status = landmass_graph::map_agent_state(state);
+    assert_eq!(status.as_str(), status_name);
+}
+
+#[given("a fresh door-link state")]
+async fn given_fresh_door_link_state(world: &mut BevyoutWorld) {
+    world.nav_backend_door_link_state = door_link::DoorLinkState::Idle;
+}
+
+#[when(regex = r"^the door-link reaches door 0x([0-9a-fA-F]+)$")]
+async fn when_door_link_reaches(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::LinkReached { door_form_id },
+    );
+}
+
+#[when(regex = r"^the door-link ticks with the door (open|closed)$")]
+async fn when_door_link_ticks(world: &mut BevyoutWorld, door_open: String) {
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::Tick {
+            door_open: door_open == "open",
+        },
+    );
+}
+
+#[when(regex = r"^the door-link ticks (\d+) times with the door closed$")]
+async fn when_door_link_ticks_n(world: &mut BevyoutWorld, count: u32) {
+    for _ in 0..count {
+        world.nav_backend_door_link_state = door_link::transition(
+            world.nav_backend_door_link_state,
+            door_link::DoorLinkEvent::Tick { door_open: false },
+        );
+    }
+}
+
+#[when("the door-link traversal completes")]
+async fn when_door_link_traversal_completes(world: &mut BevyoutWorld) {
+    world.nav_backend_door_link_state = door_link::transition(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkEvent::TraversalComplete,
+    );
+}
+
+#[then(regex = r"^the door-link state is paused for door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_paused(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    match world.nav_backend_door_link_state {
+        door_link::DoorLinkState::Paused {
+            door_form_id: actual,
+            ..
+        } => assert_eq!(actual, door_form_id),
+        other => panic!("expected Paused, got {other:?}"),
+    }
+}
+
+#[then(regex = r"^the door-link state is traversing door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_traversing(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Traversing { door_form_id }
+    );
+}
+
+#[then("the door-link state is idle")]
+async fn then_door_link_idle(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Idle
+    );
+}
+
+#[then(regex = r"^the door-link state is failed for door 0x([0-9a-fA-F]+)$")]
+async fn then_door_link_failed(world: &mut BevyoutWorld, door_hex: String) {
+    let door_form_id = parse_hex(&door_hex);
+    assert_eq!(
+        world.nav_backend_door_link_state,
+        door_link::DoorLinkState::Failed { door_form_id }
     );
 }
 

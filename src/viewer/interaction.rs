@@ -232,6 +232,57 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
     opening
 }
 
+/// M4 wave 3 (#112): scripted intra-cell door open, for the `bevy_landmass`
+/// nav-agent door-link spike (`nav::agent`'s door-link system) to request an
+/// off-mesh-link door through the same boundary the `activate` console
+/// command uses, rather than inventing a parallel door-opening path.
+/// `scripted_door_travel` (above) only covers the destination/cell-swap
+/// case; the real player path (`activate_focused_placement`'s door branch)
+/// is inline in a multi-`Query`/`MessageWriter` system and not directly
+/// callable from `&mut World`. This mirrors `scripted_container_toggle`'s
+/// shape (state toggle, sound, animation clip) restricted to the "ensure
+/// open" direction a traversing agent needs, and -- like
+/// `console::activate_reference`'s scripted door branch -- bypasses locks,
+/// since this is dev/agent tooling, not the player's raycast-focused `E`
+/// activation. Idempotent: a door already open is left open. Returns
+/// whether this call transitioned the door from closed to open.
+pub(crate) fn scripted_door_open(world: &mut World, entity: Entity) -> bool {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let name = placement_name(&placement);
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .unwrap_or_default();
+    let opening = !world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .contains(&entity);
+    if !opening {
+        return false;
+    }
+    world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .insert(entity);
+    if let Some(form_id) = placement.audio.open_sound_form_id {
+        world.write_message(PlaySound::at(form_id, position));
+    }
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition: ClipTransition::Opening,
+        lead_ms: 0.0,
+    });
+    info!(
+        "door {} ({:08x}) opened (scripted, nav agent)",
+        name, placement.reference_form_id
+    );
+    true
+}
+
 /// F118.2: scripted corpse activation enters the same transfer modal as
 /// player activation. A corpse is deliberately staged data in this slice;
 /// no actor death or AI transition is implied by this function.
