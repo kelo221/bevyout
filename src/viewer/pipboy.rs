@@ -162,12 +162,15 @@ pub(crate) fn install(app: &mut App) {
         .add_message::<PlaySound>()
         .add_message::<OpenReaderRequested>()
         .add_message::<DropInventoryStackRequested>()
+        .add_message::<ItemRowActivated>()
         .add_systems(OnEnter(GameplayModal::PipBoy), enter_pipboy)
         .add_systems(OnExit(GameplayModal::PipBoy), exit_pipboy)
         .add_systems(
             Update,
             (
-                handle_item_rows,
+                // F121.1: chained so a row's primary action, if any, is
+                // resolved the same frame the click is detected.
+                (handle_item_rows, handle_item_row_activation).chain(),
                 handle_category_tabs,
                 handle_view_tabs,
                 handle_data_section_tabs,
@@ -281,11 +284,28 @@ fn handle_item_rows(
     roots: Query<Entity, With<PipBoyRoot>>,
     picker: Option<Res<QuantityPicker>>,
     mut drops: MessageWriter<DropInventoryStackRequested>,
+    mut activations: MessageWriter<ItemRowActivated>,
 ) {
+    // F121.1: a click both selects (as before) and, if the row has a
+    // primary action, triggers it -- whether or not the row was already
+    // selected. Selection state is updated (and the screen rebuilt) first
+    // so the click still behaves like today's plain-select click even for
+    // rows with no primary action (e.g. Misc).
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed && state.selected != Some(row.0) {
-            state.selected = Some(row.0);
-            rebuild(&mut commands, &roots, &sources, &state);
+        if *interaction == Interaction::Pressed {
+            if state.selected != Some(row.0) {
+                state.selected = Some(row.0);
+                rebuild(&mut commands, &roots, &sources, &state);
+            }
+            if let Some(item) = sources
+                .catalog
+                .items
+                .iter()
+                .find(|item| item.base_form_id == row.0.base_form_id)
+                && let Some(action) = row_primary_action(row.0, item)
+            {
+                activations.write(ItemRowActivated(action));
+            }
             return;
         }
     }
@@ -527,6 +547,64 @@ fn item_action_button(
         item_use::ItemUseAction::Use => Some(("USE", ItemActionButton::Use(key))),
         item_use::ItemUseAction::Read => Some(("READ", ItemActionButton::Read(item.base_form_id))),
         item_use::ItemUseAction::Inert => None,
+    }
+}
+
+/// F121.1: which action, if any, a Pip-Boy Items row's primary interaction
+/// (a click, or the `E` key) performs. Equip-eligible categories
+/// (Weapons/Apparel/Ammo, `is_equip_eligible`) equip/unequip; everything else
+/// routes through the exact same `item_use::classify` call the details
+/// pane's USE/READ button (`item_action_button`) uses. `Inert` stacks
+/// (Key/Misc, a textless Book/Note, a quest-flagged Aid item) have no
+/// primary action, so a click on one only selects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowPrimaryAction {
+    Equip(StackKey),
+    Use(StackKey),
+    Read(u32),
+}
+
+fn row_primary_action(key: StackKey, item: &PreparedItemDefinition) -> Option<RowPrimaryAction> {
+    if is_equip_eligible(item.category) {
+        return Some(RowPrimaryAction::Equip(key));
+    }
+    match item_use::classify(item_use_stats(&item.stats), item.quest_item) {
+        item_use::ItemUseAction::Use => Some(RowPrimaryAction::Use(key)),
+        item_use::ItemUseAction::Read => Some(RowPrimaryAction::Read(item.base_form_id)),
+        item_use::ItemUseAction::Inert => None,
+    }
+}
+
+/// F121.1: written by `handle_item_rows` when a clicked row has a primary
+/// action; consumed by `handle_item_row_activation` in the same frame.
+#[derive(Message, Clone, Copy, Debug)]
+struct ItemRowActivated(RowPrimaryAction);
+
+/// F121.1: performs a row's primary action through the exact same paths the
+/// `E` key (`EquipToggleRequested`, `handle_equip_and_hotkeys`) and the
+/// details-pane button (`use_item`/`OpenReaderRequested`,
+/// `handle_item_action_button`) already use -- this system only dispatches.
+fn handle_item_row_activation(
+    mut activations: MessageReader<ItemRowActivated>,
+    mut inventory: ResMut<PlayerInventory>,
+    catalog: Res<PreparedItemCatalog>,
+    mut notice: ResMut<InteractionNotice>,
+    mut sounds: MessageWriter<PlaySound>,
+    mut reader_requests: MessageWriter<OpenReaderRequested>,
+    mut equip_requests: MessageWriter<EquipToggleRequested>,
+) {
+    for activation in activations.read() {
+        match activation.0 {
+            RowPrimaryAction::Equip(key) => {
+                equip_requests.write(EquipToggleRequested(key));
+            }
+            RowPrimaryAction::Use(key) => {
+                use_item(key, &mut inventory, &catalog, &mut notice, &mut sounds);
+            }
+            RowPrimaryAction::Read(base_form_id) => {
+                reader_requests.write(OpenReaderRequested { base_form_id });
+            }
+        }
     }
 }
 
@@ -1795,6 +1873,248 @@ mod tests {
                 .count(),
             1,
             "E should equip again once back on Items"
+        );
+    }
+
+    // -- issue #121 (F121.1/F121.2): a row click triggers its primary action --
+
+    /// A minimal cataloged item that carries no primary action of its own
+    /// (`Misc` category, `Misc` stats) unless the caller overrides
+    /// `category` -- `row_primary_action` only reads `category` for the
+    /// equip check, so this is enough to exercise Weapons/Apparel/Ammo too.
+    fn category_item(base_form_id: u32, category: PreparedItemCategory) -> PreparedItemDefinition {
+        PreparedItemDefinition {
+            base_form_id,
+            record_kind: "MISC".into(),
+            category,
+            editor_id: None,
+            display_name: Some(format!("Item {base_form_id:08X}")),
+            source_model_path: None,
+            icon_asset_path: None,
+            world_asset_path: None,
+            physics_asset_path: None,
+            drop_collider: Default::default(),
+            value: None,
+            weight: None,
+            quest_item: false,
+            stats: PreparedItemStats::Misc,
+            audio: Default::default(),
+        }
+    }
+
+    #[test]
+    fn row_primary_action_equips_weapons_apparel_and_ammo() {
+        let key = StackKey {
+            base_form_id: 1,
+            condition: None,
+        };
+        for category in [
+            PreparedItemCategory::Weapons,
+            PreparedItemCategory::Apparel,
+            PreparedItemCategory::Ammo,
+        ] {
+            let item = category_item(1, category);
+            assert_eq!(
+                row_primary_action(key, &item),
+                Some(RowPrimaryAction::Equip(key)),
+                "category {category:?} should be equip-eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn row_primary_action_uses_a_non_quest_aid_stack() {
+        let key = StackKey {
+            base_form_id: 0x77,
+            condition: None,
+        };
+        assert_eq!(
+            row_primary_action(key, &aid_item(0x77, false)),
+            Some(RowPrimaryAction::Use(key))
+        );
+    }
+
+    #[test]
+    fn row_primary_action_is_none_for_a_quest_flagged_aid_stack() {
+        let key = StackKey {
+            base_form_id: 0x77,
+            condition: None,
+        };
+        assert_eq!(row_primary_action(key, &aid_item(0x77, true)), None);
+    }
+
+    #[test]
+    fn row_primary_action_reads_a_book_with_text() {
+        let key = StackKey {
+            base_form_id: 5,
+            condition: None,
+        };
+        let item = stats_item(
+            5,
+            "Alpha book",
+            PreparedItemStats::Book {
+                flags: None,
+                text: Some("a".into()),
+            },
+            false,
+        );
+        assert_eq!(
+            row_primary_action(key, &item),
+            Some(RowPrimaryAction::Read(5))
+        );
+    }
+
+    #[test]
+    fn row_primary_action_is_none_for_a_textless_book() {
+        let key = StackKey {
+            base_form_id: 5,
+            condition: None,
+        };
+        let item = stats_item(
+            5,
+            "empty",
+            PreparedItemStats::Book {
+                flags: None,
+                text: None,
+            },
+            false,
+        );
+        assert_eq!(row_primary_action(key, &item), None);
+    }
+
+    #[test]
+    fn row_primary_action_is_none_for_key_and_misc() {
+        let key = StackKey {
+            base_form_id: 9,
+            condition: None,
+        };
+        assert_eq!(
+            row_primary_action(key, &stats_item(9, "key", PreparedItemStats::Key, false)),
+            None
+        );
+        assert_eq!(
+            row_primary_action(key, &category_item(9, PreparedItemCategory::Misc)),
+            None
+        );
+    }
+
+    fn press_item_row(app: &mut App, key: StackKey) {
+        let entity = app
+            .world_mut()
+            .query::<(Entity, &ItemRow)>()
+            .iter(app.world())
+            .find_map(|(entity, row)| (row.0 == key).then_some(entity))
+            .expect("the item row should be spawned");
+        *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Pressed;
+        app.update();
+    }
+
+    #[test]
+    fn clicking_an_equip_eligible_row_writes_an_equip_toggle_request_and_selects_it() {
+        let mut app = test_app();
+        seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Alpha Armor");
+        seed_item(&mut app, 2, PreparedItemCategory::Apparel, "Beta Armor");
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
+        open_pipboy(&mut app);
+        let key_2 = StackKey {
+            base_form_id: 2,
+            condition: None,
+        };
+        // "Alpha Armor" (base_form_id 1) sorts first, so normalize_selection
+        // auto-selects it; clicking the *other* row exercises the
+        // select-and-act path in one click.
+        assert_ne!(app.world().resource::<PipBoyState>().selected, Some(key_2));
+        press_item_row(&mut app, key_2);
+        assert_eq!(
+            app.world().resource::<PipBoyState>().selected,
+            Some(key_2),
+            "a click selects the row"
+        );
+        let request = app
+            .world()
+            .resource::<Messages<EquipToggleRequested>>()
+            .iter_current_update_messages()
+            .next()
+            .expect("expected an EquipToggleRequested message");
+        assert_eq!(request.0, key_2);
+    }
+
+    #[test]
+    fn clicking_an_already_selected_row_still_triggers_its_action() {
+        let mut app = test_app();
+        seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
+        open_pipboy(&mut app);
+        let key = StackKey {
+            base_form_id: 1,
+            condition: None,
+        };
+        assert_eq!(app.world().resource::<PipBoyState>().selected, Some(key));
+        // Two real frames apart, so this counts cumulative `Messages::len()`
+        // rather than `iter_current_update_messages()`: with `MinimalPlugins`
+        // the message-buffer swap is gated by a `FixedUpdate` signal that
+        // doesn't necessarily fire on every `app.update()`, so two writes in
+        // two separate frames aren't guaranteed to land in fresh per-frame
+        // windows -- `len()` (messages_a + messages_b) doesn't depend on that
+        // swap and is still exactly "how many were written so far".
+        press_item_row(&mut app, key);
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .len(),
+            1,
+            "the first click on an already-selected row still equips"
+        );
+        press_item_row(&mut app, key);
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .len(),
+            2,
+            "a second click toggles again"
+        );
+    }
+
+    #[test]
+    fn clicking_an_aid_row_consumes_it_through_use_item() {
+        let mut app = aid_test_app(false);
+        let key = StackKey {
+            base_form_id: 0x77,
+            condition: None,
+        };
+        press_item_row(&mut app, key);
+        assert_eq!(app.world().resource::<PlayerInventory>().count(0x77), 2);
+        assert_eq!(
+            app.world().resource::<InteractionNotice>().text(),
+            "Used Stimpak: Restore Health"
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_with_no_primary_action_only_selects() {
+        let mut app = test_app();
+        seed_item(&mut app, 3, PreparedItemCategory::Misc, "Junk");
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Misc;
+        open_pipboy(&mut app);
+        let key = StackKey {
+            base_form_id: 3,
+            condition: None,
+        };
+        press_item_row(&mut app, key);
+        assert_eq!(app.world().resource::<PipBoyState>().selected, Some(key));
+        assert_eq!(
+            app.world()
+                .resource::<Messages<EquipToggleRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Messages<OpenReaderRequested>>()
+                .iter_current_update_messages()
+                .count(),
+            0
         );
     }
 }
