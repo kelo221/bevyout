@@ -49,17 +49,54 @@
 //! length `radius`. Interior vertices (touching no boundary edge) get a
 //! zero offset and never move.
 //!
-//! **Corridor-pinch safety (F136.2).** Applying every vertex's raw offset
-//! at full strength can invert or degenerate a polygon whose available
-//! width is less than `2 * radius` (a corridor narrower than the agent).
-//! Each vertex carries a `[0, 1]` erosion factor, all starting at `1.0`.
-//! Every polygon whose *current* (factor-scaled) shape has flipped winding
-//! sign or dropped below a minimum area relative to its original shape has
-//! its three vertices' factors halved, repeated to a fixed pass limit. This
-//! is monotonic (factors only shrink) and deterministic (fixed iteration
-//! order, no hashing), and always converges since halving a factor that is
-//! already at the floor clamps it to exactly zero (the guaranteed-safe
-//! original position).
+//! **Corridor-pinch safety (F136.2), two phases over the WHOLE mesh at
+//! once.** Applying every vertex's raw offset at full strength can invert
+//! or degenerate a polygon whose available width is less than `2 *
+//! radius` (a corridor narrower than the agent) -- and because boundary
+//! vertices are shared between triangles, fixing one polygon's shape by
+//! moving its vertices can change a *different*, neighbouring polygon
+//! that shares one of those same vertices. A first version of this module
+//! checked each polygon's validity only against its own three vertices'
+//! *current* factors and stopped as soon as one pass made no changes;
+//! that missed a real case (issue #136 follow-up, Vault 101 Entrance mesh
+//! `0001862b`, polygon 164): a vertex's factor reached this module's old
+//! per-vertex floor and got silently clamped to exactly zero without the
+//! pass being marked as "changed", so the loop exited one pass too early
+//! -- before a neighbouring polygon sharing that vertex was re-checked
+//! against the vertex's *final* (just-zeroed) position. That polygon's
+//! shape had actually flipped, but nothing re-validated it, and
+//! `bevy_landmass`'s `validate()` rejected the whole mesh.
+//!
+//! The fix is two unconditional phases over every polygon, both driven by
+//! one shared `factors` array (so a change to a vertex from checking one
+//! polygon is immediately visible to every other polygon that shares it,
+//! not just its own three vertices):
+//!
+//! 1. **Proportional relaxation.** Each vertex carries a `[0, 1]` erosion
+//!    factor, starting at `1.0`. Every polygon whose *current*
+//!    (factor-scaled) shape has flipped winding sign or dropped below a
+//!    minimum area relative to its original shape has its three
+//!    vertices' factors halved -- unconditionally, no per-vertex floor
+//!    that could stop short of a real change -- and the pass is marked
+//!    changed. Repeats until a full pass makes no changes, or a generous
+//!    fixed pass cap is hit. This alone does not have to reach an exactly
+//!    valid state (halving a nonzero `f32` never reaches exactly zero in
+//!    finitely many steps), so it hands off to phase 2 rather than
+//!    asserting success.
+//! 2. **Hard fallback.** A second, unconditional pass over every polygon:
+//!    anything *still* invalid after phase 1 has its vertices' factors
+//!    forced to exactly `0.0` (their original, pre-erosion position --
+//!    already guaranteed valid, since `landmass_graph` only calls this
+//!    with polygons it has already filtered for degeneracy). This can
+//!    only ever *reduce* the set of nonzero-factor vertices (never
+//!    increase it), so it is bounded by the vertex count and always
+//!    terminates at a fully valid mesh -- the true "final fallback is
+//!    zero displacement for the vertices that can't move safely".
+//!
+//! Both phases are deterministic (fixed polygon/vertex iteration order,
+//! no hashing) and their combined pass count is returned as
+//! [`ErosionResult::relax_passes`] so the diagnostic log line makes this
+//! relaxation activity visible (F136.3 follow-up).
 //!
 //! Std-only (no `bevy`/`bevy_landmass`/`glam`, not even `serde`): this file
 //! is included verbatim by `tests/features.rs` via `#[path]` -- see
@@ -106,21 +143,26 @@ pub(crate) struct ErosionResult {
     /// Polygons with at least one vertex that actually moved.
     pub(crate) eroded_count: usize,
     /// Polygons where the corridor-pinch guard reduced erosion below full
-    /// strength for at least one of their vertices.
+    /// strength for at least one of their vertices, in either phase.
     pub(crate) pinch_guard_count: usize,
+    /// Total number of corrective passes actually run (phase 1 +
+    /// phase 2 combined) to reach a valid mesh -- 0 when every polygon
+    /// validated at full erosion strength on the first check. Makes the
+    /// relaxation activity described in the module doc comment visible
+    /// in the F136.3 diagnostic line, distinct from `pinch_guard_count`
+    /// (how many polygons needed adjustment at all).
+    pub(crate) relax_passes: usize,
 }
 
 /// Below this scaled-triangle area (2D, horizontal plane, same units as
 /// `vertices`), a candidate erosion is treated as degenerate.
 const MIN_TRIANGLE_AREA: f32 = 1.0e-4;
-/// Below this per-vertex erosion factor, treat the vertex as fully
-/// clamped back to its original position rather than continuing to halve
-/// an already-negligible offset forever.
-const MIN_FACTOR: f32 = 1.0 / 1024.0;
-/// Fixed pass limit for the pinch-guard shrink loop (see module doc
-/// comment: monotonic, so this is a safety cap, not a tuning knob real
-/// data is expected to hit).
-const MAX_SHRINK_PASSES: usize = 32;
+/// Fixed pass limit for phase 1's proportional-relaxation loop (see
+/// module doc comment). Generous rather than tight: phase 1 is an
+/// optimization over phase 2's hard fallback, not the correctness
+/// guarantee, so hitting this cap without full convergence is fine --
+/// phase 2 always finishes the job.
+const MAX_RELAX_PASSES: usize = 64;
 
 fn signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
     0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
@@ -139,6 +181,7 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
             polygon_count,
             eroded_count: 0,
             pinch_guard_count: 0,
+            relax_passes: 0,
         };
     }
 
@@ -250,48 +293,87 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
         Some([base[0] + ox * f, base[1], base[2] + oz * f])
     };
 
-    for _pass in 0..MAX_SHRINK_PASSES {
+    // Returns `true` when the polygon at `poly_index`'s CURRENT
+    // (factor-scaled) shape has flipped winding sign or dropped below the
+    // minimum area relative to its own original shape. `false` for an
+    // already-degenerate original shape or an out-of-range index defends
+    // against a divide-by-zero-style sign comparison on a shape with no
+    // meaningful sign -- upstream (`landmass_graph`) already filters
+    // degenerate/invalid polygons before calling erosion, so this should
+    // never actually trigger on real input, only guard against it.
+    let is_invalid_at = |poly_index: usize, triangle: &[u32; 3], factors: &[f32]| -> bool {
+        let Some(&original_area) = original_areas.get(poly_index) else {
+            return false;
+        };
+        if original_area.abs() < MIN_TRIANGLE_AREA {
+            return false;
+        }
+        let (Some(a), Some(b), Some(c)) = (
+            eroded_position(mesh, &offsets, factors, triangle[0]),
+            eroded_position(mesh, &offsets, factors, triangle[1]),
+            eroded_position(mesh, &offsets, factors, triangle[2]),
+        ) else {
+            return false;
+        };
+        let area = signed_area_xz(a, b, c);
+        (area > 0.0) != (original_area > 0.0) || area.abs() < MIN_TRIANGLE_AREA
+    };
+
+    let mut relax_passes = 0usize;
+
+    // Phase 1: proportional relaxation. See the module doc comment for why
+    // this alone is not the correctness guarantee (halving never reaches
+    // exactly zero) -- phase 2 below is what makes the result provably
+    // valid.
+    for _pass in 0..MAX_RELAX_PASSES {
         let mut changed = false;
         for (poly_index, triangle) in mesh.polygons.iter().enumerate() {
-            let Some(&original_area) = original_areas.get(poly_index) else {
-                continue;
-            };
-            if original_area.abs() < MIN_TRIANGLE_AREA {
-                // Already-degenerate input: upstream (`landmass_graph`)
-                // should have filtered this before calling erosion; skip
-                // defensively rather than divide-by-zero-style reasoning
-                // about a shape with no meaningful sign.
-                continue;
-            }
-            let (Some(a), Some(b), Some(c)) = (
-                eroded_position(mesh, &offsets, &factors, triangle[0]),
-                eroded_position(mesh, &offsets, &factors, triangle[1]),
-                eroded_position(mesh, &offsets, &factors, triangle[2]),
-            ) else {
-                continue;
-            };
-            let area = signed_area_xz(a, b, c);
-            let same_sign = (area > 0.0) == (original_area > 0.0);
-            if !same_sign || area.abs() < MIN_TRIANGLE_AREA {
+            if is_invalid_at(poly_index, triangle, &factors) {
                 pinch_guard_marked[poly_index] = true;
                 for &v in triangle {
                     if let Some(factor) = factors.get_mut(v as usize) {
-                        if *factor > MIN_FACTOR {
-                            *factor *= 0.5;
-                            changed = true;
-                        } else {
-                            *factor = 0.0;
-                        }
+                        *factor *= 0.5;
                     }
                 }
+                changed = true;
             }
         }
-        if !changed {
+        if changed {
+            relax_passes += 1;
+        } else {
             break;
         }
     }
 
-    // 4. Finalize eroded vertex positions.
+    // Phase 2: hard fallback. Bounded by `vertex_count + 1` passes -- each
+    // productive pass zeroes at least one vertex factor that was still
+    // nonzero, a strictly shrinking finite set, so this always terminates,
+    // and an all-zero configuration is definitionally the original mesh
+    // (already valid). This is what guarantees `erode()` never returns an
+    // inverted or degenerate triangle, regardless of how phase 1 fared.
+    for _pass in 0..=vertex_count {
+        let mut changed = false;
+        for (poly_index, triangle) in mesh.polygons.iter().enumerate() {
+            if is_invalid_at(poly_index, triangle, &factors) {
+                pinch_guard_marked[poly_index] = true;
+                for &v in triangle {
+                    if let Some(factor) = factors.get_mut(v as usize)
+                        && *factor != 0.0
+                    {
+                        *factor = 0.0;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            relax_passes += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Finalize eroded vertex positions.
     let mut eroded_vertices = mesh.vertices.clone();
     for (index, eroded) in eroded_vertices.iter_mut().enumerate() {
         let (ox, oz) = offsets[index];
@@ -327,6 +409,7 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
         polygon_count,
         eroded_count,
         pinch_guard_count,
+        relax_passes,
     }
 }
 
@@ -443,19 +526,13 @@ mod tests {
         ErosionMeshInput { vertices, polygons }
     }
 
-    #[test]
-    fn narrow_corridor_engages_the_pinch_guard_and_never_inverts() {
-        // Width 0.3 m, radius 0.35 m: full erosion from both walls (0.35 m
-        // each) would overlap by 0.4 m, well past inversion.
-        let mesh = corridor(0.3, 3);
-        let result = erode(&mesh, AGENT_RADIUS);
-        assert!(
-            result.pinch_guard_count > 0,
-            "narrow corridor must engage the pinch guard"
-        );
-        // Connectivity is untouched by construction (see module doc
-        // comment), so the only thing left to prove is that no polygon
-        // inverted or degenerated.
+    /// Asserts every polygon in `mesh` keeps its original XZ winding sign
+    /// and a non-degenerate area after `result`'s erosion -- the
+    /// never-inverts-or-degenerates contract `erode()` must hold
+    /// unconditionally (phase 2's hard fallback in the module doc comment
+    /// is what guarantees this regardless of how adversarial the input
+    /// is), shared across every regression test that needs it.
+    fn assert_no_polygon_inverted_or_degenerated(mesh: &ErosionMeshInput, result: &ErosionResult) {
         for (poly_index, triangle) in mesh.polygons.iter().enumerate() {
             let original_area = signed_area_xz(
                 mesh.vertices[triangle[0] as usize],
@@ -476,7 +553,63 @@ mod tests {
                 "polygon {poly_index} degenerated after erosion"
             );
         }
+    }
+
+    #[test]
+    fn narrow_corridor_engages_the_pinch_guard_and_never_inverts() {
+        // Width 0.3 m, radius 0.35 m: full erosion from both walls (0.35 m
+        // each) would overlap by 0.4 m, well past inversion.
+        let mesh = corridor(0.3, 3);
+        let result = erode(&mesh, AGENT_RADIUS);
+        assert!(
+            result.pinch_guard_count > 0,
+            "narrow corridor must engage the pinch guard"
+        );
+        // Connectivity is untouched by construction (see module doc
+        // comment), so the only thing left to prove is that no polygon
+        // inverted or degenerated.
+        assert_no_polygon_inverted_or_degenerated(&mesh, &result);
         // Same vertex count/order, indices unchanged: topology preserved.
+        assert_eq!(result.vertices.len(), mesh.vertices.len());
+        assert_eq!(result.polygon_count, mesh.polygons.len());
+    }
+
+    /// Regression test (issue #136 follow-up: real-data failure on Vault
+    /// 101 Entrance mesh `0001862b`, polygon 164 -- "concave or has edges
+    /// in clockwise order"). A narrow corridor corner (vertex A) shares
+    /// its vertex with a THIRD, unrelated thin triangle sticking out to
+    /// one side. The corridor's own two triangles are the ones with
+    /// boundary edges that push A; the thin triangle has no boundary
+    /// edges of its own; A's combined push (corridor walls + the thin
+    /// triangle's own two boundary edges) still inverts it at full
+    /// erosion strength if unguarded -- exactly the "a neighbouring
+    /// triangle inverts from a shared vertex's combined displacement"
+    /// class the old per-polygon-isolated check missed. Hand-verified: at
+    /// factor 1.0 the thin triangle's signed area flips from +0.05 to
+    /// about -0.202.
+    #[test]
+    fn shared_vertex_push_never_inverts_a_neighboring_triangle() {
+        let mesh = ErosionMeshInput {
+            vertices: vec![
+                [0.0, 0.0, 0.0],    // 0: A -- shared corner
+                [2.0, 0.0, 0.0],    // 1: B -- corridor bottom-right
+                [2.0, 0.0, 0.1],    // 2: C -- corridor top-right
+                [0.0, 0.0, 0.1],    // 3: D -- corridor top-left
+                [-1.0, 0.0, 0.05],  // 4: E -- thin triangle tip 1
+                [-1.0, 0.0, -0.05], // 5: F -- thin triangle tip 2
+            ],
+            polygons: vec![
+                [0, 1, 2], // corridor triangle 1 (A,B,C)
+                [0, 2, 3], // corridor triangle 2 (A,C,D)
+                [0, 4, 5], // unrelated thin triangle sharing only vertex A
+            ],
+        };
+        let result = erode(&mesh, AGENT_RADIUS);
+        assert!(
+            result.pinch_guard_count > 0,
+            "this construction must engage the pinch guard: {result:?}"
+        );
+        assert_no_polygon_inverted_or_degenerated(&mesh, &result);
         assert_eq!(result.vertices.len(), mesh.vertices.len());
         assert_eq!(result.polygon_count, mesh.polygons.len());
     }
