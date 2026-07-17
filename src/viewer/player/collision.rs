@@ -378,6 +378,14 @@ fn build_colliders_for_placement(
     allow_dynamic_bodies: bool,
     restores: &mut super::super::world::PersistRestores,
 ) {
+    // Actor collision is opt-in through the developer `ragdoll` command. A
+    // locked T-pose must not silently acquire a static skeleton collider.
+    if matches!(
+        placement.semantic,
+        crate::vsa::PreparedSemantic::Npc(_) | crate::vsa::PreparedSemantic::Creature(_)
+    ) {
+        return;
+    }
     // Issues #60/#61: a reference the save layer deleted (taken pickup)
     // must never get colliders rebuilt for it.
     if restores.suppressed.contains(&placement.reference_form_id) {
@@ -510,6 +518,217 @@ fn build_colliders_for_placement(
     }
 }
 
+/// Attaches or removes the prepared articulated actor bodies for the developer
+/// ragdoll toggle. The first body is mirrored in the legacy one-body map so
+/// existing persistence and transform-sync paths continue to work.
+pub(crate) fn process_ragdoll_toggles(
+    mut commands: Commands,
+    physics_assets: Res<PreparedPhysicsAssets>,
+    manifest: Res<PreparedSceneManifest>,
+    mut collision: ResMut<PreparedCollisionWorld>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    query: Query<(
+        Entity,
+        &super::super::interaction::PlacementRoot,
+        Option<&super::RagdollToggle>,
+    )>,
+) {
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    for (entity, root, toggle) in &query {
+        let enabled = toggle.is_some_and(|toggle| toggle.0);
+        let existing = collision.ragdoll_bodies.get(&entity).cloned();
+        if !enabled {
+            if let Some(bodies) = existing {
+                if let Some(joints) = collision.ragdoll_joints.remove(&entity) {
+                    for joint in joints {
+                        let _ = world.try_destroy_joint(joint, true);
+                    }
+                }
+                collision.ragdoll_bodies.remove(&entity);
+                collision.dynamic_bodies.remove(&entity);
+                collision.sleeping_dynamic_bodies.remove(&entity);
+                for body in bodies {
+                    collision.ragdoll_nodes.remove(&body);
+                    collision.dynamic_entities.remove(&body);
+                    let _ = world.try_destroy_body(body);
+                }
+            }
+            continue;
+        }
+        if existing.is_some() {
+            continue;
+        }
+        let placement = root.placement();
+        if !matches!(
+            placement.semantic,
+            crate::vsa::PreparedSemantic::Npc(_) | crate::vsa::PreparedSemantic::Creature(_)
+        ) {
+            continue;
+        }
+        let Some(asset) = placement
+            .physics_asset_path
+            .as_ref()
+            .and_then(|path| physics_assets.assets.get(path))
+        else {
+            continue;
+        };
+        let mut body_ids = HashMap::new();
+        for source in &asset.bodies {
+            // Actor skeleton layers are intentionally filtered from ordinary
+            // player collision (for example layer 8), but a developer
+            // ragdoll still needs those bodies. Only phantom/empty bodies are
+            // omitted here.
+            if source.phantom || source.shapes.is_empty() {
+                continue;
+            }
+            let mut body = source.clone();
+            body.motion_type = "MO_SYS_DYNAMIC".into();
+            // Havok actor skeleton bodies are commonly authored keyframed
+            // with zero gravity. The developer drop explicitly turns gravity
+            // back on while preserving the source mass/limits.
+            body.gravity_factor = 1.0;
+            body.mass = if body.mass.is_finite() && body.mass > 0.0 {
+                body.mass
+            } else {
+                5.0
+            };
+            body.constrained = false;
+            body.shapes.retain(PreparedPhysicsShape::supports_dynamic);
+            if body.shapes.is_empty() {
+                continue;
+            }
+            let body_id = create_dynamic_body(world, placement, &body);
+            let shapes = body
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    create_prepared_shape(world, body_id, &body, shape, placement, true, true)
+                        .map(|(shape_id, _)| shape_id)
+                })
+                .collect::<Vec<_>>();
+            if shapes.is_empty() {
+                let _ = world.try_destroy_body(body_id);
+                continue;
+            }
+            normalize_dynamic_mass(world, body_id, &body, placement.scale.abs());
+            body_ids.insert(source.group_id, body_id);
+            if let Some(node) = source.node.clone() {
+                collision.ragdoll_nodes.insert(
+                    body_id,
+                    RagdollNodeBinding {
+                        root: entity,
+                        node,
+                        node_entities: Vec::new(),
+                        rest_body: None,
+                        rest_node_globals: Vec::new(),
+                    },
+                );
+            }
+            collision.dynamic_entities.insert(body_id, entity);
+            collision
+                .ledger
+                .record_dynamic_body(manifest.cell.form_id, body_id);
+            for shape_id in shapes {
+                collision.surfaces.insert(
+                    shape_id,
+                    CollisionSurface {
+                        material: body.material,
+                    },
+                );
+                collision
+                    .ledger
+                    .record_body_shape(manifest.cell.form_id, shape_id);
+            }
+        }
+        let Some(primary) = body_ids.values().next().copied() else {
+            continue;
+        };
+        let mut joint_ids = Vec::new();
+        for joint in &asset.joints {
+            let (Some(body_a), Some(body_b)) =
+                (body_ids.get(&joint.body_a), body_ids.get(&joint.body_b))
+            else {
+                continue;
+            };
+            let frame_a = boxddd::Transform::new(
+                to_box_vec3(Vec3::from_array(joint.anchor_a)),
+                boxddd::Quat::IDENTITY,
+            );
+            let frame_b = boxddd::Transform::new(
+                to_box_vec3(Vec3::from_array(joint.anchor_b)),
+                boxddd::Quat::IDENTITY,
+            );
+            let result = match joint.kind.as_str() {
+                "spherical" => {
+                    let mut definition = SphericalJointDef::new(*body_a, *body_b)
+                        .local_frame_a(frame_a)
+                        .local_frame_b(frame_b);
+                    if let Some(angle) = joint.cone_limit {
+                        definition = definition.cone_limit(true, angle.max(0.0));
+                    }
+                    if let (Some(lower), Some(upper)) = (joint.lower_limit, joint.upper_limit) {
+                        definition = definition.twist_limit(true, lower, upper.max(lower));
+                    }
+                    world.try_create_spherical_joint(definition)
+                }
+                "prismatic" => world.try_create_prismatic_joint(
+                    PrismaticJointDef::new(*body_a, *body_b)
+                        .local_frame_a(frame_a)
+                        .local_frame_b(frame_b)
+                        .limit(
+                            joint.lower_limit.is_some() || joint.upper_limit.is_some(),
+                            joint.lower_limit.unwrap_or(0.0),
+                            joint
+                                .upper_limit
+                                .unwrap_or(0.0)
+                                .max(joint.lower_limit.unwrap_or(0.0)),
+                        ),
+                ),
+                _ => world.try_create_revolute_joint(
+                    RevoluteJointDef::new(*body_a, *body_b)
+                        .local_frame_a(frame_a)
+                        .local_frame_b(frame_b)
+                        .limit(
+                            joint.lower_limit.is_some() || joint.upper_limit.is_some(),
+                            joint.lower_limit.unwrap_or(0.0),
+                            joint
+                                .upper_limit
+                                .unwrap_or(0.0)
+                                .max(joint.lower_limit.unwrap_or(0.0)),
+                        ),
+                ),
+            };
+            if let Ok(joint_id) = result {
+                joint_ids.push(joint_id);
+            }
+        }
+        let all_bodies = body_ids.into_values().collect::<Vec<_>>();
+        collision.dynamic_bodies.insert(entity, primary);
+        collision.ragdoll_bodies.insert(entity, all_bodies);
+        collision.ragdoll_joints.insert(entity, joint_ids);
+        commands.entity(entity).insert(PhysicsCollider);
+        info!(
+            "ragdoll enabled reference {:08x} bodies={} joints={}",
+            placement.reference_form_id,
+            collision.ragdoll_bodies[&entity].len(),
+            collision.ragdoll_joints[&entity].len()
+        );
+    }
+}
+
+/// Maps one prepared Havok body to the GLTF node that owns its collision
+/// objects. The first physics pose and node pose are captured lazily because
+/// scene children are spawned after the placement root.
+pub(crate) struct RagdollNodeBinding {
+    pub(crate) root: Entity,
+    pub(crate) node: String,
+    pub(crate) node_entities: Vec<Entity>,
+    pub(crate) rest_body: Option<Affine3A>,
+    pub(crate) rest_node_globals: Vec<Affine3A>,
+}
+
 /// Issue #64: a keyframed body's kinematic collider, bound to the animated
 /// scene node the converter recorded on the sidecar body (`node`).
 pub(crate) struct KeyframedColliderBinding {
@@ -568,6 +787,25 @@ fn find_named_descendant(
         }
     }
     None
+}
+
+fn find_named_descendants(
+    root: Entity,
+    name: &str,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Vec<Entity> {
+    let mut matches = Vec::new();
+    let mut queue = vec![root];
+    while let Some(entity) = queue.pop() {
+        if names.get(entity).is_ok_and(|n| n.as_str() == name) {
+            matches.push(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            queue.extend(child_list.iter());
+        }
+    }
+    matches
 }
 
 /// Issue #64: every fixed step, steer each keyframed collider body toward
@@ -957,7 +1195,20 @@ pub(crate) fn cleanup_removed_dynamic_bodies(
         return;
     };
     for entity in removed {
-        if let Some(body) = collision_world.dynamic_bodies.remove(&entity) {
+        if let Some(joints) = collision_world.ragdoll_joints.remove(&entity) {
+            for joint in joints {
+                let _ = world.try_destroy_joint(joint, true);
+            }
+        }
+        if let Some(bodies) = collision_world.ragdoll_bodies.remove(&entity) {
+            collision_world.dynamic_bodies.remove(&entity);
+            collision_world.sleeping_dynamic_bodies.remove(&entity);
+            for body in bodies {
+                collision_world.ragdoll_nodes.remove(&body);
+                collision_world.dynamic_entities.remove(&body);
+                let _ = world.try_destroy_body(body);
+            }
+        } else if let Some(body) = collision_world.dynamic_bodies.remove(&entity) {
             collision_world.dynamic_entities.remove(&body);
             collision_world.sleeping_dynamic_bodies.remove(&entity);
             let _ = world.try_destroy_body(body);
@@ -1100,11 +1351,17 @@ pub(crate) fn attach_runtime_item_colliders(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_dynamic_transforms(
     mut collision_world: ResMut<PreparedCollisionWorld>,
     context: NonSend<BoxdddPhysicsContext>,
     mut stats: ResMut<CollisionRuntimeStats>,
     mut roots: Query<&mut Transform, With<PhysicsCollider>>,
+    transforms: Query<&GlobalTransform>,
+    names: Query<&Name>,
+    children: Query<&Children>,
+    parents: Query<&ChildOf>,
+    mut nodes: Query<&mut Transform, Without<PhysicsCollider>>,
 ) {
     stats.dynamic_transform_updates = 0;
     let Some(world) = context.world() else {
@@ -1132,6 +1389,12 @@ pub(crate) fn sync_dynamic_transforms(
                 if was_sleeping && event.fell_asleep() {
                     continue;
                 }
+                // A ragdoll owns several bodies but only its primary body
+                // drives the placement root. Secondary bodies are applied to
+                // their named skeleton nodes below.
+                if collision_world.dynamic_bodies.get(&entity).copied() != Some(body) {
+                    continue;
+                }
                 let Ok(mut transform) = roots.get_mut(entity) else {
                     continue;
                 };
@@ -1148,6 +1411,72 @@ pub(crate) fn sync_dynamic_transforms(
         .is_err()
     {
         return;
+    }
+
+    // Body events are intentionally sparse for sleeping actors. Read every
+    // live ragdoll pose so articulated meshes continue to follow joints even
+    // when BoxDDD did not emit a transform event this fixed step.
+    for (body, binding) in collision_world.ragdoll_nodes.iter_mut() {
+        let Ok(physics_transform) = world.try_body_transform(*body) else {
+            binding.node_entities.clear();
+            binding.rest_body = None;
+            binding.rest_node_globals.clear();
+            continue;
+        };
+        if binding.node_entities.is_empty()
+            || binding
+                .node_entities
+                .iter()
+                .any(|entity| transforms.get(*entity).is_err())
+        {
+            binding.node_entities =
+                find_named_descendants(binding.root, &binding.node, &children, &names);
+            binding.rest_body = None;
+            binding.rest_node_globals.clear();
+        }
+        if binding.node_entities.is_empty() {
+            continue;
+        }
+        let body_affine = Affine3A::from_rotation_translation(
+            from_box_quat(physics_transform.q),
+            Vec3::new(
+                physics_transform.p.x,
+                physics_transform.p.y,
+                physics_transform.p.z,
+            ),
+        );
+        let rest_body = *binding.rest_body.get_or_insert(body_affine);
+        if binding.rest_node_globals.len() != binding.node_entities.len() {
+            binding.rest_node_globals = binding
+                .node_entities
+                .iter()
+                .filter_map(|entity| transforms.get(*entity).ok().map(GlobalTransform::affine))
+                .collect();
+        }
+        let delta = body_affine * rest_body.inverse();
+        for (index, node_entity) in binding.node_entities.iter().enumerate() {
+            let Some(rest_node) = binding.rest_node_globals.get(index).copied() else {
+                continue;
+            };
+            let desired_world = delta * rest_node;
+            let parent_world = parents
+                .get(*node_entity)
+                .ok()
+                .and_then(|parent| transforms.get(parent.parent()).ok())
+                .map(GlobalTransform::affine)
+                .unwrap_or(Affine3A::IDENTITY);
+            let local = parent_world.inverse() * desired_world;
+            let (scale, rotation, translation) = local.to_scale_rotation_translation();
+            if !(scale.is_finite() && rotation.is_finite() && translation.is_finite()) {
+                continue;
+            }
+            let Ok(mut transform) = nodes.get_mut(*node_entity) else {
+                continue;
+            };
+            transform.translation = translation;
+            transform.rotation = rotation;
+            transform.scale = scale;
+        }
     }
     stats.dynamic_transform_updates = updates;
     stats.sleeping_dynamic_bodies = collision_world.sleeping_dynamic_bodies.len();

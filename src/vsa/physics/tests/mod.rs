@@ -43,6 +43,7 @@ fn exact_sphere_and_capsule_geometry_validate_without_proxy_meshes() {
             ],
             ..Default::default()
         }],
+        joints: Vec::new(),
     };
     validate_physics_asset(&asset).unwrap();
     assert_eq!(asset.bodies[0].shapes[0].kind(), "sphere");
@@ -58,6 +59,7 @@ fn dynamic_scope_rejects_concave_and_constrained_bodies() {
         schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
         source: PreparedPhysicsSource::AuthoredHavok,
         bodies: vec![dynamic],
+        joints: Vec::new(),
     };
     assert_eq!(
         classify_placement(&PreparedSemantic::Static, &asset),

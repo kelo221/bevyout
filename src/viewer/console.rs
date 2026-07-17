@@ -127,6 +127,13 @@ pub(crate) fn install(app: &mut App) {
         )
         .mutating(),
         ConsoleCommand::new(
+            "ragdoll",
+            "ragdoll <actor-reference> [on|off|reset]",
+            "Toggle a prepared NPC/creature's developer ragdoll body; actors stay locked in T-pose by default.",
+            ragdoll,
+        )
+        .mutating(),
+        ConsoleCommand::new(
             "stairdebug",
             "stairdebug",
             "Toggle stair-step rejection logging.",
@@ -400,6 +407,90 @@ fn activate_reference(
         vec![format!(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
+        )],
+    ))
+}
+
+fn ragdoll(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !(1..=2).contains(&invocation.args.len()) {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "ragdoll requires an actor reference and optional on, off, or reset",
+        ));
+    }
+    let entity = resolve_reference(world, &invocation.args[0])?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement()
+        .clone();
+    if !matches!(
+        placement.semantic,
+        PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+    ) {
+        return Err(ConsoleError::new(
+            "not_actor",
+            "ragdoll only accepts NPC or creature references",
+        ));
+    }
+    let operation = invocation
+        .args
+        .get(1)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "toggle".into());
+    match operation.as_str() {
+        "on" => {
+            world.entity_mut(entity).insert(player::RagdollToggle(true));
+        }
+        "off" => {
+            world
+                .entity_mut(entity)
+                .insert(player::RagdollToggle(false));
+        }
+        "reset" => {
+            world.entity_mut(entity).remove::<player::RagdollToggle>();
+            if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                transform.translation = Vec3::from_array(placement.translation);
+                transform.rotation = Quat::from_xyzw(
+                    placement.rotation_xyzw[0],
+                    placement.rotation_xyzw[1],
+                    placement.rotation_xyzw[2],
+                    placement.rotation_xyzw[3],
+                );
+                transform.scale = Vec3::splat(placement.scale);
+            }
+        }
+        "toggle" => {
+            let enabled = world
+                .get::<player::RagdollToggle>(entity)
+                .is_some_and(|toggle| toggle.0);
+            world
+                .entity_mut(entity)
+                .insert(player::RagdollToggle(!enabled));
+        }
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_value",
+                "ragdoll mode must be on, off, or reset",
+            ));
+        }
+    }
+    let enabled = world
+        .get::<player::RagdollToggle>(entity)
+        .is_some_and(|toggle| toggle.0);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": placement.reference_form_id,
+            "enabled": enabled,
+            "mode": operation,
+        }),
+        vec![format!(
+            "ragdoll {:08x} {}",
+            placement.reference_form_id,
+            if enabled { "enabled" } else { "disabled" }
         )],
     ))
 }

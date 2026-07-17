@@ -36,7 +36,7 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v1";
+pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v2-appearance-seeded-levels";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -307,6 +307,15 @@ pub(crate) struct ActorFactionMembership {
 #[serde(default)]
 pub(crate) struct ActorBlueprint {
     pub(crate) base_form_id: u32,
+    /// Original placement base. For a direct actor this equals
+    /// `base_form_id`; for an LVLN/LVLC placement it preserves the list while
+    /// `base_form_id` names the deterministic concrete candidate.
+    #[serde(default)]
+    pub(crate) source_base_form_id: u32,
+    #[serde(default)]
+    pub(crate) resolved_base_form_id: Option<u32>,
+    #[serde(default)]
+    pub(crate) selection_seed: Option<u64>,
     pub(crate) reference_form_id: u32,
     pub(crate) record_kind: String,
     pub(crate) editor_id: Option<String>,
@@ -634,14 +643,49 @@ pub(crate) fn build_actor_catalog(
                 }
             }
             None if inputs.leveled.contains_key(&placement.base_form_id) => {
-                counters.skipped += 1;
-                ActorCatalogEntry::Skipped {
-                    base_form_id: placement.base_form_id,
-                    reference_form_id: placement.reference_form_id,
-                    reason: format!(
-                        "base {:08x} is a leveled list (LVLN/LVLC); direct leveled actor placements are not resolved into blueprints",
-                        placement.base_form_id
-                    ),
+                let list = &inputs.leveled[&placement.base_form_id];
+                let mut candidates = list
+                    .entries
+                    .iter()
+                    .filter_map(|candidate| inputs.actors.get(candidate))
+                    .filter(|actor| actor.kind == placement.kind)
+                    .map(|actor| actor.form_id)
+                    .collect::<Vec<_>>();
+                candidates.sort_unstable();
+                candidates.dedup();
+                if candidates.is_empty() {
+                    counters.skipped += 1;
+                    ActorCatalogEntry::Skipped {
+                        base_form_id: placement.base_form_id,
+                        reference_form_id: placement.reference_form_id,
+                        reason: format!(
+                            "leveled list {:08x} has no concrete {:?} candidate",
+                            placement.base_form_id, placement.kind
+                        ),
+                    }
+                } else {
+                    let selection_seed = stable_selection_seed(
+                        source_fingerprint,
+                        placement.reference_form_id,
+                        placement.base_form_id,
+                    );
+                    let selected = candidates[(selection_seed as usize) % candidates.len()];
+                    let actor = &inputs.actors[&selected];
+                    let mut blueprint = build_blueprint(actor, placement, inputs);
+                    blueprint.base_form_id = selected;
+                    blueprint.source_base_form_id = placement.base_form_id;
+                    blueprint.resolved_base_form_id = Some(selected);
+                    blueprint.selection_seed = Some(selection_seed);
+                    blueprint.is_leveled_template = true;
+                    blueprint.template_candidates = candidates;
+                    blueprint.diagnostics.push(format!(
+                        "leveled list {:08x} selected candidate {:08x} with seed {selection_seed:016x}",
+                        placement.base_form_id, selected
+                    ));
+                    blueprint.diagnostics.sort();
+                    blueprint.diagnostics.dedup();
+                    counters.prepared += 1;
+                    ActorCatalogEntry::Prepared(Box::new(blueprint))
                 }
             }
             None => {
@@ -662,6 +706,19 @@ pub(crate) fn build_actor_catalog(
         entries,
         counters,
     }
+}
+
+fn stable_selection_seed(
+    source_fingerprint: &str,
+    reference_form_id: u32,
+    list_form_id: u32,
+) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("{source_fingerprint}:{reference_form_id:08x}:{list_form_id:08x}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn build_blueprint(
@@ -796,6 +853,9 @@ fn build_blueprint(
 
     ActorBlueprint {
         base_form_id: actor.form_id,
+        source_base_form_id: placement.base_form_id,
+        resolved_base_form_id: None,
+        selection_seed: None,
         reference_form_id: placement.reference_form_id,
         record_kind: actor.kind.as_record_signature().to_string(),
         editor_id: actor.editor_id.clone(),
@@ -926,7 +986,10 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(ACTOR_CATALOG_REVISION, "openmw-actors-v1");
+        assert_eq!(
+            ACTOR_CATALOG_REVISION,
+            "openmw-actors-v2-appearance-seeded-levels"
+        );
     }
 
     #[test]
