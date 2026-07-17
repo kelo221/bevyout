@@ -348,6 +348,7 @@ mod tests {
                     }],
                     ..PreparedPhysicsBody::default()
                 }],
+                joints: Vec::new(),
             },
         )]);
         let catalog = build_item_catalog(&bases, &HashMap::new(), &placements, &physics, "abc");

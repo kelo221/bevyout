@@ -590,12 +590,15 @@ fn prepare_cell(
         .cloned()
         .collect::<Vec<_>>();
     let mut references = std::mem::take(&mut parsed.references);
+    let actor_models =
+        build_actor_appearance_models(&parsed, &actor_references, &source_fingerprint);
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
     references.extend(catalog_references);
     let stage = stage_placements(
         references,
         &parsed.bases,
+        &actor_models,
         &data_root,
         &session.archives,
         &staging_dir,
@@ -1219,4 +1222,284 @@ fn build_actor_catalog_inputs(
         known_bases,
         placements,
     }
+}
+
+/// Selects the visual NIF set for each actor placement.  Fallout NPC records
+/// point at a skeleton rather than a render mesh, so NPCs use the sex-specific
+/// race body/head parts and deterministic inventory apparel/weapons.  CREA
+/// records already carry their renderable NIFZ list.  The list is sorted and
+/// deduplicated before it reaches the assembler, making cache keys stable
+/// across plugin traversal order.
+fn build_actor_appearance_models(
+    parsed: &ParsedPlugin,
+    references: &[ReferenceRecord],
+    source_fingerprint: &str,
+) -> HashMap<u32, Vec<String>> {
+    let mut result = HashMap::new();
+    for reference in references {
+        let Some(base) = resolve_actor_appearance_base(
+            parsed,
+            reference.base_form_id,
+            reference.kind,
+            reference.form_id,
+            source_fingerprint,
+        ) else {
+            continue;
+        };
+        let Some(actor) = base.actor.as_ref() else {
+            continue;
+        };
+        let mut models = Vec::new();
+        match reference.kind {
+            ReferenceKind::Creature => {
+                // The CREA model list contains visual attachments relative to
+                // the skeleton path. Keep the skeleton as the first assembly
+                // input so its Havok bodies/constraints are available to the
+                // optional runtime ragdoll as well as its render mesh.
+                models.extend(base.model.iter().cloned());
+                if let Some(creature) = actor.creature.as_ref() {
+                    let model_directory = base.model.as_ref().and_then(|model| {
+                        model
+                            .rfind('\\')
+                            .or_else(|| model.rfind('/'))
+                            .map(|index| model[..index].to_owned())
+                    });
+                    models.extend(creature.model_list.iter().map(|model| {
+                        if model.contains('\\') || model.contains('/') {
+                            model.clone()
+                        } else if let Some(directory) = model_directory.as_ref() {
+                            format!("{directory}\\{model}")
+                        } else {
+                            model.clone()
+                        }
+                    }));
+                }
+                if models.is_empty() {
+                    models.extend(base.model.iter().cloned());
+                }
+            }
+            ReferenceKind::Npc => {
+                let female = actor
+                    .base_config
+                    .is_some_and(|config| config.flags & 1 != 0);
+                // Body-part NIFs carry only partial armatures. Include the
+                // actor skeleton as the shared bone/physics source so the
+                // assembled GLB can drive every part and the ragdoll sidecar
+                // contains the authored articulated bodies.
+                models.extend(base.model.iter().cloned());
+                if let Some(race) = actor.race_form_id.and_then(|id| parsed.races.get(&id)) {
+                    let body = if female {
+                        &race.body_parts_female
+                    } else {
+                        &race.body_parts_male
+                    };
+                    let head = if female {
+                        &race.head_parts_female
+                    } else {
+                        &race.head_parts_male
+                    };
+                    models.extend(body.iter().filter_map(|part| part.model_path.clone()));
+                    models.extend(head.iter().filter_map(|part| part.model_path.clone()));
+                }
+                // Gear is deliberately appearance-only in this slice. Resolve
+                // each authored inventory list to one deterministic ARMO/WEAP
+                // mesh and leave equip semantics to the later actor lifecycle
+                // wave.
+                let mut gear = base
+                    .inventory
+                    .iter()
+                    .flat_map(|entry| {
+                        resolve_actor_gear_models(
+                            parsed,
+                            entry.item_form_id,
+                            reference.form_id,
+                            source_fingerprint,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                gear.sort_by_key(|model| model.to_ascii_lowercase());
+                models.extend(gear);
+                if models.is_empty() {
+                    models.extend(base.model.iter().cloned());
+                }
+            }
+            ReferenceKind::Object => continue,
+        }
+        models = models
+            .into_iter()
+            .map(|model| normalize_asset_path(&model))
+            .filter(|model| {
+                model.to_ascii_lowercase().ends_with(".nif")
+                    && !is_editor_marker(model)
+                    && !is_non_rendering_effect(model)
+            })
+            .collect();
+        models.sort();
+        models.dedup();
+        if !models.is_empty() {
+            result.insert(reference.form_id, models);
+        }
+    }
+    result
+}
+
+/// Resolves one authored inventory entry to a deterministic visual item. NPC
+/// inventories commonly point at nested LVLI lists, so following only direct
+/// ARMO/WEAP records silently drops all equipment from the assembled actor.
+fn resolve_actor_gear_models(
+    parsed: &ParsedPlugin,
+    root_form_id: u32,
+    reference_form_id: u32,
+    source_fingerprint: &str,
+) -> Vec<String> {
+    let mut candidates = actor_gear_model_candidates(parsed, root_form_id, &mut HashSet::new(), 0);
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    candidates.dedup();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let index = (appearance_selection_seed(source_fingerprint, reference_form_id, root_form_id)
+        as usize)
+        % candidates.len();
+    vec![candidates[index].1.clone()]
+}
+
+fn actor_gear_model_candidates(
+    parsed: &ParsedPlugin,
+    form_id: u32,
+    visited: &mut HashSet<u32>,
+    depth: usize,
+) -> Vec<(u32, String)> {
+    if depth >= 32 || !visited.insert(form_id) {
+        return Vec::new();
+    }
+    let Some(base) = parsed.bases.get(&form_id) else {
+        return Vec::new();
+    };
+    if matches!(base.kind.as_str(), "ARMO" | "WEAP") {
+        return base
+            .model
+            .iter()
+            .cloned()
+            .map(|model| (form_id, model))
+            .collect();
+    }
+    let Some(leveled) = base.leveled.as_ref() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in &leveled.entries {
+        candidates.extend(actor_gear_model_candidates(
+            parsed,
+            entry.item_form_id,
+            visited,
+            depth + 1,
+        ));
+    }
+    candidates
+}
+
+fn actor_kind_matches(base: &BaseRecord, kind: ReferenceKind) -> bool {
+    base.actor.as_ref().is_some_and(|actor| {
+        matches!(
+            (kind, actor.creature.is_some()),
+            (ReferenceKind::Creature, true) | (ReferenceKind::Npc, false)
+        )
+    })
+}
+
+/// Flattens an LVLN/LVLC target into concrete actors while retaining stable
+/// FormID ordering. Template shells such as `LvlRaiderGun` point at one of
+/// these lists through `TPLT`; their own inventory is intentionally empty.
+fn actor_candidate_ids(
+    parsed: &ParsedPlugin,
+    target_form_id: u32,
+    kind: ReferenceKind,
+    visited: &mut HashSet<u32>,
+    depth: usize,
+) -> Vec<u32> {
+    if depth >= 32 || !visited.insert(target_form_id) {
+        return Vec::new();
+    }
+    let Some(base) = parsed.bases.get(&target_form_id) else {
+        return Vec::new();
+    };
+    if actor_kind_matches(base, kind) {
+        return vec![target_form_id];
+    }
+    let Some(leveled) = base.leveled.as_ref() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in &leveled.entries {
+        candidates.extend(actor_candidate_ids(
+            parsed,
+            entry.item_form_id,
+            kind,
+            visited,
+            depth + 1,
+        ));
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
+/// Resolves both direct leveled placements and NPC/CREA template shells to a
+/// concrete actor for appearance work. The actor catalog keeps the source
+/// FormID for gameplay bookkeeping; this helper only chooses the deterministic
+/// visual/inventory source used by the assembled GLB.
+fn resolve_actor_appearance_base<'a>(
+    parsed: &'a ParsedPlugin,
+    start_form_id: u32,
+    kind: ReferenceKind,
+    reference_form_id: u32,
+    source_fingerprint: &str,
+) -> Option<&'a BaseRecord> {
+    let mut current_form_id = start_form_id;
+    let mut visited = HashSet::new();
+    for _ in 0..32 {
+        if !visited.insert(current_form_id) {
+            return None;
+        }
+        let base = parsed.bases.get(&current_form_id)?;
+        if !actor_kind_matches(base, kind) {
+            let candidates =
+                actor_candidate_ids(parsed, current_form_id, kind, &mut HashSet::new(), 0);
+            let selected = candidates.get(
+                (appearance_selection_seed(source_fingerprint, reference_form_id, current_form_id)
+                    as usize)
+                    % candidates.len().max(1),
+            )?;
+            current_form_id = *selected;
+            continue;
+        }
+        if let Some(template_form_id) = base.base_template_form_id {
+            let candidates =
+                actor_candidate_ids(parsed, template_form_id, kind, &mut HashSet::new(), 0);
+            if let Some(selected) = candidates.get(
+                (appearance_selection_seed(source_fingerprint, reference_form_id, template_form_id)
+                    as usize)
+                    % candidates.len().max(1),
+            ) {
+                current_form_id = *selected;
+                continue;
+            }
+        }
+        return Some(base);
+    }
+    None
+}
+
+fn appearance_selection_seed(
+    source_fingerprint: &str,
+    reference_form_id: u32,
+    list_form_id: u32,
+) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in format!("{source_fingerprint}:{reference_form_id:08x}:{list_form_id:08x}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
