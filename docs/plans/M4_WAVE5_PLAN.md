@@ -165,6 +165,45 @@ FranklinMetro02 (0001a273) and Vault 101 Entrance (00024512):
 Manual script `M4_WAVE5_MANUAL.md` before the PR; PR closes #114, #137,
 #138 (and #136 only if the measurement closes it).
 
+## Wave 5 added scope — #114 movement fidelity (user-directed)
+
+Added to #114 mid-wave after the movement/avoidance review surfaced two
+architecture gaps and the user asked for a solve-rate knob. All three
+touch the same `agent.rs` seam and run as one executor pass on the wave
+branch.
+
+1. **Fixed-timestep agent movement.** `apply_agent_physics_movement` and
+   its dependent per-agent systems move from `Update` (variable
+   render-frame `Res<Time>`) to `FixedUpdate` with `Time<Fixed>`, so the
+   agent KCC steps deterministically at the same fixed cadence as the
+   player controller and landmass (which already run fixed). Fixes
+   frame-rate-dependent stepping and the large-variable-step tunneling
+   risk #114's non-goals call out. Landmass stays in `FixedPreUpdate`
+   (desired velocity fresh before movement). Render-frame visual
+   interpolation for the agent is explicitly a follow-up, only if fixed
+   stepping is visibly steppy.
+2. **Player as landmass `Character3d` (agent↔player avoidance).**
+   Landmass local avoidance is RVO (`dodgy_2d`); agent↔agent is already
+   on. A `Character` is a non-agent obstacle agents steer around but that
+   landmass never moves — the hook for the physics-driven player. Mirror
+   the player's position and *actual KCC velocity* onto a landmass
+   character each fixed tick, before `LandmassSystems::SyncValues`, so
+   agents predict and avoid the moving player (0.5 s avoidance horizon
+   reads velocity). Re-associate the character's `ArchipelagoRef3d` on
+   cell swap alongside `NavArchipelagoState`. This is soft steering;
+   physics colliders remain the hard backstop, not replaced. Generalizes
+   later to NPC actors; player is the only concrete non-agent body today.
+3. **Configurable nav-solve interval.** Resource-backed divisor
+   (default 1 = every fixed step) gating `LandmassSystems::Update` (the
+   pathfinding+avoidance solve) via a step-counter run condition, so the
+   solve can run every N fixed steps (e.g. 2 → 32 Hz) while movement
+   still integrates the held desired velocity every step. Console-
+   settable (fits the `setrender`/`tna` pattern); pure divisor logic
+   (`should_solve(counter, interval)`) in a testable module.
+
+No prepared/serialized type changes → no `*_REVISION` bump. `KccState`
+gains a `pub(crate)` velocity accessor (the only player-module edit).
+
 ## Shipped amendments
 
 - **#137's "non-travel door" class is empty on real FO3 data.** An
