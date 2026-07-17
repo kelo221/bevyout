@@ -147,17 +147,18 @@ const AGENT_TARGET_REACHED_DISTANCE: f32 = 0.5;
 /// simplification -- #113 can derive this from the link's real length and
 /// the agent's desired speed instead).
 const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
-/// How close (metres) the agent must get to a travel door's triangle
-/// midpoint before the door lifecycle starts (issue #113 feature 3).
-/// Slightly wider than `AGENT_TARGET_REACHED_DISTANCE` so landmass's own
-/// target-reached stop always lands inside it.
+/// How close (metres, horizontal -- see `movement_policy::nav_point_reached`)
+/// the agent must get to a travel door's triangle midpoint before the door
+/// lifecycle starts (issue #113 feature 3). Slightly wider than
+/// `AGENT_TARGET_REACHED_DISTANCE` so landmass's own target-reached stop
+/// always lands inside it.
 const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
-/// How close (metres) the agent must get to a mid-route door's triangle
-/// midpoint before the crossing gate (issue #137) evaluates it. Same value
-/// and rationale as `TRAVEL_ARRIVAL_DISTANCE`, kept as its own named
-/// constant since the two triggers are conceptually distinct (an arrival
-/// at a routing target vs. a crossing check along an otherwise-uninterrupted
-/// route).
+/// How close (metres, horizontal) the agent must get to a mid-route door's
+/// triangle midpoint before the crossing gate (issue #137) evaluates it.
+/// Same value and rationale as `TRAVEL_ARRIVAL_DISTANCE`, kept as its own
+/// named constant since the two triggers are conceptually distinct (an
+/// arrival at a routing target vs. a crossing check along an otherwise-
+/// uninterrupted route).
 const MID_ROUTE_DOOR_GATE_DISTANCE: f32 = 0.75;
 
 /// The point-sampling envelope for the archipelago options
@@ -1600,9 +1601,38 @@ fn apply_agent_physics_movement(
         let Some(target_point) = target_point else {
             continue;
         };
-        let distance = new_position.distance(target_point);
+        // Horizontal, not 3D: `new_position` is the capsule *centre*,
+        // `target_point` a feet-level nav-graph point (see
+        // `movement_policy::horizontal_distance`'s doc comment) -- a 3D
+        // distance never closes the constant ~half-`AGENT_HEIGHT` gap
+        // between them, so the agent would falsely latch `stuck` at every
+        // target it has actually reached. No vertical guard here (unlike
+        // the door-proximity gates): there is exactly one committed target,
+        // not an array of candidates a stray vertical match could
+        // misidentify, and a route with real elevation change still wants
+        // horizontal progress to dominate the distance-to-target measure.
+        let distance =
+            movement_policy::horizontal_distance(new_position.to_array(), target_point.to_array());
         if kcc.best_distance == f32::MAX {
             kcc.best_distance = distance;
+        }
+        // Genuinely at the target (the same horizontal-proximity threshold
+        // `AGENT_TARGET_REACHED_DISTANCE` uses elsewhere, mirroring
+        // landmass's own `TargetReachedCondition`): "reached" and "stuck"
+        // are mutually exclusive outcomes, not independent facts. Without
+        // this short-circuit, `decide_stuck`'s "no further improvement
+        // possible" window (`STUCK_RECOVERY_TICKS + STUCK_FAILURE_TICKS`,
+        // ~2 s at 64 Hz) would eventually latch `stuck` for *any* agent that
+        // simply arrives and stops -- once at the closest point it can get,
+        // distance stops strictly decreasing regardless of *why* (blocked,
+        // or done). A `Stuck` latch from a previous route also clears here:
+        // reaching a (possibly re-issued) target is unambiguous progress.
+        if distance <= AGENT_TARGET_REACHED_DISTANCE {
+            kcc.best_distance = distance;
+            kcc.ticks_without_progress = 0;
+            kcc.recovery_active = false;
+            kcc.stuck = false;
+            continue;
         }
         let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
             distance_to_target: distance,
@@ -1830,8 +1860,13 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         .get(&door_form_id)
                         .copied()?;
                     let position = world.get::<Transform>(agent_entity)?.translation;
-                    (position.distance(link.triangle_midpoint) <= TRAVEL_ARRIVAL_DISTANCE)
-                        .then_some((door_form_id, link))
+                    movement_policy::nav_point_reached(
+                        position.to_array(),
+                        link.triangle_midpoint.to_array(),
+                        TRAVEL_ARRIVAL_DISTANCE,
+                        AGENT_HEIGHT,
+                    )
+                    .then_some((door_form_id, link))
                 });
             if let Some((door_form_id, link)) = travel_arrival {
                 let new_state = door_link::transition(
@@ -1889,7 +1924,12 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         .iter()
                         .find(|door| {
                             Some(door.door_form_id) != travel_target_door
-                                && position.distance(door.midpoint) <= MID_ROUTE_DOOR_GATE_DISTANCE
+                                && movement_policy::nav_point_reached(
+                                    position.to_array(),
+                                    door.midpoint.to_array(),
+                                    MID_ROUTE_DOOR_GATE_DISTANCE,
+                                    AGENT_HEIGHT,
+                                )
                         })
                         .copied()
                 });
@@ -2785,6 +2825,64 @@ mod tests {
         assert_eq!(world.get::<Velocity3d>(agent).unwrap().velocity, Vec3::ZERO);
     }
 
+    /// Regression test (issue #114 added scope, M4 wave 5 real-data
+    /// acceptance finding): the stuck-vs-target distance must also compare
+    /// on the horizontal plane, exactly like the two door-proximity gates
+    /// above. A target sitting directly below/above the agent (same X/Z,
+    /// wildly different Y -- capsule-centre vs. feet-level, or simply a
+    /// route target at a different storey) must never latch `stuck` purely
+    /// from that vertical gap as long as the agent is not moving away from
+    /// it horizontally: a 3D distance check would never close that gap and
+    /// would falsely report `stuck` at a target the agent has, on the
+    /// ground plane that actually matters for navigation, already reached.
+    #[test]
+    fn stuck_detection_does_not_false_trigger_against_a_vertically_offset_target() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::Ready);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        world.insert_non_send(BoxdddPhysicsContext::from_world(
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world"),
+        ));
+        world.init_resource::<NavSolveStepCounter>();
+        world.init_resource::<NavSolveRate>();
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc::default(),
+                Transform::from_xyz(0.0, 5.0, 0.0),
+                Velocity3d::default(),
+                // No desired motion at all: the agent stays put on X/Z
+                // (only falling under gravity in an empty physics world),
+                // exactly on top of its target's X/Z but ~5 m above its Y.
+                AgentDesiredVelocityBlend::default(),
+                AgentTarget3d::Point(Vec3::new(0.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        let ticks =
+            movement_policy::STUCK_RECOVERY_TICKS + movement_policy::STUCK_FAILURE_TICKS + 10;
+        for _ in 0..ticks {
+            world
+                .run_system_once(apply_agent_physics_movement)
+                .expect("system runs");
+        }
+
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert!(
+            !kcc.stuck,
+            "a target directly above/below the agent must never latch `stuck` via the horizontal-only distance check"
+        );
+    }
+
     #[test]
     fn no_args_prints_usage_without_erroring() {
         let mut world = harness_world();
@@ -3194,6 +3292,74 @@ mod tests {
         );
     }
 
+    /// Regression test (issue #114 added scope, M4 wave 5 real-data
+    /// acceptance finding): physics-authoritative movement's `Transform` is
+    /// the capsule *centre*, not feet-level like `triangle_midpoint` (a
+    /// nav-graph point). The wave-3/4 kinematic agent Y-snapped its
+    /// `Transform` onto the navmesh every tick, incidentally erasing this
+    /// gap; every other travel-arrival test in this file sets the agent's Y
+    /// to match the door's exactly, which is why the regression this test
+    /// targets shipped unnoticed. A ~0.9 m vertical offset (roughly
+    /// `AGENT_HEIGHT / 2`, matching the real Vault101a 00028579 numbers from
+    /// acceptance) must not stop the arrival gate from firing.
+    #[test]
+    fn travel_arrival_tolerates_the_agent_capsule_centre_sitting_above_the_feet_level_door_midpoint()
+     {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .travel_doors
+            .insert(
+                0x99,
+                TravelDoorLink {
+                    // Feet-level midpoint, exactly like real prepared nav
+                    // graph data.
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+
+        request_travel(&mut world, 0, 0x99).expect("travel request succeeds");
+
+        // Arrive horizontally at the triangle midpoint, but at capsule-
+        // centre height (0.9 m above the feet-level midpoint) -- the exact
+        // shape of the regression: a 3D distance check would read ~0.9 m,
+        // just outside `TRAVEL_ARRIVAL_DISTANCE` (0.75 m), and never pause.
+        world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.9, 0.0);
+        door_link_system(&mut world);
+        assert!(
+            is_paused(&world, agent),
+            "the horizontal-plane arrival check must still fire despite the capsule-centre-vs-feet vertical offset"
+        );
+        assert!(world.get::<PauseAgent>(agent).is_some());
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "arrival must scripted-open the unlocked door"
+        );
+    }
+
     fn is_paused(world: &World, agent: Entity) -> bool {
         door_link::is_paused(
             world
@@ -3480,6 +3646,59 @@ mod tests {
                 .entry_for(agent_ledger_id(0))
                 .is_none(),
             "crossing a travel door's triangle mid-route (not the agent's own travel_intent) must not ledger a handoff"
+        );
+    }
+
+    /// Regression test (issue #114 added scope, M4 wave 5 real-data
+    /// acceptance finding): same shape as
+    /// `travel_arrival_tolerates_the_agent_capsule_centre_sitting_above_the_feet_level_door_midpoint`,
+    /// for the #137 mid-route crossing gate -- a capsule-centre agent above
+    /// a feet-level `MidRouteDoor::midpoint` must still trigger the
+    /// crossing gate instead of silently clipping through the closed door.
+    #[test]
+    fn mid_route_crossing_gate_tolerates_the_agent_capsule_centre_vertical_offset() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(0.0, 0.9, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .mid_route_doors
+            .push(MidRouteDoor {
+                door_form_id: 0x99,
+                // Feet-level midpoint, exactly like real prepared nav graph
+                // data -- the agent's own Y stays at capsule-centre height
+                // (0.9 m) the whole time, never snapped down to match it.
+                midpoint: Vec3::new(5.0, 0.0, 0.0),
+            });
+
+        world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.9, 0.0);
+        door_link_system(&mut world);
+        assert!(
+            is_paused(&world, agent),
+            "the horizontal-plane crossing gate must still fire despite the capsule-centre-vs-feet vertical offset"
+        );
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "arrival must scripted-open the unlocked door"
         );
     }
 
