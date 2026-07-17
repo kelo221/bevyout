@@ -200,6 +200,16 @@ branch.
    still integrates the held desired velocity every step. Console-
    settable (fits the `setrender`/`tna` pattern); pure divisor logic
    (`should_solve(counter, interval)`) in a testable module.
+   **Nav-poll interpolation (user-directed):** when the interval N > 1 the
+   held desired velocity is *interpolated* between consecutive solves —
+   store previous + latest solved desired velocity and feed movement a
+   lerp by the fraction of the interval elapsed, so throttled polling
+   slides the steering smoothly instead of stepping every N ticks. Pure
+   `solve_blend_fraction(steps_since_solve, interval)` in the same
+   testable module; exact no-op at N == 1. This is interpolation of the
+   nav-solve *output*, explicitly **not** render/transform interpolation
+   (the agent Transform still updates every fixed step; no camera-style
+   render-history smoothing).
 
 No prepared/serialized type changes → no `*_REVISION` bump. `KccState`
 gains a `pub(crate)` velocity accessor (the only player-module edit).
