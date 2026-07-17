@@ -1,4 +1,6 @@
 use super::*;
+use bevy::light::NotShadowCaster;
+use bevy::pbr::BakedPointShadowReceiver;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
 
 fn compatible_render_manifest() -> PreparedSceneManifest {
@@ -165,6 +167,73 @@ fn fallout_bloom_uses_explicit_old_school_baseline() {
         bloom.prefilter.threshold,
         Bloom::NATURAL.prefilter.threshold
     );
+}
+
+#[test]
+fn prepared_static_meshes_leave_runtime_casters_but_physics_meshes_do_not() {
+    let mut app = App::new();
+    app.add_systems(Update, mark_prepared_shadow_meshes);
+
+    let static_root = app
+        .world_mut()
+        .spawn((
+            PreparedPointShadowReceiverRoot,
+            BakedStaticSceneRoot,
+            Transform::default(),
+        ))
+        .id();
+    let moving_root = app
+        .world_mut()
+        .spawn((PreparedPointShadowReceiverRoot, Transform::default()))
+        .id();
+    let static_mesh = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            Transform::default(),
+            ChildOf(static_root),
+        ))
+        .id();
+    let moving_mesh = app
+        .world_mut()
+        .spawn((
+            Mesh3d::default(),
+            Transform::default(),
+            ChildOf(moving_root),
+        ))
+        .id();
+
+    app.update();
+
+    assert!(
+        app.world()
+            .entity(static_mesh)
+            .contains::<BakedPointShadowReceiver>()
+    );
+    assert!(
+        app.world()
+            .entity(static_mesh)
+            .contains::<NotShadowCaster>()
+    );
+    assert!(
+        app.world()
+            .entity(moving_mesh)
+            .contains::<BakedPointShadowReceiver>()
+    );
+    assert!(
+        !app.world()
+            .entity(moving_mesh)
+            .contains::<NotShadowCaster>()
+    );
+}
+
+#[test]
+fn forward_shader_combines_prepared_and_realtime_visibility() {
+    let shader = include_str!("../../../third_party/bevy_pbr-0.19.0/src/render/pbr_functions.wgsl");
+    assert_eq!(shader.matches("shadows::fetch_point_shadow(").count(), 2);
+    assert!(shader.contains("dominant_point_light_uses_baked_shadow"));
+    assert!(shader.contains("dominant_point_light_uses_realtime_shadow"));
+    assert!(shader.contains("min(dominant_shadow, realtime_shadow)"));
 }
 
 #[test]

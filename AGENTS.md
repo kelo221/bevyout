@@ -61,11 +61,12 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
 
 - Point-shadow depth is generated automatically during `prepare`, after GLB
   conversion and physics classification. Do not add Blender shadow baking or
-  runtime cubemap rendering back into this path.
-- Casters must be initially enabled placements with resolved GLBs. Every
-  semantic and physics classification contributes its prepared initial-pose
-  geometry except `PreparedSemantic::Door`; doors are intentionally
-  non-casters.
+  per-frame runtime cubemap rendering to this preparation path.
+- Casters must be initially enabled placements with resolved GLBs. Prepared
+  static geometry excludes `PreparedSemantic::Door`, pickups, and
+  `PreparedPhysicsClassification::Dynamic`; dynamic physics placements remain
+  individually spawned so their current pose can cast through the viewer's
+  realtime pass.
 - The cache is a validated `D32_SFLOAT` KTX2 cubemap array keyed by generator
   revision, resolution/near plane, caster geometry/transforms, and light
   identity/position/range. Color, intensity, and camera changes must remain
@@ -79,10 +80,14 @@ Before handing off changes, run `cargo fmt --check`, `cargo clippy --all-targets
   `bevy_pbr` patch stages the decoded data through `R32Float` and writes the
   depth array once with a GPU render pass. This upload pass must not enqueue
   scene meshes or become a per-frame shadow pass.
-- Keep point-light runtime shadow rendering disabled. GPU light metadata uses
-  stable manifest layers, and forward shading performs at most one dominant
-  point-shadow lookup per pixel. `setrender shadow_samples 0|1` is the
-  benchmark switch; there is no gameplay shadow budget.
+- The viewer may enable exactly one camera-relevant startup-cell point light's
+  native runtime shadow cubemap. The combined prepared scene is marked
+  `NotShadowCaster`, while individually spawned dynamic/interactive meshes
+  remain runtime casters and prepared receivers.
+- Forward shading performs at most two cubemap lookups for one dominant point
+  light: prepared and realtime visibility are combined with `min`. The
+  `setrender shadow_samples 0|1` switch remains the benchmark control; there
+  is no configurable multi-light gameplay shadow budget.
 
 ## Prepared container audio
 

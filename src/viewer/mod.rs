@@ -59,6 +59,8 @@ mod console;
 mod console_ui;
 mod controls;
 mod diagnostics;
+#[cfg(test)]
+mod hybrid_shadow_policy;
 mod lighting;
 mod material_shading;
 mod material_shading_policy;

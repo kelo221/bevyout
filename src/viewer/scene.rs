@@ -7,46 +7,49 @@ use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+use bevy::light::NotShadowCaster;
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
-use bevy::world_serialization::WorldInstance;
 
 #[derive(Component)]
 pub(crate) struct BakedStaticSceneRoot;
 
 #[derive(Component)]
-pub(crate) struct BakedStaticScenePrepared;
+pub(crate) struct PreparedPointShadowReceiverRoot;
 
-/// The combined baked scene is the authoritative baked-shadow receiver. Its
-/// individually spawned dynamic/interactive placements intentionally remain
-/// outside this marker and can receive the experimental runtime shadow.
-#[allow(clippy::type_complexity)]
-pub(crate) fn mark_baked_scene_meshes(
+/// Marks meshes under the prepared scene and startup placement root as
+/// receivers of the prepared cubemap. The combined static scene is removed
+/// from Bevy's per-frame caster pass; individual physics placements remain
+/// runtime casters so their shadows can land on prepared receivers.
+pub(crate) fn mark_prepared_shadow_meshes(
     mut commands: Commands,
-    roots: Query<
-        (Entity, &Children),
-        (
-            With<BakedStaticSceneRoot>,
-            With<WorldInstance>,
-            Without<BakedStaticScenePrepared>,
-        ),
-    >,
-    children_query: Query<&Children>,
-    mesh_query: Query<(), With<Mesh3d>>,
+    roots: Query<(Entity, Has<BakedStaticSceneRoot>), With<PreparedPointShadowReceiverRoot>>,
+    parents: Query<&ChildOf>,
+    meshes: Query<Entity, Added<Mesh3d>>,
 ) {
-    for (root, children) in &roots {
-        let mut pending = children.iter().collect::<Vec<_>>();
-        while let Some(entity) = pending.pop() {
-            if mesh_query.get(entity).is_ok() {
-                commands
-                    .entity(entity)
-                    .insert(bevy::pbr::BakedPointShadowReceiver);
+    let roots = roots.iter().collect::<HashMap<_, _>>();
+    for mesh in &meshes {
+        let mut ancestor = mesh;
+        let mut root_kind = None;
+        loop {
+            if let Some(is_baked_static) = roots.get(&ancestor) {
+                root_kind = Some(*is_baked_static);
+                break;
             }
-            if let Ok(children) = children_query.get(entity) {
-                pending.extend(children.iter());
-            }
+            let Ok(parent) = parents.get(ancestor) else {
+                break;
+            };
+            ancestor = parent.parent();
         }
-        commands.entity(root).insert(BakedStaticScenePrepared);
+        let Some(is_baked_static) = root_kind else {
+            continue;
+        };
+
+        let mut entity = commands.entity(mesh);
+        entity.insert(bevy::pbr::BakedPointShadowReceiver);
+        if is_baked_static {
+            entity.insert(NotShadowCaster);
+        }
     }
 }
 
@@ -236,14 +239,18 @@ pub(crate) fn spawn_prepared_scene(
         commands.insert_resource(BakedPointShadowMap::default());
         PreparedPointShadowRuntime::default()
     };
+    let prepared_shadow_available = prepared_shadow_runtime.cpu_loaded;
     let mut attached_shadow_lights = 0_u32;
     if let Some(bake) = &manifest.bake {
-        commands.spawn((
+        let mut baked_root = commands.spawn((
             WorldAssetRoot(
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset(bake.scene_path.clone())),
             ),
             BakedStaticSceneRoot,
         ));
+        if prepared_shadow_available {
+            baked_root.insert(PreparedPointShadowReceiverRoot);
+        }
         if let Some(volume) = &bake.irradiance_volume {
             commands.spawn((
                 LightProbe::default(),
@@ -284,9 +291,11 @@ pub(crate) fn spawn_prepared_scene(
     // prepared static point shadows (#53) can attach their baked slots;
     // preloaded neighbor cells keep plain lights — the baked shadow map is
     // a single global resource holding only this manifest's artifact.
-    let root = commands
-        .spawn((Transform::default(), Visibility::Visible))
-        .id();
+    let mut root_entity = commands.spawn((Transform::default(), Visibility::Visible));
+    if prepared_shadow_available {
+        root_entity.insert(PreparedPointShadowReceiverRoot);
+    }
+    let root = root_entity.id();
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
@@ -305,7 +314,9 @@ pub(crate) fn spawn_prepared_scene(
                 ..default()
             },
             Transform::from_translation(Vec3::from_array(light.translation)),
-            RealtimeShadowCandidate,
+            RealtimeShadowCandidate {
+                reference_form_id: light.reference_form_id,
+            },
             ChildOf(root),
         ));
         if let Some(shadow) = prepared_shadow_records.get(&light.reference_form_id) {

@@ -138,6 +138,13 @@ mod performance_policy;
 #[allow(dead_code, unused_imports)]
 mod material_shading_policy;
 
+// Hybrid point-shadow composition is intentionally Bevy-free so the
+// executable specification drives the same source-selection policy as the
+// runtime shader contract.
+#[path = "../src/viewer/hybrid_shadow_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod hybrid_shadow_policy;
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -468,6 +475,11 @@ struct BevyoutWorld {
     recipe_under_test: Option<recipe_policy::PreparedRecipe>,
     recipe_available_items: std::collections::BTreeSet<u32>,
     recipe_validation: Option<Result<(), recipe_policy::RecipeValidationError>>,
+
+    // -- hybrid_lighting.feature --
+    hybrid_prepared_visibility: Option<f32>,
+    hybrid_realtime_visibility: Option<f32>,
+    hybrid_combined_visibility: Option<f32>,
 }
 
 fn find_placement<'a>(
@@ -4299,6 +4311,36 @@ async fn then_recipe_quantity_unchanged(world: &mut BevyoutWorld, expected: i32)
             .quantity,
         expected
     );
+}
+
+// ---------------------------------------------------------------------
+// hybrid_lighting.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^prepared point-shadow visibility is ([\d.]+)$")]
+async fn given_hybrid_prepared_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.hybrid_prepared_visibility = Some(visibility);
+}
+
+#[given(regex = r"^realtime point-shadow visibility is ([\d.]+)$")]
+async fn given_hybrid_realtime_visibility(world: &mut BevyoutWorld, visibility: f32) {
+    world.hybrid_realtime_visibility = Some(visibility);
+}
+
+#[when("hybrid point-shadow visibility is combined")]
+async fn when_hybrid_visibility_is_combined(world: &mut BevyoutWorld) {
+    world.hybrid_combined_visibility = Some(hybrid_shadow_policy::hybrid_shadow_visibility(
+        world.hybrid_prepared_visibility,
+        world.hybrid_realtime_visibility,
+    ));
+}
+
+#[then(regex = r"^combined point-shadow visibility is ([\d.]+)$")]
+async fn then_hybrid_visibility(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .hybrid_combined_visibility
+        .expect("hybrid visibility was not evaluated");
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
 }
 
 fn main() {
