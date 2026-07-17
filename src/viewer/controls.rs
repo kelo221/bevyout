@@ -1,7 +1,27 @@
 //! Viewer cursor, adjustment, and diagnostic controls.
 
+use bevy::input::keyboard::{Key, KeyboardFocusLost};
+
 use super::scene::CellDirectionalLight;
 use super::*;
+
+/// Issue #131: Bevy 0.19.0's `bevy_input::keyboard::keyboard_input_system`
+/// releases `ButtonInput<KeyCode>` on `KeyboardFocusLost` (e.g. Cmd+Tab away
+/// from the window) but never releases the logical `ButtonInput<Key>`
+/// resource. A stuck `Key::Super` then makes `bevy_ui_widgets`' text input
+/// treat every subsequent keystroke as a Cmd-chord, breaking console typing.
+/// Mirror Bevy's own `release_all()` call for the logical resource here; this
+/// system (and its registration) can be deleted once upstream fixes the
+/// asymmetry. Runs in `PreUpdate` after `bevy::input::InputSystems` so it is
+/// not immediately clobbered by that frame's `ButtonInput::clear()`.
+pub(crate) fn release_stuck_logical_modifiers_on_focus_lost(
+    mut key_input: ResMut<ButtonInput<Key>>,
+    mut focus_lost: MessageReader<KeyboardFocusLost>,
+) {
+    if focus_lost.read().next().is_some() {
+        key_input.release_all();
+    }
+}
 
 pub(crate) fn capture_cursor(mut cursor_options: Single<&mut CursorOptions>) {
     cursor_options.visible = false;
@@ -328,7 +348,89 @@ pub(crate) fn apply_unlit_mode(
 
 #[cfg(test)]
 mod tests {
-    use super::{horizontal_to_vertical_fov, mouse_look_is_safe};
+    use bevy::app::PreUpdate;
+    use bevy::ecs::entity::Entity;
+    use bevy::ecs::message::Messages;
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
+    use bevy::input::{ButtonInput, InputPlugin, InputSystems};
+    use bevy::prelude::{App, IntoScheduleConfigs, MinimalPlugins};
+
+    use super::{
+        horizontal_to_vertical_fov, mouse_look_is_safe,
+        release_stuck_logical_modifiers_on_focus_lost,
+    };
+
+    /// Issue #131 regression test: a real `bevy_input::InputPlugin` (so
+    /// `keyboard_input_system` runs exactly as it does in the viewer) drives
+    /// `Key::Super` pressed, then a `KeyboardFocusLost` message arrives.
+    /// Without `release_stuck_logical_modifiers_on_focus_lost` registered
+    /// after `InputSystems`, `ButtonInput<Key>` stays stuck on `Key::Super`
+    /// even though `ButtonInput<KeyCode>` correctly clears -- this is the
+    /// asymmetry that broke console typing after Cmd+Tab.
+    #[test]
+    fn focus_lost_releases_stuck_logical_super_after_input_systems() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, InputPlugin)).add_systems(
+            PreUpdate,
+            release_stuck_logical_modifiers_on_focus_lost.after(InputSystems),
+        );
+
+        // Frame 1: press Super through the real keyboard_input_system, the
+        // same path winit uses.
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardInput>>()
+            .write(KeyboardInput {
+                key_code: KeyCode::SuperLeft,
+                logical_key: Key::Super,
+                state: ButtonState::Pressed,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Super),
+            "logical Super should be pressed after the KeyboardInput event"
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::SuperLeft),
+            "physical SuperLeft should be pressed after the KeyboardInput event"
+        );
+
+        // Frame 2: the window loses focus (Cmd+Tab away) with no matching
+        // key-up event -- the scenario that leaves Key::Super stuck.
+        app.world_mut()
+            .resource_mut::<Messages<KeyboardFocusLost>>()
+            .write(KeyboardFocusLost);
+        app.update();
+
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<Key>>()
+                .pressed(Key::Super),
+            "our system must release the logical Key::Super that Bevy's own \
+             keyboard_input_system leaves stuck on KeyboardFocusLost"
+        );
+        assert!(
+            app.world()
+                .resource::<ButtonInput<Key>>()
+                .just_released(Key::Super),
+            "release should land as just_released in the same frame the \
+             focus-lost message arrives, which requires running after \
+             InputSystems rather than before it"
+        );
+        assert!(
+            !app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::SuperLeft),
+            "physical SuperLeft release (Bevy's own release_all) must still work"
+        );
+    }
 
     #[test]
     fn horizontal_fov_conversion_matches_a_16_by_9_camera() {

@@ -282,6 +282,13 @@ pub(crate) fn run_view(
         // F35.6: the CLI's view/render flow auto-advances Boot -> Loading ->
         // InGame with no menu stop; MainMenu remains reachable in the state
         // graph but the CLI never observes it (LoadingTarget is always set).
+        // Issue #131: mirror Bevy's own PreUpdate keyboard release_all() for
+        // the logical `ButtonInput<Key>` resource; see the doc comment on
+        // `release_stuck_logical_modifiers_on_focus_lost` for why.
+        .add_systems(
+            PreUpdate,
+            release_stuck_logical_modifiers_on_focus_lost.after(bevy::input::InputSystems),
+        )
         .add_systems(Update, (auto_advance_from_boot, auto_advance_from_loading))
         .add_systems(
             OnEnter(AppState::InGame),
