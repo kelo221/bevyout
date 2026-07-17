@@ -210,6 +210,9 @@ branch.
    nav-solve *output*, explicitly **not** render/transform interpolation
    (the agent Transform still updates every fixed step; no camera-style
    render-history smoothing).
+   *Deferred (not this wave):* making the interval **adaptive to the live
+   actor count** so the engine self-throttles under crowds — recorded as a
+   constraint on #114 and epic #9. Wave 5 ships only the manual knob.
 
 No prepared/serialized type changes → no `*_REVISION` bump. `KccState`
 gains a `pub(crate)` velocity accessor (the only player-module edit).
