@@ -35,6 +35,8 @@
 //! import free of any ECS/`Component`/`System`/`World` type, so it stays
 //! pure data-in-data-out and testable without spinning up a `World`.
 
+use std::collections::BTreeSet;
+
 use bevy_landmass::{AgentState, NavigationMesh3d, ValidNavigationMesh3d, ValidationError};
 use glam::Vec3;
 
@@ -111,6 +113,43 @@ pub(crate) struct BuildResult {
     pub(crate) diagnostics: Vec<ConversionDiagnostic>,
 }
 
+/// Protected (seam/portal) edges for `mesh`'s own erosion pass (issue #136
+/// follow-up): every edge of a triangle that is either a door-link/
+/// travel-door attachment (`mesh.doors`, always per-mesh already) or a
+/// cross-mesh merge participant naming this mesh's own `form_id`
+/// (`merges`, graph-wide -- only entries touching `mesh.form_id`
+/// contribute `triangle_a`/`triangle_b` respectively). See
+/// `erosion_policy`'s module doc comment for why these edges must never
+/// move during erosion, and why the whole triangle's three edges are
+/// protected rather than trying to isolate exactly one "seam" edge (this
+/// project has no data that says which single edge of a merge/door
+/// triangle actually touches the other mesh, only that the triangle as a
+/// whole is the attachment point).
+pub(crate) fn protected_edges_for_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> Vec<(u32, u32)> {
+    let mut protected_triangle_indices: BTreeSet<u32> = BTreeSet::new();
+    for door in &mesh.doors {
+        protected_triangle_indices.insert(door.triangle_index);
+    }
+    for merge in merges {
+        if merge.mesh_a_form_id == mesh.form_id {
+            protected_triangle_indices.insert(merge.triangle_a);
+        }
+        if merge.mesh_b_form_id == mesh.form_id {
+            protected_triangle_indices.insert(merge.triangle_b);
+        }
+    }
+    let mut protected_edges: Vec<(u32, u32)> = Vec::new();
+    for polygon in &mesh.polygons {
+        if protected_triangle_indices.contains(&polygon.index) {
+            let [a, b, c] = polygon.vertex_indices;
+            protected_edges.push((a, b));
+            protected_edges.push((b, c));
+            protected_edges.push((c, a));
+        }
+    }
+    protected_edges
+}
+
 /// Converts `mesh` into a validated `bevy_landmass` navigation mesh.
 ///
 /// Non-walkable exclusion: `is_water` polygons are dropped rather than
@@ -142,7 +181,17 @@ pub(crate) struct BuildResult {
 /// module's doc comment for why moving positions (not polygon topology)
 /// keeps this safe against disconnecting the mesh, and for the
 /// corridor-pinch fallback that keeps narrow corridors from inverting.
-pub(crate) fn build_navigation_mesh(mesh: &MeshInput) -> BuildResult {
+///
+/// `merges` (issue #136 follow-up, real-data regression on a two-mesh
+/// cell): every `MergeInput` touching `mesh.form_id` identifies one of
+/// this mesh's own triangles as a seam/portal to another mesh, not a
+/// wall -- eroding it independently on both sides of the seam opened a
+/// real gap where a generated animation link used to connect the two
+/// islands. Door-triangle vertices (`mesh.doors`, off-mesh link
+/// attachment points for door links/travel doors) get the same
+/// protection. See `erosion_policy`'s module doc comment for the
+/// "protected edges" rule this feeds.
+pub(crate) fn build_navigation_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> BuildResult {
     let mut diagnostics = Vec::new();
     let vertex_count = mesh.vertices.len();
 
@@ -196,14 +245,16 @@ pub(crate) fn build_navigation_mesh(mesh: &MeshInput) -> BuildResult {
             .iter()
             .map(|polygon| polygon.vertex_indices)
             .collect(),
+        protected_edges: protected_edges_for_mesh(mesh, merges),
     };
     let erosion_result = erosion_policy::erode(&erosion_input, erosion_policy::AGENT_RADIUS);
     tracing::info!(
-        "nav erosion: polys {} eroded {} pinch-guard {} relax-passes {}",
+        "nav erosion: polys {} eroded {} pinch-guard {} relax-passes {} protected {}",
         erosion_result.polygon_count,
         erosion_result.eroded_count,
         erosion_result.pinch_guard_count,
         erosion_result.relax_passes,
+        erosion_result.protected_count,
     );
 
     let vertices: Vec<Vec3> = erosion_result
@@ -582,7 +633,7 @@ mod tests {
         // vertex layout (see `reversed_winding_still_validates_after_retry`
         // for the opposite winding, which does need the retry).
         let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.is_empty(),
@@ -596,7 +647,7 @@ mod tests {
         // Same square, opposite winding: the first attempt must fail
         // internally and the retry with reversed order must succeed.
         let mesh = square_mesh([0, 2, 1], [1, 2, 3]);
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -612,7 +663,7 @@ mod tests {
     fn water_polygons_are_excluded_as_non_walkable() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         // One walkable polygon remains -- still a valid (smaller) mesh.
         // `ValidNavigationMesh`'s fields are private to `landmass`, so this
         // only asserts what's externally observable: conversion still
@@ -625,7 +676,7 @@ mod tests {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[0].is_water = true;
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         assert!(result.nav_mesh.is_none());
         assert!(
             result
@@ -641,7 +692,7 @@ mod tests {
     fn invalid_vertex_index_polygon_is_skipped_with_an_error_diagnostic_and_never_panics() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 2, u32::MAX];
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.iter().any(
@@ -656,7 +707,7 @@ mod tests {
     fn degenerate_polygon_is_skipped_with_a_warning_diagnostic() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 1, 3];
-        let result = build_navigation_mesh(&mesh);
+        let result = build_navigation_mesh(&mesh, &[]);
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -791,6 +842,61 @@ mod tests {
         ];
         let descriptors = merge_link_descriptors(&[mesh_a], &merges);
         assert!(descriptors.is_empty());
+    }
+
+    #[test]
+    fn a_merge_naming_this_mesh_as_side_a_protects_its_triangles_edges() {
+        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
+        let merges = vec![MergeInput {
+            mesh_a_form_id: 0x10,
+            triangle_a: 0, // polygon 0 = [0, 1, 2]
+            mesh_b_form_id: 0x20,
+            triangle_b: 5, // some triangle on the other mesh, irrelevant here
+        }];
+        let edges = protected_edges_for_mesh(&mesh, &merges);
+        assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0)]);
+    }
+
+    #[test]
+    fn a_merge_naming_this_mesh_as_side_b_protects_its_triangles_edges() {
+        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
+        let merges = vec![MergeInput {
+            mesh_a_form_id: 0x20,
+            triangle_a: 5,
+            mesh_b_form_id: 0x10,
+            triangle_b: 1, // polygon 1 = [1, 3, 2]
+        }];
+        let edges = protected_edges_for_mesh(&mesh, &merges);
+        assert_eq!(edges, vec![(1, 3), (3, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn a_door_triangle_protects_its_edges_the_same_way_as_a_merge() {
+        let mut mesh = square_mesh([0, 1, 2], [1, 3, 2]);
+        mesh.doors.push(DoorInput {
+            triangle_index: 0,
+            door_reference_form_id: Some(0x99),
+        });
+        let edges = protected_edges_for_mesh(&mesh, &[]);
+        assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0)]);
+    }
+
+    #[test]
+    fn a_merge_not_touching_this_mesh_protects_nothing() {
+        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
+        let merges = vec![MergeInput {
+            mesh_a_form_id: 0x30,
+            triangle_a: 0,
+            mesh_b_form_id: 0x40,
+            triangle_b: 1,
+        }];
+        assert!(protected_edges_for_mesh(&mesh, &merges).is_empty());
+    }
+
+    #[test]
+    fn no_doors_or_merges_protects_nothing() {
+        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
+        assert!(protected_edges_for_mesh(&mesh, &[]).is_empty());
     }
 
     #[test]

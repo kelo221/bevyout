@@ -5833,7 +5833,7 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         .first()
         .expect("a landmass mesh must be given first")
         .clone();
-    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh));
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh, &[]));
 }
 
 #[then("the landmass conversion produces a navigation mesh")]
