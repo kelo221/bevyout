@@ -157,6 +157,25 @@ pub(crate) struct ErosionResult {
 /// Below this scaled-triangle area (2D, horizontal plane, same units as
 /// `vertices`), a candidate erosion is treated as degenerate.
 const MIN_TRIANGLE_AREA: f32 = 1.0e-4;
+/// Below this original-triangle area, the triangle's *sign* is not just
+/// literally zero (that is `MIN_TRIANGLE_AREA`'s job) but too close to
+/// the f32 noise floor to trust as an "expected orientation" for the
+/// sign-flip comparison in `is_invalid_at`. Real FO3 NAVM data has been
+/// observed to contain deliberately-tiny sliver triangles whose original
+/// area sits right at that noise floor (issue #136 follow-up: Vault 101
+/// Entrance mesh `0001862b` polygon 164, original area ~7.7e-6) while
+/// erosion resurrects the same triangle into a large, well-defined shape
+/// (~0.046) whose sign has no relationship to the meaningless original
+/// one -- landmass rejected the resulting mesh because that resurrected
+/// orientation did not match the rest of the mesh's winding convention,
+/// and this module's old two-value (degenerate / reliable) split had no
+/// way to flag it, since it isn't literally zero. This threshold sits
+/// comfortably inside the four-order-of-magnitude gap real data showed
+/// between that one pathological triangle and the next-smallest genuine
+/// triangle in the same graph (~0.035): a full order of magnitude above
+/// `MIN_TRIANGLE_AREA` and more than 3x below the smallest real triangle
+/// observed, so it only catches the former, never the latter.
+const MIN_RELIABLE_ORIGINAL_AREA: f32 = 1.0e-2;
 /// Fixed pass limit for phase 1's proportional-relaxation loop (see
 /// module doc comment). Generous rather than tight: phase 1 is an
 /// optimization over phase 2's hard fallback, not the correctness
@@ -295,18 +314,33 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
 
     // Returns `true` when the polygon at `poly_index`'s CURRENT
     // (factor-scaled) shape has flipped winding sign or dropped below the
-    // minimum area relative to its own original shape. `false` for an
-    // already-degenerate original shape or an out-of-range index defends
-    // against a divide-by-zero-style sign comparison on a shape with no
+    // minimum area relative to its own original shape.
+    //
+    // An original area below `MIN_RELIABLE_ORIGINAL_AREA` (see that
+    // constant's doc comment -- this includes, and is strictly wider
+    // than, literally-degenerate/near-zero original shapes, so there is
+    // no separate `MIN_TRIANGLE_AREA`-only early return here: that
+    // stricter threshold is a subset of this one and checking it first
+    // would make this branch unreachable exactly for the pathological
+    // case it exists to catch) has an unreliable sign, never used as the
+    // "expected orientation" to compare against. Such a polygon is
+    // instead conservatively treated as invalid for as long as any of
+    // its vertices still carries a nonzero erosion factor, driving it
+    // toward full zero displacement (its original, already-valid shape)
+    // rather than trusting whatever orientation erosion happens to give
+    // it. An out-of-range index falls through to `false` below, guarding
+    // a divide-by-zero-style sign comparison on a shape with no
     // meaningful sign -- upstream (`landmass_graph`) already filters
-    // degenerate/invalid polygons before calling erosion, so this should
-    // never actually trigger on real input, only guard against it.
+    // invalid polygons before calling erosion, so that should never
+    // actually trigger on real input.
     let is_invalid_at = |poly_index: usize, triangle: &[u32; 3], factors: &[f32]| -> bool {
         let Some(&original_area) = original_areas.get(poly_index) else {
             return false;
         };
-        if original_area.abs() < MIN_TRIANGLE_AREA {
-            return false;
+        if original_area.abs() < MIN_RELIABLE_ORIGINAL_AREA {
+            return triangle
+                .iter()
+                .any(|&v| factors.get(v as usize).copied().unwrap_or(0.0) != 0.0);
         }
         let (Some(a), Some(b), Some(c)) = (
             eroded_position(mesh, &offsets, factors, triangle[0]),
