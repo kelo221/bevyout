@@ -151,6 +151,27 @@ pub(crate) struct PreparedNavExternalConnection {
     pub(crate) target_navmesh_form_id: Option<u32>,
 }
 
+/// A same-cell cross-mesh connection between two of this graph's own
+/// `PreparedNavMesh`es (issue #113, M4 wave 4 feature 2). `NAVI`'s `NVMI`
+/// tail (decoded in `openmw_esm4::navmesh`) does not carry OpenMW's
+/// TES4/TES5-style merged-navmesh FormID arrays for real FO3 data (see that
+/// module's doc comment and `NOTICE.md` for the byte-level verification), so
+/// this connection is derived purely from geometry instead: `triangle_a`'s
+/// boundary edge (an edge with no same-mesh neighbour) sits within
+/// [`MESH_MERGE_DISTANCE`] of `triangle_b`'s boundary edge. Consumed by
+/// `viewer::nav::landmass_graph` to build a walk-through animation link when
+/// landmass's own island-boundary linking does not connect the two meshes
+/// (real FO3 seams do not share exact vertex positions -- see that module's
+/// doc comment).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PreparedNavMeshMerge {
+    pub(crate) mesh_a_form_id: u32,
+    pub(crate) triangle_a: u32,
+    pub(crate) mesh_b_form_id: u32,
+    pub(crate) triangle_b: u32,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct PreparedNavMesh {
@@ -187,6 +208,7 @@ pub(crate) struct NavGraphCounters {
     pub(crate) vertices: usize,
     pub(crate) doors: usize,
     pub(crate) external_connections: usize,
+    pub(crate) mesh_merges: usize,
     pub(crate) diagnostics_warning: usize,
     pub(crate) diagnostics_error: usize,
 }
@@ -203,6 +225,9 @@ pub(crate) struct PreparedNavGraph {
     /// order -- never re-sorted by message text, which would scramble that.
     pub(crate) diagnostics: Vec<NavGraphDiagnostic>,
     pub(crate) counters: NavGraphCounters,
+    /// Deterministically ordered by `(mesh_a_form_id, triangle_a,
+    /// mesh_b_form_id, triangle_b)`. See [`PreparedNavMeshMerge`].
+    pub(crate) mesh_merges: Vec<PreparedNavMeshMerge>,
 }
 
 // ---------------------------------------------------------------------
@@ -246,6 +271,7 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
     }
 
     let bounds = whole_graph_bounds(&meshes);
+    let mesh_merges = compute_mesh_merges(&meshes);
     let diagnostics_warning = diagnostics
         .iter()
         .filter(|d| d.severity == "warning")
@@ -257,6 +283,7 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         vertices: meshes.iter().map(|m| m.vertices.len()).sum(),
         doors: meshes.iter().map(|m| m.doors.len()).sum(),
         external_connections: meshes.iter().map(|m| m.external_connections.len()).sum(),
+        mesh_merges: mesh_merges.len(),
         diagnostics_warning,
         diagnostics_error,
     };
@@ -268,7 +295,117 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         bounds,
         diagnostics,
         counters,
+        mesh_merges,
     }
+}
+
+/// bevy-metre distance below which two different meshes' unconnected
+/// boundary edges (an edge with no same-mesh `adjacency` neighbour) are
+/// considered the same seam and linked as a [`PreparedNavMeshMerge`] (issue
+/// #113, M4 wave 4). Real FO3 NAVM data does not share exact vertex
+/// positions across separate records at a seam: FranklinMetro02's
+/// (`0001a273`) two real meshes measured 0.09-0.9 m gaps between their
+/// nearest boundary vertices at the actual connecting corridor, confirmed by
+/// direct inspection of the prepared graph. `landmass`'s native
+/// island-boundary linking needs coincident positions and does not connect
+/// them (see `viewer::nav::landmass_graph`'s doc comment), which is exactly
+/// the gap this generates explicit links for. The threshold is generous
+/// relative to that measured real gap so other cells' seams (with slightly
+/// larger float drift) still match, while staying well under typical
+/// interior room dimensions so unrelated boundary edges across a large
+/// navmesh are not matched.
+const MESH_MERGE_DISTANCE: f32 = 2.0;
+
+struct BoundaryEdge {
+    triangle_index: u32,
+    midpoint: [f32; 3],
+}
+
+fn boundary_edges(mesh: &PreparedNavMesh) -> Vec<BoundaryEdge> {
+    let mut edges = Vec::new();
+    for polygon in &mesh.polygons {
+        for (slot, neighbor) in polygon.adjacency.iter().enumerate() {
+            if neighbor.is_some() {
+                continue;
+            }
+            let a = polygon.vertex_indices[slot];
+            let b = polygon.vertex_indices[(slot + 1) % 3];
+            if a as usize >= mesh.vertices.len() || b as usize >= mesh.vertices.len() {
+                // Already diagnosed as an invalid-index error when the
+                // polygon was built; skip rather than index out of bounds.
+                continue;
+            }
+            let va = mesh.vertices[a as usize];
+            let vb = mesh.vertices[b as usize];
+            edges.push(BoundaryEdge {
+                triangle_index: polygon.index,
+                midpoint: [
+                    (va[0] + vb[0]) / 2.0,
+                    (va[1] + vb[1]) / 2.0,
+                    (va[2] + vb[2]) / 2.0,
+                ],
+            });
+        }
+    }
+    edges
+}
+
+fn distance_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Derives same-cell cross-mesh connections between every pair of `meshes`
+/// (already sorted by `form_id`) by matching each boundary edge in the
+/// lower-`form_id` mesh of a pair to its nearest boundary edge in the
+/// higher-`form_id` mesh, keeping the match only when within
+/// [`MESH_MERGE_DISTANCE`]. One-directional matching (from the lower
+/// `form_id` mesh) keeps the connection count bounded by that mesh's own
+/// boundary-edge count rather than exploding combinatorially; deterministic
+/// (`meshes` is already form_id-sorted, `dedup` removes exact repeats), and
+/// never panics (invalid vertex indices are skipped, not indexed).
+fn compute_mesh_merges(meshes: &[PreparedNavMesh]) -> Vec<PreparedNavMeshMerge> {
+    let threshold_sq = MESH_MERGE_DISTANCE * MESH_MERGE_DISTANCE;
+    let mut merges = Vec::new();
+    for a_index in 0..meshes.len() {
+        for b_index in (a_index + 1)..meshes.len() {
+            let mesh_a = &meshes[a_index];
+            let mesh_b = &meshes[b_index];
+            let edges_a = boundary_edges(mesh_a);
+            let edges_b = boundary_edges(mesh_b);
+            for edge_a in &edges_a {
+                let mut best: Option<(f32, &BoundaryEdge)> = None;
+                for edge_b in &edges_b {
+                    let d = distance_sq(edge_a.midpoint, edge_b.midpoint);
+                    if best.is_none_or(|(best_d, _)| d < best_d) {
+                        best = Some((d, edge_b));
+                    }
+                }
+                if let Some((d, edge_b)) = best
+                    && d <= threshold_sq
+                {
+                    merges.push(PreparedNavMeshMerge {
+                        mesh_a_form_id: mesh_a.form_id,
+                        triangle_a: edge_a.triangle_index,
+                        mesh_b_form_id: mesh_b.form_id,
+                        triangle_b: edge_b.triangle_index,
+                    });
+                }
+            }
+        }
+    }
+    merges.sort_by_key(|merge| {
+        (
+            merge.mesh_a_form_id,
+            merge.triangle_a,
+            merge.mesh_b_form_id,
+            merge.triangle_b,
+        )
+    });
+    merges.dedup();
+    merges
 }
 
 fn build_mesh(
@@ -917,6 +1054,103 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("does not match this NAVM's owning cell"))
         );
+    }
+
+    /// Two meshes with a one-triangle-each square, offset so their nearest
+    /// edge is `gap` metres apart along x -- the shape of a real FO3 NAVM
+    /// seam (see `MESH_MERGE_DISTANCE`'s doc comment).
+    fn seam_meshes(gap: f32) -> Vec<NavGraphMeshInput> {
+        let mut mesh_a = mesh(0x10);
+        mesh_a.vertices = vec![
+            NavGraphVertexInput { source: [0.0; 3] },
+            NavGraphVertexInput {
+                source: [70.0, 0.0, 0.0],
+            },
+            NavGraphVertexInput {
+                source: [0.0, 0.0, 70.0],
+            },
+        ];
+        mesh_a.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
+
+        let offset = 70.0 + gap / FO3_SCALE;
+        let mut mesh_b = mesh(0x20);
+        mesh_b.vertices = vec![
+            NavGraphVertexInput {
+                source: [offset, 0.0, 0.0],
+            },
+            NavGraphVertexInput {
+                source: [offset + 70.0, 0.0, 0.0],
+            },
+            NavGraphVertexInput {
+                source: [offset, 0.0, 70.0],
+            },
+        ];
+        mesh_b.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
+        vec![mesh_a, mesh_b]
+    }
+
+    #[test]
+    fn same_cell_meshes_with_a_near_boundary_seam_are_merged() {
+        // 0.5 m gap -- well inside `MESH_MERGE_DISTANCE`, matching the real
+        // FranklinMetro02 (0.09-0.9 m) measured gap this constant is sized
+        // for.
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: seam_meshes(0.5),
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        let merge = graph.mesh_merges[0];
+        assert_eq!(merge.mesh_a_form_id, 0x10);
+        assert_eq!(merge.mesh_b_form_id, 0x20);
+        assert_eq!(graph.counters.mesh_merges, 1);
+    }
+
+    #[test]
+    fn same_cell_meshes_far_apart_are_not_merged() {
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: seam_meshes(1_000.0),
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert!(graph.mesh_merges.is_empty(), "{:?}", graph.mesh_merges);
+        assert_eq!(graph.counters.mesh_merges, 0);
+    }
+
+    #[test]
+    fn mesh_merges_are_deterministic_across_calls() {
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: seam_meshes(0.5),
+            ..NavGraphInputs::default()
+        };
+        let first = build_nav_graph(&inputs).mesh_merges;
+        let second = build_nav_graph(&inputs).mesh_merges;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_single_mesh_never_merges_with_itself() {
+        let mut single = mesh(0x10);
+        single.vertices = vec![
+            NavGraphVertexInput { source: [0.0; 3] },
+            NavGraphVertexInput {
+                source: [70.0, 0.0, 0.0],
+            },
+            NavGraphVertexInput {
+                source: [0.0, 0.0, 70.0],
+            },
+        ];
+        single.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![single],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert!(graph.mesh_merges.is_empty());
     }
 
     #[test]
