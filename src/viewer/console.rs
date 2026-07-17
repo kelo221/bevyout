@@ -58,14 +58,23 @@ impl Default for DiagnosticUiState {
     }
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct ViewerConsolePlugin;
+
+impl Plugin for ViewerConsolePlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<GameUiState>()
         .init_resource::<DiagnosticUiState>()
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
         .add_systems(
             Update,
-            (sync_ui_visibility, nav_overlay::despawn_stale_nav_overlay),
+            (sync_ui_visibility, nav_overlay::despawn_stale_nav_overlay)
+                .in_set(super::plugins::ViewerSet::Ui),
         );
     {
         let mut hooks = app.world_mut().resource_mut::<ConsoleEntityHooks>();

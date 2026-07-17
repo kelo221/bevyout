@@ -27,8 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::app_state::{
-    AppState, AppStatePlugin, GameplayModal, LoadingTarget, auto_advance_from_boot,
-    auto_advance_from_loading,
+    AppState, GameplayModal, LoadingTarget, auto_advance_from_boot, auto_advance_from_loading,
 };
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
@@ -51,6 +50,7 @@ mod openmw_player;
 mod pipboy;
 mod pipboy_reader;
 mod player;
+mod plugins;
 mod world;
 mod world_items;
 

@@ -83,23 +83,34 @@ fn keyboard_action(key: KeyCode) -> Option<UnsupportedAction> {
     }
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct BindingsPlugin;
+
+impl Plugin for BindingsPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<HotkeyBindings>()
         .add_systems(
             Update,
             report_unsupported_bindings
+                .in_set(super::plugins::ViewerSet::Input)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
         .add_systems(
             Update,
             apply_hotkeys
+                .in_set(super::plugins::ViewerSet::Input)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
         .add_systems(
             Update,
             report_pipboy_flashlight_hold
+                .in_set(super::plugins::ViewerSet::Input)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::PipBoy)),
         );

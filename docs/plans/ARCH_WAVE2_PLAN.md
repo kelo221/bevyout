@@ -28,4 +28,7 @@ Focused viewer tests, then the full Rust gate from wave 1.
 
 ## Shipped amendments
 
-None yet.
+- The shared phase chain is deliberately limited to `Input -> Interaction ->
+  WorldSync -> Ui`. Existing subsystem-local `.before`/`.after` constraints
+  remain authoritative inside each phase; unrelated systems were not forced
+  into a global serial schedule.

@@ -82,7 +82,15 @@ struct PlacementLoop {
     reference_form_id: u32,
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct ViewerAudioPlugin;
+
+impl Plugin for ViewerAudioPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<AudioClipCatalog>()
         .init_resource::<FootstepCatalog>()
         .init_resource::<ReportedMissingClips>()

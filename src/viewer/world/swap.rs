@@ -164,6 +164,7 @@ pub(crate) fn install(app: &mut App) {
                     .after(apply_pending_instant_swap)
                     .after(apply_fallback_resolution),
             )
+                .in_set(crate::viewer::plugins::ViewerSet::WorldSync)
                 .run_if(in_state(AppState::InGame)),
         );
 }

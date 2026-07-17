@@ -1126,7 +1126,15 @@ struct InteractionPromptText;
 #[derive(Component)]
 struct InteractionNoticeText;
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct InteractionPlugin;
+
+impl Plugin for InteractionPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<PlayerInventory>()
         .init_resource::<CanonicalItemLedger>()
         .init_resource::<PlayerEquipment>()
@@ -1161,12 +1169,14 @@ pub(crate) fn install(app: &mut App) {
             )
                 .chain()
                 .in_set(DoorActivationSet)
+                .in_set(super::plugins::ViewerSet::Interaction)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
         .add_systems(
             Update,
             probe_center_target
+                .in_set(super::plugins::ViewerSet::Interaction)
                 .run_if(in_state(AppState::InGame))
                 .run_if(in_state(GameplayModal::None)),
         )
@@ -1176,7 +1186,8 @@ pub(crate) fn install(app: &mut App) {
                 update_interaction_notice,
                 cleanup_removed_placements,
                 apply_equip_toggle_requests,
-            ),
+            )
+                .in_set(super::plugins::ViewerSet::Interaction),
         );
     transfer_ui::install(app);
 }

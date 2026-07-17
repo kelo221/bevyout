@@ -41,10 +41,20 @@ struct ReaderOverlay;
 #[derive(Component)]
 struct ReaderCloseButton;
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct PipBoyReaderPlugin;
+
+impl Plugin for PipBoyReaderPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.add_message::<OpenReaderRequested>().add_systems(
         Update,
-        (open_reader, handle_close_button).run_if(in_state(GameplayModal::PipBoy)),
+        (open_reader, handle_close_button)
+            .in_set(super::plugins::ViewerSet::Ui)
+            .run_if(in_state(GameplayModal::PipBoy)),
     );
 }
 

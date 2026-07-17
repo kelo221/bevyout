@@ -53,7 +53,15 @@ struct ConsolePickCycle {
     candidates: Vec<Entity>,
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct ConsoleUiPlugin;
+
+impl Plugin for ConsoleUiPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     let history_path = PathBuf::from(".bevyout/console_history.txt");
     let history = load_history(&history_path).unwrap_or_else(|error| {
         warn!("could not load console history: {error}");
@@ -77,6 +85,7 @@ pub(crate) fn install(app: &mut App) {
             update_console_title,
         )
             .chain()
+            .in_set(super::plugins::ViewerSet::Ui)
             .run_if(in_state(GameplayModal::Console)),
     )
     .add_systems(

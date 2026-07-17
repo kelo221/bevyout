@@ -31,7 +31,17 @@ struct AgentBridgeInfo {
     session_id: String,
 }
 
-pub(crate) fn install(app: &mut App, port: u16) {
+pub(crate) struct AgentBridgePlugin {
+    pub(crate) port: u16,
+}
+
+impl Plugin for AgentBridgePlugin {
+    fn build(&self, app: &mut App) {
+        install(app, self.port);
+    }
+}
+
+fn install(app: &mut App, port: u16) {
     let session_id = format!(
         "{}-{}",
         std::process::id(),

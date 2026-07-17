@@ -107,7 +107,6 @@ pub(crate) fn run_view(
     app.insert_resource(PointLightShadowMap {
         size: REALTIME_POINT_SHADOW_MAP_SIZE,
     });
-    app.add_plugins(crate::console::ConsolePlugin);
     // Issue #55 (A15): `RenderAssetBytesPerFrame` was tried here and
     // REVERTED — a 16 MB/frame upload throttle made the first hop's reveal
     // measure 119-126 ms (vs 25-35 unthrottled) because the freshly
@@ -115,35 +114,18 @@ pub(crate) fn run_view(
     // Don't reintroduce it without re-measuring the full chain.
     app.insert_resource(physics_assets);
     app.insert_resource(item_catalog.clone());
-    if let Some(port) = agent_port {
-        agent_bridge::install(&mut app, port);
-    }
-    app.add_plugins(AppStatePlugin);
+    // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
+    // user config); `view`'s CLI args have no `--config` override plumbed
+    // through yet, so the typed group carries the discovered value into the
+    // world plugin and defaults to 4 when no config file is found.
+    app.add_plugins(plugins::ViewerPlugins {
+        disable_physics,
+        resident_cell_limit: crate::config::resident_cell_limit(),
+        agent_port,
+    });
     app.insert_resource(LoadingTarget::NewGame {
         manifest: manifest_path.clone(),
     });
-
-    player::install(&mut app, disable_physics);
-    bindings::install(&mut app);
-    audio::install(&mut app);
-    material_shading::install(&mut app);
-    interaction::install(&mut app);
-    pipboy::install(&mut app);
-    pipboy_reader::install(&mut app);
-    animation::install(&mut app);
-    console::install(&mut app);
-    console_ui::install(&mut app);
-    // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
-    // user config); `view`'s CLI args have no `--config` override plumbed
-    // through yet (see src/config.rs's `resident_cell_limit` doc comment),
-    // so this always uses the same project/user discovery `render`/`prepare`
-    // use, defaulting to 4 when no config file is found.
-    world::install(&mut app, crate::config::resident_cell_limit());
-    world_items::install(&mut app);
-    // M4 wave 3 (#112): after `interaction::install` (the door-open
-    // boundary `nav::agent`'s door-link system calls into) and `world`
-    // (`PreparedSceneManifest`'s eventual home, inserted below).
-    nav::install(&mut app);
     if let Some(save) = loaded_save {
         info!(
             "save slot loaded: cell {:08x}, {} cell states",

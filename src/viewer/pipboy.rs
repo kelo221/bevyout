@@ -152,7 +152,15 @@ struct ScreenSources<'w> {
     time: Res<'w, Time>,
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct PipBoyPlugin;
+
+impl Plugin for PipBoyPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
@@ -177,6 +185,7 @@ pub(crate) fn install(app: &mut App) {
                 handle_equip_and_hotkeys,
                 refresh_after_inventory_change,
             )
+                .in_set(super::plugins::ViewerSet::Ui)
                 .run_if(in_state(GameplayModal::PipBoy)),
         );
 }
