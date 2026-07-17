@@ -166,19 +166,43 @@ pub(crate) fn model_static_usage(
     usage
 }
 
-/// `ACHR` record-header flag bit for "starts dead" (issue #120, F119.1).
-/// `ReferenceRecord::flags` is the raw record-header `flags` DWORD read by
-/// `parse_reference` -- the same field `RECORD_DELETED`/`RECORD_DISABLED`
-/// already read from -- so this is a source-authored fact about the
-/// reference itself, not a heuristic over its editor ID or name. OpenMW's
-/// `components/esm4/common.hpp` documents this exact bit as
-/// `Rec_StartDead` for `ACHR`; the same bit means `MotionBlurCastsShadows`
-/// on a plain `REFR` object reference, so it is only meaningful for
-/// `ReferenceKind::Npc` and must never be read for `ReferenceKind::Object`.
-/// FO3 does not document an equivalent override for `ACRE` (creature)
-/// references, so dead creatures are intentionally out of this issue's
-/// scope (source-authored dead actors only).
+/// `ACHR` record-header flag bit OpenMW documents as "starts dead"
+/// (issue #120, F119.1 first attempt). `ReferenceRecord::flags` is the raw
+/// record-header `flags` DWORD read by `parse_reference` -- the same field
+/// `RECORD_DELETED`/`RECORD_DISABLED` already read from -- so this would be
+/// a source-authored fact about the reference itself, not a heuristic over
+/// its editor ID or name, *if* FO3 content actually set it. Real-data
+/// acceptance against `Fallout3.esm` falsified that: all 1454 `ACHR`
+/// records in the game have this bit clear, including the reference this
+/// issue's dead actor (`CG04DeadOldLady`, ACHR `00054398`) -- its header is
+/// `0x00000400` (Persistent only). OpenMW's `components/esm4/common.hpp`
+/// documents `Rec_StartDead` for `ACHR` and reuses the same bit for
+/// `MotionBlurCastsShadows` on a plain `REFR` object reference, but FO3
+/// evidently never authors it either way. Kept as a harmless secondary
+/// OR-condition in `prepared_semantic` below (never true against real FO3
+/// data, per this survey, but free to honor if it ever were) rather than
+/// deleted outright -- see `NPC_STARTS_DEAD` for the flag FO3 actually
+/// uses.
 pub(crate) const RECORD_STARTS_DEAD: u32 = 0x0000_0200;
+
+/// `NPC_` base-record header flag bit for "starts dead" (issue #120,
+/// F119.1 rework after real-data acceptance falsified `RECORD_STARTS_DEAD`
+/// above). Survey against `Fallout3.esm`: bit `0x00080000` is set on 174
+/// `NPC_` records. 59 of those have "dead" in their editor ID; manually
+/// checking the other 115 by name found every single one is an actor found
+/// dead in-game and never alive -- `WilliamBrandiceCorpse`,
+/// `MS16Corpse1`-`MS16Corpse4`, `ExtraNote*Corpse`, `TakomaArtilleryCorpse`,
+/// `DeathclawLoot1*`, `LvlWastelanderDISMEMBER`, `Argyle`, `MS16Beatrice`,
+/// among others -- with zero false positives in the survey. This issue's
+/// own actor, `CG04DeadOldLady` (`NPC_ 00054397`), has header
+/// `0x000C0000` = `Compressed (0x40000) | 0x80000`. fopdoc documents
+/// `0x80000` only generically ("Can't Wait" / a platform-specific-texture
+/// bit, meaning is contextual per record type); the data above is the
+/// FO3-specific `NPC_` meaning it evidently carries. `BaseRecord.record_flags`
+/// is already stamped for every base record kind by `reader.rs`'s wildcard
+/// dispatch arm (`base.record_flags = flags;`), so no new ESM4 subrecord
+/// decode is needed -- only this semantic interpretation.
+pub(crate) const NPC_STARTS_DEAD: u32 = 0x0008_0000;
 
 pub(crate) fn prepared_semantic(
     reference: &ReferenceRecord,
@@ -188,10 +212,17 @@ pub(crate) fn prepared_semantic(
         base_template_form_id: base.and_then(|base| base.base_template_form_id),
     };
     match reference.kind {
-        // Issue #120 (F119.1): a source-authored dead NPC reference is a
-        // lootable corpse (#118's `PreparedSemantic::Corpse`), not a living
-        // `Npc` actor. Living actors (the flag unset) are unaffected.
-        ReferenceKind::Npc if reference.flags & RECORD_STARTS_DEAD != 0 => {
+        // Issue #120 (F119.1): a source-authored dead NPC is a lootable
+        // corpse (#118's `PreparedSemantic::Corpse`), not a living `Npc`
+        // actor. The base `NPC_` record's own header flags carry the real
+        // FO3 signal (`NPC_STARTS_DEAD`, see its doc comment for the
+        // real-data survey); the ACHR reference's `RECORD_STARTS_DEAD` bit
+        // is kept as a harmless secondary check that real FO3 data never
+        // triggers. Living actors (neither flag set) are unaffected.
+        ReferenceKind::Npc
+            if base.is_some_and(|base| base.record_flags & NPC_STARTS_DEAD != 0)
+                || reference.flags & RECORD_STARTS_DEAD != 0 =>
+        {
             return PreparedSemantic::Corpse;
         }
         ReferenceKind::Npc => return PreparedSemantic::Npc(actor),
