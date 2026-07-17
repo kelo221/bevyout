@@ -199,10 +199,11 @@ pub(crate) fn build_navigation_mesh(mesh: &MeshInput) -> BuildResult {
     };
     let erosion_result = erosion_policy::erode(&erosion_input, erosion_policy::AGENT_RADIUS);
     tracing::info!(
-        "nav erosion: polys {} eroded {} pinch-guard {}",
+        "nav erosion: polys {} eroded {} pinch-guard {} relax-passes {}",
         erosion_result.polygon_count,
         erosion_result.eroded_count,
         erosion_result.pinch_guard_count,
+        erosion_result.relax_passes,
     );
 
     let vertices: Vec<Vec3> = erosion_result
