@@ -98,6 +98,35 @@
 //! [`ErosionResult::relax_passes`] so the diagnostic log line makes this
 //! relaxation activity visible (F136.3 follow-up).
 //!
+//! **Protected (seam/portal) edges, second real-data regression.** A
+//! multi-mesh cell's meshes never share coincident boundary vertices --
+//! `nav/agent.rs`'s own module doc comment on `merge_link_descriptors`
+//! notes real FO3 meshes are joined by generated animation links between
+//! matched triangle midpoints, not landmass's native geometric adjacency.
+//! From a single mesh's own triangle-soup topology, the boundary edge of
+//! a cross-mesh merge triangle or a door-link/travel-door triangle looks
+//! *exactly* like a wall (referenced by exactly one polygon within this
+//! mesh) -- eroding it inward by the agent radius on both sides of the
+//! seam independently opened a real ~0.7 m gap between the two meshes'
+//! islands (Franklin Metro 02, mesh `0001a273`'s cell) where a link used
+//! to connect them, and could equally push a door-link/travel-door
+//! attachment triangle far enough that `bevy_landmass`'s own on-mesh
+//! sampling tolerance no longer recognizes it.
+//!
+//! The fix is the same "final fallback is zero displacement" idea phase 2
+//! already uses, applied unconditionally rather than only on a validation
+//! failure: any vertex touching an `ErosionMeshInput::protected_edges`
+//! edge has its raw offset forced to `(0.0, 0.0)` before phase 1 even
+//! runs, so it can never move, full stop -- deliberately the documented
+//! *lazy* rule (a vertex shared between a protected edge and a genuine
+//! wall edge still loses the wall's push too, rather than the more
+//! precise "exclude only the protected edge's own normal contribution"),
+//! chosen because it guarantees the exact same seam vertex position on
+//! both sides of a merge (each mesh is eroded independently, so only
+//! *never moving* the seam at all guarantees both sides still agree
+//! afterward) with no risk of the two sides drifting apart by different,
+//! independently-computed amounts.
+//!
 //! Std-only (no `bevy`/`bevy_landmass`/`glam`, not even `serde`): this file
 //! is included verbatim by `tests/features.rs` via `#[path]` -- see
 //! `src/viewer/world/policy.rs`'s module doc comment for why modules driven
@@ -106,17 +135,13 @@
 //! on lining up against.
 //!
 //! **Agent radius constant.** `nav::agent::AGENT_RADIUS` (0.35 m) is
-//! private to `agent.rs`, which is out of this issue's file-ownership
-//! boundary (`agent.rs`'s runtime call site,
-//! `landmass_graph::build_navigation_mesh(mesh)`, must keep its existing
-//! signature so this erosion pass wires in without an `agent.rs` edit) --
-//! so it cannot be imported here without either widening that private
-//! const's visibility or duplicating the literal a second time in
-//! `landmass_graph.rs`. This module holds the single copy for both of its
-//! own files; unifying it with `nav::agent::AGENT_RADIUS` /
-//! `player::CAPSULE_RADIUS` (also 0.35 m) is left to a follow-up that
-//! touches `agent.rs`.
-use std::collections::BTreeMap;
+//! private to `agent.rs`. This module holds its own copy rather than
+//! importing it, so `erosion_policy.rs`/`landmass_graph.rs` share exactly
+//! one value between themselves; unifying it with `nav::agent::
+//! AGENT_RADIUS` / `player::CAPSULE_RADIUS` (also 0.35 m) is left to a
+//! separate follow-up, since it is purely a private-visibility
+//! housekeeping change orthogonal to this module's actual behaviour.
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Agent capsule radius (metres) navmesh polygons are eroded by. See the
 /// module doc comment for why this is not imported from `nav::agent`.
@@ -130,6 +155,15 @@ pub(crate) const AGENT_RADIUS: f32 = 0.35;
 pub(crate) struct ErosionMeshInput {
     pub(crate) vertices: Vec<[f32; 3]>,
     pub(crate) polygons: Vec<[u32; 3]>,
+    /// Boundary edges (unordered vertex-index pairs) that are seam/portal
+    /// connections to another mesh or an off-mesh link attachment (door
+    /// links, travel doors, cross-mesh merges -- issue #136 follow-up),
+    /// not real walls. A vertex touching a protected edge never moves
+    /// (see the module doc comment's "protected edges" section) --
+    /// erosion would otherwise treat these exactly like a wall, since
+    /// within a single mesh's own triangle-soup topology they look
+    /// identical (referenced by exactly one polygon).
+    pub(crate) protected_edges: Vec<(u32, u32)>,
 }
 
 /// Result of eroding one [`ErosionMeshInput`]: the eroded vertex positions
@@ -152,6 +186,11 @@ pub(crate) struct ErosionResult {
     /// in the F136.3 diagnostic line, distinct from `pinch_guard_count`
     /// (how many polygons needed adjustment at all).
     pub(crate) relax_passes: usize,
+    /// Distinct vertices left unmoved because they touch a
+    /// `ErosionMeshInput::protected_edges` seam/portal edge (issue #136
+    /// follow-up), regardless of what a wall push would otherwise have
+    /// computed for them.
+    pub(crate) protected_count: usize,
 }
 
 /// Below this scaled-triangle area (2D, horizontal plane, same units as
@@ -201,6 +240,7 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
             eroded_count: 0,
             pinch_guard_count: 0,
             relax_passes: 0,
+            protected_count: 0,
         };
     }
 
@@ -280,6 +320,23 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
             offsets[index] = (sx / len * radius, sz / len * radius);
         }
     }
+
+    // 2b. Protected (seam/portal) edges: never move a vertex that touches
+    // one, unconditionally -- see the module doc comment's "protected
+    // edges" section for why this is a deliberately lazy full stop
+    // rather than only excluding the protected edge's own normal
+    // contribution.
+    let mut protected_vertices: BTreeSet<u32> = BTreeSet::new();
+    for &(a, b) in &mesh.protected_edges {
+        protected_vertices.insert(a);
+        protected_vertices.insert(b);
+    }
+    for &vertex in &protected_vertices {
+        if let Some(offset) = offsets.get_mut(vertex as usize) {
+            *offset = (0.0, 0.0);
+        }
+    }
+    let protected_count = protected_vertices.len();
 
     // 3. Corridor-pinch guard: shrink a polygon's vertex factors whenever
     // its current (factor-scaled) shape would invert or degenerate,
@@ -444,6 +501,7 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
         eroded_count,
         pinch_guard_count,
         relax_passes,
+        protected_count,
     }
 }
 
@@ -466,6 +524,7 @@ mod tests {
                 [0.0, 0.0, 4.0], // 3: D
             ],
             polygons: vec![[0, 1, 2], [0, 2, 3]],
+            protected_edges: Vec::new(),
         }
     }
 
@@ -512,6 +571,7 @@ mod tests {
                 [0.0, 0.0, 0.0],  // 4: centre -- touches only interior edges
             ],
             polygons: vec![[4, 0, 1], [4, 1, 2], [4, 2, 3], [4, 3, 0]],
+            protected_edges: Vec::new(),
         };
         let result = erode(&mesh, AGENT_RADIUS);
         assert_eq!(result.vertices[4], mesh.vertices[4], "centre must not move");
@@ -557,7 +617,11 @@ mod tests {
             polygons.push([bottom_a, bottom_b, top_b]);
             polygons.push([bottom_a, top_b, top_a]);
         }
-        ErosionMeshInput { vertices, polygons }
+        ErosionMeshInput {
+            vertices,
+            polygons,
+            protected_edges: Vec::new(),
+        }
     }
 
     /// Asserts every polygon in `mesh` keeps its original XZ winding sign
@@ -637,6 +701,7 @@ mod tests {
                 [0, 2, 3], // corridor triangle 2 (A,C,D)
                 [0, 4, 5], // unrelated thin triangle sharing only vertex A
             ],
+            protected_edges: Vec::new(),
         };
         let result = erode(&mesh, AGENT_RADIUS);
         assert!(
@@ -673,5 +738,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn protected_seam_edge_vertices_stay_fixed_while_wall_vertices_erode() {
+        // Regression (issue #136 follow-up, Franklin Metro 02 mesh
+        // 0001a273): a seam/portal edge to another mesh looks *exactly*
+        // like a wall from this single mesh's own topology (an edge
+        // referenced by exactly one polygon) -- without protection,
+        // erosion pulled both sides of a real cross-mesh merge seam
+        // inward independently, opening a ~0.7 m gap where a generated
+        // animation link used to connect the two islands. D-A here
+        // stands in for that seam (as if this mesh continued past x=0
+        // into a neighbour); A-B, B-C, C-D are real walls that must
+        // still erode normally.
+        let mesh = ErosionMeshInput {
+            vertices: vec![
+                [0.0, 0.0, 0.0], // 0: A -- on the protected seam
+                [4.0, 0.0, 0.0], // 1: B -- real wall corner
+                [4.0, 0.0, 4.0], // 2: C -- real wall corner
+                [0.0, 0.0, 4.0], // 3: D -- on the protected seam
+            ],
+            polygons: vec![[0, 1, 2], [0, 2, 3]],
+            protected_edges: vec![(3, 0)],
+        };
+        let result = erode(&mesh, AGENT_RADIUS);
+        assert_eq!(
+            result.vertices[0], mesh.vertices[0],
+            "seam vertex A must not move"
+        );
+        assert_eq!(
+            result.vertices[3], mesh.vertices[3],
+            "seam vertex D must not move"
+        );
+        assert_ne!(
+            result.vertices[1], mesh.vertices[1],
+            "wall vertex B must still erode"
+        );
+        assert_ne!(
+            result.vertices[2], mesh.vertices[2],
+            "wall vertex C must still erode"
+        );
+        assert_eq!(result.protected_count, 2);
+        assert_no_polygon_inverted_or_degenerated(&mesh, &result);
     }
 }

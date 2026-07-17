@@ -635,7 +635,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
-        let result = landmass_graph::build_navigation_mesh(mesh);
+        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs);
         for diagnostic in &result.diagnostics {
             warn!(
                 "nav landmass conversion mesh {:08x}: {}",
@@ -4367,7 +4367,7 @@ mod tests {
             ],
             doors: Vec::new(),
         };
-        let valid = landmass_graph::build_navigation_mesh(&mesh_input)
+        let valid = landmass_graph::build_navigation_mesh(&mesh_input, &[])
             .nav_mesh
             .expect("synthetic square validates");
         let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
