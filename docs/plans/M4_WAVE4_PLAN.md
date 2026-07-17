@@ -157,4 +157,36 @@ written before the wave PR; PR closes #113 and #134.
 
 ## Shipped amendments
 
-(amended during acceptance, not rewritten)
+- **The plan's NVMI FormID-array layout does not exist in FO3 data.** An
+  exhaustive byte search of real NVMI tails found no merged-navmesh /
+  preferred-merge / linked-door FormID arrays (that layout is TES4/5).
+  The actual FO3 tail — pinned byte-for-byte with zero leftover across
+  cells — is a `[f32;3]` center point, then optionally `[f32;3]×2`
+  min/max bounds + `u16×2` vertex/triangle counts + packed island
+  sub-mesh geometry, then a 4-byte trailing field. Documented in
+  `src/vsa/openmw_esm4/NOTICE.md`.
+- **Cross-mesh merges are derived geometrically, not from NVMI.**
+  Prepare pairs unconnected boundary edges of different same-cell
+  meshes within 2 m (`PreparedNavMeshMerge`); real seams share no
+  vertices (0.09–0.9 m gaps in FranklinMetro02), so landmass native
+  island linking can never fire. Travel-door/destination identity comes
+  from the existing #51/#52 `PreparedDoor.destination` metadata at
+  runtime rather than a new prepare-side table.
+- **landmass 0.9.1 bidirectional-link bug, reported upstream as
+  [landmass#192](https://github.com/andriyDev/landmass/issues/192):**
+  the reverse `OffMeshLink` indexes the start island's polygons with
+  the end portal's polygon index — panics on every cross-island link.
+  Merge links ship as pairs of unidirectional links; collapse when a
+  fixed release is adopted.
+- **`DoorTravelRequested`/`SwapRequest` gained the origin door
+  FormID** so the swap seam can feed #134's follow-through eligibility
+  from the same activation path the player uses.
+- **Acceptance direction is Entrance → Atrium:** Vault 101 Atrium's own
+  travel doors sit on mesh 0007350c, which fails landmass validation
+  (concave polygon 177, pre-existing decode gap). FranklinMetro02's
+  travel doors lead to unprepared cells, and its player start stands
+  just off-mesh (`tna spawn` there needs a 2 m reposition first).
+- **Restore semantics:** door-marker restores arrive idle
+  (`remaining_target: None` — the door was the terminus; no multi-hop),
+  frozen restores resume coordinate targets, entity targets are dropped
+  at freeze.
