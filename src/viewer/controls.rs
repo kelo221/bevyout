@@ -1,7 +1,8 @@
 //! Viewer cursor, adjustment, and diagnostic controls.
 
+use bevy::ecs::system::NonSendMarker;
 use bevy::input::keyboard::{Key, KeyboardFocusLost};
-use bevy::window::WindowFocused;
+use bevy::window::{PrimaryWindow, WindowFocused};
 
 use super::scene::CellDirectionalLight;
 use super::*;
@@ -41,12 +42,89 @@ pub(crate) fn release_stuck_keys_on_focus_change(
     mut window_focused: MessageReader<WindowFocused>,
     mut focus_lost: MessageReader<KeyboardFocusLost>,
 ) {
-    let window_focus_changed = window_focused.read().next().is_some();
-    let keyboard_focus_lost = focus_lost.read().next().is_some();
-    if window_focus_changed || keyboard_focus_lost {
+    let mut window_focus_changed = 0usize;
+    for event in window_focused.read() {
+        window_focus_changed += 1;
+        info!(
+            "focus event focused={} window={:?}",
+            event.focused, event.window
+        );
+    }
+    let keyboard_focus_lost = focus_lost.read().count();
+    if window_focus_changed > 0 || keyboard_focus_lost > 0 {
+        let released_keys = key_input.get_pressed().count();
+        info!(
+            "focus release window_focused={window_focus_changed} \
+             keyboard_focus_lost={keyboard_focus_lost} released_keys={released_keys}"
+        );
         key_input.release_all();
         key_code_input.release_all();
     }
+}
+
+/// Issue #131 follow-up: macOS's Cmd+Shift+5 screen-recording overlay can
+/// leave the window unfocused *forever*, not just stuck-key-until-next-focus
+/// as `release_stuck_keys_on_focus_change` above assumes. Once the overlay's
+/// activation dance confuses winit, macOS keeps routing mouse events to the
+/// window (clicks, selection) but stops delivering `Focused(true)` even when
+/// the user clicks back into it -- no `WindowFocused` message ever arrives,
+/// so the console stays dead for the rest of the recording.
+///
+/// Mitigation: when the window is unfocused and the user just clicked inside
+/// it, ask winit to focus it. Gated on a fresh click (`just_pressed`), not
+/// merely "unfocused this frame", so this never fights legitimate app
+/// switching (e.g. Cmd+Tab away) by re-stealing focus every frame the window
+/// happens to be unfocused.
+///
+/// Two ways to request focus were considered:
+/// 1. Write `Window::focused = true` and let `bevy_winit`'s
+///    `changed_windows` system (bevy_winit 0.19.0 `src/system.rs` ~line
+///    517) call `winit_window.focus_window()` when it sees the component
+///    flip false->true.
+/// 2. Call `winit_window.focus_window()` directly from here.
+///
+/// (1) is tempting but fragile: `Window::focused` is otherwise
+/// event-driven, so writing it directly desyncs it from reality if the OS
+/// silently drops the focus request (which is exactly the failure mode
+/// here) -- the component would read stuck `true` with no confirming
+/// `WindowFocused { focused: true }` message ever arriving, and every
+/// future click would then see `focused` already `true` and never retry.
+/// Making that safe needs its own confirm/expire bookkeeping.
+///
+/// (2) sidesteps all of that: a direct call retries naturally on every
+/// click and never touches ECS-visible state, so there is nothing to get
+/// stuck. The catch is that `bevy_winit` 0.19 doesn't expose `WinitWindows`
+/// as a queryable `NonSend` resource -- it lives behind the `WINIT_WINDOWS`
+/// thread-local (see `bevy_winit::lib.rs`, "Temporary storage of
+/// WinitWindows data to replace usage of `!Send` resources", pending
+/// upstream issue #17667) and is only guaranteed populated on the main
+/// thread. `NonSendMarker` (bevy_ecs 0.19.0
+/// `system/system_param.rs::NonSendMarker`) is the same trick
+/// `bevy_winit`'s own `changed_windows` system uses to pin itself to the
+/// main thread for exactly this reason; taking it here does the same.
+/// Chose (2).
+pub(crate) fn should_request_focus(focused: bool, clicked: bool) -> bool {
+    !focused && clicked
+}
+
+pub(crate) fn request_focus_on_click_while_unfocused(
+    primary_window: Single<(Entity, &Window), With<PrimaryWindow>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    // Forces this system onto the main thread, matching how the
+    // `WINIT_WINDOWS` thread-local is populated. See the doc comment above.
+    _non_send_marker: NonSendMarker,
+) {
+    let (entity, window) = *primary_window;
+    let clicked = mouse_buttons.get_just_pressed().next().is_some();
+    if !should_request_focus(window.focused, clicked) {
+        return;
+    }
+    info!("focus request: click while unfocused");
+    bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
+        if let Some(winit_window) = winit_windows.get_window(entity) {
+            winit_window.focus_window();
+        }
+    });
 }
 
 pub(crate) fn capture_cursor(mut cursor_options: Single<&mut CursorOptions>) {
@@ -374,17 +452,19 @@ pub(crate) fn apply_unlit_mode(
 
 #[cfg(test)]
 mod tests {
-    use bevy::app::PreUpdate;
+    use bevy::app::{PreUpdate, Update};
     use bevy::ecs::entity::Entity;
     use bevy::ecs::message::Messages;
     use bevy::input::ButtonState;
     use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
+    use bevy::input::mouse::MouseButtonInput;
     use bevy::input::{ButtonInput, InputPlugin, InputSystems};
-    use bevy::prelude::{App, IntoScheduleConfigs, MinimalPlugins};
-    use bevy::window::WindowFocused;
+    use bevy::prelude::{App, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window};
+    use bevy::window::{PrimaryWindow, WindowFocused};
 
     use super::{
         horizontal_to_vertical_fov, mouse_look_is_safe, release_stuck_keys_on_focus_change,
+        request_focus_on_click_while_unfocused, should_request_focus,
     };
 
     fn app_with_system() -> App {
@@ -617,5 +697,105 @@ mod tests {
         assert!(!mouse_look_is_safe(&mut captured, true, true));
         assert!(captured);
         assert!(mouse_look_is_safe(&mut captured, true, true));
+    }
+
+    // Issue #131 follow-up: `should_request_focus` is the pure decision
+    // logic behind `request_focus_on_click_while_unfocused`. The system
+    // itself calls out to the `WINIT_WINDOWS` thread-local (a real winit
+    // backend, absent in these headless tests), so the gating decision is
+    // exercised directly here rather than through the system's side effect.
+
+    #[test]
+    fn should_request_focus_when_unfocused_and_just_clicked() {
+        assert!(should_request_focus(false, true));
+    }
+
+    #[test]
+    fn should_not_request_focus_when_already_focused() {
+        assert!(!should_request_focus(true, true));
+    }
+
+    #[test]
+    fn should_not_request_focus_without_a_click() {
+        assert!(!should_request_focus(false, false));
+    }
+
+    fn app_with_focus_request_system() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, InputPlugin))
+            .add_systems(Update, request_focus_on_click_while_unfocused);
+        app
+    }
+
+    fn spawn_primary_window(app: &mut App, focused: bool) -> Entity {
+        app.world_mut()
+            .spawn((
+                Window {
+                    focused,
+                    ..Default::default()
+                },
+                PrimaryWindow,
+            ))
+            .id()
+    }
+
+    fn click_left_mouse_button(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Messages<MouseButtonInput>>()
+            .write(MouseButtonInput {
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+                window: Entity::PLACEHOLDER,
+            });
+    }
+
+    /// System-level sanity check backing the "direct winit call, not a
+    /// `Window.focused` write" choice documented on
+    /// `request_focus_on_click_while_unfocused`: even with an unfocused
+    /// window and a fresh click -- the case that requests focus -- the
+    /// system must run without a real winit backend registered (headless
+    /// `MinimalPlugins`, so `WINIT_WINDOWS` finds no matching window and the
+    /// call is a no-op) and it must leave the `Window` component itself
+    /// untouched. A component-write mitigation would instead force
+    /// `focused` to `true` here, which is exactly the state corruption this
+    /// approach avoids.
+    #[test]
+    fn request_focus_system_runs_headless_without_touching_window_component() {
+        let mut app = app_with_focus_request_system();
+        let window = spawn_primary_window(&mut app, false);
+        click_left_mouse_button(&mut app);
+
+        app.update();
+
+        assert!(
+            !app.world().get::<Window>(window).unwrap().focused,
+            "the direct winit call must not write the `Window` component; \
+             only a confirmed `WindowFocused` message may flip it"
+        );
+    }
+
+    /// Focused window + click: nothing to request, and (as above) the
+    /// component must stay untouched either way.
+    #[test]
+    fn request_focus_system_is_a_no_op_when_already_focused() {
+        let mut app = app_with_focus_request_system();
+        let window = spawn_primary_window(&mut app, true);
+        click_left_mouse_button(&mut app);
+
+        app.update();
+
+        assert!(app.world().get::<Window>(window).unwrap().focused);
+    }
+
+    /// Unfocused window, no click: `should_request_focus` gates this out,
+    /// so the system must not even attempt the winit call.
+    #[test]
+    fn request_focus_system_is_a_no_op_without_a_click() {
+        let mut app = app_with_focus_request_system();
+        let window = spawn_primary_window(&mut app, false);
+
+        app.update();
+
+        assert!(!app.world().get::<Window>(window).unwrap().focused);
     }
 }
