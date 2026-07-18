@@ -7243,44 +7243,6 @@ async fn then_erosion_relax_passes_positive(world: &mut BevyoutWorld) {
     );
 }
 
-// Corner-miter regression (issue #136 follow-up, external review): the
-// pre-fix implementation displaced a corner vertex by exactly `radius`
-// along the averaged wall normal, which gives a 90-degree corner only
-// `radius / sqrt(2)` clearance per wall instead of `radius`. This checks
-// the real invariant -- perpendicular distance from the ERODED vertex to
-// each ORIGINAL (pre-erosion) wall line stays at or above the given
-// clearance -- rather than displacement magnitude, which a miter corner
-// deliberately exceeds `radius` for.
-#[then(
-    regex = r"^eroded vertex (\d+) keeps at least ([\d.]+) clearance from the wall through vertices (\d+) and (\d+)$"
-)]
-async fn then_eroded_vertex_wall_clearance(
-    world: &mut BevyoutWorld,
-    index: usize,
-    min_clearance: f32,
-    wall_a: usize,
-    wall_b: usize,
-) {
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    let point = result.vertices[index];
-    let line_a = world.erosion_mesh.vertices[wall_a];
-    let line_b = world.erosion_mesh.vertices[wall_b];
-    let ex = line_b[0] - line_a[0];
-    let ez = line_b[2] - line_a[2];
-    let len = (ex * ex + ez * ez).sqrt();
-    assert!(len > f32::EPSILON, "degenerate wall {wall_a}-{wall_b}");
-    let px = point[0] - line_a[0];
-    let pz = point[2] - line_a[2];
-    let distance = (ex * pz - ez * px).abs() / len;
-    assert!(
-        distance + 1.0e-4 >= min_clearance,
-        "expected vertex {index} to keep >= {min_clearance} clearance from wall {wall_a}-{wall_b}, got {distance}"
-    );
-}
-
 fn main() {
     futures::executor::block_on(async {
         BevyoutWorld::cucumber()

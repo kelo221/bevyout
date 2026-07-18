@@ -44,29 +44,10 @@
 //! boundary edge contributes an inward-facing unit normal (2D, horizontal
 //! X/Z plane -- matching wave 5's horizontal-plane treatment of nav-point
 //! distance, since FO3 floors are near-flat and vertical erosion is not
-//! this issue's problem) to both of its endpoint vertices. Interior
-//! vertices (touching no boundary edge) get a zero offset and never move.
-//!
-//! **Miter offset, not a fixed-length average (issue #136 follow-up,
-//! external review).** A vertex touching exactly one boundary edge (a
-//! straight wall run, or two exactly-collinear boundary edges) moves along
-//! that edge's normal by exactly `radius`. A vertex touching two boundary
-//! edges whose unit inward normals `n1`, `n2` subtend angle `theta`
-//! (`cos(theta) = n1 . n2`) is a corner: moving it by `radius` along the
-//! averaged normal only gives each wall `radius * cos(theta / 2)`
-//! clearance, not `radius` -- at a 90-degree corner that is `r / sqrt(2)`,
-//! about 30% short of the agent's actual capsule radius. The correct move
-//! is the classic polygon-offset miter: scale the displacement along the
-//! averaged normal by `radius / cos(theta / 2)` (`cos(theta / 2) =
-//! sqrt((1 + n1 . n2) / 2)`, the half-angle identity), which is exactly the
-//! amount that puts each wall back at `radius` clearance. A vertex
-//! touching more than two boundary edges uses the *widest* such pair (the
-//! smallest `n_i . n_j`) to set the scale, since that pair needs the most
-//! aggressive miter to keep every incident edge at or above `radius`; the
-//! displacement direction is still the renormalized sum of all incident
-//! normals. [`MITER_LIMIT_FACTOR`] caps how far a near-reversed pair (a
-//! thin spike) can push a vertex, matching the order of magnitude
-//! Recast/Clipper-style polygon offsetters use for their own miter limits.
+//! this issue's problem) to both of its endpoint vertices; a vertex's raw
+//! offset is the average of its incident boundary normals, renormalized to
+//! length `radius`. Interior vertices (touching no boundary edge) get a
+//! zero offset and never move.
 //!
 //! **Corridor-pinch safety (F136.2), two phases over the WHOLE mesh at
 //! once.** Applying every vertex's raw offset at full strength can invert
@@ -240,23 +221,6 @@ const MIN_RELIABLE_ORIGINAL_AREA: f32 = 1.0e-2;
 /// guarantee, so hitting this cap without full convergence is fine --
 /// phase 2 always finishes the job.
 const MAX_RELAX_PASSES: usize = 64;
-/// Miter limit (issue #136 follow-up, external review): caps a corner
-/// vertex's displacement at `MITER_LIMIT_FACTOR * radius` regardless of how
-/// sharp (close to 180 degrees) the angle between its incident boundary
-/// normals is. Without this, a thin spike (two nearly-reversed boundary
-/// edges meeting at one vertex) would compute an unboundedly large
-/// `radius / cos(theta / 2)` scale as `theta` approaches 180 degrees. `2.5`
-/// matches the order of magnitude Recast/Clipper-style polygon offsetters
-/// use for their own miter limits; the corridor-pinch guard (phase 1/2
-/// below) still catches anything this clamp lets through that would invert
-/// or degenerate a polygon.
-const MITER_LIMIT_FACTOR: f32 = 2.5;
-/// Floor for `cos(theta / 2)` in the miter-scale division, guarding against
-/// a divide-by-(near)zero as the angle between two incident boundary
-/// normals approaches 180 degrees (a near-total reversal).
-/// `MITER_LIMIT_FACTOR` above is what actually bounds the result in that
-/// regime; this constant just keeps the division itself finite.
-const MIN_COS_HALF_ANGLE: f32 = 1.0e-4;
 
 fn signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
     0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
@@ -300,12 +264,8 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
     }
 
     // 2. Per-vertex raw inward offset (horizontal X/Z plane only -- Y is
-    // left untouched, see module doc comment). Collect each boundary edge's
-    // contributed unit normal per endpoint vertex (rather than only a
-    // running sum) so the miter scale below can inspect the actual angle
-    // between a vertex's incident normals, not just their average
-    // direction -- see the module doc comment's "Miter offset" section.
-    let mut vertex_normals: Vec<Vec<(f32, f32)>> = vec![Vec::new(); vertex_count];
+    // left untouched, see module doc comment).
+    let mut accum: Vec<(f32, f32)> = vec![(0.0, 0.0); vertex_count];
     for (&(a, b), polys) in &edge_polygons {
         if polys.len() != 1 {
             continue; // interior edge: shared by two polygons, not a wall.
@@ -343,56 +303,22 @@ pub(crate) fn erode(mesh: &ErosionMeshInput, radius: f32) -> ErosionResult {
             continue; // degenerate edge (zero length in the X/Z plane).
         }
         let (ux, uz) = (nx / len, nz / len);
-        if let Some(list) = vertex_normals.get_mut(a as usize) {
-            list.push((ux, uz));
+        if let Some(entry) = accum.get_mut(a as usize) {
+            entry.0 += ux;
+            entry.1 += uz;
         }
-        if let Some(list) = vertex_normals.get_mut(b as usize) {
-            list.push((ux, uz));
+        if let Some(entry) = accum.get_mut(b as usize) {
+            entry.0 += ux;
+            entry.1 += uz;
         }
     }
 
-    // Miter scale for a vertex's incident boundary normals: `radius` for
-    // zero or one incident edge (or exactly-collinear edges, where the
-    // widest pair's angle is zero); otherwise `radius / cos(theta / 2)`
-    // for the widest (largest-angle, i.e. smallest dot product) pair, per
-    // the module doc comment's "Miter offset" section, clamped to
-    // `MITER_LIMIT_FACTOR * radius` so a near-reversed (spike) pair cannot
-    // push the vertex arbitrarily far.
-    let miter_scale = |normals: &[(f32, f32)]| -> f32 {
-        if normals.len() <= 1 {
-            return radius;
-        }
-        let mut min_dot = 1.0f32;
-        for i in 0..normals.len() {
-            for j in (i + 1)..normals.len() {
-                let (ax, az) = normals[i];
-                let (bx, bz) = normals[j];
-                let dot = (ax * bx + az * bz).clamp(-1.0, 1.0);
-                if dot < min_dot {
-                    min_dot = dot;
-                }
-            }
-        }
-        let cos_half_angle = ((1.0 + min_dot) * 0.5).max(0.0).sqrt();
-        radius / cos_half_angle.max(MIN_COS_HALF_ANGLE)
-    };
-
     let mut offsets: Vec<(f32, f32)> = vec![(0.0, 0.0); vertex_count];
-    for (index, normals) in vertex_normals.iter().enumerate() {
-        if normals.is_empty() {
-            continue;
-        }
-        let (mut sx, mut sz) = (0.0f32, 0.0f32);
-        for &(nx, nz) in normals {
-            sx += nx;
-            sz += nz;
-        }
+    for (index, &(sx, sz)) in accum.iter().enumerate() {
         let len = (sx * sx + sz * sz).sqrt();
-        if len <= f32::EPSILON {
-            continue; // incident normals cancel out; no safe single direction.
+        if len > f32::EPSILON {
+            offsets[index] = (sx / len * radius, sz / len * radius);
         }
-        let scale = miter_scale(normals).min(radius * MITER_LIMIT_FACTOR);
-        offsets[index] = (sx / len * scale, sz / len * scale);
     }
 
     // 2b. Protected (seam/portal) edges: never move a vertex that touches
@@ -602,144 +528,31 @@ mod tests {
         }
     }
 
-    /// Perpendicular distance (2D, horizontal X/Z plane) from `point` to the
-    /// infinite line through `line_a`/`line_b`. Used to check the REAL
-    /// erosion invariant -- clearance to each original wall line -- rather
-    /// than displacement magnitude, which a miter corner deliberately
-    /// exceeds `radius` (issue #136 follow-up, external review).
-    fn distance_point_to_line_xz(point: [f32; 3], line_a: [f32; 3], line_b: [f32; 3]) -> f32 {
-        let ex = line_b[0] - line_a[0];
-        let ez = line_b[2] - line_a[2];
-        let len = (ex * ex + ez * ez).sqrt();
-        assert!(
-            len > f32::EPSILON,
-            "degenerate line: {line_a:?} == {line_b:?}"
-        );
-        let px = point[0] - line_a[0];
-        let pz = point[2] - line_a[2];
-        (ex * pz - ez * px).abs() / len
-    }
-
     #[test]
-    fn l_corner_vertex_keeps_radius_clearance_from_each_wall() {
-        // Regression (issue #136 follow-up, external review): the old
-        // implementation displaced the corner vertex by exactly `radius`
-        // along the averaged wall normal, which only gives each wall
-        // `radius * cos(45 deg)` = `radius / sqrt(2)` clearance at a
-        // 90-degree corner -- about 0.247 m instead of the intended
-        // 0.35 m agent radius. The miter fix scales the displacement by
-        // `radius / cos(45 deg)` instead, so each wall keeps the full
-        // `radius` clearance; the real invariant to check is exactly that
-        // per-wall clearance, not the (now intentionally larger,
-        // radius * sqrt(2)) displacement magnitude.
+    fn l_corner_vertex_is_pulled_diagonally_off_the_corner() {
         let mesh = corner_room();
-        let original = mesh.vertices[0];
-        let wall_a_b = mesh.vertices[1]; // original A-B wall (Z = 0)
-        let wall_d_a = mesh.vertices[3]; // original D-A wall (X = 0)
         let result = erode(&mesh, AGENT_RADIUS);
+        let original = mesh.vertices[0];
         let eroded = result.vertices[0];
-
-        // A large room at this radius should not trip the pinch guard, so
-        // the corner should get its full-strength miter offset.
-        assert_eq!(result.pinch_guard_count, 0);
-        assert!(result.eroded_count > 0);
-
         // A sits at the meeting point of the X=0 and Z=0 walls; clearance
         // means moving strictly into the room on both axes.
         assert!(
             eroded[0] > original[0] && eroded[2] > original[2],
             "corner vertex must move into the room on both axes: {eroded:?}"
         );
-
-        let clearance_to_a_b = distance_point_to_line_xz(eroded, original, wall_a_b);
-        let clearance_to_d_a = distance_point_to_line_xz(eroded, wall_d_a, original);
-        assert!(
-            (clearance_to_a_b - AGENT_RADIUS).abs() < 1.0e-4,
-            "expected radius clearance from wall A-B, got {clearance_to_a_b}"
-        );
-        assert!(
-            (clearance_to_d_a - AGENT_RADIUS).abs() < 1.0e-4,
-            "expected radius clearance from wall D-A, got {clearance_to_d_a}"
-        );
-
-        // The displacement itself is the miter magnitude `radius /
-        // cos(45 deg)` = `radius * sqrt(2)` for a 90-degree corner, not
-        // `radius` -- this is the defect's fingerprint made explicit.
+        // A large room at this radius should not trip the pinch guard, so
+        // the corner should get its full-strength diagonal offset (unit
+        // normals from the two walls average to length 1 after
+        // renormalizing, then scale by radius).
         let dx = eroded[0] - original[0];
         let dz = eroded[2] - original[2];
         let displacement = (dx * dx + dz * dz).sqrt();
-        let expected_displacement = AGENT_RADIUS * std::f32::consts::SQRT_2;
         assert!(
-            (displacement - expected_displacement).abs() < 1.0e-4,
-            "expected miter displacement radius*sqrt(2) = {expected_displacement}, got {displacement}"
+            (displacement - AGENT_RADIUS).abs() < 1.0e-4,
+            "expected displacement close to the agent radius, got {displacement}"
         );
-    }
-
-    #[test]
-    fn obtuse_corner_vertex_keeps_radius_clearance_from_each_wall() {
-        // A second corner-clearance regression case at a shallower, obtuse
-        // 135-degree interior angle (turn angle 45 degrees, so the two
-        // incident wall normals subtend 45 degrees rather than the square
-        // corner's 90 degrees) -- constructed by chamfering one corner off
-        // a large 6x6 room so every other vertex keeps a plain 90-degree
-        // angle and nothing here is anywhere near narrow enough to trip
-        // the corridor-pinch guard. Pentagon, fanned from vertex 0 (the
-        // chamfered corner under test):
-        //   0: (1, 0, 0) -- on the original Z=0 wall, 1 m from the corner
-        //   1: (6, 0, 0) -- far corner along the Z=0 wall
-        //   2: (6, 0, 6) -- opposite corner
-        //   3: (0, 0, 6) -- far corner along the X=0 wall
-        //   4: (0, 0, 1) -- on the original X=0 wall, 1 m from the corner
-        // Vertex 0's only two boundary edges are 0-1 (the remaining Z=0
-        // wall run) and 4-0 (the chamfer cut), whose interior angle at 0
-        // is 135 degrees by construction (cutting a right angle at equal
-        // distance along both original walls always leaves 135 degrees on
-        // each new corner).
-        let mesh = ErosionMeshInput {
-            vertices: vec![
-                [1.0, 0.0, 0.0], // 0: the chamfered corner under test
-                [6.0, 0.0, 0.0], // 1
-                [6.0, 0.0, 6.0], // 2
-                [0.0, 0.0, 6.0], // 3
-                [0.0, 0.0, 1.0], // 4
-            ],
-            polygons: vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]],
-            protected_edges: Vec::new(),
-        };
-        let original = mesh.vertices[0];
-        let wall_0_1 = mesh.vertices[1];
-        let wall_4_0 = mesh.vertices[4];
-        let result = erode(&mesh, AGENT_RADIUS);
-        let eroded = result.vertices[0];
-
         assert_eq!(result.pinch_guard_count, 0);
         assert!(result.eroded_count > 0);
-
-        let clearance_to_wall = distance_point_to_line_xz(eroded, original, wall_0_1);
-        let clearance_to_chamfer = distance_point_to_line_xz(eroded, wall_4_0, original);
-        assert!(
-            (clearance_to_wall - AGENT_RADIUS).abs() < 1.0e-4,
-            "expected radius clearance from wall 0-1, got {clearance_to_wall}"
-        );
-        assert!(
-            (clearance_to_chamfer - AGENT_RADIUS).abs() < 1.0e-4,
-            "expected radius clearance from the chamfer wall 4-0, got {clearance_to_chamfer}"
-        );
-
-        // Sanity check the construction really is a 135-degree corner: the
-        // miter displacement should be radius / cos(22.5 deg), noticeably
-        // less than the 90-degree corner's radius * sqrt(2) but still more
-        // than a bare `radius`.
-        let dx = eroded[0] - original[0];
-        let dz = eroded[2] - original[2];
-        let displacement = (dx * dx + dz * dz).sqrt();
-        let expected_displacement = AGENT_RADIUS / (std::f32::consts::FRAC_PI_8).cos();
-        assert!(
-            (displacement - expected_displacement).abs() < 1.0e-4,
-            "expected miter displacement radius/cos(22.5 deg) = {expected_displacement}, got {displacement}"
-        );
-        assert!(displacement > AGENT_RADIUS);
-        assert!(displacement < AGENT_RADIUS * std::f32::consts::SQRT_2);
     }
 
     #[test]

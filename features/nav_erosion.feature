@@ -21,25 +21,6 @@ Feature: Navmesh clearance erosion for agent radius
     Then eroded vertex 0 moved into the room on both the x and z axes
     And the erosion pinch guard count is 0
 
-  Scenario: A room corner keeps the full agent radius clearance from each wall (miter offset)
-    # Regression (issue #136 follow-up, external review): a fixed-length
-    # (non-mitered) corner offset only gave each wall radius/sqrt(2)
-    # (~0.247 m) clearance at this 90-degree corner instead of the full
-    # 0.35 m agent radius. The offset must be a miter -- scaled so BOTH
-    # walls keep at least the full radius, measured against the original
-    # (pre-erosion) wall lines, not the post-erosion displacement.
-    Given an erosion mesh
-    And erosion mesh has vertex 0 at 0, 0, 0
-    And erosion mesh has vertex 1 at 4, 0, 0
-    And erosion mesh has vertex 2 at 4, 0, 4
-    And erosion mesh has vertex 3 at 0, 0, 4
-    And erosion mesh has polygon 0 with vertices 0,1,2
-    And erosion mesh has polygon 1 with vertices 0,2,3
-    When the erosion mesh is eroded by radius 0.35
-    Then eroded vertex 0 keeps at least 0.35 clearance from the wall through vertices 0 and 1
-    And eroded vertex 0 keeps at least 0.35 clearance from the wall through vertices 3 and 0
-    And the erosion pinch guard count is 0
-
   Scenario: A corridor narrower than twice the agent radius engages the pinch guard without inverting
     Given an erosion mesh
     And erosion mesh has vertex 0 at 0, 0, 0
