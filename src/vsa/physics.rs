@@ -7,20 +7,53 @@ use std::path::Path;
 
 use super::manifest::{PreparedPhysicsClassification, PreparedSemantic};
 
-pub(crate) const PHYSICS_ASSET_SCHEMA_VERSION: u32 = 1;
+pub(crate) const PHYSICS_ASSET_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) enum PreparedPhysicsSource {
-    AuthoredHavok,
-    #[default]
-    GeneratedRender,
-}
+pub(crate) use bevyout_core::manifest::PreparedPhysicsSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PreparedPhysicsAsset {
     pub(crate) schema_version: u32,
     pub(crate) source: PreparedPhysicsSource,
     pub(crate) bodies: Vec<PreparedPhysicsBody>,
+    /// Articulated Havok relationships. Empty is valid for ordinary props;
+    /// actor assemblies use this list when the debug ragdoll is enabled.
+    #[serde(default)]
+    pub(crate) joints: Vec<PreparedPhysicsJoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct PreparedPhysicsJoint {
+    pub(crate) kind: String,
+    pub(crate) body_a: u32,
+    pub(crate) body_b: u32,
+    pub(crate) anchor_a: [f32; 3],
+    pub(crate) anchor_b: [f32; 3],
+    pub(crate) axis_a: [f32; 3],
+    pub(crate) axis_b: [f32; 3],
+    pub(crate) lower_limit: Option<f32>,
+    pub(crate) upper_limit: Option<f32>,
+    pub(crate) cone_limit: Option<f32>,
+    pub(crate) twist_limit: Option<f32>,
+}
+
+impl Default for PreparedPhysicsJoint {
+    fn default() -> Self {
+        Self {
+            kind: "fixed".into(),
+            body_a: 0,
+            body_b: 0,
+            anchor_a: [0.0; 3],
+            anchor_b: [0.0; 3],
+            axis_a: [0.0, 1.0, 0.0],
+            axis_b: [0.0, 1.0, 0.0],
+            lower_limit: None,
+            upper_limit: None,
+            cone_limit: None,
+            twist_limit: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +307,46 @@ pub(crate) fn validate_physics_asset(asset: &PreparedPhysicsAsset) -> Result<()>
         .any(|body| body.shapes.is_empty() || body.shapes.iter().any(|shape| !shape.usable()))
     {
         bail!("physics sidecar contains an unusable body or shape");
+    }
+    let body_ids = asset
+        .bodies
+        .iter()
+        .map(|body| body.group_id)
+        .collect::<std::collections::HashSet<_>>();
+    for joint in &asset.joints {
+        if !body_ids.contains(&joint.body_a) || !body_ids.contains(&joint.body_b) {
+            bail!(
+                "physics sidecar joint references missing bodies {} and {}",
+                joint.body_a,
+                joint.body_b
+            );
+        }
+        if joint.body_a == joint.body_b {
+            bail!("physics sidecar joint connects a body to itself");
+        }
+        if [joint.anchor_a, joint.anchor_b, joint.axis_a, joint.axis_b]
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+            || [
+                joint.lower_limit,
+                joint.upper_limit,
+                joint.cone_limit,
+                joint.twist_limit,
+            ]
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            bail!("physics sidecar joint contains non-finite data");
+        }
+        if joint
+            .lower_limit
+            .zip(joint.upper_limit)
+            .is_some_and(|(lower, upper)| lower > upper)
+        {
+            bail!("physics sidecar joint has inverted limits");
+        }
     }
     Ok(())
 }

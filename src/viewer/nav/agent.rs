@@ -131,6 +131,7 @@ use bevy_landmass::{
 use serde_json::json;
 
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
+#[cfg(test)]
 use crate::vsa::PreparedSceneManifest;
 
 use super::super::openmw_player::GRAVITY;
@@ -580,7 +581,7 @@ fn teardown_archipelago(world: &mut World) {
 fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let (current_cell, path, travel_destinations, door_lock_info, door_positions) = {
         let manifest = world
-            .get_resource::<PreparedSceneManifest>()
+            .get_resource::<crate::viewer::LoadedSceneManifest>()
             .ok_or_else(no_nav_graph_error)?;
         let path = super::nav_graph_path(manifest).ok_or_else(no_nav_graph_error)?;
         let travel_destinations = super::travel_door_destinations(manifest);
@@ -2431,7 +2432,7 @@ fn log_path_latency(
 /// in place in the departing cell.
 fn despawn_stale_navmesh_archipelago(world: &mut World) {
     let Some(current_cell) = world
-        .get_resource::<PreparedSceneManifest>()
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
         .map(|manifest| manifest.cell.form_id)
     else {
         return;
@@ -2545,7 +2546,7 @@ fn ledger_departing_one_agent(
 /// spawn resolution).
 fn door_position_in_active_cell(world: &World, door_form_id: u32) -> Option<Vec3> {
     world
-        .get_resource::<PreparedSceneManifest>()?
+        .get_resource::<crate::viewer::LoadedSceneManifest>()?
         .placements
         .iter()
         .find(|placement| placement.reference_form_id == door_form_id)
@@ -2561,7 +2562,7 @@ fn door_position_in_active_cell(world: &World, door_form_id: u32) -> Option<Vec3
 /// the active cell.
 fn restore_ledgered_agents_system(world: &mut World) {
     let Some(current_cell) = world
-        .get_resource::<PreparedSceneManifest>()
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
         .map(|manifest| manifest.cell.form_id)
     else {
         return;
@@ -2578,7 +2579,7 @@ fn restore_ledgered_agents_system(world: &mut World) {
     }
 
     let known_door_form_ids: std::collections::HashSet<u32> = world
-        .resource::<PreparedSceneManifest>()
+        .resource::<crate::viewer::LoadedSceneManifest>()
         .placements
         .iter()
         .filter(|placement| matches!(placement.semantic, crate::vsa::PreparedSemantic::Door(_)))
@@ -3087,7 +3088,7 @@ mod tests {
             .id();
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
 
-        world.insert_resource(minimal_manifest(0xBEEF));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xBEEF)));
         despawn_stale_navmesh_archipelago(&mut world);
 
         assert!(world.get_entity(archipelago).is_err());
@@ -3148,7 +3149,7 @@ mod tests {
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
 
-        world.insert_resource(minimal_manifest(0xBEEF));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xBEEF)));
         despawn_stale_navmesh_archipelago(&mut world);
 
         assert!(world.get_entity(agent).is_err());
@@ -3192,7 +3193,7 @@ mod tests {
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
         world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(0x99);
 
-        world.insert_resource(minimal_manifest(0xBEEF));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xBEEF)));
         despawn_stale_navmesh_archipelago(&mut world);
 
         assert!(world.get_entity(agent).is_err());
@@ -3237,7 +3238,7 @@ mod tests {
         // `ensure_archipelago` short-circuits on its `already_current`
         // check (below) before it would ever read this path from disk.
         manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource::default());
-        world.insert_resource(manifest);
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
         // Pre-seed the archipelago as already current for 0xBEEF so
         // `ensure_archipelago` returns immediately without any real
         // `bevy_landmass`/file-I/O plumbing -- this test is about the
@@ -4159,7 +4160,7 @@ mod tests {
         // building.
         let mut manifest = minimal_manifest(0xBEEF);
         manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource::default());
-        world.insert_resource(manifest);
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
         world.resource_mut::<NavArchipelagoState>().cell_form_id = Some(0xBEEF);
         world.resource_mut::<NavArchipelagoState>().archipelago = Some(world.spawn_empty().id());
         world.resource_mut::<TestNavAgentState>().entities[0] = Some(Entity::PLACEHOLDER);

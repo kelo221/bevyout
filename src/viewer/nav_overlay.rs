@@ -108,7 +108,9 @@ use bevy_landmass::{Agent3d, Archipelago3d};
 use serde_json::json;
 
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
-use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedSceneManifest};
+#[cfg(test)]
+use crate::vsa::PreparedSceneManifest;
+use crate::vsa::{PreparedNavGraph, PreparedNavMesh};
 
 /// Golden-ratio hue step (issue #128's spec): consecutive polygon indices
 /// land far apart on the hue wheel instead of drifting slowly, so adjacent
@@ -560,7 +562,7 @@ pub(crate) fn toggle_nav_mesh(
     }
 
     let (current_cell, asset_root, nav_graph_source) = {
-        let manifest = world.resource::<PreparedSceneManifest>();
+        let manifest = world.resource::<crate::viewer::LoadedSceneManifest>();
         (
             manifest.cell.form_id,
             std::path::PathBuf::from(&manifest.asset_root),
@@ -660,7 +662,7 @@ pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
     let Some(overlay) = world.resource::<NavMeshOverlayState>().overlay else {
         return;
     };
-    if let Some(manifest) = world.get_resource::<PreparedSceneManifest>()
+    if let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>()
         && overlay.cell_form_id != manifest.cell.form_id
     {
         if let Ok(entity) = world.get_entity_mut(overlay.entity) {
@@ -821,7 +823,7 @@ mod tests {
 
     fn test_world_with_manifest(manifest: PreparedSceneManifest) -> World {
         let mut world = World::new();
-        world.insert_resource(manifest);
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<NavMeshOverlayState>();
@@ -984,7 +986,11 @@ mod tests {
 
         // Simulate `world::swap::activate_resident_cell` repointing the
         // active manifest to the destination cell.
-        world.insert_resource(minimal_manifest(0xBEEF, ".".into(), None));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(
+            0xBEEF,
+            ".".into(),
+            None,
+        )));
         world
             .run_system_once(despawn_stale_nav_overlay)
             .expect("teardown system runs");
@@ -1207,7 +1213,11 @@ mod tests {
         toggle_nav_mesh(&mut world, &invocation()).expect("builds for the source cell");
         assert!(world.resource::<NavMeshOverlayState>().path.is_some());
 
-        world.insert_resource(minimal_manifest(0xBEEF, ".".into(), None));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(
+            0xBEEF,
+            ".".into(),
+            None,
+        )));
         world
             .run_system_once(despawn_stale_nav_overlay)
             .expect("teardown system runs");

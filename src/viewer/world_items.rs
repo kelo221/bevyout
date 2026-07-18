@@ -58,7 +58,15 @@ impl Default for NextRuntimeItemId {
     }
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct WorldItemsPlugin;
+
+impl Plugin for WorldItemsPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<ItemWorldAssets>()
         .init_resource::<NextRuntimeItemId>()
         .add_systems(OnEnter(AppState::InGame), collect_item_world_assets)

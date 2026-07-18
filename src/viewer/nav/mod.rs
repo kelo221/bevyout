@@ -23,7 +23,15 @@ pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;
 pub(crate) mod repath;
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct NavPlugin;
+
+impl Plugin for NavPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     agent::install(app);
 }
 

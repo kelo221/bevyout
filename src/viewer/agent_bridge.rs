@@ -18,8 +18,6 @@ use super::interaction::PlacementRoot;
 use super::player::FpsPlayer;
 use super::{RenderReportBuffer, diagnostics};
 use crate::console::{ConsoleExecutor, ConsoleRegistry, ConsoleRequest, ConsoleSessionId};
-use crate::vsa::PreparedSceneManifest;
-
 const DEFAULT_SNAPSHOT_LIMIT: usize = 100;
 const MAX_SNAPSHOT_LIMIT: usize = 1_000;
 const DEFAULT_FRAME_BUDGET_MS: f64 = 16.667;
@@ -33,7 +31,17 @@ struct AgentBridgeInfo {
     session_id: String,
 }
 
-pub(crate) fn install(app: &mut App, port: u16) {
+pub(crate) struct AgentBridgePlugin {
+    pub(crate) port: u16,
+}
+
+impl Plugin for AgentBridgePlugin {
+    fn build(&self, app: &mut App) {
+        install(app, self.port);
+    }
+}
+
+fn install(app: &mut App, port: u16) {
     let session_id = format!(
         "{}-{}",
         std::process::id(),
@@ -298,7 +306,7 @@ fn schedule_snapshot(In(params): In<Option<Value>>, world: &World) -> BrpResult 
 fn session(
     In(_params): In<Option<Value>>,
     info: Res<AgentBridgeInfo>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
 ) -> BrpResult {
     Ok(json!({
         "session_id": info.session_id,

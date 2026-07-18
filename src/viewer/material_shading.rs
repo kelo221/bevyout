@@ -6,7 +6,15 @@ use super::material_shading_policy::{
     SPECULAR_ALPHA_ROUGHNESS_DEFAULTS, specular_alpha_roughness_eligible,
 };
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct MaterialShadingPlugin;
+
+impl Plugin for MaterialShadingPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.add_systems(Update, apply_specular_alpha_roughness_policy);
 }
 

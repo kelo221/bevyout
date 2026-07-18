@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::audio::{PlaybackMode, Volume};
 use bevy::prelude::*;
 
-use crate::vsa::{PreparedAudioClip, PreparedFootstepSet, PreparedSceneManifest};
+use crate::vsa::{PreparedAudioClip, PreparedFootstepSet};
 
 const LISTENER_EAR_GAP_METERS: f32 = 0.2;
 const FOOTSTEP_GAIN_DB: f32 = -6.0;
@@ -82,7 +82,15 @@ struct PlacementLoop {
     reference_form_id: u32,
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct ViewerAudioPlugin;
+
+impl Plugin for ViewerAudioPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<AudioClipCatalog>()
         .init_resource::<FootstepCatalog>()
         .init_resource::<ReportedMissingClips>()
@@ -105,7 +113,7 @@ pub(crate) fn install(app: &mut App) {
 fn build_catalog_and_spawn_loops(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut catalog: ResMut<AudioClipCatalog>,
     mut footstep_catalog: ResMut<FootstepCatalog>,
     mut reported_missing: ResMut<ReportedMissingClips>,
@@ -405,7 +413,7 @@ fn playback_settings_with_gain(
 /// see this issue's final report for why that is deliberately deferred.
 pub(crate) fn rebuild_ambient_for_active_cell(world: &mut World) {
     let (ambient_form_ids, audio_clips, footstep_sets, hard_landing_clips) = {
-        let manifest = world.resource::<PreparedSceneManifest>();
+        let manifest = world.resource::<crate::viewer::LoadedSceneManifest>();
         (
             manifest.cell_audio.ambient_loop_sound_form_ids.clone(),
             manifest.audio_clips.clone(),

@@ -23,7 +23,7 @@ use super::physics::read_physics_asset;
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-visual-audit-havok-anim-audio-emission-v24";
+    "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v28";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AuthoredEmission {

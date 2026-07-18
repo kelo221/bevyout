@@ -1,6 +1,7 @@
 //! Prepared placement and semantic derivation.
 
 use super::*;
+use crate::vsa::assets::AssetConversion;
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -370,6 +371,7 @@ pub(crate) struct PlacementStage {
 pub(crate) fn stage_placements(
     references: Vec<ReferenceRecord>,
     bases: &HashMap<u32, BaseRecord>,
+    actor_models: &HashMap<u32, Vec<String>>,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     staging_dir: &Path,
@@ -426,9 +428,23 @@ pub(crate) fn stage_placements(
                 initially_enabled: reference.initially_enabled,
             });
         }
-        let model = (reference.kind != ReferenceKind::Npc)
-            .then_some(base.model.as_ref())
-            .flatten();
+        let actor_model_list =
+            if reference.kind == ReferenceKind::Npc || reference.kind == ReferenceKind::Creature {
+                actor_models
+                    .get(&reference.form_id)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+        let model = if !actor_model_list.is_empty() {
+            actor_model_list.first().map(String::as_str)
+        } else {
+            (reference.kind != ReferenceKind::Npc)
+                .then_some(base.model.as_ref())
+                .flatten()
+                .map(String::as_str)
+        };
         let Some(model) = model else {
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
@@ -446,7 +462,17 @@ pub(crate) fn stage_placements(
             ));
             continue;
         };
-        let normalized_model = normalize_asset_path(model);
+        let mut model_paths = if !actor_model_list.is_empty() {
+            actor_model_list
+                .iter()
+                .map(|model| normalize_asset_path(model))
+                .collect::<Vec<_>>()
+        } else {
+            vec![normalize_asset_path(model)]
+        };
+        model_paths.sort();
+        model_paths.dedup();
+        let normalized_model = model_paths[0].clone();
         if is_editor_marker(&normalized_model) {
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
@@ -470,45 +496,102 @@ pub(crate) fn stage_placements(
             });
             continue;
         }
-        let Some(nif_bytes) = resolve_asset(data_root, archives, &normalized_model)? else {
-            diagnostics.push(Diagnostic {
-                severity: "warning".into(),
-                message: format!(
-                    "missing model {normalized_model} for reference {:08x}",
-                    reference.form_id
-                ),
-            });
-            placements.push(prepared_placement(
-                &reference,
-                Some(base),
-                None,
-                Some(format!("missing model {normalized_model}")),
-                bases,
-            ));
+        let mut model_bytes = Vec::with_capacity(model_paths.len());
+        for model_path in &model_paths {
+            let Some(nif_bytes) = resolve_asset(data_root, archives, model_path)? else {
+                diagnostics.push(Diagnostic {
+                    severity: "warning".into(),
+                    message: format!(
+                        "missing model {model_path} for reference {:08x}",
+                        reference.form_id
+                    ),
+                });
+                placements.push(prepared_placement(
+                    &reference,
+                    Some(base),
+                    None,
+                    Some(format!("missing model {model_path}")),
+                    bases,
+                ));
+                model_bytes.clear();
+                break;
+            };
+            model_bytes.push(nif_bytes);
+        }
+        if model_bytes.len() != model_paths.len() {
             continue;
-        };
-        let static_asset = model_static_usage
-            .get(&normalized_model)
-            .copied()
-            .unwrap_or(false);
-        let conversion = asset_conversion(static_asset);
+        }
+        let nif_bytes = &model_bytes[0];
+        let assembly = model_paths.len() > 1;
+        let conversion = asset_conversion(
+            model_static_usage
+                .get(&normalized_model)
+                .copied()
+                .unwrap_or(false),
+        );
         let root_transform_policy = root_transform_policy(&normalized_model);
         let conversion_profile = conversion.profile_tag().to_owned();
-        let converter_profile = format!(
-            "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
-            root_transform_policy.tag()
-        );
-        let asset_name = content_addressed_glb_name(&converter_profile, &nif_bytes);
+        let mut cache_bytes = Vec::new();
+        for bytes in &model_bytes {
+            cache_bytes.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            cache_bytes.extend_from_slice(bytes);
+        }
+        let cache_profile = if assembly {
+            format!("{NIF_CONVERTER_REVISION}-actor-bindpose-v1")
+        } else {
+            format!(
+                "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
+                root_transform_policy.tag()
+            )
+        };
+        let asset_name = content_addressed_glb_name(&cache_profile, &cache_bytes);
         let asset_path = format!("assets/{asset_name}");
         let physics_name = physics_sidecar_name(&asset_name);
         let physics_asset_path = format!("assets/{physics_name}");
-        if !seen_models.contains_key(&normalized_model) {
+        let model_key = if assembly {
+            format!("actor:{}", model_paths.join("|"))
+        } else {
+            normalized_model.clone()
+        };
+        if !seen_models.contains_key(&model_key) {
             let staging_nif = staging_dir.join(&normalized_model);
             if let Some(parent) = staging_nif.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&staging_nif, &nif_bytes)?;
-            stage_textures(&nif_bytes, data_root, archives, staging_dir, diagnostics)?;
+            fs::write(&staging_nif, nif_bytes)?;
+            stage_textures(nif_bytes, data_root, archives, staging_dir, diagnostics)?;
+            let input = if assembly {
+                let assembly_key = fingerprint(asset_name.as_bytes());
+                let assembly_path = staging_dir
+                    .join("actors")
+                    .join(format!("{assembly_key}.actor.json"));
+                if let Some(parent) = assembly_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut inputs = Vec::with_capacity(model_paths.len());
+                for (index, (model_path, bytes)) in model_paths.iter().zip(&model_bytes).enumerate()
+                {
+                    let path = if index == 0 {
+                        staging_nif.clone()
+                    } else {
+                        let path = staging_dir.join(model_path);
+                        if let Some(parent) = path.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        fs::write(&path, bytes)?;
+                        stage_textures(bytes, data_root, archives, staging_dir, diagnostics)?;
+                        path
+                    };
+                    inputs.push(path.to_string_lossy().to_string());
+                }
+                fs::write(
+                    &assembly_path,
+                    serde_json::json!({"inputs": inputs}).to_string(),
+                )?;
+                assembly_path
+            } else {
+                staging_nif.clone()
+            };
             let output = assets_dir.join(&asset_name);
             let physics_output = assets_dir.join(&physics_name);
             let outputs_exist = output.exists() || physics_output.exists();
@@ -520,12 +603,24 @@ pub(crate) fn stage_placements(
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
                     jobs.push(BlenderAssetJob {
-                        input: staging_nif,
+                        input,
                         output,
                         physics_output,
-                        model: normalized_model.clone(),
-                        conversion,
-                        root_transform_policy,
+                        model: if assembly {
+                            "actors/assembled".into()
+                        } else {
+                            normalized_model.clone()
+                        },
+                        conversion: if assembly {
+                            AssetConversion::Preserve
+                        } else {
+                            conversion
+                        },
+                        root_transform_policy: if assembly {
+                            RootTransformPolicy::PreserveVerified
+                        } else {
+                            root_transform_policy
+                        },
                     });
                 }
                 AssetCacheDecision::RebuildInvalid => {
@@ -538,39 +633,76 @@ pub(crate) fn stage_placements(
                         ),
                     });
                     jobs.push(BlenderAssetJob {
-                        input: staging_nif,
+                        input,
                         output,
                         physics_output,
-                        model: normalized_model.clone(),
-                        conversion,
-                        root_transform_policy,
+                        model: if assembly {
+                            "actors/assembled".into()
+                        } else {
+                            normalized_model.clone()
+                        },
+                        conversion: if assembly {
+                            AssetConversion::Preserve
+                        } else {
+                            conversion
+                        },
+                        root_transform_policy: if assembly {
+                            RootTransformPolicy::PreserveVerified
+                        } else {
+                            root_transform_policy
+                        },
                     });
                 }
                 AssetCacheDecision::RebuildRequested => {
                     cache_explicit_rebuilds += 1;
                     jobs.push(BlenderAssetJob {
-                        input: staging_nif,
+                        input,
                         output,
                         physics_output,
-                        model: normalized_model.clone(),
-                        conversion,
-                        root_transform_policy,
+                        model: if assembly {
+                            "actors/assembled".into()
+                        } else {
+                            normalized_model.clone()
+                        },
+                        conversion: if assembly {
+                            AssetConversion::Preserve
+                        } else {
+                            conversion
+                        },
+                        root_transform_policy: if assembly {
+                            RootTransformPolicy::PreserveVerified
+                        } else {
+                            root_transform_policy
+                        },
                     });
                 }
             }
             visual_assets.push(PreparedVisualAsset {
-                model_path: normalized_model.clone(),
+                model_path: if assembly {
+                    "actors/assembled".into()
+                } else {
+                    normalized_model.clone()
+                },
                 asset_path: asset_path.clone(),
-                root_transform_policy,
+                root_transform_policy: if assembly {
+                    RootTransformPolicy::PreserveVerified
+                } else {
+                    root_transform_policy
+                },
             });
-            seen_models.insert(normalized_model.clone(), asset_path.clone());
+            seen_models.insert(model_key.clone(), asset_path.clone());
         }
         let mut placement =
             prepared_placement(&reference, Some(base), Some(asset_path), None, bases);
-        placement.ao_mode = conversion_profile;
+        placement.ao_mode = if assembly {
+            "ao-none".into()
+        } else {
+            conversion_profile
+        };
         placement.physics_asset_path = Some(physics_asset_path);
         placement.step_support = is_structural_step_support(&placement.semantic, &normalized_model);
         placements.push(placement);
+        continue;
     }
 
     let leveled_lists = collect_leveled_lists(&placements, bases);

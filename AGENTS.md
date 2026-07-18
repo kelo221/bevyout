@@ -2,19 +2,28 @@
 
 ## Project architecture
 
-This project uses Vertical Slice Architecture (VSA):
+This project uses Vertical Slice Architecture (VSA) with a pure domain core crate:
 
 - `src/main.rs` is a dispatcher only. Keep command routing there; do not add
   Fallout parsing, conversion, or Bevy systems to it.
 - `src/cli.rs` owns clap command and option definitions.
+- `crates/bevyout-core` contains pure domain contracts, data types, and policies
+  (`ItemLedger`, `FormId`, `PreparedSceneManifest`, `ContentRecordResolver`, quest item rules).
+  It depends ONLY on `std`, `serde`, and `glam` — **never add Bevy dependencies to core**.
+- `tests/architecture.rs` strictly asserts dependency direction: `bevyout-core`
+  has no Bevy imports, and `src/vsa/` has no `viewer` imports.
 - The Fallout cell feature owns its complete path from CLI input through plugin
   and BSA parsing, NIF-to-GLB conversion, manifest generation, and Bevy
   rendering. Keep those feature concerns together rather than creating a
   global layer for every parser, asset type, or system.
-- `src/vsa/` contains the current Fallout cell slice internals; `viewer.rs`
+- `src/vsa/` contains the Fallout cell slice internals; `viewer.rs`
   contains its Bevy presentation boundary and consumes only the prepared RON
-  manifest.
-- `PreparedSceneManifest` is the explicit hand-off contract inside the slice.
+  manifest via `PreparedSceneManifest`.
+- The viewer subsystem uses typed composition (`ViewerPlugins`) and explicit phase
+  scheduling (`ViewerSet`: `Input -> Interaction -> WorldSync -> Ui`).
+- Large viewer subsystems are decomposed into domain capability modules:
+  - `viewer::interaction`: modularized into `activation`, `door`, `focus`, `items`, `presentation`, `scripted`, `state`, and `ui` (module root capped at 250 lines).
+  - `viewer::console`: thin Bevy adapter over engine-agnostic `src/console/`, split into `item_commands`, `player_commands`, `render_commands`, `world_commands`, `ui_commands`, and `navigation_commands` via `ConsoleCommandProvider` traits (module root capped at 150 lines).
 
 When adding a feature, add a new slice directory or module with its own input,
 data, preparation, and runtime code. Expose only a narrow command/plugin API
@@ -247,8 +256,8 @@ can kill the viewer under load — retry.
 
 ## Canonical item transaction invariants (#95)
 
-- Runtime item movement goes through `src/item_transaction.rs`'s canonical
-  `ItemLedger`; `PlayerInventory`, container state, and dropped-world entities
+- Runtime item movement goes through `crates/bevyout-core/src/item_transaction.rs`'s canonical
+  `ItemLedger` (`bevyout::item_transaction` remains as a compatibility re-export); `PlayerInventory`, container state, and dropped-world entities
   are projections/adapters, not independent authorities.
 - Every canonical stack has a stable `ItemInstanceId`. Full moves preserve it;
   partial moves allocate a destination ID; compatible merges retain the

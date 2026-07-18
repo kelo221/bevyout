@@ -36,12 +36,12 @@ mod plugin {
     }
 }
 
-// M3/#95 canonical item instances and atomic holder transactions are pure
-// serde/std policy, so the executable-spec harness drives the same source as
-// the Bevy runtime instead of maintaining a test-only model.
-#[path = "../src/item_transaction.rs"]
+// M3/#95 canonical item instances and atomic holder transactions live in the
+// normal engine-independent crate boundary shared by runtime and tests.
 #[allow(dead_code, unused_imports)]
-mod item_transaction;
+mod item_transaction {
+    pub use bevyout_core::item_transaction::*;
+}
 
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
@@ -53,9 +53,10 @@ mod item_transaction;
 #[allow(dead_code, unused_imports)]
 mod paths;
 
-#[path = "../src/vsa/manifest/mod.rs"]
 #[allow(dead_code, unused_imports)]
-mod manifest;
+mod manifest {
+    pub use bevyout_core::manifest::*;
+}
 
 #[path = "../src/vsa/bsa.rs"]
 #[allow(dead_code, unused_imports)]
@@ -304,11 +305,11 @@ use vsa_esm::openmw_esm4;
 #[path = "../src/viewer/interaction/leveled.rs"]
 mod leveled;
 
-// `viewer::interaction::item_rules` (issue #81) is dependency-free (std
-// only, no Bevy) like `container_policy`, so it is included verbatim too.
-#[path = "../src/viewer/interaction/item_rules.rs"]
+// Item rules share the same normal core-crate boundary as item transactions.
 #[allow(dead_code, unused_imports)]
-mod item_rules;
+mod item_rules {
+    pub use bevyout_core::items::*;
+}
 
 // Drop placement is a Bevy-free candidate policy, so the runtime and the
 // executable spec share the same retreat/fallback decision logic.

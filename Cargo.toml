@@ -3,7 +3,12 @@ name = "bevyout"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "crates/bevyout-core"]
+resolver = "3"
+
 [dependencies]
+bevyout-core = { path = "crates/bevyout-core" }
 # WAV covers the ambient and interaction clips staged by the importer. MP3
 # metadata is retained in manifests, but Bevy's MP3 feature currently resolves
 # to an unavailable symphonia patch in this workspace's offline cache.

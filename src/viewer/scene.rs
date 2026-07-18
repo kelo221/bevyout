@@ -73,7 +73,7 @@ pub(crate) fn spawn_prepared_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut compensation_curves: ResMut<Assets<AutoExposureCompensationCurve>>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
@@ -355,7 +355,7 @@ pub(crate) fn spawn_prepared_scene(
         ResidentCell {
             root,
             state: ResidentState::Ready,
-            manifest: Arc::new((*manifest).clone()),
+            manifest: Arc::new((**manifest).clone()),
             scene_handles: content.scene_handles,
             placement_count: content.placement_count,
         },
@@ -631,7 +631,7 @@ pub(crate) fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Op
 
 pub(crate) fn apply_fog_strength(
     fog_strength: Res<FogStrength>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut cameras: Query<&mut DistanceFog, With<Camera3d>>,
 ) {
     if !fog_strength.is_changed() {
@@ -657,7 +657,10 @@ pub(crate) fn apply_fog_strength(
 /// the cell's `ImageSpace`) are deliberately left as-is; see this issue's
 /// final report.
 pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
-    let cell = world.resource::<PreparedSceneManifest>().cell.clone();
+    let cell = world
+        .resource::<crate::viewer::LoadedSceneManifest>()
+        .cell
+        .clone();
     let lighting_scale = world.resource::<LightingScale>().0;
     let ambient_scale = world.resource::<AmbientScale>().0;
     let fog_strength = world.resource::<FogStrength>().0;

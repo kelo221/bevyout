@@ -4,7 +4,8 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_boxddd::boxddd::{
-    self, BodyDef, BodyId, BodyType, BoxHull, CollisionPlane, Filter, Hull, ShapeDef, ShapeId,
+    self, BodyDef, BodyId, BodyType, BoxHull, CollisionPlane, Filter, Hull, JointId,
+    PrismaticJointDef, RevoluteJointDef, ShapeDef, ShapeId, SphericalJointDef,
 };
 use bevy_boxddd::prelude::{
     BoxdddDebugDrawSettings, BoxdddPhysicsContext, BoxdddPhysicsPlugin, BoxdddPhysicsSettings,
@@ -102,6 +103,13 @@ pub(crate) struct FpsPlayer {
 /// Marker used by render diagnostics for player and prepared physics entities.
 #[derive(Component)]
 pub(crate) struct PhysicsCollider;
+
+/// Developer-only actor ragdoll switch. Actors are intentionally excluded
+/// from the prepared static collider pass; adding this marker lets the
+/// collision system attach the authored actor body on demand while the
+/// rendered GLB remains in its bind/T-pose by default.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RagdollToggle(pub(crate) bool);
 
 #[derive(Component, Debug)]
 pub(crate) struct FootstepState {
@@ -251,6 +259,14 @@ pub(crate) struct PreparedCollisionWorld {
     /// boxddd bodies, keyed by placement root and driven every fixed step
     /// from their animated scene node's pose.
     keyframed_bodies: HashMap<Entity, Vec<collision::KeyframedColliderBinding>>,
+    /// Developer ragdoll ownership. The first body is mirrored in
+    /// `dynamic_bodies` for existing persistence/transform code; the full
+    /// list is torn down atomically when the toggle is cleared.
+    ragdoll_bodies: HashMap<Entity, Vec<BodyId>>,
+    ragdoll_joints: HashMap<Entity, Vec<JointId>>,
+    /// Body-to-scene-node bindings used to deform an actor's shared GLTF
+    /// skeleton while the developer ragdoll is active.
+    ragdoll_nodes: HashMap<BodyId, collision::RagdollNodeBinding>,
     player_proxy: Option<BodyId>,
     surfaces: HashMap<ShapeId, CollisionSurface>,
     /// Issue #63: which cell's build created which shapes/bodies, so
@@ -371,7 +387,18 @@ pub(crate) struct StepDebugSettings {
 }
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
-pub(crate) fn install(app: &mut App, disable_physics: bool) {
+
+pub(crate) struct PlayerPlugin {
+    pub(crate) disable_physics: bool,
+}
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        install(app, self.disable_physics);
+    }
+}
+
+fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -GRAVITY, 0.0),
         error_policy: BoxdddErrorPolicy::MessageAndLog,
@@ -388,7 +415,11 @@ pub(crate) fn install(app: &mut App, disable_physics: bool) {
     .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
     .add_systems(
         Update,
-        advance_pending_collider_builds.run_if(in_state(AppState::InGame)),
+        (
+            advance_pending_collider_builds,
+            collision::process_ragdoll_toggles,
+        )
+            .run_if(in_state(AppState::InGame)),
     )
     .add_systems(
         FixedUpdate,

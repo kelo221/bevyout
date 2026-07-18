@@ -15,10 +15,7 @@ fn master_resolver() -> FormIdResolver {
     // A plugin loaded at global index 1 whose only master sits at global
     // index 0: local FormIDs with file index 0 stay on the master, local
     // file index 1 maps to this plugin's global index 1.
-    FormIdResolver {
-        current_index: 1,
-        master_indices: vec![0],
-    }
+    FormIdResolver::new(1, vec![0])
 }
 
 fn navm_data(cell: u32, counts: [u32; 5]) -> Vec<u8> {

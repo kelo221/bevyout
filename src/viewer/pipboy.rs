@@ -14,7 +14,7 @@ use super::inventory::{DropAction, StackKey, TransferResult, drop_action};
 use super::pipboy_reader::OpenReaderRequested;
 use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
-    PreparedSceneManifest, cell_label,
+    cell_label,
 };
 
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
@@ -148,11 +148,19 @@ struct ScreenSources<'w> {
     equipment: Res<'w, PlayerEquipment>,
     catalog: Res<'w, PreparedItemCatalog>,
     assets: Res<'w, AssetServer>,
-    manifest: Option<Res<'w, PreparedSceneManifest>>,
+    manifest: Option<Res<'w, crate::viewer::LoadedSceneManifest>>,
     time: Res<'w, Time>,
 }
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct PipBoyPlugin;
+
+impl Plugin for PipBoyPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
@@ -180,6 +188,7 @@ pub(crate) fn install(app: &mut App) {
                 handle_equip_and_hotkeys,
                 refresh_after_inventory_change,
             )
+                .in_set(super::plugins::ViewerSet::Ui)
                 .run_if(in_state(GameplayModal::PipBoy)),
         );
 }
