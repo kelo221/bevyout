@@ -6,6 +6,7 @@ mod catalog;
 mod cell_map;
 mod content_index;
 mod manifest;
+mod nif_convert;
 mod openmw_esm4;
 mod paths;
 mod physics;
@@ -47,6 +48,7 @@ pub(crate) use manifest::{
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
     ensure_prepared_manifest_compatible,
 };
+pub use nif_convert::nif_convert;
 pub(crate) use paths::{FO3_SCALE, fingerprint};
 pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,

@@ -1,4 +1,45 @@
 use super::*;
+use std::path::Path;
+
+#[test]
+fn nif_convert_requires_one_source_and_parses_conversion_options() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "nif-convert",
+        "--input",
+        "mesh.nif",
+        "--output",
+        "out.glb",
+        "--conversion",
+        "quick-ao",
+        "--allow-lossy",
+        "--force",
+    ])
+    .unwrap();
+    let CommandLine::NifConvert(args) = cli.command else {
+        panic!("expected nif-convert command");
+    };
+    assert_eq!(args.input.as_deref(), Some(Path::new("mesh.nif")));
+    assert_eq!(args.output, PathBuf::from("out.glb"));
+    assert_eq!(args.conversion, NifConversionMode::QuickAo);
+    assert!(args.allow_lossy);
+    assert!(args.force);
+
+    assert!(Cli::try_parse_from(["bevyout", "nif-convert", "--output", "out.glb"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "nif-convert",
+            "--input",
+            "mesh.nif",
+            "--asset",
+            "meshes/mesh.nif",
+            "--output",
+            "out.glb",
+        ])
+        .is_err()
+    );
+}
 
 #[test]
 fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {

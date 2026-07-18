@@ -17,4 +17,4 @@ pub use save::{
     SaveStore, SavedBodyState, SavedTransform, decode_save, encode_save,
 };
 pub use viewer::{render, view};
-pub use vsa::{bake, cells, prepare, report};
+pub use vsa::{bake, cells, nif_convert, prepare, report};

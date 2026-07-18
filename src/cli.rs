@@ -37,6 +37,51 @@ pub enum CommandLine {
     /// Run deterministic Gamebryo-style console scripts.
     #[command(name = "script")]
     Script(ScriptArgs),
+    /// Experimentally convert one FO3/FNV NIF 20.2.0.7 asset to a self-contained GLB.
+    #[command(name = "nif-convert")]
+    NifConvert(NifConvertArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("source")
+        .required(true)
+        .args(["input", "asset"])
+))]
+pub struct NifConvertArgs {
+    /// Read a NIF directly from this filesystem path.
+    #[arg(long, value_name = "FILE", conflicts_with = "asset")]
+    pub(crate) input: Option<PathBuf>,
+    /// Resolve a Data-relative NIF path from loose files or Fallout BSAs.
+    #[arg(long, value_name = "meshes/PATH.nif", conflicts_with = "input")]
+    pub(crate) asset: Option<String>,
+    /// Write the self-contained binary glTF here.
+    #[arg(long, value_name = "FILE.glb")]
+    pub(crate) output: PathBuf,
+    /// Fallout 3 / New Vegas installation root; required by --asset and used for textures.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) game_root: Option<PathBuf>,
+    /// Optional authored-collision sidecar output path.
+    #[arg(long, value_name = "FILE.physics.json.gz")]
+    pub(crate) physics_output: Option<PathBuf>,
+    /// Optional deterministic JSON conversion report.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) report: Option<PathBuf>,
+    /// Vertex-color conversion policy.
+    #[arg(long, value_enum, default_value_t = NifConversionMode::Preserve)]
+    pub(crate) conversion: NifConversionMode,
+    /// Emit the usable subset while reporting unsupported or missing content.
+    #[arg(long)]
+    pub(crate) allow_lossy: bool,
+    /// Replace existing output files.
+    #[arg(long)]
+    pub(crate) force: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NifConversionMode {
+    Preserve,
+    QuickAo,
 }
 
 #[derive(Parser, Debug)]

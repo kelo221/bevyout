@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 
-use bevyout::{Cli, CommandLine, apply, bake, cells, prepare, render, report, script, view};
+use bevyout::{
+    Cli, CommandLine, apply, bake, cells, nif_convert, prepare, render, report, script, view,
+};
 
 fn main() -> Result<()> {
     let mut cli = Cli::parse();
@@ -14,5 +16,6 @@ fn main() -> Result<()> {
         CommandLine::Report(args) => report(args),
         CommandLine::Cells(args) => cells(args),
         CommandLine::Script(args) => script(args),
+        CommandLine::NifConvert(args) => nif_convert(args),
     }
 }
