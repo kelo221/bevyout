@@ -590,8 +590,14 @@ fn prepare_cell(
         .cloned()
         .collect::<Vec<_>>();
     let mut references = std::mem::take(&mut parsed.references);
-    let actor_models =
-        build_actor_appearance_models(&parsed, &actor_references, &source_fingerprint);
+    let actor_models = build_actor_appearance_models(
+        &parsed,
+        &actor_references,
+        &source_fingerprint,
+        &data_root,
+        &session.archives,
+        &mut diagnostics,
+    )?;
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
     references.extend(catalog_references);
@@ -1234,7 +1240,10 @@ fn build_actor_appearance_models(
     parsed: &ParsedPlugin,
     references: &[ReferenceRecord],
     source_fingerprint: &str,
-) -> HashMap<u32, ActorAssemblyDescriptor> {
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<HashMap<u32, ActorAssemblyDescriptor>> {
     let mut result = HashMap::new();
     for reference in references {
         let Some(base) = resolve_actor_appearance_base(
@@ -1251,6 +1260,8 @@ fn build_actor_appearance_models(
         };
         let skeleton = base.model.clone();
         let mut visual_inputs = Vec::new();
+        let mut body_parts = Vec::new();
+        let mut apparel_inputs = Vec::new();
         match reference.kind {
             ReferenceKind::Creature => {
                 // The CREA model list contains visual attachments relative to
@@ -1294,17 +1305,23 @@ fn build_actor_appearance_models(
                     } else {
                         &race.head_parts_male
                     };
-                    visual_inputs.extend(body.iter().filter_map(|part| part.model_path.clone()));
+                    body_parts.extend(body.iter().filter_map(|part| {
+                        part.model_path.clone().map(|path| ActorBodyPartInput {
+                            path,
+                            index: part.index,
+                        })
+                    }));
+                    visual_inputs.extend(body_parts.iter().map(|part| part.path.clone()));
                     visual_inputs.extend(head.iter().filter_map(|part| part.model_path.clone()));
                 }
                 // Worn apparel is appearance-only in this slice. Weapons are
                 // runtime attachments; baking inventory weapons into the actor
                 // body makes every carried weapon visible and corrupts ragdolls.
-                let mut gear = base
+                let gear = base
                     .inventory
                     .iter()
                     .flat_map(|entry| {
-                        resolve_actor_gear_models(
+                        resolve_actor_gear_candidates(
                             parsed,
                             entry.item_form_id,
                             reference.form_id,
@@ -1312,8 +1329,28 @@ fn build_actor_appearance_models(
                         )
                     })
                     .collect::<Vec<_>>();
-                gear.sort_by_key(|model| model.to_ascii_lowercase());
-                visual_inputs.extend(gear);
+                let mut available_models = HashSet::new();
+                for candidate in &gear {
+                    let Some(model) = candidate.worn_model(female) else {
+                        continue;
+                    };
+                    if resolve_asset(data_root, archives, model)?.is_some() {
+                        available_models.insert(normalize_asset_path(model));
+                    }
+                }
+                let outfit = select_spawn_outfit(&gear, female, |model| {
+                    available_models.contains(&normalize_asset_path(model))
+                });
+                diagnostics.extend(outfit.diagnostics.into_iter().map(|message| Diagnostic {
+                    severity: "warning".into(),
+                    message: format!("actor {:08x}: {message}", reference.form_id),
+                }));
+                apparel_inputs.extend(outfit.worn.into_iter().map(|item| ActorApparelInput {
+                    path: item.model_path,
+                    form_id: item.form_id,
+                    biped_slot_mask: item.biped_slot_mask,
+                }));
+                visual_inputs.extend(apparel_inputs.iter().map(|item| item.path.clone()));
             }
             ReferenceKind::Object => continue,
         }
@@ -1333,25 +1370,46 @@ fn build_actor_appearance_models(
                     && !is_editor_marker(model)
                     && !is_non_rendering_effect(model)
             });
-        if let Some(assembly) = canonical_actor_assembly(skeleton, visual_inputs) {
+        if let Some(mut assembly) = canonical_actor_assembly(skeleton, visual_inputs) {
+            body_parts.retain(|part| part.path.to_ascii_lowercase().ends_with(".nif"));
+            for part in &mut body_parts {
+                part.path = normalize_asset_path(&part.path);
+            }
+            body_parts.sort_by(|left, right| {
+                left.index
+                    .cmp(&right.index)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            body_parts.dedup();
+            for item in &mut apparel_inputs {
+                item.path = normalize_asset_path(&item.path);
+            }
+            apparel_inputs.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.form_id.cmp(&right.form_id))
+            });
+            apparel_inputs.dedup();
+            assembly.body_parts = body_parts;
+            assembly.apparel = apparel_inputs;
             result.insert(reference.form_id, assembly);
         }
     }
-    result
+    Ok(result)
 }
 
 /// Resolves one authored inventory entry to a deterministic visual item. NPC
 /// inventories commonly point at nested LVLI lists, so following only direct
 /// ARMO/WEAP records silently drops all equipment from the assembled actor.
-fn resolve_actor_gear_models(
+fn resolve_actor_gear_candidates(
     parsed: &ParsedPlugin,
     root_form_id: u32,
     reference_form_id: u32,
     source_fingerprint: &str,
-) -> Vec<String> {
+) -> Vec<ApparelCandidate> {
     let mut candidates = actor_gear_model_candidates(parsed, root_form_id, &mut HashSet::new(), 0);
-    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    candidates.dedup();
+    candidates.sort_by_key(|candidate| candidate.0);
+    candidates.dedup_by_key(|candidate| candidate.0);
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -1366,7 +1424,7 @@ fn actor_gear_model_candidates(
     form_id: u32,
     visited: &mut HashSet<u32>,
     depth: usize,
-) -> Vec<(u32, String)> {
+) -> Vec<(u32, ApparelCandidate)> {
     if depth >= 32 || !visited.insert(form_id) {
         return Vec::new();
     }
@@ -1374,12 +1432,32 @@ fn actor_gear_model_candidates(
         return Vec::new();
     };
     if crate::vsa::assets::actor_visual_gear_kind(&base.kind) {
-        return base
-            .model
-            .iter()
-            .cloned()
-            .map(|model| (form_id, model))
-            .collect();
+        let Some(models) = base.apparel_models.as_ref() else {
+            return Vec::new();
+        };
+        let OpenMwItemStats::Apparel {
+            armor_rating,
+            max_condition,
+            biped_slot_mask,
+        } = &base.item_stats
+        else {
+            return Vec::new();
+        };
+        return vec![(
+            form_id,
+            ApparelCandidate {
+                form_id,
+                male_worn: models.male_worn.clone(),
+                female_worn: models.female_worn.clone(),
+                male_world: models.male_world.clone(),
+                female_world: models.female_world.clone(),
+                biped_slot_mask: biped_slot_mask.unwrap_or_default(),
+                base_armor_rating: armor_rating.unwrap_or_default(),
+                max_condition: *max_condition,
+                current_condition: None,
+                value: base.value.unwrap_or_default(),
+            },
+        )];
     }
     let Some(leveled) = base.leveled.as_ref() else {
         return Vec::new();

@@ -285,3 +285,8 @@ can kill the viewer under load — retry.
   never weaken the blanket ignore. The same rule extends to every other
   asset format (GLB, DDS, WAV, NIF): converted game content lives only
   under the untracked `.bevyout/` cache.
+
+
+# Deep research 
+To find out about game mechanics and engine specific things call:
+agy -p "Use the deep-research skill to investigate [topic]" if possible

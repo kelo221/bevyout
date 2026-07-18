@@ -514,6 +514,7 @@ pub(crate) fn stage_placements(
                     fs::create_dir_all(parent)?;
                 }
                 let mut inputs = Vec::with_capacity(model_paths.len());
+                let mut staged_paths = HashMap::new();
                 for (index, (model_path, bytes)) in model_paths.iter().zip(&model_bytes).enumerate()
                 {
                     let path = if index == 0 {
@@ -527,11 +528,41 @@ pub(crate) fn stage_placements(
                         stage_textures(bytes, data_root, archives, staging_dir, diagnostics)?;
                         path
                     };
-                    inputs.push(path.to_string_lossy().to_string());
+                    let staged_path = path.to_string_lossy().to_string();
+                    staged_paths.insert(normalize_asset_path(model_path), staged_path.clone());
+                    inputs.push(staged_path);
                 }
+                let actor = actor_assembly
+                    .as_ref()
+                    .expect("assembly staging requires an actor descriptor");
                 let staged = ActorAssemblyDescriptor {
                     skeleton: inputs[0].clone(),
                     visual_inputs: inputs,
+                    body_parts: actor
+                        .body_parts
+                        .iter()
+                        .filter_map(|part| {
+                            staged_paths
+                                .get(&normalize_asset_path(&part.path))
+                                .map(|path| ActorBodyPartInput {
+                                    path: path.clone(),
+                                    index: part.index,
+                                })
+                        })
+                        .collect(),
+                    apparel: actor
+                        .apparel
+                        .iter()
+                        .filter_map(|item| {
+                            staged_paths
+                                .get(&normalize_asset_path(&item.path))
+                                .map(|path| ActorApparelInput {
+                                    path: path.clone(),
+                                    form_id: item.form_id,
+                                    biped_slot_mask: item.biped_slot_mask,
+                                })
+                        })
+                        .collect(),
                 };
                 fs::write(&assembly_path, serde_json::to_string(&staged)?)?;
                 assembly_path

@@ -27,16 +27,36 @@ pub(crate) const NIF_CONVERTER_REVISION: &str =
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
-pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v10";
+pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v14";
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v28+pynifly-v28-actor-bindpose-v10";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v28+pynifly-v28-actor-bindpose-v14";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ActorAssemblyDescriptor {
     pub(crate) skeleton: String,
     pub(crate) visual_inputs: Vec<String>,
+    /// Race body inputs remain in the import batch as underwear/skin
+    /// fallbacks. Blender removes a covered part only after the selected worn
+    /// apparel produced visible weighted geometry.
+    #[serde(default)]
+    pub(crate) body_parts: Vec<ActorBodyPartInput>,
+    #[serde(default)]
+    pub(crate) apparel: Vec<ActorApparelInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ActorBodyPartInput {
+    pub(crate) path: String,
+    pub(crate) index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ActorApparelInput {
+    pub(crate) path: String,
+    pub(crate) form_id: u32,
+    pub(crate) biped_slot_mask: u32,
 }
 
 /// Apparel is part of the baked actor appearance. Weapons are runtime
@@ -78,6 +98,8 @@ pub(crate) fn canonical_actor_assembly(
     Some(ActorAssemblyDescriptor {
         skeleton,
         visual_inputs,
+        body_parts: Vec::new(),
+        apparel: Vec::new(),
     })
 }
 

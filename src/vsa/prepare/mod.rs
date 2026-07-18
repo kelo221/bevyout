@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+mod actor_appearance;
 mod actor_catalog;
 mod audio;
 mod audio_resolve;
@@ -27,6 +28,7 @@ mod session;
 mod static_shadows;
 mod visual;
 
+pub(crate) use actor_appearance::*;
 pub(crate) use actor_catalog::*;
 pub(crate) use audio::*;
 pub(crate) use audio_resolve::*;
@@ -53,11 +55,12 @@ mod orchestrator;
 pub use orchestrator::prepare;
 
 use super::assets::{
-    ACTOR_CONVERTER_REVISION, ActorAssemblyDescriptor, BlenderAssetJob, NIF_CONVERTER_REVISION,
-    PREPARED_CONVERTER_REVISION, RootTransformPolicy, asset_conversion, audit_glb_visuals,
-    canonical_actor_assembly, content_addressed_glb_name, convert_staged_textures, find_blender,
-    load_archives, read_glb_animation_sound_cues, resolve_asset, root_transform_policy,
-    run_blender_batch, stage_textures, validate_actor_glb, validate_asset_cache_pair,
+    ACTOR_CONVERTER_REVISION, ActorApparelInput, ActorAssemblyDescriptor, ActorBodyPartInput,
+    BlenderAssetJob, NIF_CONVERTER_REVISION, PREPARED_CONVERTER_REVISION, RootTransformPolicy,
+    asset_conversion, audit_glb_visuals, canonical_actor_assembly, content_addressed_glb_name,
+    convert_staged_textures, find_blender, load_archives, read_glb_animation_sound_cues,
+    resolve_asset, root_transform_policy, run_blender_batch, stage_textures, validate_actor_glb,
+    validate_asset_cache_pair,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{

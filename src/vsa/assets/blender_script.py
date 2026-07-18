@@ -1,4 +1,4 @@
-import bpy, gzip, json, math, os, re, sys
+import bmesh, bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
@@ -1028,10 +1028,67 @@ def run_root_transform_self_test():
     assert is_pynifly_render_helper('headmeat.001')
     assert is_pynifly_render_helper('MeatCapBody')
     assert is_pynifly_render_helper('MeatCapLimbs')
-    assert is_pynifly_render_helper('RaiderArmor01M_GO')
-    assert is_pynifly_render_helper('RaiderArmor01M_GO.001')
+    assert is_pynifly_render_helper('llegmeatcapbody')
+    assert not is_pynifly_render_helper('RaiderArmor01M_GO')
+    assert not is_pynifly_render_helper('RaiderArmor01M_GO.001')
     assert not is_pynifly_render_helper('UpperBody')
     assert not is_pynifly_render_helper('DomeRoot:0')
+    assert partition_is_editor_visible(0x0001)
+    assert not partition_is_editor_visible(0x0000)
+    class FixtureShader:
+        def _readtexture(self, file_handle, shape_handle, slot):
+            assert file_handle == 'fixture-file'
+            assert shape_handle == 'fixture-shape'
+            return {
+                1: 'textures\\characters\\female\\UpperBodyFemale.dds',
+                2: 'textures\\characters\\female\\UpperBodyFemale_n.dds',
+            }.get(slot, '')
+    fixture_texture_node = type('TextureNode', (), {
+        'textures': {},
+        'shader': FixtureShader(),
+        'file': type('TextureFile', (), {'_handle': 'fixture-file'})(),
+        '_handle': 'fixture-shape',
+    })()
+    assert actor_shape_texture_values(
+        fixture_texture_node,
+        ['textures\\armor\\raiderarmor01\\OutfitF.dds'],
+    ) == [
+        'textures\\characters\\female\\UpperBodyFemale.dds',
+        'textures\\characters\\female\\UpperBodyFemale_n.dds',
+    ]
+    assert actor_material_alpha_policy(0) == 'OPAQUE'
+    assert actor_material_alpha_policy(1) == 'BLEND'
+    assert actor_material_alpha_policy(1 << 9) == 'MASK'
+    assert actor_material_alpha_policy(1 | (1 << 9)) == 'BLEND'
+    partition_mesh = bpy.data.meshes.new('ActorPartitionFixture')
+    partition_mesh.from_pydata(
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0),
+         (2, 0, 0), (3, 0, 0), (2, 1, 0)],
+        [],
+        [(0, 1, 2), (3, 4, 5)],
+    )
+    partition_obj = bpy.data.objects.new('ActorPartitionFixture', partition_mesh)
+    bpy.context.collection.objects.link(partition_obj)
+    visible_material = bpy.data.materials.new('VisibleSkinMaterial')
+    hidden_material = bpy.data.materials.new('HiddenGoreMaterial')
+    partition_mesh.materials.append(visible_material)
+    partition_mesh.materials.append(hidden_material)
+    partition_mesh.polygons[0].material_index = 0
+    partition_mesh.polygons[1].material_index = 1
+    visible_weights = partition_obj.vertex_groups.new(name='Bip01 Spine2')
+    visible_weights.add([0, 1, 2], 1.0, 'REPLACE')
+    fixture_node = type('PartitionNode', (), {
+        'partitions': [
+            type('Partition', (), {'flags': 0x0001})(),
+            type('Partition', (), {'flags': 0x0000})(),
+        ],
+        'partition_tris': [0, 1],
+    })()
+    assert prune_hidden_actor_partitions(partition_obj, fixture_node) == 1
+    assert len(partition_mesh.polygons) == 1
+    assert partition_mesh.polygons[0].material_index == 0
+    assert visible_weights.weight(0) == 1.0
+    bpy.data.objects.remove(partition_obj, do_unlink=True)
     fixture_bodies = [
         {'group_id': 0, 'node': 'Bip01 NonAccum',
          'shapes': [{'kind': 'Sphere', 'center': [0.0, 0.9, 0.0]}]},
@@ -1150,11 +1207,92 @@ def is_pynifly_render_helper(name):
     if normalized.startswith('bsbound:'):
         return True
     base = normalized.rsplit('.', 1)[0] if re.search(r'\.\d{3}$', normalized) else normalized
-    return base.endswith('_go') or base in {
-        'bodymeat', 'headmeat', 'meatcapbody', 'meatcaplimbs'
-    }
+    return base in {'bodymeat', 'headmeat'} or 'meatcap' in base
 
-def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
+def partition_is_editor_visible(flags):
+    return int(flags) & 0x0001 != 0
+
+def prune_hidden_actor_partitions(obj, nifnode):
+    """Drop BSDismember triangles hidden in the authored intact state."""
+    partitions = list(getattr(nifnode, 'partitions', ()) or ())
+    partition_tris = list(getattr(nifnode, 'partition_tris', ()) or ())
+    if not partitions or not partition_tris:
+        return 0
+    polygons = list(obj.data.polygons)
+    if len(partition_tris) != len(polygons):
+        print('[convert] actor partition map mismatch object={} polygons={} entries={}'.format(
+            obj.name, len(polygons), len(partition_tris)), flush=True)
+        return 0
+    hidden_faces = []
+    for polygon, partition_index in zip(polygons, partition_tris):
+        if partition_index >= len(partitions):
+            continue
+        if not partition_is_editor_visible(getattr(partitions[partition_index], 'flags', 0)):
+            hidden_faces.append(polygon.index)
+    if not hidden_faces:
+        return 0
+    mesh = bmesh.new()
+    mesh.from_mesh(obj.data)
+    mesh.faces.ensure_lookup_table()
+    bmesh.ops.delete(
+        mesh,
+        geom=[mesh.faces[index] for index in hidden_faces],
+        context='FACES',
+    )
+    mesh.to_mesh(obj.data)
+    mesh.free()
+    obj.data.update()
+    return len(hidden_faces)
+
+def actor_source_key(path):
+    return os.path.abspath(str(path)).replace('\\', '/').casefold()
+
+def actor_body_part_visible(index, occupied_slots):
+    covered_slot = {0: 0x00000004, 1: 0x00000008, 2: 0x00000010}.get(int(index), 0)
+    return covered_slot == 0 or occupied_slots & covered_slot == 0
+
+def actor_shape_texture_values(nifnode, source_fallback):
+    """Return the texture set authored for one PyNifly actor shape.
+
+    PyNifly 28 leaves ``NiShape.textures`` empty for Fallout 3's
+    BSShaderPPLightingProperty even though its native shader-slot accessor can
+    still read the referenced BSShaderTextureSet. Query those per-shape slots
+    before falling back to file-wide string recovery; a NIF can contain both
+    clothing and race-skin texture sets and must not apply the first one to
+    every mesh.
+    """
+    texture_map = getattr(nifnode, 'textures', None)
+    if texture_map:
+        values = [value for value in texture_map.values() if value]
+        if values:
+            return values
+    shader = getattr(nifnode, 'shader', None)
+    source_file = getattr(nifnode, 'file', None)
+    read_texture = getattr(shader, '_readtexture', None)
+    if callable(read_texture) and source_file is not None:
+        values = []
+        for slot in range(1, 9):
+            try:
+                value = read_texture(source_file._handle, nifnode._handle, slot)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                value = ''
+            if value and value.casefold() not in {
+                    existing.casefold() for existing in values}:
+                values.append(value)
+        if values:
+            return values
+    return list(source_fallback)
+
+def actor_material_alpha_policy(alpha_flags):
+    """Map authored NiAlphaProperty flags to a glTF alpha policy."""
+    flags = int(alpha_flags)
+    if flags & 1:
+        return 'BLEND'
+    if flags & (1 << 9):
+        return 'MASK'
+    return 'OPAQUE'
+
+def import_pynifly_actor(skeleton_path, visual_paths, body_parts, apparel, model, policy):
     """Import one actor visual assembly with PyNifly 28.
 
     NIFTools remains responsible for the isolated Havok pass. PyNifly owns the
@@ -1284,10 +1422,25 @@ def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
         diffuse.image = bpy.data.images.load(diffuse_path, check_existing=True)
         diffuse.image.colorspace_settings.name = 'sRGB'
         tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        alpha_flags = int(getattr(
+            getattr(material, 'niftools_alpha', None), 'alphaflag', 0))
+        alpha_policy = actor_material_alpha_policy(alpha_flags)
         alpha_output = diffuse.outputs.get('Alpha')
         alpha_input = principled.inputs.get('Alpha')
-        if alpha_output is not None and alpha_input is not None:
-            tree.links.new(alpha_output, alpha_input)
+        if (alpha_policy != 'OPAQUE' and
+                alpha_output is not None and alpha_input is not None):
+            if alpha_policy == 'MASK':
+                clip = tree.nodes.new('ShaderNodeMath')
+                clip.operation = 'GREATER_THAN'
+                clip.inputs[1].default_value = float(
+                    getattr(material, 'alpha_threshold', 0.5))
+                tree.links.new(alpha_output, clip.inputs[0])
+                tree.links.new(clip.outputs[0], alpha_input)
+            else:
+                tree.links.new(alpha_output, alpha_input)
+            if hasattr(material, 'surface_render_method'):
+                material.surface_render_method = (
+                    'BLENDED' if alpha_policy == 'BLEND' else 'DITHERED')
         if normal_path:
             normal = tree.nodes.new('ShaderNodeTexImage')
             normal.label = 'Normal'
@@ -1301,6 +1454,7 @@ def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
 
     repaired_materials = 0
     removed_helpers = 0
+    removed_hidden_faces = 0
     for represented in importer.objects_created:
         obj = represented.blender_obj
         nifnode = represented.nifnode
@@ -1311,14 +1465,19 @@ def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
             bpy.data.objects.remove(obj, do_unlink=True)
             removed_helpers += 1
             continue
+        hidden_faces = prune_hidden_actor_partitions(obj, nifnode)
+        removed_hidden_faces += hidden_faces
+        if len(obj.data.polygons) == 0:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            continue
         source_file = getattr(getattr(nifnode, 'file', None), 'filepath', '')
         if source_file:
             obj['bevyout_actor_source_path'] = str(source_file).replace('\\', '/')
-        texture_map = getattr(nifnode, 'textures', None)
-        texture_values = list(texture_map.values()) if texture_map else []
-        if not texture_values and source_file:
-            texture_values = source_texture_values.get(
-                os.path.abspath(source_file).casefold(), [])
+        texture_values = actor_shape_texture_values(
+            nifnode,
+            source_texture_values.get(
+                os.path.abspath(source_file).casefold(), []) if source_file else [],
+        )
         for material in obj.data.materials:
             if material is None:
                 continue
@@ -1335,6 +1494,46 @@ def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
         if obj.type == 'MESH' and is_pynifly_render_helper(obj.name):
             bpy.data.objects.remove(obj, do_unlink=True)
             removed_helpers += 1
+
+    body_part_by_source = {
+        actor_source_key(item.get('path', '')): int(item.get('index', -1))
+        for item in body_parts if item.get('path')
+    }
+    apparel_by_source = {
+        actor_source_key(item.get('path', '')): item
+        for item in apparel if item.get('path')
+    }
+    successful_apparel = set()
+    for obj in bpy.context.scene.objects:
+        if obj.type != 'MESH' or not len(obj.data.polygons):
+            continue
+        source = actor_source_key(obj.get('bevyout_actor_source_path', ''))
+        if source not in apparel_by_source:
+            continue
+        has_armature = any(modifier.type == 'ARMATURE' and modifier.object
+                           for modifier in obj.modifiers)
+        if obj.vertex_groups and has_armature:
+            successful_apparel.add(source)
+
+    occupied_slots = 0
+    for source in successful_apparel:
+        occupied_slots |= int(apparel_by_source[source].get('biped_slot_mask', 0))
+    for source, item in apparel_by_source.items():
+        if source in successful_apparel:
+            continue
+        for obj in list(bpy.context.scene.objects):
+            if (obj.type == 'MESH' and
+                    actor_source_key(obj.get('bevyout_actor_source_path', '')) == source):
+                bpy.data.objects.remove(obj, do_unlink=True)
+        print('[convert] actor apparel fallback form_id={:08x} path={}'.format(
+            int(item.get('form_id', 0)), item.get('path', '')), flush=True)
+    for source, index in body_part_by_source.items():
+        if actor_body_part_visible(index, occupied_slots):
+            continue
+        for obj in list(bpy.context.scene.objects):
+            if (obj.type == 'MESH' and
+                    actor_source_key(obj.get('bevyout_actor_source_path', '')) == source):
+                bpy.data.objects.remove(obj, do_unlink=True)
 
     armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
     meshes = [obj for obj in bpy.context.scene.objects
@@ -1375,8 +1574,9 @@ def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
     ]
     print('[convert] PyNifly actor imported version={} armatures={} meshes={} weighted={}'.format(
         '.'.join(str(value) for value in version), len(armatures), len(meshes),
-        len(weighted_meshes)), 'repaired_materials={} removed_helpers={}'.format(
-            repaired_materials, removed_helpers), flush=True)
+        len(weighted_meshes)), 'repaired_materials={} removed_helpers={} hidden_faces={} apparel={}/{}'.format(
+            repaired_materials, removed_helpers, removed_hidden_faces,
+            len(successful_apparel), len(apparel_by_source)), flush=True)
     return [], 0
 
 if sys.argv[-1] == '--self-test-root-policy':
@@ -1388,11 +1588,15 @@ for job in jobs:
     nif_path = job['input']
     assembly_inputs = None
     assembly_skeleton = None
+    assembly_body_parts = []
+    assembly_apparel = []
     if nif_path.casefold().endswith('.actor.json'):
         with open(nif_path, 'r', encoding='utf8') as assembly_file:
             assembly = json.load(assembly_file)
             assembly_skeleton = assembly.get('skeleton')
             assembly_inputs = assembly.get('visual_inputs', [])
+            assembly_body_parts = assembly.get('body_parts', [])
+            assembly_apparel = assembly.get('apparel', [])
         if not assembly_skeleton:
             raise RuntimeError('actor assembly manifest has no skeleton: ' + nif_path)
         if not assembly_inputs:
@@ -1461,6 +1665,8 @@ for job in jobs:
         spatial_corrections, collision_corrections = import_pynifly_actor(
             assembly_skeleton,
             assembly_inputs,
+            assembly_body_parts,
+            assembly_apparel,
             job.get('model', ''),
             job.get('root_transform_policy', 'preserve_verified'),
         )
