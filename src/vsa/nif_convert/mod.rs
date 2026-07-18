@@ -55,7 +55,7 @@ struct ReportIssue {
 }
 
 pub(crate) const NATIVE_NIF_REPORT_REVISION: &str =
-    "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1";
+    "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
