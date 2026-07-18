@@ -284,6 +284,16 @@ pub(crate) struct DebugInfoHud;
 
 const DEBUG_INFO_OFF_LINE: &str = "Debug info: Off";
 
+// Anchor corner note (post-merge fix, real-data smoke test): the existing
+// HUD occupies top-right (`FpsText`) and bottom-right (`ColliderDebugHud`
+// at `bottom: 10`, `StepDebugHud` at `bottom: 34`). This block's line count
+// varies at runtime (grows with live test nav agents), so anchoring it to
+// any of those same edges risks it growing into a row already in use --
+// exactly what happened bottom-left/bottom-right sharing the bottom row.
+// Top-left is the only corner nothing else uses, so pinning there rules out
+// the collision by construction regardless of how many lines this block
+// ever renders, instead of relying on padding-based spacing that a future
+// line addition could silently outgrow.
 pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
     commands.spawn((
         Text::new(DEBUG_INFO_OFF_LINE),
@@ -293,7 +303,7 @@ pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             left: px(10),
-            bottom: px(10),
+            top: px(8),
             ..default()
         },
         ZIndex(120),
@@ -367,11 +377,43 @@ pub(crate) fn update_debug_info_hud(world: &mut World) {
 
 #[cfg(test)]
 mod debug_info_tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
 
     #[test]
     fn off_line_is_stable_and_alone() {
         assert_eq!(DEBUG_INFO_OFF_LINE, "Debug info: Off");
+    }
+
+    // Real-data smoke-test fix: with the block anchored bottom-left, a
+    // multi-line render (a live test nav agent widens it to 4+ lines) grew
+    // upward into the same bottom row `ColliderDebugHud`/`StepDebugHud`
+    // occupy bottom-right, and the two texts garbled each other on screen.
+    // Top-left is the only screen corner nothing else in the HUD uses
+    // (`FpsText` is top-right, the collider/step HUDs are bottom-right), so
+    // pinning there rules out that collision by construction -- asserting
+    // `bottom`/`right` stay `Val::Auto` here is exactly the guarantee that
+    // no line count can ever grow this block into the existing bottom row.
+    #[test]
+    fn hud_is_anchored_top_left_never_the_existing_bottom_right_row() {
+        let mut world = World::new();
+        world.run_system_once(spawn_debug_info_hud).unwrap();
+        let mut query = world.query_filtered::<&Node, With<DebugInfoHud>>();
+        let node = query.single(&world).unwrap();
+        assert_eq!(node.position_type, PositionType::Absolute);
+        assert_eq!(node.top, Val::Px(8.0));
+        assert_eq!(node.left, Val::Px(10.0));
+        assert_eq!(
+            node.bottom,
+            Val::Auto,
+            "must not share the existing bottom-right HUD row"
+        );
+        assert_eq!(
+            node.right,
+            Val::Auto,
+            "must not share the existing bottom-right HUD row"
+        );
     }
 
     #[test]
