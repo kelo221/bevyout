@@ -17,7 +17,7 @@ use crate::console::{
     ConsoleInvocation, ConsoleRegistry, resolve_reference,
 };
 use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
-use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSceneManifest, PreparedSemantic};
+use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 
 use super::controls::{
     AmbientScale, AoStrength, FogStrength, HorizontalFov, IrradianceIntensity, LightingScale,
@@ -28,7 +28,6 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::{RealtimeShadowSettings, shadow_cache_status};
-use super::world::ActiveCell;
 use super::{diagnostics, interaction, nav, nav_overlay, player};
 
 mod common;
@@ -40,7 +39,7 @@ mod render_commands;
 mod ui_commands;
 mod world_commands;
 
-use common::{no_args, toggle_result};
+use common::{no_args, parse_item_form_id, toggle_result};
 #[cfg(test)]
 use render_commands::*;
 
