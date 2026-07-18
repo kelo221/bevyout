@@ -257,3 +257,170 @@ pub(crate) fn csv_field(value: &str) -> String {
         value.to_owned()
     }
 }
+
+// -- Issue #151: console-toggleable debug info HUD --------------------------
+//
+// Follows the same pattern as `player::mod`'s `ColliderDebugHud`/
+// `StepDebugHud`: a marker component spawned once under `console::
+// DiagnosticUi` (so `tdt` still folds it into the rest of the diagnostic
+// HUD), a plain toggle `Resource` the console command flips, and an
+// `Update` system that rewrites the `Text` every frame. Unlike those two
+// booleans, this block reports live state (position/cell/agents) so its
+// update system is exclusive (`&mut World`) to reach `player::FpsPlayer`'s
+// `Transform` and `nav::agent::hud_agent_status_lines` without widening
+// either module's public surface just for the HUD.
+
+/// Toggled by the `tdi` console command (`viewer::console`). A plain global
+/// resource, so it survives cell swaps untouched -- `world::swap` never
+/// resets viewer console resources -- and the HUD simply keeps reporting
+/// whatever is true of the new active cell once a swap completes.
+#[derive(Resource, Default)]
+pub(crate) struct DebugInfoState {
+    pub(crate) enabled: bool,
+}
+
+#[derive(Component)]
+pub(crate) struct DebugInfoHud;
+
+const DEBUG_INFO_OFF_LINE: &str = "Debug info: Off";
+
+pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
+    commands.spawn((
+        Text::new(DEBUG_INFO_OFF_LINE),
+        DebugInfoHud,
+        console::DiagnosticUi,
+        TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(10),
+            bottom: px(10),
+            ..default()
+        },
+        ZIndex(120),
+    ));
+}
+
+/// Pure formatting (issue #151's "deterministic text formatting" requirement,
+/// so tests can assert stable lines without spinning up a full `App`): one
+/// line for the toggle state, one for player position, one for the active
+/// cell's identity, then one per live test nav agent (already formatted by
+/// `nav::agent::hud_agent_status_lines`).
+pub(crate) fn format_debug_info_lines(
+    player_position: Option<Vec3>,
+    active_cell: Option<(u32, Option<&str>, Option<&str>)>,
+    nav_agent_lines: &[String],
+) -> Vec<String> {
+    let mut lines = vec!["Debug info: On".to_string()];
+    lines.push(match player_position {
+        Some(position) => format!(
+            "player pos=({:.2},{:.2},{:.2})",
+            position.x, position.y, position.z
+        ),
+        None => "player pos=unavailable".to_string(),
+    });
+    lines.push(match active_cell {
+        Some((form_id, editor_id, name)) => format!(
+            "cell={form_id:08x} editor_id={} name={}",
+            editor_id.unwrap_or("none"),
+            name.unwrap_or("none"),
+        ),
+        None => "cell=unavailable".to_string(),
+    });
+    lines.extend(nav_agent_lines.iter().cloned());
+    lines
+}
+
+pub(crate) fn update_debug_info_hud(world: &mut World) {
+    let enabled = world
+        .get_resource::<DebugInfoState>()
+        .is_some_and(|state| state.enabled);
+    let text = if enabled {
+        let player_position = {
+            let mut query = world.query_filtered::<&Transform, With<player::FpsPlayer>>();
+            query
+                .iter(world)
+                .next()
+                .map(|transform| transform.translation)
+        };
+        let active_cell = world
+            .get_resource::<PreparedSceneManifest>()
+            .map(|manifest| {
+                (
+                    manifest.cell.form_id,
+                    manifest.cell.editor_id.clone(),
+                    manifest.cell.name.clone(),
+                )
+            });
+        let active_cell_refs = active_cell
+            .as_ref()
+            .map(|(form_id, editor_id, name)| (*form_id, editor_id.as_deref(), name.as_deref()));
+        let nav_agent_lines = nav::agent::hud_agent_status_lines(world);
+        format_debug_info_lines(player_position, active_cell_refs, &nav_agent_lines).join("\n")
+    } else {
+        DEBUG_INFO_OFF_LINE.to_string()
+    };
+    let mut query = world.query_filtered::<&mut Text, With<DebugInfoHud>>();
+    if let Some(mut hud_text) = query.iter_mut(world).next() {
+        hud_text.0 = text;
+    }
+}
+
+#[cfg(test)]
+mod debug_info_tests {
+    use super::*;
+
+    #[test]
+    fn off_line_is_stable_and_alone() {
+        assert_eq!(DEBUG_INFO_OFF_LINE, "Debug info: Off");
+    }
+
+    #[test]
+    fn on_reports_unavailable_player_and_cell_when_absent() {
+        let lines = format_debug_info_lines(None, None, &[]);
+        assert_eq!(
+            lines,
+            vec![
+                "Debug info: On".to_string(),
+                "player pos=unavailable".to_string(),
+                "cell=unavailable".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn on_reports_player_position_and_cell_identity() {
+        let lines = format_debug_info_lines(
+            Some(Vec3::new(1.0, 2.5, -3.25)),
+            Some((0x0002_8579, Some("VaultAtrium"), Some("Vault 101 Atrium"))),
+            &[],
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "Debug info: On".to_string(),
+                "player pos=(1.00,2.50,-3.25)".to_string(),
+                "cell=00028579 editor_id=VaultAtrium name=Vault 101 Atrium".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn on_reports_cell_with_no_editor_id_or_name_as_none() {
+        let lines = format_debug_info_lines(None, Some((0x10, None, None)), &[]);
+        assert_eq!(lines[2], "cell=00000010 editor_id=none name=none");
+    }
+
+    #[test]
+    fn nav_agent_lines_are_appended_verbatim_after_cell() {
+        let lines = format_debug_info_lines(
+            None,
+            None,
+            &["nav agent 0 status=Idle position=(0.00,0.00,0.00) grounded=true stuck=false blocked=false".to_string()],
+        );
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[3],
+            "nav agent 0 status=Idle position=(0.00,0.00,0.00) grounded=true stuck=false blocked=false"
+        );
+    }
+}
