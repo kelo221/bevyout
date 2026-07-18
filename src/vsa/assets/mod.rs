@@ -25,6 +25,17 @@ use super::physics::read_physics_asset;
 pub(crate) const NIF_CONVERTER_REVISION: &str =
     "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29";
 
+/// Native static conversion cache identity. Keep independent from Blender so
+/// the two backends can coexist in one asset cache without false hits.
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str =
+    "nifty-fo3-native-v3-material-parity-workers-v2";
+
+/// Native actor assembly is deliberately unsupported in the first worker
+/// milestone. Its own cache identity prevents an existing Blender actor GLB
+/// from being mistaken for a native result.
+pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
+    "nifty-fo3-native-actor-assembly-v2-skeleton-owned-hierarchy";
+
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
 pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v17";
@@ -32,6 +43,14 @@ pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v1
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v17";
+
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str =
+    "nifty-fo3-native-v3-material-parity-workers-v2+actor-assembly-v2-skeleton-owned-hierarchy";
+
+pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
+    PREPARED_CONVERTER_REVISION,
+    NATIVE_PREPARED_CONVERTER_REVISION,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ActorAssemblyDescriptor {
@@ -219,12 +238,19 @@ pub(crate) fn asset_conversion(static_asset: bool) -> AssetConversion {
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlenderAssetJob {
+    pub(crate) kind: AssetJobKind,
     pub(crate) input: PathBuf,
     pub(crate) output: PathBuf,
     pub(crate) physics_output: PathBuf,
     pub(crate) model: String,
     pub(crate) conversion: AssetConversion,
     pub(crate) root_transform_policy: RootTransformPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssetJobKind {
+    StaticNif,
+    ActorAssembly,
 }
 
 pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[u8]) -> String {

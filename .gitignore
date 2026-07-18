@@ -18,3 +18,4 @@ tools/bevyout-mcp/node_modules/**
 !features/fixtures/*.ron
 !BevyCheatSheet/**/*.ron
 /NifConverter
+/_.bevyout

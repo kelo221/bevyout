@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::super::assets::PREPARED_CONVERTER_REVISION;
 
 /// Physics classification/sidecar pipeline revision (F49.1). Bump whenever
@@ -46,10 +47,18 @@ pub(crate) struct CellFingerprints {
 impl CellFingerprints {
     /// The fingerprints for the current toolchain/session, given the batch
     /// session's plugin content-set fingerprint (`BatchSession::fingerprint`).
+    #[cfg(test)]
     pub(crate) fn current(plugin_content_set: impl Into<String>) -> Self {
+        Self::current_with_converter(plugin_content_set, PREPARED_CONVERTER_REVISION)
+    }
+
+    pub(crate) fn current_with_converter(
+        plugin_content_set: impl Into<String>,
+        converter_revision: &str,
+    ) -> Self {
         Self {
             plugin_content_set: plugin_content_set.into(),
-            converter: PREPARED_CONVERTER_REVISION.into(),
+            converter: converter_revision.into(),
             physics: PHYSICS_PIPELINE_REVISION.into(),
             prepare_pipeline: PREPARE_PIPELINE_REVISION.into(),
         }
@@ -163,6 +172,12 @@ mod tests {
         assert_eq!(current.converter, PREPARED_CONVERTER_REVISION);
         assert_eq!(current.physics, PHYSICS_PIPELINE_REVISION);
         assert_eq!(current.prepare_pipeline, PREPARE_PIPELINE_REVISION);
+    }
+
+    #[test]
+    fn selected_converter_revision_is_recorded_independently() {
+        let current = CellFingerprints::current_with_converter("plugin-fp", "native-v1");
+        assert_eq!(current.converter, "native-v1");
     }
 
     // T49.2: an unchanged set of four fingerprints is not stale.

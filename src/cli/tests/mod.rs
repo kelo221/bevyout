@@ -42,6 +42,61 @@ fn nif_convert_requires_one_source_and_parses_conversion_options() {
 }
 
 #[test]
+fn native_converter_is_default_and_blender_remains_explicit() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Native);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "SuperDuperMart",
+        "--converter",
+        "blender",
+        "--jobs",
+        "8",
+    ])
+    .unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Blender);
+    assert_eq!(args.jobs, Some(8));
+
+    let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Native);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--converter",
+        "blender",
+    ])
+    .unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Blender);
+
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "prepare",
+            "SuperDuperMart",
+            "--converter",
+            "unknown",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     let cli = Cli::try_parse_from([
         "bevyout",

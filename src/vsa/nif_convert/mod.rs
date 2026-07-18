@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::cli::{NifConversionMode, NifConvertArgs};
 
-use super::assets::{load_archives, resolve_asset};
+use super::assets::{RootTransformPolicy, load_archives, resolve_asset};
 use super::physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, validate_physics_asset,
@@ -54,15 +54,41 @@ struct ReportIssue {
     message: String,
 }
 
-pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
-    ensure_output_available(&args.output, args.force)?;
-    if let Some(path) = &args.report {
-        ensure_output_available(path, args.force)?;
-    }
-    if let Some(path) = &args.physics_output {
-        ensure_output_available(path, args.force)?;
-    }
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v3-material-parity-skin";
 
+pub(crate) struct NifConversionRequest<'a> {
+    pub(crate) source_name: &'a str,
+    pub(crate) nif_bytes: &'a [u8],
+    pub(crate) output: &'a Path,
+    pub(crate) physics_output: Option<&'a Path>,
+    pub(crate) report: Option<&'a Path>,
+    pub(crate) conversion: NifConversionMode,
+    pub(crate) root_transform_policy: RootTransformPolicy,
+    pub(crate) allow_lossy: bool,
+    pub(crate) force: bool,
+    pub(crate) data_root: Option<&'a Path>,
+    pub(crate) archives: &'a [super::bsa::BsaArchive],
+}
+
+#[derive(Debug)]
+pub(crate) struct NifConversionResult {
+    pub(crate) lines: Vec<String>,
+    pub(crate) missing_textures: Vec<String>,
+    pub(crate) lossy_scene_issues: usize,
+}
+
+pub(crate) struct ActorSceneConversionRequest<'a> {
+    pub(crate) source_name: &'a str,
+    pub(crate) scene: nif::fo3::Scene,
+    pub(crate) skeleton_document: &'a nif::fo3::Document,
+    pub(crate) output: &'a Path,
+    pub(crate) physics_output: &'a Path,
+    pub(crate) allow_lossy: bool,
+    pub(crate) data_root: Option<&'a Path>,
+    pub(crate) archives: &'a [super::bsa::BsaArchive],
+}
+
+pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
     let data_root = resolve_data_root(args.game_root.as_deref())?;
     let mut archive_diagnostics = Vec::new();
     let archives = if let Some(data_root) = &data_root {
@@ -96,22 +122,65 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
         (asset, bytes)
     };
 
-    println!("nif-convert: input {source_name}");
-    let document = nif::fo3::parse(&nif_bytes).context("parsing FO3/FNV NIF 20.2.0.7")?;
-    println!(
+    let result = convert_nif(NifConversionRequest {
+        source_name: &source_name,
+        nif_bytes: &nif_bytes,
+        output: &args.output,
+        physics_output: args.physics_output.as_deref(),
+        report: args.report.as_deref(),
+        conversion: args.conversion,
+        root_transform_policy: RootTransformPolicy::PreserveReviewRequired,
+        allow_lossy: args.allow_lossy,
+        force: args.force,
+        data_root: data_root.as_deref(),
+        archives: &archives,
+    })?;
+    for line in result.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConversionResult> {
+    ensure_output_available(request.output, request.force)?;
+    if let Some(path) = request.report {
+        ensure_output_available(path, request.force)?;
+    }
+    if let Some(path) = request.physics_output {
+        ensure_output_available(path, request.force)?;
+    }
+
+    let mut lines = vec![format!("nif-convert: input {}", request.source_name)];
+    let document = nif::fo3::parse(request.nif_bytes).context("parsing FO3/FNV NIF 20.2.0.7")?;
+    lines.push(format!(
         "nif-convert: parsed version=20.2.0.7 bethesda={} blocks={}",
         document.header.bethesda.version,
         document.blocks.len()
-    );
+    ));
     let mut scene = nif::fo3::extract_scene(&document).context("extracting NIF scene")?;
-    apply_conversion_mode(&mut scene, args.conversion);
-    println!(
+    let record_zero_non_identity = scene
+        .nodes
+        .iter()
+        .find(|node| node.source_block == 0)
+        .is_some_and(|node| !nif_transform_is_identity(node.transform));
+    let corrected_root_transform = request.root_transform_policy
+        == RootTransformPolicy::DiscardVerified
+        && record_zero_non_identity;
+    if request.root_transform_policy == RootTransformPolicy::DiscardVerified
+        && let Some(root) = scene.nodes.iter_mut().find(|node| node.source_block == 0)
+    {
+        root.transform.translation = [0.0; 3];
+        root.transform.rotation = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        root.transform.scale = 1.0;
+    }
+    apply_conversion_mode(&mut scene, request.conversion);
+    lines.push(format!(
         "nif-convert: scene meshes={} vertices={} triangles={}",
         scene.statistics.source_meshes,
         scene.statistics.source_vertices,
         scene.statistics.source_triangles
-    );
-    println!(
+    ));
+    lines.push(format!(
         "nif-convert: animations={} channels={}",
         scene.animations.len(),
         scene
@@ -119,8 +188,8 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
             .iter()
             .map(|animation| animation.channels.len())
             .sum::<usize>()
-    );
-    if !args.allow_lossy && !scene.issues.is_empty() {
+    ));
+    if !request.allow_lossy && !scene.issues.is_empty() {
         bail!(
             "strict conversion rejected {} lossy scene issue(s): {} (pass --allow-lossy to emit the supported subset)",
             scene.issues.len(),
@@ -140,27 +209,35 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
         bail!("NIF scene contains no renderable props-first meshes");
     }
 
-    let textures = resolve_textures(&scene, data_root.as_deref(), &archives)?;
-    let output = nif::fo3::encode_glb(
+    let textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    let mut output = nif::fo3::encode_glb(
         &scene,
         &textures,
         &nif::fo3::GlbOptions {
-            source_name: source_name.clone(),
-            allow_missing_textures: args.allow_lossy,
+            source_name: request.source_name.to_owned(),
+            allow_missing_textures: request.allow_lossy,
         },
     )
     .context("encoding self-contained GLB")?;
-    println!(
+    output.bytes = patch_native_glb_metadata(
+        &output.bytes,
+        request.root_transform_policy,
+        record_zero_non_identity,
+        usize::from(corrected_root_transform),
+    )?;
+    lines.push(format!(
         "nif-convert: textures embedded={} missing={}",
         textures.len().saturating_sub(output.missing_textures.len()),
         output.missing_textures.len()
-    );
+    ));
 
-    let (physics, physics_bytes, physics_bodies, physics_shapes) = if args.physics_output.is_some()
+    let (physics, physics_bytes, physics_bodies, physics_shapes) = if request
+        .physics_output
+        .is_some()
     {
         let physics_scene =
             nif::fo3::extract_physics(&document).context("extracting authored Havok collision")?;
-        if !args.allow_lossy && !physics_scene.issues.is_empty() {
+        if !request.allow_lossy && !physics_scene.issues.is_empty() {
             bail!(
                 "strict conversion rejected {} lossy physics issue(s): {} (pass --allow-lossy to emit the supported subset)",
                 physics_scene.issues.len(),
@@ -197,12 +274,14 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
         ("not-requested", None, 0, 0)
     };
 
-    let report_bytes = if args.report.is_some() {
+    let missing_textures = output.missing_textures.clone();
+    let lossy_scene_issues = scene.issues.len();
+    let report_bytes = if request.report.is_some() {
         let report = ConversionReport {
-            converter: "nifty-fo3-native-v1",
-            source: source_name,
-            output: args.output.display().to_string(),
-            conversion: conversion_name(args.conversion),
+            converter: NATIVE_NIF_REPORT_REVISION,
+            source: request.source_name.to_owned(),
+            output: request.output.display().to_string(),
+            conversion: conversion_name(request.conversion),
             nif_version: "20.2.0.7",
             bethesda_version: document.header.bethesda.version,
             blocks: document.blocks.len(),
@@ -235,9 +314,8 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
                 })
                 .collect(),
             physics,
-            physics_output: args
+            physics_output: request
                 .physics_output
-                .as_ref()
                 .map(|path| path.display().to_string()),
             physics_bodies,
             physics_shapes,
@@ -249,26 +327,105 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
         None
     };
 
-    atomic_write(&args.output, &output.bytes, args.force)?;
-    println!(
+    atomic_write(request.output, &output.bytes, request.force)?;
+    lines.push(format!(
         "nif-convert: wrote {} bytes -> {}",
         output.bytes.len(),
-        args.output.display()
-    );
-    if let (Some(path), Some(bytes)) = (&args.physics_output, &physics_bytes) {
-        atomic_write(path, bytes, args.force)?;
-        println!(
+        request.output.display()
+    ));
+    if let (Some(path), Some(bytes)) = (request.physics_output, &physics_bytes) {
+        atomic_write(path, bytes, request.force)?;
+        lines.push(format!(
             "nif-convert: physics bodies={} shapes={} -> {}",
             physics_bodies,
             physics_shapes,
             path.display()
+        ));
+    }
+    if let (Some(path), Some(bytes)) = (request.report, &report_bytes) {
+        atomic_write(path, bytes, request.force)?;
+        lines.push(format!("nif-convert: report -> {}", path.display()));
+    }
+    Ok(NifConversionResult {
+        lines,
+        missing_textures,
+        lossy_scene_issues,
+    })
+}
+
+pub(crate) fn convert_actor_scene(
+    request: ActorSceneConversionRequest<'_>,
+) -> Result<NifConversionResult> {
+    ensure_output_available(request.output, true)?;
+    ensure_output_available(request.physics_output, true)?;
+    let mut scene = request.scene;
+    scene.animations.clear();
+    if !request.allow_lossy && !scene.issues.is_empty() {
+        bail!(
+            "strict actor conversion rejected {} lossy scene issue(s): {}",
+            scene.issues.len(),
+            scene
+                .issues
+                .iter()
+                .take(5)
+                .map(|issue| format!(
+                    "block {} {}: {}",
+                    issue.source_block, issue.type_name, issue.message
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
         );
     }
-    if let (Some(path), Some(bytes)) = (&args.report, &report_bytes) {
-        atomic_write(path, bytes, args.force)?;
-        println!("nif-convert: report -> {}", path.display());
+    if !scene.has_visible_geometry() {
+        bail!("actor assembly contains no visible geometry");
     }
-    Ok(())
+    let textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    let mut output = nif::fo3::encode_glb(
+        &scene,
+        &textures,
+        &nif::fo3::GlbOptions {
+            source_name: request.source_name.to_owned(),
+            allow_missing_textures: request.allow_lossy,
+        },
+    )
+    .context("encoding native actor GLB")?;
+    output.bytes = patch_native_glb_metadata(
+        &output.bytes,
+        RootTransformPolicy::PreserveVerified,
+        false,
+        0,
+    )?;
+
+    let physics_scene = nif::fo3::extract_physics(request.skeleton_document)
+        .context("extracting actor skeleton Havok collision")?;
+    if !request.allow_lossy && !physics_scene.issues.is_empty() {
+        bail!(
+            "strict actor conversion rejected {} lossy physics issue(s)",
+            physics_scene.issues.len()
+        );
+    }
+    let physics_bodies = physics_scene.bodies.len();
+    let physics_shapes = physics_scene
+        .bodies
+        .iter()
+        .map(|body| body.shapes.len())
+        .sum::<usize>();
+    let physics_bytes = encode_physics_sidecar(physics_scene)?;
+    atomic_write(request.output, &output.bytes, true)?;
+    atomic_write(request.physics_output, &physics_bytes, true)?;
+
+    Ok(NifConversionResult {
+        lines: vec![format!(
+            "nif-convert: actor meshes={} vertices={} triangles={} physics_bodies={} physics_shapes={}",
+            scene.statistics.source_meshes,
+            scene.statistics.source_vertices,
+            scene.statistics.source_triangles,
+            physics_bodies,
+            physics_shapes
+        )],
+        missing_textures: output.missing_textures,
+        lossy_scene_issues: scene.issues.len(),
+    })
 }
 
 fn encode_physics_sidecar(scene: nif::fo3::PhysicsScene) -> Result<Vec<u8>> {
@@ -428,6 +585,88 @@ fn apply_conversion_mode(scene: &mut nif::fo3::Scene, mode: NifConversionMode) {
     }
 }
 
+fn nif_transform_is_identity(transform: nif::fo3::Transform) -> bool {
+    const IDENTITY_ROTATION: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    transform.translation == [0.0; 3]
+        && transform.rotation == IDENTITY_ROTATION
+        && transform.scale == 1.0
+}
+
+fn patch_native_glb_metadata(
+    bytes: &[u8],
+    root_transform_policy: RootTransformPolicy,
+    record_zero_non_identity: bool,
+    spatial_corrections: usize,
+) -> Result<Vec<u8>> {
+    if bytes.len() < 20 || &bytes[0..4] != b"glTF" {
+        bail!("native converter produced an invalid GLB header");
+    }
+    let json_length = usize::try_from(u32::from_le_bytes(bytes[12..16].try_into().unwrap()))
+        .context("GLB JSON length exceeds the addressable range")?;
+    if &bytes[16..20] != b"JSON" || 20 + json_length > bytes.len() {
+        bail!("native converter produced an invalid GLB JSON chunk");
+    }
+    let mut document: serde_json::Value = serde_json::from_slice(&bytes[20..20 + json_length])
+        .context("decoding native GLB JSON metadata")?;
+    let nodes = document
+        .get_mut("nodes")
+        .and_then(serde_json::Value::as_array_mut)
+        .context("native GLB has no node array")?;
+    let carrier = nodes
+        .iter_mut()
+        .find(|node| {
+            node.get("extras")
+                .and_then(|extras| extras.get("bevyout_native_nif_converter"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .context("native GLB has no metadata carrier node")?;
+    let extras = carrier
+        .get_mut("extras")
+        .and_then(serde_json::Value::as_object_mut)
+        .context("native GLB metadata carrier has no extras object")?;
+    extras.insert(
+        "bevyout_root_transform_policy".into(),
+        root_transform_policy.tag().into(),
+    );
+    extras.insert("bevyout_spatial_audit_version".into(), 1.into());
+    extras.insert(
+        "bevyout_expected_spatial_corrections".into(),
+        spatial_corrections.into(),
+    );
+    extras.insert(
+        "bevyout_verified_spatial_corrections".into(),
+        spatial_corrections.into(),
+    );
+    extras.insert("bevyout_expected_collision_corrections".into(), 0.into());
+    extras.insert("bevyout_verified_collision_corrections".into(), 0.into());
+    extras.insert(
+        "bevyout_record_zero_non_identity".into(),
+        record_zero_non_identity.into(),
+    );
+
+    let mut json = serde_json::to_vec(&document)?;
+    while json.len() % 4 != 0 {
+        json.push(b' ');
+    }
+    let json_length = u32::try_from(json.len()).context("native GLB JSON exceeds u32")?;
+    let remaining_offset =
+        20 + usize::try_from(u32::from_le_bytes(bytes[12..16].try_into().unwrap()))?;
+    let total_length = 20_usize
+        .checked_add(json.len())
+        .and_then(|length| length.checked_add(bytes.len() - remaining_offset))
+        .context("native GLB length overflow")?;
+    let mut patched = Vec::with_capacity(total_length);
+    patched.extend_from_slice(&bytes[0..8]);
+    patched.extend_from_slice(&u32::try_from(total_length)?.to_le_bytes());
+    patched.extend_from_slice(&json_length.to_le_bytes());
+    patched.extend_from_slice(b"JSON");
+    patched.extend_from_slice(&json);
+    patched.extend_from_slice(&bytes[remaining_offset..]);
+    gltf::Gltf::from_slice(&patched).context("validating native GLB metadata patch")?;
+    Ok(patched)
+}
+
 fn conversion_name(mode: NifConversionMode) -> &'static str {
     match mode {
         NifConversionMode::Preserve => "preserve",
@@ -496,5 +735,34 @@ mod tests {
         assert!(ensure_output_available(&path, false).is_err());
         assert!(ensure_output_available(&path, true).is_ok());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reusable_conversion_rejects_malformed_nif_without_publishing_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "bevyout-nif-convert-malformed-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("malformed.glb");
+        let physics = root.join("malformed.physics.json.gz");
+        let error = convert_nif(NifConversionRequest {
+            source_name: "malformed.nif",
+            nif_bytes: b"not a nif",
+            output: &output,
+            physics_output: Some(&physics),
+            report: None,
+            conversion: NifConversionMode::Preserve,
+            root_transform_policy: RootTransformPolicy::PreserveReviewRequired,
+            allow_lossy: true,
+            force: true,
+            data_root: Some(&root),
+            archives: &[],
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("parsing FO3/FNV NIF"));
+        assert!(!output.exists());
+        assert!(!physics.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }

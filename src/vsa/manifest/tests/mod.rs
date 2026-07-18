@@ -60,6 +60,8 @@ fn prepared_artifact_versions_require_exact_pipeline_identity() {
     ))
     .unwrap();
     ensure_prepared_manifest_compatible(&manifest, "converter-v1", 1).unwrap();
+    ensure_prepared_manifest_compatible_any(&manifest, &["converter-v0", "converter-v1"], 1)
+        .unwrap();
 
     let mut future = manifest.clone();
     future.schema_version += 1;

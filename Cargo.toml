@@ -23,7 +23,7 @@ flate2 = "1.1"
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 nalgebra = "0.34"
-nif = { git = "https://github.com/kelo221/nifty.git", rev = "38018eb9c9910a603fcc5bce8d36b0390e0a5822", default-features = false, features = ["fo3_glb"] }
+nif = { path = "NifConverter/nifty", default-features = false, features = ["fo3_glb"] }
 rayon = "1.10"
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }

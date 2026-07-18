@@ -84,6 +84,31 @@ pub(crate) enum NifConversionMode {
     QuickAo,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrepareConverter {
+    Blender,
+    Native,
+}
+
+impl Default for PrepareConverter {
+    fn default() -> Self {
+        match crate::converter_policy::resolve_converter_backend(None) {
+            crate::converter_policy::ConverterBackend::Native => Self::Native,
+            crate::converter_policy::ConverterBackend::Blender => Self::Blender,
+        }
+    }
+}
+
+impl std::fmt::Display for PrepareConverter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backend = match self {
+            Self::Blender => crate::converter_policy::ConverterBackend::Blender,
+            Self::Native => crate::converter_policy::ConverterBackend::Native,
+        };
+        formatter.write_str(backend.as_str())
+    }
+}
+
 #[derive(Parser, Debug)]
 pub struct ScriptArgs {
     #[command(subcommand)]
@@ -155,6 +180,9 @@ pub struct PrepareArgs {
     /// Blender executable path.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
+    /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
+    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
+    pub(crate) converter: PrepareConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -234,6 +262,9 @@ pub struct RenderArgs {
     /// Blender executable used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) blender: Option<PathBuf>,
+    /// NIF-to-GLB backend used if render needs to prepare or refresh the cell.
+    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
+    pub(crate) converter: PrepareConverter,
     /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
     #[arg(long, hide = true)]
     pub(crate) irradiance_blender: Option<PathBuf>,

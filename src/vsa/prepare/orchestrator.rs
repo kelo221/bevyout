@@ -180,8 +180,17 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // toolchain and exits nonzero on any staleness. Performs no
     // preparation: it returns before the cell map is written or the job
     // manifest's `pending` entries and on-disk copy are touched.
+    let selected_converter_revision = match args.converter {
+        PrepareConverter::Blender => PREPARED_CONVERTER_REVISION,
+        PrepareConverter::Native => NATIVE_PREPARED_CONVERTER_REVISION,
+    };
     if args.check_fingerprints {
-        return report_fingerprints(&manifest, &resolved, &fingerprint);
+        return report_fingerprints(
+            &manifest,
+            &resolved,
+            &fingerprint,
+            selected_converter_revision,
+        );
     }
 
     // F47.4: write the deterministic cell map into the cache dir root,
@@ -210,7 +219,8 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // and `--retry-failed` all go through this same call, so any stale
     // component re-prepares exactly that cell instead of being skipped.
     manifest.ensure_pending(&resolved);
-    let current_fingerprints = CellFingerprints::current(fingerprint.clone());
+    let current_fingerprints =
+        CellFingerprints::current_with_converter(fingerprint.clone(), selected_converter_revision);
     let (to_run, skipped, stale_cells) =
         filter_resume_checked(&manifest, &resolved, args.force, &current_fingerprints);
     for (form_id, components) in &stale_cells {
@@ -367,8 +377,12 @@ fn report_fingerprints(
     manifest: &JobManifest,
     resolved: &[u32],
     plugin_content_set_fingerprint: &str,
+    converter_revision: &str,
 ) -> Result<()> {
-    let current = CellFingerprints::current(plugin_content_set_fingerprint);
+    let current = CellFingerprints::current_with_converter(
+        plugin_content_set_fingerprint,
+        converter_revision,
+    );
     let mut valid_count = 0usize;
     let mut stale_count = 0usize;
     for &form_id in resolved {
@@ -560,7 +574,22 @@ fn prepare_cell(
     } else {
         cell.effective_lighting = Some(prepared_lighting(legacy_lighting(&cell)));
     }
-    let blender = find_blender(args.blender)?;
+    let (static_converter_revision, actor_converter_revision, prepared_converter_revision) =
+        match args.converter {
+            PrepareConverter::Blender => (
+                NIF_CONVERTER_REVISION,
+                ACTOR_CONVERTER_REVISION,
+                PREPARED_CONVERTER_REVISION,
+            ),
+            PrepareConverter::Native => (
+                NATIVE_NIF_CONVERTER_REVISION,
+                NATIVE_ACTOR_CONVERTER_REVISION,
+                NATIVE_PREPARED_CONVERTER_REVISION,
+            ),
+        };
+    let blender = (args.converter == PrepareConverter::Blender)
+        .then(|| find_blender(args.blender.clone()))
+        .transpose()?;
     let (navmeshes, nav_graph, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
@@ -611,6 +640,8 @@ fn prepare_cell(
         &assets_dir,
         &mut diagnostics,
         args.rebuild_assets,
+        static_converter_revision,
+        actor_converter_revision,
     )?;
     // F47.3: fold this cell's asset cache counts into the batch total.
     session.asset_totals.lock().unwrap().add(
@@ -641,6 +672,7 @@ fn prepare_cell(
     // Blender/texture-conversion step runs at a time, while every other
     // cell's parse/stage phase keeps running in parallel around it.
     let item_icons;
+    let mut failed_native_assets = HashMap::new();
     {
         let _blender_guard = session.blender_lock.lock().unwrap();
         item_icons = stage_item_icons(
@@ -651,10 +683,90 @@ fn prepare_cell(
             &source_fingerprint,
             &mut diagnostics,
         )?;
-        convert_staged_textures(&staging_dir, &mut diagnostics)?;
-        if !jobs.is_empty() {
-            run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
-                .context("headless Blender conversion failed")?;
+        match args.converter {
+            PrepareConverter::Blender => {
+                convert_staged_textures(&staging_dir, &mut diagnostics)?;
+                if !jobs.is_empty() {
+                    run_blender_batch(
+                        blender.as_deref().expect("Blender backend resolved above"),
+                        &jobs,
+                        &data_root,
+                        &staging_dir,
+                    )
+                    .context("headless Blender conversion failed")?;
+                }
+            }
+            PrepareConverter::Native => {
+                if !jobs.is_empty() {
+                    let batch = run_native_batch(
+                        &jobs,
+                        &data_root,
+                        &session.archives,
+                        args.jobs,
+                        args.strict,
+                    )
+                    .context("native NIF batch conversion failed")?;
+                    let summary = batch.summary();
+                    let summary_line = summary.line();
+                    output.push(summary_line.clone());
+                    diagnostics.push(Diagnostic {
+                        severity: "info".into(),
+                        message: summary_line,
+                    });
+                    for outcome in &batch.outcomes {
+                        if outcome.status == NativeJobStatus::Converted {
+                            if let Some(warning) = &outcome.error {
+                                diagnostics.push(Diagnostic {
+                                    severity: "warning".into(),
+                                    message: format!(
+                                        "native conversion lossy: model={} job={} {warning}",
+                                        outcome.model, outcome.index
+                                    ),
+                                });
+                            }
+                            continue;
+                        }
+                        let message = format!(
+                            "native conversion {}: model={} job={} stage={} error={}",
+                            match outcome.status {
+                                NativeJobStatus::Unsupported => "unsupported",
+                                NativeJobStatus::Failed => "failed",
+                                NativeJobStatus::Converted => unreachable!(),
+                            },
+                            outcome.model,
+                            outcome.index,
+                            outcome.stage,
+                            outcome.error.as_deref().unwrap_or("unknown error")
+                        );
+                        output.push(message.clone());
+                        diagnostics.push(Diagnostic {
+                            severity: "warning".into(),
+                            message,
+                        });
+                    }
+                    batch.enforce_strict(args.strict)?;
+                    for (path, reason) in batch.failed_outputs(&jobs) {
+                        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                            failed_native_assets.insert(format!("assets/{file_name}"), reason);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !failed_native_assets.is_empty() {
+        visual_assets.retain(|asset| !failed_native_assets.contains_key(&asset.asset_path));
+        for placement in &mut placements {
+            let Some(asset_path) = placement.asset_path.as_ref() else {
+                continue;
+            };
+            let Some(reason) = failed_native_assets.get(asset_path) else {
+                continue;
+            };
+            placement.asset_path = None;
+            placement.physics_asset_path = None;
+            placement.error = Some(reason.clone());
+            placement.step_support = false;
         }
     }
     let mut scene_placements = Vec::new();
@@ -899,7 +1011,7 @@ fn prepare_cell(
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
-        converter_revision: Some(PREPARED_CONVERTER_REVISION.into()),
+        converter_revision: Some(prepared_converter_revision.into()),
         physics_schema_version: Some(PHYSICS_ASSET_SCHEMA_VERSION),
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),

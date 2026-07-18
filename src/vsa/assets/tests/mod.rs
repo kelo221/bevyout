@@ -265,6 +265,7 @@ fn material_emission_policy_preserves_source_strength_and_override_precedence() 
 #[test]
 fn blender_job_json_carries_quick_ao_profile() {
     let json = blender_jobs_json(&[BlenderAssetJob {
+        kind: AssetJobKind::StaticNif,
         input: PathBuf::from("C:\\staging\\mesh.nif"),
         output: PathBuf::from("C:\\cache\\mesh.glb"),
         physics_output: PathBuf::from("C:\\cache\\mesh.physics.json.gz"),

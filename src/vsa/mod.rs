@@ -16,7 +16,9 @@ mod recipe;
 mod report;
 mod scenes;
 
+#[cfg(test)]
 pub(crate) use assets::PREPARED_CONVERTER_REVISION;
+pub(crate) use assets::SUPPORTED_PREPARED_CONVERTER_REVISIONS;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;
@@ -46,7 +48,7 @@ pub(crate) use manifest::{
     PreparedItemCategory, PreparedItemDefinition, PreparedItemStats, PreparedLeveledList,
     PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedRuntimeMutability,
     PreparedSceneManifest, PreparedSemantic, cell_label, ensure_baked_scene_compatible,
-    ensure_prepared_manifest_compatible,
+    ensure_prepared_manifest_compatible_any,
 };
 pub use nif_convert::nif_convert;
 pub(crate) use paths::{FO3_SCALE, fingerprint};

@@ -187,6 +187,14 @@ mod ledger_policy;
 #[allow(dead_code, unused_imports)]
 mod movement_policy;
 
+#[path = "../src/converter_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod converter_policy;
+
+#[path = "../src/vsa/bake/gltf_extension_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod gltf_extension_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -218,6 +226,10 @@ mod prepare {
     #[path = "../src/vsa/prepare/fingerprints.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod fingerprints;
+
+    #[path = "../src/vsa/prepare/native_policy.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod native_policy;
 
     #[path = "../src/vsa/prepare/container_audio_policy.rs"]
     #[allow(dead_code, unused_imports)]
@@ -253,6 +265,7 @@ use prepare::batch_cache;
 use prepare::container_audio_policy;
 use prepare::fingerprints;
 use prepare::jobs;
+use prepare::native_policy;
 use prepare::nav_graph;
 use prepare::selectors;
 
@@ -642,6 +655,19 @@ struct BevyoutWorld {
     // -- actor_conversion.feature (authored ragdoll sidecar v3) --
     actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
     actor_physics_asset: Option<physics::PreparedPhysicsAsset>,
+
+    // -- native_conversion.feature --
+    native_outcomes: Vec<native_policy::NativeJobOutcome>,
+    native_summary: Option<native_policy::NativeBatchSummary>,
+    native_sorted_indices: Vec<usize>,
+    native_asset_count: usize,
+    native_requested_workers: Option<usize>,
+    native_host_workers: usize,
+    native_worker_count: Option<usize>,
+    requested_converter: Option<converter_policy::ConverterBackend>,
+    resolved_converter: Option<converter_policy::ConverterBackend>,
+    required_gltf_extensions: Vec<String>,
+    unsupported_gltf_extensions: Vec<String>,
 }
 
 fn find_placement<'a>(
@@ -6994,6 +7020,158 @@ fn main() {
             .run_and_exit("features")
             .await;
     });
+}
+
+// ---------------------------------------------------------------------
+// native_conversion.feature -- bounded native worker policy.
+// ---------------------------------------------------------------------
+
+#[given("no NIF converter was explicitly requested")]
+async fn given_no_converter_requested(world: &mut BevyoutWorld) {
+    world.requested_converter = None;
+}
+
+#[when("the preparation converter is resolved")]
+async fn when_converter_is_resolved(world: &mut BevyoutWorld) {
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+}
+
+#[when(regex = r#"^the \"([^\"]*)\" NIF converter is explicitly requested$"#)]
+async fn when_converter_is_explicitly_requested(world: &mut BevyoutWorld, converter: String) {
+    world.requested_converter = Some(match converter.as_str() {
+        "native" => converter_policy::ConverterBackend::Native,
+        "blender" => converter_policy::ConverterBackend::Blender,
+        other => panic!("unknown converter {other:?}"),
+    });
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+}
+
+#[then(regex = r#"^the resolved preparation converter is \"([^\"]*)\"$"#)]
+async fn then_resolved_converter_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_converter
+            .expect("resolved converter")
+            .as_str(),
+        expected
+    );
+}
+
+#[given(regex = r#"^a native GLB requires extensions \"([^\"]*)\"$"#)]
+async fn given_native_glb_required_extensions(world: &mut BevyoutWorld, extensions: String) {
+    world.required_gltf_extensions = extensions
+        .split(',')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned)
+        .collect();
+}
+
+#[when("the Rust bake validates its required glTF extensions")]
+async fn when_rust_bake_validates_extensions(world: &mut BevyoutWorld) {
+    world.unsupported_gltf_extensions = gltf_extension_policy::unsupported_required_extensions(
+        world.required_gltf_extensions.iter().map(String::as_str),
+    );
+}
+
+#[then("no required glTF extensions are unsupported")]
+async fn then_no_required_extensions_are_unsupported(world: &mut BevyoutWorld) {
+    assert!(world.unsupported_gltf_extensions.is_empty());
+}
+
+#[given(regex = r#"^native conversion outcomes \"([^\"]*)\"$"#)]
+async fn given_native_conversion_outcomes(world: &mut BevyoutWorld, outcomes: String) {
+    world.native_outcomes = outcomes
+        .split(',')
+        .map(|entry| {
+            let (index, status) = entry.split_once(':').expect("index:status outcome");
+            let status = match status {
+                "converted" => native_policy::NativeJobStatus::Converted,
+                "failed" => native_policy::NativeJobStatus::Failed,
+                "unsupported" => native_policy::NativeJobStatus::Unsupported,
+                other => panic!("unknown native status {other:?}"),
+            };
+            native_policy::NativeJobOutcome {
+                index: index.parse().expect("numeric native job index"),
+                model: entry.into(),
+                status,
+                stage: String::new(),
+                error: None,
+            }
+        })
+        .collect();
+}
+
+#[when("the native conversion batch is summarized")]
+async fn when_native_batch_is_summarized(world: &mut BevyoutWorld) {
+    world.native_summary = Some(native_policy::summarize_native_jobs(&world.native_outcomes));
+    world.native_sorted_indices = native_policy::sorted_native_outcomes(&world.native_outcomes)
+        .into_iter()
+        .map(|outcome| outcome.index)
+        .collect();
+}
+
+#[then(regex = r#"^the native conversion summary is \"([^\"]*)\"$"#)]
+async fn then_native_summary_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.native_summary.expect("native summary").line(),
+        expected
+    );
+}
+
+#[then(regex = r#"^the native conversion outcome order is \"([^\"]*)\"$"#)]
+async fn then_native_outcome_order_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .native_sorted_indices
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r"^(\d+) native conversion assets and (\d+) requested workers$")]
+async fn given_native_asset_and_worker_count(
+    world: &mut BevyoutWorld,
+    assets: usize,
+    workers: usize,
+) {
+    world.native_asset_count = assets;
+    world.native_requested_workers = Some(workers);
+    world.native_host_workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+}
+
+#[given(
+    regex = r"^(\d+) native conversion assets, no requested workers, and (\d+) host processors$"
+)]
+async fn given_native_asset_and_host_worker_count(
+    world: &mut BevyoutWorld,
+    assets: usize,
+    host_workers: usize,
+) {
+    world.native_asset_count = assets;
+    world.native_requested_workers = None;
+    world.native_host_workers = host_workers;
+}
+
+#[when("the native worker count is resolved")]
+async fn when_native_worker_count_is_resolved(world: &mut BevyoutWorld) {
+    world.native_worker_count = Some(native_policy::native_worker_count_with_host(
+        world.native_requested_workers,
+        world.native_asset_count,
+        world.native_host_workers.max(1),
+    ));
+}
+
+#[then(regex = r"^(\d+) native conversion workers are used$")]
+async fn then_native_workers_are_used(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(world.native_worker_count, Some(expected));
 }
 
 // ---------------------------------------------------------------------

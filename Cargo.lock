@@ -4466,7 +4466,6 @@ dependencies = [
 [[package]]
 name = "nif"
 version = "0.5.0"
-source = "git+https://github.com/kelo221/nifty.git?rev=38018eb9c9910a603fcc5bce8d36b0390e0a5822#38018eb9c9910a603fcc5bce8d36b0390e0a5822"
 dependencies = [
  "anyhow",
  "binrw",

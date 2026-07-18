@@ -327,6 +327,8 @@ pub(crate) fn stage_placements(
     assets_dir: &Path,
     diagnostics: &mut Vec<Diagnostic>,
     rebuild_assets: bool,
+    static_converter_revision: &str,
+    actor_converter_revision: &str,
 ) -> Result<PlacementStage> {
     let model_static_usage = model_static_usage(&references, bases);
     let mut jobs: Vec<BlenderAssetJob> = Vec::new();
@@ -482,10 +484,10 @@ pub(crate) fn stage_placements(
             cache_bytes.extend_from_slice(bytes);
         }
         let cache_profile = if assembly {
-            ACTOR_CONVERTER_REVISION.to_owned()
+            actor_converter_revision.to_owned()
         } else {
             format!(
-                "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
+                "{static_converter_revision}-{conversion_profile}-{}",
                 root_transform_policy.tag()
             )
         };
@@ -581,6 +583,11 @@ pub(crate) fn stage_placements(
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,
@@ -611,6 +618,11 @@ pub(crate) fn stage_placements(
                         ),
                     });
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,
@@ -634,6 +646,11 @@ pub(crate) fn stage_placements(
                 AssetCacheDecision::RebuildRequested => {
                     cache_explicit_rebuilds += 1;
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,

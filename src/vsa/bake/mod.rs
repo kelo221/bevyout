@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::Instant;
 
 mod batch;
+mod gltf_extension_policy;
 mod job;
 mod plan;
 mod policy;
@@ -23,11 +24,11 @@ pub(crate) use tools::*;
 
 use crate::cli::{BakeArgs, BakeQuality};
 
-use super::assets::{PREPARED_CONVERTER_REVISION, find_blender};
+use super::assets::{SUPPORTED_PREPARED_CONVERTER_REVISIONS, find_blender};
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
-    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_prepared_manifest_compatible,
+    PreparedSceneManifest, PreparedSemantic, cell_label, ensure_prepared_manifest_compatible_any,
     is_pickup_record_kind,
 };
 use super::physics::PHYSICS_ASSET_SCHEMA_VERSION;
@@ -72,9 +73,9 @@ pub(crate) fn load_prepared_manifest(manifest_path: &Path) -> Result<PreparedSce
     })?;
     let manifest: PreparedSceneManifest =
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
-    ensure_prepared_manifest_compatible(
+    ensure_prepared_manifest_compatible_any(
         &manifest,
-        PREPARED_CONVERTER_REVISION,
+        SUPPORTED_PREPARED_CONVERTER_REVISIONS,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )?;
     if manifest
