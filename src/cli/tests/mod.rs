@@ -39,9 +39,7 @@ fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
     assert!(args.agent_bridge);
     assert_eq!(args.agent_port, 16_000);
 
-    assert!(
-        Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err()
-    );
+    assert!(Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err());
     assert!(
         Cli::try_parse_from([
             "bevyout",

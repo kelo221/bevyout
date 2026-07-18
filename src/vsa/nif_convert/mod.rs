@@ -56,8 +56,7 @@ struct ReportIssue {
     message: String,
 }
 
-pub(crate) const NATIVE_NIF_REPORT_REVISION: &str =
-    "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1";
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -438,9 +437,7 @@ pub(crate) fn convert_actor_scene(
 }
 
 fn encode_physics_sidecar(scene: nif::fo3::PhysicsScene) -> Result<Vec<u8>> {
-    let nif::fo3::PhysicsScene {
-        bodies, joints, ..
-    } = scene;
+    let nif::fo3::PhysicsScene { bodies, joints, .. } = scene;
     let asset = PreparedPhysicsAsset {
         schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
         source: PreparedPhysicsSource::AuthoredHavok,

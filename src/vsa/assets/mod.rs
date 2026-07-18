@@ -27,14 +27,13 @@ pub(crate) const NIF_CONVERTER_REVISION: &str =
 
 /// Native static conversion cache identity. Keep independent from Blender so
 /// the two backends can coexist in one asset cache without false hits.
-pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1";
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 /// Native actor assembly is deliberately unsupported in the first worker
 /// milestone. Its own cache identity prevents an existing Blender actor GLB
 /// from being mistaken for a native result.
 pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-actor-assembly-v2-skeleton-owned-hierarchy-havok-joints-v1";
+    "nifty-fo3-native-actor-assembly-v2-skeleton-owned-hierarchy-havok-joints-v1-com-frame-v1";
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
@@ -44,8 +43,7 @@ pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v1
 /// completed cell stale while each asset family retains its own cache key.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v17";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1+actor-assembly-v2-skeleton-owned-hierarchy-havok-joints-v1";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v2-skeleton-owned-hierarchy-havok-joints-v1-com-frame-v1";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,

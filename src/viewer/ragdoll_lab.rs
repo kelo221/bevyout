@@ -14,8 +14,8 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy_boxddd::boxddd::{
-    self, BodyDef, BodyId, BodyType, BoxHull, JointId, PrismaticJointDef,
-    RevoluteJointDef, ShapeDef, SphericalJointDef,
+    self, BodyDef, BodyId, BodyType, BoxHull, JointId, PrismaticJointDef, RevoluteJointDef,
+    ShapeDef, SphericalJointDef,
 };
 use bevy_boxddd::prelude::{BoxdddPhysicsContext, BoxdddPhysicsPlugin, BoxdddPhysicsSettings};
 use bevy_boxddd::resources::BoxdddErrorPolicy;
@@ -29,18 +29,39 @@ use crate::vsa::{
     PreparedSceneManifest, PreparedSemantic, find_cached_manifest, read_physics_asset,
 };
 
+use super::LoadedSceneManifest;
 use super::agent_bridge::RagdollLabAgentBridgePlugin;
 use super::player::{
     PreparedShapeOptions, actor_node_names_match, create_dynamic_body_at_local_anchor,
     create_prepared_shape, normalize_dynamic_mass, ragdoll_joint_local_anchor,
-    ragdoll_local_transform, ragdoll_resolved_world, recenter_ragdoll_body,
+    ragdoll_local_transform, ragdoll_resolved_world, recenter_ragdoll_body, tune_ragdoll_body,
 };
-use super::LoadedSceneManifest;
 
 const LAB_DROP_HEIGHT: f32 = 1.75;
 const LAB_FLOOR_HALF_EXTENTS: Vec3 = Vec3::new(6.0, 0.25, 6.0);
 const LAB_FLOOR_CENTER: Vec3 = Vec3::new(0.0, -0.25, 0.0);
+const LAB_WORLD_LAYER: u32 = 1 << 0;
+const LAB_RAGDOLL_LAYER: u32 = 1 << 1;
 const DIAGNOSTIC_TIMES: [f32; 3] = [0.25, 1.25, 3.5];
+
+fn lab_floor_collision_layers() -> avian::CollisionLayers {
+    avian::CollisionLayers::from_bits(LAB_WORLD_LAYER, LAB_RAGDOLL_LAYER)
+}
+
+fn lab_ragdoll_collision_layers() -> avian::CollisionLayers {
+    avian::CollisionLayers::from_bits(LAB_RAGDOLL_LAYER, LAB_WORLD_LAYER)
+}
+
+fn lab_contact_friction(coefficient: f32) -> avian::Friction {
+    avian::Friction::new(coefficient.max(0.6)).with_combine_rule(avian::CoefficientCombine::Max)
+}
+
+fn lab_sleep_threshold() -> avian::SleepThreshold {
+    avian::SleepThreshold {
+        linear: 0.2,
+        angular: 0.8,
+    }
+}
 
 pub fn ragdoll_lab(args: RagdollLabArgs) -> Result<()> {
     let cache_dir = args
@@ -174,7 +195,9 @@ fn select_actor(manifest: &PreparedSceneManifest, form_id: u32) -> Result<&Prepa
         .placements
         .iter()
         .find(|placement| placement.reference_form_id == form_id)
-        .ok_or_else(|| anyhow::anyhow!("actor reference {form_id:08x} is not in the prepared scene"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("actor reference {form_id:08x} is not in the prepared scene")
+        })?;
     if !matches!(
         placement.semantic,
         PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
@@ -360,6 +383,8 @@ pub(crate) struct RagdollLabProbe {
     pub(crate) missing_joints: usize,
     pub(crate) awake_bodies: usize,
     pub(crate) maximum_speed: f32,
+    pub(crate) maximum_linear_speed: f32,
+    pub(crate) maximum_angular_speed: f32,
     pub(crate) maximum_anchor_separation: f32,
     pub(crate) maximum_node_position_error: f32,
     pub(crate) floor_penetration: f32,
@@ -405,6 +430,9 @@ fn spawn_laboratory(
         commands.spawn((
             avian::RigidBody::Static,
             avian::Collider::cuboid(12.0, 0.5, 12.0),
+            lab_floor_collision_layers(),
+            lab_contact_friction(1.0),
+            avian::Restitution::ZERO,
             Transform::from_translation(LAB_FLOOR_CENTER),
             LabPhysicsEntity,
         ));
@@ -432,9 +460,10 @@ fn spawn_laboratory(
     ));
     let root = commands
         .spawn((
-            WorldAssetRoot(asset_server.load(
-                GltfAssetLabel::Scene(0).from_asset(definition.asset_path.clone()),
-            )),
+            WorldAssetRoot(
+                asset_server
+                    .load(GltfAssetLabel::Scene(0).from_asset(definition.asset_path.clone())),
+            ),
             Transform::from_translation(Vec3::new(0.0, LAB_DROP_HEIGHT, 0.0))
                 .with_scale(Vec3::splat(definition.placement.scale.abs().max(0.0001))),
             LabActorRoot,
@@ -522,9 +551,7 @@ fn resolve_actor_nodes(
                 runtime.node_rest_locals.insert(*node, *local);
                 runtime.node_rest_globals.insert(*node, global.affine());
             } else {
-                runtime.failure = Some(format!(
-                    "resolved skeleton node {node:?} has no transform"
-                ));
+                runtime.failure = Some(format!("resolved skeleton node {node:?} has no transform"));
                 runtime.phase = LabPhase::Failed;
                 return;
             }
@@ -552,8 +579,9 @@ fn prepared_dynamic_body(source: &PreparedPhysicsBody) -> Option<(PreparedPhysic
     } else {
         5.0
     };
-    body.linear_velocity = [0.0; 3];
-    body.angular_velocity = [0.0; 3];
+    tune_ragdoll_body(&mut body);
+    body.linear_damping = body.linear_damping.max(0.6);
+    body.angular_damping = body.angular_damping.max(1.0);
     body.constrained = false;
     body.shapes.retain(PreparedPhysicsShape::supports_dynamic);
     if body.shapes.is_empty() {
@@ -605,26 +633,22 @@ fn activate_avian_ragdoll(
         add_node_binding(&mut runtime, group_id, origin + anchor * scale);
     }
     if !all_joint_endpoints_resolved(&definition.physics, &runtime.bodies) {
-        fail_runtime(&mut runtime, "Avian joint endpoint resolution changed during activation");
+        fail_runtime(
+            &mut runtime,
+            "Avian joint endpoint resolution changed during activation",
+        );
         return;
     }
     for joint in &definition.physics.joints {
-        let (LabBodyHandle::Avian(body_a), LabBodyHandle::Avian(body_b)) = (
-            runtime.bodies[&joint.body_a],
-            runtime.bodies[&joint.body_b],
-        ) else {
+        let (LabBodyHandle::Avian(body_a), LabBodyHandle::Avian(body_b)) =
+            (runtime.bodies[&joint.body_a], runtime.bodies[&joint.body_b])
+        else {
             unreachable!("backend-specific handles are checked above");
         };
-        let anchor_a = ragdoll_joint_local_anchor(
-            joint.anchor_a,
-            body_anchors[&joint.body_a],
-            scale,
-        );
-        let anchor_b = ragdoll_joint_local_anchor(
-            joint.anchor_b,
-            body_anchors[&joint.body_b],
-            scale,
-        );
+        let anchor_a =
+            ragdoll_joint_local_anchor(joint.anchor_a, body_anchors[&joint.body_a], scale);
+        let anchor_b =
+            ragdoll_joint_local_anchor(joint.anchor_b, body_anchors[&joint.body_b], scale);
         let frame_a = local_joint_frame(joint.frame_a_rotation_xyzw);
         let frame_b = local_joint_frame(joint.frame_b_rotation_xyzw);
         let joint_entity = match joint.kind.as_str() {
@@ -726,6 +750,7 @@ fn spawn_avian_body(
         avian::CenterOfMass(Vec3::from_array(body.center_of_mass) * scale),
         avian::NoAutoMass,
         avian::NoAutoCenterOfMass,
+        lab_sleep_threshold(),
         LabPhysicsEntity,
         LabRagdollEntity,
     ));
@@ -751,8 +776,10 @@ fn spawn_avian_body(
                 children.spawn((
                     collider,
                     transform,
-                    avian::Friction::new(body.friction.max(0.0)),
-                    avian::Restitution::new(body.restitution.max(0.0)),
+                    lab_ragdoll_collision_layers(),
+                    lab_contact_friction(body.friction),
+                    avian::Restitution::new(body.restitution.max(0.0))
+                        .with_combine_rule(avian::CoefficientCombine::Max),
                 ));
             }
         }
@@ -939,12 +966,8 @@ fn activate_boxddd_ragdoll(
         runtime
             .body_bounds
             .insert(group_id, body_bound_samples(&body, scale));
-        let body_id = create_dynamic_body_at_local_anchor(
-            world,
-            &definition.placement,
-            &body,
-            anchor,
-        );
+        let body_id =
+            create_dynamic_body_at_local_anchor(world, &definition.placement, &body, anchor);
         let shape_count = body
             .shapes
             .iter()
@@ -991,22 +1014,15 @@ fn activate_boxddd_ragdoll(
         return;
     }
     for joint in &definition.physics.joints {
-        let (LabBodyHandle::Boxddd(body_a), LabBodyHandle::Boxddd(body_b)) = (
-            runtime.bodies[&joint.body_a],
-            runtime.bodies[&joint.body_b],
-        ) else {
+        let (LabBodyHandle::Boxddd(body_a), LabBodyHandle::Boxddd(body_b)) =
+            (runtime.bodies[&joint.body_a], runtime.bodies[&joint.body_b])
+        else {
             unreachable!("backend-specific handles are checked above");
         };
-        let anchor_a = ragdoll_joint_local_anchor(
-            joint.anchor_a,
-            body_anchors[&joint.body_a],
-            scale,
-        );
-        let anchor_b = ragdoll_joint_local_anchor(
-            joint.anchor_b,
-            body_anchors[&joint.body_b],
-            scale,
-        );
+        let anchor_a =
+            ragdoll_joint_local_anchor(joint.anchor_a, body_anchors[&joint.body_a], scale);
+        let anchor_b =
+            ragdoll_joint_local_anchor(joint.anchor_b, body_anchors[&joint.body_b], scale);
         let frame_a = boxddd::Transform::new(
             to_box_vec3(anchor_a),
             to_box_quat(local_joint_frame(joint.frame_a_rotation_xyzw)),
@@ -1109,11 +1125,7 @@ fn all_joint_endpoints_resolved(
         .all(|joint| bodies.contains_key(&joint.body_a) && bodies.contains_key(&joint.body_b))
 }
 
-fn add_node_binding(
-    runtime: &mut RagdollLabRuntime,
-    group_id: u32,
-    body_position: Vec3,
-) {
+fn add_node_binding(runtime: &mut RagdollLabRuntime, group_id: u32, body_position: Vec3) {
     let nodes = runtime.resolved_nodes[&group_id].clone();
     let rest_node_globals = nodes
         .iter()
@@ -1294,11 +1306,17 @@ fn update_lab_diagnostics(
     if runtime.phase == LabPhase::Active {
         runtime.drop_elapsed += time.delta_secs();
     }
-    let maximum_speed = cache
+    let maximum_linear_speed = cache
         .0
         .values()
-        .map(|sample| sample.linear_speed.max(sample.angular_speed))
+        .map(|sample| sample.linear_speed)
         .fold(0.0, f32::max);
+    let maximum_angular_speed = cache
+        .0
+        .values()
+        .map(|sample| sample.angular_speed)
+        .fold(0.0, f32::max);
+    let maximum_speed = maximum_linear_speed.max(maximum_angular_speed);
     let awake_bodies = cache.0.values().filter(|sample| !sample.sleeping).count();
     let maximum_anchor_separation = runtime
         .joint_diagnostics
@@ -1323,8 +1341,8 @@ fn update_lab_diagnostics(
             };
             let (_, _, rest_translation) = rest.to_scale_rotation_translation();
             let expected = delta.transform_point3(rest_translation);
-            maximum_node_position_error = maximum_node_position_error
-                .max(expected.distance(actual.translation()));
+            maximum_node_position_error =
+                maximum_node_position_error.max(expected.distance(actual.translation()));
         }
     }
     let floor_penetration = runtime
@@ -1341,7 +1359,11 @@ fn update_lab_diagnostics(
                 .reduce(f32::max)
         })
         .fold(0.0, f32::max);
-    let tracked = runtime.physics_entities.iter().copied().collect::<HashSet<_>>();
+    let tracked = runtime
+        .physics_entities
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
     let orphaned = ragdoll_entities
         .iter()
         .filter(|entity| !tracked.contains(entity))
@@ -1360,6 +1382,8 @@ fn update_lab_diagnostics(
             .saturating_sub(runtime.joints.len()),
         awake_bodies,
         maximum_speed,
+        maximum_linear_speed,
+        maximum_angular_speed,
         maximum_anchor_separation,
         maximum_node_position_error,
         floor_penetration,
@@ -1550,7 +1574,7 @@ fn draw_lab_reference(mut gizmos: Gizmos) {
 
 fn update_lab_hud(probe: Res<RagdollLabProbe>, mut text: Single<&mut Text, With<LabHud>>) {
     text.0 = format!(
-        "Ragdoll Lab | {} | actor {} | {}\nBodies {} | joints {}/{} | awake {} | sleeping {}\nmax speed {:.3} | anchor gap {:.4} m | node error {:.4} m | floor penetration {:.4} m\ndrop {:.2}s | resets {} | orphaned {}\nSpace pause/resume | R reset/drop | Esc exit{}",
+        "Ragdoll Lab | {} | actor {} | {}\nBodies {} | joints {}/{} | awake {} | sleeping {}\nmax linear {:.3} m/s | angular {:.3} rad/s | anchor gap {:.4} m\nnode error {:.4} m | floor penetration {:.4} m\ndrop {:.2}s | resets {} | orphaned {}\nSpace pause/resume | R reset/drop | Esc exit{}",
         probe.backend,
         probe.actor_form_id,
         probe.phase,
@@ -1559,7 +1583,8 @@ fn update_lab_hud(probe: Res<RagdollLabProbe>, mut text: Single<&mut Text, With<
         probe.expected_joint_count,
         probe.awake_bodies,
         probe.sleeping,
-        probe.maximum_speed,
+        probe.maximum_linear_speed,
+        probe.maximum_angular_speed,
         probe.maximum_anchor_separation,
         probe.maximum_node_position_error,
         probe.floor_penetration,
@@ -1592,9 +1617,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use bevy::mesh::MeshPlugin;
-    use bevy::time::TimeUpdateStrategy;
     use crate::vsa::PreparedPhysicsSource;
+    use bevy::time::TimeUpdateStrategy;
 
     fn body(group_id: u32) -> PreparedPhysicsBody {
         PreparedPhysicsBody {
@@ -1659,8 +1683,51 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lab_body_uses_limp_zero_bounce_tuning() {
+        let mut source = body(1);
+        source.linear_damping = 0.1;
+        source.angular_damping = 0.05;
+        source.friction = 0.3;
+        source.restitution = 0.9;
+        source.linear_velocity = [4.0, 5.0, 6.0];
+        source.angular_velocity = [1.0, 2.0, 3.0];
+        source.sleep_enabled = false;
+
+        let (prepared, _) = prepared_dynamic_body(&source).unwrap();
+
+        assert_eq!(prepared.linear_velocity, [0.0; 3]);
+        assert_eq!(prepared.angular_velocity, [0.0; 3]);
+        assert!(prepared.linear_damping >= 0.6);
+        assert!(prepared.angular_damping >= 1.0);
+        assert!(prepared.friction >= 0.6);
+        assert_eq!(prepared.restitution, 0.0);
+        assert!(prepared.sleep_enabled);
+    }
+
+    #[test]
+    fn lab_ragdoll_collides_with_floor_but_not_itself() {
+        let floor = lab_floor_collision_layers();
+        let ragdoll = lab_ragdoll_collision_layers();
+
+        assert!(floor.interacts_with(ragdoll));
+        assert!(ragdoll.interacts_with(floor));
+        assert!(!ragdoll.interacts_with(ragdoll));
+    }
+
+    #[test]
+    fn lab_sleep_threshold_allows_only_settled_contact_drift() {
+        let threshold = lab_sleep_threshold();
+
+        assert_eq!(threshold.linear, 0.2);
+        assert_eq!(threshold.angular, 0.8);
+    }
+
+    #[test]
     fn prismatic_limits_preserve_order_and_scale() {
-        assert_eq!(ordered_limits(Some(-0.2), Some(0.4), 2.0), (true, -0.4, 0.8));
+        assert_eq!(
+            ordered_limits(Some(-0.2), Some(0.4), 2.0),
+            (true, -0.4, 0.8)
+        );
         assert_eq!(ordered_limits(Some(0.5), Some(-0.5), 1.0), (true, 0.5, 0.5));
         assert_eq!(ordered_limits(None, None, 1.0), (false, 0.0, 0.0));
     }
@@ -1672,7 +1739,6 @@ mod tests {
             MinimalPlugins,
             avian::PhysicsPlugins::default(),
             TransformPlugin,
-            MeshPlugin,
         ));
         app.insert_resource(avian::SubstepCount(8));
         app.insert_resource(avian::Gravity(gravity));
@@ -1693,7 +1759,10 @@ mod tests {
         let mut app = avian_test_app(Vec3::ZERO);
         let anchor = app
             .world_mut()
-            .spawn((avian::RigidBody::Static, avian::Position(Vec3::new(0.0, 2.0, 0.0))))
+            .spawn((
+                avian::RigidBody::Static,
+                avian::Position(Vec3::new(0.0, 2.0, 0.0)),
+            ))
             .id();
         let limb = app
             .world_mut()
@@ -1713,8 +1782,7 @@ mod tests {
         ));
         run_steps(&mut app, 120);
         let anchor_position = app.world().get::<avian::Position>(anchor).unwrap().0
-            + app.world().get::<avian::Rotation>(anchor).unwrap().0
-                * Vec3::new(0.0, -1.0, 0.0);
+            + app.world().get::<avian::Rotation>(anchor).unwrap().0 * Vec3::new(0.0, -1.0, 0.0);
         let limb_position = app.world().get::<avian::Position>(limb).unwrap().0;
         assert!(anchor_position.distance(limb_position) < 0.05);
     }
@@ -1724,7 +1792,10 @@ mod tests {
         let mut app = avian_test_app(Vec3::ZERO);
         let torso = app
             .world_mut()
-            .spawn((avian::RigidBody::Static, avian::Position(Vec3::new(0.0, 2.0, 0.0))))
+            .spawn((
+                avian::RigidBody::Static,
+                avian::Position(Vec3::new(0.0, 2.0, 0.0)),
+            ))
             .id();
         let arm = app
             .world_mut()
@@ -1786,7 +1857,11 @@ mod tests {
             .map(|body| app.world().get::<avian::Position>(*body).unwrap().0)
             .collect::<Vec<_>>();
         assert!(positions.iter().all(|position| position.y >= 0.15));
-        assert!(positions.windows(2).all(|pair| pair[0].distance(pair[1]) < 0.5));
+        assert!(
+            positions
+                .windows(2)
+                .all(|pair| pair[0].distance(pair[1]) < 0.5)
+        );
     }
 
     #[test]

@@ -79,8 +79,8 @@ pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
 pub(crate) use lighting::*;
-pub(crate) use scene::*;
 pub use ragdoll_lab::ragdoll_lab;
+pub(crate) use scene::*;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;
