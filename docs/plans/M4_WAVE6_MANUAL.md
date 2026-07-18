@@ -119,3 +119,24 @@ cargo run-dev -- prepare --cell 0001a273
     save/reload.
 20. Living-actor safety check: no other vault NPC in this cell became
     lootable; only authored-dead actors classify as corpses.
+
+## F. Late additions: debug HUD and teleport (#151, #152) — any cell
+
+21. Console: `tdi`. Expected: a top-left debug block appears — `Debug
+    info: On`, live `player pos=(…)`, `cell=<formid> editor_id=…
+    name=…`, and one `nav agent N …` line per spawned test agent —
+    without overlapping the bottom diagnostics row. `tdi` again hides
+    it.
+22. Console: `tp 153.2 37.6 -40`. Expected: `tp: teleported player to
+    (153.200, 37.600, -40.000).` — all three axes at once (no
+    axis-by-axis falling).
+23. Console: `tp 100 40 -55 00024511`. Expected: `tp: cell travel
+    requested to 00024511 …`, the cell swaps to Vault 101 Atrium, and
+    the player is placed at the given coordinates. (Coordinates are not
+    ground-snapped — a mid-air target drops you, as in the original
+    game's console.)
+24. `tnm` overlay check (#138 follow-up): in a dark corridor, toggle
+    `tnm`. Expected: the scene's brightness does not jump (exposure is
+    locked while the overlay is visible), the floor texture stays
+    visible through the subtly tinted triangles, and the white route
+    polyline is crisp.
