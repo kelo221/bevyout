@@ -130,7 +130,7 @@ fn cache_pair_rebuilds_when_sidecar_is_missing_or_invalid() {
     fs::write(&glb, glb_bytes).unwrap();
 
     assert!(validate_asset_cache_pair(&glb, &physics).is_err());
-    let valid = br#"{"schema_version":2,"source":"GeneratedRender","bodies":[],"joints":[]}"#;
+    let valid = br#"{"schema_version":3,"source":"GeneratedRender","bodies":[],"joints":[]}"#;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(valid).unwrap();
     fs::write(&physics, encoder.finish().unwrap()).unwrap();

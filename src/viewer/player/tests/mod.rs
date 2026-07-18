@@ -1602,7 +1602,7 @@ fn ragdoll_parts_share_a_negative_non_colliding_group_per_actor() {
 }
 
 #[test]
-fn ragdoll_body_tuning_is_limp_damped_and_tips_the_whole_chain() {
+fn ragdoll_body_tuning_is_limp_damped_and_starts_without_artificial_motion() {
     let mut root = PreparedPhysicsBody {
         node: Some("Bip01 NonAccum".into()),
         linear_damping: 0.1,
@@ -1616,26 +1616,18 @@ fn ragdoll_body_tuning_is_limp_damped_and_tips_the_whole_chain() {
         ..root.clone()
     };
 
-    tune_ragdoll_body(&mut root, 0x0004_1606);
-    tune_ragdoll_body(&mut limb, 0x0004_1606);
+    tune_ragdoll_body(&mut root);
+    tune_ragdoll_body(&mut limb);
 
     assert_eq!(root.linear_damping, 0.2);
     assert_eq!(root.angular_damping, 0.25);
     assert_eq!(root.friction, 0.6);
-    assert_eq!(root.restitution, 0.05);
-    assert_ne!(root.linear_velocity, [0.0; 3]);
-    assert_ne!(root.angular_velocity, [0.0; 3]);
-    assert_eq!(limb.linear_velocity, root.linear_velocity);
-    assert_eq!(limb.angular_velocity, root.angular_velocity);
-}
-
-#[test]
-fn ragdoll_revolute_frames_align_boxddd_z_with_the_authored_hinge_axis() {
-    for axis in [Vec3::X, Vec3::Z, Vec3::NEG_Z] {
-        let rotation = ragdoll_joint_frame_rotation(axis.to_array());
-        assert!((rotation * Vec3::Z - axis).length() < 1e-5);
-    }
-    assert_eq!(ragdoll_joint_frame_rotation([0.0; 3]), Quat::IDENTITY);
+    assert_eq!(root.restitution, 0.0);
+    assert_eq!(root.linear_velocity, [0.0; 3]);
+    assert_eq!(root.angular_velocity, [0.0; 3]);
+    assert!(root.sleep_enabled);
+    assert_eq!(limb.linear_velocity, [0.0; 3]);
+    assert_eq!(limb.angular_velocity, [0.0; 3]);
 }
 
 #[test]

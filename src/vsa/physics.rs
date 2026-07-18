@@ -7,7 +7,7 @@ use std::path::Path;
 
 use super::manifest::{PreparedPhysicsClassification, PreparedSemantic};
 
-pub(crate) const PHYSICS_ASSET_SCHEMA_VERSION: u32 = 2;
+pub(crate) const PHYSICS_ASSET_SCHEMA_VERSION: u32 = 3;
 
 pub(crate) use bevyout_core::manifest::PreparedPhysicsSource;
 
@@ -30,12 +30,27 @@ pub(crate) struct PreparedPhysicsJoint {
     pub(crate) body_b: u32,
     pub(crate) anchor_a: [f32; 3],
     pub(crate) anchor_b: [f32; 3],
-    pub(crate) axis_a: [f32; 3],
-    pub(crate) axis_b: [f32; 3],
+    /// Complete local joint frames in the flattened actor rest space. BoxDDD
+    /// uses local Z as the spherical twist/revolute axis; preserving the other
+    /// basis vectors keeps the authored zero-angle orientation intact.
+    pub(crate) frame_a_rotation_xyzw: [f32; 4],
+    pub(crate) frame_b_rotation_xyzw: [f32; 4],
     pub(crate) lower_limit: Option<f32>,
     pub(crate) upper_limit: Option<f32>,
     pub(crate) cone_limit: Option<f32>,
-    pub(crate) twist_limit: Option<f32>,
+    pub(crate) plane_lower_limit: Option<f32>,
+    pub(crate) plane_upper_limit: Option<f32>,
+    pub(crate) twist_lower_limit: Option<f32>,
+    pub(crate) twist_upper_limit: Option<f32>,
+    pub(crate) malleable_strength: Option<f32>,
+    pub(crate) source: PreparedPhysicsJointSource,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum PreparedPhysicsJointSource {
+    Authored,
+    #[default]
+    SyntheticFallback,
 }
 
 impl Default for PreparedPhysicsJoint {
@@ -46,12 +61,17 @@ impl Default for PreparedPhysicsJoint {
             body_b: 0,
             anchor_a: [0.0; 3],
             anchor_b: [0.0; 3],
-            axis_a: [0.0, 1.0, 0.0],
-            axis_b: [0.0, 1.0, 0.0],
+            frame_a_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            frame_b_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
             lower_limit: None,
             upper_limit: None,
             cone_limit: None,
-            twist_limit: None,
+            plane_lower_limit: None,
+            plane_upper_limit: None,
+            twist_lower_limit: None,
+            twist_upper_limit: None,
+            malleable_strength: None,
+            source: PreparedPhysicsJointSource::SyntheticFallback,
         }
     }
 }
@@ -324,7 +344,7 @@ pub(crate) fn validate_physics_asset(asset: &PreparedPhysicsAsset) -> Result<()>
         if joint.body_a == joint.body_b {
             bail!("physics sidecar joint connects a body to itself");
         }
-        if [joint.anchor_a, joint.anchor_b, joint.axis_a, joint.axis_b]
+        if [joint.anchor_a, joint.anchor_b]
             .iter()
             .flatten()
             .any(|value| !value.is_finite())
@@ -332,7 +352,11 @@ pub(crate) fn validate_physics_asset(asset: &PreparedPhysicsAsset) -> Result<()>
                 joint.lower_limit,
                 joint.upper_limit,
                 joint.cone_limit,
-                joint.twist_limit,
+                joint.plane_lower_limit,
+                joint.plane_upper_limit,
+                joint.twist_lower_limit,
+                joint.twist_upper_limit,
+                joint.malleable_strength,
             ]
             .iter()
             .flatten()
@@ -340,15 +364,39 @@ pub(crate) fn validate_physics_asset(asset: &PreparedPhysicsAsset) -> Result<()>
         {
             bail!("physics sidecar joint contains non-finite data");
         }
-        if joint
-            .lower_limit
-            .zip(joint.upper_limit)
-            .is_some_and(|(lower, upper)| lower > upper)
+        if [
+            (joint.lower_limit, joint.upper_limit),
+            (joint.plane_lower_limit, joint.plane_upper_limit),
+            (joint.twist_lower_limit, joint.twist_upper_limit),
+        ]
+        .into_iter()
+        .any(|(lower, upper)| lower.zip(upper).is_some_and(|(lower, upper)| lower > upper))
         {
             bail!("physics sidecar joint has inverted limits");
         }
+        if joint.cone_limit.is_some_and(|value| value < 0.0)
+            || joint.malleable_strength.is_some_and(|value| value < 0.0)
+        {
+            bail!("physics sidecar joint has a negative cone or malleable strength");
+        }
+        if !unit_quaternion(joint.frame_a_rotation_xyzw)
+            || !unit_quaternion(joint.frame_b_rotation_xyzw)
+        {
+            bail!("physics sidecar joint has an invalid local frame rotation");
+        }
     }
     Ok(())
+}
+
+fn unit_quaternion(value: [f32; 4]) -> bool {
+    value.iter().all(|component| component.is_finite())
+        && ((value
+            .iter()
+            .map(|component| component * component)
+            .sum::<f32>())
+            - 1.0)
+            .abs()
+            <= 1.0e-3
 }
 
 pub(crate) fn body_blocks_player(body: &PreparedPhysicsBody) -> bool {

@@ -627,18 +627,17 @@ def build_physics_asset():
         joint for joint in globals().get('current_joint_defs', [])
         if int(joint['body_a']) in authored_groups and int(joint['body_b']) in authored_groups
     ]
-    # Actor skeleton NIFs frequently contain Havok bodies but no usable
-    # constraint records (or records whose body indices refer to a different
-    # partial-armature import).  A developer ragdoll must still be a connected
-    # articulated chain; otherwise every limb is free to fly away and the
-    # skinned mesh stretches across the scene. Build a conservative articulated
-    # tree from the Bip01 hierarchy when this is an actor assembly.
+    # Keep every valid authored actor edge. Only connect genuinely disconnected
+    # components of a partial/custom skeleton with the conservative Bip01
+    # fallback. Fallout's authored ragdoll is a complete tree whose topology
+    # intentionally differs from the visual bone-parent hierarchy, so filling
+    # every absent visual-parent edge would over-constrain it.
     if (globals().get('assembly_inputs') is not None
             and any('bip01' in str(body.get('node', '')).casefold()
                     for body in authored_bodies)):
-        joints = actor_synthetic_joints(authored_bodies)
+        joints = actor_completed_joints(joints, authored_bodies)
     if any(body_blocks_player(body) and body['shapes'] for body in authored_bodies):
-        return {'schema_version': 2, 'source': 'AuthoredHavok', 'bodies': authored_bodies, 'joints': joints}
+        return {'schema_version': 3, 'source': 'AuthoredHavok', 'bodies': authored_bodies, 'joints': joints}
     render_objects = [obj for obj in bpy.context.scene.objects
                       if obj.type == 'MESH' and len(obj.data.polygons)
                       and not obj.get('bevyout_collision', False)
@@ -647,14 +646,14 @@ def build_physics_asset():
                       and all(fallback_material_eligible(material) for material in obj.data.materials)]
     fallback = render_fallback_body(render_objects)
     if not fallback['shapes'][0]['indices']:
-        return {'schema_version': 2, 'source': 'GeneratedRender', 'bodies': authored_bodies, 'joints': joints}
+        return {'schema_version': 3, 'source': 'GeneratedRender', 'bodies': authored_bodies, 'joints': joints}
     # Keep the render-only fallback out of the authored body-id namespace.
     # Actor body IDs start at zero; reusing zero would overwrite the first
     # ragdoll body's lookup entry when the runtime builds its joint map.
     fallback['group_id'] = max(
         (int(body['group_id']) for body in authored_bodies), default=-1
     ) + 1
-    return {'schema_version': 2, 'source': 'GeneratedRender',
+    return {'schema_version': 3, 'source': 'GeneratedRender',
             'bodies': authored_bodies + [fallback], 'joints': joints}
 
 def actor_shape_anchor(shape):
@@ -748,25 +747,183 @@ def actor_synthetic_joints(bodies):
                                          actor_body_anchor(child_body))]
         hinge_axis = hinge_axes.get(child)
         cone_limit = 1.8 if child in {'bip01thighl', 'bip01thighr'} else 1.0
+        frame = joint_frame_quaternion(
+            hinge_axis or [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0] if hinge_axis and abs(hinge_axis[1]) < 0.9
+            else [1.0, 0.0, 0.0],
+        )
         joints.append({
             'kind': 'revolute' if hinge_axis is not None else 'spherical',
             'body_a': body_a, 'body_b': body_b,
             'anchor_a': anchor, 'anchor_b': anchor,
-            'axis_a': hinge_axis or [0.0, 1.0, 0.0],
-            'axis_b': hinge_axis or [0.0, 1.0, 0.0],
-            'lower_limit': -0.05 if hinge_axis is not None else -1.0,
-            'upper_limit': 2.4 if hinge_axis is not None else 1.0,
+            'frame_a_rotation_xyzw': frame,
+            'frame_b_rotation_xyzw': frame,
+            'lower_limit': -0.05 if hinge_axis is not None else None,
+            'upper_limit': 2.4 if hinge_axis is not None else None,
             'cone_limit': None if hinge_axis is not None else cone_limit,
-            'twist_limit': None if hinge_axis is not None else 1.0,
+            'plane_lower_limit': None if hinge_axis is not None else -1.0,
+            'plane_upper_limit': None if hinge_axis is not None else 1.0,
+            'twist_lower_limit': None if hinge_axis is not None else -1.0,
+            'twist_upper_limit': None if hinge_axis is not None else 1.0,
+            'malleable_strength': None,
+            'source': 'SyntheticFallback',
         })
     return joints
 
-def nif_vec3(value, scale=1.0):
+def actor_completed_joints(authored, bodies):
+    completed = list(authored)
+    parent = {
+        int(body['group_id']): int(body['group_id'])
+        for body in bodies
+    }
+
+    def root(body_id):
+        while parent[body_id] != body_id:
+            parent[body_id] = parent[parent[body_id]]
+            body_id = parent[body_id]
+        return body_id
+
+    def connect(body_a, body_b):
+        root_a = root(body_a)
+        root_b = root(body_b)
+        if root_a == root_b:
+            return False
+        parent[root_b] = root_a
+        return True
+
+    for joint in completed:
+        connect(int(joint['body_a']), int(joint['body_b']))
+    for fallback in actor_synthetic_joints(bodies):
+        pair = tuple(sorted((int(fallback['body_a']), int(fallback['body_b']))))
+        if not connect(*pair):
+            continue
+        completed.append(fallback)
+        print('[convert] actor ragdoll fallback edge {}-{}'.format(*pair), flush=True)
+    completed.sort(key=lambda joint: (
+        min(int(joint['body_a']), int(joint['body_b'])),
+        max(int(joint['body_a']), int(joint['body_b'])),
+        str(joint.get('source', '')),
+    ))
+    return completed
+
+def nif_raw_vector(value):
     if value is None:
-        return [0.0, 0.0, 0.0]
-    return [float(getattr(value, 'x', 0.0)) * scale,
-            float(getattr(value, 'z', 0.0)) * scale,
-            -float(getattr(value, 'y', 0.0)) * scale]
+        return Vector((0.0, 0.0, 0.0))
+    return Vector((float(getattr(value, 'x', 0.0)),
+                   float(getattr(value, 'y', 0.0)),
+                   float(getattr(value, 'z', 0.0))))
+
+def joint_frame_quaternion(axis_z, reference_x):
+    """Return a deterministic BoxDDD frame with authored twist/hinge on Z."""
+    z_axis = Vector(axis_z)
+    x_axis = Vector(reference_x)
+    if (not all(math.isfinite(value) for value in (*z_axis, *x_axis))
+            or z_axis.length_squared < 1.0e-10):
+        return None
+    z_axis.normalize()
+    x_axis -= z_axis * x_axis.dot(z_axis)
+    if x_axis.length_squared < 1.0e-10:
+        return None
+    x_axis.normalize()
+    y_axis = z_axis.cross(x_axis)
+    if y_axis.length_squared < 1.0e-10:
+        return None
+    y_axis.normalize()
+    x_axis = y_axis.cross(z_axis).normalized()
+    rotation = Matrix((x_axis, y_axis, z_axis)).transposed().to_quaternion()
+    rotation.normalize()
+    values = [float(rotation.x), float(rotation.y),
+              float(rotation.z), float(rotation.w)]
+    # q and -q encode the same frame. Canonicalize the sign so sidecars are
+    # deterministic across Blender/mathutils builds.
+    if values[3] < 0.0:
+        values = [-value for value in values]
+    return values
+
+def nif_constraint_payload(block):
+    """Unwrap the concrete descriptor carried by a Havok constraint block."""
+    name = type(block).__name__
+    payload = getattr(block, 'constraint', None)
+    strength = None
+    if name == 'bhkMalleableConstraint':
+        descriptor = payload
+        type_value = getattr(descriptor, 'type', None)
+        constraint_type = str(getattr(type_value, 'name', type_value or '')).upper()
+        strength_value = getattr(descriptor, 'strength', None)
+        strength = float(strength_value) if strength_value is not None else None
+        if 'RAGDOLL' in constraint_type:
+            return ('bhkRagdollConstraint', getattr(descriptor, 'ragdoll', None), strength)
+        if 'LIMITED_HINGE' in constraint_type:
+            return ('bhkLimitedHingeConstraint',
+                    getattr(descriptor, 'limited_hinge', None), strength)
+        return (None, None, strength)
+    if name == 'bhkBreakableConstraint':
+        descriptor = getattr(block, 'constraint_data', None)
+        return ('bhkLimitedHingeConstraint',
+                getattr(descriptor, 'limited_hinge', None), None)
+    return (name, payload, strength)
+
+def nif_target_rest_matrix(nif, target):
+    if target is None:
+        return None
+    from io_scene_niftools.utils.math import nifformat_to_mathutils_matrix
+    for root in getattr(nif, 'roots', []):
+        try:
+            matrix = nifformat_to_mathutils_matrix(target.get_transform(root))
+            matrix.translation *= 1.0 / 70.0
+            return matrix
+        except (ValueError, AttributeError):
+            continue
+    try:
+        matrix = nifformat_to_mathutils_matrix(target.get_transform())
+        matrix.translation *= 1.0 / 70.0
+        return matrix
+    except (ValueError, AttributeError):
+        return None
+
+def nif_rigid_body_matrix(body, havok_scale):
+    matrix = Matrix.Identity(4)
+    if type(body).__name__ != 'bhkRigidBodyT':
+        return matrix
+    info = getattr(body, 'rigid_body_info', None)
+    rotation = getattr(body, 'rotation', None)
+    if rotation is None:
+        rotation = getattr(info, 'rotation', None)
+    if rotation is not None:
+        quaternion = __import__('mathutils').Quaternion((
+            float(getattr(rotation, 'w', 1.0)),
+            float(getattr(rotation, 'x', 0.0)),
+            float(getattr(rotation, 'y', 0.0)),
+            float(getattr(rotation, 'z', 0.0)),
+        ))
+        matrix = quaternion.to_matrix().to_4x4()
+    translation = getattr(body, 'translation', None)
+    if translation is None:
+        translation = getattr(info, 'translation', None)
+    if translation is not None:
+        matrix.translation = nif_raw_vector(translation) * (havok_scale / 70.0)
+    return matrix
+
+def nif_body_actor_matrix(nif, body, target):
+    target_matrix = nif_target_rest_matrix(nif, target)
+    if target_matrix is None:
+        return None
+    return target_matrix @ nif_rigid_body_matrix(body, float(nif.havok_scale))
+
+def nif_actor_point(value, body_matrix, havok_scale):
+    local = nif_raw_vector(value) * (havok_scale / 70.0)
+    return blender_point_to_bevy(body_matrix @ local)
+
+def nif_actor_vector(value, body_matrix):
+    actor = body_matrix.to_quaternion().to_matrix() @ nif_raw_vector(value)
+    bevy = blender_vector_to_bevy(actor)
+    return list(bevy)
+
+def nif_joint_frame(body_matrix, axis, reference):
+    return joint_frame_quaternion(
+        nif_actor_vector(axis, body_matrix),
+        nif_actor_vector(reference, body_matrix),
+    )
 
 def nif_constraint_joints(paths):
     """Extract constraint records without asking NIFTools to create Blender
@@ -783,8 +940,15 @@ def nif_constraint_joints(paths):
             nif = NifFile.from_path(path)
         except Exception:
             continue
-        bodies = [block for block in nif.blocks if type(block).__name__ == 'bhkRigidBody']
+        bodies = [block for block in nif.blocks
+                  if type(block).__name__ in {'bhkRigidBody', 'bhkRigidBodyT'}]
         body_groups = {id(block): group_offset + index for index, block in enumerate(bodies)}
+        body_targets = {
+            id(getattr(block, 'body', None)): getattr(block, 'target', None)
+            for block in nif.blocks
+            if 'CollisionObject' in type(block).__name__
+            and getattr(block, 'body', None) is not None
+        }
         for block in nif.blocks:
             name = type(block).__name__
             if not name.endswith('Constraint'):
@@ -796,50 +960,80 @@ def nif_constraint_joints(paths):
             body_b = body_groups.get(id(entity_b))
             if body_a is None or body_b is None or body_a == body_b:
                 continue
-            payload = getattr(block, 'constraint', None)
-            kind = name
-            if name == 'bhkBreakableConstraint':
-                payload = getattr(getattr(block, 'constraint_data', None), 'limited_hinge', None)
-                kind = 'bhkLimitedHingeConstraint'
-            if payload is None:
+            kind, payload, strength = nif_constraint_payload(block)
+            if kind is None or payload is None:
+                continue
+            matrix_a = nif_body_actor_matrix(nif, entity_a, body_targets.get(id(entity_a)))
+            matrix_b = nif_body_actor_matrix(nif, entity_b, body_targets.get(id(entity_b)))
+            if matrix_a is None or matrix_b is None:
+                print('[convert] skipped authored joint without body rest frame {}-{}'.format(
+                    body_a, body_b), flush=True)
+                continue
+            anchor_a = nif_actor_point(
+                getattr(payload, 'pivot_a', None), matrix_a, float(nif.havok_scale))
+            anchor_b = nif_actor_point(
+                getattr(payload, 'pivot_b', None), matrix_b, float(nif.havok_scale))
+            pivot_error = (Vector(anchor_a) - Vector(anchor_b)).length
+            if not math.isfinite(pivot_error) or pivot_error > 0.05:
+                print('[convert] skipped authored joint {}-{} pivot mismatch {:.6f}m'.format(
+                    body_a, body_b, pivot_error), flush=True)
                 continue
             joint = {
                 'kind': 'fixed', 'body_a': int(body_a), 'body_b': int(body_b),
-                'anchor_a': [0.0, 0.0, 0.0], 'anchor_b': [0.0, 0.0, 0.0],
-                'axis_a': [0.0, 1.0, 0.0], 'axis_b': [0.0, 1.0, 0.0],
+                'anchor_a': anchor_a, 'anchor_b': anchor_b,
+                'frame_a_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
+                'frame_b_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
                 'lower_limit': None, 'upper_limit': None,
-                'cone_limit': None, 'twist_limit': None,
+                'cone_limit': None,
+                'plane_lower_limit': None, 'plane_upper_limit': None,
+                'twist_lower_limit': None, 'twist_upper_limit': None,
+                'malleable_strength': strength,
+                'source': 'Authored',
             }
             if kind == 'bhkRagdollConstraint':
                 joint['kind'] = 'spherical'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'twist_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'twist_b', None))
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'twist_a', None),
+                    getattr(payload, 'plane_a', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'twist_b', None),
+                    getattr(payload, 'plane_b', None))
                 joint['cone_limit'] = float(getattr(payload, 'cone_max_angle', 0.0))
-                joint['lower_limit'] = float(getattr(payload, 'plane_min_angle', 0.0))
-                joint['upper_limit'] = float(getattr(payload, 'plane_max_angle', 0.0))
-                joint['twist_limit'] = float(getattr(payload, 'twist_max_angle', 0.0))
+                joint['plane_lower_limit'] = float(getattr(payload, 'plane_min_angle', 0.0))
+                joint['plane_upper_limit'] = float(getattr(payload, 'plane_max_angle', 0.0))
+                joint['twist_lower_limit'] = float(getattr(payload, 'twist_min_angle', 0.0))
+                joint['twist_upper_limit'] = float(getattr(payload, 'twist_max_angle', 0.0))
             elif kind == 'bhkLimitedHingeConstraint':
                 joint['kind'] = 'revolute'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'axis_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'axis_b', None))
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'axis_a', None),
+                    getattr(payload, 'perp_axis_in_a_1', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'axis_b', None),
+                    getattr(payload, 'perp_axis_in_b_1', None))
                 joint['lower_limit'] = float(getattr(payload, 'min_angle', 0.0))
                 joint['upper_limit'] = float(getattr(payload, 'max_angle', 0.0))
             elif kind == 'bhkPrismaticConstraint':
                 joint['kind'] = 'prismatic'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'sliding_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'sliding_b', None))
-                joint['lower_limit'] = float(getattr(payload, 'min_distance', 0.0)) / 70.0
-                joint['upper_limit'] = float(getattr(payload, 'max_distance', 0.0)) / 70.0
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'sliding_a', None),
+                    getattr(payload, 'rotation_a', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'sliding_b', None),
+                    getattr(payload, 'rotation_b', None))
+                distance_scale = float(nif.havok_scale) / 70.0
+                joint['lower_limit'] = float(getattr(payload, 'min_distance', 0.0)) * distance_scale
+                joint['upper_limit'] = float(getattr(payload, 'max_distance', 0.0)) * distance_scale
             else:
+                continue
+            if (joint['frame_a_rotation_xyzw'] is None
+                    or joint['frame_b_rotation_xyzw'] is None):
+                print('[convert] skipped authored joint {}-{} with degenerate frame'.format(
+                    body_a, body_b), flush=True)
                 continue
             joints.append(joint)
         group_offset += len(bodies)
+    print('[convert] authored constraints extracted {}'.format(len(joints)), flush=True)
     return joints
 
 def matrix_identity_error(matrix):
@@ -1114,12 +1308,47 @@ def run_root_transform_self_test():
         (0, 1), (0, 2), (1, 3), (0, 4), (4, 5), (5, 6)
     }, fixture_by_pair
     assert fixture_by_pair[(1, 3)]['kind'] == 'revolute'
-    assert fixture_by_pair[(1, 3)]['axis_a'] == [1.0, 0.0, 0.0]
     assert fixture_by_pair[(5, 6)]['kind'] == 'revolute'
-    assert fixture_by_pair[(5, 6)]['axis_a'] == [0.0, 0.0, 1.0]
     assert fixture_by_pair[(0, 4)]['kind'] == 'spherical'
     assert fixture_by_pair[(0, 1)]['cone_limit'] == 1.8
     assert fixture_by_pair[(0, 2)]['cone_limit'] == 1.8
+    for pair, expected_axis in {
+        (1, 3): Vector((1.0, 0.0, 0.0)),
+        (5, 6): Vector((0.0, 0.0, 1.0)),
+    }.items():
+        values = fixture_by_pair[pair]['frame_a_rotation_xyzw']
+        rotation = __import__('mathutils').Quaternion(
+            (values[3], values[0], values[1], values[2]))
+        assert (rotation @ Vector((0.0, 0.0, 1.0)) - expected_axis).length < 1e-5
+    assert all(joint['source'] == 'SyntheticFallback' for joint in fixture_joints)
+    authored_fixture = dict(fixture_by_pair[(1, 3)])
+    authored_fixture['source'] = 'Authored'
+    completed_fixture = actor_completed_joints([authored_fixture], fixture_bodies)
+    completed_by_pair = {
+        (joint['body_a'], joint['body_b']): joint
+        for joint in completed_fixture
+    }
+    assert completed_by_pair[(1, 3)]['source'] == 'Authored'
+    assert len(completed_fixture) == len(fixture_joints)
+    authored_tree = []
+    for fixture_joint in fixture_joints:
+        authored_joint = dict(fixture_joint)
+        authored_joint['source'] = 'Authored'
+        authored_tree.append(authored_joint)
+    completed_tree = actor_completed_joints(authored_tree, fixture_bodies)
+    assert len(completed_tree) == len(authored_tree)
+    assert all(joint['source'] == 'Authored' for joint in completed_tree)
+    descriptor = type('MalleableDescriptor', (), {
+        'type': type('ConstraintType', (), {'name': 'RAGDOLL'})(),
+        'ragdoll': object(),
+        'limited_hinge': None,
+        'strength': 0.9,
+    })()
+    malleable = type('bhkMalleableConstraint', (), {'constraint': descriptor})()
+    kind, payload, strength = nif_constraint_payload(malleable)
+    assert kind == 'bhkRagdollConstraint'
+    assert payload is descriptor.ragdoll
+    assert abs(strength - 0.9) < 1e-6
     print('[convert-test] model root transform policy passed', flush=True)
 
 def bake_quick_ao():
@@ -1581,6 +1810,15 @@ def import_pynifly_actor(skeleton_path, visual_paths, body_parts, apparel, model
 
 if sys.argv[-1] == '--self-test-root-policy':
     run_root_transform_self_test()
+    raise SystemExit(0)
+if len(sys.argv) >= 3 and sys.argv[-2] == '--inspect-ragdoll':
+    inspected_joints = nif_constraint_joints([sys.argv[-1]])
+    print('[convert-test] ragdoll joints={} authored={} fallback={}'.format(
+        len(inspected_joints),
+        sum(joint.get('source') == 'Authored' for joint in inspected_joints),
+        sum(joint.get('source') == 'SyntheticFallback' for joint in inspected_joints),
+    ), flush=True)
+    print(json.dumps(inspected_joints, sort_keys=True), flush=True)
     raise SystemExit(0)
 bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
 with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)

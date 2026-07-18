@@ -562,7 +562,7 @@ pub(crate) fn process_ragdoll_toggles(
                 });
                 if let Some(joints) = collision.ragdoll_joints.remove(&entity) {
                     for joint in joints {
-                        let _ = world.try_destroy_joint(joint, true);
+                        let _ = world.try_destroy_joint(joint.id, true);
                     }
                 }
                 collision.ragdoll_bodies.remove(&entity);
@@ -621,7 +621,7 @@ pub(crate) fn process_ragdoll_toggles(
             } else {
                 5.0
             };
-            tune_ragdoll_body(&mut body, placement.reference_form_id);
+            tune_ragdoll_body(&mut body);
             body.constrained = false;
             body.shapes.retain(PreparedPhysicsShape::supports_dynamic);
             if body.shapes.is_empty() {
@@ -695,22 +695,13 @@ pub(crate) fn process_ragdoll_toggles(
                 continue;
             };
             let scale = placement.scale.abs();
-            let revolute = joint.kind == "revolute";
             let frame_a = boxddd::Transform::new(
                 to_box_vec3(ragdoll_joint_local_anchor(joint.anchor_a, *anchor_a, scale)),
-                if revolute {
-                    to_box_quat(ragdoll_joint_frame_rotation(joint.axis_a))
-                } else {
-                    boxddd::Quat::IDENTITY
-                },
+                to_box_quat(Quat::from_array(joint.frame_a_rotation_xyzw)),
             );
             let frame_b = boxddd::Transform::new(
                 to_box_vec3(ragdoll_joint_local_anchor(joint.anchor_b, *anchor_b, scale)),
-                if revolute {
-                    to_box_quat(ragdoll_joint_frame_rotation(joint.axis_b))
-                } else {
-                    boxddd::Quat::IDENTITY
-                },
+                to_box_quat(Quat::from_array(joint.frame_b_rotation_xyzw)),
             );
             let result = match joint.kind.as_str() {
                 "spherical" => {
@@ -720,7 +711,9 @@ pub(crate) fn process_ragdoll_toggles(
                     if let Some(angle) = joint.cone_limit {
                         definition = definition.cone_limit(true, angle.max(0.0));
                     }
-                    if let (Some(lower), Some(upper)) = (joint.lower_limit, joint.upper_limit) {
+                    if let (Some(lower), Some(upper)) =
+                        (joint.twist_lower_limit, joint.twist_upper_limit)
+                    {
                         definition = definition.twist_limit(true, lower, upper.max(lower));
                     }
                     world.try_create_spherical_joint(definition)
@@ -753,7 +746,22 @@ pub(crate) fn process_ragdoll_toggles(
                 ),
             };
             if let Ok(joint_id) = result {
-                joint_ids.push(joint_id);
+                joint_ids.push(RagdollJointBinding {
+                    id: joint_id,
+                    kind: joint.kind.clone(),
+                    body_a: joint.body_a,
+                    body_b: joint.body_b,
+                    node_a: asset
+                        .bodies
+                        .iter()
+                        .find(|body| body.group_id == joint.body_a)
+                        .and_then(|body| body.node.clone()),
+                    node_b: asset
+                        .bodies
+                        .iter()
+                        .find(|body| body.group_id == joint.body_b)
+                        .and_then(|body| body.node.clone()),
+                });
             }
         }
         let all_bodies = body_ids
@@ -776,6 +784,7 @@ pub(crate) fn process_ragdoll_toggles(
 /// Maps one prepared Havok body to the GLTF node that owns its collision
 /// objects. The first physics pose and node pose are captured lazily because
 /// scene children are spawned after the placement root.
+#[derive(Clone)]
 pub(crate) struct RagdollNodeBinding {
     pub(crate) root: Entity,
     pub(crate) node: String,
@@ -783,6 +792,237 @@ pub(crate) struct RagdollNodeBinding {
     pub(crate) rest_body: Option<Affine3A>,
     pub(crate) rest_node_globals: Vec<Affine3A>,
     pub(crate) rest_node_locals: Vec<Transform>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RagdollJointBinding {
+    pub(crate) id: JointId,
+    pub(crate) kind: String,
+    pub(crate) body_a: u32,
+    pub(crate) body_b: u32,
+    pub(crate) node_a: Option<String>,
+    pub(crate) node_b: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct RagdollProbeSnapshot {
+    pub(crate) instantiated: bool,
+    pub(crate) body_count: usize,
+    pub(crate) joint_count: usize,
+    pub(crate) awake_count: usize,
+    pub(crate) sleep_disabled_count: usize,
+    pub(crate) max_linear_speed: f32,
+    pub(crate) max_angular_speed: f32,
+    pub(crate) max_joint_linear_separation: f32,
+    pub(crate) max_joint_angular_separation: f32,
+    pub(crate) max_node_position_error: f32,
+    pub(crate) max_node_angle_error: f32,
+    pub(crate) bodies: Vec<RagdollBodyProbe>,
+    pub(crate) joints: Vec<RagdollJointProbe>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct RagdollBodyProbe {
+    pub(crate) index: usize,
+    pub(crate) node: Option<String>,
+    pub(crate) awake: bool,
+    pub(crate) sleep_enabled: bool,
+    pub(crate) linear_speed: f32,
+    pub(crate) angular_speed: f32,
+    pub(crate) position: [f32; 3],
+    pub(crate) node_position_error: Option<f32>,
+    pub(crate) node_angle_error: Option<f32>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct RagdollJointProbe {
+    pub(crate) index: usize,
+    pub(crate) kind: String,
+    pub(crate) body_a: u32,
+    pub(crate) body_b: u32,
+    pub(crate) node_a: Option<String>,
+    pub(crate) node_b: Option<String>,
+    pub(crate) linear_separation: f32,
+    pub(crate) angular_separation: f32,
+    pub(crate) constraint_force: [f32; 3],
+    pub(crate) constraint_torque: [f32; 3],
+}
+
+/// Captures a bounded, read-only view of one live articulated actor. This is
+/// deliberately queried on demand rather than sampled every frame.
+pub(crate) fn probe_ragdoll(world: &mut World, entity: Entity) -> RagdollProbeSnapshot {
+    let Some(collision) = world.get_resource::<PreparedCollisionWorld>() else {
+        return empty_ragdoll_probe();
+    };
+    let Some(body_ids) = collision.ragdoll_bodies.get(&entity).cloned() else {
+        return empty_ragdoll_probe();
+    };
+    let joint_ids = collision
+        .ragdoll_joints
+        .get(&entity)
+        .cloned()
+        .unwrap_or_default();
+    let bindings = body_ids
+        .iter()
+        .filter_map(|body| {
+            collision
+                .ragdoll_nodes
+                .get(body)
+                .cloned()
+                .map(|binding| (*body, binding))
+        })
+        .collect::<HashMap<_, _>>();
+    let node_globals = bindings
+        .values()
+        .flat_map(|binding| binding.node_entities.iter().copied())
+        .filter_map(|node| {
+            world
+                .get::<GlobalTransform>(node)
+                .map(|transform| (node, transform.affine()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    let Some(context) = world.get_non_send::<BoxdddPhysicsContext>() else {
+        return empty_ragdoll_probe();
+    };
+    let Some(physics) = context.world() else {
+        return empty_ragdoll_probe();
+    };
+    let mut bodies = Vec::with_capacity(body_ids.len());
+    for (index, body) in body_ids.iter().copied().enumerate() {
+        let Ok(transform) = physics.try_body_transform(body) else {
+            continue;
+        };
+        let linear = physics.try_body_linear_velocity(body).unwrap_or_default();
+        let angular = physics.try_body_angular_velocity(body).unwrap_or_default();
+        let awake = physics.try_body_awake(body).unwrap_or(false);
+        let sleep_enabled = physics.try_body_sleep_enabled(body).unwrap_or(false);
+        let body_affine = Affine3A::from_rotation_translation(
+            from_box_quat(transform.q),
+            Vec3::new(transform.p.x, transform.p.y, transform.p.z),
+        );
+        let binding = bindings.get(&body);
+        let (node_position_error, node_angle_error) = binding
+            .and_then(|binding| {
+                let rest_body = binding.rest_body?;
+                let delta = body_affine * rest_body.inverse();
+                let errors = binding
+                    .node_entities
+                    .iter()
+                    .zip(&binding.rest_node_globals)
+                    .filter_map(|(node, rest_node)| {
+                        let actual = node_globals.get(node)?;
+                        let expected = delta * *rest_node;
+                        let (_, expected_rotation, expected_translation) =
+                            expected.to_scale_rotation_translation();
+                        let (_, actual_rotation, actual_translation) =
+                            actual.to_scale_rotation_translation();
+                        Some((
+                            expected_translation.distance(actual_translation),
+                            expected_rotation.angle_between(actual_rotation),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                (!errors.is_empty()).then(|| {
+                    errors
+                        .into_iter()
+                        .fold((0.0_f32, 0.0_f32), |maxima, error| {
+                            (maxima.0.max(error.0), maxima.1.max(error.1))
+                        })
+                })
+            })
+            .map_or((None, None), |(position, angle)| {
+                (Some(position), Some(angle))
+            });
+        bodies.push(RagdollBodyProbe {
+            index,
+            node: binding.map(|binding| binding.node.clone()),
+            awake,
+            sleep_enabled,
+            linear_speed: Vec3::new(linear.x, linear.y, linear.z).length(),
+            angular_speed: Vec3::new(angular.x, angular.y, angular.z).length(),
+            position: [transform.p.x, transform.p.y, transform.p.z],
+            node_position_error,
+            node_angle_error,
+        });
+    }
+    let joints = joint_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, joint)| {
+            let linear_separation = physics.try_joint_linear_separation(joint.id).ok()?;
+            let angular_separation = physics.try_joint_angular_separation(joint.id).ok()?;
+            let force = physics
+                .try_joint_constraint_force(joint.id)
+                .unwrap_or_default();
+            let torque = physics
+                .try_joint_constraint_torque(joint.id)
+                .unwrap_or_default();
+            Some(RagdollJointProbe {
+                index,
+                kind: joint.kind.clone(),
+                body_a: joint.body_a,
+                body_b: joint.body_b,
+                node_a: joint.node_a.clone(),
+                node_b: joint.node_b.clone(),
+                linear_separation,
+                angular_separation,
+                constraint_force: [force.x, force.y, force.z],
+                constraint_torque: [torque.x, torque.y, torque.z],
+            })
+        })
+        .collect::<Vec<_>>();
+    RagdollProbeSnapshot {
+        instantiated: true,
+        body_count: bodies.len(),
+        joint_count: joints.len(),
+        awake_count: bodies.iter().filter(|body| body.awake).count(),
+        sleep_disabled_count: bodies.iter().filter(|body| !body.sleep_enabled).count(),
+        max_linear_speed: bodies
+            .iter()
+            .map(|body| body.linear_speed)
+            .fold(0.0, f32::max),
+        max_angular_speed: bodies
+            .iter()
+            .map(|body| body.angular_speed)
+            .fold(0.0, f32::max),
+        max_joint_linear_separation: joints
+            .iter()
+            .map(|joint| joint.linear_separation.abs())
+            .fold(0.0, f32::max),
+        max_joint_angular_separation: joints
+            .iter()
+            .map(|joint| joint.angular_separation.abs())
+            .fold(0.0, f32::max),
+        max_node_position_error: bodies
+            .iter()
+            .filter_map(|body| body.node_position_error)
+            .fold(0.0, f32::max),
+        max_node_angle_error: bodies
+            .iter()
+            .filter_map(|body| body.node_angle_error)
+            .fold(0.0, f32::max),
+        bodies,
+        joints,
+    }
+}
+
+fn empty_ragdoll_probe() -> RagdollProbeSnapshot {
+    RagdollProbeSnapshot {
+        instantiated: false,
+        body_count: 0,
+        joint_count: 0,
+        awake_count: 0,
+        sleep_disabled_count: 0,
+        max_linear_speed: 0.0,
+        max_angular_speed: 0.0,
+        max_joint_linear_separation: 0.0,
+        max_joint_angular_separation: 0.0,
+        max_node_position_error: 0.0,
+        max_node_angle_error: 0.0,
+        bodies: Vec::new(),
+        joints: Vec::new(),
+    }
 }
 
 pub(crate) fn collect_ragdoll_node_restores<'a>(
@@ -825,30 +1065,14 @@ fn shape_anchor(shape: &PreparedPhysicsShape) -> Vec3 {
     }
 }
 
-pub(crate) fn tune_ragdoll_body(body: &mut PreparedPhysicsBody, reference_form_id: u32) {
+pub(crate) fn tune_ragdoll_body(body: &mut PreparedPhysicsBody) {
     body.linear_damping = body.linear_damping.max(0.2);
     body.angular_damping = body.angular_damping.max(0.25);
     body.friction = body.friction.max(0.6);
-    body.restitution = body.restitution.clamp(0.0, 0.05);
-
-    // Start every part with the same small nudge. Launching only the pelvis
-    // pulls it out from under an otherwise stationary torso and makes a corpse
-    // fold into a kneeling pose; coherent motion tips the articulated chain as
-    // one body while gravity and the joint limits provide the secondary motion.
-    let direction = if reference_form_id & 1 == 0 {
-        1.0
-    } else {
-        -1.0
-    };
-    body.linear_velocity = [0.55 * direction, 0.0, 0.15];
-    body.angular_velocity = [0.35 * direction, 0.0, 0.6 * direction];
-}
-
-pub(crate) fn ragdoll_joint_frame_rotation(axis: [f32; 3]) -> Quat {
-    let Some(axis) = Vec3::from_array(axis).try_normalize() else {
-        return Quat::IDENTITY;
-    };
-    Quat::from_rotation_arc(Vec3::Z, axis)
+    body.restitution = 0.0;
+    body.sleep_enabled = true;
+    body.linear_velocity = [0.0; 3];
+    body.angular_velocity = [0.0; 3];
 }
 
 fn translate_shape(shape: &mut PreparedPhysicsShape, translation: Vec3) {
@@ -1433,7 +1657,7 @@ pub(crate) fn cleanup_removed_dynamic_bodies(
     for entity in removed {
         if let Some(joints) = collision_world.ragdoll_joints.remove(&entity) {
             for joint in joints {
-                let _ = world.try_destroy_joint(joint, true);
+                let _ = world.try_destroy_joint(joint.id, true);
             }
         }
         if let Some(bodies) = collision_world.ragdoll_bodies.remove(&entity) {

@@ -638,6 +638,9 @@ struct BevyoutWorld {
     nav_solve_steps_since_solve: u32,
     nav_solve_blend_interval: u32,
     nav_solve_blend_fraction: Option<f32>,
+
+    // -- actor_conversion.feature (authored ragdoll sidecar v3) --
+    actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
 }
 
 fn find_placement<'a>(
@@ -6990,4 +6993,96 @@ fn main() {
             .run_and_exit("features")
             .await;
     });
+}
+
+// ---------------------------------------------------------------------
+// actor_conversion.feature -- authored ragdoll sidecar v3. Appended
+// section; do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^an authored spherical actor joint with cone ([\d.]+) plane (-?[\d.]+) to (-?[\d.]+) twist (-?[\d.]+) to (-?[\d.]+) strength ([\d.]+)$"
+)]
+async fn given_authored_spherical_actor_joint(
+    world: &mut BevyoutWorld,
+    cone: f32,
+    plane_lower: f32,
+    plane_upper: f32,
+    twist_lower: f32,
+    twist_upper: f32,
+    strength: f32,
+) {
+    world.actor_ragdoll_joint = Some(physics::PreparedPhysicsJoint {
+        kind: "spherical".into(),
+        body_a: 0,
+        body_b: 1,
+        anchor_a: [0.0, 1.0, 0.0],
+        anchor_b: [0.0, 1.0, 0.0],
+        frame_a_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        frame_b_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        cone_limit: Some(cone),
+        plane_lower_limit: Some(plane_lower),
+        plane_upper_limit: Some(plane_upper),
+        twist_lower_limit: Some(twist_lower),
+        twist_upper_limit: Some(twist_upper),
+        malleable_strength: Some(strength),
+        source: physics::PreparedPhysicsJointSource::Authored,
+        ..Default::default()
+    });
+}
+
+#[given("a synthetic fallback actor joint")]
+async fn given_synthetic_fallback_actor_joint(world: &mut BevyoutWorld) {
+    world.actor_ragdoll_joint = Some(physics::PreparedPhysicsJoint {
+        source: physics::PreparedPhysicsJointSource::SyntheticFallback,
+        ..Default::default()
+    });
+}
+
+#[then("the actor physics sidecar schema is 3")]
+async fn then_actor_physics_sidecar_schema_is_three(_world: &mut BevyoutWorld) {
+    assert_eq!(physics::PHYSICS_ASSET_SCHEMA_VERSION, 3);
+}
+
+#[then("the actor joint has complete local frames")]
+async fn then_actor_joint_has_complete_local_frames(world: &mut BevyoutWorld) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    assert_eq!(joint.frame_a_rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(joint.frame_b_rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
+}
+
+#[then(
+    regex = r"^the actor joint keeps plane (-?[\d.]+) to (-?[\d.]+) separate from twist (-?[\d.]+) to (-?[\d.]+)$"
+)]
+async fn then_actor_joint_keeps_plane_separate_from_twist(
+    world: &mut BevyoutWorld,
+    plane_lower: f32,
+    plane_upper: f32,
+    twist_lower: f32,
+    twist_upper: f32,
+) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    assert_eq!(joint.plane_lower_limit, Some(plane_lower));
+    assert_eq!(joint.plane_upper_limit, Some(plane_upper));
+    assert_eq!(joint.twist_lower_limit, Some(twist_lower));
+    assert_eq!(joint.twist_upper_limit, Some(twist_upper));
+}
+
+#[then(regex = r#"^the actor joint source is "([^"]*)"$"#)]
+async fn then_actor_joint_source_is(world: &mut BevyoutWorld, expected: String) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    let actual = match joint.source {
+        physics::PreparedPhysicsJointSource::Authored => "Authored",
+        physics::PreparedPhysicsJointSource::SyntheticFallback => "SyntheticFallback",
+    };
+    assert_eq!(actual, expected);
 }

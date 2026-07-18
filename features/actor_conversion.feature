@@ -10,7 +10,7 @@ Feature: PyNifly actor conversion contract
     When the actor conversion inputs are canonicalized
     Then the actor reference skeleton is "meshes/characters/_male/skeleton.nif"
     And the actor visual inputs are "meshes/characters/_male/skeleton.nif,meshes/characters/_male/head.nif,meshes/characters/_male/upperbody.nif"
-    And the actor converter profile is "pynifly-v28-actor-bindpose-v14"
+    And the actor converter profile is "pynifly-v28-actor-bindpose-v15"
 
   Scenario: Inventory weapons are not baked into the actor body
     Given actor gear record kinds "ARMO,WEAP,ARMO"
@@ -49,6 +49,17 @@ Feature: PyNifly actor conversion contract
   Scenario: Only editor-visible dismemberment partitions survive intact conversion
     Then actor partition flags 0x1 are visible
     And actor partition flags 0x0 are hidden
+
+  Scenario: Authored ragdoll frames preserve distinct swing and twist limits
+    Given an authored spherical actor joint with cone 0.785398 plane -0.879646 to 0.523597 twist -0.174533 to 0.174533 strength 0.9
+    Then the actor physics sidecar schema is 3
+    And the actor joint has complete local frames
+    And the actor joint keeps plane -0.879646 to 0.523597 separate from twist -0.174533 to 0.174533
+    And the actor joint source is "Authored"
+
+  Scenario: Synthetic human joints remain explicit per-edge fallbacks
+    Given a synthetic fallback actor joint
+    Then the actor joint source is "SyntheticFallback"
 
   Scenario: A model-only creature still has a reference and visual input
     Given actor skeleton ""
