@@ -1,4 +1,4 @@
-import bpy, gzip, json, math, os, sys
+import bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
@@ -631,8 +631,8 @@ def build_physics_asset():
     # constraint records (or records whose body indices refer to a different
     # partial-armature import).  A developer ragdoll must still be a connected
     # articulated chain; otherwise every limb is free to fly away and the
-    # skinned mesh stretches across the scene.  Build conservative spherical
-    # joints from the Bip01 hierarchy when this is an actor assembly.
+    # skinned mesh stretches across the scene. Build a conservative articulated
+    # tree from the Bip01 hierarchy when this is an actor assembly.
     if (globals().get('assembly_inputs') is not None
             and any('bip01' in str(body.get('node', '')).casefold()
                     for body in authored_bodies)):
@@ -697,6 +697,7 @@ def actor_synthetic_joints(bodies):
         'bip01thighl': 'bip01pelvis',
         'bip01footr': 'bip01calfr', 'bip01calfr': 'bip01thighr',
         'bip01thighr': 'bip01pelvis',
+        'bip01pelvis': 'bip01nonaccum',
         'bip01spine': 'bip01nonaccum',
         'bip01spine1': 'bip01spine', 'bip01spine2': 'bip01spine1',
         'bip01neck1': 'bip01spine2', 'bip01head': 'bip01neck1',
@@ -723,6 +724,16 @@ def actor_synthetic_joints(bodies):
 
     existing = set()
     joints = []
+    hinge_axes = {
+        # Bind-pose legs point down; X-axis hinges let the calves fold in the
+        # sagittal plane while blocking sideways and hyperextension collapse.
+        'bip01calfl': [1.0, 0.0, 0.0],
+        'bip01calfr': [1.0, 0.0, 0.0],
+        # Bind-pose arms point in opposite X directions. Mirroring the right
+        # hinge axis makes the same positive angular range flex both elbows.
+        'bip01forearml': [0.0, 0.0, 1.0],
+        'bip01forearmr': [0.0, 0.0, -1.0],
+    }
     for child, parent in sorted(resolved.items()):
         child_body = by_name[child]
         parent_body = by_name[parent]
@@ -735,12 +746,18 @@ def actor_synthetic_joints(bodies):
         anchor = [(left + right) * 0.5
                   for left, right in zip(actor_body_anchor(parent_body),
                                          actor_body_anchor(child_body))]
+        hinge_axis = hinge_axes.get(child)
+        cone_limit = 1.8 if child in {'bip01thighl', 'bip01thighr'} else 1.0
         joints.append({
-            'kind': 'spherical', 'body_a': body_a, 'body_b': body_b,
+            'kind': 'revolute' if hinge_axis is not None else 'spherical',
+            'body_a': body_a, 'body_b': body_b,
             'anchor_a': anchor, 'anchor_b': anchor,
-            'axis_a': [0.0, 1.0, 0.0], 'axis_b': [0.0, 1.0, 0.0],
-            'lower_limit': -1.0, 'upper_limit': 1.0,
-            'cone_limit': 1.0, 'twist_limit': 1.0,
+            'axis_a': hinge_axis or [0.0, 1.0, 0.0],
+            'axis_b': hinge_axis or [0.0, 1.0, 0.0],
+            'lower_limit': -0.05 if hinge_axis is not None else -1.0,
+            'upper_limit': 2.4 if hinge_axis is not None else 1.0,
+            'cone_limit': None if hinge_axis is not None else cone_limit,
+            'twist_limit': None if hinge_axis is not None else 1.0,
         })
     return joints
 
@@ -1005,6 +1022,47 @@ def run_root_transform_self_test():
         True,
     ) == []
     assert matrix_identity_error(bip01.matrix_local) > 0.1
+    assert is_pynifly_render_helper('BSBound:BBX')
+    assert is_pynifly_render_helper('bsbound:actor bounds')
+    assert is_pynifly_render_helper('bodymeat')
+    assert is_pynifly_render_helper('headmeat.001')
+    assert is_pynifly_render_helper('MeatCapBody')
+    assert is_pynifly_render_helper('MeatCapLimbs')
+    assert is_pynifly_render_helper('RaiderArmor01M_GO')
+    assert is_pynifly_render_helper('RaiderArmor01M_GO.001')
+    assert not is_pynifly_render_helper('UpperBody')
+    assert not is_pynifly_render_helper('DomeRoot:0')
+    fixture_bodies = [
+        {'group_id': 0, 'node': 'Bip01 NonAccum',
+         'shapes': [{'kind': 'Sphere', 'center': [0.0, 0.9, 0.0]}]},
+        {'group_id': 1, 'node': 'Bip01 Thigh.L',
+         'shapes': [{'kind': 'Sphere', 'center': [0.2, 0.65, 0.0]}]},
+        {'group_id': 2, 'node': 'Bip01 Thigh.R',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.2, 0.65, 0.0]}]},
+        {'group_id': 3, 'node': 'Bip01 Calf.L',
+         'shapes': [{'kind': 'Sphere', 'center': [0.2, 0.3, 0.0]}]},
+        {'group_id': 4, 'node': 'Bip01 Spine2',
+         'shapes': [{'kind': 'Sphere', 'center': [0.0, 1.3, 0.0]}]},
+        {'group_id': 5, 'node': 'Bip01 UpperArm.L',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.25, 1.35, 0.0]}]},
+        {'group_id': 6, 'node': 'Bip01 Forearm.L',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.55, 1.35, 0.0]}]},
+    ]
+    fixture_joints = actor_synthetic_joints(fixture_bodies)
+    fixture_by_pair = {
+        (joint['body_a'], joint['body_b']): joint
+        for joint in fixture_joints
+    }
+    assert set(fixture_by_pair) == {
+        (0, 1), (0, 2), (1, 3), (0, 4), (4, 5), (5, 6)
+    }, fixture_by_pair
+    assert fixture_by_pair[(1, 3)]['kind'] == 'revolute'
+    assert fixture_by_pair[(1, 3)]['axis_a'] == [1.0, 0.0, 0.0]
+    assert fixture_by_pair[(5, 6)]['kind'] == 'revolute'
+    assert fixture_by_pair[(5, 6)]['axis_a'] == [0.0, 0.0, 1.0]
+    assert fixture_by_pair[(0, 4)]['kind'] == 'spherical'
+    assert fixture_by_pair[(0, 1)]['cone_limit'] == 1.8
+    assert fixture_by_pair[(0, 2)]['cone_limit'] == 1.8
     print('[convert-test] model root transform policy passed', flush=True)
 
 def bake_quick_ao():
@@ -1073,6 +1131,254 @@ def collect_animation_sound_cues():
     ))
     return cues
 
+def clear_imported_scene():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    for datablocks in (
+            bpy.data.meshes, bpy.data.curves, bpy.data.materials,
+            bpy.data.cameras, bpy.data.lights, bpy.data.actions,
+            bpy.data.armatures):
+        for datablock in list(datablocks):
+            if datablock.users == 0:
+                datablocks.remove(datablock)
+
+def is_pynifly_render_helper(name):
+    # Fallout skeleton NIFs carry BSBound nodes for editor/gameplay bounds.
+    # PyNifly 28 imports them as ordinary cube meshes even when collision
+    # import is disabled, producing a giant untextured box around the actor.
+    normalized = str(name).casefold()
+    if normalized.startswith('bsbound:'):
+        return True
+    base = normalized.rsplit('.', 1)[0] if re.search(r'\.\d{3}$', normalized) else normalized
+    return base.endswith('_go') or base in {
+        'bodymeat', 'headmeat', 'meatcapbody', 'meatcaplimbs'
+    }
+
+def import_pynifly_actor(skeleton_path, visual_paths, model, policy):
+    """Import one actor visual assembly with PyNifly 28.
+
+    NIFTools remains responsible for the isolated Havok pass. PyNifly owns the
+    exported armatures, inverse bind matrices, weights, and shader materials.
+    """
+    import addon_utils
+    if 'io_scene_nifly' not in bpy.context.preferences.addons:
+        addon_utils.enable('io_scene_nifly', default_set=True, persistent=False)
+    if 'io_scene_nifly' not in bpy.context.preferences.addons:
+        raise RuntimeError('PyNifly is installed but could not be enabled for headless conversion')
+    from io_scene_nifly import bl_info as pynifly_info
+    from io_scene_nifly import blender_defs as pynifly_blender_defs
+    from io_scene_nifly.nif.import_nif import NifImporter
+    from io_scene_nifly.pyn import pynifly as pynifly_api
+    from io_scene_nifly.util.settings import ImportSettings
+
+    version = tuple(int(value) for value in pynifly_info.get('version', (0, 0, 0)))
+    if version < (28, 0, 0):
+        raise RuntimeError(
+            'PyNifly 28.0.0 or newer is required for actor conversion; found '
+            + '.'.join(str(value) for value in version)
+        )
+    clear_imported_scene()
+    settings = ImportSettings(
+        rename_bones=False,
+        rename_bones_niftools=False,
+        rotate_bones_pretty=False,
+        blender_xf=False,
+        create_bones=True,
+        import_tris=False,
+        import_cutpoints=False,
+        import_animations=False,
+        import_shapekeys=False,
+        apply_skinning=True,
+        smart_editor_markers=False,
+        create_collection=False,
+        mesh_only=False,
+        import_collisions=False,
+        import_pose=False,
+        reference_skeleton=skeleton_path,
+    )
+    reference = pynifly_api.NifFile(skeleton_path)
+    # PyNifly's standard display transform is 0.1 units; Fallout preparation
+    # uses 1/70, so apply the remaining 1/7 scale while retaining its axis fix.
+    import_xf = pynifly_blender_defs.blender_import_xf @ Matrix.Scale(1.0 / 7.0, 4)
+    importer = NifImporter(
+        visual_paths,
+        import_settings=settings,
+        collection=bpy.context.scene.collection,
+        reference_skel=reference,
+        base_transform=import_xf,
+        scale=1.0,
+    )
+    importer.execute()
+
+    def source_texture_references(path):
+        """Recover Fallout 3 texture paths PyNifly 28 does not expose.
+
+        Some BSShaderPPLightingProperty blocks import with an empty
+        ``nifnode.textures`` mapping even though their BSShaderTextureSet has
+        valid, null-terminated paths. Limit the fallback to printable texture
+        references embedded in that same source NIF.
+        """
+        try:
+            with open(path, 'rb') as source_file:
+                payload = source_file.read()
+        except OSError:
+            return []
+        references = []
+        for match in re.finditer(
+                rb'textures[\\/][\x20-\x7e]*?\.(?:dds|tga|png)',
+                payload, flags=re.IGNORECASE):
+            value = match.group(0).decode('ascii', errors='ignore')
+            if value and value.casefold() not in {
+                    existing.casefold() for existing in references}:
+                references.append(value)
+        return references
+
+    source_texture_values = {
+        os.path.abspath(path).casefold(): source_texture_references(path)
+        for path in visual_paths
+    }
+
+    def staged_texture_path(value):
+        if not value:
+            return None
+        normalized = str(value).replace('\\', '/').lower()
+        marker = normalized.find('textures/')
+        if marker >= 0:
+            normalized = normalized[marker:]
+        root = os.path.abspath(bpy.context.preferences.filepaths.texture_directory)
+        if os.path.basename(root).casefold() == 'textures':
+            root = os.path.dirname(root)
+        candidate = os.path.join(root, *normalized.split('/'))
+        png = os.path.splitext(candidate)[0] + '.png'
+        if os.path.isfile(png):
+            return png
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+
+    def install_source_material(material, texture_values):
+        resolved = [staged_texture_path(value) for value in texture_values]
+        resolved = [value for value in resolved if value]
+        if not resolved:
+            return False
+        def texture_kind(path):
+            stem = os.path.basename(path).casefold()
+            if '_n.' in stem or 'normal' in stem:
+                return 'normal'
+            if '_g.' in stem or '_em.' in stem or 'glow' in stem:
+                return 'glow'
+            if '_sk.' in stem or 'spec' in stem:
+                return 'specular'
+            return 'diffuse'
+        diffuse_path = next((path for path in resolved if texture_kind(path) == 'diffuse'), None)
+        if diffuse_path is None:
+            return False
+        normal_path = next((path for path in resolved if texture_kind(path) == 'normal'), None)
+        material.use_nodes = True
+        tree = material.node_tree
+        tree.nodes.clear()
+        output = tree.nodes.new('ShaderNodeOutputMaterial')
+        principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
+        diffuse = tree.nodes.new('ShaderNodeTexImage')
+        diffuse.label = 'Diffuse'
+        diffuse.image = bpy.data.images.load(diffuse_path, check_existing=True)
+        diffuse.image.colorspace_settings.name = 'sRGB'
+        tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        alpha_output = diffuse.outputs.get('Alpha')
+        alpha_input = principled.inputs.get('Alpha')
+        if alpha_output is not None and alpha_input is not None:
+            tree.links.new(alpha_output, alpha_input)
+        if normal_path:
+            normal = tree.nodes.new('ShaderNodeTexImage')
+            normal.label = 'Normal'
+            normal.image = bpy.data.images.load(normal_path, check_existing=True)
+            normal.image.colorspace_settings.name = 'Non-Color'
+            normal_map = tree.nodes.new('ShaderNodeNormalMap')
+            tree.links.new(normal.outputs['Color'], normal_map.inputs['Color'])
+            tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+        tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+        return True
+
+    repaired_materials = 0
+    removed_helpers = 0
+    for represented in importer.objects_created:
+        obj = represented.blender_obj
+        nifnode = represented.nifnode
+        if obj is None or obj.type != 'MESH' or nifnode is None:
+            continue
+        if is_pynifly_render_helper(obj.name) or is_pynifly_render_helper(
+                getattr(nifnode, 'name', '')):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_helpers += 1
+            continue
+        source_file = getattr(getattr(nifnode, 'file', None), 'filepath', '')
+        if source_file:
+            obj['bevyout_actor_source_path'] = str(source_file).replace('\\', '/')
+        texture_map = getattr(nifnode, 'textures', None)
+        texture_values = list(texture_map.values()) if texture_map else []
+        if not texture_values and source_file:
+            texture_values = source_texture_values.get(
+                os.path.abspath(source_file).casefold(), [])
+        for material in obj.data.materials:
+            if material is None:
+                continue
+            images = [] if not material.use_nodes else [
+                node.image for node in material.node_tree.nodes
+                if node.bl_idname == 'ShaderNodeTexImage' and node.image
+            ]
+            if not images and install_source_material(material, texture_values):
+                repaired_materials += 1
+
+    # BSBound can arrive outside PyNifly's represented-object list, so sweep
+    # the finished scene as the authoritative export set as well.
+    for obj in list(bpy.context.scene.objects):
+        if obj.type == 'MESH' and is_pynifly_render_helper(obj.name):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_helpers += 1
+
+    armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
+    meshes = [obj for obj in bpy.context.scene.objects
+              if obj.type == 'MESH' and len(obj.data.polygons)]
+    if not armatures:
+        raise RuntimeError('PyNifly actor import produced no armature')
+    if not meshes:
+        raise RuntimeError('PyNifly actor import produced no render meshes')
+    weighted_meshes = []
+    for mesh in meshes:
+        has_armature = any(modifier.type == 'ARMATURE' and modifier.object
+                           for modifier in mesh.modifiers)
+        if mesh.vertex_groups and has_armature:
+            weighted_meshes.append(mesh)
+    if not weighted_meshes:
+        raise RuntimeError('PyNifly actor import produced no weighted skinned mesh')
+    for mesh in weighted_meshes:
+        for material in mesh.data.materials:
+            images = [] if material is None or not material.use_nodes else [
+                node.image for node in material.node_tree.nodes
+                if node.bl_idname == 'ShaderNodeTexImage' and node.image
+            ]
+            if not images:
+                raise RuntimeError(
+                    'PyNifly actor material has no resolved texture: '
+                    + mesh.name + '/' + (material.name if material else '<none>')
+                )
+
+    carrier = max(armatures, key=lambda obj: (
+        len(getattr(getattr(obj, 'data', None), 'bones', [])), obj.name.casefold()
+    ))
+    carrier['bevyout_source_model'] = str(model)
+    carrier['bevyout_root_transform_policy'] = str(policy)
+    carrier['bevyout_record_zero_non_identity'] = False
+    carrier['bevyout_record_zero_transform'] = [
+        float(Matrix.Identity(4)[row][column])
+        for row in range(4) for column in range(4)
+    ]
+    print('[convert] PyNifly actor imported version={} armatures={} meshes={} weighted={}'.format(
+        '.'.join(str(value) for value in version), len(armatures), len(meshes),
+        len(weighted_meshes)), 'repaired_materials={} removed_helpers={}'.format(
+            repaired_materials, removed_helpers), flush=True)
+    return [], 0
+
 if sys.argv[-1] == '--self-test-root-policy':
     run_root_transform_self_test()
     raise SystemExit(0)
@@ -1081,13 +1387,18 @@ with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
     nif_path = job['input']
     assembly_inputs = None
+    assembly_skeleton = None
     if nif_path.casefold().endswith('.actor.json'):
         with open(nif_path, 'r', encoding='utf8') as assembly_file:
-            assembly_inputs = json.load(assembly_file).get('inputs', [])
+            assembly = json.load(assembly_file)
+            assembly_skeleton = assembly.get('skeleton')
+            assembly_inputs = assembly.get('visual_inputs', [])
+        if not assembly_skeleton:
+            raise RuntimeError('actor assembly manifest has no skeleton: ' + nif_path)
         if not assembly_inputs:
-            raise RuntimeError('actor assembly manifest has no inputs: ' + nif_path)
+            raise RuntimeError('actor assembly manifest has no visual inputs: ' + nif_path)
     current_joint_defs = nif_constraint_joints(
-        assembly_inputs if assembly_inputs is not None else [nif_path]
+        [assembly_skeleton] if assembly_skeleton is not None else [nif_path]
     )
     output_path = job['output']
     physics_output_path = job['physics_output']
@@ -1098,14 +1409,10 @@ for job in jobs:
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
-    def import_nif_scene(with_animation, append=False):
+    def import_nif_scene(with_animation, append=False, source_paths=None):
         if not append:
-            bpy.ops.object.select_all(action='SELECT')
-            bpy.ops.object.delete(use_global=False)
-            for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
-                for datablock in list(datablocks):
-                    if datablock.users == 0: datablocks.remove(datablock)
-        paths = assembly_inputs if assembly_inputs is not None else [nif_path]
+            clear_imported_scene()
+        paths = source_paths if source_paths is not None else [nif_path]
         spatial_corrections = []
         collision_corrections = 0
         for source_path in paths:
@@ -1145,14 +1452,24 @@ for job in jobs:
                 # NIF collision/helper meshes have no texture and should not be rendered.
                 bpy.data.objects.remove(obj, do_unlink=True)
         return spatial_corrections, collision_corrections
-    spatial_corrections, collision_corrections = import_nif_scene(
-        False if assembly_inputs is not None else True,
-        append=False,
-    )
     if assembly_inputs is not None:
-        normalize_actor_assembly()
+        # Physics is extracted from the explicit reference skeleton through the
+        # established NIFTools/nifgen path, then that scratch scene is replaced
+        # wholesale by the PyNifly visual import.
+        import_nif_scene(False, append=False, source_paths=[assembly_skeleton])
         physics_asset = build_physics_asset()
-    elif bpy.data.actions:
+        spatial_corrections, collision_corrections = import_pynifly_actor(
+            assembly_skeleton,
+            assembly_inputs,
+            job.get('model', ''),
+            job.get('root_transform_policy', 'preserve_verified'),
+        )
+    else:
+        spatial_corrections, collision_corrections = import_nif_scene(
+            True,
+            append=False,
+        )
+    if assembly_inputs is None and bpy.data.actions:
         # Controller import bakes an animated pose into the collision
         # objects' transforms (a door's colliders land in the Open position,
         # leaving the doorway hole open), so physics must come from a
@@ -1160,7 +1477,7 @@ for job in jobs:
         import_nif_scene(False)
         physics_asset = build_physics_asset()
         spatial_corrections, collision_corrections = import_nif_scene(True)
-    else:
+    elif assembly_inputs is None:
         physics_asset = build_physics_asset()
     with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
         json.dump(physics_asset, physics_file, separators=(',', ':'))
@@ -1200,16 +1517,31 @@ for job in jobs:
         bpy.data.objects.remove(glow_card, do_unlink=True)
     render_meshes = [obj for obj in bpy.context.scene.objects
                      if obj.type == 'MESH' and not obj.get('bevyout_collision', False)]
-    retained_names = {
-        (obj.niftools.longname if obj.niftools.longname else obj.name)
-        for obj in render_meshes
-    }
-    source_render_geometries = [
-        block for block in NifData.data.blocks
-        if str(getattr(block, 'name', '')) in retained_names
-        and getattr(block, 'data', None) is not None
-        and callable(getattr(block, 'get_triangles', None))
-    ]
+    if assembly_inputs is not None:
+        source_render_meshes = len(render_meshes)
+        source_render_vertices = sum(len(obj.data.vertices) for obj in render_meshes)
+        source_render_triangles = sum(
+            sum(max(0, len(polygon.vertices) - 2) for polygon in obj.data.polygons)
+            for obj in render_meshes
+        )
+    else:
+        retained_names = {
+            (obj.niftools.longname if obj.niftools.longname else obj.name)
+            for obj in render_meshes
+        }
+        source_render_geometries = [
+            block for block in NifData.data.blocks
+            if str(getattr(block, 'name', '')) in retained_names
+            and getattr(block, 'data', None) is not None
+            and callable(getattr(block, 'get_triangles', None))
+        ]
+        source_render_meshes = len(source_render_geometries)
+        source_render_vertices = sum(
+            int(geometry.data.num_vertices) for geometry in source_render_geometries
+        )
+        source_render_triangles = sum(
+            len(geometry.get_triangles()) for geometry in source_render_geometries
+        )
     metadata_carrier = next(
         (obj for obj in bpy.context.scene.objects
          if obj.get('bevyout_source_model') == job.get('model', '')),
@@ -1217,13 +1549,9 @@ for job in jobs:
     )
     if metadata_carrier is None:
         raise RuntimeError('converted scene lost source metadata carrier: ' + nif_path)
-    metadata_carrier['bevyout_source_render_meshes'] = len(source_render_geometries)
-    metadata_carrier['bevyout_source_render_vertices'] = sum(
-        int(geometry.data.num_vertices) for geometry in source_render_geometries
-    )
-    metadata_carrier['bevyout_source_render_triangles'] = sum(
-        len(geometry.get_triangles()) for geometry in source_render_geometries
-    )
+    metadata_carrier['bevyout_source_render_meshes'] = source_render_meshes
+    metadata_carrier['bevyout_source_render_vertices'] = source_render_vertices
+    metadata_carrier['bevyout_source_render_triangles'] = source_render_triangles
     metadata_carrier['bevyout_spatial_audit_version'] = 1
     metadata_carrier['bevyout_expected_spatial_corrections'] = len(spatial_corrections)
     metadata_carrier['bevyout_verified_spatial_corrections'] = sum(
@@ -1270,6 +1598,10 @@ for job in jobs:
             # Older NIFTools/Blender combinations may not expose the color
             # space property; the material links below are still valid.
             pass
+        if assembly_inputs is not None:
+            # PyNifly already authored its Principled/alpha/normal graph. Keep
+            # it intact; only normalize texture color spaces above.
+            continue
         authored_emission = authored_emission_color(material)
         emission_multiplier, has_emission_multiplier = source_emission_multiplier(material)
         old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)

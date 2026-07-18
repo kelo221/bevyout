@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::assets::NIF_CONVERTER_REVISION;
+use super::super::assets::PREPARED_CONVERTER_REVISION;
 
 /// Physics classification/sidecar pipeline revision (F49.1). Bump whenever
 /// `classify_placement`, `dynamic_rejection_reason`, or
@@ -49,7 +49,7 @@ impl CellFingerprints {
     pub(crate) fn current(plugin_content_set: impl Into<String>) -> Self {
         Self {
             plugin_content_set: plugin_content_set.into(),
-            converter: NIF_CONVERTER_REVISION.into(),
+            converter: PREPARED_CONVERTER_REVISION.into(),
             physics: PHYSICS_PIPELINE_REVISION.into(),
             prepare_pipeline: PREPARE_PIPELINE_REVISION.into(),
         }
@@ -160,7 +160,7 @@ mod tests {
     fn current_fingerprints_record_all_four_components() {
         let current = CellFingerprints::current("plugin-fp");
         assert_eq!(current.plugin_content_set, "plugin-fp");
-        assert_eq!(current.converter, NIF_CONVERTER_REVISION);
+        assert_eq!(current.converter, PREPARED_CONVERTER_REVISION);
         assert_eq!(current.physics, PHYSICS_PIPELINE_REVISION);
         assert_eq!(current.prepare_pipeline, PREPARE_PIPELINE_REVISION);
     }

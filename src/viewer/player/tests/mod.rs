@@ -534,8 +534,11 @@ fn prepared_downward_wound_mesh_supports_dynamic_prop() {
         &static_body_data,
         &downward_floor,
         &static_placement,
-        false,
-        false,
+        PreparedShapeOptions {
+            dynamic: false,
+            local_space: false,
+            collision_group: 0,
+        },
     )
     .expect("prepared downward-wound floor");
     world
@@ -555,8 +558,11 @@ fn prepared_downward_wound_mesh_supports_dynamic_prop() {
             radius: 0.3,
         },
         &dynamic_placement,
-        true,
-        true,
+        PreparedShapeOptions {
+            dynamic: true,
+            local_space: true,
+            collision_group: 0,
+        },
     )
     .expect("prepared dynamic prop");
     for _ in 0..180 {
@@ -1511,4 +1517,181 @@ fn keyframed_body_target_with_identity_rest_matches_the_node_pose() {
     let (translation, rotation) = keyframed_body_target(&root, Affine3A::IDENTITY, &node).unwrap();
     assert!((translation - Vec3::new(6.0, 1.0, 2.0)).length() < 1e-5);
     assert!(rotation.angle_between(Quat::from_rotation_y(1.3)) < 1e-4);
+}
+
+#[test]
+fn ragdoll_reset_plans_every_captured_node_local_transform() {
+    let mut world = World::new();
+    let root = world.spawn_empty().id();
+    let upper_body = world.spawn_empty().id();
+    let forearm = world.spawn_empty().id();
+    let upper_body_rest =
+        Transform::from_xyz(0.0, 0.9, 0.0).with_rotation(Quat::from_rotation_z(0.2));
+    let forearm_rest =
+        Transform::from_xyz(0.35, 0.0, 0.0).with_rotation(Quat::from_rotation_y(-0.4));
+    let binding = RagdollNodeBinding {
+        root,
+        node: "UpperBody".into(),
+        node_entities: vec![upper_body, forearm],
+        rest_body: None,
+        rest_node_globals: Vec::new(),
+        rest_node_locals: vec![upper_body_rest, forearm_rest],
+    };
+
+    let restores = collect_ragdoll_node_restores([&binding]);
+
+    assert_eq!(restores.len(), 2);
+    assert_eq!(restores[0], (upper_body, upper_body_rest));
+    assert_eq!(restores[1], (forearm, forearm_rest));
+}
+
+#[test]
+fn ragdoll_node_matching_bridges_niftools_and_pynifly_bone_spelling() {
+    assert!(actor_node_names_match("Bip01 Forearm.L", "Bip01 L Forearm"));
+    assert!(actor_node_names_match("Bip01 Foot.R", "Bip01 R Foot"));
+    assert!(actor_node_names_match("Bip01 Spine2", "Bip01 Spine2"));
+    assert!(!actor_node_names_match(
+        "Bip01 Forearm.L",
+        "Bip01 R Forearm"
+    ));
+}
+
+#[test]
+fn articulated_ragdoll_bodies_never_drive_the_placement_root() {
+    assert!(!dynamic_body_drives_placement_root(true, true));
+    assert!(!dynamic_body_drives_placement_root(true, false));
+    assert!(dynamic_body_drives_placement_root(false, true));
+    assert!(!dynamic_body_drives_placement_root(false, false));
+}
+
+#[test]
+fn ragdoll_body_recentering_moves_shapes_and_joint_frames_to_limb_space() {
+    let mut body = PreparedPhysicsBody {
+        center_of_mass: [0.0, 1.0, 0.0],
+        shapes: vec![PreparedPhysicsShape::Capsule {
+            point1: [0.0, 0.8, 0.0],
+            point2: [0.0, 1.2, 0.0],
+            radius: 0.1,
+        }],
+        ..default()
+    };
+
+    let anchor = recenter_ragdoll_body(&mut body);
+
+    assert!((anchor - Vec3::Y).length() < 1e-6);
+    assert_eq!(body.center_of_mass, [0.0, 0.0, 0.0]);
+    let PreparedPhysicsShape::Capsule { point1, point2, .. } = &body.shapes[0] else {
+        panic!("expected capsule");
+    };
+    assert!((Vec3::from_array(*point1) - Vec3::new(0.0, -0.2, 0.0)).length() < 1e-6);
+    assert!((Vec3::from_array(*point2) - Vec3::new(0.0, 0.2, 0.0)).length() < 1e-6);
+    assert!(
+        (ragdoll_joint_local_anchor([0.0, 1.2, 0.0], anchor, 1.0) - Vec3::new(0.0, 0.2, 0.0))
+            .length()
+            < 1e-6
+    );
+}
+
+#[test]
+fn ragdoll_parts_share_a_negative_non_colliding_group_per_actor() {
+    let first = ragdoll_collision_group(0x0004_1606);
+    let second = ragdoll_collision_group(0x0004_161a);
+    assert!(first < 0);
+    assert!(second < 0);
+    assert_ne!(first, second);
+}
+
+#[test]
+fn ragdoll_body_tuning_is_limp_damped_and_tips_the_whole_chain() {
+    let mut root = PreparedPhysicsBody {
+        node: Some("Bip01 NonAccum".into()),
+        linear_damping: 0.1,
+        angular_damping: 0.05,
+        friction: 0.3,
+        restitution: 0.8,
+        ..default()
+    };
+    let mut limb = PreparedPhysicsBody {
+        node: Some("Bip01 Forearm.L".into()),
+        ..root.clone()
+    };
+
+    tune_ragdoll_body(&mut root, 0x0004_1606);
+    tune_ragdoll_body(&mut limb, 0x0004_1606);
+
+    assert_eq!(root.linear_damping, 0.2);
+    assert_eq!(root.angular_damping, 0.25);
+    assert_eq!(root.friction, 0.6);
+    assert_eq!(root.restitution, 0.05);
+    assert_ne!(root.linear_velocity, [0.0; 3]);
+    assert_ne!(root.angular_velocity, [0.0; 3]);
+    assert_eq!(limb.linear_velocity, root.linear_velocity);
+    assert_eq!(limb.angular_velocity, root.angular_velocity);
+}
+
+#[test]
+fn ragdoll_revolute_frames_align_boxddd_z_with_the_authored_hinge_axis() {
+    for axis in [Vec3::X, Vec3::Z, Vec3::NEG_Z] {
+        let rotation = ragdoll_joint_frame_rotation(axis.to_array());
+        assert!((rotation * Vec3::Z - axis).length() < 1e-5);
+    }
+    assert_eq!(ragdoll_joint_frame_rotation([0.0; 3]), Quat::IDENTITY);
+}
+
+#[test]
+fn ragdoll_child_local_pose_is_resolved_against_the_driven_parent_pose() {
+    use bevy::math::Affine3A;
+    let parent_world = Affine3A::from_translation(Vec3::new(4.0, 1.0, -2.0));
+    let child_world = Affine3A::from_translation(Vec3::new(4.4, 1.2, -2.0));
+
+    let local = ragdoll_local_transform(parent_world, child_world).unwrap();
+
+    assert!((local.translation - Vec3::new(0.4, 0.2, 0.0)).length() < 1e-5);
+    assert!(local.rotation.angle_between(Quat::IDENTITY) < 1e-5);
+}
+
+#[test]
+fn ragdoll_parent_world_resolves_through_undriven_intermediate_bones() {
+    use bevy::math::Affine3A;
+    use std::collections::HashMap;
+
+    let mut world = World::new();
+    let spine = world.spawn_empty().id();
+    let clavicle = world.spawn_empty().id();
+    let twist = world.spawn_empty().id();
+    let upper_arm = world.spawn_empty().id();
+    let desired_worlds = HashMap::from([(
+        spine,
+        Affine3A::from_rotation_translation(Quat::from_rotation_z(0.5), Vec3::new(4.0, 1.0, -2.0)),
+    )]);
+    let parents = HashMap::from([(clavicle, spine), (twist, clavicle), (upper_arm, twist)]);
+    let locals = HashMap::from([
+        (clavicle, Transform::from_xyz(0.2, 0.1, 0.0)),
+        (twist, Transform::from_xyz(0.3, 0.0, 0.0)),
+    ]);
+
+    let resolved =
+        ragdoll_resolved_world(twist, &desired_worlds, &parents, &HashMap::new(), &locals).unwrap();
+    let expected = desired_worlds[&spine]
+        * locals[&clavicle].compute_affine()
+        * locals[&twist].compute_affine();
+
+    assert!((resolved.translation - expected.translation).length() < 1e-5);
+    let probe = Vec3::new(0.3, 0.4, 0.5);
+    assert!((resolved.transform_point3(probe) - expected.transform_point3(probe)).length() < 1e-5);
+}
+
+#[test]
+fn ragdoll_spawns_from_the_actors_current_runtime_transform() {
+    let prepared =
+        synthetic_collision_placement(PreparedPhysicsClassification::Static, [1.0, 2.0, 3.0]);
+    let runtime = Transform::from_xyz(8.0, 9.0, 10.0)
+        .with_rotation(Quat::from_rotation_y(0.75))
+        .with_scale(Vec3::splat(1.2));
+
+    let placement = ragdoll_runtime_placement(&prepared, &runtime);
+
+    assert_eq!(placement.translation, [8.0, 9.0, 10.0]);
+    assert!(Quat::from_array(placement.rotation_xyzw).angle_between(runtime.rotation) < 1e-5);
+    assert!((placement.scale - 1.2).abs() < 1e-6);
 }

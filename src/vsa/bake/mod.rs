@@ -23,7 +23,7 @@ pub(crate) use tools::*;
 
 use crate::cli::{BakeArgs, BakeQuality};
 
-use super::assets::{NIF_CONVERTER_REVISION, find_blender};
+use super::assets::{PREPARED_CONVERTER_REVISION, find_blender};
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
@@ -74,7 +74,7 @@ pub(crate) fn load_prepared_manifest(manifest_path: &Path) -> Result<PreparedSce
         ron::de::from_str(&text).context("invalid scene manifest; run prepare before bake")?;
     ensure_prepared_manifest_compatible(
         &manifest,
-        NIF_CONVERTER_REVISION,
+        PREPARED_CONVERTER_REVISION,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )?;
     if manifest

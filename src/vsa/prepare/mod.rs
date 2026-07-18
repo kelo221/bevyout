@@ -53,10 +53,11 @@ mod orchestrator;
 pub use orchestrator::prepare;
 
 use super::assets::{
-    BlenderAssetJob, NIF_CONVERTER_REVISION, RootTransformPolicy, asset_conversion,
-    audit_glb_visuals, content_addressed_glb_name, convert_staged_textures, find_blender,
+    ACTOR_CONVERTER_REVISION, ActorAssemblyDescriptor, BlenderAssetJob, NIF_CONVERTER_REVISION,
+    PREPARED_CONVERTER_REVISION, RootTransformPolicy, asset_conversion, audit_glb_visuals,
+    canonical_actor_assembly, content_addressed_glb_name, convert_staged_textures, find_blender,
     load_archives, read_glb_animation_sound_cues, resolve_asset, root_transform_policy,
-    run_blender_batch, stage_textures, validate_asset_cache_pair,
+    run_blender_batch, stage_textures, validate_actor_glb, validate_asset_cache_pair,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{

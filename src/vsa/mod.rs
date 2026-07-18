@@ -15,7 +15,7 @@ mod recipe;
 mod report;
 mod scenes;
 
-pub(crate) use assets::NIF_CONVERTER_REVISION;
+pub(crate) use assets::PREPARED_CONVERTER_REVISION;
 pub use bake::bake;
 pub(crate) use bake::is_bake_static;
 pub use catalog::cells;

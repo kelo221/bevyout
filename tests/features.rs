@@ -563,6 +563,13 @@ struct BevyoutWorld {
     actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
     actor_catalog_result: Option<actor_catalog::PreparedActorCatalog>,
 
+    // -- actor_conversion.feature --
+    actor_skeleton: String,
+    actor_visual_inputs: Vec<String>,
+    actor_assembly: Option<assets::ActorAssemblyDescriptor>,
+    actor_gear_kinds: Vec<String>,
+    retained_actor_gear_kinds: Vec<String>,
+
     // -- nav_graph.feature (issue #111, M4 wave 2) --
     nav_cell_form_id: u32,
     nav_navm_form_id: u32,
@@ -4861,6 +4868,81 @@ async fn then_actor_catalog_ron_deterministic(world: &mut BevyoutWorld) {
     let a = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     let b = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------
+// actor_conversion.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^actor skeleton \"([^\"]*)\"$"#)]
+async fn given_actor_skeleton(world: &mut BevyoutWorld, skeleton: String) {
+    world.actor_skeleton = skeleton;
+}
+
+#[given(regex = r#"^actor visual inputs \"([^\"]*)\"$"#)]
+async fn given_actor_visual_inputs(world: &mut BevyoutWorld, inputs: String) {
+    world.actor_visual_inputs = inputs
+        .split(',')
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+}
+
+#[when("the actor conversion inputs are canonicalized")]
+async fn when_actor_conversion_inputs_are_canonicalized(world: &mut BevyoutWorld) {
+    world.actor_assembly = assets::canonical_actor_assembly(
+        (!world.actor_skeleton.is_empty()).then(|| world.actor_skeleton.clone()),
+        world.actor_visual_inputs.clone(),
+    );
+}
+
+#[then(regex = r#"^the actor reference skeleton is \"([^\"]*)\"$"#)]
+async fn then_actor_reference_skeleton_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .actor_assembly
+            .as_ref()
+            .map(|value| value.skeleton.as_str()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the actor visual inputs are \"([^\"]*)\"$"#)]
+async fn then_actor_visual_inputs_are(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected.split(',').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(
+        world
+            .actor_assembly
+            .as_ref()
+            .map(|value| value.visual_inputs.as_slice()),
+        Some(expected.as_slice())
+    );
+}
+
+#[then(regex = r#"^the actor converter profile is \"([^\"]*)\"$"#)]
+async fn then_actor_converter_profile_is(_world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(assets::ACTOR_CONVERTER_REVISION, expected);
+}
+
+#[given(regex = r#"^actor gear record kinds \"([^\"]*)\"$"#)]
+async fn given_actor_gear_record_kinds(world: &mut BevyoutWorld, kinds: String) {
+    world.actor_gear_kinds = kinds.split(',').map(str::to_owned).collect();
+}
+
+#[when("actor visual gear is selected")]
+async fn when_actor_visual_gear_is_selected(world: &mut BevyoutWorld) {
+    world.retained_actor_gear_kinds = world
+        .actor_gear_kinds
+        .iter()
+        .filter(|kind| assets::actor_visual_gear_kind(kind))
+        .cloned()
+        .collect();
+}
+
+#[then(regex = r#"^the retained actor gear record kinds are \"([^\"]*)\"$"#)]
+async fn then_retained_actor_gear_record_kinds_are(world: &mut BevyoutWorld, kinds: String) {
+    let expected = kinds.split(',').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(world.retained_actor_gear_kinds, expected);
 }
 
 // ---------------------------------------------------------------------

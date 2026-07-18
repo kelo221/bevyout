@@ -9,7 +9,7 @@ fn compatible_render_manifest() -> PreparedSceneManifest {
             .expect("schema fixture should parse");
     manifest.schema_version = crate::vsa::CURRENT_MANIFEST_SCHEMA_VERSION;
     manifest.prepare_revision = Some(crate::vsa::CURRENT_PREPARE_REVISION.into());
-    manifest.converter_revision = Some(NIF_CONVERTER_REVISION.into());
+    manifest.converter_revision = Some(PREPARED_CONVERTER_REVISION.into());
     manifest.physics_schema_version = Some(PHYSICS_ASSET_SCHEMA_VERSION);
     manifest.bake = None;
     manifest

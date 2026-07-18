@@ -320,7 +320,7 @@ pub(crate) struct PlacementStage {
 pub(crate) fn stage_placements(
     references: Vec<ReferenceRecord>,
     bases: &HashMap<u32, BaseRecord>,
-    actor_models: &HashMap<u32, Vec<String>>,
+    actor_models: &HashMap<u32, ActorAssemblyDescriptor>,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     staging_dir: &Path,
@@ -377,17 +377,14 @@ pub(crate) fn stage_placements(
                 initially_enabled: reference.initially_enabled,
             });
         }
-        let actor_model_list =
+        let actor_assembly =
             if reference.kind == ReferenceKind::Npc || reference.kind == ReferenceKind::Creature {
-                actor_models
-                    .get(&reference.form_id)
-                    .cloned()
-                    .unwrap_or_default()
+                actor_models.get(&reference.form_id).cloned()
             } else {
-                Vec::new()
+                None
             };
-        let model = if !actor_model_list.is_empty() {
-            actor_model_list.first().map(String::as_str)
+        let model = if let Some(actor) = actor_assembly.as_ref() {
+            Some(actor.skeleton.as_str())
         } else {
             (reference.kind != ReferenceKind::Npc)
                 .then_some(base.model.as_ref())
@@ -411,16 +408,15 @@ pub(crate) fn stage_placements(
             ));
             continue;
         };
-        let mut model_paths = if !actor_model_list.is_empty() {
-            actor_model_list
-                .iter()
-                .map(|model| normalize_asset_path(model))
-                .collect::<Vec<_>>()
+        let mut model_paths = if let Some(actor) = actor_assembly.as_ref() {
+            actor.visual_inputs.clone()
         } else {
             vec![normalize_asset_path(model)]
         };
-        model_paths.sort();
-        model_paths.dedup();
+        if actor_assembly.is_none() {
+            model_paths.sort();
+            model_paths.dedup();
+        }
         let normalized_model = model_paths[0].clone();
         if is_editor_marker(&normalized_model) {
             diagnostics.push(Diagnostic {
@@ -471,7 +467,7 @@ pub(crate) fn stage_placements(
             continue;
         }
         let nif_bytes = &model_bytes[0];
-        let assembly = model_paths.len() > 1;
+        let assembly = actor_assembly.is_some();
         let conversion = asset_conversion(
             model_static_usage
                 .get(&normalized_model)
@@ -486,7 +482,7 @@ pub(crate) fn stage_placements(
             cache_bytes.extend_from_slice(bytes);
         }
         let cache_profile = if assembly {
-            format!("{NIF_CONVERTER_REVISION}-actor-bindpose-v1")
+            ACTOR_CONVERTER_REVISION.to_owned()
         } else {
             format!(
                 "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
@@ -533,10 +529,11 @@ pub(crate) fn stage_placements(
                     };
                     inputs.push(path.to_string_lossy().to_string());
                 }
-                fs::write(
-                    &assembly_path,
-                    serde_json::json!({"inputs": inputs}).to_string(),
-                )?;
+                let staged = ActorAssemblyDescriptor {
+                    skeleton: inputs[0].clone(),
+                    visual_inputs: inputs,
+                };
+                fs::write(&assembly_path, serde_json::to_string(&staged)?)?;
                 assembly_path
             } else {
                 staging_nif.clone()
@@ -546,7 +543,8 @@ pub(crate) fn stage_placements(
             let outputs_exist = output.exists() || physics_output.exists();
             let cache_valid = output.exists()
                 && physics_output.exists()
-                && validate_asset_cache_pair(&output, &physics_output).is_ok();
+                && validate_asset_cache_pair(&output, &physics_output).is_ok()
+                && (!assembly || validate_actor_glb(&output).is_ok());
             match asset_cache_decision(outputs_exist, cache_valid, rebuild_assets) {
                 AssetCacheDecision::Reuse => cache_hits += 1,
                 AssetCacheDecision::BuildMissing => {

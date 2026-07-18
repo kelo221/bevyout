@@ -893,7 +893,7 @@ fn prepare_cell(
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
-        converter_revision: Some(NIF_CONVERTER_REVISION.into()),
+        converter_revision: Some(PREPARED_CONVERTER_REVISION.into()),
         physics_schema_version: Some(PHYSICS_ASSET_SCHEMA_VERSION),
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
@@ -1226,7 +1226,7 @@ fn build_actor_catalog_inputs(
 
 /// Selects the visual NIF set for each actor placement.  Fallout NPC records
 /// point at a skeleton rather than a render mesh, so NPCs use the sex-specific
-/// race body/head parts and deterministic inventory apparel/weapons.  CREA
+/// race body/head parts and deterministic inventory apparel.  CREA
 /// records already carry their renderable NIFZ list.  The list is sorted and
 /// deduplicated before it reaches the assembler, making cache keys stable
 /// across plugin traversal order.
@@ -1234,7 +1234,7 @@ fn build_actor_appearance_models(
     parsed: &ParsedPlugin,
     references: &[ReferenceRecord],
     source_fingerprint: &str,
-) -> HashMap<u32, Vec<String>> {
+) -> HashMap<u32, ActorAssemblyDescriptor> {
     let mut result = HashMap::new();
     for reference in references {
         let Some(base) = resolve_actor_appearance_base(
@@ -1249,14 +1249,14 @@ fn build_actor_appearance_models(
         let Some(actor) = base.actor.as_ref() else {
             continue;
         };
-        let mut models = Vec::new();
+        let skeleton = base.model.clone();
+        let mut visual_inputs = Vec::new();
         match reference.kind {
             ReferenceKind::Creature => {
                 // The CREA model list contains visual attachments relative to
-                // the skeleton path. Keep the skeleton as the first assembly
-                // input so its Havok bodies/constraints are available to the
-                // optional runtime ragdoll as well as its render mesh.
-                models.extend(base.model.iter().cloned());
+                // the skeleton path. The canonical descriptor below retains
+                // the skeleton as both the explicit reference and the first
+                // visual input because creature skeleton NIFs may render too.
                 if let Some(creature) = actor.creature.as_ref() {
                     let model_directory = base.model.as_ref().and_then(|model| {
                         model
@@ -1264,7 +1264,7 @@ fn build_actor_appearance_models(
                             .or_else(|| model.rfind('/'))
                             .map(|index| model[..index].to_owned())
                     });
-                    models.extend(creature.model_list.iter().map(|model| {
+                    visual_inputs.extend(creature.model_list.iter().map(|model| {
                         if model.contains('\\') || model.contains('/') {
                             model.clone()
                         } else if let Some(directory) = model_directory.as_ref() {
@@ -1273,9 +1273,6 @@ fn build_actor_appearance_models(
                             model.clone()
                         }
                     }));
-                }
-                if models.is_empty() {
-                    models.extend(base.model.iter().cloned());
                 }
             }
             ReferenceKind::Npc => {
@@ -1286,7 +1283,6 @@ fn build_actor_appearance_models(
                 // actor skeleton as the shared bone/physics source so the
                 // assembled GLB can drive every part and the ragdoll sidecar
                 // contains the authored articulated bodies.
-                models.extend(base.model.iter().cloned());
                 if let Some(race) = actor.race_form_id.and_then(|id| parsed.races.get(&id)) {
                     let body = if female {
                         &race.body_parts_female
@@ -1298,13 +1294,12 @@ fn build_actor_appearance_models(
                     } else {
                         &race.head_parts_male
                     };
-                    models.extend(body.iter().filter_map(|part| part.model_path.clone()));
-                    models.extend(head.iter().filter_map(|part| part.model_path.clone()));
+                    visual_inputs.extend(body.iter().filter_map(|part| part.model_path.clone()));
+                    visual_inputs.extend(head.iter().filter_map(|part| part.model_path.clone()));
                 }
-                // Gear is deliberately appearance-only in this slice. Resolve
-                // each authored inventory list to one deterministic ARMO/WEAP
-                // mesh and leave equip semantics to the later actor lifecycle
-                // wave.
+                // Worn apparel is appearance-only in this slice. Weapons are
+                // runtime attachments; baking inventory weapons into the actor
+                // body makes every carried weapon visible and corrupts ragdolls.
                 let mut gear = base
                     .inventory
                     .iter()
@@ -1318,14 +1313,11 @@ fn build_actor_appearance_models(
                     })
                     .collect::<Vec<_>>();
                 gear.sort_by_key(|model| model.to_ascii_lowercase());
-                models.extend(gear);
-                if models.is_empty() {
-                    models.extend(base.model.iter().cloned());
-                }
+                visual_inputs.extend(gear);
             }
             ReferenceKind::Object => continue,
         }
-        models = models
+        visual_inputs = visual_inputs
             .into_iter()
             .map(|model| normalize_asset_path(&model))
             .filter(|model| {
@@ -1334,10 +1326,15 @@ fn build_actor_appearance_models(
                     && !is_non_rendering_effect(model)
             })
             .collect();
-        models.sort();
-        models.dedup();
-        if !models.is_empty() {
-            result.insert(reference.form_id, models);
+        let skeleton = skeleton
+            .map(|model| normalize_asset_path(&model))
+            .filter(|model| {
+                model.to_ascii_lowercase().ends_with(".nif")
+                    && !is_editor_marker(model)
+                    && !is_non_rendering_effect(model)
+            });
+        if let Some(assembly) = canonical_actor_assembly(skeleton, visual_inputs) {
+            result.insert(reference.form_id, assembly);
         }
     }
     result
@@ -1376,7 +1373,7 @@ fn actor_gear_model_candidates(
     let Some(base) = parsed.bases.get(&form_id) else {
         return Vec::new();
     };
-    if matches!(base.kind.as_str(), "ARMO" | "WEAP") {
+    if crate::vsa::assets::actor_visual_gear_kind(&base.kind) {
         return base
             .model
             .iter()

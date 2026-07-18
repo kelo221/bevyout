@@ -65,6 +65,19 @@ pub(crate) fn run_blender_batch(
                 job.output.display()
             )
         })?;
+        if job
+            .input
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            validate_actor_glb(&job.output).with_context(|| {
+                format!(
+                    "converted actor GLB failed skin/material validation: {}",
+                    job.output.display()
+                )
+            })?;
+        }
         read_physics_asset(&job.physics_output).with_context(|| {
             format!(
                 "converted physics sidecar failed validation: {}",

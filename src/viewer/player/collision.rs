@@ -481,8 +481,18 @@ fn build_colliders_for_placement(
         };
         stats.bodies += 1;
         for shape in &body.shapes {
-            let result =
-                create_prepared_shape(world, body_id, body, shape, placement, dynamic, local_space);
+            let result = create_prepared_shape(
+                world,
+                body_id,
+                body,
+                shape,
+                placement,
+                PreparedShapeOptions {
+                    dynamic,
+                    local_space,
+                    collision_group: 0,
+                },
+            );
             let Some((shape_id, triangles)) = result else {
                 stats.filtered_shapes += 1;
                 warn!(
@@ -530,17 +540,26 @@ pub(crate) fn process_ragdoll_toggles(
     query: Query<(
         Entity,
         &super::super::interaction::PlacementRoot,
+        &Transform,
         Option<&super::RagdollToggle>,
     )>,
+    mut node_transforms: Query<&mut Transform, Without<super::super::interaction::PlacementRoot>>,
 ) {
     let Some(world) = context.world_mut() else {
         return;
     };
-    for (entity, root, toggle) in &query {
+    for (entity, root, runtime_transform, toggle) in &query {
         let enabled = toggle.is_some_and(|toggle| toggle.0);
         let existing = collision.ragdoll_bodies.get(&entity).cloned();
         if !enabled {
             if let Some(bodies) = existing {
+                let restores = toggle.is_none().then(|| {
+                    collect_ragdoll_node_restores(
+                        bodies
+                            .iter()
+                            .filter_map(|body| collision.ragdoll_nodes.get(body)),
+                    )
+                });
                 if let Some(joints) = collision.ragdoll_joints.remove(&entity) {
                     for joint in joints {
                         let _ = world.try_destroy_joint(joint, true);
@@ -554,13 +573,20 @@ pub(crate) fn process_ragdoll_toggles(
                     collision.dynamic_entities.remove(&body);
                     let _ = world.try_destroy_body(body);
                 }
+                if let Some(restores) = restores {
+                    for (node, rest) in restores {
+                        if let Ok(mut transform) = node_transforms.get_mut(node) {
+                            *transform = rest;
+                        }
+                    }
+                }
             }
             continue;
         }
         if existing.is_some() {
             continue;
         }
-        let placement = root.placement();
+        let placement = ragdoll_runtime_placement(root.placement(), runtime_transform);
         if !matches!(
             placement.semantic,
             crate::vsa::PreparedSemantic::Npc(_) | crate::vsa::PreparedSemantic::Creature(_)
@@ -575,6 +601,7 @@ pub(crate) fn process_ragdoll_toggles(
             continue;
         };
         let mut body_ids = HashMap::new();
+        let collision_group = ragdoll_collision_group(placement.reference_form_id);
         for source in &asset.bodies {
             // Actor skeleton layers are intentionally filtered from ordinary
             // player collision (for example layer 8), but a developer
@@ -594,18 +621,32 @@ pub(crate) fn process_ragdoll_toggles(
             } else {
                 5.0
             };
+            tune_ragdoll_body(&mut body, placement.reference_form_id);
             body.constrained = false;
             body.shapes.retain(PreparedPhysicsShape::supports_dynamic);
             if body.shapes.is_empty() {
                 continue;
             }
-            let body_id = create_dynamic_body(world, placement, &body);
+            let body_anchor = recenter_ragdoll_body(&mut body);
+            let body_id =
+                create_dynamic_body_at_local_anchor(world, &placement, &body, body_anchor);
             let shapes = body
                 .shapes
                 .iter()
                 .filter_map(|shape| {
-                    create_prepared_shape(world, body_id, &body, shape, placement, true, true)
-                        .map(|(shape_id, _)| shape_id)
+                    create_prepared_shape(
+                        world,
+                        body_id,
+                        &body,
+                        shape,
+                        &placement,
+                        PreparedShapeOptions {
+                            dynamic: true,
+                            local_space: true,
+                            collision_group,
+                        },
+                    )
+                    .map(|(shape_id, _)| shape_id)
                 })
                 .collect::<Vec<_>>();
             if shapes.is_empty() {
@@ -613,7 +654,7 @@ pub(crate) fn process_ragdoll_toggles(
                 continue;
             }
             normalize_dynamic_mass(world, body_id, &body, placement.scale.abs());
-            body_ids.insert(source.group_id, body_id);
+            body_ids.insert(source.group_id, (body_id, body_anchor));
             if let Some(node) = source.node.clone() {
                 collision.ragdoll_nodes.insert(
                     body_id,
@@ -623,6 +664,7 @@ pub(crate) fn process_ragdoll_toggles(
                         node_entities: Vec::new(),
                         rest_body: None,
                         rest_node_globals: Vec::new(),
+                        rest_node_locals: Vec::new(),
                     },
                 );
             }
@@ -642,23 +684,33 @@ pub(crate) fn process_ragdoll_toggles(
                     .record_body_shape(manifest.cell.form_id, shape_id);
             }
         }
-        let Some(primary) = body_ids.values().next().copied() else {
+        let Some(primary) = body_ids.values().next().map(|(body, _)| *body) else {
             continue;
         };
         let mut joint_ids = Vec::new();
         for joint in &asset.joints {
-            let (Some(body_a), Some(body_b)) =
+            let (Some((body_a, anchor_a)), Some((body_b, anchor_b))) =
                 (body_ids.get(&joint.body_a), body_ids.get(&joint.body_b))
             else {
                 continue;
             };
+            let scale = placement.scale.abs();
+            let revolute = joint.kind == "revolute";
             let frame_a = boxddd::Transform::new(
-                to_box_vec3(Vec3::from_array(joint.anchor_a)),
-                boxddd::Quat::IDENTITY,
+                to_box_vec3(ragdoll_joint_local_anchor(joint.anchor_a, *anchor_a, scale)),
+                if revolute {
+                    to_box_quat(ragdoll_joint_frame_rotation(joint.axis_a))
+                } else {
+                    boxddd::Quat::IDENTITY
+                },
             );
             let frame_b = boxddd::Transform::new(
-                to_box_vec3(Vec3::from_array(joint.anchor_b)),
-                boxddd::Quat::IDENTITY,
+                to_box_vec3(ragdoll_joint_local_anchor(joint.anchor_b, *anchor_b, scale)),
+                if revolute {
+                    to_box_quat(ragdoll_joint_frame_rotation(joint.axis_b))
+                } else {
+                    boxddd::Quat::IDENTITY
+                },
             );
             let result = match joint.kind.as_str() {
                 "spherical" => {
@@ -704,7 +756,10 @@ pub(crate) fn process_ragdoll_toggles(
                 joint_ids.push(joint_id);
             }
         }
-        let all_bodies = body_ids.into_values().collect::<Vec<_>>();
+        let all_bodies = body_ids
+            .into_values()
+            .map(|(body, _)| body)
+            .collect::<Vec<_>>();
         collision.dynamic_bodies.insert(entity, primary);
         collision.ragdoll_bodies.insert(entity, all_bodies);
         collision.ragdoll_joints.insert(entity, joint_ids);
@@ -727,6 +782,135 @@ pub(crate) struct RagdollNodeBinding {
     pub(crate) node_entities: Vec<Entity>,
     pub(crate) rest_body: Option<Affine3A>,
     pub(crate) rest_node_globals: Vec<Affine3A>,
+    pub(crate) rest_node_locals: Vec<Transform>,
+}
+
+pub(crate) fn collect_ragdoll_node_restores<'a>(
+    bindings: impl IntoIterator<Item = &'a RagdollNodeBinding>,
+) -> Vec<(Entity, Transform)> {
+    bindings
+        .into_iter()
+        .flat_map(|binding| {
+            binding
+                .node_entities
+                .iter()
+                .copied()
+                .zip(binding.rest_node_locals.iter().cloned())
+        })
+        .collect()
+}
+
+fn shape_anchor(shape: &PreparedPhysicsShape) -> Vec3 {
+    match shape {
+        PreparedPhysicsShape::Box { center, .. } | PreparedPhysicsShape::Sphere { center, .. } => {
+            Vec3::from_array(*center)
+        }
+        PreparedPhysicsShape::Capsule { point1, point2, .. } => {
+            (Vec3::from_array(*point1) + Vec3::from_array(*point2)) * 0.5
+        }
+        PreparedPhysicsShape::ConvexHull { points }
+        | PreparedPhysicsShape::TriangleMesh {
+            vertices: points, ..
+        } => {
+            if points.is_empty() {
+                Vec3::ZERO
+            } else {
+                points
+                    .iter()
+                    .map(|point| Vec3::from_array(*point))
+                    .sum::<Vec3>()
+                    / points.len() as f32
+            }
+        }
+    }
+}
+
+pub(crate) fn tune_ragdoll_body(body: &mut PreparedPhysicsBody, reference_form_id: u32) {
+    body.linear_damping = body.linear_damping.max(0.2);
+    body.angular_damping = body.angular_damping.max(0.25);
+    body.friction = body.friction.max(0.6);
+    body.restitution = body.restitution.clamp(0.0, 0.05);
+
+    // Start every part with the same small nudge. Launching only the pelvis
+    // pulls it out from under an otherwise stationary torso and makes a corpse
+    // fold into a kneeling pose; coherent motion tips the articulated chain as
+    // one body while gravity and the joint limits provide the secondary motion.
+    let direction = if reference_form_id & 1 == 0 {
+        1.0
+    } else {
+        -1.0
+    };
+    body.linear_velocity = [0.55 * direction, 0.0, 0.15];
+    body.angular_velocity = [0.35 * direction, 0.0, 0.6 * direction];
+}
+
+pub(crate) fn ragdoll_joint_frame_rotation(axis: [f32; 3]) -> Quat {
+    let Some(axis) = Vec3::from_array(axis).try_normalize() else {
+        return Quat::IDENTITY;
+    };
+    Quat::from_rotation_arc(Vec3::Z, axis)
+}
+
+fn translate_shape(shape: &mut PreparedPhysicsShape, translation: Vec3) {
+    let translate = |point: &mut [f32; 3]| {
+        *point = (Vec3::from_array(*point) + translation).to_array();
+    };
+    match shape {
+        PreparedPhysicsShape::Box { center, .. } | PreparedPhysicsShape::Sphere { center, .. } => {
+            translate(center)
+        }
+        PreparedPhysicsShape::Capsule { point1, point2, .. } => {
+            translate(point1);
+            translate(point2);
+        }
+        PreparedPhysicsShape::ConvexHull { points }
+        | PreparedPhysicsShape::TriangleMesh {
+            vertices: points, ..
+        } => {
+            for point in points {
+                translate(point);
+            }
+        }
+    }
+}
+
+pub(crate) fn recenter_ragdoll_body(body: &mut PreparedPhysicsBody) -> Vec3 {
+    if body.shapes.is_empty() {
+        return Vec3::ZERO;
+    }
+    let anchor = body.shapes.iter().map(shape_anchor).sum::<Vec3>() / body.shapes.len() as f32;
+    for shape in &mut body.shapes {
+        translate_shape(shape, -anchor);
+    }
+    body.center_of_mass = (Vec3::from_array(body.center_of_mass) - anchor).to_array();
+    anchor
+}
+
+pub(crate) fn ragdoll_joint_local_anchor(
+    authored_anchor: [f32; 3],
+    body_anchor: Vec3,
+    scale: f32,
+) -> Vec3 {
+    (Vec3::from_array(authored_anchor) - body_anchor) * scale
+}
+
+pub(crate) fn ragdoll_collision_group(reference_form_id: u32) -> i32 {
+    let stable = (reference_form_id & i32::MAX as u32).max(1) as i32;
+    -stable
+}
+
+pub(crate) fn ragdoll_runtime_placement(
+    prepared: &crate::vsa::PreparedPlacement,
+    runtime: &Transform,
+) -> crate::vsa::PreparedPlacement {
+    let mut placement = prepared.clone();
+    placement.translation = runtime.translation.to_array();
+    placement.rotation_xyzw = runtime.rotation.normalize().to_array();
+    let uniform_scale = runtime.scale.x.abs();
+    if uniform_scale.is_finite() && uniform_scale > 0.0 {
+        placement.scale = uniform_scale;
+    }
+    placement
 }
 
 /// Issue #64: a keyframed body's kinematic collider, bound to the animated
@@ -789,7 +973,27 @@ fn find_named_descendant(
     None
 }
 
-fn find_named_descendants(
+fn actor_node_key(name: &str) -> String {
+    let mut parts = name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if parts.len() >= 3 && parts.first().is_some_and(|part| part.starts_with("bip")) {
+        let side = parts.last().is_some_and(|part| part == "l" || part == "r");
+        if side {
+            let side = parts.pop().expect("checked non-empty actor node parts");
+            parts.insert(1, side);
+        }
+    }
+    parts.concat()
+}
+
+pub(crate) fn actor_node_names_match(physics_name: &str, scene_name: &str) -> bool {
+    actor_node_key(physics_name) == actor_node_key(scene_name)
+}
+
+fn find_actor_node_descendants(
     root: Entity,
     name: &str,
     children: &Query<&Children>,
@@ -798,7 +1002,10 @@ fn find_named_descendants(
     let mut matches = Vec::new();
     let mut queue = vec![root];
     while let Some(entity) = queue.pop() {
-        if names.get(entity).is_ok_and(|n| n.as_str() == name) {
+        if names
+            .get(entity)
+            .is_ok_and(|candidate| actor_node_names_match(name, candidate.as_str()))
+        {
             matches.push(entity);
         }
         if let Ok(child_list) = children.get(entity) {
@@ -806,6 +1013,13 @@ fn find_named_descendants(
         }
     }
     matches
+}
+
+pub(crate) const fn dynamic_body_drives_placement_root(
+    articulated_ragdoll: bool,
+    primary_body: bool,
+) -> bool {
+    !articulated_ragdoll && primary_body
 }
 
 /// Issue #64: every fixed step, steer each keyframed collider body toward
@@ -867,6 +1081,15 @@ pub(crate) fn create_dynamic_body(
     placement: &crate::vsa::PreparedPlacement,
     body: &PreparedPhysicsBody,
 ) -> BodyId {
+    create_dynamic_body_at_local_anchor(world, placement, body, Vec3::ZERO)
+}
+
+fn create_dynamic_body_at_local_anchor(
+    world: &mut boxddd::World,
+    placement: &crate::vsa::PreparedPlacement,
+    body: &PreparedPhysicsBody,
+    local_anchor: Vec3,
+) -> BodyId {
     let rotation = Quat::from_array(placement.rotation_xyzw).normalize();
     let scale = placement.scale.abs();
     let mut linear_velocity = rotation * (Vec3::from_array(body.linear_velocity) * scale);
@@ -880,7 +1103,9 @@ pub(crate) fn create_dynamic_body(
     let body_id = world.create_body(
         BodyDef::builder()
             .body_type(BodyType::Dynamic)
-            .position(to_box_vec3(Vec3::from_array(placement.translation)))
+            .position(to_box_vec3(
+                Vec3::from_array(placement.translation) + rotation * (local_anchor * scale),
+            ))
             .rotation(to_box_quat(rotation))
             .linear_velocity(to_box_vec3(linear_velocity))
             .angular_velocity(to_box_vec3(angular_velocity))
@@ -913,15 +1138,26 @@ pub(crate) fn apply_dynamic_body_restore(
     let _ = world.try_set_body_awake(body_id, !restore.sleeping);
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreparedShapeOptions {
+    pub(crate) dynamic: bool,
+    pub(crate) local_space: bool,
+    pub(crate) collision_group: i32,
+}
+
 pub(crate) fn create_prepared_shape(
     world: &mut boxddd::World,
     body_id: BodyId,
     body: &PreparedPhysicsBody,
     shape: &PreparedPhysicsShape,
     placement: &crate::vsa::PreparedPlacement,
-    dynamic: bool,
-    local_space: bool,
+    options: PreparedShapeOptions,
 ) -> Option<(ShapeId, usize)> {
+    let PreparedShapeOptions {
+        dynamic,
+        local_space,
+        collision_group,
+    } = options;
     if dynamic && !shape.supports_dynamic() {
         return None;
     }
@@ -961,7 +1197,7 @@ pub(crate) fn create_prepared_shape(
         .filter(Filter {
             category_bits: category,
             mask_bits: mask,
-            group_index: 0,
+            group_index: collision_group,
         })
         .user_material_id(u64::from(body.material.unwrap_or(0)))
         .build();
@@ -1311,8 +1547,19 @@ pub(crate) fn attach_runtime_item_colliders(
             .shapes
             .iter()
             .filter_map(|shape| {
-                create_prepared_shape(world, body_id, &body, shape, &placement, true, true)
-                    .map(|(shape_id, _)| shape_id)
+                create_prepared_shape(
+                    world,
+                    body_id,
+                    &body,
+                    shape,
+                    &placement,
+                    PreparedShapeOptions {
+                        dynamic: true,
+                        local_space: true,
+                        collision_group: 0,
+                    },
+                )
+                .map(|(shape_id, _)| shape_id)
             })
             .collect::<Vec<_>>();
         if shapes.is_empty() {
@@ -1357,16 +1604,28 @@ pub(crate) fn sync_dynamic_transforms(
     context: NonSend<BoxdddPhysicsContext>,
     mut stats: ResMut<CollisionRuntimeStats>,
     mut roots: Query<&mut Transform, With<PhysicsCollider>>,
-    transforms: Query<&GlobalTransform>,
+    transforms: Query<(Entity, &GlobalTransform)>,
     names: Query<&Name>,
     children: Query<&Children>,
-    parents: Query<&ChildOf>,
-    mut nodes: Query<&mut Transform, Without<PhysicsCollider>>,
+    parents: Query<(Entity, &ChildOf)>,
+    mut nodes: Query<(Entity, &mut Transform), Without<PhysicsCollider>>,
 ) {
     stats.dynamic_transform_updates = 0;
     let Some(world) = context.world() else {
         return;
     };
+    let global_affines = transforms
+        .iter()
+        .map(|(entity, transform)| (entity, transform.affine()))
+        .collect::<HashMap<_, _>>();
+    let parent_entities = parents
+        .iter()
+        .map(|(entity, parent)| (entity, parent.parent()))
+        .collect::<HashMap<_, _>>();
+    let local_snapshots = nodes
+        .iter_mut()
+        .map(|(entity, transform)| (entity, *transform))
+        .collect::<HashMap<_, _>>();
     let mut updates = 0;
     if world
         .try_with_body_events_view(|events| {
@@ -1389,10 +1648,13 @@ pub(crate) fn sync_dynamic_transforms(
                 if was_sleeping && event.fell_asleep() {
                     continue;
                 }
-                // A ragdoll owns several bodies but only its primary body
-                // drives the placement root. Secondary bodies are applied to
-                // their named skeleton nodes below.
-                if collision_world.dynamic_bodies.get(&entity).copied() != Some(body) {
+                // Articulated ragdolls drive their skeleton nodes below. Moving
+                // the placement root with one arbitrary body double-applies the
+                // fall and can pull an otherwise-colliding actor through floors.
+                let articulated_ragdoll = collision_world.ragdoll_bodies.contains_key(&entity);
+                let primary_body =
+                    collision_world.dynamic_bodies.get(&entity).copied() == Some(body);
+                if !dynamic_body_drives_placement_root(articulated_ragdoll, primary_body) {
                     continue;
                 }
                 let Ok(mut transform) = roots.get_mut(entity) else {
@@ -1416,23 +1678,26 @@ pub(crate) fn sync_dynamic_transforms(
     // Body events are intentionally sparse for sleeping actors. Read every
     // live ragdoll pose so articulated meshes continue to follow joints even
     // when BoxDDD did not emit a transform event this fixed step.
+    let mut desired_worlds = HashMap::new();
     for (body, binding) in collision_world.ragdoll_nodes.iter_mut() {
         let Ok(physics_transform) = world.try_body_transform(*body) else {
             binding.node_entities.clear();
             binding.rest_body = None;
             binding.rest_node_globals.clear();
+            binding.rest_node_locals.clear();
             continue;
         };
         if binding.node_entities.is_empty()
             || binding
                 .node_entities
                 .iter()
-                .any(|entity| transforms.get(*entity).is_err())
+                .any(|entity| !global_affines.contains_key(entity))
         {
             binding.node_entities =
-                find_named_descendants(binding.root, &binding.node, &children, &names);
+                find_actor_node_descendants(binding.root, &binding.node, &children, &names);
             binding.rest_body = None;
             binding.rest_node_globals.clear();
+            binding.rest_node_locals.clear();
         }
         if binding.node_entities.is_empty() {
             continue;
@@ -1450,7 +1715,12 @@ pub(crate) fn sync_dynamic_transforms(
             binding.rest_node_globals = binding
                 .node_entities
                 .iter()
-                .filter_map(|entity| transforms.get(*entity).ok().map(GlobalTransform::affine))
+                .filter_map(|entity| global_affines.get(entity).copied())
+                .collect();
+            binding.rest_node_locals = binding
+                .node_entities
+                .iter()
+                .filter_map(|entity| local_snapshots.get(entity).cloned())
                 .collect();
         }
         let delta = body_affine * rest_body.inverse();
@@ -1458,25 +1728,29 @@ pub(crate) fn sync_dynamic_transforms(
             let Some(rest_node) = binding.rest_node_globals.get(index).copied() else {
                 continue;
             };
-            let desired_world = delta * rest_node;
-            let parent_world = parents
-                .get(*node_entity)
-                .ok()
-                .and_then(|parent| transforms.get(parent.parent()).ok())
-                .map(GlobalTransform::affine)
-                .unwrap_or(Affine3A::IDENTITY);
-            let local = parent_world.inverse() * desired_world;
-            let (scale, rotation, translation) = local.to_scale_rotation_translation();
-            if !(scale.is_finite() && rotation.is_finite() && translation.is_finite()) {
-                continue;
-            }
-            let Ok(mut transform) = nodes.get_mut(*node_entity) else {
-                continue;
-            };
-            transform.translation = translation;
-            transform.rotation = rotation;
-            transform.scale = scale;
+            desired_worlds.insert(*node_entity, delta * rest_node);
         }
+    }
+    for (node_entity, desired_world) in &desired_worlds {
+        let parent_world = parent_entities
+            .get(node_entity)
+            .and_then(|parent| {
+                ragdoll_resolved_world(
+                    *parent,
+                    &desired_worlds,
+                    &parent_entities,
+                    &global_affines,
+                    &local_snapshots,
+                )
+            })
+            .unwrap_or(Affine3A::IDENTITY);
+        let Some(local) = ragdoll_local_transform(parent_world, *desired_world) else {
+            continue;
+        };
+        let Ok((_, mut transform)) = nodes.get_mut(*node_entity) else {
+            continue;
+        };
+        *transform = local;
     }
     stats.dynamic_transform_updates = updates;
     stats.sleeping_dynamic_bodies = collision_world.sleeping_dynamic_bodies.len();
@@ -1484,6 +1758,63 @@ pub(crate) fn sync_dynamic_transforms(
         .dynamic_bodies
         .len()
         .saturating_sub(stats.sleeping_dynamic_bodies);
+}
+
+pub(crate) fn ragdoll_resolved_world(
+    entity: Entity,
+    desired_worlds: &HashMap<Entity, Affine3A>,
+    parents: &HashMap<Entity, Entity>,
+    current_worlds: &HashMap<Entity, Affine3A>,
+    current_locals: &HashMap<Entity, Transform>,
+) -> Option<Affine3A> {
+    let mut cursor = entity;
+    let mut local_chain = Vec::new();
+    for _ in 0..128 {
+        if let Some(world) = desired_worlds.get(&cursor).copied() {
+            return Some(
+                local_chain
+                    .iter()
+                    .rev()
+                    .fold(world, |parent, local: &Affine3A| parent * *local),
+            );
+        }
+        if let Some(local) = current_locals.get(&cursor) {
+            local_chain.push(local.compute_affine());
+            if let Some(parent) = parents.get(&cursor).copied() {
+                cursor = parent;
+                continue;
+            }
+            return Some(
+                local_chain
+                    .iter()
+                    .rev()
+                    .fold(Affine3A::IDENTITY, |parent, local| parent * *local),
+            );
+        }
+        if let Some(world) = current_worlds.get(&cursor).copied() {
+            return Some(
+                local_chain
+                    .iter()
+                    .rev()
+                    .fold(world, |parent, local| parent * *local),
+            );
+        }
+        return None;
+    }
+    None
+}
+
+pub(crate) fn ragdoll_local_transform(
+    parent_world: Affine3A,
+    desired_world: Affine3A,
+) -> Option<Transform> {
+    let local = parent_world.inverse() * desired_world;
+    let (scale, rotation, translation) = local.to_scale_rotation_translation();
+    (scale.is_finite() && rotation.is_finite() && translation.is_finite()).then_some(Transform {
+        translation,
+        rotation,
+        scale,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -458,3 +458,56 @@ fn buffer_view_extending_past_the_glb_is_rejected() {
     assert!(error.to_string().contains("extends beyond GLB"));
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn actor_glb_audit_accepts_a_textured_weighted_skin() {
+    let document = serde_json::json!({
+        "accessors": [
+            {"count": 3},
+            {"count": 3},
+            {"count": 3},
+            {"count": 1}
+        ],
+        "images": [{"uri": "skin.png"}],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
+            "material": 0
+        }]}],
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Bip01"}],
+        "skins": [{"joints": [1], "inverseBindMatrices": 3}]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-valid-actor-audit-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let audit = validate_actor_glb(&path).unwrap();
+    assert_eq!(audit.skins, 1);
+    assert_eq!(audit.skinned_primitives, 1);
+    assert_eq!(audit.textured_primitives, 1);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn actor_glb_audit_rejects_missing_weights_and_base_color_texture() {
+    let document = serde_json::json!({
+        "accessors": [{"count": 3}, {"count": 3}, {"count": 1}],
+        "materials": [{}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "JOINTS_0": 1},
+            "material": 0
+        }]}],
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Bip01"}],
+        "skins": [{"joints": [1], "inverseBindMatrices": 2}]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-invalid-actor-audit-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let error = validate_actor_glb(&path).unwrap_err();
+    assert!(error.to_string().contains("WEIGHTS_0"));
+    let _ = fs::remove_file(path);
+}

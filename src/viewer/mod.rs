@@ -31,8 +31,8 @@ use crate::app_state::{
 };
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, NIF_CONVERTER_REVISION,
-    PHYSICS_ASSET_SCHEMA_VERSION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
+    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, PHYSICS_ASSET_SCHEMA_VERSION,
+    PREPARED_CONVERTER_REVISION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
     PreparedItemDefinition, PreparedItemStats, PreparedSceneManifest, PreparedSemantic, bake,
     cell_label, ensure_baked_scene_compatible, ensure_prepared_manifest_compatible,
     find_cached_manifest, fingerprint, is_bake_static, prepare, resolve_cached_manifest,
@@ -129,7 +129,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
     if next_render_cache_action(&manifest) == RenderCacheAction::Reprepare {
         let compatibility_error = ensure_prepared_manifest_compatible(
             &manifest,
-            NIF_CONVERTER_REVISION,
+            PREPARED_CONVERTER_REVISION,
             PHYSICS_ASSET_SCHEMA_VERSION,
         )
         .expect_err("reprepare action requires an incompatible prepared manifest");
@@ -150,7 +150,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
         manifest = read_manifest(&manifest_path)?;
         ensure_prepared_manifest_compatible(
             &manifest,
-            NIF_CONVERTER_REVISION,
+            PREPARED_CONVERTER_REVISION,
             PHYSICS_ASSET_SCHEMA_VERSION,
         )?;
     }
@@ -271,7 +271,7 @@ enum RenderCacheAction {
 fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheAction {
     if ensure_prepared_manifest_compatible(
         manifest,
-        NIF_CONVERTER_REVISION,
+        PREPARED_CONVERTER_REVISION,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )
     .is_err()

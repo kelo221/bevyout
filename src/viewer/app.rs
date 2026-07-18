@@ -13,7 +13,7 @@ pub(crate) fn run_view(
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
     ensure_prepared_manifest_compatible(
         &manifest,
-        NIF_CONVERTER_REVISION,
+        PREPARED_CONVERTER_REVISION,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )?;
     ensure_baked_scene_compatible(&manifest)?;

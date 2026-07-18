@@ -25,6 +25,62 @@ use super::physics::read_physics_asset;
 pub(crate) const NIF_CONVERTER_REVISION: &str =
     "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v28";
 
+/// Actor assemblies use PyNifly independently of the general NIFTools path.
+/// Keep this revision separate so actor fixes do not invalidate static GLBs.
+pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v10";
+
+/// Prepared scenes record both conversion paths. Changing either one makes a
+/// completed cell stale while each asset family retains its own cache key.
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v28+pynifly-v28-actor-bindpose-v10";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ActorAssemblyDescriptor {
+    pub(crate) skeleton: String,
+    pub(crate) visual_inputs: Vec<String>,
+}
+
+/// Apparel is part of the baked actor appearance. Weapons are runtime
+/// attachments and must not become permanently skinned body geometry.
+pub(crate) fn actor_visual_gear_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("ARMO")
+}
+
+/// Canonical actor input contract shared by preparation and executable specs.
+/// The explicit skeleton is never displaced by sorting. It is also retained as
+/// a visual input because creature skeleton NIFs may contain render geometry.
+pub(crate) fn canonical_actor_assembly(
+    skeleton: Option<String>,
+    visual_inputs: Vec<String>,
+) -> Option<ActorAssemblyDescriptor> {
+    let mut visual_inputs = visual_inputs
+        .into_iter()
+        .map(|path| normalize_asset_path(&path))
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    visual_inputs.sort();
+    visual_inputs.dedup();
+
+    let skeleton = skeleton
+        .map(|path| normalize_asset_path(&path))
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            visual_inputs.iter().find_map(|path| {
+                let normalized = path.replace('\\', "/");
+                let mut components = normalized.rsplit('/');
+                let file_stem = components.next()?.rsplit_once('.')?.0;
+                let parent = components.next()?;
+                file_stem.eq_ignore_ascii_case(parent).then(|| path.clone())
+            })
+        })
+        .or_else(|| visual_inputs.first().cloned())?;
+    visual_inputs.retain(|path| path != &skeleton);
+    visual_inputs.insert(0, skeleton.clone());
+    Some(ActorAssemblyDescriptor {
+        skeleton,
+        visual_inputs,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AuthoredEmission {
     pub(crate) color: [f32; 3],
