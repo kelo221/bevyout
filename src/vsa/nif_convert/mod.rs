@@ -19,8 +19,9 @@ use crate::cli::{NifConversionMode, NifConvertArgs};
 
 use super::assets::{RootTransformPolicy, load_archives, resolve_asset};
 use super::physics::{
-    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
-    PreparedPhysicsSource, validate_physics_asset,
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsJoint,
+    PreparedPhysicsJointSource, PreparedPhysicsShape, PreparedPhysicsSource,
+    validate_physics_asset,
 };
 
 #[derive(Debug, Serialize)]
@@ -45,6 +46,7 @@ struct ConversionReport {
     physics_output: Option<String>,
     physics_bodies: usize,
     physics_shapes: usize,
+    physics_joints: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,7 +57,7 @@ struct ReportIssue {
 }
 
 pub(crate) const NATIVE_NIF_REPORT_REVISION: &str =
-    "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1";
+    "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -232,7 +234,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         output.missing_textures.len()
     ));
 
-    let (physics, physics_bytes, physics_bodies, physics_shapes) = if request
+    let (physics, physics_bytes, physics_bodies, physics_shapes, physics_joints) = if request
         .physics_output
         .is_some()
     {
@@ -260,6 +262,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
             .iter()
             .map(|body| body.shapes.len())
             .sum();
+        let physics_joints = physics_scene.joints.len();
         let bytes = encode_physics_sidecar(physics_scene)?;
         (
             if physics_bodies == 0 {
@@ -270,9 +273,10 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
             Some(bytes),
             physics_bodies,
             physics_shapes,
+            physics_joints,
         )
     } else {
-        ("not-requested", None, 0, 0)
+        ("not-requested", None, 0, 0, 0)
     };
 
     let missing_textures = output.missing_textures.clone();
@@ -320,6 +324,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
                 .map(|path| path.display().to_string()),
             physics_bodies,
             physics_shapes,
+            physics_joints,
         };
         let mut bytes = serde_json::to_vec_pretty(&report)?;
         bytes.push(b'\n');
@@ -337,9 +342,10 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
     if let (Some(path), Some(bytes)) = (request.physics_output, &physics_bytes) {
         atomic_write(path, bytes, request.force)?;
         lines.push(format!(
-            "nif-convert: physics bodies={} shapes={} -> {}",
+            "nif-convert: physics bodies={} shapes={} joints={} -> {}",
             physics_bodies,
             physics_shapes,
+            physics_joints,
             path.display()
         ));
     }
@@ -411,18 +417,20 @@ pub(crate) fn convert_actor_scene(
         .iter()
         .map(|body| body.shapes.len())
         .sum::<usize>();
+    let physics_joints = physics_scene.joints.len();
     let physics_bytes = encode_physics_sidecar(physics_scene)?;
     atomic_write(request.output, &output.bytes, true)?;
     atomic_write(request.physics_output, &physics_bytes, true)?;
 
     Ok(NifConversionResult {
         lines: vec![format!(
-            "nif-convert: actor meshes={} vertices={} triangles={} physics_bodies={} physics_shapes={}",
+            "nif-convert: actor meshes={} vertices={} triangles={} physics_bodies={} physics_shapes={} physics_joints={}",
             scene.statistics.source_meshes,
             scene.statistics.source_vertices,
             scene.statistics.source_triangles,
             physics_bodies,
-            physics_shapes
+            physics_shapes,
+            physics_joints
         )],
         missing_textures: output.missing_textures,
         lossy_scene_issues: scene.issues.len(),
@@ -430,11 +438,13 @@ pub(crate) fn convert_actor_scene(
 }
 
 fn encode_physics_sidecar(scene: nif::fo3::PhysicsScene) -> Result<Vec<u8>> {
+    let nif::fo3::PhysicsScene {
+        bodies, joints, ..
+    } = scene;
     let asset = PreparedPhysicsAsset {
         schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
         source: PreparedPhysicsSource::AuthoredHavok,
-        bodies: scene
-            .bodies
+        bodies: bodies
             .into_iter()
             .map(|body| PreparedPhysicsBody {
                 group_id: body.group_id,
@@ -464,9 +474,7 @@ fn encode_physics_sidecar(scene: nif::fo3::PhysicsScene) -> Result<Vec<u8>> {
                 shapes: body.shapes.into_iter().map(convert_physics_shape).collect(),
             })
             .collect(),
-        // Ragdoll constraints are deliberately deferred; ordinary props preserve whether a body
-        // is constrained so the runtime never misclassifies it as a free dynamic object.
-        joints: Vec::new(),
+        joints: joints.into_iter().map(convert_physics_joint).collect(),
     };
     validate_physics_asset(&asset)?;
     let json = serde_json::to_vec(&asset)?;
@@ -475,6 +483,27 @@ fn encode_physics_sidecar(scene: nif::fo3::PhysicsScene) -> Result<Vec<u8>> {
         .write(Vec::new(), Compression::default());
     encoder.write_all(&json)?;
     encoder.finish().context("finishing physics sidecar gzip")
+}
+
+fn convert_physics_joint(joint: nif::fo3::PhysicsJoint) -> PreparedPhysicsJoint {
+    PreparedPhysicsJoint {
+        kind: joint.kind,
+        body_a: joint.body_a,
+        body_b: joint.body_b,
+        anchor_a: joint.anchor_a,
+        anchor_b: joint.anchor_b,
+        frame_a_rotation_xyzw: joint.frame_a_rotation_xyzw,
+        frame_b_rotation_xyzw: joint.frame_b_rotation_xyzw,
+        lower_limit: joint.lower_limit,
+        upper_limit: joint.upper_limit,
+        cone_limit: joint.cone_limit,
+        plane_lower_limit: joint.plane_lower_limit,
+        plane_upper_limit: joint.plane_upper_limit,
+        twist_lower_limit: joint.twist_lower_limit,
+        twist_upper_limit: joint.twist_upper_limit,
+        malleable_strength: joint.malleable_strength,
+        source: PreparedPhysicsJointSource::Authored,
+    }
 }
 
 fn convert_physics_shape(shape: nif::fo3::ConvertedPhysicsShape) -> PreparedPhysicsShape {
@@ -765,5 +794,37 @@ mod tests {
         assert!(!output.exists());
         assert!(!physics.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_joint_preserves_authored_frames_limits_and_strength() {
+        let source = nif::fo3::PhysicsJoint {
+            source_block: 42,
+            kind: "spherical".into(),
+            body_a: 3,
+            body_b: 7,
+            anchor_a: [1.0, 2.0, 3.0],
+            anchor_b: [1.0, 2.0, 3.0],
+            frame_a_rotation_xyzw: [0.0, 0.0, 0.70710677, 0.70710677],
+            frame_b_rotation_xyzw: [0.0, 0.0, 0.70710677, 0.70710677],
+            lower_limit: None,
+            upper_limit: None,
+            cone_limit: Some(1.2),
+            plane_lower_limit: Some(-0.4),
+            plane_upper_limit: Some(0.5),
+            twist_lower_limit: Some(-0.7),
+            twist_upper_limit: Some(0.8),
+            malleable_strength: Some(0.9),
+        };
+
+        let converted = convert_physics_joint(source);
+
+        assert_eq!(converted.kind, "spherical");
+        assert_eq!((converted.body_a, converted.body_b), (3, 7));
+        assert_eq!(converted.frame_a_rotation_xyzw[3], 0.70710677);
+        assert_eq!(converted.cone_limit, Some(1.2));
+        assert_eq!(converted.twist_upper_limit, Some(0.8));
+        assert_eq!(converted.malleable_strength, Some(0.9));
+        assert_eq!(converted.source, PreparedPhysicsJointSource::Authored);
     }
 }

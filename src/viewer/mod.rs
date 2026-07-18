@@ -72,6 +72,7 @@ mod material_shading_policy;
 mod nav;
 mod nav_overlay;
 mod performance_policy;
+mod ragdoll_lab;
 mod scene;
 
 pub(crate) use app::run_view;
@@ -79,6 +80,7 @@ pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
 pub(crate) use lighting::*;
 pub(crate) use scene::*;
+pub use ragdoll_lab::ragdoll_lab;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
 const CELL_DIRECTIONAL_ILLUMINANCE: f32 = 10_000.0;

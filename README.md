@@ -73,6 +73,20 @@ unless the Bevy runtime DLLs are deliberately bundled and tested.
 debugging. The selector also accepts an eight-digit hexadecimal FormID; for
 example, `SuperDuperMart` resolves internally to `00017f37`.
 
+### Isolated ragdoll laboratory
+
+Compare one prepared actor without loading or modifying the market scene:
+
+```powershell
+cargo run-dev -- ragdoll-lab SuperDuperMart --actor 00041606
+cargo run-dev -- ragdoll-lab SuperDuperMart --actor 00041606 --backend boxddd
+```
+
+Avian3D is the laboratory default; BoxDDD remains the production viewer
+backend. Press `Space` to pause/resume the drop and `R` to restore the intact
+pose and rebuild it. Add `--agent-bridge` to expose
+`bevyout.ragdoll_lab_probe` on the usual loopback bridge.
+
 ### Experimental native NIF conversion
 
 The OS-agnostic Rust converter is available as an experimental, standalone

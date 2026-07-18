@@ -1315,7 +1315,7 @@ pub(crate) fn create_dynamic_body(
     create_dynamic_body_at_local_anchor(world, placement, body, Vec3::ZERO)
 }
 
-fn create_dynamic_body_at_local_anchor(
+pub(crate) fn create_dynamic_body_at_local_anchor(
     world: &mut boxddd::World,
     placement: &crate::vsa::PreparedPlacement,
     body: &PreparedPhysicsBody,

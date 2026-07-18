@@ -28,6 +28,9 @@ pub enum CommandLine {
     /// Open a prepared scene manifest in the Bevy viewer.
     #[command(name = "view")]
     View(ViewArgs),
+    /// Compare one prepared actor ragdoll in an isolated physics laboratory.
+    #[command(name = "ragdoll-lab")]
+    RagdollLab(RagdollLabArgs),
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
@@ -88,6 +91,21 @@ pub(crate) enum NifConversionMode {
 pub(crate) enum PrepareConverter {
     Blender,
     Native,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RagdollLabBackend {
+    Avian,
+    Boxddd,
+}
+
+impl std::fmt::Display for RagdollLabBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Avian => "avian",
+            Self::Boxddd => "boxddd",
+        })
+    }
 }
 
 impl Default for PrepareConverter {
@@ -246,6 +264,31 @@ pub struct ViewArgs {
     /// Load this save slot at startup and apply it to the launch cell.
     #[arg(long, value_name = "SLOT")]
     pub(crate) save_slot: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct RagdollLabArgs {
+    /// Prepared scene GECK EditorID or eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Actor reference FormID from the prepared scene.
+    #[arg(long, value_name = "FORM_ID")]
+    pub(crate) actor: String,
+    /// Physics solver used only by the isolated laboratory.
+    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Avian)]
+    pub(crate) backend: RagdollLabBackend,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Expose the laboratory to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
+    /// Exit after this many seconds; useful for bounded solver captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
 }
 
 #[derive(Parser, Debug)]

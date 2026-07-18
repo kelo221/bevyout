@@ -2,6 +2,61 @@ use super::*;
 use std::path::Path;
 
 #[test]
+fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "ragdoll-lab",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+    ])
+    .unwrap();
+    let CommandLine::RagdollLab(args) = cli.command else {
+        panic!("expected ragdoll-lab command");
+    };
+    assert_eq!(args.selector, "SuperDuperMart");
+    assert_eq!(args.actor, "00041606");
+    assert_eq!(args.backend, RagdollLabBackend::Avian);
+    assert_eq!(args.agent_port, 15_702);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "ragdoll-lab",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+        "--backend",
+        "boxddd",
+        "--agent-bridge",
+        "--agent-port",
+        "16000",
+    ])
+    .unwrap();
+    let CommandLine::RagdollLab(args) = cli.command else {
+        panic!("expected ragdoll-lab command");
+    };
+    assert_eq!(args.backend, RagdollLabBackend::Boxddd);
+    assert!(args.agent_bridge);
+    assert_eq!(args.agent_port, 16_000);
+
+    assert!(
+        Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "ragdoll-lab",
+            "SuperDuperMart",
+            "--actor",
+            "00041606",
+            "--agent-port",
+            "16000",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn nif_convert_requires_one_source_and_parses_conversion_options() {
     let cli = Cli::try_parse_from([
         "bevyout",
