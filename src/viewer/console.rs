@@ -17,7 +17,7 @@ use crate::console::{
     ConsoleRegistry, resolve_reference,
 };
 use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
-use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
+use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSceneManifest, PreparedSemantic};
 
 use super::controls::{
     AmbientScale, AoStrength, FogStrength, HorizontalFov, IrradianceIntensity, LightingScale,
@@ -28,6 +28,7 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::{RealtimeShadowSettings, shadow_cache_status};
+use super::world::ActiveCell;
 use super::{diagnostics, interaction, nav, nav_overlay, player};
 
 #[derive(Component)]
@@ -63,9 +64,18 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<DiagnosticUiState>()
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
+        // Issue #151: the `tdi`-toggled debug info HUD -- state lives with
+        // the HUD it drives in `diagnostics.rs`; spawn/update follow the
+        // same Startup+Update split as `player::mod`'s collider/step HUDs.
+        .init_resource::<diagnostics::DebugInfoState>()
+        .add_systems(Startup, diagnostics::spawn_debug_info_hud)
         .add_systems(
             Update,
-            (sync_ui_visibility, nav_overlay::despawn_stale_nav_overlay),
+            (
+                sync_ui_visibility,
+                nav_overlay::despawn_stale_nav_overlay,
+                diagnostics::update_debug_info_hud,
+            ),
         );
     {
         let mut hooks = app.world_mut().resource_mut::<ConsoleEntityHooks>();
@@ -285,6 +295,20 @@ pub(crate) fn install(app: &mut App) {
             save_slot,
         )
         .mutating(),
+        ConsoleCommand::new(
+            "tdi",
+            "tdi",
+            "Toggle the debug info HUD (player position, active cell, test nav agents).",
+            toggle_debug_info,
+        )
+        .mutating(),
+        ConsoleCommand::new(
+            "tp",
+            "tp <x> <y> <z> [<cell-formid>]",
+            "Atomically teleport the player to (x, y, z) in metres, optionally after swapping to a prepared cell first.",
+            teleport_player,
+        )
+        .mutating(),
     ] {
         registry
             .register(command)
@@ -404,13 +428,15 @@ fn activate_reference(
     ))
 }
 
-/// Parses a raw item FormID argument: 1..=8 hex digits, with or without a
-/// `0x` prefix -- the Bethesda console accepts bare short hex like
+/// Parses a raw item or cell FormID argument: 1..=8 hex digits, with or
+/// without a `0x` prefix -- the Bethesda console accepts bare short hex like
 /// `player.additem f 100`. Deliberately looser than `console::executor`'s
 /// private reference-selector parser (which requires a prefix or exactly 8
 /// digits to disambiguate from EditorIDs): `additem` targets a catalog item
 /// FormID rather than a live reference, so there is no EditorID form to
-/// collide with and no `RefRegistry` resolution.
+/// collide with and no `RefRegistry` resolution. `tp`'s optional
+/// `<cell-formid>` argument (issue #152) reuses this same parser for the
+/// same reason -- it names a prepared cell on disk, not a live reference.
 fn parse_item_form_id(value: &str) -> Option<u32> {
     let digits = value
         .strip_prefix("0x")
@@ -988,6 +1014,178 @@ fn save_slot(
     Ok(ConsoleCommandResult::new(
         json!({ "slot": slot, "path": path }),
         vec![format!("Save written to {}.", path.display())],
+    ))
+}
+
+/// Issue #151: toggles `diagnostics::DebugInfoState`, mirroring `tdt`'s
+/// `toggle_diagnostic_ui` shape exactly (no world side effect beyond the
+/// flag; `diagnostics::update_debug_info_hud` reads it every frame).
+fn toggle_debug_info(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let enabled = {
+        let mut state = world.resource_mut::<diagnostics::DebugInfoState>();
+        state.enabled = !state.enabled;
+        state.enabled
+    };
+    Ok(toggle_result(
+        json!({ "enabled": enabled }),
+        "Debug info",
+        enabled,
+    ))
+}
+
+/// Mirrors `world::preload::scene_manifest_path` (private to that module).
+/// Duplicated here only for `tp`'s synchronous prepared-cell existence
+/// check -- the actual swap/loader logic itself is not duplicated; `tp`
+/// drives the exact same `DoorTravelRequested` message and `world::swap`
+/// systems door travel and `activate` already use (see `teleport_player`
+/// below).
+fn tp_scene_manifest_path(asset_root: &std::path::Path, form_id: u32) -> PathBuf {
+    asset_root
+        .join("scenes")
+        .join(format!("{form_id:08x}"))
+        .join("scene.ron")
+}
+
+fn finite_tp_coordinate(value: &str) -> Result<f32, ConsoleError> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| ConsoleError::new("bad_type", "tp coordinates must be finite numbers"))?;
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(ConsoleError::new(
+            "bad_type",
+            "tp coordinates must be finite numbers",
+        ))
+    }
+}
+
+/// Issue #152: sets all three axes of the player's `Transform` in one
+/// write -- the same mechanism `[player.]setpos` uses
+/// (`console::commands::set_position`/`notify_transform_mutated`), just
+/// without the intermediate single-axis states that let a mid-sequence
+/// physics tick see the player poking through geometry. `player::
+/// console_transform_mutated` is the only hook `viewer::console::install`
+/// registers with `ConsoleEntityHooks`, so calling it directly here is
+/// equivalent to the generic `notify_transform_mutated` dispatch `setpos`
+/// goes through (that dispatcher itself is private to `crate::console` and
+/// not re-exported for callers outside it).
+fn teleport_player_in_place(
+    world: &mut World,
+    position: Vec3,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let entity = resolve_reference(world, "player")?;
+    {
+        let mut transform = world
+            .get_mut::<Transform>(entity)
+            .ok_or_else(|| ConsoleError::new("component_missing", "reference has no Transform"))?;
+        transform.translation = position;
+    }
+    player::console_transform_mutated(world, entity);
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "x": position.x,
+            "y": position.y,
+            "z": position.z,
+            "unit": "metres",
+        }),
+        vec![format!(
+            "tp: teleported player to ({:.3}, {:.3}, {:.3}).",
+            position.x, position.y, position.z
+        )],
+    ))
+}
+
+/// Issue #152: `tp <x> <y> <z> [<cell-formid>]`. The 3-arg form is an
+/// atomic `setpos` (see `teleport_player_in_place`). The 4-arg form reuses
+/// the exact same instant-swap/cell-travel machinery door activation and
+/// `activate` already drive -- a `DoorTravelRequested` message consumed by
+/// `world::swap`'s `evaluate_door_travel_requests` /
+/// `apply_pending_instant_swap` (or the loading-screen fallback for a
+/// prepared-but-not-resident cell) -- rather than a new loader. Its
+/// `translation` is the requested (x, y, z) directly, so `world::swap`'s
+/// `activate_resident_cell` places the player there via `player::
+/// teleport_active_player` as part of the very same swap a door uses; a
+/// synthetic `door_form_id: 0` (never a real FormID) marks it as not a real
+/// door for `nav::agent::note_player_swap_door`'s follow-through/freeze
+/// bookkeeping. A destination already equal to the active cell skips the
+/// swap and falls back to the plain in-place teleport above. An unprepared
+/// destination cell fails synchronously and deterministically, matching
+/// `activate`'s unknown-reference error style, instead of silently kicking
+/// off a fallback load that would only fail later.
+fn teleport_player(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (coordinates, cell_arg) = match invocation.args.as_slice() {
+        [x, y, z] => ([x, y, z], None),
+        [x, y, z, cell] => ([x, y, z], Some(cell)),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tp requires <x> <y> <z> and an optional cell FormID",
+            ));
+        }
+    };
+    let position = Vec3::new(
+        finite_tp_coordinate(coordinates[0])?,
+        finite_tp_coordinate(coordinates[1])?,
+        finite_tp_coordinate(coordinates[2])?,
+    );
+    let Some(cell_value) = cell_arg else {
+        return teleport_player_in_place(world, position);
+    };
+    let destination_cell = parse_item_form_id(cell_value).ok_or_else(|| {
+        ConsoleError::new(
+            "bad_type",
+            "tp cell FormID must be 1-8 hex digits, e.g. f, 0x1f, or 0000000f",
+        )
+    })?;
+    if world
+        .get_resource::<ActiveCell>()
+        .is_some_and(|active| active.0 == destination_cell)
+    {
+        return teleport_player_in_place(world, position);
+    }
+    let asset_root = world
+        .get_resource::<PreparedSceneManifest>()
+        .map(|manifest| PathBuf::from(&manifest.asset_root))
+        .ok_or_else(|| {
+            ConsoleError::new("cell_unavailable", "no active cell manifest is loaded")
+        })?;
+    if !tp_scene_manifest_path(&asset_root, destination_cell).is_file() {
+        return Err(ConsoleError::new(
+            "cell_not_found",
+            format!("cell {destination_cell:08x} is not a prepared cell"),
+        ));
+    }
+    let rotation_xyzw = resolve_reference(world, "player")
+        .ok()
+        .and_then(|entity| world.get::<Transform>(entity))
+        .map(|transform| transform.rotation.to_array())
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    world.write_message(interaction::DoorTravelRequested {
+        destination_cell_form_id: destination_cell,
+        translation: position,
+        rotation_xyzw,
+        door_form_id: 0,
+    });
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "x": position.x,
+            "y": position.y,
+            "z": position.z,
+            "cell_form_id": destination_cell,
+            "unit": "metres",
+        }),
+        vec![format!(
+            "tp: cell travel requested to {destination_cell:08x}; player will be placed at ({:.3}, {:.3}, {:.3}).",
+            position.x, position.y, position.z
+        )],
     ))
 }
 
@@ -2848,5 +3046,170 @@ mod tests {
                 .get_resource::<super::super::bindings::HotkeyBindings>()
                 .is_none()
         );
+    }
+
+    // -- tdi (issue #151) --------------------------------------------------
+
+    #[test]
+    fn tdi_toggles_debug_info_state_and_defaults_off() {
+        let mut app = test_app();
+        assert!(
+            !app.world()
+                .resource::<diagnostics::DebugInfoState>()
+                .enabled
+        );
+        let output = exec(&mut app, "tdi");
+        assert!(output.ok, "tdi failed: {:?}", output.error);
+        assert_eq!(output.log, ["Debug info enabled."]);
+        assert!(
+            app.world()
+                .resource::<diagnostics::DebugInfoState>()
+                .enabled
+        );
+        let output = exec(&mut app, "tdi");
+        assert!(output.ok, "tdi failed: {:?}", output.error);
+        assert_eq!(output.log, ["Debug info disabled."]);
+        assert!(
+            !app.world()
+                .resource::<diagnostics::DebugInfoState>()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn tdi_rejects_arguments() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "tdi now")), "bad_arity");
+    }
+
+    // -- tp (issue #152) -----------------------------------------------------
+
+    fn fixture_manifest() -> PreparedSceneManifest {
+        ron::de::from_str(include_str!("../../features/fixtures/scene.ron"))
+            .expect("synthetic scene fixture should parse")
+    }
+
+    #[test]
+    fn tp_rejects_bad_arity() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "tp 1 2")), "bad_arity");
+        assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 4 5")), "bad_arity");
+    }
+
+    #[test]
+    fn tp_rejects_non_finite_coordinates() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "tp nope 2 3")), "bad_type");
+        assert_eq!(error_code(&exec(&mut app, "tp 1 NaN 3")), "bad_type");
+    }
+
+    #[test]
+    fn tp_rejects_a_bad_cell_form_id() {
+        let mut app = test_app();
+        assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 zzzz")), "bad_type");
+    }
+
+    // T152.1: the 3-arg form sets all three axes in a single write (never a
+    // partial, one-axis-at-a-time state) and drives the same
+    // `console_transform_mutated` reset `[player.]setpos` triggers.
+    #[test]
+    fn tp_with_three_args_atomically_repositions_the_player() {
+        let mut app = test_app();
+        let player = app
+            .world_mut()
+            .query_filtered::<Entity, With<player::FpsPlayer>>()
+            .single(app.world())
+            .unwrap();
+        let output = exec(&mut app, "tp 4 5 6");
+        assert!(output.ok, "tp failed: {:?}", output.error);
+        assert_eq!(output.value["x"], 4.0);
+        assert_eq!(output.value["y"], 5.0);
+        assert_eq!(output.value["z"], 6.0);
+        assert_eq!(
+            output.log,
+            ["tp: teleported player to (4.000, 5.000, 6.000)."]
+        );
+        let transform = app.world().get::<Transform>(player).unwrap();
+        assert_eq!(transform.translation, Vec3::new(4.0, 5.0, 6.0));
+    }
+
+    #[test]
+    fn tp_with_a_destination_equal_to_the_active_cell_skips_the_swap() {
+        let mut app = test_app();
+        app.add_message::<interaction::DoorTravelRequested>();
+        let manifest = fixture_manifest();
+        let active_cell = manifest.cell.form_id;
+        app.world_mut().insert_resource(ActiveCell(active_cell));
+        app.world_mut().insert_resource(manifest);
+
+        let output = exec(&mut app, &format!("tp 7 8 9 {active_cell:08x}"));
+        assert!(output.ok, "tp failed: {:?}", output.error);
+        let requests = app
+            .world()
+            .resource::<Messages<interaction::DoorTravelRequested>>();
+        assert_eq!(
+            requests.iter_current_update_messages().count(),
+            0,
+            "a same-cell tp must not request a swap"
+        );
+    }
+
+    #[test]
+    fn tp_to_an_unprepared_cell_fails_deterministically() {
+        let mut app = test_app();
+        app.add_message::<interaction::DoorTravelRequested>();
+        let manifest = fixture_manifest();
+        app.world_mut()
+            .insert_resource(ActiveCell(manifest.cell.form_id));
+        app.world_mut().insert_resource(manifest);
+
+        // The fixture's asset_root ("cache/00017f37") exists nowhere, so
+        // any destination other than the active cell is unprepared.
+        assert_eq!(
+            error_code(&exec(&mut app, "tp 1 2 3 000badd0")),
+            "cell_not_found"
+        );
+        let requests = app
+            .world()
+            .resource::<Messages<interaction::DoorTravelRequested>>();
+        assert_eq!(requests.iter_current_update_messages().count(), 0);
+    }
+
+    #[test]
+    fn tp_to_a_prepared_different_cell_writes_a_travel_request_at_the_given_position() {
+        let mut app = test_app();
+        app.add_message::<interaction::DoorTravelRequested>();
+        let mut manifest = fixture_manifest();
+        let source_cell = manifest.cell.form_id;
+        let destination_cell = 0x0002_0002u32;
+        let temp_root = std::env::temp_dir().join(format!(
+            "bevyout-console-tp-test-{}-{destination_cell:08x}",
+            std::process::id()
+        ));
+        let scene_dir = temp_root
+            .join("scenes")
+            .join(format!("{destination_cell:08x}"));
+        std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+        std::fs::write(scene_dir.join("scene.ron"), "()")
+            .expect("write synthetic prepared-cell fixture file");
+        manifest.asset_root = temp_root.to_string_lossy().into_owned();
+        app.world_mut().insert_resource(ActiveCell(source_cell));
+        app.world_mut().insert_resource(manifest);
+
+        let output = exec(&mut app, "tp 4 5 6 00020002");
+        let cleanup = std::fs::remove_dir_all(&temp_root);
+        assert!(output.ok, "tp failed: {:?}", output.error);
+        assert_eq!(output.value["cell_form_id"], destination_cell);
+        let requests = app
+            .world()
+            .resource::<Messages<interaction::DoorTravelRequested>>();
+        let request = requests
+            .iter_current_update_messages()
+            .next()
+            .expect("expected a DoorTravelRequested message");
+        assert_eq!(request.destination_cell_form_id, destination_cell);
+        assert_eq!(request.translation, Vec3::new(4.0, 5.0, 6.0));
+        assert_eq!(request.door_form_id, 0);
+        cleanup.expect("remove synthetic prepared-cell fixture dir");
     }
 }
