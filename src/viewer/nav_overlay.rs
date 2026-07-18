@@ -46,7 +46,12 @@
 //!   `camera_post_processing`), which can't track a 3D overlay's
 //!   ever-changing screen footprint without a new per-frame render system --
 //!   so the smallest fix is dimming the overlay material itself rather than
-//!   trying to exclude it from metering.
+//!   trying to exclude it from metering. #138's first pass (0.28/0.22) still
+//!   read as "way too bright" in dark interiors on human acceptance; both
+//!   constants are now roughly halved again (0.12/0.12) -- see their own doc
+//!   comments for the exact values -- while the fixed-white route polyline
+//!   (`PATH_LINE_COLOR`) is untouched, since it is the thing actually being
+//!   read and can stay brighter than the triangle fill beneath it.
 
 use std::path::Path;
 
@@ -71,14 +76,18 @@ use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedSceneManifest};
 /// sequentially.
 const HUE_STEP: f32 = 0.618_034;
 /// Some transparency so the geometry underneath the overlay stays readable.
-/// Lowered from #128's 0.55 (issue #138 feature 2): see the module doc
-/// comment -- this, combined with `TRIANGLE_LIGHTNESS`, is what stops the
-/// overlay from crushing dark interiors via auto-exposure.
-const OVERLAY_ALPHA: f32 = 0.28;
+/// Lowered from #128's 0.55 (issue #138 feature 2), then lowered again from
+/// #138's own first pass at 0.28 (#138 follow-up: human acceptance still
+/// read the mesh fill as "way too bright" in dark interiors) -- see the
+/// module doc comment -- this, combined with `TRIANGLE_LIGHTNESS`, is what
+/// stops the overlay from crushing dark interiors via auto-exposure.
+const OVERLAY_ALPHA: f32 = 0.12;
 /// HSL lightness used for every triangle's hue (issue #138 feature 2,
-/// down from #128's fixed 0.5). Saturation stays at 1.0 so polygons remain
-/// visually distinct; only the overall brightness is dimmed.
-const TRIANGLE_LIGHTNESS: f32 = 0.22;
+/// down from #128's fixed 0.5, then dimmed again from #138's own first
+/// pass at 0.22 -- #138 follow-up, same human-acceptance finding as
+/// `OVERLAY_ALPHA`). Saturation stays at 1.0 so polygons remain visually
+/// distinct; only the overall brightness is dimmed.
+const TRIANGLE_LIGHTNESS: f32 = 0.12;
 /// Offset against z-fighting with the floor/nav-mesh-adjacent geometry.
 const OVERLAY_Y_OFFSET: f32 = 0.02;
 /// Additional height (relative to the triangle mesh, i.e. on top of
@@ -845,12 +854,12 @@ mod tests {
         // any regression a compile error, which is stronger than a test
         // failure anyway.
         const _: () = assert!(
-            OVERLAY_ALPHA <= 0.3,
-            "overlay alpha regressed toward #128's pre-#138 0.55"
+            OVERLAY_ALPHA <= 0.15,
+            "overlay alpha regressed toward #138's own first pass (0.28) or #128's pre-#138 0.55"
         );
         const _: () = assert!(
-            TRIANGLE_LIGHTNESS <= 0.25,
-            "triangle HSL lightness regressed toward #128's pre-#138 0.5"
+            TRIANGLE_LIGHTNESS <= 0.15,
+            "triangle HSL lightness regressed toward #138's own first pass (0.22) or #128's pre-#138 0.5"
         );
 
         // The brightest a triangle can render at is hue-independent (full
@@ -861,7 +870,7 @@ mod tests {
         let luma = 0.2126 * brightest[0] + 0.7152 * brightest[1] + 0.0722 * brightest[2];
         let contribution = luma * brightest[3];
         assert!(
-            contribution <= 0.2,
+            contribution <= 0.03,
             "dimmed overlay still contributes too much luminance ({contribution}) to be safe for auto-exposure metering"
         );
     }
