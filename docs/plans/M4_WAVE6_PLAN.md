@@ -173,3 +173,21 @@ all four issues.
 - **A9 (#121) No cucumber feature.** The only pure logic is the one-row
   `row_primary_action` decision, unit-tested directly; UI dispatch is
   covered by App-level tests. A feature file would have added no value.
+- **A10 (owner acceptance additions).** #151 `tdi` console-toggleable
+  debug HUD (top-left anchor after a real-data overlap fix) and #152
+  `tp <x> <y> <z> [cell]` atomic teleport reusing the door-travel swap
+  machinery; both smoke-tested over the bridge including a cross-cell
+  swap into Vault 101 Atrium.
+- **A11 (#138 follow-up, owner report "navmesh too bright").** Three
+  stacked causes: AutoExposure gain multiplying the overlay in dark
+  cells (fixed by locking exposure to the camera baseline while `tnm`
+  is visible), vertex-color alpha not blending for the unlit fill
+  material (fixed by moving transparency to the material `base_color`),
+  and constants retuned against real screenshots (alpha 0.1, lightness
+  0.015).
+- **A12 (external review finding 1a, attempted and reverted).** The
+  miter corner-clearance correction was implemented, gates-green, and
+  reverted after real-data acceptance made the Vault 101 doorway
+  crossing `unreachable`: correct (larger) corner offsets over-shrink
+  tight authored geometry without #153's disconnect semantics. Moved to
+  #153; the implementation is preserved in branch history.
