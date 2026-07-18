@@ -1593,12 +1593,11 @@ fn ragdoll_body_recentering_moves_shapes_and_joint_frames_to_limb_space() {
 }
 
 #[test]
-fn ragdoll_parts_share_a_negative_non_colliding_group_per_actor() {
+fn ragdoll_parts_preserve_non_adjacent_self_collision() {
     let first = ragdoll_collision_group(0x0004_1606);
     let second = ragdoll_collision_group(0x0004_161a);
-    assert!(first < 0);
-    assert!(second < 0);
-    assert_ne!(first, second);
+    assert_eq!(first, 0);
+    assert_eq!(second, 0);
 }
 
 #[test]

@@ -641,6 +641,7 @@ struct BevyoutWorld {
 
     // -- actor_conversion.feature (authored ragdoll sidecar v3) --
     actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
+    actor_physics_asset: Option<physics::PreparedPhysicsAsset>,
 }
 
 fn find_placement<'a>(
@@ -7085,4 +7086,53 @@ async fn then_actor_joint_source_is(world: &mut BevyoutWorld, expected: String) 
         physics::PreparedPhysicsJointSource::SyntheticFallback => "SyntheticFallback",
     };
     assert_eq!(actual, expected);
+}
+
+#[then("Blender ragdoll bodies and constraints use stable NIF source identities")]
+async fn then_blender_ragdoll_uses_stable_source_identity(_world: &mut BevyoutWorld) {
+    let script = assets::blender_conversion_script();
+    assert!(script.contains("bevyout_nif_body_block"));
+    assert!(script.contains("body_a_key"));
+    assert!(script.contains("body_b_key"));
+    assert!(script.contains("resolve_authored_joint_body_groups"));
+    assert!(!script.contains("_bevyout_body_group"));
+}
+
+#[given("an actor physics sidecar with duplicate body group IDs")]
+async fn given_actor_sidecar_with_duplicate_body_ids(world: &mut BevyoutWorld) {
+    let body = physics::PreparedPhysicsBody {
+        group_id: 7,
+        shapes: vec![physics::PreparedPhysicsShape::Sphere {
+            center: [0.0; 3],
+            radius: 0.25,
+        }],
+        ..Default::default()
+    };
+    world.actor_physics_asset = Some(physics::PreparedPhysicsAsset {
+        schema_version: physics::PHYSICS_ASSET_SCHEMA_VERSION,
+        source: physics::PreparedPhysicsSource::AuthoredHavok,
+        bodies: vec![body.clone(), body],
+        joints: Vec::new(),
+    });
+}
+
+#[then("actor physics sidecar validation rejects duplicate body group IDs")]
+async fn then_actor_sidecar_rejects_duplicate_body_ids(world: &mut BevyoutWorld) {
+    let error = physics::validate_physics_asset(
+        world
+            .actor_physics_asset
+            .as_ref()
+            .expect("actor physics sidecar fixture"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate body group IDs"));
+}
+
+#[then("non-ragdoll actor skin weights collapse to their nearest authored body ancestor")]
+async fn then_actor_skin_weights_follow_authored_ragdoll(_world: &mut BevyoutWorld) {
+    let script = assets::blender_conversion_script();
+    assert!(script.contains("actor_ragdoll_weight_target"));
+    assert!(script.contains("collapse_actor_ragdoll_weights"));
+    assert!(script.contains("target_group.add([vertex.index], weight, 'ADD')"));
+    assert!(script.contains("source_group.remove([vertex.index])"));
 }

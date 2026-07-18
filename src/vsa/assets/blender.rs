@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(crate) fn blender_conversion_script() -> &'static str {
+    include_str!("blender_script.py")
+}
+
 pub(crate) fn run_blender_batch(
     blender: &Path,
     jobs: &[BlenderAssetJob],
@@ -12,7 +16,7 @@ pub(crate) fn run_blender_batch(
     let job_text = blender_jobs_json(jobs);
     fs::write(&job_file, job_text)?;
     let script_file = staging_dir.join("blender_script.py");
-    fs::write(&script_file, include_str!("blender_script.py"))?;
+    fs::write(&script_file, blender_conversion_script())?;
     let result = Command::new(blender)
         .arg("--background")
         .arg("--factory-startup")

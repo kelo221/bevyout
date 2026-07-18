@@ -139,3 +139,23 @@ fn joint_validation_rejects_non_unit_frames_and_inverted_twist_limits() {
     });
     assert!(validate_physics_asset(&inverted_twist).is_err());
 }
+
+#[test]
+fn validation_rejects_duplicate_body_group_ids() {
+    let mut first = body(8, 0, false);
+    first.group_id = 7;
+    let mut second = body(8, 0, false);
+    second.group_id = 7;
+    let asset = PreparedPhysicsAsset {
+        schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
+        source: PreparedPhysicsSource::AuthoredHavok,
+        bodies: vec![first, second],
+        joints: Vec::new(),
+    };
+
+    let error = validate_physics_asset(&asset).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate body group IDs"),
+        "unexpected validation error: {error:#}"
+    );
+}

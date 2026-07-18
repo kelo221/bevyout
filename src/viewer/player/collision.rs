@@ -692,6 +692,10 @@ pub(crate) fn process_ragdoll_toggles(
             let (Some((body_a, anchor_a)), Some((body_b, anchor_b))) =
                 (body_ids.get(&joint.body_a), body_ids.get(&joint.body_b))
             else {
+                warn!(
+                    "ragdoll sidecar runtime endpoint missing actor={:08x} bodies={}-{}",
+                    placement.reference_form_id, joint.body_a, joint.body_b
+                );
                 continue;
             };
             let scale = placement.scale.abs();
@@ -1118,9 +1122,12 @@ pub(crate) fn ragdoll_joint_local_anchor(
     (Vec3::from_array(authored_anchor) - body_anchor) * scale
 }
 
-pub(crate) fn ragdoll_collision_group(reference_form_id: u32) -> i32 {
-    let stable = (reference_form_id & i32::MAX as u32).max(1) as i32;
-    -stable
+pub(crate) fn ragdoll_collision_group(_reference_form_id: u32) -> i32 {
+    // Group zero uses the ordinary category/mask filter. Joint-connected
+    // bodies still use BoxDDD's default collideConnected=false, while
+    // non-adjacent limbs can now collide with the torso and each other rather
+    // than collapsing through the complete articulated actor.
+    0
 }
 
 pub(crate) fn ragdoll_runtime_placement(

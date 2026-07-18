@@ -27,11 +27,11 @@ pub(crate) const NIF_CONVERTER_REVISION: &str =
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
-pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v15";
+pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v28-actor-bindpose-v17";
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v15";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v17";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ActorAssemblyDescriptor {

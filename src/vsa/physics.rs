@@ -333,6 +333,9 @@ pub(crate) fn validate_physics_asset(asset: &PreparedPhysicsAsset) -> Result<()>
         .iter()
         .map(|body| body.group_id)
         .collect::<std::collections::HashSet<_>>();
+    if body_ids.len() != asset.bodies.len() {
+        bail!("physics sidecar contains duplicate body group IDs");
+    }
     for joint in &asset.joints {
         if !body_ids.contains(&joint.body_a) || !body_ids.contains(&joint.body_b) {
             bail!(

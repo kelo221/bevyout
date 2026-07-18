@@ -1,5 +1,48 @@
 import bmesh, bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
+
+RIGID_BODY_TYPES = {'bhkRigidBody', 'bhkRigidBodyT'}
+
+def canonical_nif_path(path):
+    return os.path.normcase(os.path.abspath(os.fspath(path))).replace('\\', '/')
+
+def nif_block_index(blocks, target):
+    for index, block in enumerate(blocks):
+        if block is target:
+            return index
+    raise RuntimeError(
+        'Imported Havok body is absent from the active NIF block table: '
+        + type(target).__name__
+    )
+
+def nif_body_key(path, block_index):
+    return '{}#{}'.format(canonical_nif_path(path), int(block_index))
+
+def resolve_authored_joint_body_groups(source_joints, group_id_by_key):
+    resolved = []
+    for source_joint in source_joints:
+        key_a = str(source_joint.get('body_a_key', ''))
+        key_b = str(source_joint.get('body_b_key', ''))
+        body_a = group_id_by_key.get(key_a)
+        body_b = group_id_by_key.get(key_b)
+        if body_a is None or body_b is None:
+            raise RuntimeError(
+                'Unresolved authored Havok constraint endpoint: {} -> {}'.format(
+                    key_a or '<missing>', key_b or '<missing>')
+            )
+        if body_a == body_b:
+            raise RuntimeError(
+                'Authored Havok constraint resolves to one body: {}'.format(key_a)
+            )
+        joint = {
+            key: value for key, value in source_joint.items()
+            if key not in {'body_a_key', 'body_b_key'}
+        }
+        joint['body_a'] = int(body_a)
+        joint['body_b'] = int(body_b)
+        resolved.append(joint)
+    return resolved
+
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
@@ -153,9 +196,9 @@ def patch_niftools_blender52():
     original_rigid_body = BhkCollision._import_bhk_rigid_body
     def import_rigid_body_metadata(self, bhkshape, collision_objs):
         original_rigid_body(self, bhkshape, collision_objs)
+        from io_scene_niftools.utils.singleton import NifData
         body_info = bhkshape.rigid_body_info
-        next_group = getattr(self, '_bevyout_body_group', 0)
-        self._bevyout_body_group = next_group + 1
+        body_block_index = nif_block_index(NifData.data.blocks, bhkshape)
         layer_filter = getattr(body_info, 'havok_filter', None)
         body_filter = getattr(bhkshape, 'havok_filter', None)
         layer = getattr(getattr(layer_filter, 'layer', None), 'value', 1)
@@ -174,7 +217,7 @@ def patch_niftools_blender52():
         ]
         inertia_rows = [[value * inertia_scale for value in row] for row in inertia_rows]
         metadata = {
-            'bevyout_body_group': next_group,
+            'bevyout_nif_body_block': body_block_index,
             'bevyout_motion_type': enum_name(getattr(body_info, 'motion_system', None), 'MO_SYS_FIXED'),
             'bevyout_quality_type': enum_name(getattr(body_info, 'quality_type', None), 'MO_QUAL_FIXED'),
             'bevyout_mass': float(getattr(body_info, 'mass', 0.0)),
@@ -201,6 +244,8 @@ def patch_niftools_blender52():
     original_phantom = BhkCollision.import_bhk_simple_shape_phantom
     def import_phantom_metadata(self, bhkshape):
         objects = original_phantom(self, bhkshape)
+        from io_scene_niftools.utils.singleton import NifData
+        body_block_index = nif_block_index(NifData.data.blocks, bhkshape)
         transform_value = getattr(bhkshape, 'transform', None)
         if transform_value is not None:
             try:
@@ -209,7 +254,9 @@ def patch_niftools_blender52():
                 for obj in objects: obj.matrix_local = obj.matrix_local @ transform
             except Exception:
                 pass
-        for obj in objects: obj['bevyout_phantom'] = True
+        for obj in objects:
+            obj['bevyout_phantom'] = True
+            obj['bevyout_nif_body_block'] = body_block_index
         return objects
     BhkCollision.import_bhk_simple_shape_phantom = import_phantom_metadata
     def mark_shape(original, kind):
@@ -365,6 +412,76 @@ def actor_bone_name(armature, *hints):
             if hint in bone.name.casefold().replace(' ', '').replace('_', ''):
                 return bone.name
     return None
+
+def actor_node_key(name):
+    parts = [part.casefold() for part in re.findall(r'[A-Za-z0-9]+', str(name))]
+    if (len(parts) >= 3 and parts[0].startswith('bip')
+            and parts[-1] in {'l', 'r'}):
+        side = parts.pop()
+        parts.insert(1, side)
+    return ''.join(parts)
+
+def actor_ragdoll_weight_target(bone, ragdoll_names_by_key):
+    current = bone
+    while current is not None:
+        target = ragdoll_names_by_key.get(actor_node_key(current.name))
+        if target is not None:
+            return target
+        current = current.parent
+    return None
+
+def collapse_actor_ragdoll_weights(ragdoll_nodes):
+    ragdoll_names_by_key = {
+        actor_node_key(name): str(name)
+        for name in ragdoll_nodes if name
+    }
+    if not ragdoll_names_by_key:
+        return 0
+    moved_groups = 0
+    for mesh in bpy.context.scene.objects:
+        if mesh.type != 'MESH' or not mesh.vertex_groups:
+            continue
+        armature = next((
+            modifier.object for modifier in mesh.modifiers
+            if modifier.type == 'ARMATURE' and modifier.object is not None
+        ), None)
+        if armature is None:
+            continue
+        for source_group in list(mesh.vertex_groups):
+            if actor_node_key(source_group.name) in ragdoll_names_by_key:
+                continue
+            bone = armature.data.bones.get(source_group.name)
+            if bone is None:
+                continue
+            target_name = actor_ragdoll_weight_target(
+                bone.parent, ragdoll_names_by_key)
+            if target_name is None:
+                continue
+            target_bone = next((
+                candidate for candidate in armature.data.bones
+                if actor_node_key(candidate.name) == actor_node_key(target_name)
+            ), None)
+            if target_bone is None:
+                continue
+            target_group = mesh.vertex_groups.get(target_bone.name)
+            if target_group is None:
+                target_group = mesh.vertex_groups.new(name=target_bone.name)
+            moved = False
+            for vertex in mesh.data.vertices:
+                try:
+                    weight = source_group.weight(vertex.index)
+                except RuntimeError:
+                    continue
+                if weight <= 0.0:
+                    continue
+                target_group.add([vertex.index], weight, 'ADD')
+                source_group.remove([vertex.index])
+                moved = True
+            if moved:
+                moved_groups += 1
+                print('[convert] actor ragdoll weights {}:{} -> {}'.format(
+                    mesh.name, source_group.name, target_bone.name), flush=True)
+    return moved_groups
 
 def normalize_actor_assembly():
     """Normalize imported body parts and attach standalone gear.
@@ -612,21 +729,40 @@ def source_emission_multiplier(material):
             return matches[0], True
     return 1.0, False
 
+def collision_body_key(obj):
+    source_path = obj.get('bevyout_nif_source_path')
+    block_index = obj.get('bevyout_nif_body_block')
+    if source_path and block_index is not None:
+        return nif_body_key(source_path, block_index)
+    # Bounds and other non-rigid collision helpers are never constraint
+    # endpoints. Keep them deterministic without allowing their import order
+    # to enter the authored ragdoll identity namespace.
+    source = canonical_nif_path(source_path) if source_path else '<unknown>'
+    return '{}#helper:{}'.format(source, str(obj.name).casefold())
+
 def build_physics_asset():
     collision_objects = [obj for obj in bpy.context.scene.objects
                          if obj.type == 'MESH' and obj.get('bevyout_collision', False)]
-    groups = {}
-    for index, obj in enumerate(collision_objects):
-        group = int(obj.get('bevyout_body_group', 1000000 + index))
-        groups.setdefault(group, []).append(obj)
-    authored_bodies = [physics_body_from_objects(group, objects)
-                       for group, objects in sorted(groups.items())]
-    authored_bodies = [body for body in authored_bodies if body['shapes']]
-    authored_groups = {int(body['group_id']) for body in authored_bodies}
-    joints = [
-        joint for joint in globals().get('current_joint_defs', [])
-        if int(joint['body_a']) in authored_groups and int(joint['body_b']) in authored_groups
-    ]
+    groups_by_key = {}
+    for obj in collision_objects:
+        groups_by_key.setdefault(collision_body_key(obj), []).append(obj)
+    authored_bodies = []
+    group_id_by_key = {}
+    for source_key, objects in sorted(groups_by_key.items()):
+        group_id = len(authored_bodies)
+        body = physics_body_from_objects(group_id, objects)
+        if not body['shapes']:
+            continue
+        group_id_by_key[source_key] = group_id
+        authored_bodies.append(body)
+    joints = resolve_authored_joint_body_groups(
+        globals().get('current_joint_defs', []), group_id_by_key)
+    body_by_group = {int(body['group_id']): body for body in authored_bodies}
+    for joint in joints:
+        node_a = body_by_group[int(joint['body_a'])].get('node') or '<unnamed>'
+        node_b = body_by_group[int(joint['body_b'])].get('node') or '<unnamed>'
+        print('[convert] authored joint resolved {} -> {}'.format(
+            node_a, node_b), flush=True)
     # Keep every valid authored actor edge. Only connect genuinely disconnected
     # components of a partial/custom skeleton with the conservative Bip01
     # fallback. Fallout's authored ragdoll is a complete tree whose topology
@@ -928,21 +1064,19 @@ def nif_joint_frame(body_matrix, axis, reference):
 def nif_constraint_joints(paths):
     """Extract constraint records without asking NIFTools to create Blender
     rigid-body constraints (that importer still assumes removed 2.x fields).
-    Body groups follow the importer's deterministic rigid-body order."""
+    Endpoints retain their source NIF block identity until collision bodies
+    have been imported and grouped."""
     try:
         from nifgen.formats.nif import NifFile
     except Exception:
         return []
     joints = []
-    group_offset = 0
     for path in paths:
         try:
             nif = NifFile.from_path(path)
         except Exception:
             continue
-        bodies = [block for block in nif.blocks
-                  if type(block).__name__ in {'bhkRigidBody', 'bhkRigidBodyT'}]
-        body_groups = {id(block): group_offset + index for index, block in enumerate(bodies)}
+        block_indices = {id(block): index for index, block in enumerate(nif.blocks)}
         body_targets = {
             id(getattr(block, 'body', None)): getattr(block, 'target', None)
             for block in nif.blocks
@@ -956,10 +1090,15 @@ def nif_constraint_joints(paths):
             outer = getattr(block, 'constraint_info', None)
             entity_a = getattr(outer, 'entity_a', None)
             entity_b = getattr(outer, 'entity_b', None)
-            body_a = body_groups.get(id(entity_a))
-            body_b = body_groups.get(id(entity_b))
-            if body_a is None or body_b is None or body_a == body_b:
+            body_a_block = block_indices.get(id(entity_a))
+            body_b_block = block_indices.get(id(entity_b))
+            if (body_a_block is None or body_b_block is None
+                    or body_a_block == body_b_block
+                    or type(entity_a).__name__ not in RIGID_BODY_TYPES
+                    or type(entity_b).__name__ not in RIGID_BODY_TYPES):
                 continue
+            body_a_key = nif_body_key(path, body_a_block)
+            body_b_key = nif_body_key(path, body_b_block)
             kind, payload, strength = nif_constraint_payload(block)
             if kind is None or payload is None:
                 continue
@@ -967,7 +1106,7 @@ def nif_constraint_joints(paths):
             matrix_b = nif_body_actor_matrix(nif, entity_b, body_targets.get(id(entity_b)))
             if matrix_a is None or matrix_b is None:
                 print('[convert] skipped authored joint without body rest frame {}-{}'.format(
-                    body_a, body_b), flush=True)
+                    body_a_key, body_b_key), flush=True)
                 continue
             anchor_a = nif_actor_point(
                 getattr(payload, 'pivot_a', None), matrix_a, float(nif.havok_scale))
@@ -976,10 +1115,11 @@ def nif_constraint_joints(paths):
             pivot_error = (Vector(anchor_a) - Vector(anchor_b)).length
             if not math.isfinite(pivot_error) or pivot_error > 0.05:
                 print('[convert] skipped authored joint {}-{} pivot mismatch {:.6f}m'.format(
-                    body_a, body_b, pivot_error), flush=True)
+                    body_a_key, body_b_key, pivot_error), flush=True)
                 continue
             joint = {
-                'kind': 'fixed', 'body_a': int(body_a), 'body_b': int(body_b),
+                'kind': 'fixed',
+                'body_a_key': body_a_key, 'body_b_key': body_b_key,
                 'anchor_a': anchor_a, 'anchor_b': anchor_b,
                 'frame_a_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
                 'frame_b_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
@@ -1029,10 +1169,9 @@ def nif_constraint_joints(paths):
             if (joint['frame_a_rotation_xyzw'] is None
                     or joint['frame_b_rotation_xyzw'] is None):
                 print('[convert] skipped authored joint {}-{} with degenerate frame'.format(
-                    body_a, body_b), flush=True)
+                    body_a_key, body_b_key), flush=True)
                 continue
             joints.append(joint)
-        group_offset += len(bodies)
     print('[convert] authored constraints extracted {}'.format(len(joints)), flush=True)
     return joints
 
@@ -1132,6 +1271,51 @@ def apply_record_zero_transform_policy(
             changed.append(carrier.name)
         carrier.matrix_local = Matrix.Identity(4)
     return changed
+
+def run_ragdoll_identity_self_test():
+    source_keys = {
+        'Pelvis': 'fixture/skeleton.nif#10',
+        'Forearm.L': 'fixture/skeleton.nif#21',
+        'Neck1': 'fixture/skeleton.nif#32',
+        'Foot.L': 'fixture/skeleton.nif#43',
+    }
+    importer_order = ['Foot.L', 'Pelvis', 'Neck1', 'Forearm.L']
+    groups_by_key = {
+        source_keys[node]: {'node': node}
+        for node in importer_order
+    }
+    ordered_keys = sorted(groups_by_key)
+    group_id_by_key = {
+        key: group_id for group_id, key in enumerate(ordered_keys)
+    }
+    resolved = resolve_authored_joint_body_groups([{
+        'kind': 'spherical',
+        'body_a_key': source_keys['Forearm.L'],
+        'body_b_key': source_keys['Neck1'],
+    }], group_id_by_key)
+    node_by_group = {
+        group_id_by_key[key]: value['node']
+        for key, value in groups_by_key.items()
+    }
+    assert node_by_group[resolved[0]['body_a']] == 'Forearm.L'
+    assert node_by_group[resolved[0]['body_b']] == 'Neck1'
+    class FixtureBone:
+        def __init__(self, name, parent=None):
+            self.name = name
+            self.parent = parent
+    spine2 = FixtureBone('Bip01 Spine2')
+    clavicle = FixtureBone('Bip01 L Clavicle', spine2)
+    upper_arm = FixtureBone('Bip01 L UpperArm', clavicle)
+    forearm = FixtureBone('Bip01 L Forearm', upper_arm)
+    fore_twist = FixtureBone('Bip01 L ForeTwist', forearm)
+    weight_targets = {
+        actor_node_key('Bip01 Spine2'): 'Bip01 Spine2',
+        actor_node_key('Bip01 UpperArm.L'): 'Bip01 UpperArm.L',
+        actor_node_key('Bip01 Forearm.L'): 'Bip01 Forearm.L',
+    }
+    assert actor_ragdoll_weight_target(clavicle, weight_targets) == 'Bip01 Spine2'
+    assert actor_ragdoll_weight_target(fore_twist, weight_targets) == 'Bip01 Forearm.L'
+    print('[convert-test] ragdoll source identity passed', flush=True)
 
 def run_root_transform_self_test():
     bpy.ops.object.select_all(action='SELECT')
@@ -1521,7 +1705,9 @@ def actor_material_alpha_policy(alpha_flags):
         return 'MASK'
     return 'OPAQUE'
 
-def import_pynifly_actor(skeleton_path, visual_paths, body_parts, apparel, model, policy):
+def import_pynifly_actor(
+        skeleton_path, visual_paths, body_parts, apparel, ragdoll_nodes,
+        model, policy):
     """Import one actor visual assembly with PyNifly 28.
 
     NIFTools remains responsible for the isolated Havok pass. PyNifly owns the
@@ -1764,6 +1950,8 @@ def import_pynifly_actor(skeleton_path, visual_paths, body_parts, apparel, model
                     actor_source_key(obj.get('bevyout_actor_source_path', '')) == source):
                 bpy.data.objects.remove(obj, do_unlink=True)
 
+    remapped_ragdoll_groups = collapse_actor_ragdoll_weights(ragdoll_nodes)
+
     armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
     meshes = [obj for obj in bpy.context.scene.objects
               if obj.type == 'MESH' and len(obj.data.polygons)]
@@ -1803,13 +1991,16 @@ def import_pynifly_actor(skeleton_path, visual_paths, body_parts, apparel, model
     ]
     print('[convert] PyNifly actor imported version={} armatures={} meshes={} weighted={}'.format(
         '.'.join(str(value) for value in version), len(armatures), len(meshes),
-        len(weighted_meshes)), 'repaired_materials={} removed_helpers={} hidden_faces={} apparel={}/{}'.format(
+        len(weighted_meshes)), 'repaired_materials={} removed_helpers={} hidden_faces={} apparel={}/{} ragdoll_weight_groups={}'.format(
             repaired_materials, removed_helpers, removed_hidden_faces,
-            len(successful_apparel), len(apparel_by_source)), flush=True)
+            len(successful_apparel), len(apparel_by_source), remapped_ragdoll_groups), flush=True)
     return [], 0
 
 if sys.argv[-1] == '--self-test-root-policy':
     run_root_transform_self_test()
+    raise SystemExit(0)
+if sys.argv[-1] == '--self-test-ragdoll-identity':
+    run_ragdoll_identity_self_test()
     raise SystemExit(0)
 if len(sys.argv) >= 3 and sys.argv[-2] == '--inspect-ragdoll':
     inspected_joints = nif_constraint_joints([sys.argv[-1]])
@@ -1867,6 +2058,7 @@ for job in jobs:
             for imported in bpy.context.scene.objects:
                 if imported.as_pointer() not in before_objects:
                     imported['bevyout_actor_source_path'] = source_path.replace('\\', '/')
+                    imported['bevyout_nif_source_path'] = canonical_nif_path(source_path)
             record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
             reset_roots = apply_record_zero_transform_policy(
                 list(bpy.context.scene.objects),
@@ -1905,6 +2097,7 @@ for job in jobs:
             assembly_inputs,
             assembly_body_parts,
             assembly_apparel,
+            [body.get('node') for body in physics_asset.get('bodies', [])],
             job.get('model', ''),
             job.get('root_transform_policy', 'preserve_verified'),
         )
