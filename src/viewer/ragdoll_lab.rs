@@ -294,7 +294,9 @@ struct RagdollLabDefinition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 enum LabPhase {
+    #[default]
     Loading,
     Ready,
     Active,
@@ -302,11 +304,6 @@ enum LabPhase {
     Failed,
 }
 
-impl Default for LabPhase {
-    fn default() -> Self {
-        Self::Loading
-    }
-}
 
 #[derive(Resource, Default)]
 struct RagdollLabRuntime {
