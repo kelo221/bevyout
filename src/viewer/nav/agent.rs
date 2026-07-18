@@ -1337,6 +1337,47 @@ fn resolve_status(
     landmass_graph::map_agent_state(landmass_state)
 }
 
+/// Issue #151: one deterministic line per currently-spawned test nav agent
+/// for the console debug-info HUD, reusing the exact same
+/// status/grounded/stuck/blocked fields `tna status` (`agent_status` above)
+/// reports -- read-only, so this can run from a plain `Update` HUD system
+/// instead of needing the console command's `&mut World`/`ConsoleInvocation`
+/// plumbing.
+pub(crate) fn hud_agent_status_lines(world: &World) -> Vec<String> {
+    let Some(state) = world.get_resource::<TestNavAgentState>() else {
+        return Vec::new();
+    };
+    state
+        .entities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entity)| {
+            let entity = (*entity)?;
+            let position = world
+                .get::<GlobalTransform>(entity)
+                .map(|transform| transform.translation())
+                .unwrap_or_default();
+            let landmass_state = world.get::<AgentState>(entity).copied().unwrap_or_default();
+            let door_link_state = world
+                .get::<AgentRuntime>(entity)
+                .map(|runtime| runtime.door_link)
+                .unwrap_or_default();
+            let (grounded, stuck, collision_blocked) = world
+                .get::<AgentKcc>(entity)
+                .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
+                .unwrap_or_default();
+            let status = resolve_status(landmass_state, door_link_state);
+            Some(format!(
+                "nav agent {index} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
+                status.as_str(),
+                position.x,
+                position.y,
+                position.z,
+            ))
+        })
+        .collect()
+}
+
 /// The `link=` suffix for `tna status` (issue #113 feature 5): the active
 /// link kind while interacting with one (`merge` while crossing a merge
 /// seam, `door <formid>` through a door lifecycle), else `None`.
