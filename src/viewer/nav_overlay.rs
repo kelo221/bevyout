@@ -61,11 +61,35 @@
 //!   moment the overlay is hidden again (`NavOverlayExposureLock`). This is
 //!   a deliberate debug-overlay UX tradeoff: the rest of the scene stops
 //!   adapting to brightness changes for as long as `tnm` is on, in exchange
-//!   for the overlay's own dimmed colors finally rendering as intended
-//!   (~0.12/0.12) instead of at whatever the current auto-exposure gain
-//!   happens to be. The fixed-white route polyline (`PATH_LINE_COLOR`) is
-//!   untouched by any of this -- it is the thing actually being read and
+//!   for the overlay's own colors finally rendering at a predictable,
+//!   fixed brightness instead of at whatever the current auto-exposure
+//!   gain happens to be. The fixed-white route polyline (`PATH_LINE_COLOR`)
+//!   is untouched by any of this -- it is the thing actually being read and
 //!   can stay brighter than the triangle fill beneath it.
+//! - Even with exposure locked, a real-data screenshot still showed the
+//!   fill fully opaque and saturated at the 0.12/0.12 constants above --
+//!   floor texture not visible through it at all. The transparency had
+//!   been carried entirely by `Mesh::ATTRIBUTE_COLOR`'s per-vertex alpha
+//!   channel, which was not reliably blending on screen for this unlit
+//!   material (per-vertex *hue* clearly was working -- distinct colors per
+//!   triangle rendered correctly -- so this was specifically an
+//!   alpha-channel pitfall, not a missing `VERTEX_COLORS` pipeline
+//!   feature). The fix moves the actual transparency into the *material's*
+//!   `base_color` alpha instead (`spawn_nav_mesh_overlay`'s fill material
+//!   is now `Color::WHITE.with_alpha(OVERLAY_ALPHA)`, with
+//!   `build_triangle_mesh`'s vertex colors always fully opaque) --
+//!   `bevy_pbr`'s fragment shader (`pbr_input.material.base_color *=
+//!   base_color`) unconditionally multiplies the material's own base color
+//!   into every pixel regardless of vertex-color pipeline behavior, so
+//!   this is the one alpha path guaranteed to actually apply. With that
+//!   real bug fixed, real-data screenshots (agent bridge + a window
+//!   capture bypassing this sandbox's screen-occlusion quirk) drove
+//!   `OVERLAY_ALPHA`/`TRIANGLE_LIGHTNESS` down further still (0.1/0.015):
+//!   even a "dim" 0.12 lightness unlit color reads as a strong, saturated
+//!   fill once blended over an already near-black floor and put through
+//!   `AcesFitted` tonemapping's shadow lift, so the constants needed
+//!   another real reduction, not just the exposure fix, to leave the floor
+//!   texture actually visible through the fill.
 
 use std::path::Path;
 
@@ -92,18 +116,20 @@ use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedSceneManifest};
 /// sequentially.
 const HUE_STEP: f32 = 0.618_034;
 /// Some transparency so the geometry underneath the overlay stays readable.
-/// Lowered from #128's 0.55 (issue #138 feature 2), then lowered again from
-/// #138's own first pass at 0.28 (#138 follow-up: human acceptance still
-/// read the mesh fill as "way too bright" in dark interiors) -- see the
-/// module doc comment -- this, combined with `TRIANGLE_LIGHTNESS`, is what
-/// stops the overlay from crushing dark interiors via auto-exposure.
-const OVERLAY_ALPHA: f32 = 0.12;
+/// Lowered from #128's 0.55 (issue #138 feature 2), then twice more in the
+/// #138 follow-up: first to 0.28 (still "way too bright" on human
+/// acceptance), then -- after fixing the real bug (see the module doc
+/// comment: this is now the *material's* `base_color` alpha, not vertex
+/// alpha) and locking exposure -- to this value, chosen by iterating
+/// against real agent-bridge screenshots of Vault 101 Entrance until the
+/// floor texture was clearly visible through the fill.
+const OVERLAY_ALPHA: f32 = 0.1;
 /// HSL lightness used for every triangle's hue (issue #138 feature 2,
-/// down from #128's fixed 0.5, then dimmed again from #138's own first
-/// pass at 0.22 -- #138 follow-up, same human-acceptance finding as
+/// down from #128's fixed 0.5, then dimmed twice more in the #138
+/// follow-up -- same real-screenshot iteration as
 /// `OVERLAY_ALPHA`). Saturation stays at 1.0 so polygons remain visually
 /// distinct; only the overall brightness is dimmed.
-const TRIANGLE_LIGHTNESS: f32 = 0.12;
+const TRIANGLE_LIGHTNESS: f32 = 0.015;
 /// Offset against z-fighting with the floor/nav-mesh-adjacent geometry.
 const OVERLAY_Y_OFFSET: f32 = 0.02;
 /// Additional height (relative to the triangle mesh, i.e. on top of
@@ -275,7 +301,17 @@ fn build_triangle_mesh(mesh: &PreparedNavMesh) -> (Mesh, usize) {
         {
             continue;
         }
-        let color = triangle_color(polygon.index, OVERLAY_ALPHA);
+        // Issue #138 follow-up (visual verification found the fill still
+        // rendering fully opaque/saturated even at OVERLAY_ALPHA 0.12):
+        // vertex-color alpha alone was not reliably blending on screen for
+        // this unlit material/mesh combination. The transparency now lives
+        // in the *material's* `base_color` alpha instead (see
+        // `spawn_nav_mesh_overlay`), which `pbr_fragment.wgsl` always
+        // multiplies into the final pixel unconditionally
+        // (`pbr_input.material.base_color *= base_color`) regardless of
+        // any vertex-color pipeline behavior -- so per-vertex color here
+        // only ever needs to carry full opacity.
+        let color = triangle_color(polygon.index, 1.0);
         for vertex_index in polygon.vertex_indices {
             positions.push(mesh.vertices[vertex_index as usize]);
             colors.push(color);
@@ -312,10 +348,15 @@ fn spawn_nav_mesh_overlay(
             Visibility::Inherited,
         ))
         .id();
+    // Issue #138 follow-up: the fill's transparency lives in the
+    // *material's* `base_color` alpha, not per-vertex `ATTRIBUTE_COLOR`
+    // alpha (see `build_triangle_mesh`'s doc comment for why) -- white RGB
+    // (so it never tints the per-triangle hue, which vertex colors already
+    // carry at full strength) at `OVERLAY_ALPHA`.
     let material = world
         .resource_mut::<Assets<StandardMaterial>>()
         .add(StandardMaterial {
-            base_color: Color::WHITE,
+            base_color: Color::WHITE.with_alpha(OVERLAY_ALPHA),
             unlit: true,
             cull_mode: None,
             alpha_mode: AlphaMode::Blend,
@@ -1029,10 +1070,15 @@ mod tests {
         // The brightest a triangle can render at is hue-independent (full
         // saturation, fixed lightness) -- Rec. 709 luma of that color,
         // weighted by the blend alpha, bounds how much any single triangle
-        // can contribute to the metered scene brightness.
-        let brightest = triangle_color(0, OVERLAY_ALPHA);
+        // can contribute to the metered scene brightness. The rendered
+        // pixel's alpha is `vertex_alpha (always 1.0, see
+        // `build_triangle_mesh`) * material base_color alpha
+        // (`OVERLAY_ALPHA`, see `spawn_nav_mesh_overlay`)` -- multiplied
+        // explicitly here rather than baked into `triangle_color`'s own
+        // alpha parameter, since that call now always passes `1.0`.
+        let brightest = triangle_color(0, 1.0);
         let luma = 0.2126 * brightest[0] + 0.7152 * brightest[1] + 0.0722 * brightest[2];
-        let contribution = luma * brightest[3];
+        let contribution = luma * OVERLAY_ALPHA;
         assert!(
             contribution <= 0.03,
             "dimmed overlay still contributes too much luminance ({contribution}) to be safe for auto-exposure metering"
@@ -1046,9 +1092,13 @@ mod tests {
     #[test]
     fn path_line_color_is_opaque_white_and_never_produced_by_triangle_color() {
         assert_eq!(PATH_LINE_COLOR, [1.0, 1.0, 1.0, 1.0]);
+        // Vertex color alpha is always 1.0 now (transparency lives in the
+        // fill material's `base_color`, see `build_triangle_mesh`'s doc
+        // comment) -- so this compares the actual per-vertex RGBA value
+        // against the route color, hue by hue.
         for index in 0..16_u32 {
             assert_ne!(
-                triangle_color(index, OVERLAY_ALPHA),
+                triangle_color(index, 1.0),
                 PATH_LINE_COLOR,
                 "polygon {index}'s triangle color must never coincide with the route color"
             );
