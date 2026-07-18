@@ -63,6 +63,7 @@ pub(crate) fn install(app: &mut App) {
         .init_resource::<DiagnosticUiState>()
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
+        .init_resource::<nav_overlay::NavOverlayExposureLock>()
         .add_systems(
             Update,
             (sync_ui_visibility, nav_overlay::despawn_stale_nav_overlay),
