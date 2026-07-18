@@ -169,9 +169,7 @@ pub(crate) fn build_item_catalog(
                 drop_collider,
                 value: base.value,
                 weight: base.weight,
-                quest_item: crate::viewer::interaction::item_rules::is_quest_item(
-                    base.record_flags,
-                ),
+                quest_item: bevyout_core::items::is_quest_item(base.record_flags),
                 stats: prepared_stats(&base.item_stats),
                 audio: PreparedPlacementAudio {
                     loop_sound_form_id: base.audio.loop_sound_form_id,

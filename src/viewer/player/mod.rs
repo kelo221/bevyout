@@ -387,7 +387,18 @@ pub(crate) struct StepDebugSettings {
 }
 
 type FpsCameraQuery<'w> = (&'w mut Transform, &'w mut FlyCamera);
-pub(crate) fn install(app: &mut App, disable_physics: bool) {
+
+pub(crate) struct PlayerPlugin {
+    pub(crate) disable_physics: bool,
+}
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        install(app, self.disable_physics);
+    }
+}
+
+fn install(app: &mut App, disable_physics: bool) {
     app.add_plugins(BoxdddPhysicsPlugin::new(BoxdddPhysicsSettings {
         gravity: Vec3::new(0.0, -GRAVITY, 0.0),
         error_policy: BoxdddErrorPolicy::MessageAndLog,

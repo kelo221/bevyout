@@ -53,13 +53,25 @@ pub(crate) use persist::{
     ActiveSaveState, DynamicBodyRestore, PersistRestores, PlaythroughSeed,
     apply_save_state_at_startup, write_save_slot,
 };
+#[cfg(test)]
+pub(crate) use preload::ResidentCellLimit;
 pub(crate) use preload::{ActiveCell, ResidentCell, ResidentCells, ResidentState};
 pub(crate) use swap_policy::{
     COLLIDER_BUILD_BUDGET_PER_FRAME, ColliderBuildPhase, ColliderBuildQueue,
     next_collider_build_phase, partition_collider_indices,
 };
 
-pub(crate) fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
+pub(crate) struct WorldPlugin {
+    pub(crate) resident_cell_limit: usize,
+}
+
+impl bevy::app::Plugin for WorldPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        install(app, self.resident_cell_limit);
+    }
+}
+
+fn install(app: &mut bevy::app::App, resident_cell_limit: usize) {
     persist::install(app);
     preload::install(app, resident_cell_limit);
     reveal::install(app);

@@ -21,7 +21,15 @@ mod policy;
 
 pub(crate) use policy::{ClipTransition, OPEN_LEAD_CAP_SECONDS, open_lead_seconds};
 
-pub(crate) fn install(app: &mut App) {
+pub(crate) struct PlacementAnimationPlugin;
+
+impl Plugin for PlacementAnimationPlugin {
+    fn build(&self, app: &mut App) {
+        install(app);
+    }
+}
+
+fn install(app: &mut App) {
     app.init_resource::<PendingAnimationDiscovery>()
         .add_message::<PlayPlacementAnimation>()
         .add_systems(

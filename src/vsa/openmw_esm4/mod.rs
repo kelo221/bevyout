@@ -8,6 +8,8 @@ use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
+use bevyout_core::form_id::FormIdResolver;
+
 use super::manifest::{CellInfo, ImageSpaceInfo};
 use super::paths::CellSelector;
 
@@ -753,25 +755,6 @@ pub(crate) struct ParsedState {
     navigation_diagnostics: Vec<String>,
 }
 
-#[derive(Debug)]
-pub(crate) struct FormIdResolver {
-    current_index: u8,
-    master_indices: Vec<u8>,
-}
-
-impl FormIdResolver {
-    fn adjust(&self, raw: u32) -> u32 {
-        let local_file_index = (raw >> 24) as usize;
-        let object_index = raw & 0x00ff_ffff;
-        let global_file_index = self
-            .master_indices
-            .get(local_file_index)
-            .copied()
-            .unwrap_or(self.current_index);
-        (u32::from(global_file_index) << 24) | object_index
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct Subrecord {
     signature: String,
@@ -808,10 +791,7 @@ pub(crate) fn parse_content_set_all(sources: &[PluginSource<'_>]) -> Result<Pars
                     .with_context(|| format!("{} requires unloaded master {master}", source.name))
             })
             .collect::<Result<Vec<_>>>()?;
-        let resolver = FormIdResolver {
-            current_index: index as u8,
-            master_indices,
-        };
+        let resolver = FormIdResolver::new(index as u8, master_indices);
         walk_container(
             source.bytes,
             0,

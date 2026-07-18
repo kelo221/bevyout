@@ -8,6 +8,17 @@ use super::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 pub type ConsoleHandler =
     fn(&mut World, &ConsoleInvocation) -> Result<ConsoleCommandResult, ConsoleError>;
 
+/// Object-safe extension boundary for a deterministic family of commands.
+///
+/// Providers are shared by reference during startup and therefore must be
+/// thread-safe. They do not retain the registry or command handlers: handler
+/// function pointers are copied into the registry. Registration happens in
+/// provider-defined order, returns the registry's first duplicate/alias error,
+/// and does not roll back commands registered earlier by that provider.
+pub trait ConsoleCommandProvider: Send + Sync {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError>;
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ConsoleCommandMetadata {
     pub name: String,
@@ -74,6 +85,13 @@ pub struct ConsoleRegistry {
 }
 
 impl ConsoleRegistry {
+    pub fn register_provider(
+        &mut self,
+        provider: &dyn ConsoleCommandProvider,
+    ) -> Result<(), ConsoleError> {
+        provider.register_commands(self)
+    }
+
     pub fn register(&mut self, command: ConsoleCommand) -> Result<(), ConsoleError> {
         let name = command.metadata.name.clone();
         if self.commands.contains_key(&name) || self.aliases.contains_key(&name) {

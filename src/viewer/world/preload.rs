@@ -142,7 +142,7 @@ pub(crate) fn install(app: &mut App, resident_cell_limit: usize) {
         );
 }
 
-fn seed_world_state(mut commands: Commands, manifest: Res<PreparedSceneManifest>) {
+fn seed_world_state(mut commands: Commands, manifest: Res<crate::viewer::LoadedSceneManifest>) {
     commands.insert_resource(ActiveCell(manifest.cell.form_id));
     commands.insert_resource(build_cell_map_index(&manifest.asset_root));
 }
@@ -258,7 +258,7 @@ fn evaluate_preload_plan(
     cell_map_index: Res<CellMapIndex>,
     mut resident_cells: ResMut<ResidentCells>,
     resident_cell_limit: Res<ResidentCellLimit>,
-    manifest: Res<PreparedSceneManifest>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut pending_reveal: ResMut<super::reveal::PendingReveal>,
     mut pending_captures: ResMut<super::persist::PendingEvictionCaptures>,
     mut last_planned: Local<Option<u32>>,

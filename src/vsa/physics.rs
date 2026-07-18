@@ -9,12 +9,7 @@ use super::manifest::{PreparedPhysicsClassification, PreparedSemantic};
 
 pub(crate) const PHYSICS_ASSET_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) enum PreparedPhysicsSource {
-    AuthoredHavok,
-    #[default]
-    GeneratedRender,
-}
+pub(crate) use bevyout_core::manifest::PreparedPhysicsSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PreparedPhysicsAsset {
