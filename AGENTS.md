@@ -186,6 +186,9 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
 
 ## Model routing
 
+- **Plan Execution Model Recommendation**: When creating a plan (e.g. `*_PLAN.md` or any execution plan), the planning agent must explicitly recommend the model that should be used for execution based on the task requirements and runtime:
+  - **Codex runtime**: `Luna X-High`, `Sol Low`, `Sol High`, `Sol X-High`
+  - **Claude runtime**: `Fable`, `Opus`, `Sonnet`
 - **Claude runtime**: Strict split, no exceptions — single-issue waves included.
   The executor model executes, the orchestrator model plans; the executor can
   even write the tests, the orchestrator evaluates:
@@ -194,12 +197,12 @@ Multi-issue work runs as "waves" against a milestone epic (e.g. #5 for M2):
     merges/conflict resolution, diff review, and evaluation: running gates,
     real-data acceptance, and judging evidence. It never writes implementation or
     test code directly.
-  - Executor subagents (Sonnet) own all execution: production code and all test
+  - Executor subagents (`Sonnet`, `Fable`, or `Opus` as recommended in the plan) own all execution: production code and all test
     writing (feature files, cucumber steps, unit tests), each with a tightly
     scoped, self-contained brief — in an isolated worktree for parallel waves,
     or directly on the wave branch for single-issue waves.
 - **Codex runtime**: Codex does not spawn subagents because they are slow. The
-  orchestrating session (Sol high) executes and plans directly on the wave branch.
+  orchestrating session executes and plans directly on the wave branch using the recommended model (`Luna X-High`, `Sol Low`, `Sol High`, or `Sol X-High`).
 
 ## Testing (feature-first)
 
