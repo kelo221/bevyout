@@ -44,21 +44,37 @@
 //!   dark interior to black the instant `tnm` was toggled on. `AutoExposure`
 //!   only offers a screen-space `metering_mask` (see `scene.rs`'s
 //!   `camera_post_processing`), which can't track a 3D overlay's
-//!   ever-changing screen footprint without a new per-frame render system --
-//!   so the smallest fix is dimming the overlay material itself rather than
-//!   trying to exclude it from metering. #138's first pass (0.28/0.22) still
-//!   read as "way too bright" in dark interiors on human acceptance; both
-//!   constants are now roughly halved again (0.12/0.12) -- see their own doc
-//!   comments for the exact values -- while the fixed-white route polyline
-//!   (`PATH_LINE_COLOR`) is untouched, since it is the thing actually being
-//!   read and can stay brighter than the triangle fill beneath it.
+//!   ever-changing screen footprint without a new per-frame render system.
+//!   Dimming the material constants alone (#138's first pass at 0.28/0.22,
+//!   then this follow-up's 0.12/0.12) turned out not to be fixable by a
+//!   constant at all: `AutoExposure`'s adaptation is applied to the
+//!   *rendered* image after the overlay's colors are already resolved, and
+//!   Bevy 0.19's implementation is GPU-side histogram metering with no
+//!   CPU-readable adapted value -- in a dark interior the exposure gain can
+//!   be 8x or more, so any fixed material color eventually saturates on
+//!   screen regardless of how low it is set. The actual fix
+//!   (`lock_exposure_for_overlay`/`unlock_exposure_for_overlay`) neutralizes
+//!   exposure entirely while the overlay is visible: `AutoExposure` is
+//!   removed from the camera and `Exposure` is pinned to the same fixed
+//!   baseline the camera spawns with (`scene.rs`'s `Exposure { ev100: 12.0
+//!   }`), restoring the camera's exact prior `Exposure`/`AutoExposure` the
+//!   moment the overlay is hidden again (`NavOverlayExposureLock`). This is
+//!   a deliberate debug-overlay UX tradeoff: the rest of the scene stops
+//!   adapting to brightness changes for as long as `tnm` is on, in exchange
+//!   for the overlay's own dimmed colors finally rendering as intended
+//!   (~0.12/0.12) instead of at whatever the current auto-exposure gain
+//!   happens to be. The fixed-white route polyline (`PATH_LINE_COLOR`) is
+//!   untouched by any of this -- it is the thing actually being read and
+//!   can stay brighter than the triangle fill beneath it.
 
 use std::path::Path;
 
 use anyhow::Context;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::Exposure;
 use bevy::material::AlphaMode;
 use bevy::mesh::PrimitiveTopology;
+use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::prelude::*;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::debug::{
@@ -101,6 +117,14 @@ const PATH_Y_OFFSET: f32 = 0.03;
 /// triangle overlay's large screen-covering area, not a handful of 1px
 /// line pixels.
 const PATH_LINE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Fixed camera exposure the `tnm` overlay locks to while visible (#138
+/// follow-up): the same baseline `scene.rs`'s `spawn_scene_camera` gives the
+/// camera at spawn time, before any `AutoExposure` adaptation
+/// (`Exposure { ev100: 12.0 }`). Locking to this specific value (rather
+/// than, say, a brighter or darker fixed EV chosen just for the overlay)
+/// keeps the rest of the scene's baseline look consistent with what it
+/// would render as if `AutoExposure` were simply absent.
+const OVERLAY_LOCKED_EV100: f32 = 12.0;
 
 /// Marks the overlay's root entity (and its per-mesh children) for the
 /// benefit of tests and any future diagnostics query; not otherwise queried
@@ -135,6 +159,76 @@ struct NavAgentPathState {
 pub(crate) struct NavMeshOverlayState {
     overlay: Option<NavMeshOverlay>,
     path: Option<NavAgentPathState>,
+}
+
+/// The camera's exposure state as it was the moment the `tnm` overlay last
+/// locked it (issue #138 follow-up). `None` means exposure is not currently
+/// locked -- either the overlay has never been toggled on, or it was toggled
+/// off again and the saved state already restored.
+#[derive(Resource, Default)]
+pub(crate) struct NavOverlayExposureLock {
+    saved: Option<SavedExposure>,
+}
+
+struct SavedExposure {
+    camera: Entity,
+    exposure: Exposure,
+    auto_exposure: Option<AutoExposure>,
+}
+
+/// Locks the camera's exposure to a fixed baseline while the overlay is
+/// visible: see the module doc comment for why constant material dimming
+/// alone cannot compensate for `AutoExposure`'s GPU-side adaptation. Removes
+/// `AutoExposure` from the (lowest-`Entity`, matching the rest of this
+/// module's "agent 0"/"first camera found" convention) `Camera3d` entity and
+/// pins `Exposure` to `OVERLAY_LOCKED_EV100`, saving whatever was there
+/// before so `unlock_exposure_for_overlay` can restore it exactly. A no-op
+/// if exposure is already locked (repeated visibility toggles within the
+/// same overlay lifetime must not clobber the originally-saved state) or no
+/// camera entity exists yet (e.g. a test `World` with no camera spawned).
+fn lock_exposure_for_overlay(world: &mut World) {
+    if world.resource::<NavOverlayExposureLock>().saved.is_some() {
+        return;
+    }
+    let Some(camera) = world
+        .query_filtered::<Entity, With<Camera3d>>()
+        .iter(world)
+        .next()
+    else {
+        return;
+    };
+    let Ok(mut entity) = world.get_entity_mut(camera) else {
+        return;
+    };
+    let exposure = entity.get::<Exposure>().copied().unwrap_or(Exposure {
+        ev100: OVERLAY_LOCKED_EV100,
+    });
+    let auto_exposure = entity.get::<AutoExposure>().cloned();
+    entity.remove::<AutoExposure>();
+    entity.insert(Exposure {
+        ev100: OVERLAY_LOCKED_EV100,
+    });
+    world.resource_mut::<NavOverlayExposureLock>().saved = Some(SavedExposure {
+        camera,
+        exposure,
+        auto_exposure,
+    });
+}
+
+/// Restores whatever `lock_exposure_for_overlay` saved. A no-op if exposure
+/// was never locked (already restored, or never locked in the first place),
+/// or the camera entity has since been despawned.
+fn unlock_exposure_for_overlay(world: &mut World) {
+    let Some(saved) = world.resource_mut::<NavOverlayExposureLock>().saved.take() else {
+        return;
+    };
+    let Ok(mut entity) = world.get_entity_mut(saved.camera) else {
+        return;
+    };
+    entity.insert(saved.exposure);
+    if let Some(auto_exposure) = saved.auto_exposure {
+        entity.insert(auto_exposure);
+    }
 }
 
 /// Deterministic per-polygon hue fraction in `[0, 1)` (issue #128's spec:
@@ -447,6 +541,11 @@ pub(crate) fn toggle_nav_mesh(
             }
             world.resource_mut::<NavMeshOverlayState>().overlay =
                 Some(NavMeshOverlay { visible, ..overlay });
+            if visible {
+                lock_exposure_for_overlay(world);
+            } else {
+                unlock_exposure_for_overlay(world);
+            }
             return Ok(nav_mesh_toggle_reply(
                 visible,
                 overlay.mesh_count,
@@ -463,6 +562,7 @@ pub(crate) fn toggle_nav_mesh(
         let mut state = world.resource_mut::<NavMeshOverlayState>();
         state.overlay = None;
         state.path = None;
+        unlock_exposure_for_overlay(world);
     }
 
     let Some(source) = nav_graph_source else {
@@ -494,6 +594,7 @@ pub(crate) fn toggle_nav_mesh(
         mesh: path_mesh,
         last_segments: Vec::new(),
     });
+    lock_exposure_for_overlay(world);
     Ok(nav_mesh_toggle_reply(true, mesh_count, triangle_count))
 }
 
@@ -511,7 +612,9 @@ pub(crate) fn toggle_nav_mesh(
 /// a manifest must not panic. An exclusive `&mut World` system (rather than
 /// typed `Query`/`Res` params) so it can share `active_agent_corridor`'s
 /// `World`-based query construction without a second, parallel parameter
-/// list.
+/// list. Also restores the camera's exposure (`unlock_exposure_for_overlay`,
+/// #138 follow-up) on a cell-swap despawn -- from the player's perspective
+/// the overlay is now off, so its exposure lock must not outlive it.
 pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
     let Some(overlay) = world.resource::<NavMeshOverlayState>().overlay else {
         return;
@@ -525,6 +628,7 @@ pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
         let mut state = world.resource_mut::<NavMeshOverlayState>();
         state.overlay = None;
         state.path = None;
+        unlock_exposure_for_overlay(world);
         return;
     }
     if overlay.visible {
@@ -680,6 +784,7 @@ mod tests {
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<NavMeshOverlayState>();
+        world.init_resource::<NavOverlayExposureLock>();
         world
     }
 
@@ -725,6 +830,65 @@ mod tests {
             world.get::<Visibility>(built_entity),
             Some(&Visibility::Inherited)
         );
+    }
+
+    // #138 follow-up: toggling the overlay on must lock the camera's
+    // exposure (remove `AutoExposure`, pin `Exposure` to the fixed
+    // baseline) since constant material dimming alone cannot compensate
+    // for `AutoExposure`'s GPU-side adaptation (see the module doc
+    // comment); toggling off must restore the exact prior `Exposure`/
+    // `AutoExposure` rather than some new default.
+    #[test]
+    fn toggling_on_locks_exposure_and_toggling_off_restores_it() {
+        let graph = two_triangle_graph();
+        let manifest = manifest_with_nav_graph(0xC0DE, &graph);
+        let mut world = test_world_with_manifest(manifest);
+
+        let original_auto_exposure = AutoExposure {
+            speed_brighten: 1.23,
+            ..default()
+        };
+        let camera = world
+            .spawn((
+                Camera3d::default(),
+                Exposure { ev100: 9.5 },
+                original_auto_exposure.clone(),
+            ))
+            .id();
+
+        toggle_nav_mesh(&mut world, &invocation()).expect("first toggle locks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(OVERLAY_LOCKED_EV100),
+            "exposure must be pinned to the fixed baseline while the overlay is visible"
+        );
+        assert!(
+            world.get::<AutoExposure>(camera).is_none(),
+            "AutoExposure must be removed while the overlay is visible"
+        );
+
+        toggle_nav_mesh(&mut world, &invocation()).expect("second toggle unlocks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(9.5),
+            "the camera's exact prior Exposure must be restored, not some new default"
+        );
+        let restored = world
+            .get::<AutoExposure>(camera)
+            .expect("AutoExposure must be restored once the overlay is hidden again");
+        assert_eq!(
+            restored.speed_brighten,
+            original_auto_exposure.speed_brighten
+        );
+
+        // A third toggle (back on) must lock again from the *current*
+        // (restored) state, not leak the first lock's saved values.
+        toggle_nav_mesh(&mut world, &invocation()).expect("third toggle re-locks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(OVERLAY_LOCKED_EV100)
+        );
+        assert!(world.get::<AutoExposure>(camera).is_none());
     }
 
     // T128.2: a cell whose manifest carries no `nav_graph` at all replies
