@@ -180,8 +180,17 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // toolchain and exits nonzero on any staleness. Performs no
     // preparation: it returns before the cell map is written or the job
     // manifest's `pending` entries and on-disk copy are touched.
+    let selected_converter_revision = match args.converter {
+        PrepareConverter::Blender => PREPARED_CONVERTER_REVISION,
+        PrepareConverter::Native => NATIVE_PREPARED_CONVERTER_REVISION,
+    };
     if args.check_fingerprints {
-        return report_fingerprints(&manifest, &resolved, &fingerprint);
+        return report_fingerprints(
+            &manifest,
+            &resolved,
+            &fingerprint,
+            selected_converter_revision,
+        );
     }
 
     // F47.4: write the deterministic cell map into the cache dir root,
@@ -210,7 +219,8 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // and `--retry-failed` all go through this same call, so any stale
     // component re-prepares exactly that cell instead of being skipped.
     manifest.ensure_pending(&resolved);
-    let current_fingerprints = CellFingerprints::current(fingerprint.clone());
+    let current_fingerprints =
+        CellFingerprints::current_with_converter(fingerprint.clone(), selected_converter_revision);
     let (to_run, skipped, stale_cells) =
         filter_resume_checked(&manifest, &resolved, args.force, &current_fingerprints);
     for (form_id, components) in &stale_cells {
@@ -367,8 +377,12 @@ fn report_fingerprints(
     manifest: &JobManifest,
     resolved: &[u32],
     plugin_content_set_fingerprint: &str,
+    converter_revision: &str,
 ) -> Result<()> {
-    let current = CellFingerprints::current(plugin_content_set_fingerprint);
+    let current = CellFingerprints::current_with_converter(
+        plugin_content_set_fingerprint,
+        converter_revision,
+    );
     let mut valid_count = 0usize;
     let mut stale_count = 0usize;
     for &form_id in resolved {
@@ -560,7 +574,22 @@ fn prepare_cell(
     } else {
         cell.effective_lighting = Some(prepared_lighting(legacy_lighting(&cell)));
     }
-    let blender = find_blender(args.blender)?;
+    let (static_converter_revision, actor_converter_revision, prepared_converter_revision) =
+        match args.converter {
+            PrepareConverter::Blender => (
+                NIF_CONVERTER_REVISION,
+                ACTOR_CONVERTER_REVISION,
+                PREPARED_CONVERTER_REVISION,
+            ),
+            PrepareConverter::Native => (
+                NATIVE_NIF_CONVERTER_REVISION,
+                NATIVE_ACTOR_CONVERTER_REVISION,
+                NATIVE_PREPARED_CONVERTER_REVISION,
+            ),
+        };
+    let blender = (args.converter == PrepareConverter::Blender)
+        .then(|| find_blender(args.blender.clone()))
+        .transpose()?;
     let (navmeshes, nav_graph, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
@@ -590,8 +619,14 @@ fn prepare_cell(
         .cloned()
         .collect::<Vec<_>>();
     let mut references = std::mem::take(&mut parsed.references);
-    let actor_models =
-        build_actor_appearance_models(&parsed, &actor_references, &source_fingerprint);
+    let actor_models = build_actor_appearance_models(
+        &parsed,
+        &actor_references,
+        &source_fingerprint,
+        &data_root,
+        &session.archives,
+        &mut diagnostics,
+    )?;
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
     references.extend(catalog_references);
@@ -605,6 +640,8 @@ fn prepare_cell(
         &assets_dir,
         &mut diagnostics,
         args.rebuild_assets,
+        static_converter_revision,
+        actor_converter_revision,
     )?;
     // F47.3: fold this cell's asset cache counts into the batch total.
     session.asset_totals.lock().unwrap().add(
@@ -635,6 +672,7 @@ fn prepare_cell(
     // Blender/texture-conversion step runs at a time, while every other
     // cell's parse/stage phase keeps running in parallel around it.
     let item_icons;
+    let mut failed_native_assets = HashMap::new();
     {
         let _blender_guard = session.blender_lock.lock().unwrap();
         item_icons = stage_item_icons(
@@ -645,10 +683,90 @@ fn prepare_cell(
             &source_fingerprint,
             &mut diagnostics,
         )?;
-        convert_staged_textures(&staging_dir, &mut diagnostics)?;
-        if !jobs.is_empty() {
-            run_blender_batch(&blender, &jobs, &data_root, &staging_dir)
-                .context("headless Blender conversion failed")?;
+        match args.converter {
+            PrepareConverter::Blender => {
+                convert_staged_textures(&staging_dir, &mut diagnostics)?;
+                if !jobs.is_empty() {
+                    run_blender_batch(
+                        blender.as_deref().expect("Blender backend resolved above"),
+                        &jobs,
+                        &data_root,
+                        &staging_dir,
+                    )
+                    .context("headless Blender conversion failed")?;
+                }
+            }
+            PrepareConverter::Native => {
+                if !jobs.is_empty() {
+                    let batch = run_native_batch(
+                        &jobs,
+                        &data_root,
+                        &session.archives,
+                        args.jobs,
+                        args.strict,
+                    )
+                    .context("native NIF batch conversion failed")?;
+                    let summary = batch.summary();
+                    let summary_line = summary.line();
+                    output.push(summary_line.clone());
+                    diagnostics.push(Diagnostic {
+                        severity: "info".into(),
+                        message: summary_line,
+                    });
+                    for outcome in &batch.outcomes {
+                        if outcome.status == NativeJobStatus::Converted {
+                            if let Some(warning) = &outcome.error {
+                                diagnostics.push(Diagnostic {
+                                    severity: "warning".into(),
+                                    message: format!(
+                                        "native conversion lossy: model={} job={} {warning}",
+                                        outcome.model, outcome.index
+                                    ),
+                                });
+                            }
+                            continue;
+                        }
+                        let message = format!(
+                            "native conversion {}: model={} job={} stage={} error={}",
+                            match outcome.status {
+                                NativeJobStatus::Unsupported => "unsupported",
+                                NativeJobStatus::Failed => "failed",
+                                NativeJobStatus::Converted => unreachable!(),
+                            },
+                            outcome.model,
+                            outcome.index,
+                            outcome.stage,
+                            outcome.error.as_deref().unwrap_or("unknown error")
+                        );
+                        output.push(message.clone());
+                        diagnostics.push(Diagnostic {
+                            severity: "warning".into(),
+                            message,
+                        });
+                    }
+                    batch.enforce_strict(args.strict)?;
+                    for (path, reason) in batch.failed_outputs(&jobs) {
+                        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                            failed_native_assets.insert(format!("assets/{file_name}"), reason);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !failed_native_assets.is_empty() {
+        visual_assets.retain(|asset| !failed_native_assets.contains_key(&asset.asset_path));
+        for placement in &mut placements {
+            let Some(asset_path) = placement.asset_path.as_ref() else {
+                continue;
+            };
+            let Some(reason) = failed_native_assets.get(asset_path) else {
+                continue;
+            };
+            placement.asset_path = None;
+            placement.physics_asset_path = None;
+            placement.error = Some(reason.clone());
+            placement.step_support = false;
         }
     }
     let mut scene_placements = Vec::new();
@@ -893,7 +1011,7 @@ fn prepare_cell(
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
         prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
-        converter_revision: Some(NIF_CONVERTER_REVISION.into()),
+        converter_revision: Some(prepared_converter_revision.into()),
         physics_schema_version: Some(PHYSICS_ASSET_SCHEMA_VERSION),
         asset_root: cache_dir.to_string_lossy().to_string(),
         source_plugin: plugin_path.to_string_lossy().to_string(),
@@ -1226,7 +1344,7 @@ fn build_actor_catalog_inputs(
 
 /// Selects the visual NIF set for each actor placement.  Fallout NPC records
 /// point at a skeleton rather than a render mesh, so NPCs use the sex-specific
-/// race body/head parts and deterministic inventory apparel/weapons.  CREA
+/// race body/head parts and deterministic inventory apparel.  CREA
 /// records already carry their renderable NIFZ list.  The list is sorted and
 /// deduplicated before it reaches the assembler, making cache keys stable
 /// across plugin traversal order.
@@ -1234,7 +1352,10 @@ fn build_actor_appearance_models(
     parsed: &ParsedPlugin,
     references: &[ReferenceRecord],
     source_fingerprint: &str,
-) -> HashMap<u32, Vec<String>> {
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<HashMap<u32, ActorAssemblyDescriptor>> {
     let mut result = HashMap::new();
     for reference in references {
         let Some(base) = resolve_actor_appearance_base(
@@ -1249,14 +1370,16 @@ fn build_actor_appearance_models(
         let Some(actor) = base.actor.as_ref() else {
             continue;
         };
-        let mut models = Vec::new();
+        let skeleton = base.model.clone();
+        let mut visual_inputs = Vec::new();
+        let mut body_parts = Vec::new();
+        let mut apparel_inputs = Vec::new();
         match reference.kind {
             ReferenceKind::Creature => {
                 // The CREA model list contains visual attachments relative to
-                // the skeleton path. Keep the skeleton as the first assembly
-                // input so its Havok bodies/constraints are available to the
-                // optional runtime ragdoll as well as its render mesh.
-                models.extend(base.model.iter().cloned());
+                // the skeleton path. The canonical descriptor below retains
+                // the skeleton as both the explicit reference and the first
+                // visual input because creature skeleton NIFs may render too.
                 if let Some(creature) = actor.creature.as_ref() {
                     let model_directory = base.model.as_ref().and_then(|model| {
                         model
@@ -1264,7 +1387,7 @@ fn build_actor_appearance_models(
                             .or_else(|| model.rfind('/'))
                             .map(|index| model[..index].to_owned())
                     });
-                    models.extend(creature.model_list.iter().map(|model| {
+                    visual_inputs.extend(creature.model_list.iter().map(|model| {
                         if model.contains('\\') || model.contains('/') {
                             model.clone()
                         } else if let Some(directory) = model_directory.as_ref() {
@@ -1273,9 +1396,6 @@ fn build_actor_appearance_models(
                             model.clone()
                         }
                     }));
-                }
-                if models.is_empty() {
-                    models.extend(base.model.iter().cloned());
                 }
             }
             ReferenceKind::Npc => {
@@ -1286,7 +1406,6 @@ fn build_actor_appearance_models(
                 // actor skeleton as the shared bone/physics source so the
                 // assembled GLB can drive every part and the ragdoll sidecar
                 // contains the authored articulated bodies.
-                models.extend(base.model.iter().cloned());
                 if let Some(race) = actor.race_form_id.and_then(|id| parsed.races.get(&id)) {
                     let body = if female {
                         &race.body_parts_female
@@ -1298,18 +1417,23 @@ fn build_actor_appearance_models(
                     } else {
                         &race.head_parts_male
                     };
-                    models.extend(body.iter().filter_map(|part| part.model_path.clone()));
-                    models.extend(head.iter().filter_map(|part| part.model_path.clone()));
+                    body_parts.extend(body.iter().filter_map(|part| {
+                        part.model_path.clone().map(|path| ActorBodyPartInput {
+                            path,
+                            index: part.index,
+                        })
+                    }));
+                    visual_inputs.extend(body_parts.iter().map(|part| part.path.clone()));
+                    visual_inputs.extend(head.iter().filter_map(|part| part.model_path.clone()));
                 }
-                // Gear is deliberately appearance-only in this slice. Resolve
-                // each authored inventory list to one deterministic ARMO/WEAP
-                // mesh and leave equip semantics to the later actor lifecycle
-                // wave.
-                let mut gear = base
+                // Worn apparel is appearance-only in this slice. Weapons are
+                // runtime attachments; baking inventory weapons into the actor
+                // body makes every carried weapon visible and corrupts ragdolls.
+                let gear = base
                     .inventory
                     .iter()
                     .flat_map(|entry| {
-                        resolve_actor_gear_models(
+                        resolve_actor_gear_candidates(
                             parsed,
                             entry.item_form_id,
                             reference.form_id,
@@ -1317,15 +1441,32 @@ fn build_actor_appearance_models(
                         )
                     })
                     .collect::<Vec<_>>();
-                gear.sort_by_key(|model| model.to_ascii_lowercase());
-                models.extend(gear);
-                if models.is_empty() {
-                    models.extend(base.model.iter().cloned());
+                let mut available_models = HashSet::new();
+                for candidate in &gear {
+                    let Some(model) = candidate.worn_model(female) else {
+                        continue;
+                    };
+                    if resolve_asset(data_root, archives, model)?.is_some() {
+                        available_models.insert(normalize_asset_path(model));
+                    }
                 }
+                let outfit = select_spawn_outfit(&gear, female, |model| {
+                    available_models.contains(&normalize_asset_path(model))
+                });
+                diagnostics.extend(outfit.diagnostics.into_iter().map(|message| Diagnostic {
+                    severity: "warning".into(),
+                    message: format!("actor {:08x}: {message}", reference.form_id),
+                }));
+                apparel_inputs.extend(outfit.worn.into_iter().map(|item| ActorApparelInput {
+                    path: item.model_path,
+                    form_id: item.form_id,
+                    biped_slot_mask: item.biped_slot_mask,
+                }));
+                visual_inputs.extend(apparel_inputs.iter().map(|item| item.path.clone()));
             }
             ReferenceKind::Object => continue,
         }
-        models = models
+        visual_inputs = visual_inputs
             .into_iter()
             .map(|model| normalize_asset_path(&model))
             .filter(|model| {
@@ -1334,27 +1475,53 @@ fn build_actor_appearance_models(
                     && !is_non_rendering_effect(model)
             })
             .collect();
-        models.sort();
-        models.dedup();
-        if !models.is_empty() {
-            result.insert(reference.form_id, models);
+        let skeleton = skeleton
+            .map(|model| normalize_asset_path(&model))
+            .filter(|model| {
+                model.to_ascii_lowercase().ends_with(".nif")
+                    && !is_editor_marker(model)
+                    && !is_non_rendering_effect(model)
+            });
+        if let Some(mut assembly) = canonical_actor_assembly(skeleton, visual_inputs) {
+            body_parts.retain(|part| part.path.to_ascii_lowercase().ends_with(".nif"));
+            for part in &mut body_parts {
+                part.path = normalize_asset_path(&part.path);
+            }
+            body_parts.sort_by(|left, right| {
+                left.index
+                    .cmp(&right.index)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            body_parts.dedup();
+            for item in &mut apparel_inputs {
+                item.path = normalize_asset_path(&item.path);
+            }
+            apparel_inputs.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.form_id.cmp(&right.form_id))
+            });
+            apparel_inputs.dedup();
+            assembly.body_parts = body_parts;
+            assembly.apparel = apparel_inputs;
+            result.insert(reference.form_id, assembly);
         }
     }
-    result
+    Ok(result)
 }
 
 /// Resolves one authored inventory entry to a deterministic visual item. NPC
 /// inventories commonly point at nested LVLI lists, so following only direct
 /// ARMO/WEAP records silently drops all equipment from the assembled actor.
-fn resolve_actor_gear_models(
+fn resolve_actor_gear_candidates(
     parsed: &ParsedPlugin,
     root_form_id: u32,
     reference_form_id: u32,
     source_fingerprint: &str,
-) -> Vec<String> {
+) -> Vec<ApparelCandidate> {
     let mut candidates = actor_gear_model_candidates(parsed, root_form_id, &mut HashSet::new(), 0);
-    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    candidates.dedup();
+    candidates.sort_by_key(|candidate| candidate.0);
+    candidates.dedup_by_key(|candidate| candidate.0);
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -1369,20 +1536,40 @@ fn actor_gear_model_candidates(
     form_id: u32,
     visited: &mut HashSet<u32>,
     depth: usize,
-) -> Vec<(u32, String)> {
+) -> Vec<(u32, ApparelCandidate)> {
     if depth >= 32 || !visited.insert(form_id) {
         return Vec::new();
     }
     let Some(base) = parsed.bases.get(&form_id) else {
         return Vec::new();
     };
-    if matches!(base.kind.as_str(), "ARMO" | "WEAP") {
-        return base
-            .model
-            .iter()
-            .cloned()
-            .map(|model| (form_id, model))
-            .collect();
+    if crate::vsa::assets::actor_visual_gear_kind(&base.kind) {
+        let Some(models) = base.apparel_models.as_ref() else {
+            return Vec::new();
+        };
+        let OpenMwItemStats::Apparel {
+            armor_rating,
+            max_condition,
+            biped_slot_mask,
+        } = &base.item_stats
+        else {
+            return Vec::new();
+        };
+        return vec![(
+            form_id,
+            ApparelCandidate {
+                form_id,
+                male_worn: models.male_worn.clone(),
+                female_worn: models.female_worn.clone(),
+                male_world: models.male_world.clone(),
+                female_world: models.female_world.clone(),
+                biped_slot_mask: biped_slot_mask.unwrap_or_default(),
+                base_armor_rating: armor_rating.unwrap_or_default(),
+                max_condition: *max_condition,
+                current_condition: None,
+                value: base.value.unwrap_or_default(),
+            },
+        )];
     }
     let Some(leveled) = base.leveled.as_ref() else {
         return Vec::new();

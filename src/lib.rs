@@ -4,6 +4,7 @@ pub mod item_transaction;
 
 mod app_state;
 mod config;
+mod converter_policy;
 mod save;
 mod viewer;
 mod vsa;
@@ -16,5 +17,5 @@ pub use save::{
     PersistentWorldState, SaveGame, SaveGameHeader, SaveLoadOutcome, SavePlugin, SaveSlotSource,
     SaveStore, SavedBodyState, SavedTransform, decode_save, encode_save,
 };
-pub use viewer::{render, view};
-pub use vsa::{bake, cells, prepare, report};
+pub use viewer::{ragdoll_lab, render, view};
+pub use vsa::{bake, cells, nif_convert, prepare, report};

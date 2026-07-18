@@ -39,11 +39,30 @@ pub(crate) fn parse_base(
     if !is_supported_base(sig) {
         return None;
     }
-    let model_signature = if sig == "ARMO" { "MOD2" } else { "MODL" };
-    let model = sub(subs, model_signature)
-        .or_else(|| sub(subs, "MODL"))
-        .map(cstring)
-        .filter(|value| !value.is_empty());
+    let model_value = |signature| {
+        sub(subs, signature)
+            .map(cstring)
+            .filter(|value| !value.is_empty())
+    };
+    let apparel_models = (sig == "ARMO").then(|| ApparelModelSet {
+        male_worn: model_value("MODL"),
+        male_world: model_value("MOD2"),
+        female_worn: model_value("MOD3"),
+        female_world: model_value("MOD4"),
+    });
+    // Standalone ARMO placements/drops use a world model. Actor preparation
+    // reads `apparel_models` and never consumes this fallback.
+    let model = apparel_models
+        .as_ref()
+        .and_then(|models| {
+            models
+                .male_world
+                .clone()
+                .or_else(|| models.female_world.clone())
+                .or_else(|| models.male_worn.clone())
+                .or_else(|| models.female_worn.clone())
+        })
+        .or_else(|| model_value("MODL"));
     let light = (sig == "LIGH").then(|| parse_light_data(subs)).flatten();
     let (value, weight) = parse_value_weight(sig, subs);
     let item_stats = parse_item_stats(sig, subs, resolver);
@@ -59,9 +78,9 @@ pub(crate) fn parse_base(
     // allowlist below, and any malformed ACBS/AIDT/DATA payload contributes
     // its own stable diagnostic rather than panicking.
     let mut supported_signatures = vec![
-        "EDID", "FULL", "MODL", "MOD2", "DATA", "ENIT", "TPLT", "CNTO", "SNAM", "ANAM", "BNAM",
-        "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO", "ICO2", "MIC2",
-        "DESC", "EFID", "EFIT", "SCIT", "DNAM",
+        "EDID", "FULL", "MODL", "MOD2", "MOD3", "MOD4", "DATA", "ENIT", "TPLT", "CNTO", "SNAM",
+        "ANAM", "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO",
+        "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM",
         // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
         // WEAP/ARMO arms rather than falling through to diagnostics.
         "BMDT", "NAM0",
@@ -78,6 +97,7 @@ pub(crate) fn parse_base(
         editor_id: sub(subs, "EDID").map(cstring),
         name: sub(subs, "FULL").map(cstring),
         model,
+        apparel_models,
         icon: sub(subs, "ICON")
             .map(cstring)
             .filter(|value| !value.is_empty()),

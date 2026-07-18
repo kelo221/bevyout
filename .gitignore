@@ -17,3 +17,6 @@ tools/bevyout-mcp/node_modules/**
 !tests/goldens/*.ron
 !features/fixtures/*.ron
 !BevyCheatSheet/**/*.ron
+__pycache__/
+/NifConverter
+/_.bevyout

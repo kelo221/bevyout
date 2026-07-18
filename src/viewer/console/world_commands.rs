@@ -8,6 +8,7 @@ impl ConsoleCommandProvider for WorldCommandProvider {
     fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
         for command in [
             ConsoleCommand::new("ragdoll", "ragdoll <actor-reference> [on|off|reset]", "Toggle a prepared NPC/creature's developer ragdoll body; actors stay locked in T-pose by default.", ragdoll).mutating(),
+            ConsoleCommand::new("ragdollprobe", "ragdollprobe <actor-reference>", "Report live ragdoll constraint, velocity, sleep, and visual-node errors without changing the actor.", ragdoll_probe),
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
         ] {
             registry.register(command)?;
@@ -125,6 +126,64 @@ pub(super) fn activate_reference(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
         )],
+    ))
+}
+
+pub(super) fn ragdoll_probe(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() != 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "ragdollprobe requires exactly one actor reference",
+        ));
+    }
+    let entity = resolve_reference(world, &invocation.args[0])?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement()
+        .clone();
+    if !matches!(
+        placement.semantic,
+        PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+    ) {
+        return Err(ConsoleError::new(
+            "not_actor",
+            "ragdollprobe only accepts NPC or creature references",
+        ));
+    }
+    let enabled = world
+        .get::<player::RagdollToggle>(entity)
+        .is_some_and(|toggle| toggle.0);
+    let probe = player::probe_ragdoll(world, entity);
+    let summary = format!(
+        "ragdollprobe {:08x} enabled={} instantiated={} bodies={} awake={} sleep_disabled={} joints={} max_joint_linear={:.5}m max_joint_angular={:.5}rad max_node_position={:.5}m max_node_angle={:.5}rad max_linear_speed={:.5}m/s max_angular_speed={:.5}rad/s",
+        placement.reference_form_id,
+        enabled,
+        probe.instantiated,
+        probe.body_count,
+        probe.awake_count,
+        probe.sleep_disabled_count,
+        probe.joint_count,
+        probe.max_joint_linear_separation,
+        probe.max_joint_angular_separation,
+        probe.max_node_position_error,
+        probe.max_node_angle_error,
+        probe.max_linear_speed,
+        probe.max_angular_speed,
+    );
+    let value = serde_json::to_value(&probe).map_err(|error| {
+        ConsoleError::new("serialization_failed", format!("ragdoll probe: {error}"))
+    })?;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": placement.reference_form_id,
+            "enabled": enabled,
+            "probe": value,
+        }),
+        vec![summary],
     ))
 }
 

@@ -35,6 +35,16 @@ pub(crate) struct AgentBridgePlugin {
     pub(crate) port: u16,
 }
 
+pub(crate) struct RagdollLabAgentBridgePlugin {
+    pub(crate) port: u16,
+}
+
+impl Plugin for RagdollLabAgentBridgePlugin {
+    fn build(&self, app: &mut App) {
+        install_ragdoll_lab(app, self.port);
+    }
+}
+
 impl Plugin for AgentBridgePlugin {
     fn build(&self, app: &mut App) {
         install(app, self.port);
@@ -66,6 +76,34 @@ fn install(app: &mut App, port: u16) {
     app.insert_resource(AgentBridgeInfo { port, session_id })
         .add_plugins((remote, http));
     info!("agent bridge enabled on http://127.0.0.1:{port}/ (runtime-only ECS access)");
+}
+
+fn install_ragdoll_lab(app: &mut App, port: u16) {
+    let session_id = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default()
+    );
+    let remote = RemotePlugin::default()
+        .with_method_main("bevyout.session", session)
+        .with_method_main("bevyout.capture_viewport", capture_viewport)
+        .with_method_main("bevyout.ragdoll_lab_probe", ragdoll_lab_probe);
+    let http = RemoteHttpPlugin::default()
+        .with_address(std::net::Ipv4Addr::LOCALHOST)
+        .with_port(port);
+    app.insert_resource(AgentBridgeInfo { port, session_id })
+        .add_plugins((remote, http));
+    info!("ragdoll lab agent bridge enabled on http://127.0.0.1:{port}/");
+}
+
+fn ragdoll_lab_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
+    let probe = world
+        .get_resource::<super::ragdoll_lab::RagdollLabProbe>()
+        .ok_or_else(|| invalid_params("the active viewer is not a ragdoll laboratory"))?;
+    serde_json::to_value(probe).map_err(BrpError::internal)
 }
 
 fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> BrpResult {

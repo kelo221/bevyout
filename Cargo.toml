@@ -5,6 +5,7 @@ edition = "2024"
 
 [workspace]
 members = [".", "crates/bevyout-core"]
+exclude = ["NifConverter/nifty"]
 resolver = "3"
 
 [dependencies]
@@ -13,6 +14,7 @@ bevyout-core = { path = "crates/bevyout-core" }
 # metadata is retained in manifests, but Bevy's MP3 feature currently resolves
 # to an unavailable symphonia patch in this workspace's offline cache.
 bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "bevy_remote", "ktx2"] }
+avian3d = { version = "=0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "parallel", "xpbd_joints"] }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 bvh = "0.12"
 esplugin = "6.1.4"
@@ -22,6 +24,7 @@ flate2 = "1.1"
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 nalgebra = "0.34"
+nif = { git = "https://github.com/kelo221/nifty.git", rev = "7fff4e86ea3c7273078d4a73ff127c590a337e12", default-features = false, features = ["fo3_glb"] }
 rayon = "1.10"
 ron = "0.8"
 serde = { version = "1.0", features = ["derive"] }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 16;
 pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-items-v1";
-pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v12-seam-stitch";
+pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v13-material-extensions";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 
 pub(crate) use bevyout_core::manifest::*;

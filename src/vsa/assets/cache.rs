@@ -109,6 +109,184 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActorGlbAudit {
+    pub(crate) skins: usize,
+    pub(crate) skinned_primitives: usize,
+    pub(crate) textured_primitives: usize,
+}
+
+/// Structural validation for actor GLBs. The runtime needs a complete glTF
+/// skin contract, not merely an armature-shaped node tree, and every skinned
+/// primitive must retain the diffuse texture PyNifly resolved from staging.
+pub(crate) fn validate_actor_glb(path: &Path) -> Result<ActorGlbAudit> {
+    validate_glb_images(path)?;
+    let (_, document, _) = read_glb_document(path)?;
+    let accessors = document
+        .get("accessors")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let nodes = document
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let meshes = document
+        .get("meshes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let skins = document
+        .get("skins")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let materials = document
+        .get("materials")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let textures = document
+        .get("textures")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let images = document
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if skins.is_empty() {
+        bail!("actor GLB has no skins")
+    }
+
+    for (skin_index, skin) in skins.iter().enumerate() {
+        let joints = skin
+            .get("joints")
+            .and_then(serde_json::Value::as_array)
+            .with_context(|| format!("actor skin {skin_index} has no joints"))?;
+        if joints.is_empty() {
+            bail!("actor skin {skin_index} has no joints")
+        }
+        for joint in joints {
+            let joint_index = joint
+                .as_u64()
+                .with_context(|| format!("actor skin {skin_index} has a non-index joint"))?
+                as usize;
+            if joint_index >= nodes.len() {
+                bail!("actor skin {skin_index} references missing joint node {joint_index}")
+            }
+        }
+        let inverse_bind_index = skin
+            .get("inverseBindMatrices")
+            .and_then(serde_json::Value::as_u64)
+            .with_context(|| format!("actor skin {skin_index} has no inverse bind matrices"))?
+            as usize;
+        let inverse_bind_count = accessors
+            .get(inverse_bind_index)
+            .and_then(|accessor| accessor.get("count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        if inverse_bind_count != joints.len() {
+            bail!(
+                "actor skin {skin_index} has {} joints but {inverse_bind_count} inverse bind matrices",
+                joints.len()
+            )
+        }
+    }
+
+    let accessor_count = |index: usize| -> usize {
+        accessors
+            .get(index)
+            .and_then(|accessor| accessor.get("count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize
+    };
+    let mut skinned_primitives = 0usize;
+    let mut textured_primitives = 0usize;
+    for (node_index, node) in nodes.iter().enumerate() {
+        let Some(mesh_index) = node.get("mesh").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let Some(skin_index) = node.get("skin").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        if skin_index as usize >= skins.len() {
+            bail!("actor node {node_index} references missing skin {skin_index}")
+        }
+        let mesh = meshes.get(mesh_index as usize).with_context(|| {
+            format!("actor node {node_index} references missing mesh {mesh_index}")
+        })?;
+        for primitive in mesh
+            .get("primitives")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let attributes = primitive
+                .get("attributes")
+                .with_context(|| format!("actor mesh {mesh_index} primitive has no attributes"))?;
+            let position = attributes
+                .get("POSITION")
+                .and_then(serde_json::Value::as_u64)
+                .context("actor skinned primitive has no POSITION")?
+                as usize;
+            let joints = attributes
+                .get("JOINTS_0")
+                .and_then(serde_json::Value::as_u64)
+                .context("actor skinned primitive has no JOINTS_0")?
+                as usize;
+            let weights = attributes
+                .get("WEIGHTS_0")
+                .and_then(serde_json::Value::as_u64)
+                .context("actor skinned primitive has no WEIGHTS_0")?
+                as usize;
+            let vertex_count = accessor_count(position);
+            if vertex_count == 0
+                || accessor_count(joints) != vertex_count
+                || accessor_count(weights) != vertex_count
+            {
+                bail!("actor skinned primitive has mismatched POSITION/JOINTS_0/WEIGHTS_0 counts")
+            }
+            skinned_primitives += 1;
+
+            let material_index = primitive
+                .get("material")
+                .and_then(serde_json::Value::as_u64)
+                .context("actor skinned primitive has no material")?
+                as usize;
+            let texture_index = materials
+                .get(material_index)
+                .and_then(|material| material.get("pbrMetallicRoughness"))
+                .and_then(|pbr| pbr.get("baseColorTexture"))
+                .and_then(|texture| texture.get("index"))
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| {
+                    format!("actor skinned primitive material {material_index} has no base color texture")
+                })? as usize;
+            let image_index = textures
+                .get(texture_index)
+                .and_then(|texture| texture.get("source"))
+                .and_then(serde_json::Value::as_u64)
+                .with_context(|| format!("actor texture {texture_index} has no image source"))?
+                as usize;
+            if image_index >= images.len() {
+                bail!("actor texture {texture_index} references missing image {image_index}")
+            }
+            textured_primitives += 1;
+        }
+    }
+    if skinned_primitives == 0 {
+        bail!("actor GLB has no skinned primitives")
+    }
+    Ok(ActorGlbAudit {
+        skins: skins.len(),
+        skinned_primitives,
+        textured_primitives,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GlbVisualAudit {
     pub(crate) renderable_primitives: usize,

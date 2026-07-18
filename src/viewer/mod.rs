@@ -30,12 +30,15 @@ use crate::app_state::{
     AppState, GameplayModal, LoadingTarget, auto_advance_from_boot, auto_advance_from_loading,
 };
 use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
+#[cfg(test)]
+use crate::vsa::PREPARED_CONVERTER_REVISION;
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, NIF_CONVERTER_REVISION,
-    PHYSICS_ASSET_SCHEMA_VERSION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
-    PreparedItemDefinition, PreparedItemStats, PreparedSceneManifest, PreparedSemantic, bake,
-    cell_label, ensure_baked_scene_compatible, ensure_prepared_manifest_compatible,
-    find_cached_manifest, fingerprint, is_bake_static, prepare, resolve_cached_manifest,
+    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, PHYSICS_ASSET_SCHEMA_VERSION,
+    PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition,
+    PreparedItemStats, PreparedSceneManifest, PreparedSemantic,
+    SUPPORTED_PREPARED_CONVERTER_REVISIONS, bake, cell_label, ensure_baked_scene_compatible,
+    ensure_prepared_manifest_compatible_any, find_cached_manifest, fingerprint, is_bake_static,
+    prepare, resolve_cached_manifest,
 };
 
 /// Bevy-owned wrapper around the engine-independent prepared-scene contract.
@@ -69,12 +72,14 @@ mod material_shading_policy;
 mod nav;
 mod nav_overlay;
 mod performance_policy;
+mod ragdoll_lab;
 mod scene;
 
 pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
 pub(crate) use lighting::*;
+pub use ragdoll_lab::ragdoll_lab;
 pub(crate) use scene::*;
 
 const DEFAULT_LIGHTING_SCALE: f32 = 128.0;
@@ -127,9 +132,9 @@ pub fn render(args: RenderArgs) -> Result<()> {
     };
     let mut manifest = read_manifest(&manifest_path)?;
     if next_render_cache_action(&manifest) == RenderCacheAction::Reprepare {
-        let compatibility_error = ensure_prepared_manifest_compatible(
+        let compatibility_error = ensure_prepared_manifest_compatible_any(
             &manifest,
-            NIF_CONVERTER_REVISION,
+            SUPPORTED_PREPARED_CONVERTER_REVISIONS,
             PHYSICS_ASSET_SCHEMA_VERSION,
         )
         .expect_err("reprepare action requires an incompatible prepared manifest");
@@ -148,9 +153,9 @@ pub fn render(args: RenderArgs) -> Result<()> {
         }
         manifest_path = prepare_for_render(&args, &cache_dir, true)?;
         manifest = read_manifest(&manifest_path)?;
-        ensure_prepared_manifest_compatible(
+        ensure_prepared_manifest_compatible_any(
             &manifest,
-            NIF_CONVERTER_REVISION,
+            SUPPORTED_PREPARED_CONVERTER_REVISIONS,
             PHYSICS_ASSET_SCHEMA_VERSION,
         )?;
     }
@@ -269,9 +274,9 @@ enum RenderCacheAction {
 }
 
 fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheAction {
-    if ensure_prepared_manifest_compatible(
+    if ensure_prepared_manifest_compatible_any(
         manifest,
-        NIF_CONVERTER_REVISION,
+        SUPPORTED_PREPARED_CONVERTER_REVISIONS,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )
     .is_err()
@@ -296,6 +301,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         plugin: args.plugin.clone(),
         cell: None,
         blender: args.blender.clone(),
+        converter: args.converter,
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
         rebuild_shadows: args.rebuild_shadows,

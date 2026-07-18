@@ -40,6 +40,34 @@ pub(crate) fn ensure_prepared_manifest_compatible(
     fail_for_compatibility_issues(manifest, issues)
 }
 
+pub(crate) fn ensure_prepared_manifest_compatible_any(
+    manifest: &PreparedSceneManifest,
+    expected_converter_revisions: &[&str],
+    expected_physics_schema: u32,
+) -> Result<()> {
+    let Some(actual) = manifest.converter_revision.as_deref() else {
+        return ensure_prepared_manifest_compatible(
+            manifest,
+            expected_converter_revisions
+                .first()
+                .copied()
+                .unwrap_or("<none>"),
+            expected_physics_schema,
+        );
+    };
+    let expected = expected_converter_revisions
+        .iter()
+        .copied()
+        .find(|revision| *revision == actual)
+        .unwrap_or_else(|| {
+            expected_converter_revisions
+                .first()
+                .copied()
+                .unwrap_or("<none>")
+        });
+    ensure_prepared_manifest_compatible(manifest, expected, expected_physics_schema)
+}
+
 pub(crate) fn ensure_baked_scene_compatible(manifest: &PreparedSceneManifest) -> Result<()> {
     let mut issues = Vec::new();
     if let Some(bake) = manifest.bake.as_ref()

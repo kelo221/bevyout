@@ -141,6 +141,9 @@ fn developer_commands_and_aliases_are_registered_and_structured() {
     assert!(exec(&mut app, "help toggleflycam").ok);
     assert!(exec(&mut app, "help togglecollisiongeometry").ok);
     assert!(exec(&mut app, "help fov").ok);
+    let ragdoll_probe_help = exec(&mut app, "help ragdollprobe");
+    assert!(ragdoll_probe_help.ok);
+    assert_eq!(ragdoll_probe_help.value["mutating"], false);
     let free_camera = exec(&mut app, "toggleflycam");
     assert_eq!(free_camera.value["camera_mode"], "free");
     assert_eq!(free_camera.log, ["Free camera enabled."]);

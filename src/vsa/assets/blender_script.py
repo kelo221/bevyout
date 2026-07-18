@@ -1,5 +1,48 @@
-import bpy, gzip, json, math, os, sys
+import bmesh, bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
+
+RIGID_BODY_TYPES = {'bhkRigidBody', 'bhkRigidBodyT'}
+
+def canonical_nif_path(path):
+    return os.path.normcase(os.path.abspath(os.fspath(path))).replace('\\', '/')
+
+def nif_block_index(blocks, target):
+    for index, block in enumerate(blocks):
+        if block is target:
+            return index
+    raise RuntimeError(
+        'Imported Havok body is absent from the active NIF block table: '
+        + type(target).__name__
+    )
+
+def nif_body_key(path, block_index):
+    return '{}#{}'.format(canonical_nif_path(path), int(block_index))
+
+def resolve_authored_joint_body_groups(source_joints, group_id_by_key):
+    resolved = []
+    for source_joint in source_joints:
+        key_a = str(source_joint.get('body_a_key', ''))
+        key_b = str(source_joint.get('body_b_key', ''))
+        body_a = group_id_by_key.get(key_a)
+        body_b = group_id_by_key.get(key_b)
+        if body_a is None or body_b is None:
+            raise RuntimeError(
+                'Unresolved authored Havok constraint endpoint: {} -> {}'.format(
+                    key_a or '<missing>', key_b or '<missing>')
+            )
+        if body_a == body_b:
+            raise RuntimeError(
+                'Authored Havok constraint resolves to one body: {}'.format(key_a)
+            )
+        joint = {
+            key: value for key, value in source_joint.items()
+            if key not in {'body_a_key', 'body_b_key'}
+        }
+        joint['body_a'] = int(body_a)
+        joint['body_b'] = int(body_b)
+        resolved.append(joint)
+    return resolved
+
 def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex import Vertex
     from io_scene_niftools.modules.nif_import.property.nodes_wrapper import NodesWrapper
@@ -153,9 +196,9 @@ def patch_niftools_blender52():
     original_rigid_body = BhkCollision._import_bhk_rigid_body
     def import_rigid_body_metadata(self, bhkshape, collision_objs):
         original_rigid_body(self, bhkshape, collision_objs)
+        from io_scene_niftools.utils.singleton import NifData
         body_info = bhkshape.rigid_body_info
-        next_group = getattr(self, '_bevyout_body_group', 0)
-        self._bevyout_body_group = next_group + 1
+        body_block_index = nif_block_index(NifData.data.blocks, bhkshape)
         layer_filter = getattr(body_info, 'havok_filter', None)
         body_filter = getattr(bhkshape, 'havok_filter', None)
         layer = getattr(getattr(layer_filter, 'layer', None), 'value', 1)
@@ -174,7 +217,7 @@ def patch_niftools_blender52():
         ]
         inertia_rows = [[value * inertia_scale for value in row] for row in inertia_rows]
         metadata = {
-            'bevyout_body_group': next_group,
+            'bevyout_nif_body_block': body_block_index,
             'bevyout_motion_type': enum_name(getattr(body_info, 'motion_system', None), 'MO_SYS_FIXED'),
             'bevyout_quality_type': enum_name(getattr(body_info, 'quality_type', None), 'MO_QUAL_FIXED'),
             'bevyout_mass': float(getattr(body_info, 'mass', 0.0)),
@@ -201,6 +244,8 @@ def patch_niftools_blender52():
     original_phantom = BhkCollision.import_bhk_simple_shape_phantom
     def import_phantom_metadata(self, bhkshape):
         objects = original_phantom(self, bhkshape)
+        from io_scene_niftools.utils.singleton import NifData
+        body_block_index = nif_block_index(NifData.data.blocks, bhkshape)
         transform_value = getattr(bhkshape, 'transform', None)
         if transform_value is not None:
             try:
@@ -209,7 +254,9 @@ def patch_niftools_blender52():
                 for obj in objects: obj.matrix_local = obj.matrix_local @ transform
             except Exception:
                 pass
-        for obj in objects: obj['bevyout_phantom'] = True
+        for obj in objects:
+            obj['bevyout_phantom'] = True
+            obj['bevyout_nif_body_block'] = body_block_index
         return objects
     BhkCollision.import_bhk_simple_shape_phantom = import_phantom_metadata
     def mark_shape(original, kind):
@@ -365,6 +412,76 @@ def actor_bone_name(armature, *hints):
             if hint in bone.name.casefold().replace(' ', '').replace('_', ''):
                 return bone.name
     return None
+
+def actor_node_key(name):
+    parts = [part.casefold() for part in re.findall(r'[A-Za-z0-9]+', str(name))]
+    if (len(parts) >= 3 and parts[0].startswith('bip')
+            and parts[-1] in {'l', 'r'}):
+        side = parts.pop()
+        parts.insert(1, side)
+    return ''.join(parts)
+
+def actor_ragdoll_weight_target(bone, ragdoll_names_by_key):
+    current = bone
+    while current is not None:
+        target = ragdoll_names_by_key.get(actor_node_key(current.name))
+        if target is not None:
+            return target
+        current = current.parent
+    return None
+
+def collapse_actor_ragdoll_weights(ragdoll_nodes):
+    ragdoll_names_by_key = {
+        actor_node_key(name): str(name)
+        for name in ragdoll_nodes if name
+    }
+    if not ragdoll_names_by_key:
+        return 0
+    moved_groups = 0
+    for mesh in bpy.context.scene.objects:
+        if mesh.type != 'MESH' or not mesh.vertex_groups:
+            continue
+        armature = next((
+            modifier.object for modifier in mesh.modifiers
+            if modifier.type == 'ARMATURE' and modifier.object is not None
+        ), None)
+        if armature is None:
+            continue
+        for source_group in list(mesh.vertex_groups):
+            if actor_node_key(source_group.name) in ragdoll_names_by_key:
+                continue
+            bone = armature.data.bones.get(source_group.name)
+            if bone is None:
+                continue
+            target_name = actor_ragdoll_weight_target(
+                bone.parent, ragdoll_names_by_key)
+            if target_name is None:
+                continue
+            target_bone = next((
+                candidate for candidate in armature.data.bones
+                if actor_node_key(candidate.name) == actor_node_key(target_name)
+            ), None)
+            if target_bone is None:
+                continue
+            target_group = mesh.vertex_groups.get(target_bone.name)
+            if target_group is None:
+                target_group = mesh.vertex_groups.new(name=target_bone.name)
+            moved = False
+            for vertex in mesh.data.vertices:
+                try:
+                    weight = source_group.weight(vertex.index)
+                except RuntimeError:
+                    continue
+                if weight <= 0.0:
+                    continue
+                target_group.add([vertex.index], weight, 'ADD')
+                source_group.remove([vertex.index])
+                moved = True
+            if moved:
+                moved_groups += 1
+                print('[convert] actor ragdoll weights {}:{} -> {}'.format(
+                    mesh.name, source_group.name, target_bone.name), flush=True)
+    return moved_groups
 
 def normalize_actor_assembly():
     """Normalize imported body parts and attach standalone gear.
@@ -612,33 +729,51 @@ def source_emission_multiplier(material):
             return matches[0], True
     return 1.0, False
 
+def collision_body_key(obj):
+    source_path = obj.get('bevyout_nif_source_path')
+    block_index = obj.get('bevyout_nif_body_block')
+    if source_path and block_index is not None:
+        return nif_body_key(source_path, block_index)
+    # Bounds and other non-rigid collision helpers are never constraint
+    # endpoints. Keep them deterministic without allowing their import order
+    # to enter the authored ragdoll identity namespace.
+    source = canonical_nif_path(source_path) if source_path else '<unknown>'
+    return '{}#helper:{}'.format(source, str(obj.name).casefold())
+
 def build_physics_asset():
     collision_objects = [obj for obj in bpy.context.scene.objects
                          if obj.type == 'MESH' and obj.get('bevyout_collision', False)]
-    groups = {}
-    for index, obj in enumerate(collision_objects):
-        group = int(obj.get('bevyout_body_group', 1000000 + index))
-        groups.setdefault(group, []).append(obj)
-    authored_bodies = [physics_body_from_objects(group, objects)
-                       for group, objects in sorted(groups.items())]
-    authored_bodies = [body for body in authored_bodies if body['shapes']]
-    authored_groups = {int(body['group_id']) for body in authored_bodies}
-    joints = [
-        joint for joint in globals().get('current_joint_defs', [])
-        if int(joint['body_a']) in authored_groups and int(joint['body_b']) in authored_groups
-    ]
-    # Actor skeleton NIFs frequently contain Havok bodies but no usable
-    # constraint records (or records whose body indices refer to a different
-    # partial-armature import).  A developer ragdoll must still be a connected
-    # articulated chain; otherwise every limb is free to fly away and the
-    # skinned mesh stretches across the scene.  Build conservative spherical
-    # joints from the Bip01 hierarchy when this is an actor assembly.
+    groups_by_key = {}
+    for obj in collision_objects:
+        groups_by_key.setdefault(collision_body_key(obj), []).append(obj)
+    authored_bodies = []
+    group_id_by_key = {}
+    for source_key, objects in sorted(groups_by_key.items()):
+        group_id = len(authored_bodies)
+        body = physics_body_from_objects(group_id, objects)
+        if not body['shapes']:
+            continue
+        group_id_by_key[source_key] = group_id
+        authored_bodies.append(body)
+    joints = resolve_authored_joint_body_groups(
+        globals().get('current_joint_defs', []), group_id_by_key)
+    body_by_group = {int(body['group_id']): body for body in authored_bodies}
+    for joint in joints:
+        node_a = body_by_group[int(joint['body_a'])].get('node') or '<unnamed>'
+        node_b = body_by_group[int(joint['body_b'])].get('node') or '<unnamed>'
+        print('[convert] authored joint resolved {} -> {}'.format(
+            node_a, node_b), flush=True)
+    # Keep every valid authored actor edge. Only connect genuinely disconnected
+    # components of a partial/custom skeleton with the conservative Bip01
+    # fallback. Fallout's authored ragdoll is a complete tree whose topology
+    # intentionally differs from the visual bone-parent hierarchy, so filling
+    # every absent visual-parent edge would over-constrain it.
     if (globals().get('assembly_inputs') is not None
             and any('bip01' in str(body.get('node', '')).casefold()
                     for body in authored_bodies)):
-        joints = actor_synthetic_joints(authored_bodies)
+        joints = actor_completed_joints(joints, authored_bodies)
     if any(body_blocks_player(body) and body['shapes'] for body in authored_bodies):
-        return {'schema_version': 2, 'source': 'AuthoredHavok', 'bodies': authored_bodies, 'joints': joints}
+        return {'schema_version': 3, 'source': 'AuthoredHavok', 'bodies': authored_bodies, 'joints': joints}
     render_objects = [obj for obj in bpy.context.scene.objects
                       if obj.type == 'MESH' and len(obj.data.polygons)
                       and not obj.get('bevyout_collision', False)
@@ -647,14 +782,14 @@ def build_physics_asset():
                       and all(fallback_material_eligible(material) for material in obj.data.materials)]
     fallback = render_fallback_body(render_objects)
     if not fallback['shapes'][0]['indices']:
-        return {'schema_version': 2, 'source': 'GeneratedRender', 'bodies': authored_bodies, 'joints': joints}
+        return {'schema_version': 3, 'source': 'GeneratedRender', 'bodies': authored_bodies, 'joints': joints}
     # Keep the render-only fallback out of the authored body-id namespace.
     # Actor body IDs start at zero; reusing zero would overwrite the first
     # ragdoll body's lookup entry when the runtime builds its joint map.
     fallback['group_id'] = max(
         (int(body['group_id']) for body in authored_bodies), default=-1
     ) + 1
-    return {'schema_version': 2, 'source': 'GeneratedRender',
+    return {'schema_version': 3, 'source': 'GeneratedRender',
             'bodies': authored_bodies + [fallback], 'joints': joints}
 
 def actor_shape_anchor(shape):
@@ -697,6 +832,7 @@ def actor_synthetic_joints(bodies):
         'bip01thighl': 'bip01pelvis',
         'bip01footr': 'bip01calfr', 'bip01calfr': 'bip01thighr',
         'bip01thighr': 'bip01pelvis',
+        'bip01pelvis': 'bip01nonaccum',
         'bip01spine': 'bip01nonaccum',
         'bip01spine1': 'bip01spine', 'bip01spine2': 'bip01spine1',
         'bip01neck1': 'bip01spine2', 'bip01head': 'bip01neck1',
@@ -723,6 +859,16 @@ def actor_synthetic_joints(bodies):
 
     existing = set()
     joints = []
+    hinge_axes = {
+        # Bind-pose legs point down; X-axis hinges let the calves fold in the
+        # sagittal plane while blocking sideways and hyperextension collapse.
+        'bip01calfl': [1.0, 0.0, 0.0],
+        'bip01calfr': [1.0, 0.0, 0.0],
+        # Bind-pose arms point in opposite X directions. Mirroring the right
+        # hinge axis makes the same positive angular range flex both elbows.
+        'bip01forearml': [0.0, 0.0, 1.0],
+        'bip01forearmr': [0.0, 0.0, -1.0],
+    }
     for child, parent in sorted(resolved.items()):
         child_body = by_name[child]
         parent_body = by_name[parent]
@@ -735,39 +881,208 @@ def actor_synthetic_joints(bodies):
         anchor = [(left + right) * 0.5
                   for left, right in zip(actor_body_anchor(parent_body),
                                          actor_body_anchor(child_body))]
+        hinge_axis = hinge_axes.get(child)
+        cone_limit = 1.8 if child in {'bip01thighl', 'bip01thighr'} else 1.0
+        frame = joint_frame_quaternion(
+            hinge_axis or [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0] if hinge_axis and abs(hinge_axis[1]) < 0.9
+            else [1.0, 0.0, 0.0],
+        )
         joints.append({
-            'kind': 'spherical', 'body_a': body_a, 'body_b': body_b,
+            'kind': 'revolute' if hinge_axis is not None else 'spherical',
+            'body_a': body_a, 'body_b': body_b,
             'anchor_a': anchor, 'anchor_b': anchor,
-            'axis_a': [0.0, 1.0, 0.0], 'axis_b': [0.0, 1.0, 0.0],
-            'lower_limit': -1.0, 'upper_limit': 1.0,
-            'cone_limit': 1.0, 'twist_limit': 1.0,
+            'frame_a_rotation_xyzw': frame,
+            'frame_b_rotation_xyzw': frame,
+            'lower_limit': -0.05 if hinge_axis is not None else None,
+            'upper_limit': 2.4 if hinge_axis is not None else None,
+            'cone_limit': None if hinge_axis is not None else cone_limit,
+            'plane_lower_limit': None if hinge_axis is not None else -1.0,
+            'plane_upper_limit': None if hinge_axis is not None else 1.0,
+            'twist_lower_limit': None if hinge_axis is not None else -1.0,
+            'twist_upper_limit': None if hinge_axis is not None else 1.0,
+            'malleable_strength': None,
+            'source': 'SyntheticFallback',
         })
     return joints
 
-def nif_vec3(value, scale=1.0):
+def actor_completed_joints(authored, bodies):
+    completed = list(authored)
+    parent = {
+        int(body['group_id']): int(body['group_id'])
+        for body in bodies
+    }
+
+    def root(body_id):
+        while parent[body_id] != body_id:
+            parent[body_id] = parent[parent[body_id]]
+            body_id = parent[body_id]
+        return body_id
+
+    def connect(body_a, body_b):
+        root_a = root(body_a)
+        root_b = root(body_b)
+        if root_a == root_b:
+            return False
+        parent[root_b] = root_a
+        return True
+
+    for joint in completed:
+        connect(int(joint['body_a']), int(joint['body_b']))
+    for fallback in actor_synthetic_joints(bodies):
+        pair = tuple(sorted((int(fallback['body_a']), int(fallback['body_b']))))
+        if not connect(*pair):
+            continue
+        completed.append(fallback)
+        print('[convert] actor ragdoll fallback edge {}-{}'.format(*pair), flush=True)
+    completed.sort(key=lambda joint: (
+        min(int(joint['body_a']), int(joint['body_b'])),
+        max(int(joint['body_a']), int(joint['body_b'])),
+        str(joint.get('source', '')),
+    ))
+    return completed
+
+def nif_raw_vector(value):
     if value is None:
-        return [0.0, 0.0, 0.0]
-    return [float(getattr(value, 'x', 0.0)) * scale,
-            float(getattr(value, 'z', 0.0)) * scale,
-            -float(getattr(value, 'y', 0.0)) * scale]
+        return Vector((0.0, 0.0, 0.0))
+    return Vector((float(getattr(value, 'x', 0.0)),
+                   float(getattr(value, 'y', 0.0)),
+                   float(getattr(value, 'z', 0.0))))
+
+def joint_frame_quaternion(axis_z, reference_x):
+    """Return a deterministic BoxDDD frame with authored twist/hinge on Z."""
+    z_axis = Vector(axis_z)
+    x_axis = Vector(reference_x)
+    if (not all(math.isfinite(value) for value in (*z_axis, *x_axis))
+            or z_axis.length_squared < 1.0e-10):
+        return None
+    z_axis.normalize()
+    x_axis -= z_axis * x_axis.dot(z_axis)
+    if x_axis.length_squared < 1.0e-10:
+        return None
+    x_axis.normalize()
+    y_axis = z_axis.cross(x_axis)
+    if y_axis.length_squared < 1.0e-10:
+        return None
+    y_axis.normalize()
+    x_axis = y_axis.cross(z_axis).normalized()
+    rotation = Matrix((x_axis, y_axis, z_axis)).transposed().to_quaternion()
+    rotation.normalize()
+    values = [float(rotation.x), float(rotation.y),
+              float(rotation.z), float(rotation.w)]
+    # q and -q encode the same frame. Canonicalize the sign so sidecars are
+    # deterministic across Blender/mathutils builds.
+    if values[3] < 0.0:
+        values = [-value for value in values]
+    return values
+
+def nif_constraint_payload(block):
+    """Unwrap the concrete descriptor carried by a Havok constraint block."""
+    name = type(block).__name__
+    payload = getattr(block, 'constraint', None)
+    strength = None
+    if name == 'bhkMalleableConstraint':
+        descriptor = payload
+        type_value = getattr(descriptor, 'type', None)
+        constraint_type = str(getattr(type_value, 'name', type_value or '')).upper()
+        strength_value = getattr(descriptor, 'strength', None)
+        strength = float(strength_value) if strength_value is not None else None
+        if 'RAGDOLL' in constraint_type:
+            return ('bhkRagdollConstraint', getattr(descriptor, 'ragdoll', None), strength)
+        if 'LIMITED_HINGE' in constraint_type:
+            return ('bhkLimitedHingeConstraint',
+                    getattr(descriptor, 'limited_hinge', None), strength)
+        return (None, None, strength)
+    if name == 'bhkBreakableConstraint':
+        descriptor = getattr(block, 'constraint_data', None)
+        return ('bhkLimitedHingeConstraint',
+                getattr(descriptor, 'limited_hinge', None), None)
+    return (name, payload, strength)
+
+def nif_target_rest_matrix(nif, target):
+    if target is None:
+        return None
+    from io_scene_niftools.utils.math import nifformat_to_mathutils_matrix
+    for root in getattr(nif, 'roots', []):
+        try:
+            matrix = nifformat_to_mathutils_matrix(target.get_transform(root))
+            matrix.translation *= 1.0 / 70.0
+            return matrix
+        except (ValueError, AttributeError):
+            continue
+    try:
+        matrix = nifformat_to_mathutils_matrix(target.get_transform())
+        matrix.translation *= 1.0 / 70.0
+        return matrix
+    except (ValueError, AttributeError):
+        return None
+
+def nif_rigid_body_matrix(body, havok_scale):
+    matrix = Matrix.Identity(4)
+    if type(body).__name__ != 'bhkRigidBodyT':
+        return matrix
+    info = getattr(body, 'rigid_body_info', None)
+    rotation = getattr(body, 'rotation', None)
+    if rotation is None:
+        rotation = getattr(info, 'rotation', None)
+    if rotation is not None:
+        quaternion = __import__('mathutils').Quaternion((
+            float(getattr(rotation, 'w', 1.0)),
+            float(getattr(rotation, 'x', 0.0)),
+            float(getattr(rotation, 'y', 0.0)),
+            float(getattr(rotation, 'z', 0.0)),
+        ))
+        matrix = quaternion.to_matrix().to_4x4()
+    translation = getattr(body, 'translation', None)
+    if translation is None:
+        translation = getattr(info, 'translation', None)
+    if translation is not None:
+        matrix.translation = nif_raw_vector(translation) * (havok_scale / 70.0)
+    return matrix
+
+def nif_body_actor_matrix(nif, body, target):
+    target_matrix = nif_target_rest_matrix(nif, target)
+    if target_matrix is None:
+        return None
+    return target_matrix @ nif_rigid_body_matrix(body, float(nif.havok_scale))
+
+def nif_actor_point(value, body_matrix, havok_scale):
+    local = nif_raw_vector(value) * (havok_scale / 70.0)
+    return blender_point_to_bevy(body_matrix @ local)
+
+def nif_actor_vector(value, body_matrix):
+    actor = body_matrix.to_quaternion().to_matrix() @ nif_raw_vector(value)
+    bevy = blender_vector_to_bevy(actor)
+    return list(bevy)
+
+def nif_joint_frame(body_matrix, axis, reference):
+    return joint_frame_quaternion(
+        nif_actor_vector(axis, body_matrix),
+        nif_actor_vector(reference, body_matrix),
+    )
 
 def nif_constraint_joints(paths):
     """Extract constraint records without asking NIFTools to create Blender
     rigid-body constraints (that importer still assumes removed 2.x fields).
-    Body groups follow the importer's deterministic rigid-body order."""
+    Endpoints retain their source NIF block identity until collision bodies
+    have been imported and grouped."""
     try:
         from nifgen.formats.nif import NifFile
     except Exception:
         return []
     joints = []
-    group_offset = 0
     for path in paths:
         try:
             nif = NifFile.from_path(path)
         except Exception:
             continue
-        bodies = [block for block in nif.blocks if type(block).__name__ == 'bhkRigidBody']
-        body_groups = {id(block): group_offset + index for index, block in enumerate(bodies)}
+        block_indices = {id(block): index for index, block in enumerate(nif.blocks)}
+        body_targets = {
+            id(getattr(block, 'body', None)): getattr(block, 'target', None)
+            for block in nif.blocks
+            if 'CollisionObject' in type(block).__name__
+            and getattr(block, 'body', None) is not None
+        }
         for block in nif.blocks:
             name = type(block).__name__
             if not name.endswith('Constraint'):
@@ -775,54 +1090,89 @@ def nif_constraint_joints(paths):
             outer = getattr(block, 'constraint_info', None)
             entity_a = getattr(outer, 'entity_a', None)
             entity_b = getattr(outer, 'entity_b', None)
-            body_a = body_groups.get(id(entity_a))
-            body_b = body_groups.get(id(entity_b))
-            if body_a is None or body_b is None or body_a == body_b:
+            body_a_block = block_indices.get(id(entity_a))
+            body_b_block = block_indices.get(id(entity_b))
+            if (body_a_block is None or body_b_block is None
+                    or body_a_block == body_b_block
+                    or type(entity_a).__name__ not in RIGID_BODY_TYPES
+                    or type(entity_b).__name__ not in RIGID_BODY_TYPES):
                 continue
-            payload = getattr(block, 'constraint', None)
-            kind = name
-            if name == 'bhkBreakableConstraint':
-                payload = getattr(getattr(block, 'constraint_data', None), 'limited_hinge', None)
-                kind = 'bhkLimitedHingeConstraint'
-            if payload is None:
+            body_a_key = nif_body_key(path, body_a_block)
+            body_b_key = nif_body_key(path, body_b_block)
+            kind, payload, strength = nif_constraint_payload(block)
+            if kind is None or payload is None:
+                continue
+            matrix_a = nif_body_actor_matrix(nif, entity_a, body_targets.get(id(entity_a)))
+            matrix_b = nif_body_actor_matrix(nif, entity_b, body_targets.get(id(entity_b)))
+            if matrix_a is None or matrix_b is None:
+                print('[convert] skipped authored joint without body rest frame {}-{}'.format(
+                    body_a_key, body_b_key), flush=True)
+                continue
+            anchor_a = nif_actor_point(
+                getattr(payload, 'pivot_a', None), matrix_a, float(nif.havok_scale))
+            anchor_b = nif_actor_point(
+                getattr(payload, 'pivot_b', None), matrix_b, float(nif.havok_scale))
+            pivot_error = (Vector(anchor_a) - Vector(anchor_b)).length
+            if not math.isfinite(pivot_error) or pivot_error > 0.05:
+                print('[convert] skipped authored joint {}-{} pivot mismatch {:.6f}m'.format(
+                    body_a_key, body_b_key, pivot_error), flush=True)
                 continue
             joint = {
-                'kind': 'fixed', 'body_a': int(body_a), 'body_b': int(body_b),
-                'anchor_a': [0.0, 0.0, 0.0], 'anchor_b': [0.0, 0.0, 0.0],
-                'axis_a': [0.0, 1.0, 0.0], 'axis_b': [0.0, 1.0, 0.0],
+                'kind': 'fixed',
+                'body_a_key': body_a_key, 'body_b_key': body_b_key,
+                'anchor_a': anchor_a, 'anchor_b': anchor_b,
+                'frame_a_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
+                'frame_b_rotation_xyzw': [0.0, 0.0, 0.0, 1.0],
                 'lower_limit': None, 'upper_limit': None,
-                'cone_limit': None, 'twist_limit': None,
+                'cone_limit': None,
+                'plane_lower_limit': None, 'plane_upper_limit': None,
+                'twist_lower_limit': None, 'twist_upper_limit': None,
+                'malleable_strength': strength,
+                'source': 'Authored',
             }
             if kind == 'bhkRagdollConstraint':
                 joint['kind'] = 'spherical'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'twist_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'twist_b', None))
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'twist_a', None),
+                    getattr(payload, 'plane_a', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'twist_b', None),
+                    getattr(payload, 'plane_b', None))
                 joint['cone_limit'] = float(getattr(payload, 'cone_max_angle', 0.0))
-                joint['lower_limit'] = float(getattr(payload, 'plane_min_angle', 0.0))
-                joint['upper_limit'] = float(getattr(payload, 'plane_max_angle', 0.0))
-                joint['twist_limit'] = float(getattr(payload, 'twist_max_angle', 0.0))
+                joint['plane_lower_limit'] = float(getattr(payload, 'plane_min_angle', 0.0))
+                joint['plane_upper_limit'] = float(getattr(payload, 'plane_max_angle', 0.0))
+                joint['twist_lower_limit'] = float(getattr(payload, 'twist_min_angle', 0.0))
+                joint['twist_upper_limit'] = float(getattr(payload, 'twist_max_angle', 0.0))
             elif kind == 'bhkLimitedHingeConstraint':
                 joint['kind'] = 'revolute'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'axis_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'axis_b', None))
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'axis_a', None),
+                    getattr(payload, 'perp_axis_in_a_1', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'axis_b', None),
+                    getattr(payload, 'perp_axis_in_b_1', None))
                 joint['lower_limit'] = float(getattr(payload, 'min_angle', 0.0))
                 joint['upper_limit'] = float(getattr(payload, 'max_angle', 0.0))
             elif kind == 'bhkPrismaticConstraint':
                 joint['kind'] = 'prismatic'
-                joint['anchor_a'] = nif_vec3(getattr(payload, 'pivot_a', None), 1.0 / 70.0)
-                joint['anchor_b'] = nif_vec3(getattr(payload, 'pivot_b', None), 1.0 / 70.0)
-                joint['axis_a'] = nif_vec3(getattr(payload, 'sliding_a', None))
-                joint['axis_b'] = nif_vec3(getattr(payload, 'sliding_b', None))
-                joint['lower_limit'] = float(getattr(payload, 'min_distance', 0.0)) / 70.0
-                joint['upper_limit'] = float(getattr(payload, 'max_distance', 0.0)) / 70.0
+                joint['frame_a_rotation_xyzw'] = nif_joint_frame(
+                    matrix_a, getattr(payload, 'sliding_a', None),
+                    getattr(payload, 'rotation_a', None))
+                joint['frame_b_rotation_xyzw'] = nif_joint_frame(
+                    matrix_b, getattr(payload, 'sliding_b', None),
+                    getattr(payload, 'rotation_b', None))
+                distance_scale = float(nif.havok_scale) / 70.0
+                joint['lower_limit'] = float(getattr(payload, 'min_distance', 0.0)) * distance_scale
+                joint['upper_limit'] = float(getattr(payload, 'max_distance', 0.0)) * distance_scale
             else:
                 continue
+            if (joint['frame_a_rotation_xyzw'] is None
+                    or joint['frame_b_rotation_xyzw'] is None):
+                print('[convert] skipped authored joint {}-{} with degenerate frame'.format(
+                    body_a_key, body_b_key), flush=True)
+                continue
             joints.append(joint)
-        group_offset += len(bodies)
+    print('[convert] authored constraints extracted {}'.format(len(joints)), flush=True)
     return joints
 
 def matrix_identity_error(matrix):
@@ -922,6 +1272,51 @@ def apply_record_zero_transform_policy(
         carrier.matrix_local = Matrix.Identity(4)
     return changed
 
+def run_ragdoll_identity_self_test():
+    source_keys = {
+        'Pelvis': 'fixture/skeleton.nif#10',
+        'Forearm.L': 'fixture/skeleton.nif#21',
+        'Neck1': 'fixture/skeleton.nif#32',
+        'Foot.L': 'fixture/skeleton.nif#43',
+    }
+    importer_order = ['Foot.L', 'Pelvis', 'Neck1', 'Forearm.L']
+    groups_by_key = {
+        source_keys[node]: {'node': node}
+        for node in importer_order
+    }
+    ordered_keys = sorted(groups_by_key)
+    group_id_by_key = {
+        key: group_id for group_id, key in enumerate(ordered_keys)
+    }
+    resolved = resolve_authored_joint_body_groups([{
+        'kind': 'spherical',
+        'body_a_key': source_keys['Forearm.L'],
+        'body_b_key': source_keys['Neck1'],
+    }], group_id_by_key)
+    node_by_group = {
+        group_id_by_key[key]: value['node']
+        for key, value in groups_by_key.items()
+    }
+    assert node_by_group[resolved[0]['body_a']] == 'Forearm.L'
+    assert node_by_group[resolved[0]['body_b']] == 'Neck1'
+    class FixtureBone:
+        def __init__(self, name, parent=None):
+            self.name = name
+            self.parent = parent
+    spine2 = FixtureBone('Bip01 Spine2')
+    clavicle = FixtureBone('Bip01 L Clavicle', spine2)
+    upper_arm = FixtureBone('Bip01 L UpperArm', clavicle)
+    forearm = FixtureBone('Bip01 L Forearm', upper_arm)
+    fore_twist = FixtureBone('Bip01 L ForeTwist', forearm)
+    weight_targets = {
+        actor_node_key('Bip01 Spine2'): 'Bip01 Spine2',
+        actor_node_key('Bip01 UpperArm.L'): 'Bip01 UpperArm.L',
+        actor_node_key('Bip01 Forearm.L'): 'Bip01 Forearm.L',
+    }
+    assert actor_ragdoll_weight_target(clavicle, weight_targets) == 'Bip01 Spine2'
+    assert actor_ragdoll_weight_target(fore_twist, weight_targets) == 'Bip01 Forearm.L'
+    print('[convert-test] ragdoll source identity passed', flush=True)
+
 def run_root_transform_self_test():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
@@ -1005,6 +1400,139 @@ def run_root_transform_self_test():
         True,
     ) == []
     assert matrix_identity_error(bip01.matrix_local) > 0.1
+    assert is_pynifly_render_helper('BSBound:BBX')
+    assert is_pynifly_render_helper('bsbound:actor bounds')
+    assert is_pynifly_render_helper('bodymeat')
+    assert is_pynifly_render_helper('headmeat.001')
+    assert is_pynifly_render_helper('MeatCapBody')
+    assert is_pynifly_render_helper('MeatCapLimbs')
+    assert is_pynifly_render_helper('llegmeatcapbody')
+    assert not is_pynifly_render_helper('RaiderArmor01M_GO')
+    assert not is_pynifly_render_helper('RaiderArmor01M_GO.001')
+    assert not is_pynifly_render_helper('UpperBody')
+    assert not is_pynifly_render_helper('DomeRoot:0')
+    assert partition_is_editor_visible(0x0001)
+    assert not partition_is_editor_visible(0x0000)
+    class FixtureShader:
+        def _readtexture(self, file_handle, shape_handle, slot):
+            assert file_handle == 'fixture-file'
+            assert shape_handle == 'fixture-shape'
+            return {
+                1: 'textures\\characters\\female\\UpperBodyFemale.dds',
+                2: 'textures\\characters\\female\\UpperBodyFemale_n.dds',
+            }.get(slot, '')
+    fixture_texture_node = type('TextureNode', (), {
+        'textures': {},
+        'shader': FixtureShader(),
+        'file': type('TextureFile', (), {'_handle': 'fixture-file'})(),
+        '_handle': 'fixture-shape',
+    })()
+    assert actor_shape_texture_values(
+        fixture_texture_node,
+        ['textures\\armor\\raiderarmor01\\OutfitF.dds'],
+    ) == [
+        'textures\\characters\\female\\UpperBodyFemale.dds',
+        'textures\\characters\\female\\UpperBodyFemale_n.dds',
+    ]
+    assert actor_material_alpha_policy(0) == 'OPAQUE'
+    assert actor_material_alpha_policy(1) == 'BLEND'
+    assert actor_material_alpha_policy(1 << 9) == 'MASK'
+    assert actor_material_alpha_policy(1 | (1 << 9)) == 'BLEND'
+    partition_mesh = bpy.data.meshes.new('ActorPartitionFixture')
+    partition_mesh.from_pydata(
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0),
+         (2, 0, 0), (3, 0, 0), (2, 1, 0)],
+        [],
+        [(0, 1, 2), (3, 4, 5)],
+    )
+    partition_obj = bpy.data.objects.new('ActorPartitionFixture', partition_mesh)
+    bpy.context.collection.objects.link(partition_obj)
+    visible_material = bpy.data.materials.new('VisibleSkinMaterial')
+    hidden_material = bpy.data.materials.new('HiddenGoreMaterial')
+    partition_mesh.materials.append(visible_material)
+    partition_mesh.materials.append(hidden_material)
+    partition_mesh.polygons[0].material_index = 0
+    partition_mesh.polygons[1].material_index = 1
+    visible_weights = partition_obj.vertex_groups.new(name='Bip01 Spine2')
+    visible_weights.add([0, 1, 2], 1.0, 'REPLACE')
+    fixture_node = type('PartitionNode', (), {
+        'partitions': [
+            type('Partition', (), {'flags': 0x0001})(),
+            type('Partition', (), {'flags': 0x0000})(),
+        ],
+        'partition_tris': [0, 1],
+    })()
+    assert prune_hidden_actor_partitions(partition_obj, fixture_node) == 1
+    assert len(partition_mesh.polygons) == 1
+    assert partition_mesh.polygons[0].material_index == 0
+    assert visible_weights.weight(0) == 1.0
+    bpy.data.objects.remove(partition_obj, do_unlink=True)
+    fixture_bodies = [
+        {'group_id': 0, 'node': 'Bip01 NonAccum',
+         'shapes': [{'kind': 'Sphere', 'center': [0.0, 0.9, 0.0]}]},
+        {'group_id': 1, 'node': 'Bip01 Thigh.L',
+         'shapes': [{'kind': 'Sphere', 'center': [0.2, 0.65, 0.0]}]},
+        {'group_id': 2, 'node': 'Bip01 Thigh.R',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.2, 0.65, 0.0]}]},
+        {'group_id': 3, 'node': 'Bip01 Calf.L',
+         'shapes': [{'kind': 'Sphere', 'center': [0.2, 0.3, 0.0]}]},
+        {'group_id': 4, 'node': 'Bip01 Spine2',
+         'shapes': [{'kind': 'Sphere', 'center': [0.0, 1.3, 0.0]}]},
+        {'group_id': 5, 'node': 'Bip01 UpperArm.L',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.25, 1.35, 0.0]}]},
+        {'group_id': 6, 'node': 'Bip01 Forearm.L',
+         'shapes': [{'kind': 'Sphere', 'center': [-0.55, 1.35, 0.0]}]},
+    ]
+    fixture_joints = actor_synthetic_joints(fixture_bodies)
+    fixture_by_pair = {
+        (joint['body_a'], joint['body_b']): joint
+        for joint in fixture_joints
+    }
+    assert set(fixture_by_pair) == {
+        (0, 1), (0, 2), (1, 3), (0, 4), (4, 5), (5, 6)
+    }, fixture_by_pair
+    assert fixture_by_pair[(1, 3)]['kind'] == 'revolute'
+    assert fixture_by_pair[(5, 6)]['kind'] == 'revolute'
+    assert fixture_by_pair[(0, 4)]['kind'] == 'spherical'
+    assert fixture_by_pair[(0, 1)]['cone_limit'] == 1.8
+    assert fixture_by_pair[(0, 2)]['cone_limit'] == 1.8
+    for pair, expected_axis in {
+        (1, 3): Vector((1.0, 0.0, 0.0)),
+        (5, 6): Vector((0.0, 0.0, 1.0)),
+    }.items():
+        values = fixture_by_pair[pair]['frame_a_rotation_xyzw']
+        rotation = __import__('mathutils').Quaternion(
+            (values[3], values[0], values[1], values[2]))
+        assert (rotation @ Vector((0.0, 0.0, 1.0)) - expected_axis).length < 1e-5
+    assert all(joint['source'] == 'SyntheticFallback' for joint in fixture_joints)
+    authored_fixture = dict(fixture_by_pair[(1, 3)])
+    authored_fixture['source'] = 'Authored'
+    completed_fixture = actor_completed_joints([authored_fixture], fixture_bodies)
+    completed_by_pair = {
+        (joint['body_a'], joint['body_b']): joint
+        for joint in completed_fixture
+    }
+    assert completed_by_pair[(1, 3)]['source'] == 'Authored'
+    assert len(completed_fixture) == len(fixture_joints)
+    authored_tree = []
+    for fixture_joint in fixture_joints:
+        authored_joint = dict(fixture_joint)
+        authored_joint['source'] = 'Authored'
+        authored_tree.append(authored_joint)
+    completed_tree = actor_completed_joints(authored_tree, fixture_bodies)
+    assert len(completed_tree) == len(authored_tree)
+    assert all(joint['source'] == 'Authored' for joint in completed_tree)
+    descriptor = type('MalleableDescriptor', (), {
+        'type': type('ConstraintType', (), {'name': 'RAGDOLL'})(),
+        'ragdoll': object(),
+        'limited_hinge': None,
+        'strength': 0.9,
+    })()
+    malleable = type('bhkMalleableConstraint', (), {'constraint': descriptor})()
+    kind, payload, strength = nif_constraint_payload(malleable)
+    assert kind == 'bhkRagdollConstraint'
+    assert payload is descriptor.ragdoll
+    assert abs(strength - 0.9) < 1e-6
     print('[convert-test] model root transform policy passed', flush=True)
 
 def bake_quick_ao():
@@ -1073,21 +1601,437 @@ def collect_animation_sound_cues():
     ))
     return cues
 
+def clear_imported_scene():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    for datablocks in (
+            bpy.data.meshes, bpy.data.curves, bpy.data.materials,
+            bpy.data.cameras, bpy.data.lights, bpy.data.actions,
+            bpy.data.armatures):
+        for datablock in list(datablocks):
+            if datablock.users == 0:
+                datablocks.remove(datablock)
+
+def is_pynifly_render_helper(name):
+    # Fallout skeleton NIFs carry BSBound nodes for editor/gameplay bounds.
+    # PyNifly 28 imports them as ordinary cube meshes even when collision
+    # import is disabled, producing a giant untextured box around the actor.
+    normalized = str(name).casefold()
+    if normalized.startswith('bsbound:'):
+        return True
+    base = normalized.rsplit('.', 1)[0] if re.search(r'\.\d{3}$', normalized) else normalized
+    return base in {'bodymeat', 'headmeat'} or 'meatcap' in base
+
+def partition_is_editor_visible(flags):
+    return int(flags) & 0x0001 != 0
+
+def prune_hidden_actor_partitions(obj, nifnode):
+    """Drop BSDismember triangles hidden in the authored intact state."""
+    partitions = list(getattr(nifnode, 'partitions', ()) or ())
+    partition_tris = list(getattr(nifnode, 'partition_tris', ()) or ())
+    if not partitions or not partition_tris:
+        return 0
+    polygons = list(obj.data.polygons)
+    if len(partition_tris) != len(polygons):
+        print('[convert] actor partition map mismatch object={} polygons={} entries={}'.format(
+            obj.name, len(polygons), len(partition_tris)), flush=True)
+        return 0
+    hidden_faces = []
+    for polygon, partition_index in zip(polygons, partition_tris):
+        if partition_index >= len(partitions):
+            continue
+        if not partition_is_editor_visible(getattr(partitions[partition_index], 'flags', 0)):
+            hidden_faces.append(polygon.index)
+    if not hidden_faces:
+        return 0
+    mesh = bmesh.new()
+    mesh.from_mesh(obj.data)
+    mesh.faces.ensure_lookup_table()
+    bmesh.ops.delete(
+        mesh,
+        geom=[mesh.faces[index] for index in hidden_faces],
+        context='FACES',
+    )
+    mesh.to_mesh(obj.data)
+    mesh.free()
+    obj.data.update()
+    return len(hidden_faces)
+
+def actor_source_key(path):
+    return os.path.abspath(str(path)).replace('\\', '/').casefold()
+
+def actor_body_part_visible(index, occupied_slots):
+    covered_slot = {0: 0x00000004, 1: 0x00000008, 2: 0x00000010}.get(int(index), 0)
+    return covered_slot == 0 or occupied_slots & covered_slot == 0
+
+def actor_shape_texture_values(nifnode, source_fallback):
+    """Return the texture set authored for one PyNifly actor shape.
+
+    PyNifly 28 leaves ``NiShape.textures`` empty for Fallout 3's
+    BSShaderPPLightingProperty even though its native shader-slot accessor can
+    still read the referenced BSShaderTextureSet. Query those per-shape slots
+    before falling back to file-wide string recovery; a NIF can contain both
+    clothing and race-skin texture sets and must not apply the first one to
+    every mesh.
+    """
+    texture_map = getattr(nifnode, 'textures', None)
+    if texture_map:
+        values = [value for value in texture_map.values() if value]
+        if values:
+            return values
+    shader = getattr(nifnode, 'shader', None)
+    source_file = getattr(nifnode, 'file', None)
+    read_texture = getattr(shader, '_readtexture', None)
+    if callable(read_texture) and source_file is not None:
+        values = []
+        for slot in range(1, 9):
+            try:
+                value = read_texture(source_file._handle, nifnode._handle, slot)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                value = ''
+            if value and value.casefold() not in {
+                    existing.casefold() for existing in values}:
+                values.append(value)
+        if values:
+            return values
+    return list(source_fallback)
+
+def actor_material_alpha_policy(alpha_flags):
+    """Map authored NiAlphaProperty flags to a glTF alpha policy."""
+    flags = int(alpha_flags)
+    if flags & 1:
+        return 'BLEND'
+    if flags & (1 << 9):
+        return 'MASK'
+    return 'OPAQUE'
+
+def import_pynifly_actor(
+        skeleton_path, visual_paths, body_parts, apparel, ragdoll_nodes,
+        model, policy):
+    """Import one actor visual assembly with PyNifly 28.
+
+    NIFTools remains responsible for the isolated Havok pass. PyNifly owns the
+    exported armatures, inverse bind matrices, weights, and shader materials.
+    """
+    import addon_utils
+    if 'io_scene_nifly' not in bpy.context.preferences.addons:
+        addon_utils.enable('io_scene_nifly', default_set=True, persistent=False)
+    if 'io_scene_nifly' not in bpy.context.preferences.addons:
+        raise RuntimeError('PyNifly is installed but could not be enabled for headless conversion')
+    from io_scene_nifly import bl_info as pynifly_info
+    from io_scene_nifly import blender_defs as pynifly_blender_defs
+    from io_scene_nifly.nif.import_nif import NifImporter
+    from io_scene_nifly.pyn import pynifly as pynifly_api
+    from io_scene_nifly.util.settings import ImportSettings
+
+    version = tuple(int(value) for value in pynifly_info.get('version', (0, 0, 0)))
+    if version < (28, 0, 0):
+        raise RuntimeError(
+            'PyNifly 28.0.0 or newer is required for actor conversion; found '
+            + '.'.join(str(value) for value in version)
+        )
+    clear_imported_scene()
+    settings = ImportSettings(
+        rename_bones=False,
+        rename_bones_niftools=False,
+        rotate_bones_pretty=False,
+        blender_xf=False,
+        create_bones=True,
+        import_tris=False,
+        import_cutpoints=False,
+        import_animations=False,
+        import_shapekeys=False,
+        apply_skinning=True,
+        smart_editor_markers=False,
+        create_collection=False,
+        mesh_only=False,
+        import_collisions=False,
+        import_pose=False,
+        reference_skeleton=skeleton_path,
+    )
+    reference = pynifly_api.NifFile(skeleton_path)
+    # PyNifly's standard display transform is 0.1 units; Fallout preparation
+    # uses 1/70, so apply the remaining 1/7 scale while retaining its axis fix.
+    import_xf = pynifly_blender_defs.blender_import_xf @ Matrix.Scale(1.0 / 7.0, 4)
+    importer = NifImporter(
+        visual_paths,
+        import_settings=settings,
+        collection=bpy.context.scene.collection,
+        reference_skel=reference,
+        base_transform=import_xf,
+        scale=1.0,
+    )
+    importer.execute()
+
+    def source_texture_references(path):
+        """Recover Fallout 3 texture paths PyNifly 28 does not expose.
+
+        Some BSShaderPPLightingProperty blocks import with an empty
+        ``nifnode.textures`` mapping even though their BSShaderTextureSet has
+        valid, null-terminated paths. Limit the fallback to printable texture
+        references embedded in that same source NIF.
+        """
+        try:
+            with open(path, 'rb') as source_file:
+                payload = source_file.read()
+        except OSError:
+            return []
+        references = []
+        for match in re.finditer(
+                rb'textures[\\/][\x20-\x7e]*?\.(?:dds|tga|png)',
+                payload, flags=re.IGNORECASE):
+            value = match.group(0).decode('ascii', errors='ignore')
+            if value and value.casefold() not in {
+                    existing.casefold() for existing in references}:
+                references.append(value)
+        return references
+
+    source_texture_values = {
+        os.path.abspath(path).casefold(): source_texture_references(path)
+        for path in visual_paths
+    }
+
+    def staged_texture_path(value):
+        if not value:
+            return None
+        normalized = str(value).replace('\\', '/').lower()
+        marker = normalized.find('textures/')
+        if marker >= 0:
+            normalized = normalized[marker:]
+        root = os.path.abspath(bpy.context.preferences.filepaths.texture_directory)
+        if os.path.basename(root).casefold() == 'textures':
+            root = os.path.dirname(root)
+        candidate = os.path.join(root, *normalized.split('/'))
+        png = os.path.splitext(candidate)[0] + '.png'
+        if os.path.isfile(png):
+            return png
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+
+    def install_source_material(material, texture_values):
+        resolved = [staged_texture_path(value) for value in texture_values]
+        resolved = [value for value in resolved if value]
+        if not resolved:
+            return False
+        def texture_kind(path):
+            stem = os.path.basename(path).casefold()
+            if '_n.' in stem or 'normal' in stem:
+                return 'normal'
+            if '_g.' in stem or '_em.' in stem or 'glow' in stem:
+                return 'glow'
+            if '_sk.' in stem or 'spec' in stem:
+                return 'specular'
+            return 'diffuse'
+        diffuse_path = next((path for path in resolved if texture_kind(path) == 'diffuse'), None)
+        if diffuse_path is None:
+            return False
+        normal_path = next((path for path in resolved if texture_kind(path) == 'normal'), None)
+        material.use_nodes = True
+        tree = material.node_tree
+        tree.nodes.clear()
+        output = tree.nodes.new('ShaderNodeOutputMaterial')
+        principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
+        diffuse = tree.nodes.new('ShaderNodeTexImage')
+        diffuse.label = 'Diffuse'
+        diffuse.image = bpy.data.images.load(diffuse_path, check_existing=True)
+        diffuse.image.colorspace_settings.name = 'sRGB'
+        tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        alpha_flags = int(getattr(
+            getattr(material, 'niftools_alpha', None), 'alphaflag', 0))
+        alpha_policy = actor_material_alpha_policy(alpha_flags)
+        alpha_output = diffuse.outputs.get('Alpha')
+        alpha_input = principled.inputs.get('Alpha')
+        if (alpha_policy != 'OPAQUE' and
+                alpha_output is not None and alpha_input is not None):
+            if alpha_policy == 'MASK':
+                clip = tree.nodes.new('ShaderNodeMath')
+                clip.operation = 'GREATER_THAN'
+                clip.inputs[1].default_value = float(
+                    getattr(material, 'alpha_threshold', 0.5))
+                tree.links.new(alpha_output, clip.inputs[0])
+                tree.links.new(clip.outputs[0], alpha_input)
+            else:
+                tree.links.new(alpha_output, alpha_input)
+            if hasattr(material, 'surface_render_method'):
+                material.surface_render_method = (
+                    'BLENDED' if alpha_policy == 'BLEND' else 'DITHERED')
+        if normal_path:
+            normal = tree.nodes.new('ShaderNodeTexImage')
+            normal.label = 'Normal'
+            normal.image = bpy.data.images.load(normal_path, check_existing=True)
+            normal.image.colorspace_settings.name = 'Non-Color'
+            normal_map = tree.nodes.new('ShaderNodeNormalMap')
+            tree.links.new(normal.outputs['Color'], normal_map.inputs['Color'])
+            tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+        tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
+        return True
+
+    repaired_materials = 0
+    removed_helpers = 0
+    removed_hidden_faces = 0
+    for represented in importer.objects_created:
+        obj = represented.blender_obj
+        nifnode = represented.nifnode
+        if obj is None or obj.type != 'MESH' or nifnode is None:
+            continue
+        if is_pynifly_render_helper(obj.name) or is_pynifly_render_helper(
+                getattr(nifnode, 'name', '')):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_helpers += 1
+            continue
+        hidden_faces = prune_hidden_actor_partitions(obj, nifnode)
+        removed_hidden_faces += hidden_faces
+        if len(obj.data.polygons) == 0:
+            bpy.data.objects.remove(obj, do_unlink=True)
+            continue
+        source_file = getattr(getattr(nifnode, 'file', None), 'filepath', '')
+        if source_file:
+            obj['bevyout_actor_source_path'] = str(source_file).replace('\\', '/')
+        texture_values = actor_shape_texture_values(
+            nifnode,
+            source_texture_values.get(
+                os.path.abspath(source_file).casefold(), []) if source_file else [],
+        )
+        for material in obj.data.materials:
+            if material is None:
+                continue
+            images = [] if not material.use_nodes else [
+                node.image for node in material.node_tree.nodes
+                if node.bl_idname == 'ShaderNodeTexImage' and node.image
+            ]
+            if not images and install_source_material(material, texture_values):
+                repaired_materials += 1
+
+    # BSBound can arrive outside PyNifly's represented-object list, so sweep
+    # the finished scene as the authoritative export set as well.
+    for obj in list(bpy.context.scene.objects):
+        if obj.type == 'MESH' and is_pynifly_render_helper(obj.name):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            removed_helpers += 1
+
+    body_part_by_source = {
+        actor_source_key(item.get('path', '')): int(item.get('index', -1))
+        for item in body_parts if item.get('path')
+    }
+    apparel_by_source = {
+        actor_source_key(item.get('path', '')): item
+        for item in apparel if item.get('path')
+    }
+    successful_apparel = set()
+    for obj in bpy.context.scene.objects:
+        if obj.type != 'MESH' or not len(obj.data.polygons):
+            continue
+        source = actor_source_key(obj.get('bevyout_actor_source_path', ''))
+        if source not in apparel_by_source:
+            continue
+        has_armature = any(modifier.type == 'ARMATURE' and modifier.object
+                           for modifier in obj.modifiers)
+        if obj.vertex_groups and has_armature:
+            successful_apparel.add(source)
+
+    occupied_slots = 0
+    for source in successful_apparel:
+        occupied_slots |= int(apparel_by_source[source].get('biped_slot_mask', 0))
+    for source, item in apparel_by_source.items():
+        if source in successful_apparel:
+            continue
+        for obj in list(bpy.context.scene.objects):
+            if (obj.type == 'MESH' and
+                    actor_source_key(obj.get('bevyout_actor_source_path', '')) == source):
+                bpy.data.objects.remove(obj, do_unlink=True)
+        print('[convert] actor apparel fallback form_id={:08x} path={}'.format(
+            int(item.get('form_id', 0)), item.get('path', '')), flush=True)
+    for source, index in body_part_by_source.items():
+        if actor_body_part_visible(index, occupied_slots):
+            continue
+        for obj in list(bpy.context.scene.objects):
+            if (obj.type == 'MESH' and
+                    actor_source_key(obj.get('bevyout_actor_source_path', '')) == source):
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+    remapped_ragdoll_groups = collapse_actor_ragdoll_weights(ragdoll_nodes)
+
+    armatures = [obj for obj in bpy.context.scene.objects if obj.type == 'ARMATURE']
+    meshes = [obj for obj in bpy.context.scene.objects
+              if obj.type == 'MESH' and len(obj.data.polygons)]
+    if not armatures:
+        raise RuntimeError('PyNifly actor import produced no armature')
+    if not meshes:
+        raise RuntimeError('PyNifly actor import produced no render meshes')
+    weighted_meshes = []
+    for mesh in meshes:
+        has_armature = any(modifier.type == 'ARMATURE' and modifier.object
+                           for modifier in mesh.modifiers)
+        if mesh.vertex_groups and has_armature:
+            weighted_meshes.append(mesh)
+    if not weighted_meshes:
+        raise RuntimeError('PyNifly actor import produced no weighted skinned mesh')
+    for mesh in weighted_meshes:
+        for material in mesh.data.materials:
+            images = [] if material is None or not material.use_nodes else [
+                node.image for node in material.node_tree.nodes
+                if node.bl_idname == 'ShaderNodeTexImage' and node.image
+            ]
+            if not images:
+                raise RuntimeError(
+                    'PyNifly actor material has no resolved texture: '
+                    + mesh.name + '/' + (material.name if material else '<none>')
+                )
+
+    carrier = max(armatures, key=lambda obj: (
+        len(getattr(getattr(obj, 'data', None), 'bones', [])), obj.name.casefold()
+    ))
+    carrier['bevyout_source_model'] = str(model)
+    carrier['bevyout_root_transform_policy'] = str(policy)
+    carrier['bevyout_record_zero_non_identity'] = False
+    carrier['bevyout_record_zero_transform'] = [
+        float(Matrix.Identity(4)[row][column])
+        for row in range(4) for column in range(4)
+    ]
+    print('[convert] PyNifly actor imported version={} armatures={} meshes={} weighted={}'.format(
+        '.'.join(str(value) for value in version), len(armatures), len(meshes),
+        len(weighted_meshes)), 'repaired_materials={} removed_helpers={} hidden_faces={} apparel={}/{} ragdoll_weight_groups={}'.format(
+            repaired_materials, removed_helpers, removed_hidden_faces,
+            len(successful_apparel), len(apparel_by_source), remapped_ragdoll_groups), flush=True)
+    return [], 0
+
 if sys.argv[-1] == '--self-test-root-policy':
     run_root_transform_self_test()
+    raise SystemExit(0)
+if sys.argv[-1] == '--self-test-ragdoll-identity':
+    run_ragdoll_identity_self_test()
+    raise SystemExit(0)
+if len(sys.argv) >= 3 and sys.argv[-2] == '--inspect-ragdoll':
+    inspected_joints = nif_constraint_joints([sys.argv[-1]])
+    print('[convert-test] ragdoll joints={} authored={} fallback={}'.format(
+        len(inspected_joints),
+        sum(joint.get('source') == 'Authored' for joint in inspected_joints),
+        sum(joint.get('source') == 'SyntheticFallback' for joint in inspected_joints),
+    ), flush=True)
+    print(json.dumps(inspected_joints, sort_keys=True), flush=True)
     raise SystemExit(0)
 bpy.context.preferences.filepaths.texture_directory = os.path.abspath(sys.argv[-1])
 with open(sys.argv[-2], 'r', encoding='utf8') as f: jobs=json.load(f)
 for job in jobs:
     nif_path = job['input']
     assembly_inputs = None
+    assembly_skeleton = None
+    assembly_body_parts = []
+    assembly_apparel = []
     if nif_path.casefold().endswith('.actor.json'):
         with open(nif_path, 'r', encoding='utf8') as assembly_file:
-            assembly_inputs = json.load(assembly_file).get('inputs', [])
+            assembly = json.load(assembly_file)
+            assembly_skeleton = assembly.get('skeleton')
+            assembly_inputs = assembly.get('visual_inputs', [])
+            assembly_body_parts = assembly.get('body_parts', [])
+            assembly_apparel = assembly.get('apparel', [])
+        if not assembly_skeleton:
+            raise RuntimeError('actor assembly manifest has no skeleton: ' + nif_path)
         if not assembly_inputs:
-            raise RuntimeError('actor assembly manifest has no inputs: ' + nif_path)
+            raise RuntimeError('actor assembly manifest has no visual inputs: ' + nif_path)
     current_joint_defs = nif_constraint_joints(
-        assembly_inputs if assembly_inputs is not None else [nif_path]
+        [assembly_skeleton] if assembly_skeleton is not None else [nif_path]
     )
     output_path = job['output']
     physics_output_path = job['physics_output']
@@ -1098,14 +2042,10 @@ for job in jobs:
     def is_non_rendering_object(obj):
         name=obj.name.casefold().replace('_','').replace(' ','')
         return name.startswith(non_rendering_prefixes)
-    def import_nif_scene(with_animation, append=False):
+    def import_nif_scene(with_animation, append=False, source_paths=None):
         if not append:
-            bpy.ops.object.select_all(action='SELECT')
-            bpy.ops.object.delete(use_global=False)
-            for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights, bpy.data.actions):
-                for datablock in list(datablocks):
-                    if datablock.users == 0: datablocks.remove(datablock)
-        paths = assembly_inputs if assembly_inputs is not None else [nif_path]
+            clear_imported_scene()
+        paths = source_paths if source_paths is not None else [nif_path]
         spatial_corrections = []
         collision_corrections = 0
         for source_path in paths:
@@ -1118,6 +2058,7 @@ for job in jobs:
             for imported in bpy.context.scene.objects:
                 if imported.as_pointer() not in before_objects:
                     imported['bevyout_actor_source_path'] = source_path.replace('\\', '/')
+                    imported['bevyout_nif_source_path'] = canonical_nif_path(source_path)
             record_zero = NifData.data.blocks[0] if NifData.data.blocks else None
             reset_roots = apply_record_zero_transform_policy(
                 list(bpy.context.scene.objects),
@@ -1145,14 +2086,27 @@ for job in jobs:
                 # NIF collision/helper meshes have no texture and should not be rendered.
                 bpy.data.objects.remove(obj, do_unlink=True)
         return spatial_corrections, collision_corrections
-    spatial_corrections, collision_corrections = import_nif_scene(
-        False if assembly_inputs is not None else True,
-        append=False,
-    )
     if assembly_inputs is not None:
-        normalize_actor_assembly()
+        # Physics is extracted from the explicit reference skeleton through the
+        # established NIFTools/nifgen path, then that scratch scene is replaced
+        # wholesale by the PyNifly visual import.
+        import_nif_scene(False, append=False, source_paths=[assembly_skeleton])
         physics_asset = build_physics_asset()
-    elif bpy.data.actions:
+        spatial_corrections, collision_corrections = import_pynifly_actor(
+            assembly_skeleton,
+            assembly_inputs,
+            assembly_body_parts,
+            assembly_apparel,
+            [body.get('node') for body in physics_asset.get('bodies', [])],
+            job.get('model', ''),
+            job.get('root_transform_policy', 'preserve_verified'),
+        )
+    else:
+        spatial_corrections, collision_corrections = import_nif_scene(
+            True,
+            append=False,
+        )
+    if assembly_inputs is None and bpy.data.actions:
         # Controller import bakes an animated pose into the collision
         # objects' transforms (a door's colliders land in the Open position,
         # leaving the doorway hole open), so physics must come from a
@@ -1160,7 +2114,7 @@ for job in jobs:
         import_nif_scene(False)
         physics_asset = build_physics_asset()
         spatial_corrections, collision_corrections = import_nif_scene(True)
-    else:
+    elif assembly_inputs is None:
         physics_asset = build_physics_asset()
     with gzip.open(physics_output_path, 'wt', encoding='utf8', compresslevel=6) as physics_file:
         json.dump(physics_asset, physics_file, separators=(',', ':'))
@@ -1200,16 +2154,31 @@ for job in jobs:
         bpy.data.objects.remove(glow_card, do_unlink=True)
     render_meshes = [obj for obj in bpy.context.scene.objects
                      if obj.type == 'MESH' and not obj.get('bevyout_collision', False)]
-    retained_names = {
-        (obj.niftools.longname if obj.niftools.longname else obj.name)
-        for obj in render_meshes
-    }
-    source_render_geometries = [
-        block for block in NifData.data.blocks
-        if str(getattr(block, 'name', '')) in retained_names
-        and getattr(block, 'data', None) is not None
-        and callable(getattr(block, 'get_triangles', None))
-    ]
+    if assembly_inputs is not None:
+        source_render_meshes = len(render_meshes)
+        source_render_vertices = sum(len(obj.data.vertices) for obj in render_meshes)
+        source_render_triangles = sum(
+            sum(max(0, len(polygon.vertices) - 2) for polygon in obj.data.polygons)
+            for obj in render_meshes
+        )
+    else:
+        retained_names = {
+            (obj.niftools.longname if obj.niftools.longname else obj.name)
+            for obj in render_meshes
+        }
+        source_render_geometries = [
+            block for block in NifData.data.blocks
+            if str(getattr(block, 'name', '')) in retained_names
+            and getattr(block, 'data', None) is not None
+            and callable(getattr(block, 'get_triangles', None))
+        ]
+        source_render_meshes = len(source_render_geometries)
+        source_render_vertices = sum(
+            int(geometry.data.num_vertices) for geometry in source_render_geometries
+        )
+        source_render_triangles = sum(
+            len(geometry.get_triangles()) for geometry in source_render_geometries
+        )
     metadata_carrier = next(
         (obj for obj in bpy.context.scene.objects
          if obj.get('bevyout_source_model') == job.get('model', '')),
@@ -1217,13 +2186,9 @@ for job in jobs:
     )
     if metadata_carrier is None:
         raise RuntimeError('converted scene lost source metadata carrier: ' + nif_path)
-    metadata_carrier['bevyout_source_render_meshes'] = len(source_render_geometries)
-    metadata_carrier['bevyout_source_render_vertices'] = sum(
-        int(geometry.data.num_vertices) for geometry in source_render_geometries
-    )
-    metadata_carrier['bevyout_source_render_triangles'] = sum(
-        len(geometry.get_triangles()) for geometry in source_render_geometries
-    )
+    metadata_carrier['bevyout_source_render_meshes'] = source_render_meshes
+    metadata_carrier['bevyout_source_render_vertices'] = source_render_vertices
+    metadata_carrier['bevyout_source_render_triangles'] = source_render_triangles
     metadata_carrier['bevyout_spatial_audit_version'] = 1
     metadata_carrier['bevyout_expected_spatial_corrections'] = len(spatial_corrections)
     metadata_carrier['bevyout_verified_spatial_corrections'] = sum(
@@ -1270,6 +2235,10 @@ for job in jobs:
             # Older NIFTools/Blender combinations may not expose the color
             # space property; the material links below are still valid.
             pass
+        if assembly_inputs is not None:
+            # PyNifly already authored its Principled/alpha/normal graph. Keep
+            # it intact; only normalize texture color spaces above.
+            continue
         authored_emission = authored_emission_color(material)
         emission_multiplier, has_emission_multiplier = source_emission_multiplier(material)
         old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)

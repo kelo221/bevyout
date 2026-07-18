@@ -1,4 +1,7 @@
-use super::JobPlacement;
+use super::{
+    JobPlacement,
+    gltf_extension_policy::{material_extensions_used, unsupported_required_extensions},
+};
 use anyhow::{Context, Result, bail};
 use bevy::math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 use gltf::mesh::util::{ReadColors, ReadTexCoords};
@@ -392,12 +395,9 @@ impl RustBakeScene {
                 Value::Array(self.resources.samplers.clone()),
             );
         }
-        if self.resources.materials.iter().any(|material| {
-            material
-                .pointer("/extensions/KHR_materials_specular")
-                .is_some()
-        }) {
-            root.insert("extensionsUsed".into(), json!(["KHR_materials_specular"]));
+        let extensions_used = material_extensions_used(&self.resources.materials);
+        if !extensions_used.is_empty() {
+            root.insert("extensionsUsed".into(), json!(extensions_used));
         }
         write_glb(output, &Value::Object(root), &self.resources.binary)?;
         gltf::Gltf::open(output).with_context(|| {
@@ -415,9 +415,8 @@ fn load_asset(path: &Path, resources: &mut OutputResources) -> Result<LoadedAsse
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
-        .filter(|name| *name != "KHR_materials_specular")
-        .collect::<Vec<_>>();
+        .filter_map(Value::as_str);
+    let required = unsupported_required_extensions(required);
     if !required.is_empty() {
         bail!(
             "{} requires unsupported glTF extensions: {}",
