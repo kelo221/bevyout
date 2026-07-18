@@ -207,6 +207,11 @@ fn t39_6_editor_id_and_record_type_queries() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].record_type, "CELL");
 
+    let resolver: &dyn ContentRecordResolver = &index;
+    let resolved = resolver.resolve_form_id(FormId(0x100)).unwrap();
+    assert_eq!(resolved.editor_id.as_deref(), Some("TestCell"));
+    assert_eq!(resolver.resolve_editor_id("TESTCELL"), [resolved]);
+
     assert!(index.by_editor_id("does-not-exist").is_empty());
 }
 

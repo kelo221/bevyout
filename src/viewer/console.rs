@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 
 use crate::app_state::GameplayModal;
 use crate::console::{
-    ConsoleCommand, ConsoleCommandResult, ConsoleEntityHooks, ConsoleError, ConsoleInvocation,
-    ConsoleRegistry, resolve_reference,
+    ConsoleCommand, ConsoleCommandProvider, ConsoleCommandResult, ConsoleEntityHooks, ConsoleError,
+    ConsoleInvocation, ConsoleRegistry, resolve_reference,
 };
 use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
 use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
@@ -98,13 +98,20 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    player_commands::register(&mut registry);
-    navigation_commands::register(&mut registry);
-    world_commands::register(&mut registry);
-    render_commands::register(&mut registry);
-    ui_commands::register(&mut registry);
-    item_commands::register(&mut registry);
-    persistence_commands::register(&mut registry);
+    let providers: [&dyn ConsoleCommandProvider; 7] = [
+        &player_commands::PlayerCommandProvider,
+        &navigation_commands::NavigationCommandProvider,
+        &world_commands::WorldCommandProvider,
+        &render_commands::RenderCommandProvider,
+        &ui_commands::UiCommandProvider,
+        &item_commands::ItemCommandProvider,
+        &persistence_commands::PersistenceCommandProvider,
+    ];
+    for provider in providers {
+        registry
+            .register_provider(provider)
+            .expect("built-in viewer console providers must be unique");
+    }
 }
 
 #[cfg(test)]

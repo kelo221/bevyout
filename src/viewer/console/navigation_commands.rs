@@ -2,8 +2,11 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    for command in [
+pub(super) struct NavigationCommandProvider;
+
+impl ConsoleCommandProvider for NavigationCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
         ConsoleCommand::new(
             "tnm",
             "tnm",
@@ -19,9 +22,9 @@ pub(super) fn register(registry: &mut ConsoleRegistry) {
             nav::agent::tna_command,
         )
         .mutating(),
-    ] {
-        registry
-            .register(command)
-            .expect("navigation console command is unique");
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
     }
 }

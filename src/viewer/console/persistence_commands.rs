@@ -2,9 +2,11 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    registry
-        .register(
+pub(super) struct PersistenceCommandProvider;
+
+impl ConsoleCommandProvider for PersistenceCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        registry.register(
             ConsoleCommand::new(
                 "save",
                 "save <slot>",
@@ -13,7 +15,7 @@ pub(super) fn register(registry: &mut ConsoleRegistry) {
             )
             .mutating(),
         )
-        .expect("save console command is unique");
+    }
 }
 
 /// Issue #60 (F60.3): captures the active cell into `ActiveSaveState` and

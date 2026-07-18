@@ -2,26 +2,29 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    for command in [
-        ConsoleCommand::new(
-            "tm",
-            "tm",
-            "Toggle gameplay UI; the open console remains visible.",
-            toggle_game_ui,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tdt",
-            "tdt",
-            "Toggle diagnostic UI entities.",
-            toggle_diagnostic_ui,
-        )
-        .mutating(),
-    ] {
-        registry
-            .register(command)
-            .expect("UI console command is unique");
+pub(super) struct UiCommandProvider;
+
+impl ConsoleCommandProvider for UiCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
+            ConsoleCommand::new(
+                "tm",
+                "tm",
+                "Toggle gameplay UI; the open console remains visible.",
+                toggle_game_ui,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tdt",
+                "tdt",
+                "Toggle diagnostic UI entities.",
+                toggle_diagnostic_ui,
+            )
+            .mutating(),
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
     }
 }
 

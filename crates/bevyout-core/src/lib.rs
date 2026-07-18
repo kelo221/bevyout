@@ -4,6 +4,7 @@
 //! execution. The application crate adapts these values at its preparation
 //! and runtime boundaries.
 
+pub mod content;
 pub mod form_id;
 pub mod item_transaction;
 pub mod items;

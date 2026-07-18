@@ -2,19 +2,24 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    for command in [
-        ConsoleCommand::new("additem", "[player.]additem <FormID> [count]", "Add count (default 1) of an item FormID to the player inventory.", add_item).reference_callable(false).mutating(),
-        ConsoleCommand::new("equip", "[player.]equip <ItemInstanceId>", "Equip a canonical player item by stable instance id.", equip_item).reference_callable(false).mutating(),
-        ConsoleCommand::new("equipitem", "[player.]equipitem <FormID>", "Equip (or unequip, if already equipped) an item FormID already in the player inventory.", equip_item_formid).reference_callable(false).mutating(),
-        ConsoleCommand::new("unequip", "[player.]unequip", "Unequip the canonical player item.", unequip_item).reference_callable(false).mutating(),
-        ConsoleCommand::new("hotkey", "[player.]hotkey <0..7> <ItemInstanceId>", "Bind a stable canonical item id to a player hotkey slot.", bind_hotkey).reference_callable(false).mutating(),
-        ConsoleCommand::new("useitem", "[player.]useitem <ItemInstanceId>", "Consume one unit through the canonical item-use seam.", use_item).reference_callable(false).mutating(),
-        ConsoleCommand::new("setmerchant", "setmerchant <container-reference> <caps>", "Mark a prepared static container as a merchant with fixed caps.", set_merchant).mutating(),
-        ConsoleCommand::new("buy", "buy <merchant-reference> <ItemInstanceId> [count]", "Buy a fixed-price item from a prepared static merchant.", buy_item).mutating(),
-        ConsoleCommand::new("sell", "sell <merchant-reference> <ItemInstanceId> [count]", "Sell a fixed-price item to a prepared static merchant.", sell_item).mutating(),
-    ] {
-        registry.register(command).expect("item console command is unique");
+pub(super) struct ItemCommandProvider;
+
+impl ConsoleCommandProvider for ItemCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
+            ConsoleCommand::new("additem", "[player.]additem <FormID> [count]", "Add count (default 1) of an item FormID to the player inventory.", add_item).reference_callable(false).mutating(),
+            ConsoleCommand::new("equip", "[player.]equip <ItemInstanceId>", "Equip a canonical player item by stable instance id.", equip_item).reference_callable(false).mutating(),
+            ConsoleCommand::new("equipitem", "[player.]equipitem <FormID>", "Equip (or unequip, if already equipped) an item FormID already in the player inventory.", equip_item_formid).reference_callable(false).mutating(),
+            ConsoleCommand::new("unequip", "[player.]unequip", "Unequip the canonical player item.", unequip_item).reference_callable(false).mutating(),
+            ConsoleCommand::new("hotkey", "[player.]hotkey <0..7> <ItemInstanceId>", "Bind a stable canonical item id to a player hotkey slot.", bind_hotkey).reference_callable(false).mutating(),
+            ConsoleCommand::new("useitem", "[player.]useitem <ItemInstanceId>", "Consume one unit through the canonical item-use seam.", use_item).reference_callable(false).mutating(),
+            ConsoleCommand::new("setmerchant", "setmerchant <container-reference> <caps>", "Mark a prepared static container as a merchant with fixed caps.", set_merchant).mutating(),
+            ConsoleCommand::new("buy", "buy <merchant-reference> <ItemInstanceId> [count]", "Buy a fixed-price item from a prepared static merchant.", buy_item).mutating(),
+            ConsoleCommand::new("sell", "sell <merchant-reference> <ItemInstanceId> [count]", "Sell a fixed-price item to a prepared static merchant.", sell_item).mutating(),
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
     }
 }
 

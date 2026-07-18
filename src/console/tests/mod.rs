@@ -34,29 +34,48 @@ fn register_entity(app: &mut App, form_id: u32, editor_id: &str, position: Vec3)
     entity
 }
 
-#[test]
-fn third_party_registration_and_generated_help_work() {
-    fn echo(
-        _world: &mut World,
-        invocation: &ConsoleInvocation,
-    ) -> Result<ConsoleCommandResult, ConsoleError> {
-        Ok(ConsoleCommandResult::value(json!(invocation.args)))
-    }
+struct EchoCommandProvider;
 
-    let mut app = test_app();
-    app.world_mut()
-        .resource_mut::<ConsoleRegistry>()
-        .register(ConsoleCommand::new(
+impl ConsoleCommandProvider for EchoCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        fn echo(
+            _world: &mut World,
+            invocation: &ConsoleInvocation,
+        ) -> Result<ConsoleCommandResult, ConsoleError> {
+            Ok(ConsoleCommandResult::value(json!(invocation.args)))
+        }
+
+        registry.register(ConsoleCommand::new(
             "echo",
             "echo <value>",
             "Echo values.",
             echo,
         ))
+    }
+}
+
+#[test]
+fn third_party_registration_and_generated_help_work() {
+    let mut app = test_app();
+    app.world_mut()
+        .resource_mut::<ConsoleRegistry>()
+        .register_provider(&EchoCommandProvider)
         .unwrap();
     assert_eq!(exec(&mut app, "a", "echo hello").value, json!(["hello"]));
     let help = exec(&mut app, "a", "help echo");
     assert!(help.ok);
     assert_eq!(help.value["name"], "echo");
+
+    let duplicate = app
+        .world_mut()
+        .resource_mut::<ConsoleRegistry>()
+        .register_provider(&EchoCommandProvider)
+        .unwrap_err();
+    assert_eq!(duplicate.code, "duplicate_command");
+    assert_eq!(
+        exec(&mut app, "a", "echo still-live").value,
+        json!(["still-live"])
+    );
 }
 
 #[test]

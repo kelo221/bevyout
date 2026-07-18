@@ -2,60 +2,63 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    for command in [
-        ConsoleCommand::new(
-            "getrender",
-            "getrender [setting]",
-            "Get one render setting or all render settings.",
-            get_render,
-        ),
-        ConsoleCommand::new(
-            "setrender",
-            "setrender <setting> <value>",
-            "Set a validated render setting.",
-            set_render,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tonemap",
-            "tonemap [mode]",
-            "Get or set the active camera tonemapper.",
-            tonemap,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "renderreport",
-            "renderreport",
-            "Write the configured render timing and diagnostic reports immediately.",
-            render_report,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "shadowcache",
-            "shadowcache <status|rebuild>",
-            "Inspect the prepared point-shadow artifact or show rebuild instructions.",
-            shadow_cache,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "sgtm",
-            "sgtm <0.01..100>",
-            "Set Time<Virtual> relative speed without changing pause state.",
-            set_global_time_multiplier,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "screenshot",
-            "screenshot [name]",
-            "Save the primary window under .bevyout/screenshots using a sanitized name.",
-            screenshot,
-        )
-        .mutating(),
-    ] {
-        registry
-            .register(command)
-            .expect("render console command is unique");
+pub(super) struct RenderCommandProvider;
+
+impl ConsoleCommandProvider for RenderCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
+            ConsoleCommand::new(
+                "getrender",
+                "getrender [setting]",
+                "Get one render setting or all render settings.",
+                get_render,
+            ),
+            ConsoleCommand::new(
+                "setrender",
+                "setrender <setting> <value>",
+                "Set a validated render setting.",
+                set_render,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tonemap",
+                "tonemap [mode]",
+                "Get or set the active camera tonemapper.",
+                tonemap,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "renderreport",
+                "renderreport",
+                "Write the configured render timing and diagnostic reports immediately.",
+                render_report,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "shadowcache",
+                "shadowcache <status|rebuild>",
+                "Inspect the prepared point-shadow artifact or show rebuild instructions.",
+                shadow_cache,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "sgtm",
+                "sgtm <0.01..100>",
+                "Set Time<Virtual> relative speed without changing pause state.",
+                set_global_time_multiplier,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "screenshot",
+                "screenshot [name]",
+                "Save the primary window under .bevyout/screenshots using a sanitized name.",
+                screenshot,
+            )
+            .mutating(),
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
     }
 }
 

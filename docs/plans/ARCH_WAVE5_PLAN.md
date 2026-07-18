@@ -32,4 +32,13 @@ representative prepared cell. The final PR targets `master` and closes
 
 ## Shipped amendments
 
-None yet.
+- `ContentRecordResolver` lives in the engine-independent core and returns
+  owned snapshots, so implementations never leak parser-buffer lifetimes.
+  `ConsoleCommandProvider` stays beside `ConsoleRegistry` in the application
+  crate because its handlers intentionally accept Bevy `World`; moving that
+  trait into the pure core would reintroduce the engine coupling wave 1
+  removed.
+- The production catalogue uses a resolver adapter over its already-parsed
+  ESM content rather than building `ContentIndex` a second time. The canonical
+  index implements the same trait, while synthetic core tests prove alternate
+  providers without licensed data.

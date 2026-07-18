@@ -2,63 +2,66 @@
 
 use super::*;
 
-pub(super) fn register(registry: &mut ConsoleRegistry) {
-    for command in [
-        ConsoleCommand::new(
-            "tcl",
-            "tcl",
-            "Toggle FPS-player collision and gravity while preserving movement.",
-            toggle_collision,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tfc",
-            "tfc",
-            "Toggle between the FPS player and free-fly camera.",
-            toggle_fly_camera,
-        )
-        .aliases(&["toggleflycam"])
-        .mutating(),
-        ConsoleCommand::new(
-            "fov",
-            "fov [10..170]",
-            "Get or set the horizontal camera field of view in degrees.",
-            field_of_view,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tlights",
-            "tlights",
-            "Toggle all runtime scene lights.",
-            toggle_lights,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tcg",
-            "tcg",
-            "Toggle collision geometry diagnostics.",
-            toggle_collision_geometry,
-        )
-        .aliases(&["togglecollisiongeometry"])
-        .mutating(),
-        ConsoleCommand::new(
-            "stairdebug",
-            "stairdebug",
-            "Toggle stair-step rejection logging.",
-            toggle_stair_debug,
-        )
-        .mutating(),
-        ConsoleCommand::new(
-            "tunlit",
-            "tunlit",
-            "Toggle unlit material diagnostics.",
-            toggle_unlit,
-        )
-        .mutating(),
-    ] {
-        registry
-            .register(command)
-            .expect("player console command is unique");
+pub(super) struct PlayerCommandProvider;
+
+impl ConsoleCommandProvider for PlayerCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
+            ConsoleCommand::new(
+                "tcl",
+                "tcl",
+                "Toggle FPS-player collision and gravity while preserving movement.",
+                toggle_collision,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tfc",
+                "tfc",
+                "Toggle between the FPS player and free-fly camera.",
+                toggle_fly_camera,
+            )
+            .aliases(&["toggleflycam"])
+            .mutating(),
+            ConsoleCommand::new(
+                "fov",
+                "fov [10..170]",
+                "Get or set the horizontal camera field of view in degrees.",
+                field_of_view,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tlights",
+                "tlights",
+                "Toggle all runtime scene lights.",
+                toggle_lights,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tcg",
+                "tcg",
+                "Toggle collision geometry diagnostics.",
+                toggle_collision_geometry,
+            )
+            .aliases(&["togglecollisiongeometry"])
+            .mutating(),
+            ConsoleCommand::new(
+                "stairdebug",
+                "stairdebug",
+                "Toggle stair-step rejection logging.",
+                toggle_stair_debug,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "tunlit",
+                "tunlit",
+                "Toggle unlit material diagnostics.",
+                toggle_unlit,
+            )
+            .mutating(),
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
     }
 }
 

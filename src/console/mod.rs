@@ -18,7 +18,9 @@ pub use executor::{
     ConsoleEntityHooks, ConsoleExecutor, ConsoleFrame, ConsoleQueue, ConsoleQueuedResponse,
     ConsoleResponses, ConsoleSessionStore, RefIdentity, RefRegistry, resolve_reference,
 };
-pub use registry::{ConsoleCommand, ConsoleCommandMetadata, ConsoleHandler, ConsoleRegistry};
+pub use registry::{
+    ConsoleCommand, ConsoleCommandMetadata, ConsoleCommandProvider, ConsoleHandler, ConsoleRegistry,
+};
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
