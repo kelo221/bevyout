@@ -353,12 +353,12 @@ pub(crate) fn update_debug_info_hud(world: &mut World) {
                 .map(|transform| transform.translation)
         };
         let active_cell = world
-            .get_resource::<PreparedSceneManifest>()
+            .get_resource::<crate::viewer::LoadedSceneManifest>()
             .map(|manifest| {
                 (
-                    manifest.cell.form_id,
-                    manifest.cell.editor_id.clone(),
-                    manifest.cell.name.clone(),
+                    manifest.0.cell.form_id,
+                    manifest.0.cell.editor_id.clone(),
+                    manifest.0.cell.name.clone(),
                 )
             });
         let active_cell_refs = active_cell
