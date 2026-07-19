@@ -33,8 +33,8 @@
 //! used, keeping both sides of a cross-mesh seam agreeing exactly.
 //!
 //! Std-only (no `bevy`/`glam`/`serde`): this file is included verbatim by
-//! `tests/features.rs` via `#[path]`, the same way `erosion_policy.rs` and
-//! `nav_graph.rs` are -- see `AGENTS.md`'s testing section. The boundary
+//! `tests/features.rs` via `#[path]`, the same way `nav_graph.rs` is -- see
+//! `AGENTS.md`'s testing section. The boundary
 //! conversion from `PreparedNavMesh`/`PreparedPhysicsShape` into the plain
 //! world-space triangle inputs below lives in `navmesh.rs` (which is free to
 //! import `glam`/`vsa` types), not here.
@@ -42,8 +42,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Agent capsule radius (metres). Matches `nav::agent::AGENT_RADIUS` and
-/// `player::CAPSULE_RADIUS` (0.35 m); held locally per the same
-/// no-cross-import rule `erosion_policy` documented.
+/// `player::CAPSULE_RADIUS` (0.35 m); held locally rather than imported,
+/// keeping this module std-only for the cucumber `#[path]` include.
 pub(crate) const AGENT_RADIUS: f32 = 0.35;
 /// Agent capsule height (metres). Matches `nav::agent::AGENT_HEIGHT` (1.8 m).
 /// A collider must rise into `[floor, floor + AGENT_HEIGHT]` to count as an
@@ -93,8 +93,8 @@ pub(crate) struct CollisionTriangle {
 }
 
 /// One nav mesh's walkable triangle soup, plus its seam/door protected edges
-/// (unordered vertex-index pairs) -- the same plain shape
-/// `erosion_policy::ErosionMeshInput` used.
+/// (unordered vertex-index pairs) -- a plain vertex-array + index-triple
+/// shape, the boundary conversion filling it in `navmesh.rs`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct NavClearanceMeshInput {
     pub(crate) vertices: Vec<[f32; 3]>,

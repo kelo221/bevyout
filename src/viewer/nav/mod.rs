@@ -17,7 +17,6 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
 pub(crate) mod door_link;
-pub(crate) mod erosion_policy;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;
@@ -70,9 +69,8 @@ pub(crate) fn nav_graph_path(manifest: &PreparedSceneManifest) -> Option<PathBuf
 /// lacking collision support, cut by an interior collider, or disconnected as
 /// a sub-diameter corridor throat). `!walkable` polygons are excluded here so
 /// they never reach the landmass navigation mesh -- a route into a dropped
-/// region is then `unreachable` at query time. The runtime
-/// `erosion_policy::erode` is a no-op passthrough (clearance now lives
-/// prepare-side).
+/// region is then `unreachable` at query time. The interim runtime erosion
+/// pass is retired; clearance now lives entirely prepare-side.
 pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshInput> {
     graph
         .meshes

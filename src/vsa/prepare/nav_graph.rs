@@ -255,7 +255,7 @@ pub(crate) struct PreparedNavExternalConnection {
 /// legitimately face several shorter tessellated edges on the other mesh)
 /// and passing `validate_portal_candidate`'s opposing-direction/
 /// overlapping-interval checks. `edge_a`/`edge_b` are the matched edges'
-/// own vertex-index identity (stable across erosion: `erosion_policy`'s
+/// own vertex-index identity (stable across clearance: `nav_clearance`'s
 /// protected-edge rule pins these exact vertices in place);
 /// `interval_a`/`interval_b` are the two edges' overlapping world-space
 /// portal interval, clamped to the shared overlap and positionally
