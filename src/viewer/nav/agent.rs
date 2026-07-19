@@ -865,7 +865,7 @@ fn teardown_archipelago(world: &mut World) {
 /// islands, and door-link entities for the active cell's prepared nav
 /// graph. Lazy: only called from `tna spawn`, never eagerly per cell swap.
 fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
-    let (current_cell, path, travel_destinations, door_lock_info, door_positions) = {
+    let (current_cell, path, travel_destinations, mut door_lock_info, door_positions) = {
         let manifest = world
             .get_resource::<crate::viewer::LoadedSceneManifest>()
             .ok_or_else(no_nav_graph_error)?;
@@ -904,6 +904,22 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     if already_current {
         return Ok(());
     }
+
+    // Issue #169: a runtime lock change already recorded before this build
+    // -- an early `setlock` issued before any archipelago exists yet (this
+    // resource is `init_resource`d at plugin install, so it exists and is
+    // writable long before the first `tna spawn`), or one that landed
+    // earlier in the same session -- must survive the rebuild below. The
+    // authored baseline just read from the manifest is the fallback, not
+    // the winner: overlay whatever `NavArchipelagoState.door_lock_info`
+    // (the exact map `set_door_lock_level`/`setlock` writes into) already
+    // holds for each door FormID before `teardown_archipelago` resets the
+    // resource to its default a few lines down. A door this session never
+    // touched keeps its authored value untouched.
+    for (&door_form_id, &info) in &world.resource::<NavArchipelagoState>().door_lock_info {
+        door_lock_info.insert(door_form_id, info);
+    }
+
     teardown_archipelago(world);
 
     let graph = super::read_nav_graph(&path).map_err(|error| {
@@ -5621,6 +5637,188 @@ mod tests {
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #169: setlock issued before the archipelago exists.
+    // -----------------------------------------------------------------
+
+    /// Writes a synthetic `navgraph.ron` (never Bethesda-derived -- see
+    /// AGENTS.md's git caution) under a scratch cache dir and returns a
+    /// manifest whose `nav_graph.asset_path`/`asset_root` resolve to it,
+    /// plus one door placement -- mirrors `nav_overlay.rs`'s own test
+    /// helper of the same shape (private to that module, so duplicated
+    /// rather than shared, the same rationale `nav/mod.rs::read_nav_graph`'s
+    /// doc comment gives for its own duplication). Exercises
+    /// `ensure_archipelago`'s real file-reading path directly, rather than
+    /// the `already_current` short-circuit every other test in this module
+    /// relies on -- issue #169's bug is specifically in what that path does
+    /// with `door_lock_info` before the short-circuit is even possible (the
+    /// very first build of a session). The mesh carries no door triangles
+    /// of its own: these tests are about `NavArchipelagoState::
+    /// door_lock_info` surviving the rebuild, not about door-typed
+    /// pathing (that is issue #155's own coverage).
+    fn manifest_with_nav_graph_and_door(
+        cell_form_id: u32,
+        door_form_id: u32,
+        authored_lock_level: Option<i8>,
+    ) -> PreparedSceneManifest {
+        let graph = crate::vsa::PreparedNavGraph {
+            cell_form_id,
+            meshes: vec![crate::vsa::PreparedNavMesh {
+                form_id: 0x10,
+                vertices: vec![
+                    [0.0, 0.0, 0.0],
+                    [4.0, 0.0, 0.0],
+                    [0.0, 0.0, 4.0],
+                    [4.0, 0.0, 4.0],
+                ],
+                polygons: vec![
+                    crate::vsa::PreparedNavPolygon {
+                        index: 0,
+                        vertex_indices: [0, 1, 2],
+                        ..Default::default()
+                    },
+                    crate::vsa::PreparedNavPolygon {
+                        index: 1,
+                        vertex_indices: [1, 3, 2],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "bevyout-nav-agent-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let relative = "navgraph.ron";
+        std::fs::write(
+            dir.join(relative),
+            ron::ser::to_string_pretty(&graph, ron::ser::PrettyConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let mut manifest = minimal_manifest(cell_form_id);
+        manifest.asset_root = dir.to_string_lossy().into_owned();
+        manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource {
+            asset_path: relative.into(),
+            ..Default::default()
+        });
+        manifest.placements = vec![crate::vsa::PreparedPlacement {
+            semantic: crate::vsa::PreparedSemantic::Door(crate::vsa::PreparedDoor {
+                lock_level: authored_lock_level,
+                key_form_id: None,
+                destination: None,
+            }),
+            ..door_placement(door_form_id)
+        }];
+        manifest
+    }
+
+    /// Minimal resources `ensure_archipelago` unconditionally touches,
+    /// beyond what `harness_world()` already provides -- `PhysicsDisabled`
+    /// is set `true` so the merge-link collision-validation pass (this
+    /// fixture's mesh has no merges anyway) never needs a real
+    /// `BoxdddPhysicsContext`.
+    fn archipelago_build_world() -> World {
+        let mut world = harness_world();
+        world.init_resource::<Assets<NavMesh3d>>();
+        world.init_resource::<NavCellFallBounds>();
+        world.insert_resource(PhysicsDisabled(true));
+        world
+    }
+
+    /// Build-after-unlock (issue #169's exact repro): the door's authored
+    /// data is locked (`Some(25)`), but a `setlock` unlock landed *before*
+    /// `ensure_archipelago` ever ran -- `NavArchipelagoState` is
+    /// `init_resource`d empty at plugin install, well before the first
+    /// `tna spawn`, so `set_door_lock_level` (`setlock`'s own narrow
+    /// mutation point) already has somewhere to write. The runtime unlock
+    /// must win over the authored lock at build time.
+    #[test]
+    fn an_early_setlock_unlock_survives_the_first_archipelago_build() {
+        let mut world = archipelago_build_world();
+        let manifest = manifest_with_nav_graph_and_door(0xBEEF, 0x99, Some(25));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+        set_door_lock_level(&mut world, 0x99, None);
+
+        ensure_archipelago(&mut world).expect("archipelago builds");
+
+        assert_eq!(
+            door_lock_level_for_test(&world, 0x99),
+            None,
+            "the runtime unlock recorded before the archipelago existed must survive the build, winning over the authored lock level"
+        );
+    }
+
+    /// The build-after-lock counterpart: authored data is unlocked
+    /// (`None`), but a runtime `setlock` recorded a lock before the
+    /// archipelago ever existed.
+    #[test]
+    fn an_early_setlock_lock_survives_the_first_archipelago_build() {
+        let mut world = archipelago_build_world();
+        let manifest = manifest_with_nav_graph_and_door(0xBEEF, 0x99, None);
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+        set_door_lock_level(&mut world, 0x99, Some(50));
+
+        ensure_archipelago(&mut world).expect("archipelago builds");
+
+        assert_eq!(
+            door_lock_level_for_test(&world, 0x99),
+            Some(50),
+            "the runtime lock recorded before the archipelago existed must survive the build, winning over the authored (unlocked) baseline"
+        );
+    }
+
+    /// Regression pin: a door this session's `setlock` never touched keeps
+    /// its authored value -- the merge in `ensure_archipelago` must not
+    /// blanket-override every door with whatever the (empty)
+    /// `NavArchipelagoState.door_lock_info` happens to hold, only apply an
+    /// actual recorded runtime change.
+    #[test]
+    fn a_door_untouched_by_setlock_keeps_its_authored_lock_level() {
+        let mut world = archipelago_build_world();
+        let manifest = manifest_with_nav_graph_and_door(0xBEEF, 0x99, Some(25));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+        ensure_archipelago(&mut world).expect("archipelago builds");
+
+        assert_eq!(
+            door_lock_level_for_test(&world, 0x99),
+            Some(25),
+            "an untouched door's authored lock level must be unchanged by the merge"
+        );
+    }
+
+    /// A lock change issued *after* the archipelago already exists still
+    /// applies (the pre-#169 path -- `set_door_lock_level` writing directly
+    /// into the live `NavArchipelagoState.door_lock_info`, no rebuild
+    /// needed). Pinned here alongside the early-setlock tests so the two
+    /// timing cases -- before and after the first build -- are both
+    /// covered in one place.
+    #[test]
+    fn a_late_setlock_change_still_applies_without_a_rebuild() {
+        let mut world = archipelago_build_world();
+        let manifest = manifest_with_nav_graph_and_door(0xBEEF, 0x99, Some(25));
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+        ensure_archipelago(&mut world).expect("archipelago builds");
+        assert_eq!(door_lock_level_for_test(&world, 0x99), Some(25));
+
+        set_door_lock_level(&mut world, 0x99, None);
+        assert_eq!(
+            door_lock_level_for_test(&world, 0x99),
+            None,
+            "a lock change after the archipelago exists must apply immediately, no rebuild needed"
+        );
     }
 
     // -----------------------------------------------------------------
