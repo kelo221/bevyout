@@ -710,6 +710,18 @@ struct BevyoutWorld {
     actor_fallback_input: actor::ActorAppearanceAvailability,
     actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
     actor_fallback_decision: Option<actor::ActorFallbackDecision>,
+
+    // -- nav_stuck_progress.feature (issue #157) --
+    nav_stuck_progress_desired: [f32; 2],
+    nav_stuck_progress_achieved: [f32; 2],
+    nav_stuck_progress_delta: Option<f32>,
+    /// "u_shaped" or "blocked" -- picks the per-tick desired/achieved
+    /// generator `when_route_is_simulated` runs.
+    nav_stuck_progress_route_kind: Option<String>,
+    nav_stuck_progress_route_ticks: u32,
+    nav_stuck_progress_route_speed: f32,
+    nav_stuck_progress_start_recovery_tick: Option<u32>,
+    nav_stuck_progress_stuck_tick: Option<u32>,
 }
 
 fn find_placement<'a>(
@@ -8257,4 +8269,163 @@ async fn then_fallback_identity_remains(
         .expect("actor fallback must be resolved");
     assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
     assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
+}
+
+// ---------------------------------------------------------------------
+// nav_stuck_progress.feature (issue #157) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a desired horizontal velocity of ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_nav_stuck_progress_desired(world: &mut BevyoutWorld, x: f32, z: f32) {
+    world.nav_stuck_progress_desired = [x, z];
+}
+
+#[given(regex = r"^an achieved horizontal velocity of ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_nav_stuck_progress_achieved(world: &mut BevyoutWorld, x: f32, z: f32) {
+    world.nav_stuck_progress_achieved = [x, z];
+}
+
+#[when("the route progress delta is computed")]
+async fn when_route_progress_delta_computed(world: &mut BevyoutWorld) {
+    world.nav_stuck_progress_delta = Some(movement_policy::route_progress_delta(
+        world.nav_stuck_progress_desired,
+        world.nav_stuck_progress_achieved,
+    ));
+}
+
+#[then(regex = r"^the route progress delta is ([\-\d.]+)$")]
+async fn then_route_progress_delta_is(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.nav_stuck_progress_delta, Some(expected));
+}
+
+#[given(
+    regex = r"^a U-shaped detour route of (\d+) ticks where the agent always achieves its desired horizontal velocity$"
+)]
+async fn given_u_shaped_detour_route(world: &mut BevyoutWorld, ticks: u32) {
+    world.nav_stuck_progress_route_kind = Some("u_shaped".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+}
+
+#[given(regex = r"^a fully blocked route of (\d+) ticks with desired horizontal speed ([\d.]+)$")]
+async fn given_fully_blocked_route(world: &mut BevyoutWorld, ticks: u32, speed: f32) {
+    world.nav_stuck_progress_route_kind = Some("blocked".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+    world.nav_stuck_progress_route_speed = speed;
+}
+
+/// This tick's `(desired, achieved)` horizontal-velocity pair for the named
+/// route kind, mirroring exactly what `apply_agent_physics_movement` would
+/// sample from a real KCC sweep at tick `tick` (1-indexed) of `total_ticks`.
+fn nav_stuck_progress_route_tick(
+    kind: &str,
+    tick: u32,
+    total_ticks: u32,
+    blocked_speed: f32,
+) -> ([f32; 2], [f32; 2]) {
+    match kind {
+        "u_shaped" => {
+            // Three equal legs: away from the final target, around the
+            // wall, then back toward it -- the exact detour shape issue
+            // #157 exists to stop false-triggering stuck recovery on. The
+            // agent always achieves what it desires (never collision-
+            // blocked), so every tick is genuine corridor progress.
+            let leg = total_ticks / 3;
+            let direction = if tick <= leg {
+                [-1.0, 0.0]
+            } else if tick <= 2 * leg {
+                [0.0, 1.0]
+            } else {
+                [1.0, 0.0]
+            };
+            let desired = [direction[0] * 2.0, direction[1] * 2.0];
+            (desired, desired)
+        }
+        "blocked" => {
+            // Landmass keeps asking for horizontal motion; the KCC sweep
+            // never achieves any of it -- a genuine wedge, not a detour.
+            ([blocked_speed, 0.0], [0.0, 0.0])
+        }
+        other => panic!("unknown nav stuck-progress route kind {other:?}"),
+    }
+}
+
+/// Fixed-tick simulation mirroring `apply_agent_physics_movement`'s own
+/// stuck-tracking bookkeeping (see that function's `route_progress`/
+/// `best_distance`/`ticks_without_progress`/`recovery_active` handling in
+/// `src/viewer/nav/agent.rs`) against the pure `movement_policy` functions
+/// directly -- no Bevy/boxddd involved. Returns the first tick (1-indexed)
+/// each of `StartRecovery`/`Stuck` was reached, if ever.
+#[when("the route is simulated tick by tick")]
+async fn when_route_is_simulated(world: &mut BevyoutWorld) {
+    let kind = world
+        .nav_stuck_progress_route_kind
+        .clone()
+        .expect("a route must be given first");
+    let total_ticks = world.nav_stuck_progress_route_ticks;
+    let blocked_speed = world.nav_stuck_progress_route_speed;
+    const DT: f32 = 1.0 / 64.0;
+
+    let mut best_distance = f32::MAX;
+    let mut ticks_without_progress: u32 = 0;
+    let mut recovery_active = false;
+    let mut route_progress: f32 = 0.0;
+    let mut start_recovery_tick = None;
+    let mut stuck_tick = None;
+
+    for tick in 1..=total_ticks {
+        let (desired, achieved) =
+            nav_stuck_progress_route_tick(&kind, tick, total_ticks, blocked_speed);
+        route_progress += movement_policy::route_progress_delta(desired, achieved) * DT;
+        let distance = -route_progress;
+        if best_distance == f32::MAX {
+            best_distance = distance;
+        }
+        let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
+            distance_to_target: distance,
+            best_distance_so_far: best_distance,
+            ticks_without_progress,
+            recovery_active,
+        });
+        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < best_distance;
+        if progressed {
+            best_distance = distance;
+            ticks_without_progress = 0;
+            recovery_active = false;
+        } else {
+            ticks_without_progress = ticks_without_progress.saturating_add(1);
+        }
+        match decision {
+            movement_policy::StuckDecision::StartRecovery => {
+                recovery_active = true;
+                start_recovery_tick.get_or_insert(tick);
+            }
+            movement_policy::StuckDecision::Stuck => {
+                stuck_tick.get_or_insert(tick);
+            }
+            movement_policy::StuckDecision::Progressing
+            | movement_policy::StuckDecision::RecoveryPending => {}
+        }
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = stuck_tick;
+}
+
+#[then("no stuck decision along the route ever reaches start-recovery")]
+async fn then_no_stuck_recovery_along_route(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_stuck_progress_start_recovery_tick, None,
+        "a valid detour route must never false-trigger stuck recovery"
+    );
+}
+
+#[then(regex = r"^the stuck decision first reaches start-recovery at tick (\d+)$")]
+async fn then_start_recovery_at_tick(world: &mut BevyoutWorld, tick: u32) {
+    assert_eq!(world.nav_stuck_progress_start_recovery_tick, Some(tick));
+}
+
+#[then(regex = r"^the stuck decision first reaches stuck at tick (\d+)$")]
+async fn then_stuck_at_tick(world: &mut BevyoutWorld, tick: u32) {
+    assert_eq!(world.nav_stuck_progress_stuck_tick, Some(tick));
 }
