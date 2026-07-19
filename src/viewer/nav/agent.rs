@@ -116,6 +116,29 @@
 //!    solve can run less often than every fixed tick while movement itself
 //!    still runs every tick, integrating whichever desired velocity the
 //!    last solve produced.
+//!
+//! Cross-mesh portal traversal (issue #154, M4 wave 8): a merge-seam
+//! crossing used to reuse the exact same `DoorTraversal` component/lerp a
+//! door-link crossing does (0.6 s fixed transform interpolation regardless
+//! of what, if anything, sits between the two portal points -- a real
+//! collision-blocked review finding). It is now its own `MergeTraversal`
+//! component/`merge_traversal_system`, swept with the same physics KCC
+//! (`step_agent_kcc`) ordinary movement uses: a portal that turns out to be
+//! blocked by collision reports the same stable `nav agent
+//! collision-blocked <id>`/`nav agent stuck <id>` lines ordinary blocked/
+//! stuck movement already does, instead of always completing. Door-link
+//! traversal (`DoorTraversal`/`door_traversal_system`) is unchanged --
+//! this issue owns merge-link traversal only, not the door pause -> open ->
+//! traverse lifecycle. The prepared merge data itself also changed shape
+//! this issue: `vsa::prepare::nav_graph::compute_mesh_merges` now validates
+//! each cross-mesh boundary-edge candidate (mutual-nearest correspondence,
+//! opposing directions, an overlapping interval, step-height clearance)
+//! before it becomes a `PreparedNavMeshMerge`, which carries the matched
+//! edges' vertex-index identity and a clamped world-space portal interval
+//! on both sides -- `landmass_graph::merge_link_descriptors` links the two
+//! sides' interval midpoints (not triangle centroids) with a real
+//! traversal-distance `AnimationLink3d` cost (`spawn_link_pair`'s new
+//! `cost` parameter), in place of the previous flat `1.0` every link used.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -161,6 +184,27 @@ const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 /// arrival at a routing target vs. a crossing check along an otherwise-
 /// uninterrupted route).
 const MID_ROUTE_DOOR_GATE_DISTANCE: f32 = 0.75;
+/// How close (metres, horizontal) a swept merge-portal crossing (issue
+/// #154 feature 4) must get to its far portal point before it counts as
+/// complete. Same value/rationale as `AGENT_TARGET_REACHED_DISTANCE`.
+const MERGE_TRAVERSAL_REACHED_DISTANCE: f32 = 0.5;
+/// Multiplier applied to a swept merge-portal crossing's straight-line
+/// time-at-desired-speed to get its timeout budget (issue #154 feature 4).
+/// An *absolute wall-clock deadline* rather than ordinary movement's
+/// resettable "ticks since last measurable progress" window
+/// (`movement_policy::decide_stuck`): a capsule wedged against a wall can
+/// keep creeping forward by an amount just under
+/// `movement_policy::STUCK_PROGRESS_EPSILON` every tick indefinitely
+/// without any no-progress counter ever latching (observed while writing
+/// this traversal's own tests), so "genuinely blocked" here means "took
+/// far longer than a clear crossing plausibly would", not "stopped making
+/// any measurable progress at all". Generous slack for landmass/avoidance
+/// steering to not follow a perfectly straight line.
+const MERGE_TRAVERSAL_TIMEOUT_FACTOR: f32 = 4.0;
+/// Fixed floor (seconds) added to the computed timeout (issue #154 feature
+/// 4) so a very short crossing still gets a sane minimum window instead of
+/// a near-zero deadline.
+const MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS: f32 = 1.0;
 
 /// The point-sampling envelope for the archipelago options
 /// (`ensure_archipelago`): how far landmass itself may look for the navmesh
@@ -212,6 +256,32 @@ struct DoorTraversal {
     start: Vec3,
     end: Vec3,
     elapsed: f32,
+}
+
+/// Present on the agent entity while it is physically sweeping across a
+/// same-cell cross-mesh merge portal (issue #154 feature 4): unlike
+/// [`DoorTraversal`] (a scripted lerp across a door's off-mesh gap, driven
+/// by the door lifecycle FSM waiting on the door to open), a merge crossing
+/// has nothing to wait on -- there is no door -- so it is instead swept
+/// toward the far portal point with the same physics KCC ordinary movement
+/// uses (`step_agent_kcc`, driven by `merge_traversal_system`), so a portal
+/// whose far side is actually blocked by collision stops the agent for
+/// real instead of always completing over a fixed window regardless of what
+/// is in the way.
+#[derive(Component)]
+struct MergeTraversal {
+    target: Vec3,
+    /// Seconds elapsed since this crossing started.
+    elapsed: f32,
+    /// Absolute wall-clock deadline (seconds): computed once at traversal
+    /// start from the *initial* straight-line distance to `target`, not
+    /// recomputed per tick. See [`MERGE_TRAVERSAL_TIMEOUT_FACTOR`]'s doc
+    /// comment for why this is a fixed deadline rather than a resettable
+    /// no-progress counter (`AgentKcc::best_distance`/
+    /// `ticks_without_progress`, owned by the #157 stuck-progress issue and
+    /// unsuitable here regardless -- a portal crossing is a distinct,
+    /// much shorter-lived motion regime from ordinary route following).
+    timeout: f32,
 }
 
 /// Per-agent physics-authoritative KCC state (issue #114): the capsule
@@ -533,6 +603,7 @@ impl Plugin for NavBackendPlugin {
                     door_availability_system,
                     door_link_system,
                     apply_agent_physics_movement,
+                    merge_traversal_system,
                     door_traversal_system,
                     log_agent_state_changes,
                     log_path_latency,
@@ -687,7 +758,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     for descriptor in landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs) {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
-        for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+        // Issue #154 feature 3: real traversal-distance cost, floored well
+        // above zero -- `AnimationLink3d::cost` must stay strictly positive
+        // regardless of how tight a validated portal's overlap ended up.
+        let cost = descriptor.distance.max(0.01);
+        for link_entity in spawn_link_pair(world, archipelago_entity, start, end, cost) {
             link_kinds.insert(link_entity, LinkKind::Merge);
             links.push(link_entity);
         }
@@ -703,7 +778,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         let usable = door_usable_now(world, descriptor.door_form_id, &door_lock_info);
         door_usable.insert(descriptor.door_form_id, usable);
         if usable {
-            for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+            for link_entity in spawn_link_pair(world, archipelago_entity, start, end, 1.0) {
                 link_kinds.insert(
                     link_entity,
                     LinkKind::Door {
@@ -798,11 +873,18 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 /// path and are semantically identical. Reported upstream as
 /// <https://github.com/andriyDev/landmass/issues/192>; collapse back to one
 /// `bidirectional: true` link once a fixed release is adopted.
+///
+/// `cost` (issue #154 feature 3): door links keep passing the previous flat
+/// `1.0`; merge links pass their own `MergeLinkDescriptor::distance` (real
+/// traversal distance between the two portal-interval midpoints) so
+/// landmass's route cost reflects how far a crossing actually moves the
+/// agent instead of treating every merge seam as equally cheap.
 fn spawn_link_pair(
     world: &mut World,
     archipelago_entity: Entity,
     start: Vec3,
     end: Vec3,
+    cost: f32,
 ) -> [Entity; 2] {
     let mut spawn_one = |from: Vec3, to: Vec3| {
         world
@@ -811,7 +893,7 @@ fn spawn_link_pair(
                     start_edge: (from, from),
                     end_edge: (to, to),
                     kind: 0,
-                    cost: 1.0,
+                    cost,
                     bidirectional: false,
                 },
                 archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
@@ -1537,7 +1619,13 @@ type AgentPhysicsQuery<'w, 's> = Query<
         Option<&'static AgentTarget3d>,
         Option<&'static AgentState>,
     ),
-    (With<TestNavAgentMarker>, Without<DoorTraversal>),
+    (
+        With<TestNavAgentMarker>,
+        Without<DoorTraversal>,
+        // Issue #154 feature 4: a merge-portal crossing is swept by its own
+        // `merge_traversal_system`, not this system.
+        Without<MergeTraversal>,
+    ),
 >;
 
 /// Physics-authoritative agent movement (issue #114): landmass's desired
@@ -1780,8 +1868,13 @@ fn door_traversal_system(
                 .remove::<DoorTraversal>()
                 .remove::<UsingAnimationLink>();
             match runtime.active_link {
-                // A merge-seam crossing involves no door: the state machine
-                // never left Idle, so completion only clears the link.
+                // Issue #154: a merge-seam crossing no longer drives
+                // `DoorTraversal` at all (see `merge_traversal_system`), so
+                // `Some(LinkKind::Merge)` should never actually reach here
+                // in practice -- kept alongside `None` defensively (just
+                // clear the link) rather than treated as an invariant
+                // violation, the same conservative stance this match
+                // already took for the "no active link" case.
                 Some(LinkKind::Merge) | None => {
                     runtime.active_link = None;
                 }
@@ -1851,6 +1944,152 @@ fn door_traversal_system(
             }
         }
     }
+}
+
+type MergeTraversalQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Transform,
+        &'static mut AgentKcc,
+        &'static mut MergeTraversal,
+        &'static mut AgentRuntime,
+    ),
+    With<TestNavAgentMarker>,
+>;
+
+/// Sweeps every agent currently crossing a same-cell merge portal (issue
+/// #154 feature 4) toward the far portal point with the same
+/// `step_agent_kcc` physics `apply_agent_physics_movement` uses for
+/// ordinary movement, instead of `door_traversal_system`'s scripted lerp --
+/// a portal candidate that turns out to be collision-blocked must fail
+/// visibly (the same stable `nav agent collision-blocked <id>`/`nav agent
+/// stuck <id>` lines ordinary movement already reports, feeding `tna
+/// status`'s `blocked=`/`stuck=` fields) rather than teleport the agent
+/// through geometry. Runs in the same `FixedUpdate` chain slot
+/// `door_traversal_system` occupies for the door lifecycle
+/// (`NavBackendPlugin::build`): the two systems drive entirely disjoint
+/// entity sets (`MergeTraversal` vs. `DoorTraversal`), so ordering between
+/// them does not matter, and `apply_agent_physics_movement` itself excludes
+/// both marker components (`AgentPhysicsQuery`) so nothing ever
+/// double-drives the same entity's `Transform` in one tick.
+#[allow(clippy::too_many_arguments)]
+fn merge_traversal_system(
+    time: Res<Time>,
+    physics_disabled: Res<PhysicsDisabled>,
+    cell_physics: Res<CellPhysicsReadiness>,
+    roster: Res<TestNavAgentState>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    mut agents: MergeTraversalQuery<'_, '_>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 || physics_disabled.0 || !cell_physics.static_collision_ready() {
+        // Physics is not ready to collide against yet (or is globally
+        // disabled): hold every in-progress crossing in place rather than
+        // advance it against a world that cannot resolve collision this
+        // tick, mirroring `apply_agent_physics_movement`'s own guard.
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let mover = boxddd::Capsule::new(
+        [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+        [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+        AGENT_RADIUS,
+    );
+    let collision_filter = player::player_collision_filter();
+    let support_filter = player::stair_support_filter();
+
+    for (entity, mut transform, mut kcc, mut traversal, mut runtime) in &mut agents {
+        if movement_policy::nav_point_reached(
+            transform.translation.to_array(),
+            traversal.target.to_array(),
+            MERGE_TRAVERSAL_REACHED_DISTANCE,
+            AGENT_HEIGHT,
+        ) {
+            commands
+                .entity(entity)
+                .remove::<MergeTraversal>()
+                .remove::<UsingAnimationLink>();
+            runtime.active_link = None;
+            continue;
+        }
+
+        traversal.elapsed += dt;
+        if traversal.elapsed > traversal.timeout {
+            let was_reported = kcc.stuck || kcc.collision_blocked;
+            kcc.stuck = true;
+            kcc.collision_blocked = true;
+            commands
+                .entity(entity)
+                .remove::<MergeTraversal>()
+                .remove::<UsingAnimationLink>();
+            runtime.active_link = None;
+            // Minimum viable mitigation for a blocked-portal repath loop
+            // (issue #154 review correction, feature 4): the agent's
+            // current route/travel-door target is cleared outright rather
+            // than left in place, so `LandmassSystems::Update`'s next solve
+            // has nothing left to path across the same blocked link with --
+            // an idle agent that goes nowhere, instead of one that
+            // silently re-selects the identical invalid link and repeats
+            // this exact failure forever.
+            //
+            // ponytail: this is not per-portal-link quarantine (excluding
+            // just the blocked seam while keeping the agent's real
+            // destination, so a repath can route *around* it) -- that
+            // needs a landmass-side mechanism to exclude one specific
+            // off-mesh link from a route, which does not exist yet for
+            // merge links (F155's door work adds a per-polygon *type-index*
+            // cost override, but merge-link polygons have no type tagging).
+            // Left for a follow-up once that infra exists; flagged to the
+            // orchestrator for its own issue.
+            commands.entity(entity).remove::<AgentTarget3d>();
+            runtime.travel_intent = None;
+            if !was_reported && let Some(index) = roster.index_of(entity) {
+                warn!(
+                    "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s; agent stopped mid-portal and its route was cleared",
+                    traversal.timeout
+                );
+                info!("nav agent collision-blocked {index}");
+                info!("nav agent stuck {index}");
+            }
+            continue;
+        }
+
+        let to_target = traversal.target - transform.translation;
+        let horizontal = Vec2::new(to_target.x, to_target.z);
+        let desired_horizontal = if horizontal.length() > f32::EPSILON {
+            horizontal.normalize() * AGENT_DESIRED_SPEED
+        } else {
+            Vec2::ZERO
+        };
+        let (new_position, new_velocity, grounded) = step_agent_kcc(
+            world,
+            &mover,
+            collision_filter,
+            support_filter,
+            transform.translation,
+            kcc.velocity,
+            kcc.grounded,
+            desired_horizontal,
+            dt,
+        );
+        transform.translation = new_position;
+        kcc.velocity = new_velocity;
+        kcc.grounded = grounded;
+    }
+}
+
+/// The wall-clock deadline (seconds) for a swept merge-portal crossing of
+/// `initial_distance` metres (issue #154 feature 4) -- see
+/// [`MERGE_TRAVERSAL_TIMEOUT_FACTOR`]'s doc comment for why this is an
+/// absolute budget rather than a resettable no-progress counter.
+fn merge_traversal_timeout(initial_distance: f32) -> f32 {
+    (initial_distance.max(0.0) / AGENT_DESIRED_SPEED) * MERGE_TRAVERSAL_TIMEOUT_FACTOR
+        + MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS
 }
 
 /// Requests the door `door_form_id` open through the same boundary the
@@ -2058,13 +2297,32 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
             };
             match link_kind {
                 LinkKind::Merge => {
-                    // A merge seam has no door: cross it immediately.
+                    // A merge seam has no door to wait on (issue #154
+                    // feature 4): sweep the agent to the far portal point
+                    // with the physics KCC (`merge_traversal_system`)
+                    // instead of the door lifecycle's scripted lerp -- a
+                    // portal whose far side is actually blocked must stop
+                    // the agent for real, not clip it through. `start_point`
+                    // is unused here (unlike a door traversal's fixed lerp
+                    // start): the sweep simply starts from wherever the
+                    // agent's `Transform` actually is this tick. The
+                    // timeout budget is derived from the *actual* current
+                    // position, not `start_point`, for the same reason.
+                    let initial_distance = world
+                        .get::<Transform>(agent_entity)
+                        .map(|transform| {
+                            movement_policy::horizontal_distance(
+                                transform.translation.to_array(),
+                                end_point.to_array(),
+                            )
+                        })
+                        .unwrap_or(0.0);
                     world.entity_mut(agent_entity).insert((
                         UsingAnimationLink,
-                        DoorTraversal {
-                            start: start_point,
-                            end: end_point,
+                        MergeTraversal {
+                            target: end_point,
                             elapsed: 0.0,
+                            timeout: merge_traversal_timeout(initial_distance),
                         },
                     ));
                     world
@@ -2223,7 +2481,8 @@ fn door_availability_system(world: &mut World) {
                     .resource::<NavArchipelagoState>()
                     .archipelago
                     .expect("availability tracking implies a built archipelago");
-                for link_entity in spawn_link_pair(world, archipelago_entity, link.start, link.end)
+                for link_entity in
+                    spawn_link_pair(world, archipelago_entity, link.start, link.end, 1.0)
                 {
                     let mut state = world.resource_mut::<NavArchipelagoState>();
                     state.link_kinds.insert(
@@ -2951,6 +3210,208 @@ mod tests {
         assert!(
             !kcc.stuck,
             "a target directly above/below the agent must never latch `stuck` via the horizontal-only distance check"
+        );
+    }
+
+    /// Issue #154 feature 4: a clear merge-portal crossing sweeps the
+    /// agent to the far portal point (not an instant teleport/lerp -- the
+    /// KCC needs several ticks to physically cover the distance) and clears
+    /// `MergeTraversal`/`UsingAnimationLink`/`active_link` once it arrives.
+    #[test]
+    fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::Ready);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        // `merge_traversal_system` collides against the real
+        // `player::player_collision_filter()`/`stair_support_filter()`
+        // queries (same as `apply_agent_physics_movement`), so the fixture
+        // geometry must use `add_player_compatible_floor`'s filter, not
+        // `add_fixture_box`'s self-consistent-but-unrelated one (that
+        // mismatch was the root cause of an earlier version of this test
+        // free-falling straight through the floor).
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let target = Vec3::new(2.0, AGENT_HEIGHT / 2.0, 0.0);
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc {
+                    grounded: true,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                AgentRuntime {
+                    active_link: Some(LinkKind::Merge),
+                    ..default()
+                },
+                MergeTraversal {
+                    target,
+                    elapsed: 0.0,
+                    timeout: merge_traversal_timeout(2.0),
+                },
+                UsingAnimationLink,
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        // Plenty of ticks for the KCC (desired speed 2.5 m/s) to cover the
+        // 2 m crossing on flat open ground.
+        for _ in 0..180 {
+            world
+                .run_system_once(merge_traversal_system)
+                .expect("system runs");
+            if world.get::<MergeTraversal>(agent).is_none() {
+                break;
+            }
+        }
+
+        assert!(
+            world.get::<MergeTraversal>(agent).is_none(),
+            "a clear crossing must complete and remove MergeTraversal"
+        );
+        assert!(world.get::<UsingAnimationLink>(agent).is_none());
+        assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+        let position = world.get::<Transform>(agent).unwrap().translation;
+        assert!(
+            (position.x - target.x).abs() < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
+            "agent should have swept to the far portal point, got {position:?}"
+        );
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert!(!kcc.stuck, "a clear crossing must never latch stuck");
+        assert!(!kcc.collision_blocked);
+    }
+
+    /// Issue #154 feature 4: a merge-portal crossing whose far side is
+    /// walled off must fail visibly through the existing stuck/blocked
+    /// reporting (`kcc.stuck`/`kcc.collision_blocked`, the same fields
+    /// `tna status` and the stable `nav agent stuck <id>`/`nav agent
+    /// collision-blocked <id>` log lines already use) rather than
+    /// teleporting the agent through the wall via a scripted lerp.
+    #[test]
+    fn merge_traversal_system_reports_stuck_when_the_portal_is_walled_off() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::Ready);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        // Same real-player-filter requirement as the sweep test above: both
+        // the floor and the wall must use `add_player_compatible_floor`'s
+        // filter, not `add_fixture_box`'s, or `merge_traversal_system`'s
+        // real collision query never sees either shape and the agent free-
+        // falls through both -- which happened to still end in `stuck` (via
+        // the vertical-gap guard on `nav_point_reached` never being
+        // satisfied while falling) for the wrong reason entirely, not
+        // because the wall actually blocked it.
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        // A wall immediately in front (+X) of the agent's start position,
+        // between it and the portal's far point.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(1.0, 1.0, 0.0),
+            boxddd::Vec3::new(0.1, 2.0, 5.0),
+        );
+        world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let target = Vec3::new(5.0, AGENT_HEIGHT / 2.0, 0.0);
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc {
+                    grounded: true,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                AgentRuntime {
+                    active_link: Some(LinkKind::Merge),
+                    ..default()
+                },
+                MergeTraversal {
+                    target,
+                    elapsed: 0.0,
+                    timeout: merge_traversal_timeout(5.0),
+                },
+                UsingAnimationLink,
+                AgentTarget3d::Point(target),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        // The agent makes genuine initial progress closing the ~0.55 m gap
+        // to the wall before it wedges (see
+        // `a_blocked_agent_reports_its_real_near_zero_velocity`'s own
+        // 120-tick budget for the same fixture shape) and then keeps
+        // creeping forward by less than a measurable step forever --
+        // that's exactly why this traversal uses an absolute deadline
+        // rather than a resettable no-progress counter (see
+        // `MERGE_TRAVERSAL_TIMEOUT_FACTOR`'s doc comment). Run comfortably
+        // past the computed timeout in fixed-tick terms.
+        let dt = 1.0 / 60.0;
+        let ticks_to_timeout = (merge_traversal_timeout(5.0) / dt).ceil() as usize;
+        for _ in 0..(ticks_to_timeout + 60) {
+            world
+                .run_system_once(merge_traversal_system)
+                .expect("system runs");
+            if world.get::<MergeTraversal>(agent).is_none() {
+                break;
+            }
+        }
+
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert!(
+            kcc.stuck,
+            "a wall-blocked crossing must report stuck, not silently keep pushing forever"
+        );
+        assert!(kcc.collision_blocked);
+        assert!(
+            world.get::<MergeTraversal>(agent).is_none(),
+            "the traversal must stop, not keep the agent pinned mid-portal indefinitely"
+        );
+        assert!(world.get::<UsingAnimationLink>(agent).is_none());
+        assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+        let position = world.get::<Transform>(agent).unwrap().translation;
+        assert!(
+            position.x < target.x - 1.0,
+            "the agent must never teleport through the wall to the far portal point, got {position:?}"
+        );
+        // Review correction (issue #154 feature 4): the blocked crossing's
+        // route must be cleared, not left in place -- otherwise the next
+        // landmass solve re-selects the exact same invalid link and the
+        // agent repeats this failure forever.
+        assert!(
+            world.get::<AgentTarget3d>(agent).is_none(),
+            "a blocked portal crossing must clear the agent's target so it does not immediately re-select the same blocked link"
+        );
+        assert!(
+            world
+                .get::<AgentRuntime>(agent)
+                .unwrap()
+                .travel_intent
+                .is_none()
         );
     }
 
