@@ -172,3 +172,28 @@ after merge.
   investigate before sign-off: genuinely unwalkable seam accepted by
   geometric validation (evidence for #156's authored-NVTR refinement)
   vs. straight-line sweep limitation.
+- **A7 — #163 `setlock` joined the wave.** Neither prepared cell has a
+  usable authored-locked in-cell door, so #155's lock flow had no
+  drivable runtime surface — the AGENTS.md visibility rule added
+  `setlock <reference> <level>` (GECK `lock`/`unlock` parity) as its own
+  sub-issue, updating both lock-state consumers (nav
+  `door_lock_info`, interaction `PlacementRoot`) from one command.
+- **A8 — Real-data acceptance outcomes.** (1) A6's blocked crossings
+  root-caused: geometric validation accepted portals spanning 1.1–2.0 m
+  of *empty space* — one led into literal void (agent fell out of the
+  world). Fixed in-wave via #154's originally-specified capsule-sweep
+  validation, implemented at runtime link building (`move_mover` slide +
+  step-height ground probes): 10 of 11 FranklinMetro02 candidates drop
+  with logged reasons, the genuine ~0.5 m seam survives, and the
+  cross-mesh route persists through it. (2) #148 re-measured on both
+  cells post-rework: identical wedge points (metro x=9.90; Vault
+  stair-top (154.29, 39.61, -80.38)) — interior-collider hypothesis
+  stands; both repros now have exact coordinates on the issue. (3) New
+  defects found and filed rather than absorbed: #164 (walkable navmesh
+  over missing collision in both cells; agents fall out of the world;
+  no kill-Z guard) and #165 (travel-door arrival lifecycle hands off
+  through a locked door — the setlock A-B-A on metro door 0007f7e3
+  proved lock state is ignored by travel). (4) #155's query-time
+  exclusion invariants are pinned by live-Archipelago unit tests; no
+  honest in-cell real-data drive exists until #148/#164 land (see
+  MANUAL section C).
