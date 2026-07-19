@@ -1282,9 +1282,13 @@ mod tests {
             ],
             doors: Vec::new(),
         };
-        let valid = landmass_graph::build_navigation_mesh(&mesh_input, &[])
-            .nav_mesh
-            .expect("synthetic square validates");
+        let valid = landmass_graph::build_navigation_mesh(
+            &mesh_input,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .nav_mesh
+        .expect("synthetic square validates");
         let nav_mesh_handle = app
             .world_mut()
             .resource_mut::<Assets<NavMesh3d>>()

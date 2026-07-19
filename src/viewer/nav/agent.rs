@@ -46,16 +46,18 @@
 //!   "other side" point to link to without new edge-adjacency geometry, and
 //!   excluding the polygon without a working bridge would just replace
 //!   "clips through" with "always unreachable", locked or not.
-//! - **Route-crossing proximity check** (the one implemented): every
-//!   single-sided door's triangle -- travel-door candidate or not -- stays
-//!   walkable at all times and is a crossing-gate candidate
+//! - **Route-crossing containment check** (the one implemented; corridor-
+//!   based since issue #155, see below): every single-sided door's
+//!   triangle -- travel-door candidate or not -- stays walkable at all
+//!   times and is a crossing-gate candidate
 //!   (`NavArchipelagoState::mid_route_doors`), exactly mirroring how
 //!   `TRAVEL_ARRIVAL_DISTANCE` already gates travel-door *arrival*.
-//!   Proximity to a candidate's triangle midpoint, checked inside
-//!   `drive_door_link_for_agent`'s existing `Idle`/`Failed`/`TravelReached`
-//!   arm right after the travel-arrival check, fires the *same*
-//!   `DoorLinkEvent::LinkReached` the off-mesh link case fires -- but
-//!   always with an `IntraCell` destination, never `Travel`: crossing a
+//!   Containment of the agent's own position within a candidate's actual
+//!   triangle footprint (`landmass_graph::point_in_door_triangle`), checked
+//!   inside `drive_door_link_for_agent`'s existing `Idle`/`Failed`/
+//!   `TravelReached` arm right after the travel-arrival check, fires the
+//!   *same* `DoorLinkEvent::LinkReached` the off-mesh link case fires --
+//!   but always with an `IntraCell` destination, never `Travel`: crossing a
 //!   travel door's triangle mid-route (a `goto`, or a `tna travel` to a
 //!   *different* door) is not the agent's own travel terminal, so it must
 //!   not hand off to another cell. The one door a candidate is deliberately
@@ -77,6 +79,45 @@
 //!   an unlock flips usability and triggers the same one repath (target
 //!   re-insertion, and a `request_door_open` retry for any agent paused on
 //!   that exact door) with zero new structural-update code.
+//!
+//! Doors as conditional route topology (issue #155, M4 wave 8): the
+//! mid-route gate above still only fires once the agent is already
+//! standing on the door triangle -- it says nothing to `landmass`'s own
+//! solver about a locked door being avoidable, so a route whose *only*
+//! path crossed a locked door used to walk all the way there before
+//! discovering the failure. Three changes close that gap:
+//!
+//! 1. **Typed door polygons** (`landmass_graph::door_type_indices`/
+//!    `build_navigation_mesh`'s new parameter): every door-associated
+//!    triangle, across every mesh in the archipelago, gets a `landmass`
+//!    polygon type index unique to its door FormID (`0` stays "ordinary
+//!    walkable ground", untouched). Typing only changes which
+//!    `type_index_to_cost` a polygon looks up during a solve -- it does not
+//!    remove the polygon or its adjacency, so an unlocked typed door still
+//!    connects its neighbours exactly as before.
+//! 2. **Query-time lock exclusion** (`LOCKED_DOOR_TYPE_INDEX_COST`,
+//!    `apply_door_lock_overrides`): every spawned agent carries a
+//!    `bevy_landmass::AgentTypeIndexCostOverrides` component rebuilt from
+//!    `NavArchipelagoState::door_usable` at spawn and on every
+//!    `door_availability_system` flip -- a locked door's type index gets
+//!    the sentinel cost, an unlocked/open one gets none (the component is
+//!    replaced wholesale each rebuild, not patched, since `bevy_landmass`
+//!    exposes no public "remove one override" call). `landmass` retries
+//!    pathfinding on its own every tick an agent has no current path
+//!    (`does_agent_need_repath`'s `current_path: None` case), so an agent
+//!    that is idle or already failed picks up a lock change on its very
+//!    next solve with no explicit retarget needed; an agent already
+//!    mid-transit through a door at the instant it locks keeps following
+//!    its already-computed (structurally still valid) path until its next
+//!    genuine repath -- a known, narrow scope cut (see `agent.rs`'s test
+//!    module for the invariant coverage this does provide).
+//! 3. **Distinct failure status** (`resolve_status`): a door lifecycle that
+//!    gave up waiting (`door_link::DoorLinkState::Failed`, the same
+//!    `MAX_WAIT_TICKS` terminal a locked mid-route crossing above also
+//!    reaches) now resolves to `NavAgentStatus::Unreachable` instead of
+//!    `Paused` -- the same word the stable `nav agent unreachable` log line
+//!    at that call site already used, so `tna status`/the HUD finally agree
+//!    with the log instead of contradicting it.
 //!
 //! Wave 5 added scope (movement fidelity, user-directed): three changes to
 //! the same seam, landed together.
@@ -116,7 +157,30 @@
 //!    solve can run less often than every fixed tick while movement itself
 //!    still runs every tick, integrating whichever desired velocity the
 //!    last solve produced.
-use std::collections::HashMap;
+//!
+//! Cross-mesh portal traversal (issue #154, M4 wave 8): a merge-seam
+//! crossing used to reuse the exact same `DoorTraversal` component/lerp a
+//! door-link crossing does (0.6 s fixed transform interpolation regardless
+//! of what, if anything, sits between the two portal points -- a real
+//! collision-blocked review finding). It is now its own `MergeTraversal`
+//! component/`merge_traversal_system`, swept with the same physics KCC
+//! (`step_agent_kcc`) ordinary movement uses: a portal that turns out to be
+//! blocked by collision reports the same stable `nav agent
+//! collision-blocked <id>`/`nav agent stuck <id>` lines ordinary blocked/
+//! stuck movement already does, instead of always completing. Door-link
+//! traversal (`DoorTraversal`/`door_traversal_system`) is unchanged --
+//! this issue owns merge-link traversal only, not the door pause -> open ->
+//! traverse lifecycle. The prepared merge data itself also changed shape
+//! this issue: `vsa::prepare::nav_graph::compute_mesh_merges` now validates
+//! each cross-mesh boundary-edge candidate (mutual-nearest correspondence,
+//! opposing directions, an overlapping interval, step-height clearance)
+//! before it becomes a `PreparedNavMeshMerge`, which carries the matched
+//! edges' vertex-index identity and a clamped world-space portal interval
+//! on both sides -- `landmass_graph::merge_link_descriptors` links the two
+//! sides' interval midpoints (not triangle centroids) with a real
+//! traversal-distance `AnimationLink3d` cost (`spawn_link_pair`'s new
+//! `cost` parameter), in place of the previous flat `1.0` every link used.
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bevy::math::Vec2;
@@ -126,7 +190,8 @@ use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::prelude::*;
 use bevy_landmass::{
-    NavMeshHandle, PauseAgent, PointSampleDistance3d, TargetReachedCondition, UsingAnimationLink,
+    AgentTypeIndexCostOverrides, NavMeshHandle, PauseAgent, PointSampleDistance3d,
+    TargetReachedCondition, UsingAnimationLink,
 };
 use serde_json::json;
 
@@ -154,13 +219,90 @@ const DOOR_TRAVERSAL_SECONDS: f32 = 0.6;
 /// `AGENT_TARGET_REACHED_DISTANCE` so landmass's own target-reached stop
 /// always lands inside it.
 const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
-/// How close (metres, horizontal) the agent must get to a mid-route door's
-/// triangle midpoint before the crossing gate (issue #137) evaluates it.
-/// Same value and rationale as `TRAVEL_ARRIVAL_DISTANCE`, kept as its own
-/// named constant since the two triggers are conceptually distinct (an
-/// arrival at a routing target vs. a crossing check along an otherwise-
-/// uninterrupted route).
-const MID_ROUTE_DOOR_GATE_DISTANCE: f32 = 0.75;
+/// Per-agent `landmass` type-index cost applied to a locked door's polygon
+/// type (issue #155 feature 2): high enough that any plausible detour
+/// within a single loaded cell is always cheaper, without being literal
+/// `f32::INFINITY` itself, after verification against `landmass` 0.9.2's
+/// source -- see below for why a large finite sentinel, the wave plan's
+/// other option, would silently fail the "exact exclusion" requirement.
+///
+/// **Why exclusion, not just a strong penalty:** the issue's acceptance
+/// test is "locking a door on the only route makes the route fail at query
+/// time" -- `AgentState::NoPath`, not merely a longer/costlier path. `A*`
+/// never refuses to return a path solely because it is expensive: any
+/// *finite* cost, however large, still yields a "successful" (if ugly)
+/// route whenever one topologically exists, so a large-but-finite sentinel
+/// would make a locked door on the *only* route still pathable -- the
+/// exact bug this feature exists to fix. Only an actually-unbounded
+/// (`is_finite() == false`) cost makes `landmass` refuse the edge outright.
+///
+/// **Verification (per the wave plan's "verified-safe exclusion semantics"
+/// requirement, recorded on issue #155):** `landmass` 0.9.2's own
+/// `pathfinding.rs::ArchipelagoPathProblem::successors` filters every
+/// *destination*-node candidate on `target_node_cost.is_finite()` *before*
+/// ever computing `distance * current_node_cost` for it (the multiplication
+/// that a literal `INFINITY` cost could otherwise turn into `0.0 * inf =
+/// NaN` if `distance` happened to be exactly `0.0`) -- so transitioning
+/// *into* a locked-cost polygon is filtered out categorically, never
+/// multiplied at all. `landmass`'s own test (`pathfinding_test.rs::
+/// infinite_or_nan_cost_cannot_find_path_between_nodes`) pins exactly this
+/// with a literal `f32::INFINITY` type-index cost on the only route between
+/// two nodes and confirms it produces `path: None`, `explored_nodes: 1`,
+/// with no panic -- the identical shape this project's own invariant tests
+/// (`agent.rs`'s `door_topology_mesh`-based tests) exercise against a live
+/// `Archipelago3d`.
+///
+/// **The one gap literal infinity leaves open:** `current_node_cost` (the
+/// *source* polygon's own cost, used for the edges *leaving* it) is read
+/// unconditionally in `successors`, with no `is_finite()` guard -- so an
+/// agent whose search *starts* already standing inside a just-locked
+/// polygon, at a position exactly `0.0` from one of its edge midpoints,
+/// could in principle still hit `0.0 * inf = NaN` for that one polygon's
+/// own outgoing edges. This project's structural exclusion for two-sided
+/// doors (the off-mesh link is despawned outright, not cost-penalised) and
+/// the corridor-based mid-route gate (`point_in_door_triangle`, issue
+/// #137/#155 -- an agent is paused for a closed/locked door the moment its
+/// position enters the door triangle, rather than being left free to
+/// settle at an arbitrary point within it) both keep an agent from
+/// starting a fresh path query with its position resolved to a locked
+/// door's own polygon in the first place; combined with "distance to an
+/// edge midpoint is exactly `0.0`" being a measure-zero floating-point
+/// coincidence even then, this stays a theoretical edge case rather than
+/// an observed one -- recorded here rather than worked around, since doing
+/// so would mean giving up on `NoPath` for the one-route-only case, this
+/// feature's actual requirement.
+const LOCKED_DOOR_TYPE_INDEX_COST: f32 = f32::INFINITY;
+/// How close (metres, horizontal) a swept merge-portal crossing (issue
+/// #154 feature 4) must get to its far portal point before it counts as
+/// complete. Same value/rationale as `AGENT_TARGET_REACHED_DISTANCE`.
+const MERGE_TRAVERSAL_REACHED_DISTANCE: f32 = 0.5;
+/// Multiplier applied to a swept merge-portal crossing's straight-line
+/// time-at-desired-speed to get its timeout budget (issue #154 feature 4).
+/// An *absolute wall-clock deadline* rather than ordinary movement's
+/// resettable "ticks since last measurable progress" window
+/// (`movement_policy::decide_stuck`): a capsule wedged against a wall can
+/// keep creeping forward by an amount just under
+/// `movement_policy::STUCK_PROGRESS_EPSILON` every tick indefinitely
+/// without any no-progress counter ever latching (observed while writing
+/// this traversal's own tests), so "genuinely blocked" here means "took
+/// far longer than a clear crossing plausibly would", not "stopped making
+/// any measurable progress at all". Generous slack for landmass/avoidance
+/// steering to not follow a perfectly straight line.
+const MERGE_TRAVERSAL_TIMEOUT_FACTOR: f32 = 4.0;
+/// Fixed floor (seconds) added to the computed timeout (issue #154 feature
+/// 4) so a very short crossing still gets a sane minimum window instead of
+/// a near-zero deadline.
+const MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS: f32 = 1.0;
+/// How close (metres, full 3D) `validate_merge_link_collision`'s one-shot
+/// `player::move_mover` slide must land to a merge candidate's far portal
+/// point to count as "arrived" (issue #154 real-data acceptance
+/// correction). Deliberately looser than `MERGE_TRAVERSAL_REACHED_DISTANCE`
+/// (which is horizontal-only and compares against a live, already-moving
+/// agent): this is a single static slide budgeted at
+/// `player::mod::MAX_SLIDE_PASSES` correction passes, not a full per-tick
+/// crossing, so a small full-3D residual after sliding off one nearby
+/// surface is expected on an otherwise-clear seam.
+const MERGE_LINK_SWEEP_TOLERANCE: f32 = 0.6;
 
 /// The point-sampling envelope for the archipelago options
 /// (`ensure_archipelago`): how far landmass itself may look for the navmesh
@@ -214,6 +356,32 @@ struct DoorTraversal {
     elapsed: f32,
 }
 
+/// Present on the agent entity while it is physically sweeping across a
+/// same-cell cross-mesh merge portal (issue #154 feature 4): unlike
+/// [`DoorTraversal`] (a scripted lerp across a door's off-mesh gap, driven
+/// by the door lifecycle FSM waiting on the door to open), a merge crossing
+/// has nothing to wait on -- there is no door -- so it is instead swept
+/// toward the far portal point with the same physics KCC ordinary movement
+/// uses (`step_agent_kcc`, driven by `merge_traversal_system`), so a portal
+/// whose far side is actually blocked by collision stops the agent for
+/// real instead of always completing over a fixed window regardless of what
+/// is in the way.
+#[derive(Component)]
+struct MergeTraversal {
+    target: Vec3,
+    /// Seconds elapsed since this crossing started.
+    elapsed: f32,
+    /// Absolute wall-clock deadline (seconds): computed once at traversal
+    /// start from the *initial* straight-line distance to `target`, not
+    /// recomputed per tick. See [`MERGE_TRAVERSAL_TIMEOUT_FACTOR`]'s doc
+    /// comment for why this is a fixed deadline rather than a resettable
+    /// no-progress counter (`AgentKcc::best_distance`/
+    /// `ticks_without_progress`, owned by the #157 stuck-progress issue and
+    /// unsuitable here regardless -- a portal crossing is a distinct,
+    /// much shorter-lived motion regime from ordinary route following).
+    timeout: f32,
+}
+
 /// Per-agent physics-authoritative KCC state (issue #114): the capsule
 /// mover's own velocity (landmass's desired velocity is only ever this
 /// tick's *input*), grounded state, and the deterministic stuck-tracking
@@ -223,9 +391,23 @@ struct DoorTraversal {
 struct AgentKcc {
     velocity: Vec3,
     grounded: bool,
-    /// Smallest distance-to-target observed so far along the current route
-    /// (reset whenever a new `tna goto`/`tna travel` target is set).
+    /// Smallest `movement_policy::StuckObservation::distance_to_target`
+    /// observed so far along the current route (reset to `f32::MAX`
+    /// whenever a new `tna goto`/`tna travel` target is set, or to the
+    /// current value on arrival -- see `apply_agent_physics_movement`).
+    /// Since issue #157 this is the negated `route_progress` below, not a
+    /// literal distance to the final target; see `movement_policy`'s module
+    /// doc comment for why.
     best_distance: f32,
+    /// Running integral of `movement_policy::route_progress_delta` over the
+    /// whole route (issue #157): metres of real, KCC-resolved motion
+    /// achieved along whatever direction landmass was steering toward at
+    /// the time, accumulated tick over tick. Never reset on its own --
+    /// `best_distance`'s own reset-to-`f32::MAX` handling re-baselines every
+    /// comparison to "progress since then" regardless of this field's
+    /// absolute running total, so a fresh target does not need a fresh
+    /// zero here.
+    route_progress: f32,
     ticks_without_progress: u32,
     recovery_active: bool,
     /// This tick's `movement_policy::decide_collision_outcome` classification
@@ -337,6 +519,13 @@ struct NavArchipelagoState {
     /// captured from the manifest at build time so the availability poll
     /// does not re-borrow the manifest every frame.
     door_lock_info: HashMap<u32, DoorLockInfo>,
+    /// Door FormID -> `landmass` polygon type index (issue #155 feature 1),
+    /// the same archipelago-wide mapping `landmass_graph::door_type_indices`
+    /// computed for this build's `build_navigation_mesh` calls -- kept here
+    /// so `door_availability_system`/`spawn_test_agent` can translate a
+    /// door's lock state into the matching `AgentTypeIndexCostOverrides`
+    /// entry without recomputing it from the raw mesh inputs every time.
+    door_type_indices: BTreeMap<u32, usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -350,13 +539,16 @@ struct DoorLockInfo {
 /// every door resolves to a travel destination, so restricting this set to
 /// non-travel doors left it empty and never gated anything. Left part of
 /// the walkable island (see `nav/agent.rs`'s module doc for why); gated at
-/// runtime by proximity to `midpoint`, the same way `TravelDoorLink`'s own
-/// arrival check works, *except* for the one door a given agent's own
-/// `travel_intent` currently targets.
+/// runtime by whether the agent's own position is inside `vertices`'
+/// footprint (issue #155 feature 3, `landmass_graph::point_in_door_triangle`
+/// -- replacing this file's earlier `MID_ROUTE_DOOR_GATE_DISTANCE`
+/// centroid-proximity scan, which could gate a route that merely passed
+/// *near* a doorway without ever crossing it), *except* for the one door a
+/// given agent's own `travel_intent` currently targets.
 #[derive(Debug, Clone, Copy)]
 struct MidRouteDoor {
     door_form_id: u32,
-    midpoint: Vec3,
+    vertices: [Vec3; 3],
 }
 
 /// Per-agent bookkeeping that used to live in the single-agent
@@ -533,6 +725,7 @@ impl Plugin for NavBackendPlugin {
                     door_availability_system,
                     door_link_system,
                     apply_agent_physics_movement,
+                    merge_traversal_system,
                     door_traversal_system,
                     log_agent_state_changes,
                     log_path_latency,
@@ -626,6 +819,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     })?;
     let mesh_inputs = super::mesh_inputs(&graph);
     let merge_inputs = super::merge_inputs(&graph);
+    // Issue #155 feature 1: one archipelago-wide door FormID -> type index
+    // mapping, computed once before any mesh's conversion (every mesh must
+    // agree on the same door's type index -- see `door_type_indices`'s doc
+    // comment).
+    let door_type_indices = landmass_graph::door_type_indices(&mesh_inputs);
 
     // Widen the sample distances to humanoid scale (see
     // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
@@ -636,7 +834,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
-        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs);
+        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs, &door_type_indices);
         for diagnostic in &result.diagnostics {
             warn!(
                 "nav landmass conversion mesh {:08x}: {}",
@@ -684,10 +882,75 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // boundary linking cannot connect them (it needs coincident boundary
     // vertices); generated walk-through animation links across the matched
     // boundary edges are the path real data takes.
-    for descriptor in landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs) {
+    //
+    // Runtime collision-visibility validation (issue #154 real-data
+    // acceptance correction) runs as its own pass first, in a scoped
+    // borrow of the physics world that cannot overlap the `world` borrow
+    // `spawn_link_pair` needs below -- see `validate_merge_link_collision`'s
+    // doc comment for why prepare-side geometry alone is not enough. A
+    // cell whose static collision has not finished building yet (rare in
+    // practice: `tna spawn` is a manual console action issued after the
+    // cell is already visibly loaded) skips validation rather than
+    // dropping every merge link's connectivity for the session.
+    let candidate_merge_descriptors =
+        landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs);
+    let physics_disabled = world.resource::<PhysicsDisabled>().0;
+    let physics_ready = !physics_disabled
+        && world
+            .get_resource::<CellPhysicsReadiness>()
+            .is_some_and(|readiness| readiness.static_collision_ready());
+    let validated_merge_descriptors = if !physics_ready {
+        candidate_merge_descriptors
+    } else if let Some(physics_world) = world
+        .get_non_send_mut::<BoxdddPhysicsContext>()
+        .as_deref_mut()
+        .and_then(BoxdddPhysicsContext::world_mut)
+    {
+        let mover = boxddd::Capsule::new(
+            [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+            [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+            AGENT_RADIUS,
+        );
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+        let mut validated = Vec::with_capacity(candidate_merge_descriptors.len());
+        for descriptor in candidate_merge_descriptors {
+            let start = Vec3::from_array(descriptor.side_a.midpoint);
+            let end = Vec3::from_array(descriptor.side_b.midpoint);
+            match validate_merge_link_collision(
+                physics_world,
+                &mover,
+                collision_filter,
+                support_filter,
+                start,
+                end,
+            ) {
+                Ok(()) => validated.push(descriptor),
+                Err(reason) => {
+                    warn!(
+                        "nav merge link mesh {:08x} triangle {} <-> mesh {:08x} triangle {}: dropped ({})",
+                        descriptor.side_a.mesh_form_id,
+                        descriptor.side_a.polygon_index,
+                        descriptor.side_b.mesh_form_id,
+                        descriptor.side_b.polygon_index,
+                        reason.as_str(),
+                    );
+                }
+            }
+        }
+        validated
+    } else {
+        candidate_merge_descriptors
+    };
+
+    for descriptor in validated_merge_descriptors {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
-        for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+        // Issue #154 feature 3: real traversal-distance cost, floored well
+        // above zero -- `AnimationLink3d::cost` must stay strictly positive
+        // regardless of how tight a validated portal's overlap ended up.
+        let cost = descriptor.distance.max(0.01);
+        for link_entity in spawn_link_pair(world, archipelago_entity, start, end, cost) {
             link_kinds.insert(link_entity, LinkKind::Merge);
             links.push(link_entity);
         }
@@ -703,7 +966,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         let usable = door_usable_now(world, descriptor.door_form_id, &door_lock_info);
         door_usable.insert(descriptor.door_form_id, usable);
         if usable {
-            for link_entity in spawn_link_pair(world, archipelago_entity, start, end) {
+            for link_entity in spawn_link_pair(world, archipelago_entity, start, end, 1.0) {
                 link_kinds.insert(
                     link_entity,
                     LinkKind::Door {
@@ -746,7 +1009,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         );
         mid_route_doors.push(MidRouteDoor {
             door_form_id: door.door_form_id,
-            midpoint: triangle_midpoint,
+            vertices: door.vertices.map(Vec3::from_array),
         });
         if let Some(&destination) = travel_destinations.get(&door.door_form_id) {
             let door_position = door_positions
@@ -781,6 +1044,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         mid_route_doors,
         door_usable,
         door_lock_info,
+        door_type_indices,
     };
     Ok(())
 }
@@ -798,11 +1062,18 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 /// path and are semantically identical. Reported upstream as
 /// <https://github.com/andriyDev/landmass/issues/192>; collapse back to one
 /// `bidirectional: true` link once a fixed release is adopted.
+///
+/// `cost` (issue #154 feature 3): door links keep passing the previous flat
+/// `1.0`; merge links pass their own `MergeLinkDescriptor::distance` (real
+/// traversal distance between the two portal-interval midpoints) so
+/// landmass's route cost reflects how far a crossing actually moves the
+/// agent instead of treating every merge seam as equally cheap.
 fn spawn_link_pair(
     world: &mut World,
     archipelago_entity: Entity,
     start: Vec3,
     end: Vec3,
+    cost: f32,
 ) -> [Entity; 2] {
     let mut spawn_one = |from: Vec3, to: Vec3| {
         world
@@ -811,7 +1082,7 @@ fn spawn_link_pair(
                     start_edge: (from, from),
                     end_edge: (to, to),
                     kind: 0,
-                    cost: 1.0,
+                    cost,
                     bidirectional: false,
                 },
                 archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
@@ -819,6 +1090,120 @@ fn spawn_link_pair(
             .id()
     };
     [spawn_one(start, end), spawn_one(end, start)]
+}
+
+/// Why a merge portal candidate failed runtime collision-visibility
+/// validation (issue #154 real-data acceptance correction). Reported once
+/// per dropped link via a stable `warn!` line naming both sides' mesh/
+/// triangle ids (`ensure_archipelago`).
+#[derive(Debug, Clone, Copy)]
+enum MergeLinkRejection {
+    /// The capsule sweep from the near portal point to the far one did not
+    /// reach the far point without first contacting something.
+    SweptBlocked,
+    /// No walkable ground support was found within step height below the
+    /// crossing's midpoint or its far point.
+    NoGroundSupport,
+}
+
+impl MergeLinkRejection {
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeLinkRejection::SweptBlocked => "swept blocked",
+            MergeLinkRejection::NoGroundSupport => "no ground support",
+        }
+    }
+}
+
+/// Runtime collision-visibility validation for one merge portal candidate
+/// (issue #154 real-data acceptance correction): prepare-side geometric
+/// validation (opposing directions, an overlapping interval --
+/// `vsa::prepare::nav_graph::validate_portal_candidate`) has no cooked
+/// physics to check against, and real FranklinMetro02 data showed it can
+/// accept a candidate that is a genuine seam in the abstract navmesh
+/// topology but empty air (or blocked by intervening geometry) in the
+/// actual level -- one accepted portal with a 1.69 m XZ gap swept a live
+/// agent clean off the mesh edge into the void (`y` still falling at
+/// -348 m when observed). This runs once per candidate link at
+/// archipelago-build time (`ensure_archipelago`, where the cooked BoxDDD
+/// collision world is already available), mirroring where issue #154's
+/// step-height check already moved to for the identical "no cooked
+/// physics prepare-side" reason.
+///
+/// Two checks, both using the same capsule/filters ordinary agent movement
+/// uses (`step_agent_kcc`'s own `mover`/`collision_filter`/
+/// `support_filter`, constructed identically by the caller):
+/// 1. Ground support (`player::try_step_down` -- the same step-height-
+///    bounded downward probe the KCC itself uses when stepping down) must
+///    exist within step height below both the crossing's midpoint and
+///    `end`. This is what actually catches the void-fall case: a capsule
+///    swept purely horizontally never contacts a floor that simply is not
+///    there underneath it.
+/// 2. A capsule slide from `start` to `end` (`player::move_mover`, the
+///    same move-and-slide collision response ordinary agent/player
+///    movement runs every tick -- deliberately *not* a single raw
+///    `boxddd::World::cast_mover`) must actually arrive within a small
+///    tolerance. A raw single sweep starting exactly at `start` routinely
+///    reports "blocked immediately" for an otherwise walkable seam: `start`
+///    is an un-eroded seam boundary point (`erosion_policy`'s protected-
+///    edge rule deliberately never pulls a merge-triangle vertex inward,
+///    so both sides keep agreeing on the same seam position), which in
+///    real FO3 data commonly sits flush against the near-side wall -- a
+///    capsule centred exactly there already touches that wall at the very
+///    first query. `move_mover`'s plane-based sliding is what real
+///    per-tick movement already relies on to handle a capsule touching a
+///    wall without misreporting the whole crossing as impassable; a raw
+///    cast has no such contact tolerance.
+///
+/// `start`/`end` are feet-level points (the same convention every other
+/// nav-graph point in this module uses -- see `TRAVEL_ARRIVAL_DISTANCE`'s
+/// doc comment); both are raised by `AGENT_HEIGHT / 2` to the capsule-
+/// centre height `step_agent_kcc`'s own `origin` convention expects before
+/// either check runs.
+fn validate_merge_link_collision(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    start: Vec3,
+    end: Vec3,
+) -> Result<(), MergeLinkRejection> {
+    let to_capsule_center = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+    let start_origin = start + to_capsule_center;
+    let end_origin = end + to_capsule_center;
+    let mid_origin = start_origin.lerp(end_origin, 0.5);
+
+    for probe in [mid_origin, end_origin] {
+        if player::try_step_down(
+            world,
+            player::to_box_vec3(probe),
+            mover,
+            boxddd::Vec3::ZERO,
+            collision_filter,
+            support_filter,
+        )
+        .is_none()
+        {
+            return Err(MergeLinkRejection::NoGroundSupport);
+        }
+    }
+
+    let delta = player::to_box_vec3(end_origin - start_origin);
+    let (achieved_box, ..) = player::move_mover(
+        world,
+        player::to_box_vec3(start_origin),
+        mover,
+        delta,
+        collision_filter,
+        support_filter,
+        true,
+        false,
+    );
+    let achieved = player::from_box_vec3(achieved_box);
+    if (achieved - end_origin).length() > MERGE_LINK_SWEEP_TOLERANCE {
+        return Err(MergeLinkRejection::SweptBlocked);
+    }
+    Ok(())
 }
 
 /// Spawns the landmass `Character3d` mirroring the FPS player (issue #114
@@ -925,6 +1310,102 @@ fn door_usable_now(
 ) -> bool {
     let (open, locked) = door_open_and_locked(world, door_form_id, door_lock_info);
     repath::door_usable(repath::DoorObservation { locked, open })
+}
+
+/// Rebuilds `agent_entity`'s `AgentTypeIndexCostOverrides` wholesale from
+/// `NavArchipelagoState::door_usable`/`door_type_indices` (issue #155
+/// feature 2): every currently-unusable (locked, closed) door with a
+/// resolved type index gets [`LOCKED_DOOR_TYPE_INDEX_COST`]; everything
+/// else -- including a door that *was* locked and just became usable --
+/// gets no entry. Replacing the whole component rather than patching it is
+/// deliberate: `bevy_landmass::AgentTypeIndexCostOverrides` only exposes
+/// `set_type_index_cost` (insert/overwrite) publicly, with no matching
+/// "remove one override" call, so the only way to actually *clear* a
+/// stale locked-door entry from outside `bevy_landmass` is to insert a
+/// fresh component that never had it. `bevy_landmass`'s own sync system
+/// only re-applies this component to the underlying `landmass::Agent` when
+/// it is `Changed<_>` -- inserting a fresh value every call always
+/// satisfies that, so this is safe to call unconditionally (at spawn) or
+/// on every door-usability flip (`door_availability_system`) without
+/// needing its own separate change-tracking.
+///
+/// Called both at spawn time (`spawn_test_agent`, so a freshly spawned
+/// agent's very first path query already respects whatever is locked) and
+/// on every `door_availability_system` flip (so an agent that is idle, or
+/// already `NoPath`/`Unreachable`, picks up the change on its next solve --
+/// `landmass`'s own `does_agent_need_repath` retries every tick whenever
+/// `current_path` is `None`, with no explicit retarget needed for that
+/// case). An agent already mid-transit through a door at the exact instant
+/// it locks keeps following its already-computed, structurally still-valid
+/// path until its next genuine repath -- see this file's module doc
+/// comment for why that narrower case is a documented scope cut rather
+/// than fixed here.
+fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
+    let mut overrides = AgentTypeIndexCostOverrides::default();
+    let state = world.resource::<NavArchipelagoState>();
+    for (&door_form_id, &usable) in &state.door_usable {
+        if usable {
+            continue;
+        }
+        if let Some(&type_index) = state.door_type_indices.get(&door_form_id) {
+            overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
+        }
+    }
+    if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
+        entity.insert(overrides);
+    }
+}
+
+/// Issue #163 (`setlock`): the narrow external mutation point for a door's
+/// prepared lock level, callable from `console::world_commands` without
+/// exposing `NavArchipelagoState` itself. Inserts/replaces the door's
+/// `door_lock_info` entry -- the exact shape `ensure_archipelago` populates
+/// from the manifest above -- preserving whatever `key_form_id` was already
+/// recorded (a runtime lock change never invents a new key requirement). A
+/// missing resource (no archipelago built yet for this cell, or a console
+/// harness without the nav plugin) is a no-op: there is no `door_usable`
+/// entry to flip either in that case, and the interaction-side write in the
+/// same console command is still the ultimate consistent state for anything
+/// reading only `PlacementRoot`. Once the resource exists,
+/// `door_availability_system`'s next poll (`door_usable_now` ->
+/// `door_open_and_locked`) reads this updated map and treats a runtime lock
+/// exactly like an authored one -- no separate repath plumbing needed.
+pub(crate) fn set_door_lock_level(world: &mut World, door_form_id: u32, lock_level: Option<i8>) {
+    let Some(mut state) = world.get_resource_mut::<NavArchipelagoState>() else {
+        return;
+    };
+    let key_form_id = state
+        .door_lock_info
+        .get(&door_form_id)
+        .and_then(|info| info.key_form_id);
+    state.door_lock_info.insert(
+        door_form_id,
+        DoorLockInfo {
+            lock_level,
+            key_form_id,
+        },
+    );
+}
+
+/// Test-only support for `console::world_commands`'s `setlock` tests, which
+/// run in the lighter console harness (`test_app` in
+/// `console::tests`) that never builds a real archipelago. Neither
+/// `NavArchipelagoState` nor `DoorLockInfo` is nameable outside this module,
+/// so a console test cannot construct or inspect them directly.
+#[cfg(test)]
+pub(crate) fn init_test_archipelago_state(world: &mut World) {
+    world.init_resource::<NavArchipelagoState>();
+}
+
+/// Test-only companion to [`init_test_archipelago_state`]: the locked-level
+/// currently recorded for `door_form_id`, or `None` if it is absent or
+/// recorded unlocked -- either way, "not locked" for route planning.
+#[cfg(test)]
+pub(crate) fn door_lock_level_for_test(world: &World, door_form_id: u32) -> Option<i8> {
+    world
+        .get_resource::<NavArchipelagoState>()
+        .and_then(|state| state.door_lock_info.get(&door_form_id))
+        .and_then(|info| info.lock_level)
 }
 
 fn player_transform_query(world: &mut World) -> Option<Vec3> {
@@ -1090,6 +1571,10 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
         .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::IDENTITY))
         .id();
     world.entity_mut(agent_entity).add_child(visual);
+    // Issue #155 feature 2: this agent's very first path query must already
+    // respect whatever is locked in the active cell -- see
+    // `apply_door_lock_overrides`'s doc comment.
+    apply_door_lock_overrides(world, agent_entity);
     agent_entity
 }
 
@@ -1332,7 +1817,18 @@ fn resolve_status(
     if door_link::is_travel_reached(door_link_state) {
         return landmass_graph::NavAgentStatus::TravelReached;
     }
-    if door_link::is_paused(door_link_state) || door_link::is_failed(door_link_state) {
+    // Issue #155 feature 4: a door lifecycle that gave up waiting
+    // (`MAX_WAIT_TICKS` exhausted, whether from a locked mid-route crossing
+    // or a two-sided link) is a distinct, terminal failure -- not the same
+    // "temporarily waiting" status a `Paused` agent still recovering from is
+    // in. `Unreachable` (not a brand-new variant) is deliberate: it is the
+    // exact word both call sites' `nav agent unreachable` log line already
+    // uses (AGENTS.md: stable log wording), so `tna status`/the HUD finally
+    // agree with the log instead of contradicting it.
+    if door_link::is_failed(door_link_state) {
+        return landmass_graph::NavAgentStatus::Unreachable;
+    }
+    if door_link::is_paused(door_link_state) {
         return landmass_graph::NavAgentStatus::Paused;
     }
     landmass_graph::map_agent_state(landmass_state)
@@ -1537,7 +2033,13 @@ type AgentPhysicsQuery<'w, 's> = Query<
         Option<&'static AgentTarget3d>,
         Option<&'static AgentState>,
     ),
-    (With<TestNavAgentMarker>, Without<DoorTraversal>),
+    (
+        With<TestNavAgentMarker>,
+        Without<DoorTraversal>,
+        // Issue #154 feature 4: a merge-portal crossing is swept by its own
+        // `merge_traversal_system`, not this system.
+        Without<MergeTraversal>,
+    ),
 >;
 
 /// Physics-authoritative agent movement (issue #114): landmass's desired
@@ -1663,10 +2165,31 @@ fn apply_agent_physics_movement(
         // not an array of candidates a stray vertical match could
         // misidentify, and a route with real elevation change still wants
         // horizontal progress to dominate the distance-to-target measure.
+        //
+        // This `distance` now feeds only the arrival short-circuit just
+        // below (`arrival_resets_stuck`, issue #136 follow-up) -- literal
+        // proximity to the final target is exactly what "have I arrived"
+        // means. Issue #157: it no longer feeds `decide_stuck` itself, see
+        // `progress_distance` below.
         let distance =
             movement_policy::horizontal_distance(new_position.to_array(), target_point.to_array());
+
+        // Corridor-progress signal (issue #157, see `movement_policy`'s
+        // module doc comment): integrate this tick's real, KCC-resolved
+        // horizontal motion projected onto whatever direction landmass is
+        // *currently* steering toward, then negate the running total into
+        // the same monotone "smaller is better" shape `decide_stuck`
+        // already expects. A route leg that must move away from the final
+        // target keeps registering fresh progress every tick it is
+        // actually walking the corridor, unlike literal
+        // distance-to-final-target.
+        kcc.route_progress += movement_policy::route_progress_delta(
+            [desired_horizontal.x, desired_horizontal.y],
+            [achieved.x, achieved.z],
+        ) * dt;
+        let progress_distance = -kcc.route_progress;
         if kcc.best_distance == f32::MAX {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
         }
         // Genuinely at the target: "reached" and "stuck" are mutually
         // exclusive outcomes, not independent facts. Without this
@@ -1699,21 +2222,22 @@ fn apply_agent_physics_movement(
             AGENT_TARGET_REACHED_DISTANCE,
             landmass_reached,
         ) {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
             kcc.ticks_without_progress = 0;
             kcc.recovery_active = false;
             kcc.stuck = false;
             continue;
         }
         let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
-            distance_to_target: distance,
+            distance_to_target: progress_distance,
             best_distance_so_far: kcc.best_distance,
             ticks_without_progress: kcc.ticks_without_progress,
             recovery_active: kcc.recovery_active,
         });
-        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < kcc.best_distance;
+        let progressed =
+            progress_distance + movement_policy::STUCK_PROGRESS_EPSILON < kcc.best_distance;
         if progressed {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
             kcc.ticks_without_progress = 0;
             kcc.recovery_active = false;
         } else {
@@ -1780,8 +2304,13 @@ fn door_traversal_system(
                 .remove::<DoorTraversal>()
                 .remove::<UsingAnimationLink>();
             match runtime.active_link {
-                // A merge-seam crossing involves no door: the state machine
-                // never left Idle, so completion only clears the link.
+                // Issue #154: a merge-seam crossing no longer drives
+                // `DoorTraversal` at all (see `merge_traversal_system`), so
+                // `Some(LinkKind::Merge)` should never actually reach here
+                // in practice -- kept alongside `None` defensively (just
+                // clear the link) rather than treated as an invariant
+                // violation, the same conservative stance this match
+                // already took for the "no active link" case.
                 Some(LinkKind::Merge) | None => {
                     runtime.active_link = None;
                 }
@@ -1851,6 +2380,152 @@ fn door_traversal_system(
             }
         }
     }
+}
+
+type MergeTraversalQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Transform,
+        &'static mut AgentKcc,
+        &'static mut MergeTraversal,
+        &'static mut AgentRuntime,
+    ),
+    With<TestNavAgentMarker>,
+>;
+
+/// Sweeps every agent currently crossing a same-cell merge portal (issue
+/// #154 feature 4) toward the far portal point with the same
+/// `step_agent_kcc` physics `apply_agent_physics_movement` uses for
+/// ordinary movement, instead of `door_traversal_system`'s scripted lerp --
+/// a portal candidate that turns out to be collision-blocked must fail
+/// visibly (the same stable `nav agent collision-blocked <id>`/`nav agent
+/// stuck <id>` lines ordinary movement already reports, feeding `tna
+/// status`'s `blocked=`/`stuck=` fields) rather than teleport the agent
+/// through geometry. Runs in the same `FixedUpdate` chain slot
+/// `door_traversal_system` occupies for the door lifecycle
+/// (`NavBackendPlugin::build`): the two systems drive entirely disjoint
+/// entity sets (`MergeTraversal` vs. `DoorTraversal`), so ordering between
+/// them does not matter, and `apply_agent_physics_movement` itself excludes
+/// both marker components (`AgentPhysicsQuery`) so nothing ever
+/// double-drives the same entity's `Transform` in one tick.
+#[allow(clippy::too_many_arguments)]
+fn merge_traversal_system(
+    time: Res<Time>,
+    physics_disabled: Res<PhysicsDisabled>,
+    cell_physics: Res<CellPhysicsReadiness>,
+    roster: Res<TestNavAgentState>,
+    mut context: NonSendMut<BoxdddPhysicsContext>,
+    mut agents: MergeTraversalQuery<'_, '_>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 || physics_disabled.0 || !cell_physics.static_collision_ready() {
+        // Physics is not ready to collide against yet (or is globally
+        // disabled): hold every in-progress crossing in place rather than
+        // advance it against a world that cannot resolve collision this
+        // tick, mirroring `apply_agent_physics_movement`'s own guard.
+        return;
+    }
+    let Some(world) = context.world_mut() else {
+        return;
+    };
+    let mover = boxddd::Capsule::new(
+        [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+        [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+        AGENT_RADIUS,
+    );
+    let collision_filter = player::player_collision_filter();
+    let support_filter = player::stair_support_filter();
+
+    for (entity, mut transform, mut kcc, mut traversal, mut runtime) in &mut agents {
+        if movement_policy::nav_point_reached(
+            transform.translation.to_array(),
+            traversal.target.to_array(),
+            MERGE_TRAVERSAL_REACHED_DISTANCE,
+            AGENT_HEIGHT,
+        ) {
+            commands
+                .entity(entity)
+                .remove::<MergeTraversal>()
+                .remove::<UsingAnimationLink>();
+            runtime.active_link = None;
+            continue;
+        }
+
+        traversal.elapsed += dt;
+        if traversal.elapsed > traversal.timeout {
+            let was_reported = kcc.stuck || kcc.collision_blocked;
+            kcc.stuck = true;
+            kcc.collision_blocked = true;
+            commands
+                .entity(entity)
+                .remove::<MergeTraversal>()
+                .remove::<UsingAnimationLink>();
+            runtime.active_link = None;
+            // Minimum viable mitigation for a blocked-portal repath loop
+            // (issue #154 review correction, feature 4): the agent's
+            // current route/travel-door target is cleared outright rather
+            // than left in place, so `LandmassSystems::Update`'s next solve
+            // has nothing left to path across the same blocked link with --
+            // an idle agent that goes nowhere, instead of one that
+            // silently re-selects the identical invalid link and repeats
+            // this exact failure forever.
+            //
+            // ponytail: this is not per-portal-link quarantine (excluding
+            // just the blocked seam while keeping the agent's real
+            // destination, so a repath can route *around* it) -- that
+            // needs a landmass-side mechanism to exclude one specific
+            // off-mesh link from a route, which does not exist yet for
+            // merge links (F155's door work adds a per-polygon *type-index*
+            // cost override, but merge-link polygons have no type tagging).
+            // Left for a follow-up once that infra exists; flagged to the
+            // orchestrator for its own issue.
+            commands.entity(entity).remove::<AgentTarget3d>();
+            runtime.travel_intent = None;
+            if !was_reported && let Some(index) = roster.index_of(entity) {
+                warn!(
+                    "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s; agent stopped mid-portal and its route was cleared",
+                    traversal.timeout
+                );
+                info!("nav agent collision-blocked {index}");
+                info!("nav agent stuck {index}");
+            }
+            continue;
+        }
+
+        let to_target = traversal.target - transform.translation;
+        let horizontal = Vec2::new(to_target.x, to_target.z);
+        let desired_horizontal = if horizontal.length() > f32::EPSILON {
+            horizontal.normalize() * AGENT_DESIRED_SPEED
+        } else {
+            Vec2::ZERO
+        };
+        let (new_position, new_velocity, grounded) = step_agent_kcc(
+            world,
+            &mover,
+            collision_filter,
+            support_filter,
+            transform.translation,
+            kcc.velocity,
+            kcc.grounded,
+            desired_horizontal,
+            dt,
+        );
+        transform.translation = new_position;
+        kcc.velocity = new_velocity;
+        kcc.grounded = grounded;
+    }
+}
+
+/// The wall-clock deadline (seconds) for a swept merge-portal crossing of
+/// `initial_distance` metres (issue #154 feature 4) -- see
+/// [`MERGE_TRAVERSAL_TIMEOUT_FACTOR`]'s doc comment for why this is an
+/// absolute budget rather than a resettable no-progress counter.
+fn merge_traversal_timeout(initial_distance: f32) -> f32 {
+    (initial_distance.max(0.0) / AGENT_DESIRED_SPEED) * MERGE_TRAVERSAL_TIMEOUT_FACTOR
+        + MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS
 }
 
 /// Requests the door `door_form_id` open through the same boundary the
@@ -1985,6 +2660,12 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
             let travel_target_door = world
                 .get::<AgentRuntime>(agent_entity)
                 .and_then(|runtime| runtime.travel_intent);
+            // Issue #155 feature 3: corridor-based containment
+            // (`landmass_graph::point_in_door_triangle` against the door's
+            // own un-eroded triangle vertices), not the earlier
+            // `MID_ROUTE_DOOR_GATE_DISTANCE` centroid-proximity scan -- a
+            // route that merely passes near a doorway without its corridor
+            // ever crossing it must not gate.
             let mid_route_crossing = has_target
                 .then(|| world.get::<Transform>(agent_entity).map(|t| t.translation))
                 .flatten()
@@ -1995,10 +2676,9 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         .iter()
                         .find(|door| {
                             Some(door.door_form_id) != travel_target_door
-                                && movement_policy::nav_point_reached(
+                                && landmass_graph::point_in_door_triangle(
                                     position.to_array(),
-                                    door.midpoint.to_array(),
-                                    MID_ROUTE_DOOR_GATE_DISTANCE,
+                                    door.vertices.map(|vertex| vertex.to_array()),
                                     AGENT_HEIGHT,
                                 )
                         })
@@ -2058,13 +2738,32 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
             };
             match link_kind {
                 LinkKind::Merge => {
-                    // A merge seam has no door: cross it immediately.
+                    // A merge seam has no door to wait on (issue #154
+                    // feature 4): sweep the agent to the far portal point
+                    // with the physics KCC (`merge_traversal_system`)
+                    // instead of the door lifecycle's scripted lerp -- a
+                    // portal whose far side is actually blocked must stop
+                    // the agent for real, not clip it through. `start_point`
+                    // is unused here (unlike a door traversal's fixed lerp
+                    // start): the sweep simply starts from wherever the
+                    // agent's `Transform` actually is this tick. The
+                    // timeout budget is derived from the *actual* current
+                    // position, not `start_point`, for the same reason.
+                    let initial_distance = world
+                        .get::<Transform>(agent_entity)
+                        .map(|transform| {
+                            movement_policy::horizontal_distance(
+                                transform.translation.to_array(),
+                                end_point.to_array(),
+                            )
+                        })
+                        .unwrap_or(0.0);
                     world.entity_mut(agent_entity).insert((
                         UsingAnimationLink,
-                        DoorTraversal {
-                            start: start_point,
-                            end: end_point,
+                        MergeTraversal {
+                            target: end_point,
                             elapsed: 0.0,
+                            timeout: merge_traversal_timeout(initial_distance),
                         },
                     ));
                     world
@@ -2223,7 +2922,8 @@ fn door_availability_system(world: &mut World) {
                     .resource::<NavArchipelagoState>()
                     .archipelago
                     .expect("availability tracking implies a built archipelago");
-                for link_entity in spawn_link_pair(world, archipelago_entity, link.start, link.end)
+                for link_entity in
+                    spawn_link_pair(world, archipelago_entity, link.start, link.end, 1.0)
                 {
                     let mut state = world.resource_mut::<NavArchipelagoState>();
                     state.link_kinds.insert(
@@ -2282,6 +2982,14 @@ fn door_availability_system(world: &mut World) {
             .active()
             .map(|(_, entity)| entity)
             .collect();
+        // Issue #155 feature 2: every active agent's lock-cost overrides
+        // must reflect this exact flip before landmass's next solve --
+        // `NavArchipelagoState::door_usable` was already updated above, so
+        // this rebuild picks up `door_form_id`'s new state along with any
+        // other door's existing one.
+        for agent_entity in &active_agents {
+            apply_door_lock_overrides(world, *agent_entity);
+        }
         for agent_entity in &active_agents {
             let target =
                 world
@@ -2954,6 +3662,306 @@ mod tests {
         );
     }
 
+    /// Issue #154 feature 4: a clear merge-portal crossing sweeps the
+    /// agent to the far portal point (not an instant teleport/lerp -- the
+    /// KCC needs several ticks to physically cover the distance) and clears
+    /// `MergeTraversal`/`UsingAnimationLink`/`active_link` once it arrives.
+    #[test]
+    fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::Ready);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        // `merge_traversal_system` collides against the real
+        // `player::player_collision_filter()`/`stair_support_filter()`
+        // queries (same as `apply_agent_physics_movement`), so the fixture
+        // geometry must use `add_player_compatible_floor`'s filter, not
+        // `add_fixture_box`'s self-consistent-but-unrelated one (that
+        // mismatch was the root cause of an earlier version of this test
+        // free-falling straight through the floor).
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let target = Vec3::new(2.0, AGENT_HEIGHT / 2.0, 0.0);
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc {
+                    grounded: true,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                AgentRuntime {
+                    active_link: Some(LinkKind::Merge),
+                    ..default()
+                },
+                MergeTraversal {
+                    target,
+                    elapsed: 0.0,
+                    timeout: merge_traversal_timeout(2.0),
+                },
+                UsingAnimationLink,
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        // Plenty of ticks for the KCC (desired speed 2.5 m/s) to cover the
+        // 2 m crossing on flat open ground.
+        for _ in 0..180 {
+            world
+                .run_system_once(merge_traversal_system)
+                .expect("system runs");
+            if world.get::<MergeTraversal>(agent).is_none() {
+                break;
+            }
+        }
+
+        assert!(
+            world.get::<MergeTraversal>(agent).is_none(),
+            "a clear crossing must complete and remove MergeTraversal"
+        );
+        assert!(world.get::<UsingAnimationLink>(agent).is_none());
+        assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+        let position = world.get::<Transform>(agent).unwrap().translation;
+        assert!(
+            (position.x - target.x).abs() < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
+            "agent should have swept to the far portal point, got {position:?}"
+        );
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert!(!kcc.stuck, "a clear crossing must never latch stuck");
+        assert!(!kcc.collision_blocked);
+    }
+
+    /// Issue #154 feature 4: a merge-portal crossing whose far side is
+    /// walled off must fail visibly through the existing stuck/blocked
+    /// reporting (`kcc.stuck`/`kcc.collision_blocked`, the same fields
+    /// `tna status` and the stable `nav agent stuck <id>`/`nav agent
+    /// collision-blocked <id>` log lines already use) rather than
+    /// teleporting the agent through the wall via a scripted lerp.
+    #[test]
+    fn merge_traversal_system_reports_stuck_when_the_portal_is_walled_off() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<TestNavAgentState>();
+        world.insert_resource(PhysicsDisabled(false));
+        world.insert_resource(CellPhysicsReadiness::Ready);
+        world.init_resource::<Time>();
+        world
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        // Same real-player-filter requirement as the sweep test above: both
+        // the floor and the wall must use `add_player_compatible_floor`'s
+        // filter, not `add_fixture_box`'s, or `merge_traversal_system`'s
+        // real collision query never sees either shape and the agent free-
+        // falls through both -- which happened to still end in `stuck` (via
+        // the vertical-gap guard on `nav_point_reached` never being
+        // satisfied while falling) for the wrong reason entirely, not
+        // because the wall actually blocked it.
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        // A wall immediately in front (+X) of the agent's start position,
+        // between it and the portal's far point.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(1.0, 1.0, 0.0),
+            boxddd::Vec3::new(0.1, 2.0, 5.0),
+        );
+        world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let target = Vec3::new(5.0, AGENT_HEIGHT / 2.0, 0.0);
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentKcc {
+                    grounded: true,
+                    ..default()
+                },
+                Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                AgentRuntime {
+                    active_link: Some(LinkKind::Merge),
+                    ..default()
+                },
+                MergeTraversal {
+                    target,
+                    elapsed: 0.0,
+                    timeout: merge_traversal_timeout(5.0),
+                },
+                UsingAnimationLink,
+                AgentTarget3d::Point(target),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        // The agent makes genuine initial progress closing the ~0.55 m gap
+        // to the wall before it wedges (see
+        // `a_blocked_agent_reports_its_real_near_zero_velocity`'s own
+        // 120-tick budget for the same fixture shape) and then keeps
+        // creeping forward by less than a measurable step forever --
+        // that's exactly why this traversal uses an absolute deadline
+        // rather than a resettable no-progress counter (see
+        // `MERGE_TRAVERSAL_TIMEOUT_FACTOR`'s doc comment). Run comfortably
+        // past the computed timeout in fixed-tick terms.
+        let dt = 1.0 / 60.0;
+        let ticks_to_timeout = (merge_traversal_timeout(5.0) / dt).ceil() as usize;
+        for _ in 0..(ticks_to_timeout + 60) {
+            world
+                .run_system_once(merge_traversal_system)
+                .expect("system runs");
+            if world.get::<MergeTraversal>(agent).is_none() {
+                break;
+            }
+        }
+
+        let kcc = world.get::<AgentKcc>(agent).unwrap();
+        assert!(
+            kcc.stuck,
+            "a wall-blocked crossing must report stuck, not silently keep pushing forever"
+        );
+        assert!(kcc.collision_blocked);
+        assert!(
+            world.get::<MergeTraversal>(agent).is_none(),
+            "the traversal must stop, not keep the agent pinned mid-portal indefinitely"
+        );
+        assert!(world.get::<UsingAnimationLink>(agent).is_none());
+        assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+        let position = world.get::<Transform>(agent).unwrap().translation;
+        assert!(
+            position.x < target.x - 1.0,
+            "the agent must never teleport through the wall to the far portal point, got {position:?}"
+        );
+        // Review correction (issue #154 feature 4): the blocked crossing's
+        // route must be cleared, not left in place -- otherwise the next
+        // landmass solve re-selects the exact same invalid link and the
+        // agent repeats this failure forever.
+        assert!(
+            world.get::<AgentTarget3d>(agent).is_none(),
+            "a blocked portal crossing must clear the agent's target so it does not immediately re-select the same blocked link"
+        );
+        assert!(
+            world
+                .get::<AgentRuntime>(agent)
+                .unwrap()
+                .travel_intent
+                .is_none()
+        );
+    }
+
+    /// Issue #154 real-data acceptance correction: a candidate whose two
+    /// portal points sit on the same connected, unobstructed floor must
+    /// pass runtime collision-visibility validation.
+    #[test]
+    fn validate_merge_link_collision_accepts_a_clean_connected_floor() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The FranklinMetro02 real-data finding this correction fixes: a
+    /// candidate whose far portal point overhangs empty space (no floor
+    /// underneath, only a ledge at the near side) must be rejected for
+    /// missing ground support, not accepted and left to sweep an agent off
+    /// the edge into the void at traversal time.
+    #[test]
+    fn validate_merge_link_collision_rejects_a_ledge_into_the_void() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        // Floor only under the near point (x in [-2, 2]); the far point at
+        // x = 5 overhangs nothing.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(2.0, 0.1, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+        );
+        assert!(
+            matches!(result, Err(MergeLinkRejection::NoGroundSupport)),
+            "{result:?}"
+        );
+    }
+
+    /// A candidate whose straight-line crossing is physically blocked by
+    /// intervening geometry (not merely a portal accepted on abstract
+    /// topology alone) must be rejected as swept-blocked.
+    #[test]
+    fn validate_merge_link_collision_rejects_a_swept_blocked_crossing() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        // A wall spanning the full crossing width, directly between the
+        // two portal points.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(2.0, 1.0, 0.0),
+            boxddd::Vec3::new(0.1, 2.0, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+        );
+        assert!(
+            matches!(result, Err(MergeLinkRejection::SweptBlocked)),
+            "{result:?}"
+        );
+    }
+
     /// Regression test (issue #114 added scope, M4 wave 5 real-data
     /// acceptance finding): `spawn_test_agent`'s visual child must sit
     /// exactly centred on its parent (zero local offset), never raised.
@@ -3292,6 +4300,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_status_maps_a_failed_door_lifecycle_to_unreachable_not_paused() {
+        // Issue #155 feature 4: `Failed` (the `MAX_WAIT_TICKS`-exhausted
+        // terminal, reached identically whether the underlying cause was a
+        // locked mid-route crossing or a two-sided door link) used to
+        // resolve to `Paused` here even though the log line at the same
+        // call site already says `nav agent unreachable` -- `tna status`/
+        // the HUD must agree with that wording, not contradict it.
+        let failed = door_link::DoorLinkState::Failed { door_form_id: 0x99 };
+        assert_eq!(
+            resolve_status(AgentState::Moving, failed),
+            landmass_graph::NavAgentStatus::Unreachable
+        );
+        assert_ne!(
+            resolve_status(AgentState::Moving, failed),
+            landmass_graph::NavAgentStatus::Paused
+        );
+    }
+
+    #[test]
     fn resolve_status_reports_travel_reached_as_its_own_status() {
         let reached = door_link::DoorLinkState::TravelReached {
             door_form_id: 0x99,
@@ -3524,6 +4551,21 @@ mod tests {
         }
     }
 
+    /// A door triangle (issue #155 feature 3) whose horizontal footprint
+    /// contains `center` -- the shape every `MidRouteDoor` fixture below
+    /// needs now that the crossing gate is point-in-triangle, not
+    /// centroid-proximity. Spans 2 m either side of `center` along X and Z,
+    /// well inside old `MID_ROUTE_DOOR_GATE_DISTANCE` scale but large
+    /// enough that the test-fixture agent positions below (which move
+    /// straight along X, holding Z fixed) reliably land inside it.
+    fn door_triangle_around(center: Vec3) -> [Vec3; 3] {
+        [
+            center + Vec3::new(-2.0, 0.0, -2.0),
+            center + Vec3::new(2.0, 0.0, -2.0),
+            center + Vec3::new(0.0, 0.0, 2.0),
+        ]
+    }
+
     /// A door placement at a specific position (issue #134's restore
     /// tests, which spawn at a resolved door-marker position).
     fn door_placement_at(
@@ -3662,6 +4704,114 @@ mod tests {
         assert_eq!(world.resource::<NavArchipelagoState>().links.len(), 2);
     }
 
+    /// Issue #163 (`setlock`): the narrow `set_door_lock_level` mutation
+    /// point behaves exactly like a manifest-authored lock for
+    /// `door_availability_system`'s change detection -- inserting a level
+    /// records it (preserving any existing `key_form_id`), and clearing it
+    /// (`None`) flips a previously-locked door usable and drives the exact
+    /// same one-repath link-spawn `a_door_state_change_triggers_exactly_one_
+    /// repath` exercises via a direct field poke, this time through the
+    /// console-facing setter instead.
+    #[test]
+    fn set_door_lock_level_propagates_through_door_availability_system() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let archipelago = world.spawn_empty().id();
+        // The door starts usable with a real link pair already spawned
+        // (mirroring what `ensure_archipelago`/an earlier unblock would have
+        // produced), so locking it has a link to remove.
+        let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.archipelago = Some(archipelago);
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: None,
+                    key_form_id: Some(0x1234),
+                },
+            );
+            state.door_usable.insert(0x99, true);
+            for link_entity in link_entities {
+                state
+                    .link_kinds
+                    .insert(link_entity, LinkKind::Door { form_id: 0x99 });
+                state.links.push(link_entity);
+            }
+        }
+
+        // Locking the door records the level and preserves the existing key
+        // requirement, without needing to pass it again.
+        set_door_lock_level(&mut world, 0x99, Some(50));
+        assert_eq!(door_lock_level_for_test(&world, 0x99), Some(50));
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_lock_info
+                .get(&0x99)
+                .unwrap()
+                .key_form_id,
+            Some(0x1234)
+        );
+
+        // The next poll sees the flip: the door becomes unusable and its
+        // link is removed (recorded as blocked) -- one repath.
+        door_availability_system(&mut world);
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_usable
+                .get(&0x99),
+            Some(&false)
+        );
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .len(),
+            1
+        );
+
+        // Clearing the lock (level 0 in the console command maps to `None`
+        // here) makes the door usable again on the following poll.
+        set_door_lock_level(&mut world, 0x99, None);
+        assert_eq!(door_lock_level_for_test(&world, 0x99), None);
+        door_availability_system(&mut world);
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_usable
+                .get(&0x99),
+            Some(&true)
+        );
+        assert!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .is_empty()
+        );
+    }
+
+    /// Issue #163: a door with no `door_usable` entry (no in-cell nav
+    /// triangles) still records the lock level -- the pure state mutation
+    /// the issue calls out as the fallback when the flip itself isn't
+    /// observable through `door_availability_system` (nothing tracks that
+    /// door for availability polling in the first place).
+    #[test]
+    fn set_door_lock_level_records_state_for_a_door_with_no_nav_triangles() {
+        let mut world = harness_world();
+        assert_eq!(door_lock_level_for_test(&world, 0x77), None);
+        set_door_lock_level(&mut world, 0x77, Some(25));
+        assert_eq!(door_lock_level_for_test(&world, 0x77), Some(25));
+        set_door_lock_level(&mut world, 0x77, None);
+        assert_eq!(door_lock_level_for_test(&world, 0x77), None);
+    }
+
     /// Plan #137 minimal-App test (real-data-corrected): a `goto` past a
     /// closed unlocked door mid-route drives the existing `DoorLinkState`
     /// lifecycle exactly once via the crossing-check trigger, then returns
@@ -3701,7 +4851,7 @@ mod tests {
             let mut state = world.resource_mut::<NavArchipelagoState>();
             state.mid_route_doors.push(MidRouteDoor {
                 door_form_id: 0x99,
-                midpoint: Vec3::new(5.0, 0.0, 0.0),
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
             });
             // The same door is also a travel-door candidate -- this is the
             // real-data shape (see this file's module doc): the crossing
@@ -3771,9 +4921,10 @@ mod tests {
     /// Regression test (issue #114 added scope, M4 wave 5 real-data
     /// acceptance finding): same shape as
     /// `travel_arrival_tolerates_the_agent_capsule_centre_sitting_above_the_feet_level_door_midpoint`,
-    /// for the #137 mid-route crossing gate -- a capsule-centre agent above
-    /// a feet-level `MidRouteDoor::midpoint` must still trigger the
-    /// crossing gate instead of silently clipping through the closed door.
+    /// for the #137/#155 mid-route crossing gate -- a capsule-centre agent
+    /// above a feet-level `MidRouteDoor::vertices` triangle must still
+    /// trigger the crossing gate instead of silently clipping through the
+    /// closed door.
     #[test]
     fn mid_route_crossing_gate_tolerates_the_agent_capsule_centre_vertical_offset() {
         let mut world = harness_world();
@@ -3803,7 +4954,7 @@ mod tests {
                 // Feet-level midpoint, exactly like real prepared nav graph
                 // data -- the agent's own Y stays at capsule-centre height
                 // (0.9 m) the whole time, never snapped down to match it.
-                midpoint: Vec3::new(5.0, 0.0, 0.0),
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
             });
 
         world.get_mut::<Transform>(agent).unwrap().translation = Vec3::new(5.0, 0.9, 0.0);
@@ -3864,7 +5015,7 @@ mod tests {
             // check once `travel_intent` targets it.
             state.mid_route_doors.push(MidRouteDoor {
                 door_form_id: 0x99,
-                midpoint: Vec3::new(5.0, 0.0, 0.0),
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
             });
         }
 
@@ -3941,7 +5092,7 @@ mod tests {
             let mut state = world.resource_mut::<NavArchipelagoState>();
             state.mid_route_doors.push(MidRouteDoor {
                 door_form_id: 0x99,
-                midpoint: Vec3::new(5.0, 0.0, 0.0),
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
             });
             state.travel_doors.insert(
                 0x99,
@@ -4014,7 +5165,7 @@ mod tests {
             let mut state = world.resource_mut::<NavArchipelagoState>();
             state.mid_route_doors.push(MidRouteDoor {
                 door_form_id: 0x99,
-                midpoint: Vec3::new(5.0, 0.0, 0.0),
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
             });
             state.door_lock_info.insert(
                 0x99,
@@ -4409,9 +5560,13 @@ mod tests {
             ],
             doors: Vec::new(),
         };
-        let valid = landmass_graph::build_navigation_mesh(&mesh_input, &[])
-            .nav_mesh
-            .expect("synthetic square validates");
+        let valid = landmass_graph::build_navigation_mesh(
+            &mesh_input,
+            &[],
+            &std::collections::BTreeMap::new(),
+        )
+        .nav_mesh
+        .expect("synthetic square validates");
         let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
             nav_mesh: Arc::new(valid),
         });
@@ -4761,6 +5916,282 @@ mod tests {
             (achieved.z - latest.z).abs() < 1e-3,
             "at interval 1 the applied value must equal `latest` exactly, got achieved.z={}",
             achieved.z
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Issue #155 features 1/2: door polygon typing + query-time lock
+    // exclusion, exercised against a real `Archipelago3d` solve (this file
+    // owns the live-Bevy tests -- `landmass_graph.rs` stays Bevy-engine-free,
+    // see its module doc comment). No physics/floor and no `FixedUpdate`
+    // movement chain is needed here (unlike `fixed_tick_test_app`'s other
+    // consumers): these tests only assert `AgentState`, which
+    // `Landmass3dPlugin`'s `FixedPreUpdate` systems alone produce, exactly
+    // mirroring `nav_overlay.rs`'s own minimal landmass-only harness test.
+    // -------------------------------------------------------------
+
+    /// Two rooms (`Room A` west, `Room B` east), connected by two
+    /// *independent* two-triangle corridors that share no vertex with each
+    /// other: a "door" corridor (triangles 4/5, typed under door FormID
+    /// `0x99` when `with_bypass` doors are wanted) along the south edges,
+    /// and -- only when `with_bypass` is true -- a plain "bypass" corridor
+    /// (triangles 6/7, never typed) along the north edges. `with_bypass:
+    /// false` yields a mesh where the door corridor is the *only* route
+    /// between the rooms (invariants 1/3); `true` adds the independent
+    /// alternate route (invariant 2). Room A's interior point `(0.7, 0.0,
+    /// 1.0)` and Room B's interior point `(8.7, 0.0, 1.7)` are this
+    /// fixture's start/target throughout (Room B is offset +1 in Z from
+    /// Room A -- see the vertex list below for why).
+    fn door_topology_mesh(with_bypass: bool) -> landmass_graph::MeshInput {
+        let vertices = vec![
+            [0.0, 0.0, 0.0], // 0: Room A SW
+            [2.0, 0.0, 0.0], // 1: Room A SE
+            [0.0, 0.0, 4.0], // 2: Room A NW
+            [2.0, 0.0, 4.0], // 3: Room A NE
+            // Room B is offset +1 in Z relative to Room A (z:1..5, not
+            // z:0..4): using the *same* Z range as Room A would put both
+            // rooms' south edges (and both north edges) on the exact same
+            // Z line, making the door/bypass quads degenerate (three
+            // collinear corners, zero area) instead of real triangles.
+            [8.0, 0.0, 1.0],  // 4: Room B SW
+            [10.0, 0.0, 1.0], // 5: Room B SE
+            [8.0, 0.0, 5.0],  // 6: Room B NW
+            [10.0, 0.0, 5.0], // 7: Room B NE
+        ];
+        let mut polygons = vec![
+            // Room A (SW/NE halves).
+            landmass_graph::PolygonInput {
+                index: 0,
+                vertex_indices: [0, 1, 2],
+                is_water: false,
+            },
+            landmass_graph::PolygonInput {
+                index: 1,
+                vertex_indices: [1, 3, 2],
+                is_water: false,
+            },
+            // Room B (SW/NE halves).
+            landmass_graph::PolygonInput {
+                index: 2,
+                vertex_indices: [4, 5, 6],
+                is_water: false,
+            },
+            landmass_graph::PolygonInput {
+                index: 3,
+                vertex_indices: [5, 7, 6],
+                is_water: false,
+            },
+            // Door corridor: Room A's south edge (0,1) <-> Room B's south
+            // edge (4,5).
+            landmass_graph::PolygonInput {
+                index: 4,
+                vertex_indices: [0, 1, 4],
+                is_water: false,
+            },
+            landmass_graph::PolygonInput {
+                index: 5,
+                vertex_indices: [1, 5, 4],
+                is_water: false,
+            },
+        ];
+        if with_bypass {
+            // Bypass corridor: Room A's north edge (3,2) <-> Room B's north
+            // edge (7,6), reusing those rooms' own existing corner vertices
+            // (no new vertices needed) -- and, critically, sharing no
+            // vertex at all with the door corridor's own (0,1,4,5), so the
+            // two corridors are topologically independent routes.
+            polygons.push(landmass_graph::PolygonInput {
+                index: 6,
+                vertex_indices: [2, 3, 6],
+                is_water: false,
+            });
+            polygons.push(landmass_graph::PolygonInput {
+                index: 7,
+                vertex_indices: [3, 7, 6],
+                is_water: false,
+            });
+        }
+        landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices,
+            polygons,
+            doors: vec![
+                landmass_graph::DoorInput {
+                    triangle_index: 4,
+                    door_reference_form_id: Some(0x99),
+                },
+                landmass_graph::DoorInput {
+                    triangle_index: 5,
+                    door_reference_form_id: Some(0x99),
+                },
+            ],
+        }
+    }
+
+    const DOOR_TOPOLOGY_ROOM_A_POINT: Vec3 = Vec3::new(0.7, 0.0, 1.0);
+    const DOOR_TOPOLOGY_ROOM_B_POINT: Vec3 = Vec3::new(8.7, 0.0, 1.7);
+
+    /// Builds a minimal landmass-only App (mirrors `nav_overlay.rs`'s own
+    /// harness test, not `fixed_tick_test_app`'s physics-laden one -- these
+    /// tests only need `AgentState`, which `Landmass3dPlugin`'s own
+    /// `FixedPreUpdate` systems alone produce), spawns `door_topology_mesh`
+    /// as a single island, and spawns one agent at `DOOR_TOPOLOGY_ROOM_A_
+    /// POINT` targeting `DOOR_TOPOLOGY_ROOM_B_POINT`. `lock_override`, if
+    /// `Some`, is inserted on the agent *before* the first solve -- the
+    /// "door already locked when the query is issued" shape the wave's
+    /// acceptance script exercises, and issue #155 feature 2's actual
+    /// contract (`apply_door_lock_overrides` is exercised separately, at
+    /// the `NavArchipelagoState`-driven integration level, by the mid-route
+    /// gating tests above; this harness drives the raw `bevy_landmass`
+    /// component directly since it has no `NavArchipelagoState`/manifest to
+    /// build one from).
+    fn door_topology_test_app(with_bypass: bool, lock_override: Option<f32>) -> (App, Entity) {
+        let mesh = door_topology_mesh(with_bypass);
+        let door_type_indices = landmass_graph::door_type_indices(std::slice::from_ref(&mesh));
+        assert_eq!(
+            door_type_indices.get(&0x99),
+            Some(&1),
+            "test setup: the door must resolve to type index 1"
+        );
+        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let valid = build_result.nav_mesh.unwrap_or_else(|| {
+            panic!(
+                "door_topology_mesh always validates: {:?}",
+                build_result.diagnostics
+            )
+        });
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            Landmass3dPlugin::default(),
+        ));
+        let nav_mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(nav_mesh_handle),
+        });
+
+        let mut agent_entity = app.world_mut().spawn((
+            Agent3dBundle {
+                agent: default(),
+                settings: AgentSettings {
+                    radius: AGENT_RADIUS,
+                    desired_speed: AGENT_DESIRED_SPEED,
+                    max_speed: AGENT_MAX_SPEED,
+                },
+                archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            },
+            Transform::from_translation(DOOR_TOPOLOGY_ROOM_A_POINT),
+            AgentTarget3d::Point(DOOR_TOPOLOGY_ROOM_B_POINT),
+        ));
+        if let Some(cost) = lock_override {
+            let mut overrides = AgentTypeIndexCostOverrides::default();
+            assert!(
+                overrides.set_type_index_cost(1, cost),
+                "test setup: the override cost must be > 0.0"
+            );
+            agent_entity.insert(overrides);
+        }
+        let agent = agent_entity.id();
+        (app, agent)
+    }
+
+    #[test]
+    fn locking_the_only_route_door_fails_at_query_time_not_after_walking_and_waiting() {
+        // Invariant 1: the door corridor is the mesh's *only* route (no
+        // bypass); locking it (the real `LOCKED_DOOR_TYPE_INDEX_COST`
+        // sentinel, applied before the very first solve) must produce
+        // `NoPath` immediately -- landmass never even attempts to walk the
+        // agent there and wait, unlike this file's pre-#155 proximity gate.
+        let (mut app, agent) = door_topology_test_app(false, Some(LOCKED_DOOR_TYPE_INDEX_COST));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        assert_eq!(
+            app.world().get::<AgentState>(agent).copied(),
+            Some(AgentState::NoPath),
+            "a locked door with no alternate route must fail at query time"
+        );
+        // No walk-and-wait: the agent's position never left its spawn.
+        assert_eq!(
+            app.world().get::<Transform>(agent).unwrap().translation,
+            DOOR_TOPOLOGY_ROOM_A_POINT
+        );
+    }
+
+    #[test]
+    fn locking_a_door_with_an_alternate_route_selects_the_alternate() {
+        // Invariant 2: the same lock, but the bypass corridor exists too --
+        // the solver must find *a* route (not `NoPath`), necessarily via
+        // the bypass, since the door corridor's own type index is
+        // cost-excluded for this agent.
+        let (mut app, agent) = door_topology_test_app(true, Some(LOCKED_DOOR_TYPE_INDEX_COST));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        let state = app.world().get::<AgentState>(agent).copied();
+        assert_ne!(
+            state,
+            Some(AgentState::NoPath),
+            "an alternate route must be found when the door is locked, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn unlocking_the_only_route_door_restores_the_direct_path() {
+        // Invariant 3: starting locked (as above, `NoPath`), then clearing
+        // the override wholesale (mirroring `apply_door_lock_overrides`'s
+        // own "replace the whole component" rebuild on an unlock) must let
+        // the agent path again on its very next solve -- `landmass`'s own
+        // `does_agent_need_repath` retries every tick while `current_path`
+        // is `None` (the `NoPath` state's own path value), so no explicit
+        // retarget is needed for this case.
+        let (mut app, agent) = door_topology_test_app(false, Some(LOCKED_DOOR_TYPE_INDEX_COST));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        assert_eq!(
+            app.world().get::<AgentState>(agent).copied(),
+            Some(AgentState::NoPath),
+            "test setup: the door must start locked-and-failed"
+        );
+
+        app.world_mut()
+            .entity_mut(agent)
+            .insert(AgentTypeIndexCostOverrides::default());
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        let state = app.world().get::<AgentState>(agent).copied();
+        assert_ne!(
+            state,
+            Some(AgentState::NoPath),
+            "unlocking must restore the direct route, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_typed_door_triangle_still_connects_its_neighbours() {
+        // CONSTRAINT pin (issue #155 feature 1): typing a door triangle
+        // must not remove or alter unrelated adjacency. No lock override at
+        // all here -- the door corridor is typed (type index 1) but never
+        // cost-excluded, so the direct route must still be found exactly as
+        // if it had never been typed.
+        let (mut app, agent) = door_topology_test_app(false, None);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        let state = app.world().get::<AgentState>(agent).copied();
+        assert_ne!(
+            state,
+            Some(AgentState::NoPath),
+            "a typed-but-unlocked door triangle must still connect its neighbours, got {state:?}"
         );
     }
 }

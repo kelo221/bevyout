@@ -12,6 +12,13 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             ConsoleCommand::new("ragdollprobe", "ragdollprobe <actor-reference>", "Report live ragdoll constraint, velocity, sleep, and visual-node errors without changing the actor.", ragdoll_probe),
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
             ConsoleCommand::new(
+                "setlock",
+                "setlock <reference> <level>",
+                "Set (positive level) or clear (0) a door reference's lock level at runtime (GECK lock/unlock parity); updates both the player-facing activation check and nav route planning.",
+                setlock,
+            )
+            .mutating(),
+            ConsoleCommand::new(
                 "tp",
                 "tp <x> <y> <z> [<cell-formid>]",
                 "Atomically teleport the player to (x, y, z) in metres, optionally after swapping to a prepared cell first.",
@@ -382,6 +389,79 @@ pub(super) fn activate_reference(
             "travel requested to cell {:08x} (open lead {open_lead_ms:.0} ms)",
             destination.cell_form_id
         )],
+    ))
+}
+
+/// Issue #163: GECK-parity `setlock`/`unlock` console command. A locked
+/// in-cell acceptance door didn't exist in either prepared acceptance cell
+/// (#155's manual script gap), so this is the runtime surface that flips a
+/// door's lock level for both consumers from one call site, matching
+/// `interaction::door_is_locked`/`nav::agent::door_open_and_locked`'s shared
+/// "level <= 0 or absent is unlocked" rule:
+///  - `interaction::PlacementRoot::set_door_lock_level` -- the same
+///    component the player's own E-activation reads (`door_is_locked`), so
+///    the very next activation attempt sees the change.
+///  - `nav::agent::set_door_lock_level` -- `NavArchipelagoState`'s
+///    `door_lock_info` snapshot `door_availability_system` polls every
+///    frame, so a route through a newly locked door is excluded (or a
+///    newly unlocked one re-included) without any extra plumbing.
+///
+/// Updating both from this single command, rather than leaving each
+/// consumer free to read a different copy, is what keeps them from ever
+/// disagreeing about a door's lock state.
+pub(super) fn setlock(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector, level_arg] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "setlock requires exactly a reference and a lock level",
+        ));
+    };
+    let entity = resolve_reference(world, selector)?;
+    let level: i32 = level_arg.parse().map_err(|_| {
+        ConsoleError::new(
+            "bad_type",
+            "setlock level must be a non-negative integer (0 clears the lock)",
+        )
+    })?;
+    if !(0..=i32::from(i8::MAX)).contains(&level) {
+        return Err(ConsoleError::new(
+            "bad_type",
+            "setlock level must be between 0 and 127",
+        ));
+    }
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
+        .placement()
+        .clone();
+    if !matches!(placement.semantic, PreparedSemantic::Door(_)) {
+        return Err(ConsoleError::new(
+            "not_a_door",
+            "setlock only accepts door references",
+        ));
+    }
+    // Level 0 clears the lock, matching `door_is_locked`'s own
+    // `lock_level.is_none_or(|level| level <= 0)` rule.
+    let lock_level = if level == 0 { None } else { Some(level as i8) };
+    world
+        .get_mut::<interaction::PlacementRoot>(entity)
+        .expect("placement root presence checked above")
+        .set_door_lock_level(lock_level);
+    nav::agent::set_door_lock_level(world, placement.reference_form_id, lock_level);
+    let summary = match lock_level {
+        Some(level) => format!("setlock {:08x} level {level}", placement.reference_form_id),
+        None => format!("setlock {:08x} unlocked", placement.reference_form_id),
+    };
+    info!("{summary}");
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": placement.reference_form_id,
+            "lock_level": lock_level,
+        }),
+        vec![summary],
     ))
 }
 

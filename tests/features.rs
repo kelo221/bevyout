@@ -710,6 +710,31 @@ struct BevyoutWorld {
     actor_fallback_input: actor::ActorAppearanceAvailability,
     actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
     actor_fallback_decision: Option<actor::ActorFallbackDecision>,
+
+    // -- nav_stuck_progress.feature (issue #157) --
+    nav_stuck_progress_desired: [f32; 2],
+    nav_stuck_progress_achieved: [f32; 2],
+    nav_stuck_progress_delta: Option<f32>,
+    /// "u_shaped", "blocked", or "oscillating" -- picks the per-tick
+    /// desired/achieved generator `when_route_is_simulated` runs.
+    nav_stuck_progress_route_kind: Option<String>,
+    nav_stuck_progress_route_ticks: u32,
+    nav_stuck_progress_route_speed: f32,
+    nav_stuck_progress_start_recovery_tick: Option<u32>,
+    nav_stuck_progress_stuck_tick: Option<u32>,
+    // -- nav_stuck_progress.feature (issue #157 follow-up: avoidance-pause
+    // and repath-mid-route scenarios) --
+    nav_stuck_progress_pause_progress_ticks: u32,
+    nav_stuck_progress_pause_speed: f32,
+    nav_stuck_progress_pause_ticks: u32,
+    nav_stuck_progress_repath_blocked_ticks: u32,
+    nav_stuck_progress_repath_leg_ticks: u32,
+    nav_stuck_progress_repath_leg_speed: f32,
+
+    // -- nav_door_topology.feature (issue #155) --
+    nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
+    nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
+    nav_door_topology_point: Option<[f32; 3]>,
 }
 
 fn find_placement<'a>(
@@ -6215,7 +6240,11 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         .first()
         .expect("a landmass mesh must be given first")
         .clone();
-    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh, &[]));
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(
+        &mesh,
+        &[],
+        &std::collections::BTreeMap::new(),
+    ));
 }
 
 #[then("the landmass conversion produces a navigation mesh")]
@@ -6777,6 +6806,11 @@ async fn given_prepared_merge(
     mesh_b_hex: String,
     triangle_b: u32,
 ) {
+    // Issue #154 widened `MergeInput` with the validated portal interval;
+    // this scenario only exercises `merge_link_descriptors`' mesh/triangle
+    // plumbing (`then_merge_link_descriptor` below checks `mesh_form_id`/
+    // `polygon_index`, not `midpoint`/`distance`), so a zeroed interval is
+    // fine here.
     world
         .nav_adapter_merge_inputs
         .push(landmass_graph::MergeInput {
@@ -6784,6 +6818,8 @@ async fn given_prepared_merge(
             triangle_a,
             mesh_b_form_id: parse_hex(&mesh_b_hex),
             triangle_b,
+            interval_a: [[0.0; 3]; 2],
+            interval_b: [[0.0; 3]; 2],
         });
 }
 
@@ -8257,4 +8293,509 @@ async fn then_fallback_identity_remains(
         .expect("actor fallback must be resolved");
     assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
     assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
+}
+
+// ---------------------------------------------------------------------
+// nav_portals.feature (issue #154, M4 wave 8) -- appended section, do not
+// interleave. Reuses `nav_graph.feature`'s "a nav graph mesh"/"has source
+// vertex"/"has triangle"/"the nav graph is built" steps (prepare-side
+// portal validation, `vsa::prepare::nav_graph::compute_mesh_merges`) and
+// `nav_backend.feature`/`nav_adapter.feature`'s "landmass mesh"/"a prepared
+// merge connects"/"the merge-link descriptors are resolved" steps (runtime
+// interval-to-link conversion, `viewer::nav::landmass_graph::
+// merge_link_descriptors`) rather than re-declaring either seam. New steps
+// below only cover what #154 actually added: matched-edge identity, a
+// portal's recorded vertical drop, and interval-aware merge inputs/cost.
+// ---------------------------------------------------------------------
+
+#[then(regex = r"^cross-mesh merge (\d+) has edge_a (\d+),(\d+) and edge_b (\d+),(\d+)$")]
+async fn then_nav_portals_merge_edge_identity(
+    world: &mut BevyoutWorld,
+    index: usize,
+    edge_a_start: u32,
+    edge_a_end: u32,
+    edge_b_start: u32,
+    edge_b_end: u32,
+) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let merge = graph.mesh_merges[index];
+    assert_eq!(merge.edge_a, [edge_a_start, edge_a_end]);
+    assert_eq!(merge.edge_b, [edge_b_start, edge_b_end]);
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) has a vertical drop of about ([\d.]+) metres$")]
+async fn then_nav_portals_merge_vertical_drop(world: &mut BevyoutWorld, index: usize, drop: f32) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let merge = graph.mesh_merges[index];
+    let actual = (merge.interval_a[0][1] - merge.interval_b[0][1]).abs();
+    assert!(
+        (actual - drop).abs() < 0.01,
+        "expected a vertical drop near {drop} m, got {actual} m ({:?})",
+        merge
+    );
+}
+
+#[given(
+    regex = r"^a prepared merge connects mesh 0x([0-9a-fA-F]+) triangle (\d+) to mesh 0x([0-9a-fA-F]+) triangle (\d+) with interval ([-\d.,\s]+) to ([-\d.,\s]+) and interval ([-\d.,\s]+) to ([-\d.,\s]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_prepared_merge_with_interval(
+    world: &mut BevyoutWorld,
+    mesh_a_hex: String,
+    triangle_a: u32,
+    mesh_b_hex: String,
+    triangle_b: u32,
+    interval_a_start: String,
+    interval_a_end: String,
+    interval_b_start: String,
+    interval_b_end: String,
+) {
+    world
+        .nav_adapter_merge_inputs
+        .push(landmass_graph::MergeInput {
+            mesh_a_form_id: parse_hex(&mesh_a_hex),
+            triangle_a,
+            mesh_b_form_id: parse_hex(&mesh_b_hex),
+            triangle_b,
+            interval_a: [
+                nav_adapter_parse_f32_triple(&interval_a_start),
+                nav_adapter_parse_f32_triple(&interval_a_end),
+            ],
+            interval_b: [
+                nav_adapter_parse_f32_triple(&interval_b_start),
+                nav_adapter_parse_f32_triple(&interval_b_end),
+            ],
+        });
+}
+
+#[then(regex = r"^merge-link descriptor (\d+) has a cost of about ([\d.]+)$")]
+async fn then_nav_portals_merge_link_cost(world: &mut BevyoutWorld, index: usize, cost: f32) {
+    let links = world
+        .nav_adapter_merge_links
+        .as_ref()
+        .expect("merge links must be resolved first");
+    let actual = links[index].distance;
+    assert!(
+        (actual - cost).abs() < 0.01,
+        "expected cost near {cost}, got {actual}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_stuck_progress.feature (issue #157) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a desired horizontal velocity of ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_nav_stuck_progress_desired(world: &mut BevyoutWorld, x: f32, z: f32) {
+    world.nav_stuck_progress_desired = [x, z];
+}
+
+#[given(regex = r"^an achieved horizontal velocity of ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_nav_stuck_progress_achieved(world: &mut BevyoutWorld, x: f32, z: f32) {
+    world.nav_stuck_progress_achieved = [x, z];
+}
+
+#[when("the route progress delta is computed")]
+async fn when_route_progress_delta_computed(world: &mut BevyoutWorld) {
+    world.nav_stuck_progress_delta = Some(movement_policy::route_progress_delta(
+        world.nav_stuck_progress_desired,
+        world.nav_stuck_progress_achieved,
+    ));
+}
+
+#[then(regex = r"^the route progress delta is ([\-\d.]+)$")]
+async fn then_route_progress_delta_is(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(world.nav_stuck_progress_delta, Some(expected));
+}
+
+#[given(
+    regex = r"^a U-shaped detour route of (\d+) ticks where the agent always achieves its desired horizontal velocity$"
+)]
+async fn given_u_shaped_detour_route(world: &mut BevyoutWorld, ticks: u32) {
+    world.nav_stuck_progress_route_kind = Some("u_shaped".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+}
+
+#[given(regex = r"^a fully blocked route of (\d+) ticks with desired horizontal speed ([\d.]+)$")]
+async fn given_fully_blocked_route(world: &mut BevyoutWorld, ticks: u32, speed: f32) {
+    world.nav_stuck_progress_route_kind = Some("blocked".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+    world.nav_stuck_progress_route_speed = speed;
+}
+
+#[given(
+    regex = r"^an oscillating route of (\d+) ticks where the agent always achieves its desired horizontal velocity$"
+)]
+async fn given_oscillating_route(world: &mut BevyoutWorld, ticks: u32) {
+    world.nav_stuck_progress_route_kind = Some("oscillating".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+}
+
+/// This tick's `(desired, achieved)` horizontal-velocity pair for the named
+/// route kind, mirroring exactly what `apply_agent_physics_movement` would
+/// sample from a real KCC sweep at tick `tick` (1-indexed) of `total_ticks`.
+fn nav_stuck_progress_route_tick(
+    kind: &str,
+    tick: u32,
+    total_ticks: u32,
+    blocked_speed: f32,
+) -> ([f32; 2], [f32; 2]) {
+    match kind {
+        "u_shaped" => {
+            // Three equal legs: away from the final target, around the
+            // wall, then back toward it -- the exact detour shape issue
+            // #157 exists to stop false-triggering stuck recovery on. The
+            // agent always achieves what it desires (never collision-
+            // blocked), so every tick is genuine corridor progress.
+            let leg = total_ticks / 3;
+            let direction = if tick <= leg {
+                [-1.0, 0.0]
+            } else if tick <= 2 * leg {
+                [0.0, 1.0]
+            } else {
+                [1.0, 0.0]
+            };
+            let desired = [direction[0] * 2.0, direction[1] * 2.0];
+            (desired, desired)
+        }
+        "blocked" => {
+            // Landmass keeps asking for horizontal motion; the KCC sweep
+            // never achieves any of it -- a genuine wedge, not a detour.
+            ([blocked_speed, 0.0], [0.0, 0.0])
+        }
+        "oscillating" => {
+            // Known limitation (see `movement_policy.rs`'s module doc
+            // comment): desired direction flips every tick and the agent
+            // fully achieves each flip, so every tick's achieved motion is
+            // trivially parallel to that same tick's desired direction --
+            // perpetual "progress" despite the agent effectively orbiting
+            // in place. Documented as an accepted trade-off, not desired
+            // behaviour.
+            let sign = if tick % 2 == 1 { 1.0 } else { -1.0 };
+            let desired = [sign * 2.0, 0.0];
+            (desired, desired)
+        }
+        other => panic!("unknown nav stuck-progress route kind {other:?}"),
+    }
+}
+
+/// The same per-tick stuck-tracking bookkeeping
+/// `apply_agent_physics_movement` performs (see that function's
+/// `route_progress`/`best_distance`/`ticks_without_progress`/
+/// `recovery_active` handling in `src/viewer/nav/agent.rs`), replayed here
+/// against the pure `movement_policy` functions directly -- no Bevy/boxddd
+/// involved. Shared by every `nav_stuck_progress.feature` route-simulation
+/// step so the bookkeeping is written once.
+struct NavStuckProgressSim {
+    best_distance: f32,
+    ticks_without_progress: u32,
+    recovery_active: bool,
+    route_progress: f32,
+    tick: u32,
+    start_recovery_tick: Option<u32>,
+    stuck_tick: Option<u32>,
+}
+
+impl NavStuckProgressSim {
+    fn new() -> Self {
+        Self {
+            best_distance: f32::MAX,
+            ticks_without_progress: 0,
+            recovery_active: false,
+            route_progress: 0.0,
+            tick: 0,
+            start_recovery_tick: None,
+            stuck_tick: None,
+        }
+    }
+
+    /// Mirrors a real repath / new-target event: `nav/agent.rs`'s
+    /// target-change handler resets exactly these three fields (issue
+    /// #157 left that handler untouched). `route_progress` itself is never
+    /// reset -- `best_distance`'s own reset-to-`f32::MAX` re-baselines
+    /// every future comparison to "progress since now" regardless of
+    /// `route_progress`'s absolute running total, so a fresh target does
+    /// not need a fresh zero there (see `AgentKcc::route_progress`'s doc
+    /// comment).
+    fn repath(&mut self) {
+        self.best_distance = f32::MAX;
+        self.ticks_without_progress = 0;
+        self.recovery_active = false;
+    }
+
+    fn step(&mut self, desired: [f32; 2], achieved: [f32; 2]) {
+        const DT: f32 = 1.0 / 64.0;
+        self.tick += 1;
+        self.route_progress += movement_policy::route_progress_delta(desired, achieved) * DT;
+        let distance = -self.route_progress;
+        if self.best_distance == f32::MAX {
+            self.best_distance = distance;
+        }
+        let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
+            distance_to_target: distance,
+            best_distance_so_far: self.best_distance,
+            ticks_without_progress: self.ticks_without_progress,
+            recovery_active: self.recovery_active,
+        });
+        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < self.best_distance;
+        if progressed {
+            self.best_distance = distance;
+            self.ticks_without_progress = 0;
+            self.recovery_active = false;
+        } else {
+            self.ticks_without_progress = self.ticks_without_progress.saturating_add(1);
+        }
+        match decision {
+            movement_policy::StuckDecision::StartRecovery => {
+                self.recovery_active = true;
+                self.start_recovery_tick.get_or_insert(self.tick);
+            }
+            movement_policy::StuckDecision::Stuck => {
+                self.stuck_tick.get_or_insert(self.tick);
+            }
+            movement_policy::StuckDecision::Progressing
+            | movement_policy::StuckDecision::RecoveryPending => {}
+        }
+    }
+}
+
+/// Returns the first tick (1-indexed) each of `StartRecovery`/`Stuck` was
+/// reached along the named route kind, if ever.
+#[when("the route is simulated tick by tick")]
+async fn when_route_is_simulated(world: &mut BevyoutWorld) {
+    let kind = world
+        .nav_stuck_progress_route_kind
+        .clone()
+        .expect("a route must be given first");
+    let total_ticks = world.nav_stuck_progress_route_ticks;
+    let blocked_speed = world.nav_stuck_progress_route_speed;
+
+    let mut sim = NavStuckProgressSim::new();
+    for tick in 1..=total_ticks {
+        let (desired, achieved) =
+            nav_stuck_progress_route_tick(&kind, tick, total_ticks, blocked_speed);
+        sim.step(desired, achieved);
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
+}
+
+#[given(
+    regex = r"^an avoidance-paused route with (\d+) ticks of progress at speed ([\d.]+) followed by (\d+) ticks of zero desired velocity$"
+)]
+async fn given_avoidance_paused_route(
+    world: &mut BevyoutWorld,
+    progress_ticks: u32,
+    speed: f32,
+    pause_ticks: u32,
+) {
+    world.nav_stuck_progress_pause_progress_ticks = progress_ticks;
+    world.nav_stuck_progress_pause_speed = speed;
+    world.nav_stuck_progress_pause_ticks = pause_ticks;
+}
+
+/// Follow-up to the "route is simulated tick by tick" step above (issue
+/// #157 follow-up): a two-phase route -- genuine forward progress, then a
+/// stretch of zero desired horizontal velocity (landmass legitimately
+/// pausing the agent, e.g. queuing at a doorway) -- pinning today's actual
+/// behaviour for that pause rather than leaving it implicit.
+#[when("the paused route is simulated tick by tick")]
+async fn when_paused_route_is_simulated(world: &mut BevyoutWorld) {
+    let progress_ticks = world.nav_stuck_progress_pause_progress_ticks;
+    let speed = world.nav_stuck_progress_pause_speed;
+    let pause_ticks = world.nav_stuck_progress_pause_ticks;
+
+    let mut sim = NavStuckProgressSim::new();
+    for _ in 0..progress_ticks {
+        sim.step([speed, 0.0], [speed, 0.0]);
+    }
+    // Zero desired horizontal velocity: `route_progress_delta`'s
+    // near-zero-desired-length guard contributes exactly 0.0 every tick
+    // here, so corridor progress flatlines for the whole pause exactly
+    // like a genuine collision block would (see the "blocked" route kind
+    // above) -- today's pinned behaviour, not a claim that this is the
+    // *right* behaviour for a legitimate avoidance stall.
+    for _ in 0..pause_ticks {
+        sim.step([0.0, 0.0], [0.0, 0.0]);
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
+}
+
+#[given(
+    regex = r"^a blocked route of (\d+) ticks that repaths onto a new detour leg of (\d+) ticks at speed ([\d.]+)$"
+)]
+async fn given_repathed_route(
+    world: &mut BevyoutWorld,
+    blocked_ticks: u32,
+    leg_ticks: u32,
+    leg_speed: f32,
+) {
+    world.nav_stuck_progress_repath_blocked_ticks = blocked_ticks;
+    world.nav_stuck_progress_repath_leg_ticks = leg_ticks;
+    world.nav_stuck_progress_repath_leg_speed = leg_speed;
+}
+
+/// Issue #157 follow-up: a genuine block runs right up to (but not past)
+/// the recovery threshold, then a repath (`NavStuckProgressSim::repath`,
+/// mirroring `nav/agent.rs`'s target-change handler) lands, followed by a
+/// new, slower detour leg the agent fully achieves. Pins that the repath's
+/// reset means the new leg's own progress is judged on its own terms
+/// rather than inheriting the old near-miss window.
+#[when("the repathed route is simulated tick by tick")]
+async fn when_repathed_route_is_simulated(world: &mut BevyoutWorld) {
+    let blocked_ticks = world.nav_stuck_progress_repath_blocked_ticks;
+    let leg_ticks = world.nav_stuck_progress_repath_leg_ticks;
+    let leg_speed = world.nav_stuck_progress_repath_leg_speed;
+
+    let mut sim = NavStuckProgressSim::new();
+    for _ in 0..blocked_ticks {
+        sim.step([2.0, 0.0], [0.0, 0.0]);
+    }
+    sim.repath();
+    for _ in 0..leg_ticks {
+        sim.step([leg_speed, 0.0], [leg_speed, 0.0]);
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
+}
+
+#[then("no stuck decision along the route ever reaches start-recovery")]
+async fn then_no_stuck_recovery_along_route(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_stuck_progress_start_recovery_tick, None,
+        "a valid detour route must never false-trigger stuck recovery"
+    );
+}
+
+#[then(regex = r"^the stuck decision first reaches start-recovery at tick (\d+)$")]
+async fn then_start_recovery_at_tick(world: &mut BevyoutWorld, tick: u32) {
+    assert_eq!(world.nav_stuck_progress_start_recovery_tick, Some(tick));
+}
+
+#[then(regex = r"^the stuck decision first reaches stuck at tick (\d+)$")]
+async fn then_stuck_at_tick(world: &mut BevyoutWorld, tick: u32) {
+    assert_eq!(world.nav_stuck_progress_stuck_tick, Some(tick));
+}
+
+// ---------------------------------------------------------------------
+// nav_door_topology.feature (issue #155, M4 wave 8) -- appended section,
+// do not interleave. Reuses nav_backend.feature's "landmass mesh"/"has a
+// door" steps (`world.nav_backend_meshes`) for the door-typing scenarios
+// rather than re-declaring mesh-building steps; the point-in-triangle
+// scenarios are pure geometry, needing no mesh at all.
+// ---------------------------------------------------------------------
+
+#[when("the door type indices are resolved")]
+async fn when_door_type_indices_resolved(world: &mut BevyoutWorld) {
+    world.nav_door_topology_type_indices =
+        Some(landmass_graph::door_type_indices(&world.nav_backend_meshes));
+}
+
+#[then(regex = r"^door 0x([0-9a-fA-F]+) has type index (\d+)$")]
+async fn then_door_has_type_index(world: &mut BevyoutWorld, door_hex: String, index: usize) {
+    let indices = world
+        .nav_door_topology_type_indices
+        .as_ref()
+        .expect("door type indices must be resolved first");
+    assert_eq!(indices.get(&parse_hex(&door_hex)), Some(&index));
+}
+
+#[then(regex = r"^there is exactly (\d+) resolved door type index$")]
+async fn then_resolved_door_type_index_count(world: &mut BevyoutWorld, count: usize) {
+    let indices = world
+        .nav_door_topology_type_indices
+        .as_ref()
+        .expect("door type indices must be resolved first");
+    assert_eq!(indices.len(), count);
+}
+
+#[given(
+    regex = r"^a door triangle with vertices ([\-\d.]+), ([\-\d.]+), ([\-\d.]+) and ([\-\d.]+), ([\-\d.]+), ([\-\d.]+) and ([\-\d.]+), ([\-\d.]+), ([\-\d.]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_door_triangle(
+    world: &mut BevyoutWorld,
+    ax: f32,
+    ay: f32,
+    az: f32,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+) {
+    world.nav_door_topology_triangle = Some([[ax, ay, az], [bx, by, bz], [cx, cy, cz]]);
+}
+
+#[given(regex = r"^a query point at ([\-\d.]+), ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_query_point(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.nav_door_topology_point = Some([x, y, z]);
+}
+
+/// The vertical-gap tolerance passed to `point_in_door_triangle` in every
+/// scenario below: the same value `nav/agent.rs`'s `AGENT_HEIGHT` constant
+/// holds (that constant is private to a Bevy-only module this
+/// Bevy-engine-free suite does not include -- see `landmass_graph.rs`'s
+/// own module doc comment for why -- so this is a small literal
+/// duplicate, the same precedent `landmass_graph.rs` itself already sets
+/// for `MERGE_PORTAL_STEP_HEIGHT`).
+const NAV_DOOR_TOPOLOGY_VERTICAL_GAP: f32 = 1.8;
+
+fn nav_door_topology_triangle_and_point(world: &BevyoutWorld) -> ([[f32; 3]; 3], [f32; 3]) {
+    let triangle = world
+        .nav_door_topology_triangle
+        .expect("a door triangle must be given first");
+    let point = world
+        .nav_door_topology_point
+        .expect("a query point must be given first");
+    (triangle, point)
+}
+
+#[then("the query point is inside the door triangle")]
+async fn then_point_inside_door_triangle(world: &mut BevyoutWorld) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    assert!(landmass_graph::point_in_door_triangle(
+        point,
+        triangle,
+        NAV_DOOR_TOPOLOGY_VERTICAL_GAP
+    ));
+}
+
+#[then("the query point is outside the door triangle")]
+async fn then_point_outside_door_triangle(world: &mut BevyoutWorld) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    assert!(!landmass_graph::point_in_door_triangle(
+        point,
+        triangle,
+        NAV_DOOR_TOPOLOGY_VERTICAL_GAP
+    ));
+}
+
+#[then(regex = r"^the query point is within ([\d.]+) metres of the door triangle's centroid$")]
+async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    let centroid = [
+        (triangle[0][0] + triangle[1][0] + triangle[2][0]) / 3.0,
+        (triangle[0][1] + triangle[1][1] + triangle[2][1]) / 3.0,
+        (triangle[0][2] + triangle[1][2] + triangle[2][2]) / 3.0,
+    ];
+    let dx = point[0] - centroid[0];
+    let dz = point[2] - centroid[2];
+    let distance = (dx * dx + dz * dz).sqrt();
+    assert!(
+        distance <= radius,
+        "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
+    );
 }

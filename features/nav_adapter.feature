@@ -50,16 +50,28 @@ Feature: Fallout nav adapter: NVMI merges, travel-door links, repath
     And the navigation entry for NAVM 0x00000500 retains undecoded tail bytes
 
   Scenario: Two same-cell meshes with a near boundary seam gain a merge connection
+    # Two-triangle quads (issue #154), not single right triangles: under
+    # #154's full pairwise-candidate portal validation, a lone right
+    # triangle's other two edges can themselves become spurious candidates
+    # against the opposing mesh. A quad's three non-facing sides are each
+    # perpendicular to the facing side, which cannot satisfy the
+    # opposing-direction check regardless of distance -- see
+    # `vsa::prepare::nav_graph`'s own `quad_mesh` unit-test helper for the
+    # verified-by-hand geometry this mirrors.
     Given a nav graph mesh 0x00000010 for cell 0x00000C00
     And mesh 0x00000010 has source vertex 0, 0, 0
     And mesh 0x00000010 has source vertex 70, 0, 0
-    And mesh 0x00000010 has source vertex 0, 70, 0
-    And mesh 0x00000010 has triangle 0,1,2 with edges -1,-1,-1
+    And mesh 0x00000010 has source vertex 70, 210, 0
+    And mesh 0x00000010 has source vertex 0, 210, 0
+    And mesh 0x00000010 has triangle 0,1,2 with edges -1,-1,1
+    And mesh 0x00000010 has triangle 0,2,3 with edges 0,-1,-1
     And a nav graph mesh 0x00000020 for cell 0x00000C00
-    And mesh 0x00000020 has source vertex 105, 0, 0
-    And mesh 0x00000020 has source vertex 175, 0, 0
-    And mesh 0x00000020 has source vertex 105, 70, 0
-    And mesh 0x00000020 has triangle 0,1,2 with edges -1,-1,-1
+    And mesh 0x00000020 has source vertex 70, -35, 0
+    And mesh 0x00000020 has source vertex 0, -35, 0
+    And mesh 0x00000020 has source vertex 0, -245, 0
+    And mesh 0x00000020 has source vertex 70, -245, 0
+    And mesh 0x00000020 has triangle 0,1,2 with edges -1,-1,1
+    And mesh 0x00000020 has triangle 0,2,3 with edges 0,-1,-1
     When the nav graph is built for cell 0x00000C00
     Then the nav graph has 1 cross-mesh merge
     And cross-mesh merge 0 connects mesh 0x00000010 polygon 0 to mesh 0x00000020 polygon 0
