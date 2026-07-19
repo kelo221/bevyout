@@ -730,6 +730,11 @@ struct BevyoutWorld {
     nav_stuck_progress_repath_blocked_ticks: u32,
     nav_stuck_progress_repath_leg_ticks: u32,
     nav_stuck_progress_repath_leg_speed: f32,
+
+    // -- nav_door_topology.feature (issue #155) --
+    nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
+    nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
+    nav_door_topology_point: Option<[f32; 3]>,
 }
 
 fn find_placement<'a>(
@@ -6235,7 +6240,11 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         .first()
         .expect("a landmass mesh must be given first")
         .clone();
-    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh, &[]));
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(
+        &mesh,
+        &[],
+        &std::collections::BTreeMap::new(),
+    ));
 }
 
 #[then("the landmass conversion produces a navigation mesh")]
@@ -8677,4 +8686,116 @@ async fn then_start_recovery_at_tick(world: &mut BevyoutWorld, tick: u32) {
 #[then(regex = r"^the stuck decision first reaches stuck at tick (\d+)$")]
 async fn then_stuck_at_tick(world: &mut BevyoutWorld, tick: u32) {
     assert_eq!(world.nav_stuck_progress_stuck_tick, Some(tick));
+}
+
+// ---------------------------------------------------------------------
+// nav_door_topology.feature (issue #155, M4 wave 8) -- appended section,
+// do not interleave. Reuses nav_backend.feature's "landmass mesh"/"has a
+// door" steps (`world.nav_backend_meshes`) for the door-typing scenarios
+// rather than re-declaring mesh-building steps; the point-in-triangle
+// scenarios are pure geometry, needing no mesh at all.
+// ---------------------------------------------------------------------
+
+#[when("the door type indices are resolved")]
+async fn when_door_type_indices_resolved(world: &mut BevyoutWorld) {
+    world.nav_door_topology_type_indices =
+        Some(landmass_graph::door_type_indices(&world.nav_backend_meshes));
+}
+
+#[then(regex = r"^door 0x([0-9a-fA-F]+) has type index (\d+)$")]
+async fn then_door_has_type_index(world: &mut BevyoutWorld, door_hex: String, index: usize) {
+    let indices = world
+        .nav_door_topology_type_indices
+        .as_ref()
+        .expect("door type indices must be resolved first");
+    assert_eq!(indices.get(&parse_hex(&door_hex)), Some(&index));
+}
+
+#[then(regex = r"^there is exactly (\d+) resolved door type index$")]
+async fn then_resolved_door_type_index_count(world: &mut BevyoutWorld, count: usize) {
+    let indices = world
+        .nav_door_topology_type_indices
+        .as_ref()
+        .expect("door type indices must be resolved first");
+    assert_eq!(indices.len(), count);
+}
+
+#[given(
+    regex = r"^a door triangle with vertices ([\-\d.]+), ([\-\d.]+), ([\-\d.]+) and ([\-\d.]+), ([\-\d.]+), ([\-\d.]+) and ([\-\d.]+), ([\-\d.]+), ([\-\d.]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_door_triangle(
+    world: &mut BevyoutWorld,
+    ax: f32,
+    ay: f32,
+    az: f32,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+) {
+    world.nav_door_topology_triangle = Some([[ax, ay, az], [bx, by, bz], [cx, cy, cz]]);
+}
+
+#[given(regex = r"^a query point at ([\-\d.]+), ([\-\d.]+), ([\-\d.]+)$")]
+async fn given_query_point(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.nav_door_topology_point = Some([x, y, z]);
+}
+
+/// The vertical-gap tolerance passed to `point_in_door_triangle` in every
+/// scenario below: the same value `nav/agent.rs`'s `AGENT_HEIGHT` constant
+/// holds (that constant is private to a Bevy-only module this
+/// Bevy-engine-free suite does not include -- see `landmass_graph.rs`'s
+/// own module doc comment for why -- so this is a small literal
+/// duplicate, the same precedent `landmass_graph.rs` itself already sets
+/// for `MERGE_PORTAL_STEP_HEIGHT`).
+const NAV_DOOR_TOPOLOGY_VERTICAL_GAP: f32 = 1.8;
+
+fn nav_door_topology_triangle_and_point(world: &BevyoutWorld) -> ([[f32; 3]; 3], [f32; 3]) {
+    let triangle = world
+        .nav_door_topology_triangle
+        .expect("a door triangle must be given first");
+    let point = world
+        .nav_door_topology_point
+        .expect("a query point must be given first");
+    (triangle, point)
+}
+
+#[then("the query point is inside the door triangle")]
+async fn then_point_inside_door_triangle(world: &mut BevyoutWorld) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    assert!(landmass_graph::point_in_door_triangle(
+        point,
+        triangle,
+        NAV_DOOR_TOPOLOGY_VERTICAL_GAP
+    ));
+}
+
+#[then("the query point is outside the door triangle")]
+async fn then_point_outside_door_triangle(world: &mut BevyoutWorld) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    assert!(!landmass_graph::point_in_door_triangle(
+        point,
+        triangle,
+        NAV_DOOR_TOPOLOGY_VERTICAL_GAP
+    ));
+}
+
+#[then(regex = r"^the query point is within ([\d.]+) metres of the door triangle's centroid$")]
+async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32) {
+    let (triangle, point) = nav_door_topology_triangle_and_point(world);
+    let centroid = [
+        (triangle[0][0] + triangle[1][0] + triangle[2][0]) / 3.0,
+        (triangle[0][1] + triangle[1][1] + triangle[2][1]) / 3.0,
+        (triangle[0][2] + triangle[1][2] + triangle[2][2]) / 3.0,
+    ];
+    let dx = point[0] - centroid[0];
+    let dz = point[2] - centroid[2];
+    let distance = (dx * dx + dz * dz).sqrt();
+    assert!(
+        distance <= radius,
+        "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
+    );
 }
