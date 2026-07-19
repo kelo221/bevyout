@@ -154,7 +154,7 @@ pub(crate) struct PreparedNavGrid {
     pub(crate) y: i16,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct PreparedNavPolygon {
     /// Index within this mesh's `polygons` (matches the source `NVTR`
@@ -197,6 +197,27 @@ pub(crate) struct PreparedNavPolygon {
     /// additive; the revision bump above rejects stale caches regardless.
     #[serde(default = "default_walkable")]
     pub(crate) walkable: bool,
+}
+
+/// Manual `Default` (not derived) so the Rust-side default of `walkable`
+/// matches its serde default (`default_walkable`, `true`). A derived `Default`
+/// would give `walkable: false`, so a synthetic `PreparedNavPolygon { ..,
+/// ..Default::default() }` would be silently filtered out by
+/// `viewer::nav::mesh_inputs`'s walkable filter -- keep the two aligned.
+impl Default for PreparedNavPolygon {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            vertex_indices: [0; 3],
+            adjacency: [None; 3],
+            flags: 0,
+            is_water: false,
+            is_preferred_pathing: false,
+            contains_door: false,
+            authored_external: [false; 3],
+            walkable: default_walkable(),
+        }
+    }
 }
 
 fn default_walkable() -> bool {
@@ -1515,6 +1536,15 @@ mod tests {
     #[test]
     fn revision_is_pinned() {
         assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v5");
+    }
+
+    #[test]
+    fn a_default_polygon_is_walkable() {
+        // Rust-side `Default` must agree with the serde default: a synthetic
+        // `PreparedNavPolygon { .., ..Default::default() }` (how other slices
+        // build test graphs) must be walkable, or `mesh_inputs`'s walkable
+        // filter would silently drop it.
+        assert!(PreparedNavPolygon::default().walkable);
     }
 
     #[test]
