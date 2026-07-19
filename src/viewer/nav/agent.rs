@@ -204,6 +204,14 @@ use super::super::player::{CellPhysicsReadiness, PhysicsDisabled};
 use super::super::{interaction, player};
 use super::{door_link, landmass_graph, ledger_policy, movement_policy, repath};
 
+// Issue #164 fall-out-of-world guard. The pure policy is a std-only sibling
+// module (same `#[path]` include tests/features.rs uses); declared here as a
+// private submodule of `agent` -- via `#[path]` so it resolves to the shared
+// `nav/fall_guard.rs` file -- rather than in `nav/mod.rs`, whose ownership
+// this wave's guard work does not include.
+#[path = "fall_guard.rs"]
+mod fall_guard;
+
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
 const AGENT_DESIRED_SPEED: f32 = 2.5;
@@ -690,6 +698,63 @@ fn update_agent_desired_velocity_blend(
     }
 }
 
+/// Issue #164: despawns any nav agent that has fallen clear out of the world
+/// -- its capsule-centre Y dropped a whole [`fall_guard::FALL_GUARD_MARGIN_METRES`]
+/// below the active cell's lowest prepared geometry Y -- instead of letting
+/// it descend forever under gravity (FranklinMetro02's walkable-navmesh-over-
+/// missing-collision regions, cell `0001a273`). The verdict is the pure
+/// `fall_guard::evaluate_fall` policy; this system only samples each agent's
+/// real transform Y and the cell bounds, applies the verdict, and -- on a
+/// fall -- emits the stable `nav agent fell out of world <id> ...` line,
+/// despawns the entity, and clears its roster slot (the same teardown `tna
+/// despawn` performs), so a subsequent `tna spawn` at that index works
+/// normally. Runs after `apply_agent_physics_movement` in the `FixedUpdate`
+/// chain, i.e. after this tick's gravity integration has updated the
+/// capsule's Y. Player handling is out of scope (issue #164).
+fn nav_fall_guard_system(world: &mut World) {
+    let Some(min_y) = world.resource::<NavCellFallBounds>().min_y else {
+        return;
+    };
+    let fallen: Vec<(usize, Entity, f32)> = {
+        let roster = world.resource::<TestNavAgentState>();
+        let mut fallen = Vec::new();
+        for (index, entity) in roster.active() {
+            let Some(transform) = world.get::<Transform>(entity) else {
+                continue;
+            };
+            let agent_y = transform.translation.y;
+            if fall_guard::evaluate_fall(min_y, agent_y) == fall_guard::FallVerdict::FellOutOfWorld
+            {
+                fallen.push((index, entity, agent_y));
+            }
+        }
+        fallen
+    };
+    if fallen.is_empty() {
+        return;
+    }
+    let kill_z = fall_guard::fall_kill_z(min_y);
+    for (index, entity, agent_y) in fallen {
+        warn!("nav agent fell out of world {index} y={agent_y} kill_z={kill_z}");
+        if let Ok(entity) = world.get_entity_mut(entity) {
+            entity.despawn();
+        }
+        world.resource_mut::<TestNavAgentState>().entities[index] = None;
+    }
+}
+
+/// The active cell's minimum prepared geometry Y (issue #164), captured from
+/// the whole-graph nav bounds in `ensure_archipelago` when the archipelago
+/// is (re)built. `None` until a cell with a prepared nav graph is loaded;
+/// `nav_fall_guard_system` derives the kill plane from it via
+/// `fall_guard::fall_kill_z`. Kept as an ordinary resource (not part of
+/// `NavArchipelagoState`, which `teardown_archipelago` blanks) so its value
+/// simply reflects whatever cell was last built.
+#[derive(Resource, Default)]
+struct NavCellFallBounds {
+    min_y: Option<f32>,
+}
+
 pub(crate) struct NavBackendPlugin;
 
 impl Plugin for NavBackendPlugin {
@@ -701,6 +766,7 @@ impl Plugin for NavBackendPlugin {
             .init_resource::<PendingPlayerSwapDoor>()
             .init_resource::<NavSolveRate>()
             .init_resource::<NavSolveStepCounter>()
+            .init_resource::<NavCellFallBounds>()
             .configure_sets(
                 FixedPreUpdate,
                 LandmassSystems::Update.run_if(nav_solve_gate),
@@ -725,6 +791,7 @@ impl Plugin for NavBackendPlugin {
                     door_availability_system,
                     door_link_system,
                     apply_agent_physics_movement,
+                    nav_fall_guard_system,
                     merge_traversal_system,
                     door_traversal_system,
                     log_agent_state_changes,
@@ -817,6 +884,10 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         warn!("nav graph read failed at {}: {error:#}", path.display());
         no_nav_graph_error()
     })?;
+    // Issue #164: capture this cell's lowest prepared geometry Y so the fall
+    // guard can derive its kill plane from real per-cell bounds rather than a
+    // hard-coded world Y (see `fall_guard`'s module doc).
+    world.resource_mut::<NavCellFallBounds>().min_y = Some(graph.bounds.min[1]);
     let mesh_inputs = super::mesh_inputs(&graph);
     let merge_inputs = super::merge_inputs(&graph);
     // Issue #155 feature 1: one archipelago-wide door FormID -> type index

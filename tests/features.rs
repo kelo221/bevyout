@@ -735,6 +735,12 @@ struct BevyoutWorld {
     nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
     nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
     nav_door_topology_point: Option<[f32; 3]>,
+
+    // -- nav_fall_guard.feature (issue #164) --
+    nav_fall_guard_bounds_min_y: Option<f32>,
+    nav_fall_guard_agent_y: Option<f32>,
+    nav_fall_guard_kill_z: Option<f32>,
+    nav_fall_guard_verdict: Option<fall_guard::FallVerdict>,
 }
 
 fn find_placement<'a>(
@@ -8797,5 +8803,90 @@ async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32
     assert!(
         distance <= radius,
         "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
+    );
+}
+
+// =====================================================================
+// nav_fall_guard.feature (issue #164) -- appended step section.
+//
+// `viewer::nav::fall_guard` is std-only (no bevy/bevy_landmass import),
+// same flat `#[path]` include rationale as `movement_policy` et al. above;
+// declared here inside this appended section to respect the shared
+// merge-seam convention (only World fields and one delimited step section
+// appended at the end of this file).
+// =====================================================================
+#[path = "../src/viewer/nav/fall_guard.rs"]
+#[allow(dead_code, unused_imports)]
+mod fall_guard;
+
+#[given(regex = r"^a cell whose minimum geometry Y is (-?[\d.]+)$")]
+async fn given_cell_minimum_geometry_y(world: &mut BevyoutWorld, min_y: f32) {
+    world.nav_fall_guard_bounds_min_y = Some(min_y);
+}
+
+#[given(regex = r"^a nav agent at Y (-?[\d.]+)$")]
+async fn given_nav_agent_at_y(world: &mut BevyoutWorld, agent_y: f32) {
+    world.nav_fall_guard_agent_y = Some(agent_y);
+}
+
+#[given("a nav agent resting exactly at the kill plane")]
+async fn given_nav_agent_at_kill_plane(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_agent_y = Some(fall_guard::fall_kill_z(min_y));
+}
+
+#[given("a nav agent just below the kill plane")]
+async fn given_nav_agent_just_below_kill_plane(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_agent_y = Some(fall_guard::fall_kill_z(min_y) - 0.01);
+}
+
+#[when("the fall kill plane is computed")]
+async fn when_fall_kill_plane_computed(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_kill_z = Some(fall_guard::fall_kill_z(min_y));
+}
+
+#[when("the fall guard is evaluated")]
+async fn when_fall_guard_evaluated(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    let agent_y = world
+        .nav_fall_guard_agent_y
+        .expect("a nav agent Y must be given first");
+    world.nav_fall_guard_verdict = Some(fall_guard::evaluate_fall(min_y, agent_y));
+}
+
+#[then(regex = r"^the fall kill plane is (-?[\d.]+) metres below the minimum geometry Y$")]
+async fn then_fall_kill_plane_below_min(world: &mut BevyoutWorld, margin: f32) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    let kill_z = world
+        .nav_fall_guard_kill_z
+        .expect("the kill plane must be computed first");
+    assert!((kill_z - (min_y - margin)).abs() < 1e-4);
+}
+
+#[then("the fall guard reports the agent is in bounds")]
+async fn then_fall_guard_in_bounds(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_fall_guard_verdict,
+        Some(fall_guard::FallVerdict::InBounds)
+    );
+}
+
+#[then("the fall guard reports the agent has fallen out of the world")]
+async fn then_fall_guard_fell_out(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_fall_guard_verdict,
+        Some(fall_guard::FallVerdict::FellOutOfWorld)
     );
 }
