@@ -113,4 +113,42 @@ textures/clutter/questitems/holodogtags01.dds,Metal Dog Tags,1
 textures/clutter/hospital/anesthesiamachine01.dds,Anesthesia Machine Frame,1
 textures/clutter/projector/projector01.dds,Film Projector Housing,1
 textures/clutter/hamradio/hamradio.dds,HAM Radio Chassis,1
+textures/architecture/megaton/metalpiperusted02.dds,Megaton Metal Rusted Steam Pipe,1
+textures/architecture/megaton/metalpowerlines01.dds,Megaton Metal Power Lines,1
+textures/architecture/megaton/metalscrapbeams01.dds,Megaton Structural Scrap Metal Beams,1
+textures/architecture/megaton/metalscrapdoor02.dds,Megaton Scrap Metal Door 02,1
+textures/architecture/megaton/metalscrapdoor03.dds,Megaton Scrap Metal Door 03,1
+textures/architecture/megaton/metalscrapfencing01.dds,Megaton Scrap Metal Fencing,1
+textures/architecture/megaton/metalscraplight01.dds,Megaton Scrap Metal Light Fixture,1
+textures/architecture/megaton/metalscrappanels03.dds,Megaton Corrugated Metal Wall Panels 03,1
+textures/architecture/megaton/metalscrappanels04.dds,Megaton Corrugated Metal Wall Panels 04,1
+textures/architecture/megaton/metalscrapshingle08.dds,Megaton Scrap Metal Roof Shingles 08,1
+textures/architecture/megaton/metalscrapshingles04.dds,Megaton Scrap Metal Roof Shingles 04,1
+textures/architecture/megaton/metalscrapshingles05.dds,Megaton Scrap Metal Roof Shingles 05,1
+textures/architecture/megaton/metalscrapshingles06.dds,Megaton Scrap Metal Roof Shingles 06,1
+textures/architecture/megaton/genericpaperdebris01.dds,Megaton Paper Debris,0
+textures/furniture/workbench.dds,Crafting Workbench,1
+textures/furniture/locker01.dds,Metal Storage Locker,1
+textures/furniture/fan01.dds,Electric Desk Fan,1
+textures/furniture/hotellamp.dds,Metal Desk Lamp,1
+textures/furniture/desk01.dds,Steel Executive Desk,1
+textures/furniture/cabinet01.dds,Metal File Cabinet,1
+textures/furniture/suburban_hatstand.dds,Metal Hat Stand,1
+textures/furniture/shelveswooden01.dds,Wooden Shelves,0
+textures/furniture/tv_set_clean.dds,Retro Television Set,0
+textures/clutter/console01.dds,Control Console 01,1
+textures/clutter/consoles/console02.dds,Control Console 02,1
+textures/clutter/metalconsolebase01.dds,Metal Console Base 01,1
+textures/clutter/metalconsolebase02.dds,Metal Console Base 02,1
+textures/clutter/ivstand01.dds,Medical IV Stand,1
+textures/clutter/garbagecan/garbagecanurban01.dds,Urban Metal Garbage Can,1
+textures/dungeons/vault/vcontrolpanels02.dds,Vault Control Panels 02,1
+textures/dungeons/vault/vtechbox01.dds,Vault Tech Box,1
+textures/dungeons/vault/vmetal01.dds,Vault Interior Sheet Metal,1
+textures/dungeons/vault/vpipecap01.dds,Vault Metal Pipe Cap,1
+textures/dungeons/vault/vfangrill01.dds,Vault Metal Fan Grill,1
+textures/architecture/urban/firehydrant01.dds,Cast Iron Fire Hydrant,1
+textures/architecture/urban/streetlight01.dds,Steel Streetlight,1
+textures/architecture/urban/trusswork01.dds,Structural Metal Truss Work,1
+textures/architecture/citadel/citadelfloodligts.dds,Citadel Metal Floodlights,1
 
