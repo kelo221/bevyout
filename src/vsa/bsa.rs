@@ -131,6 +131,21 @@ impl BsaArchive {
         Ok(Some((path.to_string(), self.read_entry(entry)?)))
     }
 
+    /// Enumerates normalized archive paths with one extension in stable order.
+    /// The BSA index is case-insensitive because keys are normalized at load.
+    pub(crate) fn paths_with_extension(&self, extension: &str) -> Vec<String> {
+        let extension = extension.trim_start_matches('.').to_ascii_lowercase();
+        let suffix = format!(".{extension}");
+        let mut paths = self
+            .entries
+            .keys()
+            .filter(|path| path.ends_with(&suffix))
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
     fn read_entry(&self, entry: &ArchiveEntry) -> Result<Vec<u8>> {
         let mut file = File::open(&self.file)?;
         file.seek(SeekFrom::Start(entry.offset))?;
@@ -501,6 +516,34 @@ mod tests {
         );
         let archive = open_bsa("missing-path", &bytes).unwrap();
         assert!(archive.read("meshes/absent.nif").unwrap().is_none());
+    }
+
+    #[test]
+    fn extension_listing_is_case_insensitive_sorted_and_complete() {
+        let bytes = build_bsa(
+            0,
+            &[
+                (
+                    "Meshes\\Characters\\_Male",
+                    vec![
+                        TestFile::new("Walk.KF", b"walk".to_vec()),
+                        TestFile::new("skeleton.NIF", b"skeleton".to_vec()),
+                    ],
+                ),
+                (
+                    "meshes\\creatures\\molerat",
+                    vec![TestFile::new("Attack.kf", b"attack".to_vec())],
+                ),
+            ],
+        );
+        let archive = open_bsa("extension-list", &bytes).unwrap();
+        assert_eq!(
+            archive.paths_with_extension(".KF"),
+            [
+                "meshes/characters/_male/walk.kf",
+                "meshes/creatures/molerat/attack.kf"
+            ]
+        );
     }
 
     #[test]

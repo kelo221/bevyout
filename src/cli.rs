@@ -31,6 +31,9 @@ pub enum CommandLine {
     /// Compare one prepared actor ragdoll in an isolated physics laboratory.
     #[command(name = "ragdoll-lab")]
     RagdollLab(RagdollLabArgs),
+    /// Cycle every compatible prepared animation on one isolated actor.
+    #[command(name = "animation-zoo")]
+    AnimationZoo(AnimationZooArgs),
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
@@ -289,6 +292,31 @@ pub struct RagdollLabArgs {
     /// Exit after this many seconds; useful for bounded solver captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+}
+
+#[derive(Parser, Debug)]
+pub struct AnimationZooArgs {
+    /// Prepared scene GECK EditorID or eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Actor reference FormID from the prepared scene.
+    #[arg(long, value_name = "FORM_ID")]
+    pub(crate) actor: String,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Normalized clip name to select first.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) start_clip: Option<String>,
+    /// Exit after this many seconds; useful for bounded captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
+    /// Expose the zoo to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]

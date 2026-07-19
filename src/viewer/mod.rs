@@ -47,6 +47,7 @@ pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
 
 mod actor;
 mod animation;
+mod animation_zoo;
 mod audio;
 mod interaction;
 mod inventory;
@@ -74,6 +75,7 @@ mod performance_policy;
 mod ragdoll_lab;
 mod scene;
 
+pub use animation_zoo::animation_zoo;
 pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;

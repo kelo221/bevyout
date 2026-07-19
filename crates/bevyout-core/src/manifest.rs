@@ -51,6 +51,14 @@ pub struct PreparedSceneManifest {
     pub actor_catalog_revision: Option<String>,
     #[serde(default)]
     pub actor_catalog_hash: Option<String>,
+    /// Per-cell, content-addressed actor animation catalogue. The catalogue
+    /// maps actor references to deduplicated skeleton/KF clip packs.
+    #[serde(default)]
+    pub actor_animation_catalog_path: Option<String>,
+    #[serde(default)]
+    pub actor_animation_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub actor_animation_catalog_hash: Option<String>,
     #[serde(default)]
     pub source_plugins: Vec<PreparedPluginSource>,
     pub cell: CellInfo,

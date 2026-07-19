@@ -2,6 +2,41 @@ use super::*;
 use std::path::Path;
 
 #[test]
+fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "animation-zoo",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+        "--start-clip",
+        "idle",
+    ])
+    .unwrap();
+    let CommandLine::AnimationZoo(args) = cli.command else {
+        panic!("expected animation-zoo command");
+    };
+    assert_eq!(args.selector, "SuperDuperMart");
+    assert_eq!(args.actor, "00041606");
+    assert_eq!(args.start_clip.as_deref(), Some("idle"));
+    assert_eq!(args.agent_port, 15_702);
+    assert!(!args.agent_bridge);
+    assert!(Cli::try_parse_from(["bevyout", "animation-zoo", "SuperDuperMart"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "animation-zoo",
+            "SuperDuperMart",
+            "--actor",
+            "00041606",
+            "--agent-port",
+            "16000",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
     let cli = Cli::try_parse_from([
         "bevyout",

@@ -114,6 +114,11 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
+        CommandLine::AnimationZoo(args) => {
+            if args.cache_dir.is_none() {
+                args.cache_dir = config.output.cache_dir.clone();
+            }
+        }
         CommandLine::View(_) | CommandLine::Script(_) => {}
         CommandLine::NifConvert(args) => {
             if args.game_root.is_none() {
@@ -387,6 +392,28 @@ mod tests {
 
         let CommandLine::RagdollLab(args) = &cli.command else {
             panic!("expected ragdoll-lab command");
+        };
+        assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
+    }
+
+    #[test]
+    fn animation_zoo_uses_configured_cache_without_touching_prepared_data() {
+        let config = TempConfigFile::new(SAMPLE_CONFIG);
+        let mut cli = Cli::try_parse_from([
+            "bevyout",
+            "animation-zoo",
+            "SuperDuperMart",
+            "--actor",
+            "00041606",
+            "--config",
+            config.path().to_str().unwrap(),
+        ])
+        .unwrap();
+
+        apply(&mut cli).unwrap();
+
+        let CommandLine::AnimationZoo(args) = &cli.command else {
+            panic!("expected animation-zoo command");
         };
         assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
     }

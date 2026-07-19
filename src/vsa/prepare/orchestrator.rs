@@ -930,6 +930,25 @@ fn prepare_cell(
         })
         .collect::<HashMap<_, _>>();
     attach_actor_assemblies(&mut actor_catalog, &finalized_actor_assemblies);
+    let mut actor_animation_catalog = discover_actor_animation_catalog(
+        &actor_catalog,
+        &source_fingerprint,
+        &data_root,
+        &session.archives,
+    )?;
+    let actor_animation_conversion = {
+        let _blender_guard = session.blender_lock.lock().unwrap();
+        convert_actor_animation_catalog(
+            &mut actor_animation_catalog,
+            args.converter,
+            blender.as_deref(),
+            &data_root,
+            &session.archives,
+            &staging_dir,
+            &assets_dir,
+            args.rebuild_assets,
+        )?
+    };
     let (catalog_path, catalog_hash) = write_item_catalog(&cache_dir, &item_catalog)?;
     output.push(format!(
         "item catalog: {} records, {} icons, {} world assets -> {}",
@@ -998,6 +1017,38 @@ fn prepare_cell(
     let actor_catalog_path = Some(actor_catalog_artifact.relative_path);
     let actor_catalog_revision = Some(ACTOR_CATALOG_REVISION.into());
     let actor_catalog_hash = Some(actor_catalog_artifact.hash);
+    let actor_animation_catalog_artifact =
+        write_actor_animation_catalog(&cache_dir, cell_id, &actor_animation_catalog)?;
+    let ready_animation_clips = actor_animation_catalog
+        .animation_sets
+        .iter()
+        .flat_map(|set| set.clips.iter())
+        .filter(|clip| {
+            clip.status == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+        })
+        .count();
+    let actor_animation_catalog_summary = format!(
+        "actor animation catalog: {} actor mappings, {} sets, {} ready clips, packs built {}, reused {}, failed clips {}, cache {}",
+        actor_animation_catalog.actor_mappings.len(),
+        actor_animation_catalog.animation_sets.len(),
+        ready_animation_clips,
+        actor_animation_conversion.built_packs,
+        actor_animation_conversion.reused_packs,
+        actor_animation_conversion.failed_clips,
+        if actor_animation_catalog_artifact.reused {
+            "reused"
+        } else {
+            "written"
+        }
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: actor_animation_catalog_summary.clone(),
+    });
+    output.push(actor_animation_catalog_summary);
+    let actor_animation_catalog_path = Some(actor_animation_catalog_artifact.relative_path);
+    let actor_animation_catalog_revision = Some(ACTOR_ANIMATION_CATALOG_REVISION.into());
+    let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -1065,6 +1116,9 @@ fn prepare_cell(
         actor_catalog_path,
         actor_catalog_revision,
         actor_catalog_hash,
+        actor_animation_catalog_path,
+        actor_animation_catalog_revision,
+        actor_animation_catalog_hash,
         source_plugins,
         cell,
         placements,
@@ -1246,11 +1300,7 @@ fn actor_record_input(
             .as_ref()
             .map(|creature| creature.model_list.clone())
             .unwrap_or_default(),
-        creature_animation_files: actor
-            .creature
-            .as_ref()
-            .map(|creature| creature.animation_files.clone())
-            .unwrap_or_default(),
+        animation_files: actor.animation_files.clone(),
         creature_base_scale: actor
             .creature
             .as_ref()

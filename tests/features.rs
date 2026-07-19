@@ -361,6 +361,7 @@ mod recipe_policy;
 
 use assets::AssetConversion;
 use bevyout_core::actor;
+use bevyout_core::actor_animation;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -682,6 +683,15 @@ struct BevyoutWorld {
     actor_fallback_input: actor::ActorAppearanceAvailability,
     actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
     actor_fallback_decision: Option<actor::ActorFallbackDecision>,
+
+    // -- actor_animation_catalog.feature --
+    npc_kffz_payload: Vec<u8>,
+    creature_kffz_payload: Vec<u8>,
+    npc_kffz_paths: Vec<String>,
+    creature_kffz_paths: Vec<String>,
+    actor_animation_discovery_inputs: Vec<actor_animation::ActorAnimationDiscoveryInput>,
+    actor_animation_assets: Vec<actor_animation::ActorAnimationAsset>,
+    actor_animation_catalog: Option<actor_animation::PreparedActorAnimationCatalog>,
 }
 
 fn find_placement<'a>(
@@ -7807,4 +7817,314 @@ async fn then_fallback_identity_remains(
         .expect("actor fallback must be resolved");
     assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
     assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_catalog.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+fn decode_kffz_fixture(encoded: &str) -> Vec<u8> {
+    let encoded = encoded.replace("\\\\0", "\0").replace("\\\\", "\\");
+    encoded.into_bytes()
+}
+
+#[given(regex = r#"^an NPC KFFZ payload \"([^\"]*)\"$"#)]
+async fn given_npc_kffz_payload(world: &mut BevyoutWorld, payload: String) {
+    world.npc_kffz_payload = decode_kffz_fixture(&payload);
+}
+
+#[given(regex = r#"^a creature KFFZ payload \"([^\"]*)\"$"#)]
+async fn given_creature_kffz_payload(world: &mut BevyoutWorld, payload: String) {
+    world.creature_kffz_payload = decode_kffz_fixture(&payload);
+}
+
+#[when("the actor animation payloads are decoded")]
+async fn when_actor_animation_payloads_are_decoded(world: &mut BevyoutWorld) {
+    world.npc_kffz_paths = actor_animation::decode_kffz(&world.npc_kffz_payload).paths;
+    world.creature_kffz_paths = actor_animation::decode_kffz(&world.creature_kffz_payload).paths;
+}
+
+#[then(regex = r#"^the NPC animation paths are \"([^\"]*)\"$"#)]
+async fn then_npc_animation_paths(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.npc_kffz_paths.join(","), expected);
+}
+
+#[then(regex = r#"^the creature animation paths are \"([^\"]*)\"$"#)]
+async fn then_creature_animation_paths(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.creature_kffz_paths.join(","), expected);
+}
+
+#[given(
+    regex = r#"^actor animation source 0x([0-9a-fA-F]+) uses skeleton \"([^\"]*)\" and clips \"([^\"]*)\"$"#
+)]
+async fn given_actor_animation_source(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    skeleton: String,
+    clips: String,
+) {
+    let form_id = parse_hex(&form_hex);
+    let actor = actor_catalog::ActorRecordInput {
+        form_id,
+        kind: actor_catalog::ActorRecordKind::Npc,
+        model_animation: actor_catalog::ActorModelAnimation {
+            model_path: Some(skeleton),
+            animation_files: clips
+                .split(',')
+                .filter(|clip| !clip.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    world.actor_catalog_inputs.actors.insert(form_id, actor);
+    world
+        .actor_catalog_inputs
+        .placements
+        .push(actor_catalog::ActorPlacementInput {
+            reference_form_id: form_id,
+            base_form_id: form_id,
+            kind: actor_catalog::ActorRecordKind::Npc,
+            ..Default::default()
+        });
+}
+
+#[given(
+    regex = r"^actor animation source 0x([0-9a-fA-F]+) inherits model animation from 0x([0-9a-fA-F]+)$"
+)]
+async fn given_actor_animation_source_inherits(
+    world: &mut BevyoutWorld,
+    actor_hex: String,
+    template_hex: String,
+) {
+    let actor = actor_catalog_actor_mut(world, parse_hex(&actor_hex));
+    actor.base_template_form_id = Some(parse_hex(&template_hex));
+    actor.template_usage.model_animation = true;
+}
+
+#[when("actor animation sources are resolved")]
+async fn when_actor_animation_sources_are_resolved(world: &mut BevyoutWorld) {
+    world.actor_catalog_result = Some(actor_catalog::build_actor_catalog(
+        &world.actor_catalog_inputs,
+        "animation-fixture",
+    ));
+}
+
+#[then(regex = r#"^actor animation source 0x([0-9a-fA-F]+) resolves clips \"([^\"]*)\"$"#)]
+async fn then_actor_animation_source_resolves_clips(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    assert_eq!(
+        actor_catalog_blueprint(world, &reference_hex)
+            .animation_candidates
+            .join(","),
+        expected
+    );
+}
+
+#[given(
+    regex = r#"^animation actor reference 0x([0-9a-fA-F]+) base 0x([0-9a-fA-F]+) model \"([^\"]*)\" skeleton \"([^\"]*)\" explicit clips \"([^\"]*)\"$"#
+)]
+async fn given_animation_actor_reference(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    model_path: String,
+    skeleton_path: String,
+    clips: String,
+) {
+    world
+        .actor_animation_discovery_inputs
+        .push(actor_animation::ActorAnimationDiscoveryInput {
+            reference_form_id: parse_hex(&reference_hex),
+            base_form_id: parse_hex(&base_hex),
+            kind: if model_path.to_ascii_lowercase().contains("creatures/") {
+                actor_animation::PreparedActorAnimationKind::Creature
+            } else {
+                actor_animation::PreparedActorAnimationKind::Npc
+            },
+            model_path,
+            skeleton_fingerprint: format!("skeleton-{skeleton_path}"),
+            skeleton_path,
+            explicit_kf_paths: clips
+                .split(',')
+                .filter(|clip| !clip.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            default_directories: Vec::new(),
+        });
+}
+
+#[given(regex = r#"^available KF assets \"([^\"]*)\"$"#)]
+async fn given_available_kf_assets(world: &mut BevyoutWorld, encoded: String) {
+    world.actor_animation_assets = encoded
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (path, fingerprint_and_state) = entry
+                .split_once('@')
+                .expect("KF asset fixture must be path@fingerprint");
+            let (fingerprint, state) = match fingerprint_and_state.split_once('!') {
+                Some((fingerprint, "malformed")) => (
+                    fingerprint,
+                    actor_animation::ActorAnimationAssetState::Malformed(
+                        "synthetic malformed KF".to_owned(),
+                    ),
+                ),
+                Some((fingerprint, "incompatible")) => (
+                    fingerprint,
+                    actor_animation::ActorAnimationAssetState::Incompatible(
+                        "synthetic skeleton mismatch".to_owned(),
+                    ),
+                ),
+                Some((_, other)) => panic!("unknown KF asset fixture state {other}"),
+                None => (
+                    fingerprint_and_state,
+                    actor_animation::ActorAnimationAssetState::Compatible,
+                ),
+            };
+            actor_animation::ActorAnimationAsset {
+                path: path.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                state,
+            }
+        })
+        .collect();
+}
+
+#[when("the prepared actor animation catalog is built")]
+async fn when_prepared_actor_animation_catalog_is_built(world: &mut BevyoutWorld) {
+    world.actor_animation_catalog = Some(actor_animation::build_actor_animation_catalog(
+        "actor-animations-v1",
+        "fixture-content",
+        &world.actor_animation_discovery_inputs,
+        &world.actor_animation_assets,
+    ));
+}
+
+fn actor_animation_set_for_reference<'a>(
+    world: &'a BevyoutWorld,
+    reference_hex: &str,
+) -> &'a actor_animation::PreparedActorAnimationSet {
+    let reference_form_id = parse_hex(reference_hex);
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    let mapping = catalog
+        .actor_mappings
+        .iter()
+        .find(|mapping| mapping.reference_form_id == reference_form_id)
+        .expect("actor animation mapping must exist");
+    catalog
+        .animation_sets
+        .iter()
+        .find(|set| set.id == mapping.animation_set_id)
+        .expect("mapped actor animation set must exist")
+}
+
+#[then(regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has source paths \"([^\"]*)\"$"#)]
+async fn then_animation_set_source_paths(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let actual = actor_animation_set_for_reference(world, &reference_hex)
+        .clips
+        .iter()
+        .map(|clip| clip.source_kf_path.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has clip names \"([^\"]*)\"$"#)]
+async fn then_animation_set_clip_names(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let actual = actor_animation_set_for_reference(world, &reference_hex)
+        .clips
+        .iter()
+        .map(|clip| clip.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^animation set for reference 0x([0-9a-fA-F]+) contains (\d+) ready clip$")]
+async fn then_animation_set_ready_count(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: usize,
+) {
+    assert_eq!(
+        actor_animation_set_for_reference(world, &reference_hex)
+            .clips
+            .iter()
+            .filter(|clip| {
+                clip.status == actor_animation::PreparedActorAnimationClipStatus::Ready
+            })
+            .count(),
+        expected
+    );
+}
+
+#[then(
+    regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has diagnostic codes \"([^\"]*)\"$"#
+)]
+async fn then_animation_set_diagnostic_codes(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let mut actual = actor_animation_set_for_reference(world, &reference_hex)
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.clone())
+        .collect::<Vec<_>>();
+    actual.sort();
+    actual.dedup();
+    assert_eq!(actual.join(","), expected);
+}
+
+#[then(
+    regex = r"^the prepared actor animation catalog has (\d+) actor mappings and (\d+) animation set$"
+)]
+async fn then_prepared_actor_animation_catalog_counts(
+    world: &mut BevyoutWorld,
+    mappings: usize,
+    sets: usize,
+) {
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    assert_eq!(catalog.actor_mappings.len(), mappings);
+    assert_eq!(catalog.animation_sets.len(), sets);
+}
+
+#[then(regex = r"^references 0x([0-9a-fA-F]+) and 0x([0-9a-fA-F]+) use the same animation set$")]
+async fn then_references_use_same_animation_set(
+    world: &mut BevyoutWorld,
+    left_hex: String,
+    right_hex: String,
+) {
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    let set_id = |form_id| {
+        catalog
+            .actor_mappings
+            .iter()
+            .find(|mapping| mapping.reference_form_id == form_id)
+            .map(|mapping| mapping.animation_set_id.as_str())
+            .expect("actor animation mapping must exist")
+    };
+    assert_eq!(set_id(parse_hex(&left_hex)), set_id(parse_hex(&right_hex)));
 }

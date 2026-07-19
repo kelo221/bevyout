@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 17;
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-actor-assembly-v1";
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 18;
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-actor-animation-catalog-v2";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v13-material-extensions";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 
