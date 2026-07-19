@@ -35,7 +35,7 @@
 //! import free of any ECS/`Component`/`System`/`World` type, so it stays
 //! pure data-in-data-out and testable without spinning up a `World`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy_landmass::{AgentState, NavigationMesh3d, ValidNavigationMesh3d, ValidationError};
 use glam::Vec3;
@@ -150,6 +150,37 @@ pub(crate) fn protected_edges_for_mesh(mesh: &MeshInput, merges: &[MergeInput]) 
     protected_edges
 }
 
+/// Global door FormID -> `landmass` polygon type index (issue #155 feature
+/// 1), computed once across every mesh in one archipelago build (not
+/// per-mesh): `override_type_index_cost`/`AgentTypeIndexCostOverrides`
+/// (`nav/agent.rs`) key by type index against the whole archipelago's
+/// shared `NavigationData`, not per-island, so the *same* door referenced
+/// from two meshes (a two-sided `DoorLinkDescriptor`'s `side_a`/`side_b`,
+/// or the rarer case of one door's triangle appearing in more than one
+/// mesh) must resolve to the *same* type index everywhere or locking it
+/// would only exclude one side. Type index `0` is left for ordinary
+/// walkable ground (every polygon's default, unchanged) since
+/// `landmass::pathfinding`'s `type_index_to_cost` already treats an
+/// unlisted index as cost `1.0` -- doors get `1..`, assigned in ascending
+/// door-FormID order so the mapping is deterministic across calls on the
+/// same graph (the same determinism rule `door_link_descriptors`/
+/// `single_sided_doors` already follow).
+pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
+    let mut door_form_ids: BTreeSet<u32> = BTreeSet::new();
+    for mesh in meshes {
+        for door in &mesh.doors {
+            if let Some(door_form_id) = door.door_reference_form_id {
+                door_form_ids.insert(door_form_id);
+            }
+        }
+    }
+    door_form_ids
+        .into_iter()
+        .enumerate()
+        .map(|(offset, door_form_id)| (door_form_id, offset + 1))
+        .collect()
+}
+
 /// Converts `mesh` into a validated `bevy_landmass` navigation mesh.
 ///
 /// Non-walkable exclusion: `is_water` polygons are dropped rather than
@@ -191,11 +222,49 @@ pub(crate) fn protected_edges_for_mesh(mesh: &MeshInput, merges: &[MergeInput]) 
 /// attachment points for door links/travel doors) get the same
 /// protection. See `erosion_policy`'s module doc comment for the
 /// "protected edges" rule this feeds.
-pub(crate) fn build_navigation_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> BuildResult {
+///
+/// `door_type_indices` (issue #155 feature 1): every door-associated
+/// triangle (`mesh.doors`) gets the polygon type index its door FormID
+/// resolves to in this map, instead of the flat `0` every polygon used
+/// before -- everything else stays type `0`. This only changes which
+/// `landmass::pathfinding` cost a polygon looks up (`type_index_to_cost`,
+/// overridden per agent by `nav/agent.rs`'s `AgentTypeIndexCostOverrides`
+/// when a door is locked); it does not remove the polygon or touch its
+/// vertices/winding, so a typed door triangle stays exactly as connected to
+/// its neighbours as before -- confirmed against `landmass` 0.9.2's own
+/// `NavigationMesh::validate()` (`nav_mesh.rs`): region/adjacency
+/// (`DisjointSet`/`connectivity`) is computed purely from shared vertex
+/// indices between polygons, and `polygon_type_indices[i]` only ever feeds
+/// `ValidPolygon::type_index`, read solely by the cost lookup in
+/// `pathfinding.rs`. The live-Archipelago tests that actually run a solve
+/// against a typed mesh to confirm this live in `agent.rs`'s own test
+/// module instead of here, since this module stays Bevy-engine-free (no
+/// `bevy::app`/`Landmass3dPlugin` -- see the module doc comment).
+pub(crate) fn build_navigation_mesh(
+    mesh: &MeshInput,
+    merges: &[MergeInput],
+    door_type_indices: &BTreeMap<u32, usize>,
+) -> BuildResult {
     let mut diagnostics = Vec::new();
     let vertex_count = mesh.vertices.len();
 
+    // Issue #155 feature 1: triangle index -> door FormID, resolved to this
+    // build's polygon type index (falling back to `0`, ordinary walkable
+    // ground, for any triangle not in `mesh.doors` or whose FormID this
+    // archipelago-wide map has no entry for -- e.g. a door with no
+    // `door_reference_form_id` decoded).
+    let mut door_type_index_by_triangle: HashMap<u32, usize> = HashMap::new();
+    for door in &mesh.doors {
+        let Some(door_form_id) = door.door_reference_form_id else {
+            continue;
+        };
+        if let Some(&type_index) = door_type_indices.get(&door_form_id) {
+            door_type_index_by_triangle.insert(door.triangle_index, type_index);
+        }
+    }
+
     let mut included_polygons: Vec<&PolygonInput> = Vec::new();
+    let mut included_type_indices: Vec<usize> = Vec::new();
     for polygon in &mesh.polygons {
         if polygon.is_water {
             continue;
@@ -219,6 +288,12 @@ pub(crate) fn build_navigation_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> 
             )));
             continue;
         }
+        included_type_indices.push(
+            door_type_index_by_triangle
+                .get(&polygon.index)
+                .copied()
+                .unwrap_or(0),
+        );
         included_polygons.push(polygon);
     }
 
@@ -279,11 +354,14 @@ pub(crate) fn build_navigation_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> 
                 indices
             })
             .collect();
-        let polygon_type_indices = vec![0usize; polygons.len()];
+        // Issue #155 feature 1: `included_type_indices` was built in the
+        // same order/filter as `included_polygons` above, so it lines up
+        // 1:1 with `polygons` here regardless of winding (reversal only
+        // touches vertex order within a polygon, never polygon order).
         let candidate = NavigationMesh3d {
             vertices: vertices.clone(),
             polygons,
-            polygon_type_indices,
+            polygon_type_indices: included_type_indices.clone(),
             height_mesh: None,
         };
         match candidate.validate() {
@@ -337,7 +415,10 @@ pub(crate) struct DoorLinkDescriptor {
     pub(crate) side_b: DoorLinkSide,
 }
 
-fn polygon_centroid(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[f32; 3]> {
+/// The polygon's own three vertex positions, in `vertex_indices` order.
+/// `None` if any index is out of bounds (same defensive check
+/// `build_navigation_mesh` applies before excluding an invalid polygon).
+fn polygon_vertices(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[[f32; 3]; 3]> {
     if polygon
         .vertex_indices
         .iter()
@@ -345,9 +426,17 @@ fn polygon_centroid(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[f32; 3]
     {
         return None;
     }
+    Some(
+        polygon
+            .vertex_indices
+            .map(|index| mesh.vertices[index as usize]),
+    )
+}
+
+fn polygon_centroid(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[f32; 3]> {
+    let vertices = polygon_vertices(mesh, polygon)?;
     let mut sum = [0.0f32; 3];
-    for &index in &polygon.vertex_indices {
-        let vertex = mesh.vertices[index as usize];
+    for vertex in vertices {
         sum[0] += vertex[0];
         sum[1] += vertex[1];
         sum[2] += vertex[2];
@@ -355,14 +444,19 @@ fn polygon_centroid(mesh: &MeshInput, polygon: &PolygonInput) -> Option<[f32; 3]
     Some([sum[0] / 3.0, sum[1] / 3.0, sum[2] / 3.0])
 }
 
-/// Builds `(door_form_id, side)` for every door-triangle association across
-/// `meshes`, ordered by `(door_form_id, mesh_form_id, polygon_index)` --
-/// the shared grouping key `door_link_descriptors` and `single_sided_doors`
-/// both partition, so a door's real FO3 triangle count (usually exactly 1;
-/// see wave 3's finding that every real door triangle is single-sided) only
-/// needs computing once.
-fn door_sides(meshes: &[MeshInput]) -> Vec<(u32, DoorLinkSide)> {
-    let mut sides: Vec<(u32, DoorLinkSide)> = Vec::new();
+/// Builds `(door_form_id, side, vertices)` for every door-triangle
+/// association across `meshes`, ordered by `(door_form_id, mesh_form_id,
+/// polygon_index)` -- the shared grouping key `door_link_descriptors` and
+/// `single_sided_doors` both partition, so a door's real FO3 triangle count
+/// (usually exactly 1; see wave 3's finding that every real door triangle
+/// is single-sided) only needs computing once. `vertices` (issue #155
+/// feature 3) is the door triangle's own three vertex positions --
+/// `single_sided_doors` carries it forward on `SingleSidedDoor` for the
+/// corridor-based mid-route crossing gate's point-in-triangle test;
+/// `door_link_descriptors` ignores it (`DoorLinkSide`'s `midpoint` is all a
+/// two-sided animation-link endpoint ever needed).
+fn door_sides(meshes: &[MeshInput]) -> Vec<(u32, DoorLinkSide, [[f32; 3]; 3])> {
+    let mut sides: Vec<(u32, DoorLinkSide, [[f32; 3]; 3])> = Vec::new();
     for mesh in meshes {
         for door in &mesh.doors {
             let Some(door_form_id) = door.door_reference_form_id else {
@@ -375,6 +469,9 @@ fn door_sides(meshes: &[MeshInput]) -> Vec<(u32, DoorLinkSide)> {
             else {
                 continue;
             };
+            let Some(vertices) = polygon_vertices(mesh, polygon) else {
+                continue;
+            };
             let Some(midpoint) = polygon_centroid(mesh, polygon) else {
                 continue;
             };
@@ -385,11 +482,13 @@ fn door_sides(meshes: &[MeshInput]) -> Vec<(u32, DoorLinkSide)> {
                     polygon_index: polygon.index,
                     midpoint,
                 },
+                vertices,
             ));
         }
     }
-    sides
-        .sort_by_key(|(door_form_id, side)| (*door_form_id, side.mesh_form_id, side.polygon_index));
+    sides.sort_by_key(|(door_form_id, side, _)| {
+        (*door_form_id, side.mesh_form_id, side.polygon_index)
+    });
     sides
 }
 
@@ -432,6 +531,13 @@ pub(crate) fn door_link_descriptors(meshes: &[MeshInput]) -> Vec<DoorLinkDescrip
 pub(crate) struct SingleSidedDoor {
     pub(crate) door_form_id: u32,
     pub(crate) side: DoorLinkSide,
+    /// The door triangle's own three vertex positions (issue #155 feature
+    /// 3): `nav/agent.rs`'s corridor-based mid-route crossing gate needs
+    /// the actual polygon footprint for a point-in-triangle containment
+    /// test (`point_in_door_triangle`), not just `side.midpoint`'s
+    /// centroid -- issue #137's proximity scan this replaces only ever
+    /// needed the midpoint.
+    pub(crate) vertices: [[f32; 3]; 3],
 }
 
 /// Deterministic single-sided-door list, ordered by `(door_form_id,
@@ -452,11 +558,68 @@ pub(crate) fn single_sided_doors(meshes: &[MeshInput]) -> Vec<SingleSidedDoor> {
             result.push(SingleSidedDoor {
                 door_form_id,
                 side: sides[index].1,
+                vertices: sides[index].2,
             });
         }
         index = group_end;
     }
     result
+}
+
+// ---------------------------------------------------------------------
+// Corridor-based mid-route door crossing gate (issue #155 feature 3)
+// ---------------------------------------------------------------------
+
+/// Whether `point` (an agent's current world position) lies within
+/// `triangle`'s horizontal (XZ) footprint, within `max_vertical_gap` of it
+/// vertically -- the corridor-based mid-route door crossing gate `nav/
+/// agent.rs`'s `drive_door_link_for_agent` feeds this with a `SingleSidedDoor
+/// ::vertices` candidate and the agent's own `Transform::translation` each
+/// tick, replacing issue #137's `MID_ROUTE_DOOR_GATE_DISTANCE`
+/// centroid-proximity scan (a route merely passing *near* a doorway used to
+/// gate even when its corridor never actually crossed it -- see this
+/// module's `door_type_indices` doc comment's sibling problem for locking).
+///
+/// `triangle` should be the door polygon's exact, un-eroded vertices:
+/// `erosion_policy` (via `protected_edges_for_mesh`) deliberately excludes
+/// door triangles from the agent-radius boundary erosion every other
+/// walkable polygon gets, so this is always the authored NAVM footprint,
+/// not a shrunk approximation -- an agent's capsule *centre* threading
+/// through a real doorway gap will cross exactly this triangle.
+///
+/// The vertical guard mirrors `movement_policy::nav_point_reached`'s
+/// same-XZ-different-floor rejection (a horizontal-only test alone cannot
+/// tell a door triangle from an unrelated one stacked directly above/below
+/// it on another storey) without importing that module -- this one stays
+/// Bevy-engine-free (see the module doc comment), the same small
+/// duplication precedent as `MERGE_PORTAL_STEP_HEIGHT`.
+pub(crate) fn point_in_door_triangle(
+    point: [f32; 3],
+    triangle: [[f32; 3]; 3],
+    max_vertical_gap: f32,
+) -> bool {
+    let vertical_ok = triangle
+        .iter()
+        .any(|vertex| (point[1] - vertex[1]).abs() <= max_vertical_gap);
+    vertical_ok && point_in_triangle_xz(point, triangle)
+}
+
+/// Barycentric-sign point-in-triangle containment test, projected onto the
+/// horizontal (XZ) plane -- Y (height) is ignored entirely here;
+/// [`point_in_door_triangle`] applies the separate vertical-gap guard
+/// first. Winding-independent (accepts either polygon winding: the three
+/// signed areas either all agree in sign, or the point sits exactly on an
+/// edge/vertex, giving at least one zero).
+fn point_in_triangle_xz(point: [f32; 3], triangle: [[f32; 3]; 3]) -> bool {
+    fn signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+        (a[0] - c[0]) * (c[2] - b[2]) - (b[0] - c[0]) * (c[2] - a[2])
+    }
+    let d1 = signed_area_xz(point, triangle[0], triangle[1]);
+    let d2 = signed_area_xz(point, triangle[1], triangle[2]);
+    let d3 = signed_area_xz(point, triangle[2], triangle[0]);
+    let has_negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_negative && has_positive)
 }
 
 // ---------------------------------------------------------------------
@@ -678,7 +841,7 @@ mod tests {
         // vertex layout (see `reversed_winding_still_validates_after_retry`
         // for the opposite winding, which does need the retry).
         let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.is_empty(),
@@ -692,7 +855,7 @@ mod tests {
         // Same square, opposite winding: the first attempt must fail
         // internally and the retry with reversed order must succeed.
         let mesh = square_mesh([0, 2, 1], [1, 2, 3]);
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -708,7 +871,7 @@ mod tests {
     fn water_polygons_are_excluded_as_non_walkable() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         // One walkable polygon remains -- still a valid (smaller) mesh.
         // `ValidNavigationMesh`'s fields are private to `landmass`, so this
         // only asserts what's externally observable: conversion still
@@ -721,7 +884,7 @@ mod tests {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[0].is_water = true;
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         assert!(result.nav_mesh.is_none());
         assert!(
             result
@@ -737,7 +900,7 @@ mod tests {
     fn invalid_vertex_index_polygon_is_skipped_with_an_error_diagnostic_and_never_panics() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 2, u32::MAX];
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.iter().any(
@@ -752,7 +915,7 @@ mod tests {
     fn degenerate_polygon_is_skipped_with_a_warning_diagnostic() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 1, 3];
-        let result = build_navigation_mesh(&mesh, &[]);
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -847,6 +1010,147 @@ mod tests {
             first.iter().map(|d| d.door_form_id).collect::<Vec<_>>(),
             vec![0x50, 0x99]
         );
+    }
+
+    #[test]
+    fn single_sided_doors_carry_the_triangle_vertices() {
+        // Issue #155 feature 3: the corridor-based crossing gate needs the
+        // door triangle's real footprint, not just its centroid.
+        let mesh = mesh_with_door(0x10, 0, 0x99);
+        let doors = single_sided_doors(&[mesh]);
+        assert_eq!(doors.len(), 1);
+        assert_eq!(
+            doors[0].vertices,
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+    }
+
+    // -------------------------------------------------------------
+    // door_type_indices (issue #155 feature 1)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn each_distinct_door_gets_its_own_type_index_starting_at_one() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x50);
+        let indices = door_type_indices(&[mesh_a, mesh_b]);
+        // Ascending by door FormID, not by discovery order: 0x50 < 0x99.
+        assert_eq!(indices.get(&0x50), Some(&1));
+        assert_eq!(indices.get(&0x99), Some(&2));
+    }
+
+    #[test]
+    fn the_same_door_referenced_from_two_meshes_gets_one_shared_type_index() {
+        // The two-sided `DoorLinkDescriptor` case: the same door FormID
+        // appears in both meshes' `doors` list. Locking it must exclude
+        // both triangles via one type index, not two different ones.
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x99);
+        let indices = door_type_indices(&[mesh_a, mesh_b]);
+        assert_eq!(indices.len(), 1);
+        assert_eq!(indices.get(&0x99), Some(&1));
+    }
+
+    #[test]
+    fn a_door_with_no_resolved_form_id_gets_no_type_index() {
+        let mut mesh = mesh_with_door(0x10, 0, 0x99);
+        mesh.doors[0].door_reference_form_id = None;
+        let indices = door_type_indices(&[mesh]);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn door_type_indices_is_deterministic_across_calls() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x50);
+        let first = door_type_indices(&[mesh_a.clone(), mesh_b.clone()]);
+        let second = door_type_indices(&[mesh_a, mesh_b]);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_typed_door_triangle_still_validates_and_keeps_its_polygon_count() {
+        // CONSTRAINT pin (issue #155 feature 1): typing a door triangle must
+        // not remove or alter unrelated adjacency. This module cannot run a
+        // live pathfind (Bevy-engine-free, see the module doc comment), but
+        // it can confirm conversion still succeeds and produces the same
+        // polygon count with a non-trivial type index as it does with the
+        // all-zero default -- `agent.rs`'s own tests confirm the live
+        // solve still connects across a typed-but-unlocked door.
+        let mesh = mesh_with_door(0x10, 0, 0x99);
+        let indices = door_type_indices(std::slice::from_ref(&mesh));
+        assert_eq!(indices.get(&0x99), Some(&1));
+        let typed = build_navigation_mesh(&mesh, &[], &indices);
+        let untyped = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
+        assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
+    }
+
+    // -------------------------------------------------------------
+    // point_in_door_triangle (issue #155 feature 3)
+    // -------------------------------------------------------------
+
+    /// A door-sized triangle spanning x:4..6, z:-1..1 (apex at z=1), the
+    /// same shape the invariant tests below reason about.
+    fn sample_door_triangle() -> [[f32; 3]; 3] {
+        [[4.0, 0.0, -1.0], [6.0, 0.0, -1.0], [5.0, 0.0, 1.0]]
+    }
+
+    #[test]
+    fn a_point_inside_the_triangle_footprint_is_contained() {
+        assert!(point_in_door_triangle(
+            [5.0, 0.0, 0.0],
+            sample_door_triangle(),
+            1.8
+        ));
+    }
+
+    #[test]
+    fn a_point_clearly_outside_the_triangle_footprint_is_not_contained() {
+        assert!(!point_in_door_triangle(
+            [5.0, 0.0, -5.0],
+            sample_door_triangle(),
+            1.8
+        ));
+    }
+
+    #[test]
+    fn a_point_near_the_centroid_but_outside_the_footprint_is_not_contained() {
+        // The exact bug issue #155 fixes: the old `MID_ROUTE_DOOR_GATE_
+        // DISTANCE` (0.75 m) centroid-proximity scan would have gated a
+        // route merely passing close to the door's midpoint. The
+        // triangle's centroid is about (5.0, 0.0, -0.33); this point sits
+        // just outside the triangle's base edge (z = -1) but well within
+        // 0.75 m of that centroid.
+        let point = [5.0, 0.0, -1.05];
+        let triangle = sample_door_triangle();
+        let centroid_z = (triangle[0][2] + triangle[1][2] + triangle[2][2]) / 3.0;
+        assert!(
+            (point[2] - centroid_z).abs() < 0.75,
+            "test setup: the point must be within the old proximity radius"
+        );
+        assert!(!point_in_door_triangle(point, triangle, 1.8));
+    }
+
+    #[test]
+    fn a_point_on_a_different_floor_is_not_contained_despite_matching_xz() {
+        assert!(!point_in_door_triangle(
+            [5.0, 5.0, 0.0],
+            sample_door_triangle(),
+            1.8
+        ));
+    }
+
+    #[test]
+    fn the_vertical_gap_tolerates_the_agent_capsule_centre_offset() {
+        // Mirrors `movement_policy::nav_point_reached`'s own tolerance: a
+        // capsule-centre agent above a feet-level door triangle must still
+        // be contained.
+        assert!(point_in_door_triangle(
+            [5.0, 0.9, 0.0],
+            sample_door_triangle(),
+            1.8
+        ));
     }
 
     #[test]
