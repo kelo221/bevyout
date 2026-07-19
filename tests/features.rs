@@ -678,7 +678,6 @@ struct BevyoutWorld {
     corpse_npc_bases: Vec<(u32, bool)>,
     corpse_parsed: Option<openmw_esm4::ParsedPlugin>,
 
-
     // -- actor_conversion.feature (authored ragdoll sidecar v3) --
     actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
     actor_physics_asset: Option<physics::PreparedPhysicsAsset>,
