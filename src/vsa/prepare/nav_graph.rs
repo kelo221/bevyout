@@ -27,7 +27,7 @@ use super::super::paths::FO3_SCALE;
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
 /// precedent.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v2";
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v3";
 
 // ---------------------------------------------------------------------
 // Plain input types (boundary conversion happens in navmesh.rs)
@@ -152,24 +152,52 @@ pub(crate) struct PreparedNavExternalConnection {
 }
 
 /// A same-cell cross-mesh connection between two of this graph's own
-/// `PreparedNavMesh`es (issue #113, M4 wave 4 feature 2). `NAVI`'s `NVMI`
-/// tail (decoded in `openmw_esm4::navmesh`) does not carry OpenMW's
-/// TES4/TES5-style merged-navmesh FormID arrays for real FO3 data (see that
-/// module's doc comment and `NOTICE.md` for the byte-level verification), so
-/// this connection is derived purely from geometry instead: `triangle_a`'s
-/// boundary edge (an edge with no same-mesh neighbour) sits within
-/// [`MESH_MERGE_DISTANCE`] of `triangle_b`'s boundary edge. Consumed by
-/// `viewer::nav::landmass_graph` to build a walk-through animation link when
-/// landmass's own island-boundary linking does not connect the two meshes
-/// (real FO3 seams do not share exact vertex positions -- see that module's
-/// doc comment).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// `PreparedNavMesh`es (issue #113, M4 wave 4 feature 2; validated portal
+/// geometry added issue #154, M4 wave 8). `NAVI`'s `NVMI` tail (decoded in
+/// `openmw_esm4::navmesh`) does not carry OpenMW's TES4/TES5-style
+/// merged-navmesh FormID arrays for real FO3 data (see that module's doc
+/// comment and `NOTICE.md` for the byte-level verification), so this
+/// connection is derived purely from geometry instead: `triangle_a`'s
+/// boundary edge (an edge with no same-mesh neighbour) within
+/// [`MESH_MERGE_DISTANCE`] of `triangle_b`'s, matched by
+/// `compute_mesh_merges`'s reciprocal, non-overlapping-interval resolution
+/// (issue #154 feature 2 -- see that function's doc comment for why this is
+/// not simple mutual-nearest matching: one long boundary edge can
+/// legitimately face several shorter tessellated edges on the other mesh)
+/// and passing `validate_portal_candidate`'s opposing-direction/
+/// overlapping-interval checks. `edge_a`/`edge_b` are the matched edges'
+/// own vertex-index identity (stable across erosion: `erosion_policy`'s
+/// protected-edge rule pins these exact vertices in place);
+/// `interval_a`/`interval_b` are the two edges' overlapping world-space
+/// portal interval, clamped to the shared overlap and positionally
+/// corresponding (`interval_a[0]`/`interval_b[0]` are the same point along
+/// the shared axis, likewise index `1`) -- note this module deliberately
+/// does *not* reject a candidate for excessive vertical drop between the
+/// two sides; that is an agent-class-specific check `viewer::nav::
+/// landmass_graph` makes at runtime instead (see `BoundaryEdge`'s doc
+/// comment). Consumed by
+/// `viewer::nav::landmass_graph` to build a walk-through animation link
+/// between the interval midpoints (not triangle centroids, issue #154
+/// feature 3) when landmass's own island-boundary linking does not connect
+/// the two meshes (real FO3 seams do not share exact vertex positions -- see
+/// that module's doc comment).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct PreparedNavMeshMerge {
     pub(crate) mesh_a_form_id: u32,
     pub(crate) triangle_a: u32,
+    /// `[start_index, end_index]` into `mesh_a`'s own `vertices`, in the
+    /// triangle's own winding order.
+    pub(crate) edge_a: [u32; 2],
     pub(crate) mesh_b_form_id: u32,
     pub(crate) triangle_b: u32,
+    /// `[start_index, end_index]` into `mesh_b`'s own `vertices`.
+    pub(crate) edge_b: [u32; 2],
+    /// Bevy-metre portal interval on `mesh_a`'s side of the seam, after the
+    /// mutual overlap clamp.
+    pub(crate) interval_a: [[f32; 3]; 2],
+    /// Bevy-metre portal interval on `mesh_b`'s side of the seam.
+    pub(crate) interval_b: [[f32; 3]; 2],
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -209,6 +237,14 @@ pub(crate) struct NavGraphCounters {
     pub(crate) doors: usize,
     pub(crate) external_connections: usize,
     pub(crate) mesh_merges: usize,
+    /// Mutual-nearest-within-threshold boundary-edge pairs issue #154
+    /// feature 2's validation rejected (non-opposing direction, no
+    /// overlapping interval, step too high, or a repeated-destination
+    /// candidate that lost its mutual-nearest tie) -- one per rejection
+    /// diagnostic `compute_mesh_merges` emits. Kept separate from
+    /// `mesh_merges` itself so that counter's existing "accepted merges"
+    /// meaning stays exactly what it was before this issue.
+    pub(crate) mesh_merges_rejected: usize,
     pub(crate) diagnostics_warning: usize,
     pub(crate) diagnostics_error: usize,
 }
@@ -271,7 +307,9 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
     }
 
     let bounds = whole_graph_bounds(&meshes);
-    let mesh_merges = compute_mesh_merges(&meshes);
+    let (mesh_merges, merge_diagnostics) = compute_mesh_merges(&meshes);
+    let mesh_merges_rejected = merge_diagnostics.len();
+    diagnostics.extend(merge_diagnostics);
     let diagnostics_warning = diagnostics
         .iter()
         .filter(|d| d.severity == "warning")
@@ -284,6 +322,7 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         doors: meshes.iter().map(|m| m.doors.len()).sum(),
         external_connections: meshes.iter().map(|m| m.external_connections.len()).sum(),
         mesh_merges: mesh_merges.len(),
+        mesh_merges_rejected,
         diagnostics_warning,
         diagnostics_error,
     };
@@ -316,9 +355,49 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
 /// navmesh are not matched.
 const MESH_MERGE_DISTANCE: f32 = 2.0;
 
+/// Minimum cosine of the angle between two candidate portal edges'
+/// direction vectors for them to count as "facing" each other across a
+/// seam (issue #154 feature 2, "near-opposing edge directions"). `-1.0` is
+/// perfectly opposite (180°); this project accepts down to `-0.5` (an angle
+/// of at least 120°) -- generous enough for FO3's independently-authored
+/// per-mesh boundary edges (the seams `MESH_MERGE_DISTANCE`'s doc comment
+/// cites already measure 0.09-0.9 m of position drift, so some angular
+/// drift between the two edges is expected too) while still rejecting a
+/// near-perpendicular or same-direction pairing, which cannot be two sides
+/// of one doorway/seam.
+const PORTAL_DIRECTION_COSINE_MAX: f32 = -0.5;
+
+/// Minimum length (bevy metres) of the two candidate edges' overlapping
+/// projection onto their shared axis for it to count as a real portal
+/// (issue #154 feature 2). A hair above zero: large enough to reject two
+/// edges that merely touch at a single point (no actual walkable crossing
+/// between them), small enough not to reject a genuine narrow real-data
+/// seam.
+const PORTAL_MIN_OVERLAP: f32 = 0.01;
+
+/// One mesh-boundary edge candidate for [`compute_mesh_merges`] (issue
+/// #154): an edge referenced by exactly one polygon (`adjacency` slot
+/// `None`), carrying both its stable vertex-index identity (feeding
+/// [`PreparedNavMeshMerge::edge_a`]/`edge_b`) and its resolved world
+/// positions (feeding `validate_portal_candidate`'s direction/overlap
+/// geometry). Deliberately agent-class-agnostic: earlier revisions of this
+/// module also rejected a candidate whose matched interval had too much
+/// vertical drop for a *specific* (hardcoded, unnamed) agent step height --
+/// an external review correctly flagged that as baking an agent-class
+/// assumption into the universal prepared graph. That check now lives at
+/// runtime in `viewer::nav::landmass_graph`, where the actual agent
+/// definition (`nav::agent::AGENT_RADIUS` and friends) already lives; this
+/// module still records the full (possibly vertically offset)
+/// `interval_a`/`interval_b` on every accepted [`PreparedNavMeshMerge`] so
+/// that runtime check has the data to work with.
 struct BoundaryEdge {
     triangle_index: u32,
-    midpoint: [f32; 3],
+    /// `[start_index, end_index]` into the owning mesh's `vertices`, in the
+    /// triangle's own winding order (`vertex_indices[slot]` ->
+    /// `vertex_indices[(slot + 1) % 3]`).
+    vertex_indices: [u32; 2],
+    start: [f32; 3],
+    end: [f32; 3],
 }
 
 fn boundary_edges(mesh: &PreparedNavMesh) -> Vec<BoundaryEdge> {
@@ -339,11 +418,9 @@ fn boundary_edges(mesh: &PreparedNavMesh) -> Vec<BoundaryEdge> {
             let vb = mesh.vertices[b as usize];
             edges.push(BoundaryEdge {
                 triangle_index: polygon.index,
-                midpoint: [
-                    (va[0] + vb[0]) / 2.0,
-                    (va[1] + vb[1]) / 2.0,
-                    (va[2] + vb[2]) / 2.0,
-                ],
+                vertex_indices: [a, b],
+                start: va,
+                end: vb,
             });
         }
     }
@@ -357,55 +434,381 @@ fn distance_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
     dx * dx + dy * dy + dz * dz
 }
 
+fn vec_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn vec_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn vec_length(a: [f32; 3]) -> f32 {
+    vec_dot(a, a).sqrt()
+}
+
+/// `None` for a (near-)zero-length vector -- callers treat that as a
+/// degenerate edge, never a division by (near) zero.
+fn vec_normalize(a: [f32; 3]) -> Option<[f32; 3]> {
+    let length = vec_length(a);
+    if length < 1.0e-6 {
+        None
+    } else {
+        Some([a[0] / length, a[1] / length, a[2] / length])
+    }
+}
+
+fn vec_add_scaled(origin: [f32; 3], direction: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        origin[0] + direction[0] * t,
+        origin[1] + direction[1] * t,
+        origin[2] + direction[2] * t,
+    ]
+}
+
+fn vec_lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// Squared distance from `point` to the segment `start..end`.
+fn point_segment_distance_sq(point: [f32; 3], start: [f32; 3], end: [f32; 3]) -> f32 {
+    let segment = vec_sub(end, start);
+    let length_sq = vec_dot(segment, segment);
+    if length_sq < 1.0e-12 {
+        return distance_sq(point, start);
+    }
+    let t = (vec_dot(vec_sub(point, start), segment) / length_sq).clamp(0.0, 1.0);
+    distance_sq(point, vec_add_scaled(start, segment, t))
+}
+
+/// A conservative closeness pre-filter between two boundary edges, robust
+/// to very different edge lengths (issue #154 review correction: one long
+/// boundary edge may legitimately face several much shorter tessellated
+/// edges on the other mesh, whose *midpoints* can sit far from the long
+/// edge's own midpoint even though the edges genuinely overlap along part
+/// of their length) -- the minimum of each edge's endpoints' squared
+/// distance to the *other* edge's segment, not just midpoint-to-midpoint.
+fn boundary_edge_distance_sq(edge_a: &BoundaryEdge, edge_b: &BoundaryEdge) -> f32 {
+    point_segment_distance_sq(edge_a.start, edge_b.start, edge_b.end)
+        .min(point_segment_distance_sq(
+            edge_a.end,
+            edge_b.start,
+            edge_b.end,
+        ))
+        .min(point_segment_distance_sq(
+            edge_b.start,
+            edge_a.start,
+            edge_a.end,
+        ))
+        .min(point_segment_distance_sq(
+            edge_b.end,
+            edge_a.start,
+            edge_a.end,
+        ))
+}
+
+/// Why a portal candidate failed issue #154 feature 2's per-pair geometric
+/// checks; each variant carries its own stable diagnostic wording
+/// (`describe`) so a `prepare` operator can tell which rule fired without
+/// re-deriving the geometry by hand. A candidate that passes both of these
+/// can still be rejected later by `compute_mesh_merges`'s own interval-
+/// overlap resolution -- that rejection is reported inline there, not
+/// through this enum, since it depends on *other* candidates, not just this
+/// pair.
+#[derive(Debug, Clone, Copy)]
+enum PortalRejection {
+    /// The two edges' direction vectors are not opposing enough to be two
+    /// sides of the same seam/doorway (see [`PORTAL_DIRECTION_COSINE_MAX`]).
+    NonOpposingDirection { cosine: f32 },
+    /// One (or both) edges are degenerate (near-zero length), so no
+    /// direction can be derived.
+    DegenerateEdge,
+    /// The two edges' projections onto their shared axis do not overlap
+    /// (see [`PORTAL_MIN_OVERLAP`]).
+    NoIntervalOverlap,
+}
+
+impl PortalRejection {
+    fn describe(self) -> String {
+        match self {
+            PortalRejection::NonOpposingDirection { cosine } => format!(
+                "edge directions not opposing enough (cosine {cosine:.3}, need <= {PORTAL_DIRECTION_COSINE_MAX})"
+            ),
+            PortalRejection::DegenerateEdge => "a degenerate (near-zero-length) edge".to_string(),
+            PortalRejection::NoIntervalOverlap => {
+                "no overlapping portal interval along the shared edge axis".to_string()
+            }
+        }
+    }
+}
+
+/// A validated portal candidate between one `BoundaryEdge` in each mesh:
+/// the matched world-space interval on both sides (positionally
+/// corresponding -- `interval_a[0]`/`interval_b[0]` are the same point
+/// along the shared axis, likewise index `1`), plus each side's own
+/// interval expressed as a `[min, max]` distance-along-the-edge range (from
+/// `edge_a.start`/`edge_b.start` respectively) -- the common unit
+/// `compute_mesh_merges`'s overlap-resolution phase compares different
+/// candidates on the *same* edge against each other in, regardless of which
+/// opposing edge (and therefore which shared axis) produced each one.
+struct PortalCandidate {
+    interval_a: [[f32; 3]; 2],
+    interval_b: [[f32; 3]; 2],
+    a_range: (f32, f32),
+    b_range: (f32, f32),
+}
+
+/// Issue #154 feature 2's per-pair geometric validation: opposing
+/// directions and an overlapping projected interval. Reciprocal, non-
+/// overlapping interval correspondence *across every candidate on an edge*
+/// (no repeated/conflicting destination coverage) is a global property the
+/// caller (`compute_mesh_merges`) resolves afterward, once every pair's
+/// candidate interval is known -- a single pair can never determine that on
+/// its own.
+fn validate_portal_candidate(
+    edge_a: &BoundaryEdge,
+    edge_b: &BoundaryEdge,
+) -> Result<PortalCandidate, PortalRejection> {
+    let raw_direction_a = vec_sub(edge_a.end, edge_a.start);
+    let raw_direction_b = vec_sub(edge_b.end, edge_b.start);
+    let Some(direction_a) = vec_normalize(raw_direction_a) else {
+        return Err(PortalRejection::DegenerateEdge);
+    };
+    let Some(direction_b) = vec_normalize(raw_direction_b) else {
+        return Err(PortalRejection::DegenerateEdge);
+    };
+    let cosine = vec_dot(direction_a, direction_b);
+    if cosine > PORTAL_DIRECTION_COSINE_MAX {
+        return Err(PortalRejection::NonOpposingDirection { cosine });
+    }
+
+    // Project both edges onto edge_a's own axis -- the direction check just
+    // above already confirmed edge_b's direction is substantially opposed
+    // to it, so it is a reasonable shared axis for both sides.
+    let origin = edge_a.start;
+    let t_a0 = 0.0_f32;
+    let t_a1 = vec_dot(vec_sub(edge_a.end, origin), direction_a);
+    let (a_min, a_max) = (t_a0.min(t_a1), t_a0.max(t_a1));
+    let t_b0 = vec_dot(vec_sub(edge_b.start, origin), direction_a);
+    let t_b1 = vec_dot(vec_sub(edge_b.end, origin), direction_a);
+    let (b_min, b_max) = (t_b0.min(t_b1), t_b0.max(t_b1));
+
+    let overlap_min = a_min.max(b_min);
+    let overlap_max = a_max.min(b_max);
+    if overlap_max - overlap_min < PORTAL_MIN_OVERLAP {
+        return Err(PortalRejection::NoIntervalOverlap);
+    }
+
+    let interval_a = [
+        vec_add_scaled(origin, direction_a, overlap_min),
+        vec_add_scaled(origin, direction_a, overlap_max),
+    ];
+    // Map the same two axis parameters back onto edge_b's own segment via
+    // its local `t_b0..t_b1` parametrization. `t_b1 - t_b0` cannot be (near)
+    // zero here: `cosine <= PORTAL_DIRECTION_COSINE_MAX` above already
+    // guarantees edge_b's direction has a component of magnitude >= 0.5
+    // along `direction_a`, and `vec_normalize` above already ruled out a
+    // zero-length edge_b.
+    let denom = t_b1 - t_b0;
+    let s_min = (overlap_min - t_b0) / denom;
+    let s_max = (overlap_max - t_b0) / denom;
+    let interval_b = [
+        vec_lerp(edge_b.start, edge_b.end, s_min),
+        vec_lerp(edge_b.start, edge_b.end, s_max),
+    ];
+
+    // edge_b's own distance-along-edge_b range, independent of whichever
+    // edge_a produced this candidate -- `length_b` un-normalizes `s_min`/
+    // `s_max` (each in `[0, 1]` along edge_b) back to bevy metres from
+    // `edge_b.start`.
+    let length_b = vec_length(raw_direction_b);
+    let (b_range_min, b_range_max) = (
+        (s_min * length_b).min(s_max * length_b),
+        (s_min * length_b).max(s_max * length_b),
+    );
+
+    Ok(PortalCandidate {
+        interval_a,
+        interval_b,
+        a_range: (overlap_min, overlap_max),
+        b_range: (b_range_min, b_range_max),
+    })
+}
+
+/// Whether two `[min, max]` ranges on the same edge overlap by more than a
+/// hair (floating-point slack so two intervals that merely touch at a
+/// shared boundary point are not treated as conflicting).
+fn ranges_overlap(a: (f32, f32), b: (f32, f32)) -> bool {
+    const EPSILON: f32 = 1.0e-4;
+    a.0 < b.1 - EPSILON && b.0 < a.1 - EPSILON
+}
+
 /// Derives same-cell cross-mesh connections between every pair of `meshes`
-/// (already sorted by `form_id`) by matching each boundary edge in the
-/// lower-`form_id` mesh of a pair to its nearest boundary edge in the
-/// higher-`form_id` mesh, keeping the match only when within
-/// [`MESH_MERGE_DISTANCE`]. One-directional matching (from the lower
-/// `form_id` mesh) keeps the connection count bounded by that mesh's own
-/// boundary-edge count rather than exploding combinatorially; deterministic
-/// (`meshes` is already form_id-sorted, `dedup` removes exact repeats), and
-/// never panics (invalid vertex indices are skipped, not indexed).
-fn compute_mesh_merges(meshes: &[PreparedNavMesh]) -> Vec<PreparedNavMeshMerge> {
+/// (already sorted by `form_id`) using issue #154's validated-portal
+/// pipeline (reworked after external review: an earlier revision required
+/// each boundary edge to be the *other's* single nearest match, which
+/// cannot represent a long boundary edge legitimately facing several
+/// shorter tessellated edges on the other mesh -- real FO3 NAVM data does
+/// this):
+///
+/// 1. **Candidate generation.** Every boundary-edge pair within
+///    [`MESH_MERGE_DISTANCE`] of each other (`boundary_edge_distance_sq`,
+///    robust to very different edge lengths) is geometrically validated
+///    (`validate_portal_candidate`: opposing directions, an overlapping
+///    projected interval) independently -- an edge can appear in any
+///    number of candidates, not just one.
+/// 2. **Reciprocal, non-overlapping resolution.** Candidates are visited in
+///    a deterministic priority order (longest overlap first, tie-broken by
+///    edge index) and greedily accepted only when neither side's own
+///    `[min, max]` distance-along-the-edge range overlaps a range already
+///    accepted on that *same* edge (`ranges_overlap`) -- this is what
+///    replaces mutual-nearest-only matching: it allows disjoint intervals
+///    on one long edge to each pair with a different shorter opposing edge
+///    (one-to-many), while still rejecting two candidates that would
+///    double-claim the same stretch of an edge (the real-data defect an
+///    external review found in the original one-directional
+///    nearest-midpoint matching, where every edge of a facing triangle
+///    independently claimed the same destination edge).
+///
+/// Deterministic (`meshes` is already form_id-sorted, boundary edges are
+/// visited in stable polygon/vertex order, candidates are sorted by a
+/// total order before the greedy resolution pass, and the result is
+/// explicitly sorted+deduped by full mesh/triangle/edge identity) and never
+/// panics (invalid vertex indices are skipped by `boundary_edges`, never
+/// indexed). Returns the accepted merges plus one diagnostic for each
+/// candidate rejected by a per-pair geometric check (direction/overlap) or
+/// by the overlap-resolution pass; a boundary-edge pair that never became a
+/// candidate at all (outside `MESH_MERGE_DISTANCE`, or geometrically
+/// non-overlapping) is not diagnosed -- most nearby boundary-edge pairs on
+/// a busy seam are not the matching edge, and logging every one of them
+/// would drown the signal a real rejection (a near-miss that *did* pass the
+/// distance gate) is meant to surface.
+fn compute_mesh_merges(
+    meshes: &[PreparedNavMesh],
+) -> (Vec<PreparedNavMeshMerge>, Vec<NavGraphDiagnostic>) {
     let threshold_sq = MESH_MERGE_DISTANCE * MESH_MERGE_DISTANCE;
     let mut merges = Vec::new();
+    let mut diagnostics = Vec::new();
     for a_index in 0..meshes.len() {
         for b_index in (a_index + 1)..meshes.len() {
             let mesh_a = &meshes[a_index];
             let mesh_b = &meshes[b_index];
             let edges_a = boundary_edges(mesh_a);
             let edges_b = boundary_edges(mesh_b);
-            for edge_a in &edges_a {
-                let mut best: Option<(f32, &BoundaryEdge)> = None;
-                for edge_b in &edges_b {
-                    let d = distance_sq(edge_a.midpoint, edge_b.midpoint);
-                    if best.is_none_or(|(best_d, _)| d < best_d) {
-                        best = Some((d, edge_b));
+
+            struct IndexedCandidate {
+                a_edge_index: usize,
+                b_edge_index: usize,
+                candidate: PortalCandidate,
+            }
+            let mut candidates: Vec<IndexedCandidate> = Vec::new();
+            for (a_edge_index, edge_a) in edges_a.iter().enumerate() {
+                for (b_edge_index, edge_b) in edges_b.iter().enumerate() {
+                    if boundary_edge_distance_sq(edge_a, edge_b) > threshold_sq {
+                        continue;
+                    }
+                    match validate_portal_candidate(edge_a, edge_b) {
+                        Ok(candidate) => candidates.push(IndexedCandidate {
+                            a_edge_index,
+                            b_edge_index,
+                            candidate,
+                        }),
+                        // A pure "these two nearby edges don't actually
+                        // overlap along their length" outcome is the
+                        // expected common case, not a defect -- only a
+                        // direction/degeneracy failure (a genuine near-miss
+                        // shape) is worth an operator's attention. See this
+                        // function's doc comment.
+                        Err(PortalRejection::NoIntervalOverlap) => {}
+                        Err(reason) => diagnostics.push(warning(format!(
+                            "mesh {:08x} triangle {} <-> mesh {:08x} triangle {}: rejected portal candidate ({})",
+                            mesh_a.form_id,
+                            edge_a.triangle_index,
+                            mesh_b.form_id,
+                            edge_b.triangle_index,
+                            reason.describe(),
+                        ))),
                     }
                 }
-                if let Some((d, edge_b)) = best
-                    && d <= threshold_sq
-                {
-                    merges.push(PreparedNavMeshMerge {
-                        mesh_a_form_id: mesh_a.form_id,
-                        triangle_a: edge_a.triangle_index,
-                        mesh_b_form_id: mesh_b.form_id,
-                        triangle_b: edge_b.triangle_index,
-                    });
+            }
+
+            // Longest overlap first: the most unambiguous portal match on
+            // any contested stretch of an edge should win it. Ties broken
+            // by edge index for full determinism.
+            candidates.sort_by(|left, right| {
+                let left_len = left.candidate.a_range.1 - left.candidate.a_range.0;
+                let right_len = right.candidate.a_range.1 - right.candidate.a_range.0;
+                right_len
+                    .partial_cmp(&left_len)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(left.a_edge_index.cmp(&right.a_edge_index))
+                    .then(left.b_edge_index.cmp(&right.b_edge_index))
+            });
+
+            let mut accepted_a_ranges: Vec<Vec<(f32, f32)>> = vec![Vec::new(); edges_a.len()];
+            let mut accepted_b_ranges: Vec<Vec<(f32, f32)>> = vec![Vec::new(); edges_b.len()];
+            for indexed in candidates {
+                let edge_a = &edges_a[indexed.a_edge_index];
+                let edge_b = &edges_b[indexed.b_edge_index];
+                let a_conflict = accepted_a_ranges[indexed.a_edge_index]
+                    .iter()
+                    .any(|range| ranges_overlap(*range, indexed.candidate.a_range));
+                let b_conflict = accepted_b_ranges[indexed.b_edge_index]
+                    .iter()
+                    .any(|range| ranges_overlap(*range, indexed.candidate.b_range));
+                if a_conflict || b_conflict {
+                    diagnostics.push(warning(format!(
+                        "mesh {:08x} triangle {} <-> mesh {:08x} triangle {}: rejected portal candidate (overlaps another accepted portal interval on the {})",
+                        mesh_a.form_id,
+                        edge_a.triangle_index,
+                        mesh_b.form_id,
+                        edge_b.triangle_index,
+                        if a_conflict { "mesh_a edge" } else { "mesh_b edge" },
+                    )));
+                    continue;
                 }
+                accepted_a_ranges[indexed.a_edge_index].push(indexed.candidate.a_range);
+                accepted_b_ranges[indexed.b_edge_index].push(indexed.candidate.b_range);
+                merges.push(PreparedNavMeshMerge {
+                    mesh_a_form_id: mesh_a.form_id,
+                    triangle_a: edge_a.triangle_index,
+                    edge_a: edge_a.vertex_indices,
+                    mesh_b_form_id: mesh_b.form_id,
+                    triangle_b: edge_b.triangle_index,
+                    edge_b: edge_b.vertex_indices,
+                    interval_a: indexed.candidate.interval_a,
+                    interval_b: indexed.candidate.interval_b,
+                });
             }
         }
     }
-    merges.sort_by_key(|merge| {
+    merges.sort_by(|left, right| {
         (
-            merge.mesh_a_form_id,
-            merge.triangle_a,
-            merge.mesh_b_form_id,
-            merge.triangle_b,
+            left.mesh_a_form_id,
+            left.triangle_a,
+            left.edge_a,
+            left.mesh_b_form_id,
+            left.triangle_b,
+            left.edge_b,
         )
+            .cmp(&(
+                right.mesh_a_form_id,
+                right.triangle_a,
+                right.edge_a,
+                right.mesh_b_form_id,
+                right.triangle_b,
+                right.edge_b,
+            ))
     });
+    // Defensive only at this point (each `(a_edge_index, b_edge_index)`
+    // pair is visited at most once above, so structurally-identical
+    // duplicates should not arise) -- kept so a future refactor bug fails
+    // safe (a dropped duplicate) rather than shipping a doubled link.
     merges.dedup();
-    merges
+    (merges, diagnostics)
 }
 
 fn build_mesh(
@@ -755,9 +1158,69 @@ mod tests {
         }
     }
 
+    /// Inverse of `to_bevy_position`: bevy metres -> raw source units.
+    fn bevy_to_source(p: [f32; 3]) -> [f32; 3] {
+        [p[0] / FO3_SCALE, -p[2] / FO3_SCALE, p[1] / FO3_SCALE]
+    }
+
+    /// A two-triangle rectangle (bevy metres, `corners` in `p0, p1, p2, p3`
+    /// winding order) with the internal diagonal `p0-p2` correctly marked
+    /// as a same-mesh neighbour, so only the outer four sides are boundary
+    /// edges -- unlike a single right triangle (this module's portal tests'
+    /// original shape), a quad's three *other* sides are each perpendicular
+    /// to the pair of opposite long sides, so none of them can accidentally
+    /// satisfy `validate_portal_candidate`'s opposing-direction check
+    /// against an edge that faces one of those long sides, regardless of
+    /// distance. `p0-p1` is boundary edge 0 of triangle 0; `p2-p3` is
+    /// boundary edge 1 of triangle 1 -- the two long sides portal tests
+    /// pick one of to face another mesh.
+    fn quad_mesh(form_id: u32, corners: [[f32; 3]; 4]) -> NavGraphMeshInput {
+        let mut m = mesh(form_id);
+        m.vertices = corners
+            .into_iter()
+            .map(|bevy| NavGraphVertexInput {
+                source: bevy_to_source(bevy),
+            })
+            .collect();
+        m.triangles = vec![
+            triangle([0, 1, 2], [-1, -1, 1]),
+            triangle([0, 2, 3], [0, -1, -1]),
+        ];
+        m
+    }
+
+    /// Combines several same-`form_id` mesh pieces (typically `quad_mesh`
+    /// outputs) into one `NavGraphMeshInput`, remapping each later piece's
+    /// vertex/triangle indices past the earlier pieces' -- lets a test
+    /// build one mesh out of several geometrically-separated quads (e.g.
+    /// two candidate edges competing to face the same edge on another
+    /// mesh) without their vertex/triangle indices colliding.
+    fn combine_mesh_pieces(form_id: u32, pieces: Vec<NavGraphMeshInput>) -> NavGraphMeshInput {
+        let mut combined = mesh(form_id);
+        for piece in pieces {
+            let vertex_offset = combined.vertices.len() as i32;
+            let triangle_offset = combined.triangles.len() as i32;
+            combined.vertices.extend(piece.vertices);
+            combined
+                .triangles
+                .extend(piece.triangles.into_iter().map(|t| {
+                    NavGraphTriangleInput {
+                        vertex_indices: t
+                            .vertex_indices
+                            .map(|i| if i < 0 { i } else { i + vertex_offset }),
+                        edge_neighbors: t
+                            .edge_neighbors
+                            .map(|i| if i < 0 { i } else { i + triangle_offset }),
+                        flags: t.flags,
+                    }
+                }));
+        }
+        combined
+    }
+
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v2");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v3");
     }
 
     #[test]
@@ -1056,36 +1519,34 @@ mod tests {
         );
     }
 
-    /// Two meshes with a one-triangle-each square, offset so their nearest
-    /// edge is `gap` metres apart along x -- the shape of a real FO3 NAVM
-    /// seam (see `MESH_MERGE_DISTANCE`'s doc comment).
+    /// Two quad meshes (`quad_mesh`, bevy metres), offset so their nearest
+    /// long side is `gap` metres apart along Z -- the shape of a real FO3
+    /// NAVM seam (see `MESH_MERGE_DISTANCE`'s doc comment), and (unlike a
+    /// single right triangle) unambiguous under the full pairwise-candidate
+    /// algorithm: every other boundary-edge pair between the two meshes is
+    /// excluded by direction, distance, or lack of overlap -- verified by
+    /// hand for exactly this geometry -- leaving exactly one accepted
+    /// portal, `mesh_a`'s `p0-p1` (triangle 0) against `mesh_b`'s `q0-q1`
+    /// (triangle 0).
     fn seam_meshes(gap: f32) -> Vec<NavGraphMeshInput> {
-        let mut mesh_a = mesh(0x10);
-        mesh_a.vertices = vec![
-            NavGraphVertexInput { source: [0.0; 3] },
-            NavGraphVertexInput {
-                source: [70.0, 0.0, 0.0],
-            },
-            NavGraphVertexInput {
-                source: [0.0, 0.0, 70.0],
-            },
-        ];
-        mesh_a.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
-
-        let offset = 70.0 + gap / FO3_SCALE;
-        let mut mesh_b = mesh(0x20);
-        mesh_b.vertices = vec![
-            NavGraphVertexInput {
-                source: [offset, 0.0, 0.0],
-            },
-            NavGraphVertexInput {
-                source: [offset + 70.0, 0.0, 0.0],
-            },
-            NavGraphVertexInput {
-                source: [offset, 0.0, 70.0],
-            },
-        ];
-        mesh_b.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let mesh_b = quad_mesh(
+            0x20,
+            [
+                [1.0, 0.0, gap],
+                [0.0, 0.0, gap],
+                [0.0, 0.0, gap + 3.0],
+                [1.0, 0.0, gap + 3.0],
+            ],
+        );
         vec![mesh_a, mesh_b]
     }
 
@@ -1105,6 +1566,290 @@ mod tests {
         assert_eq!(merge.mesh_a_form_id, 0x10);
         assert_eq!(merge.mesh_b_form_id, 0x20);
         assert_eq!(graph.counters.mesh_merges, 1);
+        // Issue #154 feature 1: edge identity and a real (non-degenerate,
+        // non-zero-length) matched world-space interval on both sides.
+        assert_ne!(merge.edge_a[0], merge.edge_a[1]);
+        assert_ne!(merge.edge_b[0], merge.edge_b[1]);
+        assert!(distance_sq(merge.interval_a[0], merge.interval_a[1]) > 1.0e-6);
+        assert!(distance_sq(merge.interval_b[0], merge.interval_b[1]) > 1.0e-6);
+        // No vertical drop for this flat synthetic seam.
+        assert!((merge.interval_a[0][1] - merge.interval_b[0][1]).abs() < 1.0e-4);
+        assert!((merge.interval_a[1][1] - merge.interval_b[1][1]).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_conflicting_candidate_is_rejected_leaving_one_accepted_interval() {
+        // Real FO3 data shape (the review finding this issue originally
+        // fixed): mesh_b offers *two* separate edges (`winner`, `loser`)
+        // both facing mesh_a's single long edge; `loser`'s candidate
+        // interval on mesh_a's edge is a strict *subset* of `winner`'s
+        // (shorter overlap, so it sorts after `winner`), so the resolution
+        // pass (`compute_mesh_merges`'s doc comment) rejects it as
+        // conflicting rather than silently producing a second (or,
+        // pre-#154, an accidentally-deduplicated-away) merge. This is
+        // deliberately *not* framed as "not the nearest edge" (a review
+        // correction replaced single-nearest-only matching with
+        // reciprocal, non-overlapping *interval* matching so one long edge
+        // can legitimately face several short ones -- see
+        // `a_long_edge_legitimately_matches_two_short_collinear_edges`
+        // below for that one-to-many case).
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.5;
+        let winner = quad_mesh(
+            0x20,
+            [
+                [2.0, 0.0, gap],
+                [0.0, 0.0, gap],
+                [0.0, 0.0, gap + 3.0],
+                [2.0, 0.0, gap + 3.0],
+            ],
+        );
+        let loser = quad_mesh(
+            0x20,
+            [
+                [1.5, 0.0, gap],
+                [0.5, 0.0, gap],
+                [0.5, 0.0, gap + 3.0],
+                [1.5, 0.0, gap + 3.0],
+            ],
+        );
+        let mesh_b = combine_mesh_pieces(0x20, vec![winner, loser]);
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        // The winner's full-length interval, not the loser's shorter one.
+        assert!(
+            distance_sq(
+                graph.mesh_merges[0].interval_a[0],
+                graph.mesh_merges[0].interval_a[1]
+            ) > 3.0,
+            "{:?}",
+            graph.mesh_merges
+        );
+        assert!(
+            graph.diagnostics.iter().any(|d| d
+                .message
+                .contains("overlaps another accepted portal interval")),
+            "{:?}",
+            graph.diagnostics
+        );
+        assert!(graph.counters.mesh_merges_rejected >= 1);
+    }
+
+    #[test]
+    fn a_long_edge_legitimately_matches_two_short_collinear_edges() {
+        // Review correction (issue #154): one long boundary edge may face
+        // several shorter tessellated edges on the other mesh -- a real
+        // FO3 shape single-nearest-only matching could not represent. Two
+        // short mesh_b edges, collinear and each covering half of one long
+        // mesh_a edge, must both become accepted (non-overlapping)
+        // portals, not just the "nearest" one.
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.3;
+        // The far half of mesh_a's edge (x in [1, 2]).
+        let far_half = quad_mesh(
+            0x20,
+            [
+                [2.0, 0.0, gap],
+                [1.0, 0.0, gap],
+                [1.0, 0.0, gap + 3.0],
+                [2.0, 0.0, gap + 3.0],
+            ],
+        );
+        // The near half (x in [0, 1]).
+        let near_half = quad_mesh(
+            0x20,
+            [
+                [1.0, 0.0, gap],
+                [0.0, 0.0, gap],
+                [0.0, 0.0, gap + 3.0],
+                [1.0, 0.0, gap + 3.0],
+            ],
+        );
+        let mesh_b = combine_mesh_pieces(0x20, vec![far_half, near_half]);
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 2, "{:?}", graph.mesh_merges);
+        assert!(
+            graph
+                .mesh_merges
+                .iter()
+                .all(|merge| merge.mesh_a_form_id == 0x10 && merge.triangle_a == 0),
+            "both portals share the same long mesh_a edge: {:?}",
+            graph.mesh_merges
+        );
+        let mut triangle_bs: Vec<u32> = graph
+            .mesh_merges
+            .iter()
+            .map(|merge| merge.triangle_b)
+            .collect();
+        triangle_bs.sort_unstable();
+        triangle_bs.dedup();
+        assert_eq!(
+            triangle_bs.len(),
+            2,
+            "the two portals must come from two distinct mesh_b triangles: {:?}",
+            graph.mesh_merges
+        );
+    }
+
+    #[test]
+    fn adversarial_close_parallel_walls_do_not_portal() {
+        // Adversarial fixture: two close, *parallel* (not opposing) walls
+        // -- the shape of two independently-authored corridor edges that
+        // merely happen to run near and alongside each other, never a real
+        // doorway/seam. `seam_meshes`' own geometry, but mesh_b's facing
+        // edge is authored to run the *same* +X direction as mesh_a's
+        // instead of opposing it (its two long sides are swapped so the
+        // near one -- not the far one -- runs +X).
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.5;
+        let mesh_b = quad_mesh(
+            0x20,
+            [
+                [0.0, 0.0, gap],
+                [1.0, 0.0, gap],
+                [1.0, 0.0, gap + 3.0],
+                [0.0, 0.0, gap + 3.0],
+            ],
+        );
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert!(graph.mesh_merges.is_empty(), "{:?}", graph.mesh_merges);
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("not opposing enough")),
+            "{:?}",
+            graph.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_vertically_offset_pair_is_still_accepted_prepare_side_with_the_drop_recorded() {
+        // Review correction (issue #154): prepare-time validation must not
+        // bake an agent-class assumption (step height) into the universal
+        // prepared graph. `seam_meshes`' own geometry, but mesh_b's quad is
+        // additionally raised 1 m in bevy Y -- adversarial fixture
+        // "vertically stacked floors whose edges overlap in XZ". The pair
+        // is still perfectly opposing and perfectly overlapping in XZ, so
+        // it is geometrically a valid *portal candidate* prepare-side; the
+        // interval it records simply carries that 1 m drop for
+        // `viewer::nav::landmass_graph`'s runtime, agent-aware check to act
+        // on (see that module's `MERGE_PORTAL_STEP_HEIGHT`).
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.5;
+        let mesh_b = quad_mesh(
+            0x20,
+            [
+                [1.0, 1.0, gap],
+                [0.0, 1.0, gap],
+                [0.0, 1.0, gap + 3.0],
+                [1.0, 1.0, gap + 3.0],
+            ],
+        );
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        let merge = graph.mesh_merges[0];
+        let drop = (merge.interval_a[0][1] - merge.interval_b[0][1]).abs();
+        assert!(
+            (drop - 1.0).abs() < 1.0e-4,
+            "expected a 1 m drop, got {drop}"
+        );
+    }
+
+    #[test]
+    fn adversarial_reversed_winding_that_would_otherwise_match_is_rejected() {
+        // Adversarial fixture: `seam_meshes`' own geometry, but mesh_b's
+        // quad is built with its corners in the reverse order a mis-wound
+        // source triangle would produce (`p1, p0, p3, p2` instead of `p0,
+        // p1, p2, p3`) -- the same four physical corners and the same
+        // internal-diagonal adjacency shape, just with every edge's
+        // start/end (and therefore direction) flipped. What would
+        // correctly oppose mesh_a's edge instead runs the same direction
+        // and must be rejected exactly like any other non-opposing pair,
+        // not silently "corrected" by inferring a canonical winding.
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.5;
+        let mesh_b = quad_mesh(
+            0x20,
+            [
+                [0.0, 0.0, gap],
+                [1.0, 0.0, gap],
+                [1.0, 0.0, gap + 3.0],
+                [0.0, 0.0, gap + 3.0],
+            ],
+        );
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert!(graph.mesh_merges.is_empty(), "{:?}", graph.mesh_merges);
     }
 
     #[test]
