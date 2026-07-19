@@ -32,6 +32,21 @@
 //! (KCC sweep achieves near-zero motion regardless of direction) still
 //! flatlines this signal exactly as it flatlined the old one, so the
 //! existing wedge/blocked recovery behaviour is unchanged.
+//!
+//! Known limitation (external architecture review, issue #157 follow-up):
+//! because `route_progress_delta` only ever compares this tick's achieved
+//! motion against *this same tick's* desired direction, an agent whose
+//! desired direction keeps flipping under oscillating avoidance steering --
+//! and which fully achieves each flip -- reads as perpetual corridor
+//! progress here, even though its net position barely moves (it is
+//! effectively orbiting in place). The old distance-to-final-target signal
+//! would eventually have caught that case; this one does not. This is an
+//! accepted trade-off, not an oversight: the field failure mode this signal
+//! exists to catch is a genuine collision wedge (the KCC sweep achieves
+//! near-zero motion regardless of the desired direction), and that case
+//! still flatlines the signal exactly as before. Pinned by
+//! `tests/features.rs`'s `nav_stuck_progress.feature` step section (the
+//! oscillating-route scenario) rather than left implicit.
 
 /// Ticks (fixed-cadence movement observations) without net progress toward
 /// the current waypoint before a stuck agent first attempts recovery.

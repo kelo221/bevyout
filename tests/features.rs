@@ -715,13 +715,21 @@ struct BevyoutWorld {
     nav_stuck_progress_desired: [f32; 2],
     nav_stuck_progress_achieved: [f32; 2],
     nav_stuck_progress_delta: Option<f32>,
-    /// "u_shaped" or "blocked" -- picks the per-tick desired/achieved
-    /// generator `when_route_is_simulated` runs.
+    /// "u_shaped", "blocked", or "oscillating" -- picks the per-tick
+    /// desired/achieved generator `when_route_is_simulated` runs.
     nav_stuck_progress_route_kind: Option<String>,
     nav_stuck_progress_route_ticks: u32,
     nav_stuck_progress_route_speed: f32,
     nav_stuck_progress_start_recovery_tick: Option<u32>,
     nav_stuck_progress_stuck_tick: Option<u32>,
+    // -- nav_stuck_progress.feature (issue #157 follow-up: avoidance-pause
+    // and repath-mid-route scenarios) --
+    nav_stuck_progress_pause_progress_ticks: u32,
+    nav_stuck_progress_pause_speed: f32,
+    nav_stuck_progress_pause_ticks: u32,
+    nav_stuck_progress_repath_blocked_ticks: u32,
+    nav_stuck_progress_repath_leg_ticks: u32,
+    nav_stuck_progress_repath_leg_speed: f32,
 }
 
 fn find_placement<'a>(
@@ -8314,6 +8322,14 @@ async fn given_fully_blocked_route(world: &mut BevyoutWorld, ticks: u32, speed: 
     world.nav_stuck_progress_route_speed = speed;
 }
 
+#[given(
+    regex = r"^an oscillating route of (\d+) ticks where the agent always achieves its desired horizontal velocity$"
+)]
+async fn given_oscillating_route(world: &mut BevyoutWorld, ticks: u32) {
+    world.nav_stuck_progress_route_kind = Some("oscillating".to_string());
+    world.nav_stuck_progress_route_ticks = ticks;
+}
+
 /// This tick's `(desired, achieved)` horizontal-velocity pair for the named
 /// route kind, mirroring exactly what `apply_agent_physics_movement` would
 /// sample from a real KCC sweep at tick `tick` (1-indexed) of `total_ticks`.
@@ -8346,16 +8362,104 @@ fn nav_stuck_progress_route_tick(
             // never achieves any of it -- a genuine wedge, not a detour.
             ([blocked_speed, 0.0], [0.0, 0.0])
         }
+        "oscillating" => {
+            // Known limitation (see `movement_policy.rs`'s module doc
+            // comment): desired direction flips every tick and the agent
+            // fully achieves each flip, so every tick's achieved motion is
+            // trivially parallel to that same tick's desired direction --
+            // perpetual "progress" despite the agent effectively orbiting
+            // in place. Documented as an accepted trade-off, not desired
+            // behaviour.
+            let sign = if tick % 2 == 1 { 1.0 } else { -1.0 };
+            let desired = [sign * 2.0, 0.0];
+            (desired, desired)
+        }
         other => panic!("unknown nav stuck-progress route kind {other:?}"),
     }
 }
 
-/// Fixed-tick simulation mirroring `apply_agent_physics_movement`'s own
-/// stuck-tracking bookkeeping (see that function's `route_progress`/
-/// `best_distance`/`ticks_without_progress`/`recovery_active` handling in
-/// `src/viewer/nav/agent.rs`) against the pure `movement_policy` functions
-/// directly -- no Bevy/boxddd involved. Returns the first tick (1-indexed)
-/// each of `StartRecovery`/`Stuck` was reached, if ever.
+/// The same per-tick stuck-tracking bookkeeping
+/// `apply_agent_physics_movement` performs (see that function's
+/// `route_progress`/`best_distance`/`ticks_without_progress`/
+/// `recovery_active` handling in `src/viewer/nav/agent.rs`), replayed here
+/// against the pure `movement_policy` functions directly -- no Bevy/boxddd
+/// involved. Shared by every `nav_stuck_progress.feature` route-simulation
+/// step so the bookkeeping is written once.
+struct NavStuckProgressSim {
+    best_distance: f32,
+    ticks_without_progress: u32,
+    recovery_active: bool,
+    route_progress: f32,
+    tick: u32,
+    start_recovery_tick: Option<u32>,
+    stuck_tick: Option<u32>,
+}
+
+impl NavStuckProgressSim {
+    fn new() -> Self {
+        Self {
+            best_distance: f32::MAX,
+            ticks_without_progress: 0,
+            recovery_active: false,
+            route_progress: 0.0,
+            tick: 0,
+            start_recovery_tick: None,
+            stuck_tick: None,
+        }
+    }
+
+    /// Mirrors a real repath / new-target event: `nav/agent.rs`'s
+    /// target-change handler resets exactly these three fields (issue
+    /// #157 left that handler untouched). `route_progress` itself is never
+    /// reset -- `best_distance`'s own reset-to-`f32::MAX` re-baselines
+    /// every future comparison to "progress since now" regardless of
+    /// `route_progress`'s absolute running total, so a fresh target does
+    /// not need a fresh zero there (see `AgentKcc::route_progress`'s doc
+    /// comment).
+    fn repath(&mut self) {
+        self.best_distance = f32::MAX;
+        self.ticks_without_progress = 0;
+        self.recovery_active = false;
+    }
+
+    fn step(&mut self, desired: [f32; 2], achieved: [f32; 2]) {
+        const DT: f32 = 1.0 / 64.0;
+        self.tick += 1;
+        self.route_progress += movement_policy::route_progress_delta(desired, achieved) * DT;
+        let distance = -self.route_progress;
+        if self.best_distance == f32::MAX {
+            self.best_distance = distance;
+        }
+        let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
+            distance_to_target: distance,
+            best_distance_so_far: self.best_distance,
+            ticks_without_progress: self.ticks_without_progress,
+            recovery_active: self.recovery_active,
+        });
+        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < self.best_distance;
+        if progressed {
+            self.best_distance = distance;
+            self.ticks_without_progress = 0;
+            self.recovery_active = false;
+        } else {
+            self.ticks_without_progress = self.ticks_without_progress.saturating_add(1);
+        }
+        match decision {
+            movement_policy::StuckDecision::StartRecovery => {
+                self.recovery_active = true;
+                self.start_recovery_tick.get_or_insert(self.tick);
+            }
+            movement_policy::StuckDecision::Stuck => {
+                self.stuck_tick.get_or_insert(self.tick);
+            }
+            movement_policy::StuckDecision::Progressing
+            | movement_policy::StuckDecision::RecoveryPending => {}
+        }
+    }
+}
+
+/// Returns the first tick (1-indexed) each of `StartRecovery`/`Stuck` was
+/// reached along the named route kind, if ever.
 #[when("the route is simulated tick by tick")]
 async fn when_route_is_simulated(world: &mut BevyoutWorld) {
     let kind = world
@@ -8364,52 +8468,98 @@ async fn when_route_is_simulated(world: &mut BevyoutWorld) {
         .expect("a route must be given first");
     let total_ticks = world.nav_stuck_progress_route_ticks;
     let blocked_speed = world.nav_stuck_progress_route_speed;
-    const DT: f32 = 1.0 / 64.0;
 
-    let mut best_distance = f32::MAX;
-    let mut ticks_without_progress: u32 = 0;
-    let mut recovery_active = false;
-    let mut route_progress: f32 = 0.0;
-    let mut start_recovery_tick = None;
-    let mut stuck_tick = None;
-
+    let mut sim = NavStuckProgressSim::new();
     for tick in 1..=total_ticks {
         let (desired, achieved) =
             nav_stuck_progress_route_tick(&kind, tick, total_ticks, blocked_speed);
-        route_progress += movement_policy::route_progress_delta(desired, achieved) * DT;
-        let distance = -route_progress;
-        if best_distance == f32::MAX {
-            best_distance = distance;
-        }
-        let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
-            distance_to_target: distance,
-            best_distance_so_far: best_distance,
-            ticks_without_progress,
-            recovery_active,
-        });
-        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < best_distance;
-        if progressed {
-            best_distance = distance;
-            ticks_without_progress = 0;
-            recovery_active = false;
-        } else {
-            ticks_without_progress = ticks_without_progress.saturating_add(1);
-        }
-        match decision {
-            movement_policy::StuckDecision::StartRecovery => {
-                recovery_active = true;
-                start_recovery_tick.get_or_insert(tick);
-            }
-            movement_policy::StuckDecision::Stuck => {
-                stuck_tick.get_or_insert(tick);
-            }
-            movement_policy::StuckDecision::Progressing
-            | movement_policy::StuckDecision::RecoveryPending => {}
-        }
+        sim.step(desired, achieved);
     }
 
-    world.nav_stuck_progress_start_recovery_tick = start_recovery_tick;
-    world.nav_stuck_progress_stuck_tick = stuck_tick;
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
+}
+
+#[given(
+    regex = r"^an avoidance-paused route with (\d+) ticks of progress at speed ([\d.]+) followed by (\d+) ticks of zero desired velocity$"
+)]
+async fn given_avoidance_paused_route(
+    world: &mut BevyoutWorld,
+    progress_ticks: u32,
+    speed: f32,
+    pause_ticks: u32,
+) {
+    world.nav_stuck_progress_pause_progress_ticks = progress_ticks;
+    world.nav_stuck_progress_pause_speed = speed;
+    world.nav_stuck_progress_pause_ticks = pause_ticks;
+}
+
+/// Follow-up to the "route is simulated tick by tick" step above (issue
+/// #157 follow-up): a two-phase route -- genuine forward progress, then a
+/// stretch of zero desired horizontal velocity (landmass legitimately
+/// pausing the agent, e.g. queuing at a doorway) -- pinning today's actual
+/// behaviour for that pause rather than leaving it implicit.
+#[when("the paused route is simulated tick by tick")]
+async fn when_paused_route_is_simulated(world: &mut BevyoutWorld) {
+    let progress_ticks = world.nav_stuck_progress_pause_progress_ticks;
+    let speed = world.nav_stuck_progress_pause_speed;
+    let pause_ticks = world.nav_stuck_progress_pause_ticks;
+
+    let mut sim = NavStuckProgressSim::new();
+    for _ in 0..progress_ticks {
+        sim.step([speed, 0.0], [speed, 0.0]);
+    }
+    // Zero desired horizontal velocity: `route_progress_delta`'s
+    // near-zero-desired-length guard contributes exactly 0.0 every tick
+    // here, so corridor progress flatlines for the whole pause exactly
+    // like a genuine collision block would (see the "blocked" route kind
+    // above) -- today's pinned behaviour, not a claim that this is the
+    // *right* behaviour for a legitimate avoidance stall.
+    for _ in 0..pause_ticks {
+        sim.step([0.0, 0.0], [0.0, 0.0]);
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
+}
+
+#[given(
+    regex = r"^a blocked route of (\d+) ticks that repaths onto a new detour leg of (\d+) ticks at speed ([\d.]+)$"
+)]
+async fn given_repathed_route(
+    world: &mut BevyoutWorld,
+    blocked_ticks: u32,
+    leg_ticks: u32,
+    leg_speed: f32,
+) {
+    world.nav_stuck_progress_repath_blocked_ticks = blocked_ticks;
+    world.nav_stuck_progress_repath_leg_ticks = leg_ticks;
+    world.nav_stuck_progress_repath_leg_speed = leg_speed;
+}
+
+/// Issue #157 follow-up: a genuine block runs right up to (but not past)
+/// the recovery threshold, then a repath (`NavStuckProgressSim::repath`,
+/// mirroring `nav/agent.rs`'s target-change handler) lands, followed by a
+/// new, slower detour leg the agent fully achieves. Pins that the repath's
+/// reset means the new leg's own progress is judged on its own terms
+/// rather than inheriting the old near-miss window.
+#[when("the repathed route is simulated tick by tick")]
+async fn when_repathed_route_is_simulated(world: &mut BevyoutWorld) {
+    let blocked_ticks = world.nav_stuck_progress_repath_blocked_ticks;
+    let leg_ticks = world.nav_stuck_progress_repath_leg_ticks;
+    let leg_speed = world.nav_stuck_progress_repath_leg_speed;
+
+    let mut sim = NavStuckProgressSim::new();
+    for _ in 0..blocked_ticks {
+        sim.step([2.0, 0.0], [0.0, 0.0]);
+    }
+    sim.repath();
+    for _ in 0..leg_ticks {
+        sim.step([leg_speed, 0.0], [leg_speed, 0.0]);
+    }
+
+    world.nav_stuck_progress_start_recovery_tick = sim.start_recovery_tick;
+    world.nav_stuck_progress_stuck_tick = sim.stuck_tick;
 }
 
 #[then("no stuck decision along the route ever reaches start-recovery")]
