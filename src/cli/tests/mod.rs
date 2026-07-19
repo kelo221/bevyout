@@ -136,6 +136,27 @@ fn native_converter_is_default_and_blender_remains_explicit() {
         panic!("expected prepare command");
     };
     assert_eq!(args.converter, PrepareConverter::Native);
+    assert_eq!(
+        args.actor_animation_converter,
+        ActorAnimationConverter::Disabled
+    );
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "SuperDuperMart",
+        "--actor-animation-converter",
+        "blender",
+    ])
+    .unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Native);
+    assert_eq!(
+        args.actor_animation_converter,
+        ActorAnimationConverter::Blender
+    );
 
     let cli = Cli::try_parse_from([
         "bevyout",

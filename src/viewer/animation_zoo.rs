@@ -11,6 +11,8 @@ use bevy::gltf::{Gltf, GltfAssetLabel, GltfNode};
 use bevy::prelude::*;
 use bevyout_core::actor_animation::{
     PreparedActorAnimationCatalog, PreparedActorAnimationClip, PreparedActorAnimationClipStatus,
+    PreparedActorAnimationLoopMode, PreparedActorAnimationRootMotionPolicy,
+    PreparedActorAnimationTextKey,
 };
 use ron::de::from_str;
 use serde::Serialize;
@@ -71,7 +73,7 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
             .next()
             .unwrap_or("no compatible clip pack was prepared");
         format!(
-            "actor animation set has no clip pack: {reason}; rerun prepare with --converter blender"
+            "actor animation set has no clip pack: {reason}; rerun prepare with --actor-animation-converter blender"
         )
     })?;
     require_file(&asset_root.join(&appearance_path), "actor appearance GLB")?;
@@ -277,6 +279,14 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) actor_form_id: String,
     pub(crate) current_clip: Option<String>,
     pub(crate) source_kf_path: Option<String>,
+    pub(crate) source_sequence_name: Option<String>,
+    pub(crate) source_start_seconds: Option<f32>,
+    pub(crate) source_end_seconds: Option<f32>,
+    pub(crate) source_frequency: Option<f32>,
+    pub(crate) source_phase: Option<f32>,
+    pub(crate) source_loop_mode: Option<PreparedActorAnimationLoopMode>,
+    pub(crate) root_motion_policy: Option<PreparedActorAnimationRootMotionPolicy>,
+    pub(crate) accumulation_root: Option<String>,
     pub(crate) index: usize,
     pub(crate) count: usize,
     pub(crate) playback_state: String,
@@ -286,6 +296,11 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) loop_current: bool,
     pub(crate) completed_cycles: u64,
     pub(crate) missing_targets: Vec<String>,
+    pub(crate) required_targets: Vec<String>,
+    pub(crate) animated_targets: Vec<String>,
+    pub(crate) controller_types: Vec<String>,
+    pub(crate) interpolator_types: Vec<String>,
+    pub(crate) text_keys: Vec<PreparedActorAnimationTextKey>,
     pub(crate) skipped_clips: usize,
     pub(crate) error: Option<String>,
 }
@@ -698,6 +713,14 @@ fn update_probe(
         actor_form_id: format!("{:08x}", definition.actor_form_id),
         current_clip: clip.map(|clip| clip.catalog.name.clone()),
         source_kf_path: clip.map(|clip| clip.catalog.source_kf_path.clone()),
+        source_sequence_name: clip.and_then(|clip| clip.catalog.source_sequence_name.clone()),
+        source_start_seconds: clip.and_then(|clip| clip.catalog.source_start_seconds),
+        source_end_seconds: clip.and_then(|clip| clip.catalog.source_end_seconds),
+        source_frequency: clip.and_then(|clip| clip.catalog.source_frequency),
+        source_phase: clip.and_then(|clip| clip.catalog.source_phase),
+        source_loop_mode: clip.map(|clip| clip.catalog.loop_mode),
+        root_motion_policy: clip.map(|clip| clip.catalog.root_motion_policy),
+        accumulation_root: clip.and_then(|clip| clip.catalog.accumulation_root.clone()),
         index: policy.map_or(0, |policy| policy.index),
         count: policy.map_or(0, |policy| policy.clip_count),
         playback_state: match runtime.phase {
@@ -714,6 +737,21 @@ fn update_probe(
         completed_cycles: policy.map_or(0, |policy| policy.completed_cycles),
         missing_targets: clip
             .map(|clip| clip.catalog.missing_targets.clone())
+            .unwrap_or_default(),
+        required_targets: clip
+            .map(|clip| clip.catalog.required_targets.clone())
+            .unwrap_or_default(),
+        animated_targets: clip
+            .map(|clip| clip.catalog.animated_targets.clone())
+            .unwrap_or_default(),
+        controller_types: clip
+            .map(|clip| clip.catalog.controller_types.clone())
+            .unwrap_or_default(),
+        interpolator_types: clip
+            .map(|clip| clip.catalog.interpolator_types.clone())
+            .unwrap_or_default(),
+        text_keys: clip
+            .map(|clip| clip.catalog.text_keys.clone())
             .unwrap_or_default(),
         skipped_clips: definition.skipped_clips,
         error: runtime.error.clone(),
@@ -741,22 +779,30 @@ fn update_hud(
         })
         .unwrap_or_default();
     text.0 = format!(
-        "Animation Zoo | {} | actor {} | {}\nClip {}/{} | {}\nSource: {}\nDuration {:.3}s | elapsed {:.3}s | speed {:.2}x | loop {} | cycles {}\nChannels {} | targets {} | missing targets {} | skipped clips {}\nSpace pause/resume | Left/Right previous/next | R restart | L loop | Up/Down speed | Esc exit{}{}",
+        "Animation Zoo | {} | actor {} | {}\nClip {}/{} | {} ({})\nSource: {} | range {:?}..{:?} | source loop {:?}\nDuration {:.3}s | elapsed {:.3}s | speed {:.2}x | playback loop {} | cycles {}\nRoot motion {:?} ({}) | channels {} | targets {}/{} | missing targets {} | text keys {} | skipped clips {}\nSpace pause/resume | Left/Right previous/next | R restart | L loop | Up/Down speed | Esc exit{}{}",
         definition.actor_name,
         probe.actor_form_id,
         probe.playback_state,
         if probe.count == 0 { 0 } else { probe.index + 1 },
         probe.count,
         probe.current_clip.as_deref().unwrap_or("<loading>"),
+        probe.source_sequence_name.as_deref().unwrap_or("<unnamed>"),
         probe.source_kf_path.as_deref().unwrap_or("<none>"),
+        probe.source_start_seconds,
+        probe.source_end_seconds,
+        probe.source_loop_mode,
         probe.duration,
         probe.elapsed,
         probe.speed,
         probe.loop_current,
         probe.completed_cycles,
+        probe.root_motion_policy,
+        probe.accumulation_root.as_deref().unwrap_or("<none>"),
         clip.map_or(0, |clip| clip.catalog.animated_channel_count),
         clip.map_or(0, |clip| clip.catalog.animated_target_count),
+        probe.required_targets.len(),
         probe.missing_targets.len(),
+        probe.text_keys.len(),
         probe.skipped_clips,
         if diagnostics.is_empty() {
             String::new()

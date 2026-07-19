@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 mod actor_animation;
+mod actor_animation_cache;
 mod actor_appearance;
 mod actor_catalog;
 mod audio;
@@ -32,6 +33,7 @@ mod static_shadows;
 mod visual;
 
 pub(crate) use actor_animation::*;
+pub(crate) use actor_animation_cache::*;
 pub(crate) use actor_appearance::*;
 pub(crate) use actor_catalog::*;
 pub(crate) use audio::*;

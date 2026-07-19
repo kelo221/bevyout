@@ -23,6 +23,34 @@ pub enum PreparedActorAnimationClipStatus {
     Incompatible,
     Malformed,
     ConversionFailed,
+    NotConverted,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparedActorAnimationLoopMode {
+    Loop,
+    Clamp,
+    Reverse,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparedActorAnimationRootMotionPolicy {
+    #[default]
+    Unknown,
+    /// Keep every source controller channel, including the accumulation root,
+    /// in the exported clip. Runtime extraction is a later policy decision.
+    PreserveAuthored,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PreparedActorAnimationTextKey {
+    pub time_seconds: f32,
+    pub value: String,
 }
 
 impl PreparedActorAnimationClipStatus {
@@ -34,6 +62,7 @@ impl PreparedActorAnimationClipStatus {
             Self::Incompatible => Some("incompatible_kf"),
             Self::Malformed => Some("malformed_kf"),
             Self::ConversionFailed => Some("conversion_failed"),
+            Self::NotConverted => Some("conversion_not_requested"),
         }
     }
 }
@@ -60,11 +89,37 @@ pub struct PreparedActorAnimationClip {
     #[serde(default)]
     pub duration_seconds: Option<f32>,
     #[serde(default)]
+    pub source_sequence_name: Option<String>,
+    #[serde(default)]
+    pub source_start_seconds: Option<f32>,
+    #[serde(default)]
+    pub source_end_seconds: Option<f32>,
+    #[serde(default)]
+    pub source_frequency: Option<f32>,
+    #[serde(default)]
+    pub source_phase: Option<f32>,
+    #[serde(default)]
+    pub loop_mode: PreparedActorAnimationLoopMode,
+    #[serde(default)]
+    pub root_motion_policy: PreparedActorAnimationRootMotionPolicy,
+    #[serde(default)]
+    pub accumulation_root: Option<String>,
+    #[serde(default)]
     pub animated_channel_count: usize,
     #[serde(default)]
     pub animated_target_count: usize,
     #[serde(default)]
+    pub required_targets: Vec<String>,
+    #[serde(default)]
+    pub animated_targets: Vec<String>,
+    #[serde(default)]
     pub missing_targets: Vec<String>,
+    #[serde(default)]
+    pub controller_types: Vec<String>,
+    #[serde(default)]
+    pub interpolator_types: Vec<String>,
+    #[serde(default)]
+    pub text_keys: Vec<PreparedActorAnimationTextKey>,
     #[serde(default)]
     pub diagnostics: Vec<PreparedActorAnimationDiagnostic>,
 }
@@ -567,5 +622,34 @@ mod tests {
                 .iter()
                 .any(|clip| clip.status == PreparedActorAnimationClipStatus::Missing)
         }));
+    }
+
+    #[test]
+    fn normalized_clip_runtime_metadata_round_trips() {
+        let clip = PreparedActorAnimationClip {
+            name: "equip".into(),
+            source_kf_path: "meshes/characters/_male/1hpequip.kf".into(),
+            source_sequence_name: Some("Equip".into()),
+            source_start_seconds: Some(0.25),
+            source_end_seconds: Some(0.75),
+            source_frequency: Some(1.0),
+            source_phase: Some(0.0),
+            loop_mode: PreparedActorAnimationLoopMode::Clamp,
+            root_motion_policy: PreparedActorAnimationRootMotionPolicy::PreserveAuthored,
+            accumulation_root: Some("Bip01".into()),
+            required_targets: vec!["Bip01 R Hand".into(), "Weapon".into()],
+            animated_targets: vec!["Bip01 R Hand".into()],
+            controller_types: vec!["NiTransformController".into()],
+            interpolator_types: vec!["NiTransformInterpolator".into()],
+            text_keys: vec![PreparedActorAnimationTextKey {
+                time_seconds: 0.5,
+                value: "Attach".into(),
+            }],
+            ..Default::default()
+        };
+
+        let serialized = ron::to_string(&clip).unwrap();
+        let decoded: PreparedActorAnimationClip = ron::from_str(&serialized).unwrap();
+        assert_eq!(decoded, clip);
     }
 }

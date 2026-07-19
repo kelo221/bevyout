@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(state.index, 0);
         assert_eq!(state.completed_cycles, 1);
         assert!(state.apply(ZooControlAction::Restart));
-        assert!(state.apply(ZooControlAction::TogglePause) == false);
+        assert!(!state.apply(ZooControlAction::TogglePause));
         assert!(state.paused);
         state.apply(ZooControlAction::ToggleLoop);
         assert!(state.loop_current);

@@ -96,6 +96,13 @@ pub(crate) enum PrepareConverter {
     Native,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ActorAnimationConverter {
+    #[default]
+    Disabled,
+    Blender,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RagdollLabBackend {
     Avian,
@@ -127,6 +134,25 @@ impl std::fmt::Display for PrepareConverter {
             Self::Native => crate::converter_policy::ConverterBackend::Native,
         };
         formatter.write_str(backend.as_str())
+    }
+}
+
+impl std::fmt::Display for ActorAnimationConverter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backend = match self {
+            Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
+        };
+        formatter.write_str(backend.as_str())
+    }
+}
+
+impl ActorAnimationConverter {
+    pub(crate) const fn backend(self) -> crate::converter_policy::ActorAnimationBackend {
+        match self {
+            Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
+        }
     }
 }
 
@@ -204,6 +230,10 @@ pub struct PrepareArgs {
     /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
     #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
     pub(crate) converter: PrepareConverter,
+    /// External-KF clip-pack backend. Disabled by default so native prepare
+    /// never requires Blender; select `blender` for the compatibility spike.
+    #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
+    pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,

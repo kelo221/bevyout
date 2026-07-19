@@ -1,6 +1,10 @@
 //! External-KF animation-only GLB conversion.
 
 use super::*;
+use bevyout_core::actor_animation::{
+    PreparedActorAnimationLoopMode, PreparedActorAnimationRootMotionPolicy,
+    PreparedActorAnimationTextKey,
+};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -26,12 +30,36 @@ pub(crate) struct ActorAnimationClipReport {
     pub(crate) source_path: String,
     pub(crate) success: bool,
     pub(crate) duration_seconds: Option<f32>,
+    #[serde(default)]
+    pub(crate) source_sequence_name: Option<String>,
+    #[serde(default)]
+    pub(crate) source_start_seconds: Option<f32>,
+    #[serde(default)]
+    pub(crate) source_end_seconds: Option<f32>,
+    #[serde(default)]
+    pub(crate) source_frequency: Option<f32>,
+    #[serde(default)]
+    pub(crate) source_phase: Option<f32>,
+    #[serde(default)]
+    pub(crate) loop_mode: PreparedActorAnimationLoopMode,
+    #[serde(default)]
+    pub(crate) root_motion_policy: PreparedActorAnimationRootMotionPolicy,
+    #[serde(default)]
+    pub(crate) accumulation_root: Option<String>,
     pub(crate) animated_channel_count: usize,
     pub(crate) animated_target_count: usize,
+    #[serde(default)]
+    pub(crate) required_targets: Vec<String>,
     #[serde(default)]
     pub(crate) animated_targets: Vec<String>,
     #[serde(default)]
     pub(crate) missing_targets: Vec<String>,
+    #[serde(default)]
+    pub(crate) controller_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) interpolator_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) text_keys: Vec<PreparedActorAnimationTextKey>,
     pub(crate) error: Option<String>,
 }
 
@@ -229,7 +257,7 @@ mod tests {
             }]
         });
         let mut json = serde_json::to_vec(&document).unwrap();
-        while json.len() % 4 != 0 {
+        while !json.len().is_multiple_of(4) {
             json.push(b' ');
         }
         let mut binary = Vec::new();
@@ -303,5 +331,45 @@ mod tests {
                 .contains("non-finite")
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn converter_report_retains_source_sequence_contract() {
+        let report: ActorAnimationPackReport = serde_json::from_value(serde_json::json!({
+            "revision": "v1",
+            "skeleton_path": "meshes/characters/_male/skeleton.nif",
+            "clips": [{
+                "name": "equip",
+                "source_path": "meshes/characters/_male/1hpequip.kf",
+                "success": true,
+                "duration_seconds": 0.5,
+                "source_sequence_name": "Equip",
+                "source_start_seconds": 0.25,
+                "source_end_seconds": 0.75,
+                "source_frequency": 1.0,
+                "source_phase": 0.0,
+                "loop_mode": "clamp",
+                "root_motion_policy": "preserve_authored",
+                "accumulation_root": "Bip01",
+                "animated_channel_count": 3,
+                "animated_target_count": 1,
+                "required_targets": ["Bip01 R Hand", "Weapon"],
+                "animated_targets": ["Bip01 R Hand"],
+                "missing_targets": ["Weapon"],
+                "controller_types": ["NiTransformController"],
+                "interpolator_types": ["NiTransformInterpolator"],
+                "text_keys": [{"time_seconds": 0.5, "value": "Attach"}],
+                "error": null
+            }],
+            "pack_error": null
+        }))
+        .unwrap();
+
+        let clip = &report.clips[0];
+        assert_eq!(clip.source_sequence_name.as_deref(), Some("Equip"));
+        assert_eq!(clip.loop_mode, PreparedActorAnimationLoopMode::Clamp);
+        assert_eq!(clip.accumulation_root.as_deref(), Some("Bip01"));
+        assert_eq!(clip.required_targets, ["Bip01 R Hand", "Weapon"]);
+        assert_eq!(clip.text_keys[0].value, "Attach");
     }
 }

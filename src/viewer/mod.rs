@@ -303,6 +303,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         cell: None,
         blender: args.blender.clone(),
         converter: args.converter,
+        actor_animation_converter: crate::cli::ActorAnimationConverter::Disabled,
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
         rebuild_shadows: args.rebuild_shadows,

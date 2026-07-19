@@ -36,17 +36,19 @@ pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v6-norm
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
-pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str = "nifty-fo3-native-actor-assembly-v16-animation-zoo-catalog-native-unsupported-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
+pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
+    "nifty-fo3-native-actor-assembly-v12-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
-pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v36-niftools-external-kf-pack-v5-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
+pub(crate) const ACTOR_CONVERTER_REVISION: &str =
+    "pynifly-v31-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v32-normal-y-v1-pbr-material-v2+pynifly-v36-niftools-external-kf-pack-v5-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v32-normal-y-v1-pbr-material-v2+pynifly-v31-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v16-animation-zoo-catalog-native-unsupported-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v12-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,

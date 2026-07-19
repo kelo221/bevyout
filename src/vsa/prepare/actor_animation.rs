@@ -9,9 +9,9 @@ use bevyout_core::actor_animation::{
 };
 
 pub(crate) const ACTOR_ANIMATION_CATALOG_REVISION: &str =
-    "actor-animations-v1-kffz-relative-default-directory-clip-packs";
+    "actor-animations-v3-normalized-runtime-contract";
 pub(crate) const ACTOR_ANIMATION_CONVERTER_REVISION: &str =
-    "niftools-external-kf-clip-pack-v5-blender-layered-actions";
+    "niftools-external-kf-clip-pack-v6-source-metadata";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActorAnimationCatalogArtifact {
@@ -25,6 +25,16 @@ pub(crate) struct ActorAnimationConversionSummary {
     pub(crate) built_packs: usize,
     pub(crate) reused_packs: usize,
     pub(crate) failed_clips: usize,
+}
+
+pub(crate) struct ActorAnimationConversionContext<'a> {
+    pub(crate) converter: crate::converter_policy::ActorAnimationBackend,
+    pub(crate) blender: Option<&'a Path>,
+    pub(crate) data_root: &'a Path,
+    pub(crate) archives: &'a [crate::vsa::bsa::BsaArchive],
+    pub(crate) staging_dir: &'a Path,
+    pub(crate) assets_dir: &'a Path,
+    pub(crate) rebuild: bool,
 }
 
 fn collect_loose_kf_paths(data_root: &Path) -> Result<Vec<String>> {
@@ -214,11 +224,11 @@ fn fail_clip(clip: &mut PreparedActorAnimationClip, code: &str, message: impl In
     ));
 }
 
-fn mark_unsupported_backend(catalog: &mut PreparedActorAnimationCatalog) {
-    let message = "external KF clip-pack conversion is unavailable for the native backend; rerun prepare with --converter blender";
+fn mark_conversion_not_requested(catalog: &mut PreparedActorAnimationCatalog) {
+    let message = "external KF clip-pack conversion was not requested; rerun prepare with --actor-animation-converter blender";
     catalog.diagnostics.push(animation_diagnostic(
-        "warning",
-        "unsupported_backend",
+        "info",
+        "conversion_not_requested",
         None,
         message,
     ));
@@ -226,14 +236,14 @@ fn mark_unsupported_backend(catalog: &mut PreparedActorAnimationCatalog) {
         set.clip_pack_asset_path = None;
         set.clip_pack_hash = None;
         set.diagnostics.push(animation_diagnostic(
-            "warning",
-            "unsupported_backend",
+            "info",
+            "conversion_not_requested",
             Some(&set.skeleton_path),
             message,
         ));
         for clip in &mut set.clips {
             if clip.status == PreparedActorAnimationClipStatus::Ready {
-                fail_clip(clip, "unsupported_backend", message);
+                clip.status = PreparedActorAnimationClipStatus::NotConverted;
             }
         }
     }
@@ -397,6 +407,24 @@ fn apply_pack_report(
             );
             continue;
         };
+        clip.duration_seconds = item.duration_seconds.filter(|value| value.is_finite());
+        clip.source_sequence_name
+            .clone_from(&item.source_sequence_name);
+        clip.source_start_seconds = item.source_start_seconds.filter(|value| value.is_finite());
+        clip.source_end_seconds = item.source_end_seconds.filter(|value| value.is_finite());
+        clip.source_frequency = item.source_frequency.filter(|value| value.is_finite());
+        clip.source_phase = item.source_phase.filter(|value| value.is_finite());
+        clip.loop_mode = item.loop_mode;
+        clip.root_motion_policy = item.root_motion_policy;
+        clip.accumulation_root.clone_from(&item.accumulation_root);
+        clip.animated_channel_count = item.animated_channel_count;
+        clip.animated_target_count = item.animated_target_count;
+        clip.required_targets.clone_from(&item.required_targets);
+        clip.animated_targets.clone_from(&item.animated_targets);
+        clip.missing_targets.clone_from(&item.missing_targets);
+        clip.controller_types.clone_from(&item.controller_types);
+        clip.interpolator_types.clone_from(&item.interpolator_types);
+        clip.text_keys.clone_from(&item.text_keys);
         if !item.success {
             fail_clip(
                 clip,
@@ -407,10 +435,6 @@ fn apply_pack_report(
             );
             continue;
         }
-        clip.duration_seconds = item.duration_seconds.filter(|value| value.is_finite());
-        clip.animated_channel_count = item.animated_channel_count;
-        clip.animated_target_count = item.animated_target_count;
-        clip.missing_targets.clone_from(&item.missing_targets);
         if !item.missing_targets.is_empty() {
             clip.diagnostics.push(animation_diagnostic(
                 "warning",
@@ -432,57 +456,64 @@ fn apply_pack_report(
 
 pub(crate) fn convert_actor_animation_catalog(
     catalog: &mut PreparedActorAnimationCatalog,
-    converter: PrepareConverter,
-    blender: Option<&Path>,
-    data_root: &Path,
-    archives: &[crate::vsa::bsa::BsaArchive],
-    staging_dir: &Path,
-    assets_dir: &Path,
-    rebuild: bool,
+    context: &ActorAnimationConversionContext<'_>,
 ) -> Result<ActorAnimationConversionSummary> {
-    if converter == PrepareConverter::Native {
-        mark_unsupported_backend(catalog);
-        return Ok(ActorAnimationConversionSummary {
-            failed_clips: catalog
-                .animation_sets
-                .iter()
-                .flat_map(|set| &set.clips)
-                .filter(|clip| clip.status == PreparedActorAnimationClipStatus::ConversionFailed)
-                .count(),
-            ..Default::default()
-        });
+    if context.converter == crate::converter_policy::ActorAnimationBackend::Disabled {
+        mark_conversion_not_requested(catalog);
+        return Ok(ActorAnimationConversionSummary::default());
     }
-    fs::create_dir_all(assets_dir)?;
+    fs::create_dir_all(context.assets_dir)?;
     let mut pending = Vec::<(usize, ActorAnimationPackJob, String)>::new();
     let mut summary = ActorAnimationConversionSummary::default();
     for index in 0..catalog.animation_sets.len() {
         let Some((job, identity)) = stage_pack_job(
             &mut catalog.animation_sets[index],
-            data_root,
-            archives,
-            staging_dir,
-            assets_dir,
+            context.data_root,
+            context.archives,
+            context.staging_dir,
+            context.assets_dir,
         )?
         else {
             continue;
         };
-        let cached = !rebuild
-            && job.output.is_file()
-            && job.report.is_file()
+        let output_present = job.output.is_file();
+        let report_present = job.report.is_file();
+        let validation_passed = output_present
+            && report_present
             && read_actor_animation_report(&job.report)
                 .ok()
                 .is_some_and(|report| {
+                    let expected_reports = job
+                        .clips
+                        .iter()
+                        .map(|clip| (clip.name.as_str(), clip.source_path.as_str()))
+                        .collect::<HashSet<_>>();
+                    let actual_reports = report
+                        .clips
+                        .iter()
+                        .map(|clip| (clip.name.as_str(), clip.source_path.as_str()))
+                        .collect::<HashSet<_>>();
                     let expected = report
                         .clips
                         .iter()
                         .filter(|clip| clip.success)
                         .map(|clip| clip.name.clone())
                         .collect::<HashSet<_>>();
-                    report.pack_error.is_none()
+                    report.revision == job.revision
+                        && report.skeleton_path == job.skeleton_path
+                        && expected_reports == actual_reports
+                        && report.clips.len() == job.clips.len()
+                        && report.pack_error.is_none()
                         && !expected.is_empty()
                         && validate_actor_animation_glb(&job.output, &expected).is_ok()
                 });
-        if cached {
+        let cache_decision = actor_animation_pack_cache_decision(ActorAnimationPackCacheState {
+            rebuild_requested: context.rebuild,
+            output_present,
+            report_present,
+            validation_passed,
+        });
+        if cache_decision == ActorAnimationPackCacheDecision::Reuse {
             let report = read_actor_animation_report(&job.report)?;
             apply_pack_report(&mut catalog.animation_sets[index], &job, &identity, &report)?;
             summary.reused_packs += 1;
@@ -496,9 +527,11 @@ pub(crate) fn convert_actor_animation_catalog(
             .map(|(_, job, _)| job.clone())
             .collect::<Vec<_>>();
         run_actor_animation_batch(
-            blender.context("Blender backend was selected but no executable was resolved")?,
+            context
+                .blender
+                .context("Blender backend was selected but no executable was resolved")?,
             &jobs,
-            staging_dir,
+            context.staging_dir,
         )?;
         for (index, job, identity) in pending {
             let report = read_actor_animation_report(&job.report)?;
@@ -551,6 +584,55 @@ mod tests {
         assert_eq!(
             parent_directory("characters/_female/skeleton.nif"),
             "meshes/characters/_female"
+        );
+    }
+
+    #[test]
+    fn disabled_conversion_is_diagnostic_not_failure() {
+        let mut catalog = build_actor_animation_catalog(
+            ACTOR_ANIMATION_CATALOG_REVISION,
+            "source",
+            &[ActorAnimationDiscoveryInput {
+                reference_form_id: 1,
+                base_form_id: 2,
+                model_path: "meshes/characters/_male/skeleton.nif".into(),
+                skeleton_path: "meshes/characters/_male/skeleton.nif".into(),
+                skeleton_fingerprint: "skeleton".into(),
+                explicit_kf_paths: vec!["idle.kf".into()],
+                ..Default::default()
+            }],
+            &[ActorAnimationAsset {
+                path: "meshes/characters/_male/idle.kf".into(),
+                fingerprint: "idle".into(),
+                state: ActorAnimationAssetState::Compatible,
+            }],
+        );
+        let summary = convert_actor_animation_catalog(
+            &mut catalog,
+            &ActorAnimationConversionContext {
+                converter: crate::converter_policy::ActorAnimationBackend::Disabled,
+                blender: None,
+                data_root: Path::new("unused-data"),
+                archives: &[],
+                staging_dir: Path::new("unused-staging"),
+                assets_dir: Path::new("unused-assets"),
+                rebuild: false,
+            },
+        )
+        .expect("disabled conversion must not touch tools or files");
+
+        assert_eq!(summary, ActorAnimationConversionSummary::default());
+        assert_eq!(
+            catalog.animation_sets[0].clips[0].status,
+            PreparedActorAnimationClipStatus::NotConverted
+        );
+        assert!(
+            catalog.animation_sets[0]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code == "conversion_not_requested" && diagnostic.severity == "info"
+                })
         );
     }
 }

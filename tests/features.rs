@@ -244,6 +244,10 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod actor_appearance;
 
+    #[path = "../src/vsa/prepare/actor_animation_cache.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod actor_animation_cache;
+
     // `vsa::prepare::nav_graph` (issue #111, M4 wave 2) reuses
     // `vsa::paths::{FO3_SCALE, fingerprint}` via relative `super::super::`
     // imports, so it is nested here too -- same pattern as `actor_catalog`
@@ -253,6 +257,7 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod nav_graph;
 }
+use prepare::actor_animation_cache;
 use prepare::actor_appearance;
 use prepare::actor_catalog;
 use prepare::batch_cache;
@@ -711,14 +716,6 @@ struct BevyoutWorld {
     actor_fallback_input: actor::ActorAppearanceAvailability,
     actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
     actor_fallback_decision: Option<actor::ActorFallbackDecision>,
-    // -- actor_animation_catalog.feature --
-    npc_kffz_payload: Vec<u8>,
-    creature_kffz_payload: Vec<u8>,
-    npc_kffz_paths: Vec<String>,
-    creature_kffz_paths: Vec<String>,
-    actor_animation_discovery_inputs: Vec<actor_animation::ActorAnimationDiscoveryInput>,
-    actor_animation_assets: Vec<actor_animation::ActorAnimationAsset>,
-    actor_animation_catalog: Option<actor_animation::PreparedActorAnimationCatalog>,
     // -- nav_stuck_progress.feature (issue #157) --
     nav_stuck_progress_desired: [f32; 2],
     nav_stuck_progress_achieved: [f32; 2],
@@ -743,6 +740,21 @@ struct BevyoutWorld {
     nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
     nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
     nav_door_topology_point: Option<[f32; 3]>,
+
+    // -- actor_animation_catalog.feature / actor_animation_conversion.feature
+    // (issue #104, M4 wave 10): append-only shared seam. --
+    npc_kffz_payload: Vec<u8>,
+    creature_kffz_payload: Vec<u8>,
+    npc_kffz_paths: Vec<String>,
+    creature_kffz_paths: Vec<String>,
+    actor_animation_discovery_inputs: Vec<actor_animation::ActorAnimationDiscoveryInput>,
+    actor_animation_assets: Vec<actor_animation::ActorAnimationAsset>,
+    actor_animation_catalog: Option<actor_animation::PreparedActorAnimationCatalog>,
+    requested_actor_animation_converter: Option<converter_policy::ActorAnimationBackend>,
+    resolved_actor_animation_converter: Option<converter_policy::ActorAnimationBackend>,
+    actor_animation_pack_cache_state: actor_animation_cache::ActorAnimationPackCacheState,
+    actor_animation_pack_cache_decision:
+        Option<actor_animation_cache::ActorAnimationPackCacheDecision>,
 }
 
 fn find_placement<'a>(
@@ -8611,6 +8623,7 @@ async fn then_references_use_same_animation_set(
     };
     assert_eq!(set_id(parse_hex(&left_hex)), set_id(parse_hex(&right_hex)));
 }
+
 // ---------------------------------------------------------------------
 // nav_portals.feature (issue #154, M4 wave 8) -- appended section, do not
 // interleave. Reuses `nav_graph.feature`'s "a nav graph mesh"/"has source
@@ -9114,4 +9127,116 @@ async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32
         distance <= radius,
         "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
     );
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_conversion.feature (issue #104, M4 wave 10) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given("no scene converter is requested for actor animation preparation")]
+async fn given_no_scene_converter_for_actor_animation(world: &mut BevyoutWorld) {
+    world.requested_converter = None;
+}
+
+#[given("no actor animation converter is requested")]
+async fn given_no_actor_animation_converter(world: &mut BevyoutWorld) {
+    world.requested_actor_animation_converter = None;
+}
+
+#[given(regex = r#"^the \"([^\"]*)\" actor animation converter is requested$"#)]
+async fn given_actor_animation_converter(world: &mut BevyoutWorld, converter: String) {
+    world.requested_actor_animation_converter = Some(match converter.as_str() {
+        "disabled" => converter_policy::ActorAnimationBackend::Disabled,
+        "blender" => converter_policy::ActorAnimationBackend::Blender,
+        other => panic!("unknown actor animation converter {other:?}"),
+    });
+}
+
+#[given("an actor animation clip pack has an output and report that both validate")]
+async fn given_valid_actor_animation_clip_pack(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.output_present = true;
+    world.actor_animation_pack_cache_state.report_present = true;
+    world.actor_animation_pack_cache_state.validation_passed = true;
+}
+
+#[given("actor animation clip-pack rebuild is not requested")]
+async fn given_actor_animation_rebuild_not_requested(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.rebuild_requested = false;
+}
+
+#[given("actor animation clip-pack rebuild is requested")]
+async fn given_actor_animation_rebuild_requested(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.rebuild_requested = true;
+}
+
+#[when("the actor animation converter selections are resolved")]
+async fn when_actor_animation_converter_selections_resolved(world: &mut BevyoutWorld) {
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+    world.resolved_actor_animation_converter =
+        Some(converter_policy::resolve_actor_animation_backend(
+            world.requested_actor_animation_converter,
+        ));
+}
+
+#[when("the actor animation clip-pack cache decision is made")]
+async fn when_actor_animation_pack_cache_decision_is_made(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_decision =
+        Some(actor_animation_cache::actor_animation_pack_cache_decision(
+            world.actor_animation_pack_cache_state,
+        ));
+}
+
+#[then(regex = r#"^the selected scene converter is \"([^\"]*)\"$"#)]
+async fn then_selected_scene_converter(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_converter
+            .expect("scene converter must be resolved")
+            .as_str(),
+        expected
+    );
+}
+
+#[then(regex = r#"^the selected actor animation converter is \"([^\"]*)\"$"#)]
+async fn then_selected_actor_animation_converter(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+            .as_str(),
+        expected
+    );
+}
+
+#[then("actor animation preparation requires Blender")]
+async fn then_actor_animation_preparation_requires_blender(world: &mut BevyoutWorld) {
+    assert!(converter_policy::actor_animation_backend_requires_blender(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+    ));
+}
+
+#[then("actor animation preparation does not require Blender")]
+async fn then_actor_animation_preparation_does_not_require_blender(world: &mut BevyoutWorld) {
+    assert!(!converter_policy::actor_animation_backend_requires_blender(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+    ));
+}
+
+#[then(regex = r#"^the actor animation clip-pack cache decision is \"([^\"]*)\"$"#)]
+async fn then_actor_animation_pack_cache_decision(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world
+        .actor_animation_pack_cache_decision
+        .expect("actor animation cache decision must be made")
+    {
+        actor_animation_cache::ActorAnimationPackCacheDecision::Reuse => "reuse",
+        actor_animation_cache::ActorAnimationPackCacheDecision::Build => "build",
+    };
+    assert_eq!(actual, expected);
 }

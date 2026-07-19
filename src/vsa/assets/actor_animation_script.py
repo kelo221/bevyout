@@ -184,7 +184,16 @@ def import_niftools_skeleton(skeleton_path):
     return armature
 
 
-def authored_targets(kf_path):
+def normalized_cycle_type(value):
+    name = getattr(value, "name", str(value)).rsplit(".", 1)[-1].casefold()
+    return {
+        "cycle_loop": "loop",
+        "cycle_clamp": "clamp",
+        "cycle_reverse": "reverse",
+    }.get(name, "unknown")
+
+
+def source_metadata(kf_path):
     from io_scene_niftools.file_io.nif import NifFile as KFFile
     from io_scene_niftools.modules.nif_import.object import block_registry
     from io_scene_niftools.utils.logging import NifLog, _MockOperator
@@ -196,7 +205,42 @@ def authored_targets(kf_path):
 
     data = KFFile.load_nif(kf_path)
     targets = []
+    controller_types = []
+    interpolator_types = []
+    sequence_names = []
+    start_times = []
+    stop_times = []
+    frequencies = []
+    phases = []
+    cycle_types = []
+    accumulation_roots = []
+    text_keys = []
     for root in data.roots:
+        sequence_name = str(getattr(root, "name", "")).strip()
+        if sequence_name:
+            sequence_names.append(sequence_name)
+        for values, attribute in (
+            (start_times, "start_time"),
+            (stop_times, "stop_time"),
+            (frequencies, "frequency"),
+            (phases, "phase"),
+        ):
+            value = getattr(root, attribute, None)
+            if value is not None and math.isfinite(float(value)):
+                values.append(float(value))
+        cycle_types.append(normalized_cycle_type(getattr(root, "cycle_type", None)))
+        accumulation_root = str(getattr(root, "accum_root_name", "")).strip()
+        if accumulation_root:
+            accumulation_roots.append(accumulation_root)
+        root_text_keys = getattr(root, "text_keys", None)
+        if root_text_keys:
+            for key in root_text_keys.text_keys:
+                time_seconds = float(key.time)
+                value = str(key.value)
+                if math.isfinite(time_seconds):
+                    text_keys.append(
+                        {"time_seconds": time_seconds, "value": value}
+                    )
         for block in getattr(root, "controlled_blocks", []):
             value = getattr(block, "target_name", "")
             if not value:
@@ -206,7 +250,34 @@ def authored_targets(kf_path):
                     value = ""
             if value:
                 targets.append(block_registry.get_bone_name_for_blender(value))
-    return sorted(set(targets), key=str.casefold)
+            controller_type = str(getattr(block, "controller_type", "")).strip()
+            if controller_type:
+                controller_types.append(controller_type)
+            interpolator = getattr(block, "interpolator", None)
+            if interpolator is not None:
+                interpolator_types.append(type(interpolator).__name__)
+    cycle_types = sorted(set(cycle_types))
+    sequence_names = sorted(set(sequence_names), key=str.casefold)
+    accumulation_roots = sorted(set(accumulation_roots), key=str.casefold)
+    text_keys.sort(key=lambda item: (item["time_seconds"], item["value"].casefold(), item["value"]))
+    return {
+        "source_sequence_name": sequence_names[0] if len(sequence_names) == 1 else None,
+        "source_start_seconds": min(start_times) if start_times else None,
+        "source_end_seconds": max(stop_times) if stop_times else None,
+        "source_frequency": frequencies[0] if len(set(frequencies)) == 1 else None,
+        "source_phase": phases[0] if len(set(phases)) == 1 else None,
+        "loop_mode": (
+            cycle_types[0]
+            if len(cycle_types) == 1
+            else ("mixed" if cycle_types else "unknown")
+        ),
+        "root_motion_policy": "preserve_authored",
+        "accumulation_root": accumulation_roots[0] if len(accumulation_roots) == 1 else None,
+        "required_targets": sorted(set(targets), key=str.casefold),
+        "controller_types": sorted(set(controller_types), key=str.casefold),
+        "interpolator_types": sorted(set(interpolator_types), key=str.casefold),
+        "text_keys": text_keys,
+    }
 
 
 def animated_targets(action):
@@ -219,9 +290,8 @@ def animated_targets(action):
     return sorted(set(targets), key=str.casefold)
 
 
-def import_clip(armature, clip):
+def import_clip(armature, clip, metadata):
     before = {action.as_pointer() for action in bpy.data.actions}
-    source_targets = authored_targets(clip["path"])
     result = bpy.ops.import_scene.kf(
         filepath=clip["path"],
         files=[{"name": os.path.basename(clip["path"])}],
@@ -246,10 +316,14 @@ def import_clip(armature, clip):
     track.strips.new(clip["name"], int(round(action.frame_range[0])), action)
     targets = animated_targets(action)
     target_lookup = {target.casefold() for target in targets}
-    missing = [target for target in source_targets if target.casefold() not in target_lookup]
+    missing = [
+        target
+        for target in metadata["required_targets"]
+        if target.casefold() not in target_lookup
+    ]
     fps = max(float(bpy.context.scene.render.fps), 1.0)
     duration = max(0.0, float(action.frame_range[1] - action.frame_range[0]) / fps)
-    return {
+    return metadata | {
         "name": clip["name"],
         "source_path": clip["source_path"],
         "success": True,
@@ -262,8 +336,21 @@ def import_clip(armature, clip):
     }
 
 
-def failed_clip(clip, error):
-    return {
+def failed_clip(clip, error, metadata=None):
+    return (metadata or {
+        "source_sequence_name": None,
+        "source_start_seconds": None,
+        "source_end_seconds": None,
+        "source_frequency": None,
+        "source_phase": None,
+        "loop_mode": "unknown",
+        "root_motion_policy": "unknown",
+        "accumulation_root": None,
+        "required_targets": [],
+        "controller_types": [],
+        "interpolator_types": [],
+        "text_keys": [],
+    }) | {
         "name": clip["name"],
         "source_path": clip["source_path"],
         "success": False,
@@ -297,10 +384,12 @@ def process_job(job):
             )
             armature = import_niftools_skeleton(job["skeleton"])
         for index, clip in enumerate(job["clips"]):
+            metadata = None
             try:
-                report["clips"].append(import_clip(armature, clip))
+                metadata = source_metadata(clip["path"])
+                report["clips"].append(import_clip(armature, clip, metadata))
             except Exception as error:
-                report["clips"].append(failed_clip(clip, error))
+                report["clips"].append(failed_clip(clip, error, metadata))
                 print(
                     "[actor-animation] failed {}/{} {}: {}".format(
                         index + 1, len(job["clips"]), clip["source_path"], error
