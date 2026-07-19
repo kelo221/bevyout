@@ -293,6 +293,16 @@ const MERGE_TRAVERSAL_TIMEOUT_FACTOR: f32 = 4.0;
 /// 4) so a very short crossing still gets a sane minimum window instead of
 /// a near-zero deadline.
 const MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS: f32 = 1.0;
+/// How close (metres, full 3D) `validate_merge_link_collision`'s one-shot
+/// `player::move_mover` slide must land to a merge candidate's far portal
+/// point to count as "arrived" (issue #154 real-data acceptance
+/// correction). Deliberately looser than `MERGE_TRAVERSAL_REACHED_DISTANCE`
+/// (which is horizontal-only and compares against a live, already-moving
+/// agent): this is a single static slide budgeted at
+/// `player::mod::MAX_SLIDE_PASSES` correction passes, not a full per-tick
+/// crossing, so a small full-3D residual after sliding off one nearby
+/// surface is expected on an otherwise-clear seam.
+const MERGE_LINK_SWEEP_TOLERANCE: f32 = 0.6;
 
 /// The point-sampling envelope for the archipelago options
 /// (`ensure_archipelago`): how far landmass itself may look for the navmesh
@@ -872,7 +882,68 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // boundary linking cannot connect them (it needs coincident boundary
     // vertices); generated walk-through animation links across the matched
     // boundary edges are the path real data takes.
-    for descriptor in landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs) {
+    //
+    // Runtime collision-visibility validation (issue #154 real-data
+    // acceptance correction) runs as its own pass first, in a scoped
+    // borrow of the physics world that cannot overlap the `world` borrow
+    // `spawn_link_pair` needs below -- see `validate_merge_link_collision`'s
+    // doc comment for why prepare-side geometry alone is not enough. A
+    // cell whose static collision has not finished building yet (rare in
+    // practice: `tna spawn` is a manual console action issued after the
+    // cell is already visibly loaded) skips validation rather than
+    // dropping every merge link's connectivity for the session.
+    let candidate_merge_descriptors =
+        landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs);
+    let physics_disabled = world.resource::<PhysicsDisabled>().0;
+    let physics_ready = !physics_disabled
+        && world
+            .get_resource::<CellPhysicsReadiness>()
+            .is_some_and(|readiness| readiness.static_collision_ready());
+    let validated_merge_descriptors = if !physics_ready {
+        candidate_merge_descriptors
+    } else if let Some(physics_world) = world
+        .get_non_send_mut::<BoxdddPhysicsContext>()
+        .as_deref_mut()
+        .and_then(BoxdddPhysicsContext::world_mut)
+    {
+        let mover = boxddd::Capsule::new(
+            [0.0, -(AGENT_HEIGHT * 0.5 - AGENT_RADIUS), 0.0],
+            [0.0, AGENT_HEIGHT * 0.5 - AGENT_RADIUS, 0.0],
+            AGENT_RADIUS,
+        );
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+        let mut validated = Vec::with_capacity(candidate_merge_descriptors.len());
+        for descriptor in candidate_merge_descriptors {
+            let start = Vec3::from_array(descriptor.side_a.midpoint);
+            let end = Vec3::from_array(descriptor.side_b.midpoint);
+            match validate_merge_link_collision(
+                physics_world,
+                &mover,
+                collision_filter,
+                support_filter,
+                start,
+                end,
+            ) {
+                Ok(()) => validated.push(descriptor),
+                Err(reason) => {
+                    warn!(
+                        "nav merge link mesh {:08x} triangle {} <-> mesh {:08x} triangle {}: dropped ({})",
+                        descriptor.side_a.mesh_form_id,
+                        descriptor.side_a.polygon_index,
+                        descriptor.side_b.mesh_form_id,
+                        descriptor.side_b.polygon_index,
+                        reason.as_str(),
+                    );
+                }
+            }
+        }
+        validated
+    } else {
+        candidate_merge_descriptors
+    };
+
+    for descriptor in validated_merge_descriptors {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
         // Issue #154 feature 3: real traversal-distance cost, floored well
@@ -1019,6 +1090,120 @@ fn spawn_link_pair(
             .id()
     };
     [spawn_one(start, end), spawn_one(end, start)]
+}
+
+/// Why a merge portal candidate failed runtime collision-visibility
+/// validation (issue #154 real-data acceptance correction). Reported once
+/// per dropped link via a stable `warn!` line naming both sides' mesh/
+/// triangle ids (`ensure_archipelago`).
+#[derive(Debug, Clone, Copy)]
+enum MergeLinkRejection {
+    /// The capsule sweep from the near portal point to the far one did not
+    /// reach the far point without first contacting something.
+    SweptBlocked,
+    /// No walkable ground support was found within step height below the
+    /// crossing's midpoint or its far point.
+    NoGroundSupport,
+}
+
+impl MergeLinkRejection {
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeLinkRejection::SweptBlocked => "swept blocked",
+            MergeLinkRejection::NoGroundSupport => "no ground support",
+        }
+    }
+}
+
+/// Runtime collision-visibility validation for one merge portal candidate
+/// (issue #154 real-data acceptance correction): prepare-side geometric
+/// validation (opposing directions, an overlapping interval --
+/// `vsa::prepare::nav_graph::validate_portal_candidate`) has no cooked
+/// physics to check against, and real FranklinMetro02 data showed it can
+/// accept a candidate that is a genuine seam in the abstract navmesh
+/// topology but empty air (or blocked by intervening geometry) in the
+/// actual level -- one accepted portal with a 1.69 m XZ gap swept a live
+/// agent clean off the mesh edge into the void (`y` still falling at
+/// -348 m when observed). This runs once per candidate link at
+/// archipelago-build time (`ensure_archipelago`, where the cooked BoxDDD
+/// collision world is already available), mirroring where issue #154's
+/// step-height check already moved to for the identical "no cooked
+/// physics prepare-side" reason.
+///
+/// Two checks, both using the same capsule/filters ordinary agent movement
+/// uses (`step_agent_kcc`'s own `mover`/`collision_filter`/
+/// `support_filter`, constructed identically by the caller):
+/// 1. Ground support (`player::try_step_down` -- the same step-height-
+///    bounded downward probe the KCC itself uses when stepping down) must
+///    exist within step height below both the crossing's midpoint and
+///    `end`. This is what actually catches the void-fall case: a capsule
+///    swept purely horizontally never contacts a floor that simply is not
+///    there underneath it.
+/// 2. A capsule slide from `start` to `end` (`player::move_mover`, the
+///    same move-and-slide collision response ordinary agent/player
+///    movement runs every tick -- deliberately *not* a single raw
+///    `boxddd::World::cast_mover`) must actually arrive within a small
+///    tolerance. A raw single sweep starting exactly at `start` routinely
+///    reports "blocked immediately" for an otherwise walkable seam: `start`
+///    is an un-eroded seam boundary point (`erosion_policy`'s protected-
+///    edge rule deliberately never pulls a merge-triangle vertex inward,
+///    so both sides keep agreeing on the same seam position), which in
+///    real FO3 data commonly sits flush against the near-side wall -- a
+///    capsule centred exactly there already touches that wall at the very
+///    first query. `move_mover`'s plane-based sliding is what real
+///    per-tick movement already relies on to handle a capsule touching a
+///    wall without misreporting the whole crossing as impassable; a raw
+///    cast has no such contact tolerance.
+///
+/// `start`/`end` are feet-level points (the same convention every other
+/// nav-graph point in this module uses -- see `TRAVEL_ARRIVAL_DISTANCE`'s
+/// doc comment); both are raised by `AGENT_HEIGHT / 2` to the capsule-
+/// centre height `step_agent_kcc`'s own `origin` convention expects before
+/// either check runs.
+fn validate_merge_link_collision(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    start: Vec3,
+    end: Vec3,
+) -> Result<(), MergeLinkRejection> {
+    let to_capsule_center = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+    let start_origin = start + to_capsule_center;
+    let end_origin = end + to_capsule_center;
+    let mid_origin = start_origin.lerp(end_origin, 0.5);
+
+    for probe in [mid_origin, end_origin] {
+        if player::try_step_down(
+            world,
+            player::to_box_vec3(probe),
+            mover,
+            boxddd::Vec3::ZERO,
+            collision_filter,
+            support_filter,
+        )
+        .is_none()
+        {
+            return Err(MergeLinkRejection::NoGroundSupport);
+        }
+    }
+
+    let delta = player::to_box_vec3(end_origin - start_origin);
+    let (achieved_box, ..) = player::move_mover(
+        world,
+        player::to_box_vec3(start_origin),
+        mover,
+        delta,
+        collision_filter,
+        support_filter,
+        true,
+        false,
+    );
+    let achieved = player::from_box_vec3(achieved_box);
+    if (achieved - end_origin).length() > MERGE_LINK_SWEEP_TOLERANCE {
+        return Err(MergeLinkRejection::SweptBlocked);
+    }
+    Ok(())
 }
 
 /// Spawns the landmass `Character3d` mirroring the FPS player (issue #114
@@ -3624,6 +3809,104 @@ mod tests {
                 .unwrap()
                 .travel_intent
                 .is_none()
+        );
+    }
+
+    /// Issue #154 real-data acceptance correction: a candidate whose two
+    /// portal points sit on the same connected, unobstructed floor must
+    /// pass runtime collision-visibility validation.
+    #[test]
+    fn validate_merge_link_collision_accepts_a_clean_connected_floor() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The FranklinMetro02 real-data finding this correction fixes: a
+    /// candidate whose far portal point overhangs empty space (no floor
+    /// underneath, only a ledge at the near side) must be rejected for
+    /// missing ground support, not accepted and left to sweep an agent off
+    /// the edge into the void at traversal time.
+    #[test]
+    fn validate_merge_link_collision_rejects_a_ledge_into_the_void() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        // Floor only under the near point (x in [-2, 2]); the far point at
+        // x = 5 overhangs nothing.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(2.0, 0.1, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+        );
+        assert!(
+            matches!(result, Err(MergeLinkRejection::NoGroundSupport)),
+            "{result:?}"
+        );
+    }
+
+    /// A candidate whose straight-line crossing is physically blocked by
+    /// intervening geometry (not merely a portal accepted on abstract
+    /// topology alone) must be rejected as swept-blocked.
+    #[test]
+    fn validate_merge_link_collision_rejects_a_swept_blocked_crossing() {
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(0.0, -0.1, 0.0),
+            boxddd::Vec3::new(5.0, 0.1, 5.0),
+        );
+        // A wall spanning the full crossing width, directly between the
+        // two portal points.
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(2.0, 1.0, 0.0),
+            boxddd::Vec3::new(0.1, 2.0, 5.0),
+        );
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let result = validate_merge_link_collision(
+            &mut physics_world,
+            &mover,
+            collision_filter,
+            support_filter,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+        );
+        assert!(
+            matches!(result, Err(MergeLinkRejection::SweptBlocked)),
+            "{result:?}"
         );
     }
 
