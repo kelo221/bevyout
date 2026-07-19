@@ -571,7 +571,7 @@ mod tests {
         nav_graph: Option<PreparedNavGraphSource>,
     ) -> PreparedSceneManifest {
         PreparedSceneManifest {
-            schema_version: 16,
+            schema_version: 17,
             prepare_revision: None,
             converter_revision: None,
             physics_schema_version: None,

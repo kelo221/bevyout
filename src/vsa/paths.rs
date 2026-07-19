@@ -77,7 +77,13 @@ pub(crate) fn normalize_asset_path(value: &str) -> String {
 pub(crate) fn is_editor_marker(path: &str) -> bool {
     matches!(
         path.rsplit('/').next(),
-        Some("markerx.nif" | "markerxheading.nif" | "marker_north.nif" | "markercocheading.nif",)
+        Some(
+            "marker_creature.nif"
+                | "markerx.nif"
+                | "markerxheading.nif"
+                | "marker_north.nif"
+                | "markercocheading.nif",
+        )
     )
 }
 

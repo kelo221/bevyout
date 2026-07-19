@@ -280,6 +280,7 @@ fn lab_placement(source: &PreparedPlacement) -> PreparedPlacement {
     let mut placement = source.clone();
     placement.translation = [0.0, LAB_DROP_HEIGHT, 0.0];
     placement.rotation_xyzw = [0.0, 0.0, 0.0, 1.0];
+    placement.scale = super::actor::placement_root_scale(source);
     placement
 }
 
@@ -293,8 +294,7 @@ struct RagdollLabDefinition {
     trace_seconds: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LabPhase {
     #[default]
     Loading,
@@ -303,7 +303,6 @@ enum LabPhase {
     Paused,
     Failed,
 }
-
 
 #[derive(Resource, Default)]
 struct RagdollLabRuntime {

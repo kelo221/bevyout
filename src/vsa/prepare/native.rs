@@ -171,6 +171,18 @@ fn convert_native_actor(
         .iter()
         .map(|part| (actor_path_key(&part.path), part.index))
         .collect::<HashMap<_, _>>();
+    let head_part_keys = descriptor
+        .head_parts
+        .iter()
+        .map(|path| actor_path_key(path))
+        .collect::<Vec<_>>();
+    let head_parts = head_part_keys.iter().cloned().collect::<HashSet<_>>();
+    let head_anim_parts = descriptor
+        .head_anim_parts
+        .iter()
+        .map(|path| actor_path_key(path))
+        .collect::<HashSet<_>>();
+    let head_anchor = head_part_keys.first();
     let mut decoded = Vec::new();
     let mut warnings = Vec::new();
     let skeleton_key = actor_path_key(&descriptor.skeleton);
@@ -207,13 +219,37 @@ fn convert_native_actor(
         }
     }
 
-    for (path, _key, scene) in decoded
-        .iter()
-        .filter(|(_, key, _)| !apparel.contains_key(key) && !body_parts.contains_key(key))
-    {
+    for (path, _key, scene) in decoded.iter().filter(|(_, key, _)| {
+        !apparel.contains_key(key) && !body_parts.contains_key(key) && !head_parts.contains(key)
+    }) {
         if let Err(error) = nif::fo3::merge_actor_scene(&mut actor, scene) {
             warnings.push(format!(
                 "actor visual {} could not bind to the shared skeleton: {}",
+                path, error
+            ));
+        }
+    }
+
+    if let Some(anchor_key) = head_anchor
+        && let Some((path, _, scene)) = decoded.iter().find(|(_, key, _)| key == anchor_key)
+        && let Err(error) = nif::fo3::merge_actor_scene(&mut actor, scene)
+    {
+        warnings.push(format!(
+            "actor head anchor {} could not bind to the shared skeleton: {}",
+            path, error
+        ));
+    }
+    for (path, key, scene) in decoded.iter().filter(|(_, key, _)| {
+        head_parts.contains(key) && head_anchor.is_none_or(|anchor| key != anchor)
+    }) {
+        let attachment = if head_anim_parts.contains(key) {
+            "HeadAnims"
+        } else {
+            "Bip01 Head"
+        };
+        if let Err(error) = nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
+            warnings.push(format!(
+                "actor head visual {} could not bind to the shared skeleton: {}",
                 path, error
             ));
         }
@@ -240,8 +276,6 @@ fn convert_native_actor(
         }
     }
     actor.animations.clear();
-    nif::fo3::recalculate_actor_inverse_bind_matrices(&mut actor)
-        .context("recalculating actor inverse bind matrices from the shared skeleton")?;
     let mut result = convert_actor_scene(ActorSceneConversionRequest {
         source_name: &job.model,
         scene: actor,

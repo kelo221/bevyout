@@ -1706,8 +1706,8 @@ def actor_material_alpha_policy(alpha_flags):
     return 'OPAQUE'
 
 def import_pynifly_actor(
-        skeleton_path, visual_paths, body_parts, apparel, ragdoll_nodes,
-        model, policy):
+        skeleton_path, visual_paths, body_parts, apparel, eye_geometry,
+        eye_texture, ragdoll_nodes, model, policy):
     """Import one actor visual assembly with PyNifly 28.
 
     NIFTools remains responsible for the isolated Havok pass. PyNifly owns the
@@ -1790,6 +1790,7 @@ def import_pynifly_actor(
         os.path.abspath(path).casefold(): source_texture_references(path)
         for path in visual_paths
     }
+    eye_sources = {actor_source_key(path) for path in eye_geometry}
 
     def staged_texture_path(value):
         if not value:
@@ -1893,9 +1894,22 @@ def import_pynifly_actor(
             source_texture_values.get(
                 os.path.abspath(source_file).casefold(), []) if source_file else [],
         )
-        for material in obj.data.materials:
+        is_selected_eye = actor_source_key(source_file) in eye_sources
+        for slot, material in enumerate(list(obj.data.materials)):
             if material is None:
                 continue
+            if is_selected_eye and eye_texture:
+                # Eye NIFs provide geometry/UVs; the NPC/RACE-selected EYES
+                # record owns the diffuse identity. Copy the material so a
+                # shared head material cannot be changed accidentally, and
+                # retain the authored normal input after the override.
+                selected = material.copy()
+                obj.data.materials[slot] = selected
+                if install_source_material(
+                        selected, [eye_texture] + list(texture_values)):
+                    repaired_materials += 1
+                    continue
+                material = selected
             images = [] if not material.use_nodes else [
                 node.image for node in material.node_tree.nodes
                 if node.bl_idname == 'ShaderNodeTexImage' and node.image
@@ -2019,6 +2033,9 @@ for job in jobs:
     assembly_skeleton = None
     assembly_body_parts = []
     assembly_apparel = []
+    assembly_eye_geometry = []
+    assembly_eye_texture = None
+    assembly_used_niftools_fallback = False
     if nif_path.casefold().endswith('.actor.json'):
         with open(nif_path, 'r', encoding='utf8') as assembly_file:
             assembly = json.load(assembly_file)
@@ -2026,6 +2043,8 @@ for job in jobs:
             assembly_inputs = assembly.get('visual_inputs', [])
             assembly_body_parts = assembly.get('body_parts', [])
             assembly_apparel = assembly.get('apparel', [])
+            assembly_eye_geometry = assembly.get('eye_geometry', [])
+            assembly_eye_texture = assembly.get('eye_texture')
         if not assembly_skeleton:
             raise RuntimeError('actor assembly manifest has no skeleton: ' + nif_path)
         if not assembly_inputs:
@@ -2092,15 +2111,32 @@ for job in jobs:
         # wholesale by the PyNifly visual import.
         import_nif_scene(False, append=False, source_paths=[assembly_skeleton])
         physics_asset = build_physics_asset()
-        spatial_corrections, collision_corrections = import_pynifly_actor(
-            assembly_skeleton,
-            assembly_inputs,
-            assembly_body_parts,
-            assembly_apparel,
-            [body.get('node') for body in physics_asset.get('bodies', [])],
-            job.get('model', ''),
-            job.get('root_transform_policy', 'preserve_verified'),
-        )
+        try:
+            spatial_corrections, collision_corrections = import_pynifly_actor(
+                assembly_skeleton,
+                assembly_inputs,
+                assembly_body_parts,
+                assembly_apparel,
+                assembly_eye_geometry,
+                assembly_eye_texture,
+                [body.get('node') for body in physics_asset.get('bodies', [])],
+                job.get('model', ''),
+                job.get('root_transform_policy', 'preserve_verified'),
+            )
+        except Exception as error:
+            # PyNifly 28 can reject creature attachment NIFs whose shapes are
+            # parented directly to bones. NIFTools imports those authored
+            # hierarchies correctly, so rebuild the visual scene through the
+            # established compatibility path while keeping skeleton-derived
+            # physics and the same deterministic assembly inputs.
+            print('[convert] actor PyNifly import failed; retrying NIFTools compatibility path: {}'.format(error), flush=True)
+            assembly_used_niftools_fallback = True
+            spatial_corrections, collision_corrections = import_nif_scene(
+                False,
+                append=False,
+                source_paths=assembly_inputs,
+            )
+            normalize_actor_assembly()
     else:
         spatial_corrections, collision_corrections = import_nif_scene(
             True,
@@ -2235,7 +2271,7 @@ for job in jobs:
             # Older NIFTools/Blender combinations may not expose the color
             # space property; the material links below are still valid.
             pass
-        if assembly_inputs is not None:
+        if assembly_inputs is not None and not assembly_used_niftools_fallback:
             # PyNifly already authored its Principled/alpha/normal graph. Keep
             # it intact; only normalize texture color spaces above.
             continue

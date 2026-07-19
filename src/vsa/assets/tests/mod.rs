@@ -461,6 +461,26 @@ fn buffer_view_extending_past_the_glb_is_rejected() {
 }
 
 #[test]
+fn actor_conversion_retries_creature_assemblies_through_niftools() {
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("actor PyNifly import failed; retrying NIFTools compatibility path")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("source_paths=assembly_inputs"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("assembly_inputs is not None and not assembly_used_niftools_fallback")
+    );
+}
+
+#[test]
+fn actor_conversion_applies_the_selected_eyes_texture_only_to_eye_sources() {
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("eye_sources = {actor_source_key(path)"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("is_selected_eye and eye_texture"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("selected, [eye_texture] + list(texture_values)"));
+}
+
+#[test]
 fn actor_glb_audit_accepts_a_textured_weighted_skin() {
     let document = serde_json::json!({
         "accessors": [

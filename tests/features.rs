@@ -366,6 +366,7 @@ use viewer_player::player::equipment;
 mod recipe_policy;
 
 use assets::AssetConversion;
+use bevyout_core::actor;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -668,6 +669,22 @@ struct BevyoutWorld {
     resolved_converter: Option<converter_policy::ConverterBackend>,
     required_gltf_extensions: Vec<String>,
     unsupported_gltf_extensions: Vec<String>,
+
+    // -- actor_assembly.feature / actor_fallback.feature (#107, #108) --
+    actor_mesh_parts: Vec<actor::AssembledMeshPart>,
+    actor_occupied_slots: u32,
+    actor_hair_visible: Option<bool>,
+    actor_eyes_visible: Option<bool>,
+    actor_weapon_candidates: Vec<actor::ActorWeaponCandidate>,
+    actor_selected_weapon: Option<actor::AssembledWeapon>,
+    actor_scale_kind: actor::ActorKind,
+    actor_reference_scale: f32,
+    actor_race_scale: Option<f32>,
+    actor_base_scale: Option<f32>,
+    actor_resolved_scale: Option<f32>,
+    actor_fallback_input: actor::ActorAppearanceAvailability,
+    actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
+    actor_fallback_decision: Option<actor::ActorFallbackDecision>,
 }
 
 fn find_placement<'a>(
@@ -4586,6 +4603,32 @@ async fn given_actor_template(
     }
 }
 
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) is female$")]
+async fn given_actor_is_female(world: &mut BevyoutWorld, hex: String) {
+    actor_catalog_actor_mut(world, parse_hex(&hex))
+        .traits
+        .female = true;
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_actor_inventory_item(
+    world: &mut BevyoutWorld,
+    actor_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    actor_catalog_actor_mut(world, parse_hex(&actor_hex))
+        .inventory
+        .push(manifest::PreparedInventoryEntry {
+            base_form_id: parse_hex(&item_hex),
+            count,
+            record_kind: "ARMO".into(),
+            editor_id: None,
+            display_name: None,
+            leveled: false,
+        });
+}
+
 #[given(regex = r"^actor 0x([0-9a-fA-F]+) class is 0x([0-9a-fA-F]+)$")]
 async fn given_actor_class(world: &mut BevyoutWorld, hex: String, class_hex: String) {
     let form_id = parse_hex(&hex);
@@ -4761,6 +4804,41 @@ async fn then_blueprint_leveled_template(
     let blueprint = actor_catalog_blueprint(world, &reference_hex);
     assert!(blueprint.is_leveled_template);
     assert_eq!(blueprint.template_candidates, parse_hex_list(&candidates));
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) resolves base 0x([0-9a-fA-F]+)$")]
+async fn then_blueprint_resolved_base(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+) {
+    assert_eq!(
+        actor_catalog_blueprint(world, &reference_hex).resolved_base_form_id,
+        Some(parse_hex(&base_hex))
+    );
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is female$")]
+async fn then_blueprint_is_female(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(actor_catalog_blueprint(world, &reference_hex).female);
+}
+
+#[then(
+    regex = r"^blueprint for reference 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$"
+)]
+async fn then_blueprint_inventory_item(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let item_form_id = parse_hex(&item_hex);
+    assert!(
+        actor_catalog_blueprint(world, &reference_hex)
+            .inventory
+            .iter()
+            .any(|entry| entry.base_form_id == item_form_id && entry.count == count)
+    );
 }
 
 #[then(
@@ -7313,4 +7391,336 @@ async fn then_actor_skin_weights_follow_authored_ragdoll(_world: &mut BevyoutWor
     assert!(script.contains("collapse_actor_ragdoll_weights"));
     assert!(script.contains("target_group.add([vertex.index], weight, 'ADD')"));
     assert!(script.contains("source_group.remove([vertex.index])"));
+}
+
+// ---------------------------------------------------------------------
+// actor_assembly.feature / actor_fallback.feature (#107, #108) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r#"^actor mesh part (Body|Head|Hair|Eyes) index (\d+) form 0x([0-9a-fA-F]+) model \"([^\"]+)\"$"#
+)]
+async fn given_actor_mesh_part(
+    world: &mut BevyoutWorld,
+    role: String,
+    index: u32,
+    form_id: String,
+    model_path: String,
+) {
+    let role = match role.as_str() {
+        "Body" => actor::ActorMeshRole::Body(index),
+        "Head" => actor::ActorMeshRole::Head(index),
+        "Hair" => actor::ActorMeshRole::Hair,
+        "Eyes" => actor::ActorMeshRole::Eyes,
+        other => panic!("unknown actor mesh role {other}"),
+    };
+    world.actor_mesh_parts.push(actor::AssembledMeshPart {
+        name: format!("{role:?}"),
+        source_form_id: Some(parse_hex(&form_id)),
+        model_path,
+        attachment_point: actor::ActorAttachmentPoint::Head,
+        role,
+        is_visible: true,
+    });
+}
+
+#[when("actor mesh parts are canonicalized")]
+async fn when_actor_mesh_parts_are_canonicalized(world: &mut BevyoutWorld) {
+    actor::canonicalize_mesh_parts(&mut world.actor_mesh_parts);
+}
+
+#[then(regex = r#"^actor mesh roles are \"([^\"]*)\"$"#)]
+async fn then_actor_mesh_roles_are(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_mesh_parts
+        .iter()
+        .map(|part| part.role.label())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then("every actor mesh part attaches to Head")]
+async fn then_every_actor_mesh_part_attaches_to_head(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .actor_mesh_parts
+            .iter()
+            .all(|part| part.attachment_point == actor::ActorAttachmentPoint::Head)
+    );
+}
+
+#[given(regex = r"^occupied actor apparel slots 0x([0-9a-fA-F]+)$")]
+async fn given_occupied_actor_apparel_slots(world: &mut BevyoutWorld, slots: String) {
+    world.actor_occupied_slots = parse_hex(&slots);
+}
+
+#[when("actor optional-part visibility is evaluated")]
+async fn when_actor_optional_part_visibility_is_evaluated(world: &mut BevyoutWorld) {
+    world.actor_hair_visible = Some(actor::hair_visible(world.actor_occupied_slots));
+    world.actor_eyes_visible = Some(actor::eyes_visible(world.actor_occupied_slots));
+}
+
+#[then(regex = r"^actor hair is (visible|hidden)$")]
+async fn then_actor_hair_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.actor_hair_visible, Some(expected == "visible"));
+}
+
+#[then(regex = r"^actor eyes are (visible|hidden)$")]
+async fn then_actor_eyes_are(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.actor_eyes_visible, Some(expected == "visible"));
+}
+
+#[given(
+    regex = r#"^actor weapon 0x([0-9a-fA-F]+) model \"([^\"]+)\" damage (\d+) value (-?\d+) available (yes|no)$"#
+)]
+async fn given_actor_weapon_candidate(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    model_path: String,
+    damage: u16,
+    value: i32,
+    available: String,
+) {
+    world
+        .actor_weapon_candidates
+        .push(actor::ActorWeaponCandidate {
+            item_form_id: parse_hex(&form_id),
+            model_path: Some(model_path),
+            damage,
+            value,
+            available: available == "yes",
+        });
+}
+
+#[when("the actor starting weapon is selected")]
+async fn when_actor_starting_weapon_is_selected(world: &mut BevyoutWorld) {
+    world.actor_selected_weapon = actor::select_starting_weapon(&world.actor_weapon_candidates);
+}
+
+#[then(regex = r"^actor weapon 0x([0-9a-fA-F]+) is selected at (RightHand)$")]
+async fn then_actor_weapon_is_selected(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    attachment: String,
+) {
+    let selected = world
+        .actor_selected_weapon
+        .as_ref()
+        .expect("actor starting weapon must be selected");
+    assert_eq!(selected.item_form_id, parse_hex(&form_id));
+    assert_eq!(attachment, "RightHand");
+    assert_eq!(
+        selected.attachment_point,
+        actor::ActorAttachmentPoint::RightHand
+    );
+}
+
+#[then("the selected actor weapon model is unavailable")]
+async fn then_selected_actor_weapon_model_is_unavailable(world: &mut BevyoutWorld) {
+    assert!(
+        !world
+            .actor_selected_weapon
+            .as_ref()
+            .expect("actor starting weapon must be selected")
+            .model_available
+    );
+}
+
+fn parse_scale_component(value: &str) -> f32 {
+    if value.eq_ignore_ascii_case("nan") {
+        f32::NAN
+    } else {
+        value.parse().expect("scale component must be a float")
+    }
+}
+
+#[given(regex = r"^humanoid scale reference (\S+) race (\S+) actor (\S+)$")]
+async fn given_humanoid_scale(
+    world: &mut BevyoutWorld,
+    reference: String,
+    race: String,
+    actor_height: String,
+) {
+    world.actor_scale_kind = actor::ActorKind::Humanoid;
+    world.actor_reference_scale = parse_scale_component(&reference);
+    world.actor_race_scale = Some(parse_scale_component(&race));
+    world.actor_base_scale = Some(parse_scale_component(&actor_height));
+}
+
+#[given(regex = r"^creature scale reference (\S+) base (\S+)$")]
+async fn given_creature_scale(world: &mut BevyoutWorld, reference: String, base: String) {
+    world.actor_scale_kind = actor::ActorKind::Creature;
+    world.actor_reference_scale = parse_scale_component(&reference);
+    world.actor_race_scale = None;
+    world.actor_base_scale = Some(parse_scale_component(&base));
+}
+
+#[when("actor root scale is resolved")]
+async fn when_actor_root_scale_is_resolved(world: &mut BevyoutWorld) {
+    world.actor_resolved_scale = Some(actor::resolve_actor_root_scale(
+        world.actor_scale_kind,
+        world.actor_reference_scale,
+        world.actor_race_scale,
+        world.actor_base_scale,
+    ));
+}
+
+#[then(regex = r"^actor root scale is ([0-9.]+)$")]
+async fn then_actor_root_scale_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .actor_resolved_scale
+        .expect("actor root scale must be resolved");
+    assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+}
+
+#[given(
+    regex = r"^a (Humanoid|Creature) appearance for base 0x([0-9a-fA-F]+) reference 0x([0-9a-fA-F]+)$"
+)]
+async fn given_actor_fallback_identity(
+    world: &mut BevyoutWorld,
+    kind: String,
+    base_form_id: String,
+    reference_form_id: String,
+) {
+    world.actor_fallback_input = actor::ActorAppearanceAvailability {
+        kind: match kind.as_str() {
+            "Humanoid" => actor::ActorKind::Humanoid,
+            "Creature" => actor::ActorKind::Creature,
+            other => panic!("unknown actor kind {other}"),
+        },
+        base_form_id: parse_hex(&base_form_id),
+        reference_form_id: parse_hex(&reference_form_id),
+        ..actor::ActorAppearanceAvailability::default()
+    };
+}
+
+#[given(regex = r"^(exact|race sex|race default|generic) actor assets are available$")]
+async fn given_actor_assets_available(world: &mut BevyoutWorld, tier: String) {
+    match tier.as_str() {
+        "exact" => world.actor_fallback_input.exact_available = true,
+        "race sex" => world.actor_fallback_input.race_sex_available = true,
+        "race default" => world.actor_fallback_input.race_default_available = true,
+        "generic" => world.actor_fallback_input.generic_available = true,
+        other => panic!("unknown fallback availability {other}"),
+    }
+}
+
+#[given("FaceGen is not authored")]
+async fn given_facegen_not_authored(world: &mut BevyoutWorld) {
+    world.actor_fallback_input.facegen = actor::FaceGenAvailability::NotAuthored;
+}
+
+#[given("FaceGen is authored but incompatible")]
+async fn given_facegen_authored_incompatible(world: &mut BevyoutWorld) {
+    world.actor_fallback_input.facegen = actor::FaceGenAvailability::Incompatible;
+}
+
+fn fallback_reason(code: &str) -> actor::ActorFallbackReason {
+    match code {
+        "missing_facegen" => actor::ActorFallbackReason::MissingFaceGen,
+        "missing_equipment" => actor::ActorFallbackReason::MissingEquipmentModel {
+            item_form_id: 0,
+            path: String::new(),
+        },
+        "missing_skeleton" => actor::ActorFallbackReason::MissingSkeleton {
+            path: "fixture/skeleton.nif".into(),
+        },
+        "missing_head_model" => actor::ActorFallbackReason::MissingHeadModel {
+            path: "fixture/head.nif".into(),
+        },
+        "incompatible_skin" => actor::ActorFallbackReason::IncompatibleSkin {
+            path: "fixture/skin.nif".into(),
+        },
+        other => panic!("unsupported fallback reason fixture {other}"),
+    }
+}
+
+#[given(regex = r#"^actor fallback reason \"([^\"]+)\" is supplied$"#)]
+async fn given_actor_fallback_reason_supplied(world: &mut BevyoutWorld, code: String) {
+    world
+        .actor_fallback_supplied_reasons
+        .push(fallback_reason(&code));
+}
+
+#[when("actor appearance fallback is resolved")]
+async fn when_actor_appearance_fallback_is_resolved(world: &mut BevyoutWorld) {
+    world.actor_fallback_decision = Some(actor::resolve_actor_fallback(
+        &world.actor_fallback_input,
+        world.actor_fallback_supplied_reasons.clone(),
+    ));
+}
+
+#[then(
+    regex = r"^actor fallback level is (AuthoredExact|RaceSexSpecific|RaceDefault|GenericProjectBody|ProxyMesh)$"
+)]
+async fn then_actor_fallback_level_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .level;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r"^actor FaceGen policy is (NotAuthored|Authored|RestPoseFallback)$")]
+async fn then_actor_facegen_policy_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .facegen_policy;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r"^actor proxy kind is (None|GenericHumanoid|Bounds)$")]
+async fn then_actor_proxy_kind_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .proxy_kind;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r#"^actor fallback reason \"([^\"]+)\" is recorded$"#)]
+async fn then_actor_fallback_reason_is_recorded(world: &mut BevyoutWorld, code: String) {
+    assert!(
+        world
+            .actor_fallback_decision
+            .as_ref()
+            .expect("actor fallback must be resolved")
+            .reasons
+            .iter()
+            .any(|reason| reason.code() == code)
+    );
+}
+
+#[then(regex = r#"^actor fallback reasons are \"([^\"]*)\"$"#)]
+async fn then_actor_fallback_reasons_are(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .reasons
+        .iter()
+        .map(|reason| reason.code())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^fallback identity remains base 0x([0-9a-fA-F]+) reference 0x([0-9a-fA-F]+)$")]
+async fn then_fallback_identity_remains(
+    world: &mut BevyoutWorld,
+    base_form_id: String,
+    reference_form_id: String,
+) {
+    let decision = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved");
+    assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
+    assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
 }

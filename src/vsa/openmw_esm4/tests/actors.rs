@@ -10,6 +10,42 @@ fn form_id_bytes(id: u32) -> Vec<u8> {
 }
 
 #[test]
+fn appearance_part_records_retain_actor_assembly_assets() {
+    let resolver = direct_resolver();
+    for (kind, path) in [
+        ("HDPT", "characters/head/humanhead.nif"),
+        ("HAIR", "characters/hair/messy.nif"),
+    ] {
+        let record = parse_base(
+            kind,
+            &[
+                direct_subrecord("EDID", format!("Test{kind}\0").into_bytes()),
+                direct_subrecord("MODL", format!("{path}\0").into_bytes()),
+            ],
+            &resolver,
+        )
+        .unwrap_or_else(|| panic!("{kind} must be retained as a supported actor part"));
+
+        assert_eq!(record.kind, kind);
+        assert_eq!(record.model.as_deref(), Some(path));
+        assert!(record.ignored_subrecords.is_empty());
+    }
+
+    let eyes = parse_base(
+        "EYES",
+        &[
+            direct_subrecord("EDID", b"TestEYES\0".to_vec()),
+            direct_subrecord("ICON", b"characters/eyes/blue.dds\0".to_vec()),
+        ],
+        &resolver,
+    )
+    .expect("EYES must be retained as a supported actor appearance record");
+    assert_eq!(eyes.icon.as_deref(), Some("characters/eyes/blue.dds"));
+    assert!(eyes.model.is_none(), "EYES selects texture, not geometry");
+    assert!(eyes.ignored_subrecords.is_empty());
+}
+
+#[test]
 fn decodes_every_supported_npc_subrecord() {
     let resolver = direct_resolver();
 

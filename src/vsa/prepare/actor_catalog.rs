@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use bevyout_core::actor::ActorAssemblyBlueprint;
 use serde::{Deserialize, Serialize};
 
 use super::super::manifest::PreparedInventoryEntry;
@@ -36,7 +37,7 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v2-appearance-seeded-levels";
+pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v4-nested-leveled-resolution";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -46,6 +47,7 @@ pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v2-appearance-see
 /// content without an unbounded walk; ordinary FO3 template chains are one
 /// or two hops.
 const MAX_TEMPLATE_CHAIN_DEPTH: usize = 32;
+const MAX_LEVELED_LIST_DEPTH: usize = 32;
 
 // ---------------------------------------------------------------------
 // Plain input types (boundary conversion happens in orchestrator.rs)
@@ -164,6 +166,7 @@ pub(crate) struct ActorModelAnimation {
     pub(crate) model_path: Option<String>,
     pub(crate) creature_model_list: Vec<String>,
     pub(crate) creature_animation_files: Vec<String>,
+    pub(crate) creature_base_scale: Option<f32>,
 }
 
 /// `USE_BASE_DATA` group: display name plus the raw `ACBS.flags` (essential/
@@ -224,7 +227,7 @@ pub(crate) struct ActorRecordInput {
 }
 
 /// A resolved `LVLN`/`LVLC` leveled-list base reachable from a `TPLT` chain
-/// (or directly as an `ACRE`/`ACHR` base -- see `ActorCatalogEntry::Skipped`).
+/// or directly as an `ACRE`/`ACHR` base.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LeveledInput {
     pub(crate) form_id: u32,
@@ -283,10 +286,10 @@ pub(crate) struct ActorCatalogInputs {
     pub(crate) factions: HashMap<u32, FactionInput>,
     pub(crate) packages: HashSet<u32>,
     /// FormIDs of every decoded base record, used to check hair/eyes/
-    /// head-part links. `HAIR`/`EYES`/`HDPT` are not yet decoded record
-    /// kinds (see `openmw_esm4::records::is_supported_base`), so those
-    /// links are honestly diagnosed unresolved today; this set is forward
-    /// compatible with a future task that adds them.
+    /// head-part links. `HAIR`/`HDPT` are model-bearing and `EYES` is
+    /// texture-bearing; all three remain appearance base records so their
+    /// references resolve through the same load-order map as every other
+    /// actor input.
     pub(crate) known_bases: HashSet<u32>,
     pub(crate) placements: Vec<ActorPlacementInput>,
 }
@@ -330,7 +333,11 @@ pub(crate) struct ActorBlueprint {
     pub(crate) hair_form_id: Option<u32>,
     pub(crate) eyes_form_id: Option<u32>,
     pub(crate) head_part_form_ids: Vec<u32>,
+    #[serde(default)]
+    pub(crate) facegen_present: bool,
     pub(crate) voice_form_id: Option<u32>,
+    #[serde(default)]
+    pub(crate) creature_base_scale: Option<f32>,
     pub(crate) level_or_mult: i16,
     pub(crate) calc_min_level: u16,
     pub(crate) calc_max_level: u16,
@@ -357,11 +364,10 @@ pub(crate) struct ActorBlueprint {
     pub(crate) death_item_form_id: Option<u32>,
     pub(crate) script_form_id: Option<u32>,
     pub(crate) inventory: Vec<PreparedInventoryEntry>,
-    /// `true` when this actor's `TPLT` chain passed through an `LVLN`/
-    /// `LVLC` leveled list rather than resolving to a single concrete
-    /// actor; `template_candidates` then carries every leveled entry's
-    /// FormID, sorted and deduplicated (F103.C, "record the resolved
-    /// candidate set deterministically").
+    /// `true` when this actor's base or `TPLT` chain passed through an
+    /// `LVLN`/`LVLC` leveled list. `resolved_base_form_id` carries the selected
+    /// concrete actor; `template_candidates` retains the root list's immediate
+    /// entries, sorted and deduplicated, for deterministic diagnostics.
     pub(crate) is_leveled_template: bool,
     pub(crate) template_candidates: Vec<u32>,
     pub(crate) base_template_form_id: Option<u32>,
@@ -372,6 +378,11 @@ pub(crate) struct ActorBlueprint {
     pub(crate) rotation_xyzw: [f32; 4],
     pub(crate) scale: f32,
     pub(crate) initially_enabled: bool,
+    /// Canonical preparation/runtime appearance decision. Filled after asset
+    /// availability is resolved; serde-default keeps old artifacts readable
+    /// long enough for the catalog revision gate to reject them explicitly.
+    #[serde(default)]
+    pub(crate) assembly: Option<ActorAssemblyBlueprint>,
     /// Stable diagnostic strings: template cycles, missing/unresolved
     /// template targets, unresolved race/class/faction/package/hair/eyes/
     /// head-part links, and unsupported template flag bits. Sorted and
@@ -397,9 +408,8 @@ pub(crate) enum ActorCatalogEntry {
         reason: String,
     },
     /// The placement's base FormID resolves to an `LVLN`/`LVLC` leveled
-    /// list rather than a concrete actor; direct leveled placements are
-    /// not resolved into blueprints (unlike leveled targets reached mid
-    /// `TPLT` chain, which populate `template_candidates` instead).
+    /// list that contains no concrete actor of the expected kind after
+    /// recursively traversing nested lists.
     Skipped {
         base_form_id: u32,
         reference_form_id: u32,
@@ -561,6 +571,98 @@ fn build_chain(
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConcreteActorCandidates {
+    form_ids: Vec<u32>,
+    diagnostics: Vec<String>,
+}
+
+/// Flattens one actor leveled list into concrete actor leaves. Fallout actor
+/// lists commonly contain other `LVLN` records, so filtering only the root
+/// entries against `actors` silently drops valid NPCs and freezes the shell's
+/// own traits/inventory. Cycles are scoped to the active recursion path so a
+/// shared nested list can still be visited from multiple valid branches.
+fn resolve_concrete_actor_candidates(
+    root_list_form_id: u32,
+    expected_kind: ActorRecordKind,
+    actors: &HashMap<u32, ActorRecordInput>,
+    leveled: &HashMap<u32, LeveledInput>,
+) -> ConcreteActorCandidates {
+    fn visit(
+        list_form_id: u32,
+        depth: usize,
+        expected_kind: ActorRecordKind,
+        actors: &HashMap<u32, ActorRecordInput>,
+        leveled: &HashMap<u32, LeveledInput>,
+        active: &mut HashSet<u32>,
+        result: &mut ConcreteActorCandidates,
+    ) {
+        if depth >= MAX_LEVELED_LIST_DEPTH {
+            result.diagnostics.push(format!(
+                "leveled list {list_form_id:08x} exceeds maximum nesting depth {MAX_LEVELED_LIST_DEPTH}"
+            ));
+            return;
+        }
+        if !active.insert(list_form_id) {
+            result
+                .diagnostics
+                .push(format!("leveled list cycle at {list_form_id:08x}"));
+            return;
+        }
+
+        let Some(list) = leveled.get(&list_form_id) else {
+            result
+                .diagnostics
+                .push(format!("missing leveled list {list_form_id:08x}"));
+            active.remove(&list_form_id);
+            return;
+        };
+        for candidate in &list.entries {
+            if let Some(actor) = actors.get(candidate) {
+                if actor.kind == expected_kind {
+                    result.form_ids.push(*candidate);
+                } else {
+                    result.diagnostics.push(format!(
+                        "leveled candidate {candidate:08x} is {:?}, expected {:?}",
+                        actor.kind, expected_kind
+                    ));
+                }
+            } else if leveled.contains_key(candidate) {
+                visit(
+                    *candidate,
+                    depth + 1,
+                    expected_kind,
+                    actors,
+                    leveled,
+                    active,
+                    result,
+                );
+            } else {
+                result
+                    .diagnostics
+                    .push(format!("unresolved leveled candidate {candidate:08x}"));
+            }
+        }
+        active.remove(&list_form_id);
+    }
+
+    let mut result = ConcreteActorCandidates::default();
+    visit(
+        root_list_form_id,
+        0,
+        expected_kind,
+        actors,
+        leveled,
+        &mut HashSet::new(),
+        &mut result,
+    );
+    result.form_ids.sort_unstable();
+    result.form_ids.dedup();
+    result.diagnostics.sort();
+    result.diagnostics.dedup();
+    result
+}
+
 /// Walks `chain` for one field group: starting at `chain.nodes[0]`, keeps
 /// moving to the next concrete node as long as the current node's own
 /// `ActorTemplateUsage` (via `uses_group`) says "my value for this group
@@ -621,7 +723,7 @@ pub(crate) fn build_actor_catalog(
     for placement in &inputs.placements {
         let entry = match inputs.actors.get(&placement.base_form_id) {
             Some(actor) if actor.kind == placement.kind => {
-                let blueprint = build_blueprint(actor, placement, inputs);
+                let blueprint = build_blueprint(actor, placement, inputs, source_fingerprint);
                 counters.prepared += 1;
                 if blueprint.inherited {
                     counters.inherited += 1;
@@ -644,24 +746,33 @@ pub(crate) fn build_actor_catalog(
             }
             None if inputs.leveled.contains_key(&placement.base_form_id) => {
                 let list = &inputs.leveled[&placement.base_form_id];
-                let mut candidates = list
-                    .entries
-                    .iter()
-                    .filter_map(|candidate| inputs.actors.get(candidate))
-                    .filter(|actor| actor.kind == placement.kind)
-                    .map(|actor| actor.form_id)
-                    .collect::<Vec<_>>();
-                candidates.sort_unstable();
-                candidates.dedup();
-                if candidates.is_empty() {
+                let mut immediate_candidates = list.entries.clone();
+                immediate_candidates.sort_unstable();
+                immediate_candidates.dedup();
+                let resolution = resolve_concrete_actor_candidates(
+                    placement.base_form_id,
+                    placement.kind,
+                    &inputs.actors,
+                    &inputs.leveled,
+                );
+                if resolution.form_ids.is_empty() {
                     counters.skipped += 1;
                     ActorCatalogEntry::Skipped {
                         base_form_id: placement.base_form_id,
                         reference_form_id: placement.reference_form_id,
-                        reason: format!(
-                            "leveled list {:08x} has no concrete {:?} candidate",
-                            placement.base_form_id, placement.kind
-                        ),
+                        reason: if resolution.diagnostics.is_empty() {
+                            format!(
+                                "leveled list {:08x} has no concrete {:?} candidate",
+                                placement.base_form_id, placement.kind
+                            )
+                        } else {
+                            format!(
+                                "leveled list {:08x} has no concrete {:?} candidate: {}",
+                                placement.base_form_id,
+                                placement.kind,
+                                resolution.diagnostics.join("; ")
+                            )
+                        },
                     }
                 } else {
                     let selection_seed = stable_selection_seed(
@@ -669,15 +780,18 @@ pub(crate) fn build_actor_catalog(
                         placement.reference_form_id,
                         placement.base_form_id,
                     );
-                    let selected = candidates[(selection_seed as usize) % candidates.len()];
+                    let selected =
+                        resolution.form_ids[(selection_seed as usize) % resolution.form_ids.len()];
                     let actor = &inputs.actors[&selected];
-                    let mut blueprint = build_blueprint(actor, placement, inputs);
+                    let mut blueprint =
+                        build_blueprint(actor, placement, inputs, source_fingerprint);
                     blueprint.base_form_id = selected;
                     blueprint.source_base_form_id = placement.base_form_id;
                     blueprint.resolved_base_form_id = Some(selected);
                     blueprint.selection_seed = Some(selection_seed);
                     blueprint.is_leveled_template = true;
-                    blueprint.template_candidates = candidates;
+                    blueprint.template_candidates = immediate_candidates;
+                    blueprint.diagnostics.extend(resolution.diagnostics);
                     blueprint.diagnostics.push(format!(
                         "leveled list {:08x} selected candidate {:08x} with seed {selection_seed:016x}",
                         placement.base_form_id, selected
@@ -725,6 +839,7 @@ fn build_blueprint(
     actor: &ActorRecordInput,
     placement: &ActorPlacementInput,
     inputs: &ActorCatalogInputs,
+    source_fingerprint: &str,
 ) -> ActorBlueprint {
     let mut diagnostics = Vec::new();
     if actor.template_usage.unsupported_bits != 0 {
@@ -734,7 +849,7 @@ fn build_blueprint(
         ));
     }
 
-    let chain = if actor.template_usage.any() {
+    let mut chain = if actor.template_usage.any() {
         build_chain(actor.form_id, &inputs.actors, &inputs.leveled)
     } else {
         TemplateChain::trivial(actor.form_id)
@@ -744,6 +859,48 @@ fn build_blueprint(
         ChainEnd::Leveled { candidates, .. } => (true, candidates.clone()),
         _ => (false, Vec::new()),
     };
+
+    // A template shell that delegates a field group to LVLN/LVLC must use
+    // the same concrete candidate for every delegated group. Extending the
+    // chain once here makes the catalog the sole identity resolver consumed
+    // by appearance preparation, rather than letting visuals independently
+    // roll a second candidate.
+    let mut resolved_base_form_id = None;
+    let mut selection_seed = None;
+    if let ChainEnd::Leveled {
+        target_form_id,
+        candidates: _,
+    } = chain.end.clone()
+    {
+        let resolution = resolve_concrete_actor_candidates(
+            target_form_id,
+            actor.kind,
+            &inputs.actors,
+            &inputs.leveled,
+        );
+        diagnostics.extend(resolution.diagnostics);
+        if !resolution.form_ids.is_empty() {
+            let seed = stable_selection_seed(
+                source_fingerprint,
+                placement.reference_form_id,
+                target_form_id,
+            );
+            let selected = resolution.form_ids[(seed as usize) % resolution.form_ids.len()];
+            let selected_chain = build_chain(selected, &inputs.actors, &inputs.leveled);
+            for node in selected_chain.nodes {
+                if !chain.nodes.contains(&node) {
+                    chain.nodes.push(node);
+                }
+            }
+            chain.end = selected_chain.end;
+            resolved_base_form_id = Some(selected);
+            selection_seed = Some(seed);
+            diagnostics.push(format!(
+                "leveled template {:08x} selected candidate {selected:08x} with seed {seed:016x}",
+                target_form_id
+            ));
+        }
+    }
 
     let mut inherited = false;
     macro_rules! resolve_group {
@@ -854,8 +1011,8 @@ fn build_blueprint(
     ActorBlueprint {
         base_form_id: actor.form_id,
         source_base_form_id: placement.base_form_id,
-        resolved_base_form_id: None,
-        selection_seed: None,
+        resolved_base_form_id,
+        selection_seed,
         reference_form_id: placement.reference_form_id,
         record_kind: actor.kind.as_record_signature().to_string(),
         editor_id: actor.editor_id.clone(),
@@ -870,7 +1027,9 @@ fn build_blueprint(
         hair_form_id: traits.hair_form_id,
         eyes_form_id: traits.eyes_form_id,
         head_part_form_ids: traits.head_part_form_ids.clone(),
+        facegen_present: traits.facegen_present,
         voice_form_id: traits.voice_form_id,
+        creature_base_scale: model_animation.creature_base_scale,
         level_or_mult: stats.level_or_mult,
         calc_min_level: stats.calc_min_level,
         calc_max_level: stats.calc_max_level,
@@ -904,7 +1063,20 @@ fn build_blueprint(
         rotation_xyzw: placement.rotation_xyzw,
         scale: placement.scale,
         initially_enabled: placement.initially_enabled,
+        assembly: None,
         diagnostics,
+    }
+}
+
+pub(crate) fn attach_actor_assemblies(
+    catalog: &mut PreparedActorCatalog,
+    assemblies: &HashMap<u32, ActorAssemblyBlueprint>,
+) {
+    for entry in &mut catalog.entries {
+        let ActorCatalogEntry::Prepared(blueprint) = entry else {
+            continue;
+        };
+        blueprint.assembly = assemblies.get(&blueprint.reference_form_id).cloned();
     }
 }
 
@@ -971,6 +1143,14 @@ mod tests {
         }
     }
 
+    fn creature(form_id: u32) -> ActorRecordInput {
+        ActorRecordInput {
+            form_id,
+            kind: ActorRecordKind::Creature,
+            ..ActorRecordInput::default()
+        }
+    }
+
     fn placement(
         reference_form_id: u32,
         base_form_id: u32,
@@ -988,7 +1168,7 @@ mod tests {
     fn revision_is_pinned() {
         assert_eq!(
             ACTOR_CATALOG_REVISION,
-            "openmw-actors-v2-appearance-seeded-levels"
+            "openmw-actors-v4-nested-leveled-resolution"
         );
     }
 
@@ -1126,6 +1306,45 @@ mod tests {
     }
 
     #[test]
+    fn leveled_template_resolves_flagged_groups_from_one_seeded_actor() {
+        let mut shell = npc(0x10);
+        shell.base_template_form_id = Some(0x99);
+        shell.template_usage.traits = true;
+        shell.template_usage.model_animation = true;
+        shell.traits.race_form_id = Some(0xAA);
+        shell.model_animation.model_path = Some("characters/shell.nif".into());
+
+        let mut concrete = npc(0x20);
+        concrete.traits.race_form_id = Some(0xBB);
+        concrete.model_animation.model_path = Some("characters/concrete.nif".into());
+
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x10, shell), (0x20, concrete)]),
+            leveled: HashMap::from([(
+                0x99,
+                LeveledInput {
+                    form_id: 0x99,
+                    entries: vec![0x20],
+                },
+            )]),
+            placements: vec![placement(1, 0x10, ActorRecordKind::Npc)],
+            races: HashSet::from([0xBB]),
+            ..ActorCatalogInputs::default()
+        };
+
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected a prepared blueprint");
+        };
+        assert_eq!(blueprint.resolved_base_form_id, Some(0x20));
+        assert_eq!(blueprint.race_form_id, Some(0xBB));
+        assert_eq!(
+            blueprint.model_path.as_deref(),
+            Some("characters/concrete.nif")
+        );
+    }
+
+    #[test]
     fn an_unused_dangling_template_produces_no_leveled_marker() {
         let mut a = npc(0x10);
         a.base_template_form_id = Some(0xDEAD); // dangling, but no flags use it
@@ -1241,6 +1460,147 @@ mod tests {
             &catalog.entries[0],
             ActorCatalogEntry::Skipped { .. }
         ));
+    }
+
+    #[test]
+    fn direct_nested_leveled_base_resolves_to_a_concrete_actor() {
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x20, npc(0x20))]),
+            leveled: HashMap::from([
+                (
+                    0x77,
+                    LeveledInput {
+                        form_id: 0x77,
+                        entries: vec![0x78],
+                    },
+                ),
+                (
+                    0x78,
+                    LeveledInput {
+                        form_id: 0x78,
+                        entries: vec![0x20],
+                    },
+                ),
+            ]),
+            placements: vec![placement(1, 0x77, ActorRecordKind::Npc)],
+            ..ActorCatalogInputs::default()
+        };
+
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected a prepared blueprint");
+        };
+        assert_eq!(blueprint.source_base_form_id, 0x77);
+        assert_eq!(blueprint.resolved_base_form_id, Some(0x20));
+        assert_eq!(blueprint.template_candidates, vec![0x78]);
+        assert_eq!(catalog.counters.prepared, 1);
+        assert_eq!(catalog.counters.skipped, 0);
+    }
+
+    #[test]
+    fn nested_candidate_resolution_keeps_valid_leaves_and_diagnoses_bad_branches() {
+        let actors = HashMap::from([(0x20, npc(0x20)), (0x30, creature(0x30))]);
+        let leveled = HashMap::from([
+            (
+                0x90,
+                LeveledInput {
+                    form_id: 0x90,
+                    entries: vec![0x91, 0x20],
+                },
+            ),
+            (
+                0x91,
+                LeveledInput {
+                    form_id: 0x91,
+                    entries: vec![0x90, 0x30, 0xDEAD],
+                },
+            ),
+        ]);
+
+        let resolved =
+            resolve_concrete_actor_candidates(0x90, ActorRecordKind::Npc, &actors, &leveled);
+        assert_eq!(resolved.form_ids, vec![0x20]);
+        for expected in [
+            "leveled list cycle at 00000090",
+            "leveled candidate 00000030 is Creature, expected Npc",
+            "unresolved leveled candidate 0000dead",
+        ] {
+            assert!(
+                resolved
+                    .diagnostics
+                    .iter()
+                    .any(|message| message == expected),
+                "missing {expected:?} in {:?}",
+                resolved.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn nested_candidate_selection_is_stable_across_entry_order_and_duplicates() {
+        let catalog_for = |root_entries: Vec<u32>, nested_entries: Vec<u32>| {
+            let inputs = ActorCatalogInputs {
+                actors: HashMap::from([(0x20, npc(0x20)), (0x30, npc(0x30))]),
+                leveled: HashMap::from([
+                    (
+                        0x90,
+                        LeveledInput {
+                            form_id: 0x90,
+                            entries: root_entries,
+                        },
+                    ),
+                    (
+                        0x91,
+                        LeveledInput {
+                            form_id: 0x91,
+                            entries: nested_entries,
+                        },
+                    ),
+                ]),
+                placements: vec![placement(1, 0x90, ActorRecordKind::Npc)],
+                ..ActorCatalogInputs::default()
+            };
+            build_actor_catalog(&inputs, "fp")
+        };
+
+        let first = catalog_for(vec![0x91, 0x20, 0x91], vec![0x30, 0x20]);
+        let second = catalog_for(vec![0x20, 0x91], vec![0x20, 0x30, 0x20]);
+        let resolved = |catalog: &PreparedActorCatalog| {
+            let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+                panic!("expected a prepared blueprint");
+            };
+            blueprint.resolved_base_form_id
+        };
+        assert_eq!(resolved(&first), resolved(&second));
+    }
+
+    #[test]
+    fn nested_candidate_resolution_is_depth_bounded() {
+        let mut leveled = HashMap::new();
+        for depth in 0..=MAX_LEVELED_LIST_DEPTH {
+            let form_id = 0x100 + depth as u32;
+            leveled.insert(
+                form_id,
+                LeveledInput {
+                    form_id,
+                    entries: vec![form_id + 1],
+                },
+            );
+        }
+        let actors = HashMap::from([(
+            0x100 + MAX_LEVELED_LIST_DEPTH as u32 + 1,
+            npc(0x100 + MAX_LEVELED_LIST_DEPTH as u32 + 1),
+        )]);
+
+        let resolved =
+            resolve_concrete_actor_candidates(0x100, ActorRecordKind::Npc, &actors, &leveled);
+        assert!(resolved.form_ids.is_empty());
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("maximum nesting depth 32"))
+        );
     }
 
     #[test]
