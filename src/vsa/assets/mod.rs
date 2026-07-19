@@ -6,11 +6,15 @@ use std::path::{Path, PathBuf};
 mod archives;
 mod blender;
 mod cache;
+mod material_glb;
+mod material_policy;
 mod textures;
 
 pub(crate) use archives::*;
 pub(crate) use blender::*;
 pub(crate) use cache::*;
+pub(crate) use material_glb::*;
+pub(crate) use material_policy::*;
 use std::process::Command;
 pub(crate) use textures::*;
 
@@ -22,33 +26,45 @@ use super::physics::read_physics_asset;
 /// Bump this whenever the embedded NIFTools conversion/filtering changes.
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v30-normal-y-v1";
+pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v32-normal-y-v1-pbr-material-v2";
 
 /// Native static conversion cache identity. Keep independent from Blender so
 /// the two backends can coexist in one asset cache without false hits.
-pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v4-normal-y-v1-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
 pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-actor-assembly-v10-normal-y-v1-selective-head-anims-0dfd052";
+    "nifty-fo3-native-actor-assembly-v12-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
 pub(crate) const ACTOR_CONVERTER_REVISION: &str =
-    "pynifly-v29-normal-y-v1-actor-bindpose-v22-eyes-creature-primary-fallback";
+    "pynifly-v31-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v30-normal-y-v1+pynifly-v29-normal-y-v1-actor-bindpose-v22-eyes-creature-primary-fallback";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v32-normal-y-v1-pbr-material-v2+pynifly-v31-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v4-normal-y-v1-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v10-normal-y-v1-selective-head-anims-0dfd052";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v12-normal-y-v1-pbr-material-v2-selective-head-anims-0dfd052";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,
     NATIVE_PREPARED_CONVERTER_REVISION,
 ];
+
+pub(crate) fn material_policy_identity(base_revision: &str) -> String {
+    material_policy_identity_with_csv(base_revision, METALLIC_MATERIALS_CSV)
+}
+
+pub(crate) fn material_policy_identity_with_csv(base_revision: &str, csv: &str) -> String {
+    let mut identity = Vec::new();
+    identity.extend_from_slice(MATERIAL_POLICY_REVISION.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(csv.as_bytes());
+    let digest = fingerprint(&identity);
+    format!("{base_revision}+material-policy-{}", &digest[..16])
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ActorAssemblyDescriptor {
@@ -269,6 +285,7 @@ pub(crate) enum AssetJobKind {
 }
 
 pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[u8]) -> String {
+    let converter_revision = material_policy_identity(converter_revision);
     let mut cache_key = converter_revision.as_bytes().to_vec();
     cache_key.push(0);
     cache_key.extend_from_slice(nif_bytes);

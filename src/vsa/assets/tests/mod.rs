@@ -13,6 +13,18 @@ fn directx_normal_conversion_flips_only_green() {
 }
 
 #[test]
+fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("2.0 * (2.0 / (exponent + 2.0)) ** 0.25"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("Material.import_material_gloss = staticmethod(import_material_gloss_ggx)")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("actor_shape_glossiness(nifnode)"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_diffuse_texture_path"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_perceptual_roughness"));
+}
+
+#[test]
 fn blender_normal_conversion_is_green_only_and_rebuilds_stale_pngs() {
     let dds = Path::new(r"textures\architecture\Wall_N.DDS");
     let output = Path::new(r"textures\architecture\Wall.normal-y.tmp.png");
@@ -69,6 +81,21 @@ fn content_addressed_glb_names_are_stable_and_revision_sensitive() {
         content_addressed_glb_name("converter-v1", b"changed-nif")
     );
     assert!(first.ends_with(".glb"));
+}
+
+#[test]
+fn material_policy_content_participates_in_converter_identity() {
+    let identity = material_policy_identity("converter-v1");
+    assert!(identity.starts_with("converter-v1+material-policy-"));
+    assert_ne!(identity, "converter-v1");
+    assert_eq!(identity, material_policy_identity("converter-v1"));
+    assert_ne!(
+        identity,
+        material_policy_identity_with_csv(
+            "converter-v1",
+            "diffuse_texture,object_name,metallic\ntextures/fixtures/metal.dds,Metal Fixture,1\n"
+        )
+    );
 }
 
 #[test]

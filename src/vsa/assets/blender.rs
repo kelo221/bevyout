@@ -63,6 +63,12 @@ pub(crate) fn run_blender_batch(
                 stderr_tail
             );
         }
+        apply_material_policy_to_glb_file(&job.output).with_context(|| {
+            format!(
+                "applying authored material policy to {}",
+                job.output.display()
+            )
+        })?;
         validate_glb_images(&job.output).with_context(|| {
             format!(
                 "converted GLB failed texture validation: {}",

@@ -151,7 +151,7 @@ pub(crate) fn convert_staged_textures(
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -188,7 +188,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> Result<()> {
     fs::rename(source, destination).with_context(|| {
         format!(
             "could not atomically replace {} with {}",

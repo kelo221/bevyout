@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::super::assets::PREPARED_CONVERTER_REVISION;
+use super::super::assets::material_policy_identity;
 
 /// Physics classification/sidecar pipeline revision (F49.1). Bump whenever
 /// `classify_placement`, `dynamic_rejection_reason`, or
@@ -58,7 +59,7 @@ impl CellFingerprints {
     ) -> Self {
         Self {
             plugin_content_set: plugin_content_set.into(),
-            converter: converter_revision.into(),
+            converter: material_policy_identity(converter_revision),
             physics: PHYSICS_PIPELINE_REVISION.into(),
             prepare_pipeline: PREPARE_PIPELINE_REVISION.into(),
         }
@@ -169,7 +170,10 @@ mod tests {
     fn current_fingerprints_record_all_four_components() {
         let current = CellFingerprints::current("plugin-fp");
         assert_eq!(current.plugin_content_set, "plugin-fp");
-        assert_eq!(current.converter, PREPARED_CONVERTER_REVISION);
+        assert_eq!(
+            current.converter,
+            material_policy_identity(PREPARED_CONVERTER_REVISION)
+        );
         assert_eq!(current.physics, PHYSICS_PIPELINE_REVISION);
         assert_eq!(current.prepare_pipeline, PREPARE_PIPELINE_REVISION);
     }
@@ -177,7 +181,7 @@ mod tests {
     #[test]
     fn selected_converter_revision_is_recorded_independently() {
         let current = CellFingerprints::current_with_converter("plugin-fp", "native-v1");
-        assert_eq!(current.converter, "native-v1");
+        assert_eq!(current.converter, material_policy_identity("native-v1"));
     }
 
     // T49.2: an unchanged set of four fingerprints is not stale.

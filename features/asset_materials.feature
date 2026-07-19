@@ -48,24 +48,52 @@ Feature: Asset conversion profile selection
     When its material emission policy is evaluated
     Then the selected emission source is Glow
 
-  Scenario: Shared Fallout normal/specular texture enables roughness proxy
-    Given an imported material has a shared normal and specular image
-    And it has no authored metallic roughness map
-    When its roughness proxy policy is evaluated
-    Then specular-alpha roughness is enabled
+  Scenario Outline: NIF glossiness becomes perceptual GGX roughness
+    Given a NIF material glossiness exponent <glossiness>
+    When its PBR material policy is evaluated
+    Then its perceptual roughness is approximately <roughness>
 
-  Scenario: Authored roughness takes precedence over proxy
-    Given an imported material has a shared normal and specular image
-    And it has an authored metallic roughness map
-    When its roughness proxy policy is evaluated
-    Then specular-alpha roughness is disabled
+    Examples:
+      | glossiness | roughness |
+      | 0           | 1.000000  |
+      | 10          | 1.000000  |
+      | 70          | 0.816497  |
+      | 100         | 0.748407  |
 
-  Scenario: Non-opaque decals stay off the roughness proxy
-    Given an imported material has a shared normal and specular image
-    And it is a non-opaque decal
-    And it has no authored metallic roughness map
-    When its roughness proxy policy is evaluated
-    Then specular-alpha roughness is disabled
+  Scenario Outline: Missing or invalid glossiness uses exponent ten
+    Given a NIF material glossiness value "<glossiness>"
+    When its PBR material policy is evaluated
+    Then its perceptual roughness is approximately 1.000000
+
+    Examples:
+      | glossiness |
+      | missing    |
+      | negative   |
+      | nan        |
+      | infinite   |
+
+  Scenario: Exact normalized diffuse paths select binary metalness
+    Given metallic material CSV "diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,Test Weapon,1\n"
+    And a material diffuse texture "Data\\Textures\\Weapons\\TEST.DDS"
+    When its PBR material policy is evaluated
+    Then its metallic factor is 1
+
+  Scenario: Unlisted diffuse paths remain dielectric
+    Given metallic material CSV "diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,Test Weapon,1\n"
+    And a material diffuse texture "textures/weapons/other.dds"
+    When its PBR material policy is evaluated
+    Then its metallic factor is 0
+
+  Scenario Outline: Invalid metallic CSV is rejected
+    Given metallic material CSV "<csv>"
+    When the metallic material CSV is parsed
+    Then the metallic material CSV is rejected
+
+    Examples:
+      | csv                                                                                                                       |
+      | diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,Test Weapon,0.5\n                                      |
+      | diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,Test Weapon,1\nTEXTURES\\WEAPONS\\TEST.DDS,Duplicate Weapon,0\n |
+      | diffuse_texture,object_name,metallic\ntextures/weapons/test.dds,,1\n                                                |
 
   Scenario: DirectX normal Y is converted without changing specular alpha
     Given a DirectX normal texel (12, 34, 56, 78)

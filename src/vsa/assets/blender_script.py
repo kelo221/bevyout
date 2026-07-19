@@ -3,6 +3,32 @@ from mathutils import Matrix, Vector
 
 RIGID_BODY_TYPES = {'bhkRigidBody', 'bhkRigidBodyT'}
 
+def perceptual_roughness_from_glossiness(glossiness):
+    try:
+        exponent = float(glossiness)
+    except (TypeError, ValueError):
+        exponent = 10.0
+    if not math.isfinite(exponent) or exponent < 0.0:
+        exponent = 10.0
+    return max(0.0, min(1.0, 2.0 * (2.0 / (exponent + 2.0)) ** 0.25))
+
+def canonical_texture_reference(path):
+    normalized = str(path or '').strip().replace('\\', '/').casefold()
+    marker = normalized.find('textures/')
+    return normalized[marker:] if marker >= 0 else None
+
+def set_material_roughness(material, glossiness):
+    roughness = perceptual_roughness_from_glossiness(glossiness)
+    material.roughness = roughness
+    material['bevyout_perceptual_roughness'] = roughness
+    if material.use_nodes:
+        for node in material.node_tree.nodes:
+            if node.bl_idname == 'ShaderNodeBsdfPrincipled':
+                socket = node.inputs.get('Roughness')
+                if socket is not None and not socket.is_linked:
+                    socket.default_value = roughness
+    return roughness
+
 def canonical_nif_path(path):
     return os.path.normcase(os.path.abspath(os.fspath(path))).replace('\\', '/')
 
@@ -55,6 +81,9 @@ def patch_niftools_blender52():
     from io_scene_niftools.modules.nif_import.geometry.vertex.groups import VertexGroup
     from io_scene_niftools.modules.nif_import.constraint import Constraint
     from nifgen.formats.nif.bshavok.niobjects.BhkConstraint import BhkConstraint
+    def import_material_gloss_ggx(b_mat, glossiness):
+        set_material_roughness(b_mat, glossiness)
+    Material.import_material_gloss = staticmethod(import_material_gloss_ggx)
     def preserve_emission_multiplier(material, key, value):
         try:
             value = float(value)
@@ -1696,6 +1725,18 @@ def actor_shape_texture_values(nifnode, source_fallback):
             return values
     return list(source_fallback)
 
+def actor_shape_glossiness(nifnode):
+    shader = getattr(nifnode, 'shader', None)
+    properties = getattr(shader, 'properties', None)
+    for source in (properties, shader, nifnode):
+        if source is None:
+            continue
+        for name in ('Glossiness', 'glossiness'):
+            value = getattr(source, name, None)
+            if value is not None:
+                return value
+    return None
+
 def actor_material_alpha_policy(alpha_flags):
     """Map authored NiAlphaProperty flags to a glTF alpha policy."""
     flags = int(alpha_flags)
@@ -1810,29 +1851,39 @@ def import_pynifly_actor(
             return candidate
         return None
 
-    def install_source_material(material, texture_values):
+    def actor_texture_kind(path):
+        stem = os.path.basename(path).casefold()
+        if '_n.' in stem or 'normal' in stem:
+            return 'normal'
+        if '_g.' in stem or '_em.' in stem or 'glow' in stem:
+            return 'glow'
+        if '_sk.' in stem or 'spec' in stem:
+            return 'specular'
+        return 'diffuse'
+
+    def install_source_material(material, texture_values, glossiness=None):
         resolved = [staged_texture_path(value) for value in texture_values]
         resolved = [value for value in resolved if value]
         if not resolved:
             return False
-        def texture_kind(path):
-            stem = os.path.basename(path).casefold()
-            if '_n.' in stem or 'normal' in stem:
-                return 'normal'
-            if '_g.' in stem or '_em.' in stem or 'glow' in stem:
-                return 'glow'
-            if '_sk.' in stem or 'spec' in stem:
-                return 'specular'
-            return 'diffuse'
-        diffuse_path = next((path for path in resolved if texture_kind(path) == 'diffuse'), None)
+        diffuse_path = next((path for path in resolved if actor_texture_kind(path) == 'diffuse'), None)
         if diffuse_path is None:
             return False
-        normal_path = next((path for path in resolved if texture_kind(path) == 'normal'), None)
+        diffuse_reference = next((
+            canonical_texture_reference(value) for value in texture_values
+            if canonical_texture_reference(value) and
+            actor_texture_kind(str(value)) == 'diffuse'
+        ), None)
+        if diffuse_reference:
+            material['bevyout_diffuse_texture_path'] = diffuse_reference
+        normal_path = next((path for path in resolved if actor_texture_kind(path) == 'normal'), None)
         material.use_nodes = True
         tree = material.node_tree
         tree.nodes.clear()
         output = tree.nodes.new('ShaderNodeOutputMaterial')
         principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
+        principled.inputs['Roughness'].default_value = perceptual_roughness_from_glossiness(glossiness)
+        set_material_roughness(material, glossiness)
         diffuse = tree.nodes.new('ShaderNodeTexImage')
         diffuse.label = 'Diffuse'
         diffuse.image = bpy.data.images.load(diffuse_path, check_existing=True)
@@ -1865,6 +1916,10 @@ def import_pynifly_actor(
             normal_map = tree.nodes.new('ShaderNodeNormalMap')
             tree.links.new(normal.outputs['Color'], normal_map.inputs['Color'])
             tree.links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+            specular_input = principled.inputs.get('Specular IOR Level')
+            normal_alpha = normal.outputs.get('Alpha')
+            if specular_input is not None and normal_alpha is not None:
+                tree.links.new(normal_alpha, specular_input)
         tree.links.new(principled.outputs['BSDF'], output.inputs['Surface'])
         return True
 
@@ -1894,6 +1949,7 @@ def import_pynifly_actor(
             source_texture_values.get(
                 os.path.abspath(source_file).casefold(), []) if source_file else [],
         )
+        glossiness = actor_shape_glossiness(nifnode)
         is_selected_eye = actor_source_key(source_file) in eye_sources
         for slot, material in enumerate(list(obj.data.materials)):
             if material is None:
@@ -1906,15 +1962,23 @@ def import_pynifly_actor(
                 selected = material.copy()
                 obj.data.materials[slot] = selected
                 if install_source_material(
-                        selected, [eye_texture] + list(texture_values)):
+                        selected, [eye_texture] + list(texture_values), glossiness):
                     repaired_materials += 1
                     continue
                 material = selected
+            diffuse_reference = next((
+                canonical_texture_reference(value) for value in texture_values
+                if canonical_texture_reference(value) and
+                actor_texture_kind(str(value)) == 'diffuse'
+            ), None)
+            if diffuse_reference:
+                material['bevyout_diffuse_texture_path'] = diffuse_reference
+            set_material_roughness(material, glossiness)
             images = [] if not material.use_nodes else [
                 node.image for node in material.node_tree.nodes
                 if node.bl_idname == 'ShaderNodeTexImage' and node.image
             ]
-            if not images and install_source_material(material, texture_values):
+            if not images and install_source_material(material, texture_values, glossiness):
                 repaired_materials += 1
 
     # BSBound can arrive outside PyNifly's represented-object list, so sweep
@@ -2258,6 +2322,22 @@ for job in jobs:
         glow = next((node for node in images if is_glow_image(node)), None)
         diffuse = next((node for node in images if node is not glow and 'normal' not in node.label.lower() and '_n.' not in image_name(node) and not is_glow_image(node)), images[0])
         normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
+        diffuse_reference = canonical_texture_reference(
+            getattr(diffuse.image, 'filepath', '') or diffuse.image.name
+        )
+        if diffuse_reference:
+            material['bevyout_diffuse_texture_path'] = diffuse_reference
+        material_roughness = material.get(
+            'bevyout_perceptual_roughness',
+            perceptual_roughness_from_glossiness(None),
+        )
+        material['bevyout_perceptual_roughness'] = material_roughness
+        material.roughness = material_roughness
+        for node in tree.nodes:
+            if node.bl_idname == 'ShaderNodeBsdfPrincipled':
+                roughness_input = node.inputs.get('Roughness')
+                if roughness_input is not None and not roughness_input.is_linked:
+                    roughness_input.default_value = material_roughness
         # NIFTools can leave imported actor maps tagged as Non-Color. That
         # makes the skin atlas sample as linear data in the exported GLB and
         # produces the uniformly pale/pink appearance seen in the viewer.
@@ -2292,6 +2372,7 @@ for job in jobs:
             if strength_input:
                 emission_strength = strength_input.default_value
         principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
+        principled.inputs['Roughness'].default_value = material_roughness
         tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
         new_emission = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
         if new_emission:

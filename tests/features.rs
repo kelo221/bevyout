@@ -133,12 +133,6 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
-// Material shading policy is intentionally std-only so the executable spec can
-// pin the same eligibility decision used by the runtime material event system.
-#[path = "../src/viewer/material_shading_policy.rs"]
-#[allow(dead_code, unused_imports)]
-mod material_shading_policy;
-
 // Hybrid point-shadow composition is intentionally Bevy-free so the
 // executable specification drives the same source-selection policy as the
 // runtime shader contract.
@@ -373,7 +367,6 @@ use item_transaction::{
     TransactionError, TransactionRequest,
 };
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
-use material_shading_policy::specular_alpha_roughness_eligible;
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
 use selectors::{CellSummary, SelectionSpec, resolve_selection};
 
@@ -402,12 +395,12 @@ struct BevyoutWorld {
     bulb_emission_override: bool,
     glow_emission_override: bool,
     emission_policy: Option<assets::MaterialEmissionPolicy>,
-    material_has_normal_map: bool,
-    material_has_specular_map: bool,
-    material_shared_texture: bool,
-    material_has_roughness_map: bool,
-    material_is_non_opaque: bool,
-    material_roughness_proxy_eligible: Option<bool>,
+    material_glossiness: Option<Option<f32>>,
+    metallic_csv: Option<String>,
+    metallic_csv_rejected: bool,
+    material_diffuse_texture: Option<String>,
+    material_roughness: Option<f32>,
+    material_metallic: Option<f32>,
     directx_normal_texel: Option<[u8; 4]>,
     converted_normal_texel: Option<[u8; 4]>,
     staged_texture_path: Option<String>,
@@ -1095,47 +1088,68 @@ async fn then_selected_emission_source(world: &mut BevyoutWorld, expected: Strin
     assert!(matches, "expected {expected}, got {actual:?}");
 }
 
-#[given("an imported material has a shared normal and specular image")]
-async fn given_shared_normal_specular_image(world: &mut BevyoutWorld) {
-    world.material_has_normal_map = true;
-    world.material_has_specular_map = true;
-    world.material_shared_texture = true;
+#[given(regex = r"^a NIF material glossiness exponent ([\d.]+)$")]
+async fn given_material_glossiness_exponent(world: &mut BevyoutWorld, value: String) {
+    world.material_glossiness = Some(Some(value.parse().unwrap()));
 }
 
-#[given("it has no authored metallic roughness map")]
-async fn given_no_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
-    world.material_has_roughness_map = false;
+#[given(regex = r#"^a NIF material glossiness value "([^"]+)"$"#)]
+async fn given_material_glossiness_value(world: &mut BevyoutWorld, value: String) {
+    world.material_glossiness = Some(match value.as_str() {
+        "missing" => None,
+        "negative" => Some(-1.0),
+        "nan" => Some(f32::NAN),
+        "infinite" => Some(f32::INFINITY),
+        other => panic!("unknown glossiness fixture {other}"),
+    });
 }
 
-#[given("it has an authored metallic roughness map")]
-async fn given_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
-    world.material_has_roughness_map = true;
+#[given(regex = r#"(?s)^metallic material CSV "(.*)"$"#)]
+async fn given_metallic_material_csv(world: &mut BevyoutWorld, csv: String) {
+    world.metallic_csv = Some(csv.replace("\\n", "\n"));
 }
 
-#[given("it is a non-opaque decal")]
-async fn given_non_opaque_decal(world: &mut BevyoutWorld) {
-    world.material_is_non_opaque = true;
+#[given(regex = r#"^a material diffuse texture "([^"]+)"$"#)]
+async fn given_material_diffuse_texture(world: &mut BevyoutWorld, path: String) {
+    world.material_diffuse_texture = Some(path);
 }
 
-#[when("its roughness proxy policy is evaluated")]
-async fn when_roughness_proxy_policy_evaluated(world: &mut BevyoutWorld) {
-    world.material_roughness_proxy_eligible = Some(specular_alpha_roughness_eligible(
-        world.material_has_normal_map,
-        world.material_has_specular_map,
-        world.material_shared_texture,
-        world.material_has_roughness_map,
-        world.material_is_non_opaque,
+#[when("the metallic material CSV is parsed")]
+async fn when_metallic_material_csv_is_parsed(world: &mut BevyoutWorld) {
+    world.metallic_csv_rejected =
+        assets::MetallicMaterialTable::parse(world.metallic_csv.as_deref().unwrap()).is_err();
+}
+
+#[when("its PBR material policy is evaluated")]
+async fn when_pbr_material_policy_is_evaluated(world: &mut BevyoutWorld) {
+    world.material_roughness = Some(assets::perceptual_roughness_from_glossiness(
+        world.material_glossiness.flatten(),
     ));
+    if let Some(csv) = &world.metallic_csv {
+        let table = assets::MetallicMaterialTable::parse(csv).unwrap();
+        world.material_metallic =
+            Some(table.metallic_factor(world.material_diffuse_texture.as_deref()));
+    }
 }
 
-#[then("specular-alpha roughness is enabled")]
-async fn then_specular_alpha_roughness_enabled(world: &mut BevyoutWorld) {
-    assert_eq!(world.material_roughness_proxy_eligible, Some(true));
+#[then(regex = r"^its perceptual roughness is approximately ([\d.]+)$")]
+async fn then_perceptual_roughness_is(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected.parse::<f32>().unwrap();
+    let actual = world.material_roughness.unwrap();
+    assert!(
+        (actual - expected).abs() < 0.000_01,
+        "{actual} != {expected}"
+    );
 }
 
-#[then("specular-alpha roughness is disabled")]
-async fn then_specular_alpha_roughness_disabled(world: &mut BevyoutWorld) {
-    assert_eq!(world.material_roughness_proxy_eligible, Some(false));
+#[then(regex = r"^its metallic factor is ([01])$")]
+async fn then_metallic_factor_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.material_metallic, Some(expected.parse().unwrap()));
+}
+
+#[then("the metallic material CSV is rejected")]
+async fn then_metallic_material_csv_is_rejected(world: &mut BevyoutWorld) {
+    assert!(world.metallic_csv_rejected);
 }
 
 #[given(regex = r"^a DirectX normal texel \((\d+), (\d+), (\d+), (\d+)\)$")]

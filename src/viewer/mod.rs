@@ -68,8 +68,6 @@ mod diagnostics;
 #[cfg(test)]
 mod hybrid_shadow_policy;
 mod lighting;
-mod material_shading;
-mod material_shading_policy;
 mod nav;
 mod nav_overlay;
 mod performance_policy;
