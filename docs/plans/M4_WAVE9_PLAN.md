@@ -144,3 +144,45 @@ tests → implementation. `cargo fmt --check`, `cargo clippy --all-targets
 -- -D warnings`, `cargo test`, representative `cargo run-dev -- prepare`.
 Manual script `docs/plans/M4_WAVE9_MANUAL.md` before the PR; PR closes
 #165 and #164 (`Closes`), references #148 and #156 per their outcome.
+
+## Shipped amendments
+
+- **A1 — #165 had a second mechanism, found only in real-data acceptance.**
+  The planned lock check on the open-request path (`06c41eb`) fixed a
+  demonstrated oscillation (`Failed` cleared `travel_intent` but not
+  `AgentTarget3d`), but the issue's measured hand-off was a different
+  bypass: a prior hand-off leaves the door physically open, so no open
+  request — and therefore no lock check — ever fires. `021ab30` adds
+  `door_link::effective_door_open`: for a `Travel` destination the
+  scripted hand-off is lock-gated regardless of physical open state;
+  intra-cell crossings keep the "already open passes" rule.
+- **A2 — acceptance found a latent wave-8 seam bug, filed as #169.** A
+  `setlock` issued before the nav archipelago exists updates
+  `InteractionState`/`PlacementRoot` but is lost for #155's query-time
+  cost override: an early unlock of an authored-locked door leaves a
+  stale impassable cost (`unreachable state=NoPath` on an unlocked
+  door). Workaround in the manual script: spawn the agent before
+  `setlock`.
+- **A3 — #156 executor boundary deviations, reviewed and accepted.**
+  Necessary wiring in `src/vsa/prepare/navmesh.rs` (input conversion +
+  extended summary line) beyond the planned file list, and mechanical
+  `is_preferred_pathing: false` additions to test-only `PolygonInput`
+  literals in `agent.rs`/`nav_overlay.rs` (no logic touched). The
+  preferred-pathing base cost is assigned/tested but intentionally
+  unwired (`set_type_index_cost` lives in `agent.rs`'s archipelago
+  build, another seam) — follow-up #168.
+- **A4 — both collision root causes are authored-data reality, not
+  pipeline bugs.** #164: the restroom strip's room-shell statics
+  (`OffRmCorInExSmL01` 370287, `OffRmCorIn05` 370299) end at x≈−15.6
+  while the NAVM runs to x≈−14.2 over empty-collision clutter. #148:
+  `MetHallEntrance01` (370250) TriangleMesh overlaps the walkable NAVM
+  at the doorway threshold; Vault 101's stair-top wedge sits at the
+  `VURmGearExit01` (149187) / `CaveHallVaultTrans01` (149223) seam.
+  #148 stays open per its amendment; the evidence decides #153 toward
+  collision-aware navmesh validation/rebuild.
+- **A5 — real-data NVTR evidence is zero in interior cells.** Both test
+  cells show `candidates authored 0`: interior NAVM seams are not
+  NVTR-flagged, so #162 should not wait on authored evidence (it only
+  materializes for exterior stitching, M6). NVCI's fopdoc layout parses
+  cleanly on real FO3 bytes (7198 subrecords / 11150 entries, plausible
+  per-cell FormID matches).
