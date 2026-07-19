@@ -1078,12 +1078,18 @@ mod tests {
     // model) must stay unspawned exactly as before this issue -- real actor
     // bodies are the #106-#108 track, not this placeholder.
     #[test]
-    fn an_npc_placement_without_an_asset_still_spawns_nothing() {
+    fn an_npc_placement_without_an_asset_spawns_an_actor_root_not_a_corpse_placeholder() {
+        // Pre-merge (#120) an asset-less living Npc spawned nothing; M4
+        // wave 7 (#107/#108, merged from master) now deliberately spawns a
+        // bare `PlacementRoot` for living actors so ActorPlugin can project
+        // their identity. The #120 invariant that survives the merge: a
+        // living actor never receives the corpse placeholder mesh.
         let mut app = test_app();
         let manifest = minimal_manifest(vec![placement(
             0x0005_4399,
             PreparedSemantic::Npc(crate::vsa::PreparedActor {
                 base_template_form_id: None,
+                assembly: None,
             }),
         )]);
         let root = app
@@ -1092,9 +1098,18 @@ mod tests {
             .id();
 
         let content = spawn_chunk(&mut app, &manifest, root);
-        assert_eq!(content.placement_count, 0);
+        assert_eq!(content.placement_count, 1);
 
-        let mut query = app.world_mut().query::<&interaction::PlacementRoot>();
-        assert_eq!(query.iter(app.world()).count(), 0);
+        let mut roots = app
+            .world_mut()
+            .query::<(&interaction::PlacementRoot, Option<&Mesh3d>)>();
+        let (_, mesh) = roots
+            .iter(app.world())
+            .next()
+            .expect("the living actor's placement root must spawn");
+        assert!(
+            mesh.is_none(),
+            "a living actor must not receive the corpse placeholder mesh"
+        );
     }
 }
