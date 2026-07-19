@@ -28,9 +28,41 @@ Feature: Travel-door hand-off respects runtime lock state
   # only cleared `travel_intent` (not `AgentTarget3d`) let the mid-route
   # gate "rediscover" the same door and restart the lifecycle forever
   # instead of settling at this deterministic terminal.
+  #
+  # Real-data acceptance follow-up: a *second* measurement (leg A hand-off
+  # first with the door unlocked, THEN `setlock`, respawn, `tna travel`
+  # again) still hung off through the locked door. A completed hand-off
+  # leaves the door physically open forever (`InteractionState.open` never
+  # clears), so the reissued travel's very first `Paused` tick observed
+  # `door_open == true` and skipped straight to `Traversing` -- the lock
+  # check that lives on the open-*request* path never got a chance to run,
+  # because no fresh open request was ever needed. `door_link::
+  # effective_door_open` is the fix: a `Travel` destination's hand-off is a
+  # scripted cell transition, not a physical walk-through, so lock state is
+  # authoritative for it regardless of the door's physical open state --
+  # unlike an ordinary `IntraCell` crossing, which keeps passing through an
+  # already-open door regardless of lock (`crossing_gate`'s own rule). The
+  # outline below pins that decision table directly; leg B in the A-B-A
+  # scenario now exercises it end-to-end by ticking with the door left
+  # physically open, exactly like the real contaminated repro.
 
-  Scenario: A-B-A -- unlocked travel completes, a locked travel fails deterministically, unlocking again completes
-    # A: unlocked travel reaches the destination cell.
+  Scenario Outline: Whether a door-link tick reports the door open depends on destination and lock state
+    Given a door-link tick observation that is <physical_state>, <lock_state>, and bound for <destination>
+    Then the effective door-open decision is <effective>
+
+    Examples:
+      | physical_state | lock_state | destination | effective |
+      | open           | unlocked   | travel      | open      |
+      | open           | locked     | travel      | closed    |
+      | closed         | locked     | travel      | closed    |
+      | closed         | unlocked   | travel      | closed    |
+      | open           | locked     | intra-cell  | open      |
+      | open           | unlocked   | intra-cell  | open      |
+      | closed         | locked     | intra-cell  | closed    |
+
+  Scenario: A-B-A -- unlocked travel completes, a locked travel fails deterministically even against a door left open by leg A, unlocking again completes
+    # A: unlocked travel reaches the destination cell. This is exactly what
+    # leaves the door physically open for leg B below.
     Given a fresh door-link state
     When the door-link reaches travel door 0x99 to cell 0xC0DE
     And the door-link ticks with the door open
@@ -38,11 +70,13 @@ Feature: Travel-door hand-off respects runtime lock state
     When the door-link traversal completes
     Then the door-link state is travel-reached for door 0x99 to cell 0xC0DE
 
-    # B: a locked travel door never opens through the scripted boundary and
-    # gives up after the deterministic wait bound -- no hand-off.
+    # B: `setlock` then a reissued travel, against the door leg A left
+    # physically open -- the real contaminated-leg-B repro. Lock is
+    # authoritative for the hand-off regardless: no traversal, deterministic
+    # failure after the wait bound.
     Given a fresh door-link state
     When the door-link reaches travel door 0x99 to cell 0xC0DE
-    And the door-link ticks 120 times with the door closed
+    And the door-link ticks 120 times with the door physically open and locked
     Then the door-link state is failed for door 0x99
 
     # A again: reissuing the travel after the door is unlocked restarts the

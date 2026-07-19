@@ -741,6 +741,12 @@ struct BevyoutWorld {
     nav_fall_guard_agent_y: Option<f32>,
     nav_fall_guard_kill_z: Option<f32>,
     nav_fall_guard_verdict: Option<fall_guard::FallVerdict>,
+
+    // -- nav_travel_lock.feature (issue #165 real-data acceptance
+    // follow-up: `door_link::effective_door_open`) --
+    nav_travel_lock_destination: Option<door_link::LinkDestination>,
+    nav_travel_lock_physically_open: bool,
+    nav_travel_lock_locked: bool,
 }
 
 fn find_placement<'a>(
@@ -9120,4 +9126,66 @@ async fn given_landmass_polygon_preferred_pathing(
         .find(|polygon| polygon.index == index)
         .expect("polygon must be given first");
     polygon.is_preferred_pathing = true;
+}
+
+// ---------------------------------------------------------------------
+// nav_travel_lock.feature (issue #165 real-data acceptance follow-up) --
+// appended section, do not interleave. `door_link::effective_door_open`
+// is the pure decision the travel-arrival `Paused` arm in `nav/agent.rs`
+// now consults: a `Travel` destination's hand-off must stay gated on
+// lock state even when the door is physically open (left that way by a
+// prior successful hand-off through the same door), while an ordinary
+// `IntraCell` mid-route crossing keeps passing through an already-open
+// door regardless of lock, exactly like `crossing_gate`.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^a door-link tick observation that is (open|closed), (locked|unlocked), and bound for (travel|intra-cell)$"
+)]
+async fn given_travel_lock_tick_observation(
+    world: &mut BevyoutWorld,
+    physical: String,
+    lock: String,
+    destination: String,
+) {
+    world.nav_travel_lock_physically_open = physical == "open";
+    world.nav_travel_lock_locked = lock == "locked";
+    world.nav_travel_lock_destination = Some(match destination.as_str() {
+        "travel" => door_link::LinkDestination::Travel {
+            destination_cell_form_id: 0xC0DE,
+        },
+        _ => door_link::LinkDestination::IntraCell,
+    });
+}
+
+#[then(regex = r"^the effective door-open decision is (open|closed)$")]
+async fn then_travel_lock_effective_open(world: &mut BevyoutWorld, expected: String) {
+    let destination = world
+        .nav_travel_lock_destination
+        .expect("a door-link tick observation must be given first");
+    let effective = door_link::effective_door_open(
+        destination,
+        world.nav_travel_lock_physically_open,
+        world.nav_travel_lock_locked,
+    );
+    assert_eq!(effective, expected == "open");
+}
+
+/// Represents leg B's real-data shape: a *prior* hand-off left the door
+/// physically open, so every tick observes `physically_open == true`
+/// throughout -- only `effective_door_open`'s lock-authoritative rule for
+/// `Travel` destinations keeps the agent from completing the crossing.
+#[when(regex = r"^the door-link ticks (\d+) times with the door physically open and locked$")]
+async fn when_door_link_ticks_n_open_and_locked(world: &mut BevyoutWorld, count: u32) {
+    for _ in 0..count {
+        let destination = match world.nav_backend_door_link_state {
+            door_link::DoorLinkState::Paused { destination, .. } => destination,
+            _ => door_link::LinkDestination::IntraCell,
+        };
+        let door_open = door_link::effective_door_open(destination, true, true);
+        world.nav_backend_door_link_state = door_link::transition(
+            world.nav_backend_door_link_state,
+            door_link::DoorLinkEvent::Tick { door_open },
+        );
+    }
 }

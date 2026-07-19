@@ -2889,8 +2889,12 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 }
             }
         }
-        door_link::DoorLinkState::Paused { door_form_id, .. } => {
-            let door_open = world
+        door_link::DoorLinkState::Paused {
+            door_form_id,
+            destination,
+            ..
+        } => {
+            let physically_open = world
                 .get_resource::<crate::console::RefRegistry>()
                 .is_some()
                 && crate::console::resolve_reference(world, &format!("{door_form_id:08x}"))
@@ -2901,6 +2905,23 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                             .open
                             .contains(&door_entity)
                     });
+            // Issue #165 (real-data acceptance, contaminated-leg-B
+            // measurement): the door's raw physical open flag alone is not
+            // enough for a `Travel` destination -- a prior successful
+            // hand-off through this exact door leaves it physically open
+            // forever, and a later `setlock` + reissued `tna travel` must
+            // not let that stale physical state complete a scripted
+            // hand-off through what is now a locked door. See
+            // `door_link::effective_door_open`'s doc comment for the full
+            // rationale (why `IntraCell` keeps the plain physical-open
+            // rule and `Travel` does not).
+            let lock_info = world
+                .resource::<NavArchipelagoState>()
+                .door_lock_info
+                .clone();
+            let (_, door_locked) = door_open_and_locked(world, door_form_id, &lock_info);
+            let door_open =
+                door_link::effective_door_open(destination, physically_open, door_locked);
             let new_state =
                 door_link::transition(current_state, door_link::DoorLinkEvent::Tick { door_open });
             if door_link::is_traversing(new_state) {
@@ -6545,5 +6566,118 @@ mod tests {
             .entry_for(agent_ledger_id(0))
             .expect("the agent must be ledgered on handoff");
         assert_eq!(entry.cell_form_id, 0xC0DE);
+    }
+
+    /// Real-data acceptance follow-up (orchestrator, contaminated-leg-B
+    /// measurement): a *prior* successful travel through this exact door
+    /// leaves it physically open in `InteractionState.open` forever (a
+    /// hand-off never closes it). A later `setlock` + reissued `tna
+    /// travel` then reaches the travel-arrival branch with the door
+    /// already open on the very first tick -- no fresh scripted-open
+    /// request is ever needed, so the lock check living on the open-
+    /// *request* path (the arrival branch's `crossing_gate` consult,
+    /// `request_door_open`'s internal check) never runs, and without the
+    /// `Paused`-arm fix below the agent would walk straight through into
+    /// `Traversing` -> `TravelReached` -> a scripted hand-off through a
+    /// locked door. A hand-off is a scripted cell transition, not a
+    /// physical walk-through: lock state must be authoritative for it
+    /// regardless of the door's current physical open state.
+    #[test]
+    fn a_travel_target_left_open_by_a_prior_handoff_still_fails_when_locked() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+        // Simulates the state a prior successful hand-off leaves behind:
+        // the door is physically open, with nothing left to close it.
+        world
+            .resource_mut::<interaction::InteractionState>()
+            .open
+            .insert(door_entity);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(25),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        request_travel(&mut world, 0, 0x99).expect("routing to a locked door is allowed");
+
+        // Arrival: the door is already open, so `crossing_gate` reports
+        // `Pass` and `request_door_open` is skipped -- exactly the real
+        // repro's shape. Must still only reach `Paused`, never
+        // `Traversing`, on this very first tick.
+        door_link_system(&mut world);
+        assert!(
+            is_paused(&world, agent),
+            "an already-open but locked travel target must still pause, not hand off immediately"
+        );
+
+        // Exhaust the wait bound. At every tick the agent must still be
+        // alive, on the ground, and never `Traversing` -- the physically
+        // open door must never let a locked travel destination complete.
+        for _ in 0..door_link::MAX_WAIT_TICKS {
+            door_link_system(&mut world);
+            assert!(
+                world.get_entity(agent).is_ok(),
+                "a locked travel target left physically open must never hand the agent off"
+            );
+            assert!(
+                !door_link::is_traversing(world.get::<AgentRuntime>(agent).unwrap().door_link),
+                "lock state must be authoritative for the hand-off regardless of physical open state"
+            );
+        }
+
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 },
+            "an already-open but locked travel target must settle at the deterministic Failed terminal"
+        );
+        assert!(
+            matches!(world.get::<AgentTarget3d>(agent), Some(AgentTarget3d::None)),
+            "F165 fix: the failed target must be cleared here too"
+        );
+
+        // Stability: further ticks must not oscillate back into Paused or
+        // Traversing (mirrors the closed-door oscillation regression pin
+        // above).
+        for _ in 0..(door_link::MAX_WAIT_TICKS * 2) {
+            door_link_system(&mut world);
+            assert_eq!(
+                world.get::<AgentRuntime>(agent).unwrap().door_link,
+                door_link::DoorLinkState::Failed { door_form_id: 0x99 },
+                "the Failed terminal must be stable even though the door stays physically open"
+            );
+        }
     }
 }
