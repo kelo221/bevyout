@@ -223,9 +223,23 @@ struct DoorTraversal {
 struct AgentKcc {
     velocity: Vec3,
     grounded: bool,
-    /// Smallest distance-to-target observed so far along the current route
-    /// (reset whenever a new `tna goto`/`tna travel` target is set).
+    /// Smallest `movement_policy::StuckObservation::distance_to_target`
+    /// observed so far along the current route (reset to `f32::MAX`
+    /// whenever a new `tna goto`/`tna travel` target is set, or to the
+    /// current value on arrival -- see `apply_agent_physics_movement`).
+    /// Since issue #157 this is the negated `route_progress` below, not a
+    /// literal distance to the final target; see `movement_policy`'s module
+    /// doc comment for why.
     best_distance: f32,
+    /// Running integral of `movement_policy::route_progress_delta` over the
+    /// whole route (issue #157): metres of real, KCC-resolved motion
+    /// achieved along whatever direction landmass was steering toward at
+    /// the time, accumulated tick over tick. Never reset on its own --
+    /// `best_distance`'s own reset-to-`f32::MAX` handling re-baselines every
+    /// comparison to "progress since then" regardless of this field's
+    /// absolute running total, so a fresh target does not need a fresh
+    /// zero here.
+    route_progress: f32,
     ticks_without_progress: u32,
     recovery_active: bool,
     /// This tick's `movement_policy::decide_collision_outcome` classification
@@ -1663,10 +1677,31 @@ fn apply_agent_physics_movement(
         // not an array of candidates a stray vertical match could
         // misidentify, and a route with real elevation change still wants
         // horizontal progress to dominate the distance-to-target measure.
+        //
+        // This `distance` now feeds only the arrival short-circuit just
+        // below (`arrival_resets_stuck`, issue #136 follow-up) -- literal
+        // proximity to the final target is exactly what "have I arrived"
+        // means. Issue #157: it no longer feeds `decide_stuck` itself, see
+        // `progress_distance` below.
         let distance =
             movement_policy::horizontal_distance(new_position.to_array(), target_point.to_array());
+
+        // Corridor-progress signal (issue #157, see `movement_policy`'s
+        // module doc comment): integrate this tick's real, KCC-resolved
+        // horizontal motion projected onto whatever direction landmass is
+        // *currently* steering toward, then negate the running total into
+        // the same monotone "smaller is better" shape `decide_stuck`
+        // already expects. A route leg that must move away from the final
+        // target keeps registering fresh progress every tick it is
+        // actually walking the corridor, unlike literal
+        // distance-to-final-target.
+        kcc.route_progress += movement_policy::route_progress_delta(
+            [desired_horizontal.x, desired_horizontal.y],
+            [achieved.x, achieved.z],
+        ) * dt;
+        let progress_distance = -kcc.route_progress;
         if kcc.best_distance == f32::MAX {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
         }
         // Genuinely at the target: "reached" and "stuck" are mutually
         // exclusive outcomes, not independent facts. Without this
@@ -1699,21 +1734,22 @@ fn apply_agent_physics_movement(
             AGENT_TARGET_REACHED_DISTANCE,
             landmass_reached,
         ) {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
             kcc.ticks_without_progress = 0;
             kcc.recovery_active = false;
             kcc.stuck = false;
             continue;
         }
         let decision = movement_policy::decide_stuck(movement_policy::StuckObservation {
-            distance_to_target: distance,
+            distance_to_target: progress_distance,
             best_distance_so_far: kcc.best_distance,
             ticks_without_progress: kcc.ticks_without_progress,
             recovery_active: kcc.recovery_active,
         });
-        let progressed = distance + movement_policy::STUCK_PROGRESS_EPSILON < kcc.best_distance;
+        let progressed =
+            progress_distance + movement_policy::STUCK_PROGRESS_EPSILON < kcc.best_distance;
         if progressed {
-            kcc.best_distance = distance;
+            kcc.best_distance = progress_distance;
             kcc.ticks_without_progress = 0;
             kcc.recovery_active = false;
         } else {
