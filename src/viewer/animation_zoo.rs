@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use bevy::animation::{AnimatedBy, AnimationTargetId, RepeatAnimation};
+use bevy::animation::{AnimatedBy, AnimationTargetId, RepeatAnimation, animated_field};
+use bevy::app::AnimationSystems;
 use bevy::gltf::{Gltf, GltfAssetLabel, GltfNode};
 use bevy::prelude::*;
 use bevyout_core::actor_animation::{
@@ -160,6 +161,12 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
             )
                 .chain(),
         )
+        .add_systems(
+            PostUpdate,
+            retarget_animation_zoo
+                .after(AnimationSystems)
+                .before(TransformSystems::Propagate),
+        )
         .run();
     Ok(())
 }
@@ -254,8 +261,26 @@ enum ZooPhase {
 #[derive(Debug, Clone)]
 struct ResolvedZooClip {
     catalog: PreparedActorAnimationClip,
+    handle: Handle<AnimationClip>,
     node: AnimationNodeIndex,
     duration: f32,
+}
+
+#[derive(Clone)]
+struct PackTarget {
+    name_key: String,
+    id: AnimationTargetId,
+    path: Vec<String>,
+    rest_local: Transform,
+    rest_global: Mat4,
+    parent: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ZooRetargetTarget {
+    entity: Entity,
+    source_index: usize,
+    target_rest_global: Mat4,
 }
 
 #[derive(Resource, Default)]
@@ -264,6 +289,9 @@ struct AnimationZooRuntime {
     actor_root: Option<Entity>,
     player: Option<Entity>,
     pack: Option<Handle<Gltf>>,
+    pack_targets: Vec<PackTarget>,
+    retarget_targets: Vec<ZooRetargetTarget>,
+    bound_targets: usize,
     clips: Vec<ResolvedZooClip>,
     policy: Option<ZooPlaybackPolicy>,
     bind_pose: HashMap<Entity, Transform>,
@@ -296,6 +324,7 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) loop_current: bool,
     pub(crate) completed_cycles: u64,
     pub(crate) missing_targets: Vec<String>,
+    pub(crate) bound_targets: usize,
     pub(crate) required_targets: Vec<String>,
     pub(crate) animated_targets: Vec<String>,
     pub(crate) controller_types: Vec<String>,
@@ -391,20 +420,49 @@ fn collect_pack_target_paths(
     handle: &Handle<GltfNode>,
     nodes: &Assets<GltfNode>,
     path: &mut Vec<Name>,
-    output: &mut Vec<(String, AnimationTargetId, Vec<String>)>,
+    parent: Option<usize>,
+    parent_global: Mat4,
+    output: &mut Vec<PackTarget>,
 ) -> Option<()> {
     let node = nodes.get(handle)?;
     path.push(Name::new(node.name.clone()));
-    output.push((
-        node.name.to_ascii_lowercase(),
-        AnimationTargetId::from_names(path.iter()),
-        path.iter().map(|name| name.as_str().to_owned()).collect(),
-    ));
+    let index = output.len();
+    let rest_global = parent_global * node.transform.to_matrix();
+    output.push(PackTarget {
+        name_key: animation_node_name_key(&node.name),
+        id: AnimationTargetId::from_names(path.iter()),
+        path: path.iter().map(|name| name.as_str().to_owned()).collect(),
+        rest_local: node.transform,
+        rest_global,
+        parent,
+    });
     for child in &node.children {
-        collect_pack_target_paths(child, nodes, path, output)?;
+        collect_pack_target_paths(child, nodes, path, Some(index), rest_global, output)?;
     }
     path.pop();
     Some(())
+}
+
+/// NIFTools exposes Fallout's side suffix as `Bip01 Calf.L`, while the
+/// native converter preserves the source node spelling `Bip01 L Calf`.
+/// Canonicalizing only this known side-name convention keeps the original
+/// `AnimationTargetId` paths intact while allowing the two prepared assets to
+/// bind to one another.
+fn animation_node_name_key(value: &str) -> String {
+    let value = value.to_ascii_lowercase();
+    let Some((prefix, side)) = value.rsplit_once('.') else {
+        return value;
+    };
+    if !matches!(side, "l" | "r") {
+        return value;
+    }
+    let Some((root, bone)) = prefix.split_once(' ') else {
+        return value;
+    };
+    if root != "bip01" {
+        return value;
+    }
+    format!("{root} {side} {bone}")
 }
 
 fn appearance_name_path(
@@ -435,7 +493,7 @@ fn path_has_case_insensitive_suffix(actual: &[String], expected: &[String]) -> b
         && actual[actual.len() - expected.len()..]
             .iter()
             .zip(expected)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            .all(|(left, right)| animation_node_name_key(left) == animation_node_name_key(right))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -448,6 +506,7 @@ fn resolve_animation_zoo(
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     transforms: Query<&Transform>,
+    global_transforms: Query<&GlobalTransform>,
     gltfs: Res<Assets<Gltf>>,
     nodes: Res<Assets<GltfNode>>,
     clip_assets: Res<Assets<AnimationClip>>,
@@ -486,8 +545,15 @@ fn resolve_animation_zoo(
             return;
         };
         if node.is_animation_root
-            && collect_pack_target_paths(handle, &nodes, &mut Vec::new(), &mut target_paths)
-                .is_none()
+            && collect_pack_target_paths(
+                handle,
+                &nodes,
+                &mut Vec::new(),
+                None,
+                Mat4::IDENTITY,
+                &mut target_paths,
+            )
+            .is_none()
         {
             return;
         }
@@ -497,30 +563,50 @@ fn resolve_animation_zoo(
         runtime.error = Some("clip pack contains no named animation hierarchy".into());
         return;
     }
-    let mut targets_by_name = HashMap::<String, Vec<(AnimationTargetId, Vec<String>)>>::new();
-    for (name, id, path) in target_paths {
-        targets_by_name.entry(name).or_default().push((id, path));
+    let mut targets_by_name = HashMap::<String, Vec<usize>>::new();
+    for (index, target) in target_paths.iter().enumerate() {
+        targets_by_name
+            .entry(target.name_key.clone())
+            .or_default()
+            .push(index);
     }
     let mut bound_targets = 0_usize;
+    let mut retarget_targets = Vec::new();
     for entity in &hierarchy {
         let Ok(name) = names.get(*entity) else {
             continue;
         };
-        let Some(candidates) = targets_by_name.get(&name.as_str().to_ascii_lowercase()) else {
+        let Some(candidates) = targets_by_name.get(&animation_node_name_key(name.as_str())) else {
             continue;
         };
         let appearance_path = appearance_name_path(*entity, root, &parents, &names);
         let selected = if candidates.len() == 1 {
-            candidates.first()
+            candidates.first().copied()
         } else {
             candidates
                 .iter()
-                .find(|(_, expected)| path_has_case_insensitive_suffix(&appearance_path, expected))
+                .find(|index| {
+                    path_has_case_insensitive_suffix(&appearance_path, &target_paths[**index].path)
+                })
+                .copied()
         };
-        if let Some((id, _)) = selected {
+        if let Some(source_index) = selected {
+            let Some(target_rest_global) = global_transforms
+                .get(*entity)
+                .ok()
+                .map(GlobalTransform::to_matrix)
+            else {
+                return;
+            };
+            let id = target_paths[source_index].id;
             commands
                 .entity(*entity)
-                .insert((*id, AnimatedBy(player_entity)));
+                .insert((id, AnimatedBy(player_entity)));
+            retarget_targets.push(ZooRetargetTarget {
+                entity: *entity,
+                source_index,
+                target_rest_global,
+            });
             bound_targets += 1;
         }
     }
@@ -545,6 +631,7 @@ fn resolve_animation_zoo(
         let node = graph.add_clip(handle.clone(), 1.0, graph_root);
         resolved.push(ResolvedZooClip {
             catalog: catalog_clip.clone(),
+            handle: handle.clone(),
             node,
             duration: clip.duration(),
         });
@@ -575,6 +662,10 @@ fn resolve_animation_zoo(
         .position(|clip| clip.catalog.name == *start_name)
         .unwrap_or(0);
     runtime.policy = Some(ZooPlaybackPolicy::new(resolved.len(), start_index));
+    retarget_targets.sort_by_key(|target| target.source_index);
+    runtime.pack_targets = target_paths;
+    runtime.retarget_targets = retarget_targets;
+    runtime.bound_targets = bound_targets;
     runtime.clips = resolved;
     runtime.player = Some(player_entity);
     runtime.phase = ZooPhase::Playing;
@@ -586,11 +677,111 @@ fn resolve_animation_zoo(
         ));
     }
     info!(
-        "animation-zoo ready actor={:08x} clips={} skipped={}",
+        "animation-zoo ready actor={:08x} clips={} skipped={} bound_targets={}",
         definition.actor_form_id,
         runtime.clips.len(),
-        definition.skipped_clips + missing.len()
+        definition.skipped_clips + missing.len(),
+        bound_targets
     );
+}
+
+fn source_clip_transform(
+    clip: &AnimationClip,
+    target: AnimationTargetId,
+    time: f32,
+    rest: Transform,
+) -> Transform {
+    let mut transform = rest;
+    if let Some(value) = clip.sample_clamped(animated_field!(Transform::translation), target, time)
+    {
+        transform.translation = value;
+    }
+    if let Some(value) = clip.sample_clamped(animated_field!(Transform::rotation), target, time) {
+        transform.rotation = value;
+    }
+    if let Some(value) = clip.sample_clamped(animated_field!(Transform::scale), target, time) {
+        transform.scale = value;
+    }
+    transform
+}
+
+fn retarget_global_transform(
+    target_rest_global: Mat4,
+    source_rest_global: Mat4,
+    source_current_global: Mat4,
+) -> Mat4 {
+    target_rest_global * source_rest_global.inverse() * source_current_global
+}
+
+/// The Blender/NIFTools clip pack and the native actor GLB describe the same
+/// skeleton in different local coordinate bases. Reconstruct the source pose
+/// in the pack hierarchy, transfer each node's delta from source rest to target
+/// rest in global space, and decompose it back into the native actor's locals.
+/// This keeps the compatibility backend isolated to the zoo and avoids baking
+/// a Blender-space pose into native Fallout-unit nodes.
+fn retarget_animation_zoo(
+    runtime: Res<AnimationZooRuntime>,
+    players: Query<&AnimationPlayer>,
+    clips: Res<Assets<AnimationClip>>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut transforms: Query<&mut Transform>,
+) {
+    if runtime.phase != ZooPhase::Playing || runtime.retarget_targets.is_empty() {
+        return;
+    }
+    let Some(policy) = runtime.policy.as_ref() else {
+        return;
+    };
+    let Some(clip_info) = runtime.clips.get(policy.index) else {
+        return;
+    };
+    let Some(clip) = clips.get(&clip_info.handle) else {
+        return;
+    };
+    let Some(player_entity) = runtime.player else {
+        return;
+    };
+    let time = players
+        .get(player_entity)
+        .ok()
+        .and_then(|player| player.animation(clip_info.node))
+        .map_or(runtime.elapsed, |active| active.seek_time());
+
+    let mut source_globals = vec![Mat4::IDENTITY; runtime.pack_targets.len()];
+    for (index, target) in runtime.pack_targets.iter().enumerate() {
+        let local = source_clip_transform(clip, target.id, time, target.rest_local);
+        source_globals[index] = target
+            .parent
+            .map_or(Mat4::IDENTITY, |parent| source_globals[parent])
+            * local.to_matrix();
+    }
+
+    let mut desired_globals = HashMap::<Entity, Mat4>::new();
+    for target in &runtime.retarget_targets {
+        let source = &runtime.pack_targets[target.source_index];
+        let desired_global = retarget_global_transform(
+            target.target_rest_global,
+            source.rest_global,
+            source_globals[target.source_index],
+        );
+        let parent_global = parents
+            .get(target.entity)
+            .ok()
+            .and_then(|parent| desired_globals.get(&parent.parent()).copied())
+            .or_else(|| {
+                parents
+                    .get(target.entity)
+                    .ok()
+                    .and_then(|parent| globals.get(parent.parent()).ok())
+                    .map(GlobalTransform::to_matrix)
+            })
+            .unwrap_or(Mat4::IDENTITY);
+        if let Ok(mut transform) = transforms.get_mut(target.entity) {
+            *transform = Transform::from_matrix(parent_global.inverse() * desired_global);
+        }
+        desired_globals.insert(target.entity, desired_global);
+    }
 }
 
 fn keyboard_controls(
@@ -738,6 +929,7 @@ fn update_probe(
         missing_targets: clip
             .map(|clip| clip.catalog.missing_targets.clone())
             .unwrap_or_default(),
+        bound_targets: runtime.bound_targets,
         required_targets: clip
             .map(|clip| clip.catalog.required_targets.clone())
             .unwrap_or_default(),
@@ -889,6 +1081,46 @@ mod tests {
         assert_eq!(parse_form_id("00041606").unwrap(), 0x0004_1606);
         assert_eq!(parse_form_id("0x00041606").unwrap(), 0x0004_1606);
         assert!(parse_form_id("raider").is_err());
+    }
+
+    #[test]
+    fn animation_node_names_bridge_niftools_side_suffixes() {
+        assert_eq!(animation_node_name_key("Bip01 Calf.L"), "bip01 l calf");
+        assert_eq!(animation_node_name_key("Bip01 L Calf"), "bip01 l calf");
+        assert_eq!(
+            animation_node_name_key("Bip01 Finger1.R"),
+            "bip01 r finger1"
+        );
+        assert_eq!(animation_node_name_key("Weapon"), "weapon");
+    }
+
+    #[test]
+    fn retarget_global_transform_preserves_target_rest_pose() {
+        let source_rest = Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.5),
+            Quat::from_rotation_y(0.25),
+            Vec3::new(0.0, 1.0, 2.0),
+        );
+        let target_rest = Mat4::from_scale_rotation_translation(
+            Vec3::splat(2.0),
+            Quat::from_rotation_x(-0.4),
+            Vec3::new(3.0, -1.0, 0.5),
+        );
+        let desired = retarget_global_transform(target_rest, source_rest, source_rest);
+        let (scale, rotation, translation) = desired.to_scale_rotation_translation();
+        assert!(scale.abs_diff_eq(Vec3::splat(2.0), 1e-5));
+        assert!(rotation.abs_diff_eq(Quat::from_rotation_x(-0.4), 1e-5));
+        assert!(translation.abs_diff_eq(Vec3::new(3.0, -1.0, 0.5), 1e-5));
+    }
+
+    #[test]
+    fn retarget_global_transform_applies_source_delta_in_target_space() {
+        let source_rest = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
+        let source_current = Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0));
+        let target_rest = Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0));
+        let desired = retarget_global_transform(target_rest, source_rest, source_current);
+        let (_, _, translation) = desired.to_scale_rotation_translation();
+        assert!(translation.abs_diff_eq(Vec3::new(4.0, 1.0, 0.0), 1e-5));
     }
 
     #[test]

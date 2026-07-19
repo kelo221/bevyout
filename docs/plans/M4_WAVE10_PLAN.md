@@ -194,3 +194,19 @@ appropriate for keeping those contracts aligned.
   The synthetic report fixture separately preserves a non-zero 0.25–0.75
   source range, missing targets, and unsupported/failure diagnostics because
   every real source in this corpus starts at zero.
+
+- **A9 — Visual playback regression and correction.** The first live humanoid
+  run proved the catalog and Bevy control surface but exposed a real visual
+  defect: NIFTools clip packs use Blender-space transforms and `Bip01 Calf.L`
+  naming, while the native actor GLB uses Fallout-space transforms and
+  `Bip01 L Calf` names. Binding those clips directly made the actor visibly
+  collapse even though metadata and state probes were green. The zoo now
+  canonicalizes the known side-name spelling, records source and target rest
+  hierarchies, and transfers sampled source deltas through global rest space
+  before writing native local transforms. The compatibility backend remains
+  explicit and Blender is still not resolved by ordinary native preparation.
+  Live probes and viewport captures now pass for humanoid `00041600`
+  (`bound_targets=66`, 1,385 clips) and Radroach `0005443b`
+  (`bound_targets=48`, 16 clips, no missing targets); the bridge probe exposes
+  the bound-target count so this regression cannot hide behind catalog
+  metadata again.

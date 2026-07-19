@@ -59,6 +59,9 @@ it.
    sequence `Equip`, source range approximately `0.0..0.3667`, source loop
    `clamp`, root-motion policy `preserve_authored` with accumulation root
    `Bip01`, and five text keys. The actor visibly plays the equip motion.
+   The startup log/probe should report `bound_targets: 66`; this confirms the
+   Blender-space clip pack was retargeted onto the native actor hierarchy
+   rather than merely accepted by metadata.
 3. Press `Space`. **Expected:** HUD state changes to `paused` and elapsed time
    stops. Press `Space` again to resume.
 4. Press Right Arrow, then `R`. **Expected:** the next compatible clip is
@@ -72,7 +75,8 @@ it.
    curl -X POST http://127.0.0.1:15702/ -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":2,"method":"bevyout.animation_zoo_control","params":{"action":"toggle_pause"}}'
    ```
 
-   **Expected:** the probe reports `count: 1385`, `error: null`, the source
+   **Expected:** the probe reports `count: 1385`, `bound_targets: 66`,
+   `error: null`, the source
    metadata named above, required/animated/missing target arrays,
    controller/interpolator arrays, and the original text-key values (including
    `Enum: Equip`, `prn: Bip01 R Hand`, and `Attach`). The control response is
@@ -97,7 +101,8 @@ it.
    ```
 
 4. **Expected:** the window shows `CG04Radroach`, 16 clips, zero skipped, and
-   visible movement. The attack metadata reports sequence `AttackLeft`, source
+   visible movement. The startup log/probe should report `bound_targets: 48`.
+   The attack metadata reports sequence `AttackLeft`, source
    range approximately `0.0..0.6667`, source loop `clamp`, root-motion policy
    `preserve_authored`, accumulation root `Bip01`, transform controllers, and
    authored text keys including `Hit` and `Sound: NPCRoachWings`.
