@@ -260,6 +260,41 @@ fn polygon_centroid(mesh: &NavClearanceMeshInput, tri: [u32; 3]) -> Option<[f32;
     ])
 }
 
+fn edge_key(a: u32, b: u32) -> (u32, u32) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Boundary edges of the currently-walkable region: an edge (unordered
+/// vertex-index pair) referenced by exactly one walkable polygon. Shared by
+/// F153.2's interior test and F153.3's offset boundary detection so both agree
+/// on what "the boundary" is.
+fn walkable_boundary_edges(
+    mesh: &NavClearanceMeshInput,
+    walkable: &[bool],
+) -> BTreeSet<(u32, u32)> {
+    let mut counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        if !walkable.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            *counts.entry(edge_key(a, b)).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(edge, count)| (count == 1).then_some(edge))
+        .collect()
+}
+
+/// Whether `tri` is an interior triangle: none of its three edges lies on the
+/// walkable-region `boundary`.
+fn is_interior_triangle(tri: [u32; 3], boundary: &BTreeSet<(u32, u32)>) -> bool {
+    !boundary.contains(&edge_key(tri[0], tri[1]))
+        && !boundary.contains(&edge_key(tri[1], tri[2]))
+        && !boundary.contains(&edge_key(tri[2], tri[0]))
+}
+
 // ---------------------------------------------------------------------
 // The pass
 // ---------------------------------------------------------------------
@@ -308,10 +343,18 @@ pub(crate) fn validate_and_clear(
     }
 
     // F153.2: interior-obstruction cutting (skipped when no collision).
+    // Only *interior* triangles (none of whose three edges lie on the
+    // walkable-region boundary) are candidates: a triangle on the boundary is
+    // already up against a wall/void the F153.3 clearance offset handles, so
+    // cutting it here for the same wall would double-treat it and erode real
+    // rooms. A triangle the authored NAVM paved *over* a freestanding
+    // collider (the #148 entrance frame, a column) is genuinely interior --
+    // walkable on every side -- and is what this phase exists to cut.
     let mut cut_obstructed = 0usize;
     if !collision.is_empty() {
+        let boundary = walkable_boundary_edges(mesh, &walkable);
         for (index, tri) in mesh.polygons.iter().enumerate() {
-            if !walkable[index] {
+            if !walkable[index] || !is_interior_triangle(*tri, &boundary) {
                 continue;
             }
             let Some(centroid) = polygon_centroid(mesh, *tri) else {
@@ -728,35 +771,60 @@ mod tests {
         assert!(result.walkable.iter().all(|&w| !w));
     }
 
+    /// A big triangle midpoint-subdivided into four: the central triangle
+    /// (index 3, vertices D,E,F) has all three edges shared with the three
+    /// corner triangles, so it is the one genuinely *interior* triangle. The
+    /// three corner triangles are boundary. Vertices: A,B,C corners then
+    /// D=mid(A,B), E=mid(B,C), F=mid(C,A).
+    fn subdivided_triangle() -> NavClearanceMeshInput {
+        NavClearanceMeshInput {
+            vertices: vec![
+                [0.0, 0.0, 0.0], // 0 A
+                [4.0, 0.0, 0.0], // 1 B
+                [0.0, 0.0, 4.0], // 2 C
+                [2.0, 0.0, 0.0], // 3 D = mid(A,B)
+                [2.0, 0.0, 2.0], // 4 E = mid(B,C)
+                [0.0, 0.0, 2.0], // 5 F = mid(C,A)
+            ],
+            polygons: vec![
+                [0, 3, 5], // corner A (boundary)
+                [3, 1, 4], // corner B (boundary)
+                [5, 4, 2], // corner C (boundary)
+                [3, 4, 5], // centre D,E,F (interior)
+            ],
+            protected_edges: Vec::new(),
+        }
+    }
+
     #[test]
-    fn an_interior_wall_cuts_the_overlapping_triangle_but_leaves_the_opening() {
-        // Supporting floor everywhere; a short wall stub near x=1, z=0.5
-        // rising into the agent band. The near triangle's centroid is within
-        // a radius of it; the far one is not.
-        let mesh = nav_quad(0.0, 4.0, 0.0, 1.0, 0.0);
-        let mut collision = floor(-1.0, 5.0, -1.0, 2.0, 0.0);
-        // Wall stub covering only x in [1.1, 1.5] at z=0.5, rising 2 m.
-        collision.extend(wall(1.1, 1.5, 0.5, 0.0, 2.0));
+    fn an_interior_collider_cuts_only_the_interior_triangle_it_sits_on() {
+        // The central (interior) triangle's centroid is ~(1.33, 1.33); a wall
+        // stub stands on it. The three boundary corner triangles are left
+        // walkable -- a perimeter/boundary wall is the F153.3 clearance
+        // offset's job, not this phase's, so only genuinely interior
+        // obstructions (the #148 entrance-frame class) are cut here.
+        let mesh = subdivided_triangle();
+        let mut collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
+        collision.extend(wall(1.2, 1.5, 1.33, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
         assert_eq!(result.removed_unsupported, 0, "{:?}", result);
-        // At least one triangle cut, not both (the opening survives).
-        assert!(result.cut_obstructed >= 1, "{:?}", result);
+        assert_eq!(result.cut_obstructed, 1, "{:?}", result);
+        assert!(!result.walkable[3], "the interior triangle must be cut");
         assert!(
-            result.walkable.iter().any(|&w| w),
-            "the doorway opening must stay walkable: {:?}",
+            result.walkable[0] && result.walkable[1] && result.walkable[2],
+            "boundary corner triangles must stay walkable: {:?}",
             result
         );
     }
 
     #[test]
-    fn a_low_ledge_below_agent_height_does_not_obstruct() {
-        // A knee-high wall stub (0.3 m) does not reach into the agent band
-        // enough... it starts at floor, so it DOES overlap [0, 1.8]. To model
-        // a step-over ledge the collider must sit fully below the band: here
-        // a ledge from y=-1 to y=-0.2, entirely below the floor band start.
+    fn a_boundary_wall_does_not_cut_perimeter_triangles() {
+        // A wall stub sitting on a *boundary* triangle is not cut here (the
+        // clearance offset handles the perimeter); this guards against the
+        // over-cut a naive within-radius test produced on real room shells.
         let mesh = nav_quad(0.0, 4.0, 0.0, 1.0, 0.0);
         let mut collision = floor(-1.0, 5.0, -1.0, 2.0, 0.0);
-        collision.extend(wall(1.1, 1.5, 0.5, -1.0, -0.2));
+        collision.extend(wall(1.1, 1.5, 0.5, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
         assert_eq!(result.cut_obstructed, 0, "{:?}", result);
     }
