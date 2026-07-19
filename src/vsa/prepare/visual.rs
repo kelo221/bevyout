@@ -141,10 +141,55 @@ pub(crate) fn audit_prepared_visuals(
             ));
         }
     }
+    issues.extend(actor_fallback_visual_issues(placements));
     issues.sort_by(|left, right| {
-        (&left.model_path, &left.code).cmp(&(&right.model_path, &right.code))
+        (&left.model_path, &left.code, &left.message).cmp(&(
+            &right.model_path,
+            &right.code,
+            &right.message,
+        ))
     });
     Ok(issues)
+}
+
+fn actor_fallback_visual_issues(placements: &[PreparedPlacement]) -> Vec<PreparedVisualIssue> {
+    let mut issues = Vec::new();
+    for placement in placements {
+        let assembly = match &placement.semantic {
+            PreparedSemantic::Npc(actor) | PreparedSemantic::Creature(actor) => {
+                actor.assembly.as_ref()
+            }
+            _ => None,
+        };
+        let Some(assembly) = assembly else {
+            continue;
+        };
+        for reason in &assembly.fallback.reasons {
+            let mut base_form_ids =
+                vec![assembly.source_base_form_id, assembly.resolved_base_form_id];
+            base_form_ids.sort_unstable();
+            base_form_ids.dedup();
+            issues.push(PreparedVisualIssue {
+                code: format!("actor_{}", reason.code()),
+                severity: "warning".into(),
+                model_path: assembly
+                    .skeleton_path
+                    .clone()
+                    .unwrap_or_else(|| "<actor-proxy>".into()),
+                base_form_ids,
+                reference_form_ids: vec![placement.reference_form_id],
+                message: format!(
+                    "actor source={:08x} resolved={:08x} reference={:08x} tier={} reason={} detail={reason:?}",
+                    assembly.source_base_form_id,
+                    assembly.resolved_base_form_id,
+                    placement.reference_form_id,
+                    assembly.fallback.level.label(),
+                    reason.code(),
+                ),
+            });
+        }
+    }
+    issues
 }
 
 fn issue_for_asset(
@@ -246,5 +291,42 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("1 visual completeness issue"));
+    }
+
+    #[test]
+    fn actor_fallback_issue_keeps_source_resolved_and_reference_identity() {
+        let mut placement: PreparedPlacement = ron::from_str(
+            r#"(
+                reference_form_id: 48,
+                base_form_id: 16,
+                asset_path: None,
+                translation: (0.0, 0.0, 0.0),
+                rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+                scale: 1.0,
+                error: None,
+                semantic: Npc((base_template_form_id: None, assembly: None)),
+            )"#,
+        )
+        .expect("synthetic actor placement");
+        let PreparedSemantic::Npc(actor) = &mut placement.semantic else {
+            unreachable!("test semantic is an NPC")
+        };
+        actor.assembly = Some(bevyout_core::actor::ActorAssemblyBlueprint {
+            source_base_form_id: 0x10,
+            resolved_base_form_id: 0x20,
+            reference_form_id: 0x30,
+            fallback: bevyout_core::actor::ActorFallbackDecision {
+                reasons: vec![bevyout_core::actor::ActorFallbackReason::MissingFaceGen],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let issues = actor_fallback_visual_issues(&[placement]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "actor_missing_facegen");
+        assert_eq!(issues[0].base_form_ids, vec![0x10, 0x20]);
+        assert_eq!(issues[0].reference_form_ids, vec![0x30]);
+        assert!(issues[0].message.contains("tier=AuthoredExact"));
     }
 }

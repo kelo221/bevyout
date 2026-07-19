@@ -16,7 +16,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::super::assets::NIF_CONVERTER_REVISION;
+#[cfg(test)]
+use super::super::assets::PREPARED_CONVERTER_REVISION;
+use super::super::assets::material_policy_identity;
 
 /// Physics classification/sidecar pipeline revision (F49.1). Bump whenever
 /// `classify_placement`, `dynamic_rejection_reason`, or
@@ -31,13 +33,15 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// compatibility for the viewer). Bump whenever `prepare_cell`'s staging,
 /// lighting, or manifest-assembly logic changes in a way that should
 /// invalidate a previously prepared cell even though its plugin content,
-/// converter, and physics pipeline are unchanged. Issue #120 (M4 wave 6)
-/// bumped this alongside `CURRENT_PREPARE_REVISION`: a source-dead NPC
-/// reference now classifies as `PreparedSemantic::Corpse` instead of
-/// `Npc`, changing what `prepare_cell`'s placement-classification step
-/// produces from the same source content, so a resumable *batch* prepare
-/// run must not skip a cell it had already completed under the old logic.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-corpse-v1";
+/// converter, and physics pipeline are unchanged. This revision combines
+/// two independent bumps that raced on parallel branches: issue #120 (M4
+/// wave 6) reclassifies source-dead NPC references as
+/// `PreparedSemantic::Corpse` instead of `Npc`, and M4 wave 7 (#160)
+/// corrected nested actor appearance resolution — both change what
+/// `prepare_cell` produces from the same source content, so a resumable
+/// *batch* prepare run must not skip a cell completed under either old
+/// logic.
+pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v3-corpse-nested-actors";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,10 +55,18 @@ pub(crate) struct CellFingerprints {
 impl CellFingerprints {
     /// The fingerprints for the current toolchain/session, given the batch
     /// session's plugin content-set fingerprint (`BatchSession::fingerprint`).
+    #[cfg(test)]
     pub(crate) fn current(plugin_content_set: impl Into<String>) -> Self {
+        Self::current_with_converter(plugin_content_set, PREPARED_CONVERTER_REVISION)
+    }
+
+    pub(crate) fn current_with_converter(
+        plugin_content_set: impl Into<String>,
+        converter_revision: &str,
+    ) -> Self {
         Self {
             plugin_content_set: plugin_content_set.into(),
-            converter: NIF_CONVERTER_REVISION.into(),
+            converter: material_policy_identity(converter_revision),
             physics: PHYSICS_PIPELINE_REVISION.into(),
             prepare_pipeline: PREPARE_PIPELINE_REVISION.into(),
         }
@@ -165,9 +177,18 @@ mod tests {
     fn current_fingerprints_record_all_four_components() {
         let current = CellFingerprints::current("plugin-fp");
         assert_eq!(current.plugin_content_set, "plugin-fp");
-        assert_eq!(current.converter, NIF_CONVERTER_REVISION);
+        assert_eq!(
+            current.converter,
+            material_policy_identity(PREPARED_CONVERTER_REVISION)
+        );
         assert_eq!(current.physics, PHYSICS_PIPELINE_REVISION);
         assert_eq!(current.prepare_pipeline, PREPARE_PIPELINE_REVISION);
+    }
+
+    #[test]
+    fn selected_converter_revision_is_recorded_independently() {
+        let current = CellFingerprints::current_with_converter("plugin-fp", "native-v1");
+        assert_eq!(current.converter, material_policy_identity("native-v1"));
     }
 
     // T49.2: an unchanged set of four fingerprints is not stale.

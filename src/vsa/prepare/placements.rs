@@ -7,6 +7,34 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::vsa::manifest::{PreparedLeveledEntry, PreparedLeveledList};
 
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedActorAppearance {
+    pub(crate) descriptor: Option<ActorAssemblyDescriptor>,
+    pub(crate) blueprint: bevyout_core::actor::ActorAssemblyBlueprint,
+    pub(crate) inventory: Vec<PreparedInventoryEntry>,
+}
+
+fn actor_cache_input_bytes(
+    model_bytes: &[Vec<u8>],
+    appearance: Option<&PreparedActorAppearance>,
+) -> Result<Vec<u8>> {
+    let mut cache_bytes = Vec::new();
+    for bytes in model_bytes {
+        cache_bytes.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        cache_bytes.extend_from_slice(bytes);
+    }
+    if let Some(appearance) = appearance {
+        let metadata = serde_json::to_vec(&(
+            &appearance.descriptor,
+            appearance.blueprint.fallback.level,
+            appearance.blueprint.fallback.facegen_policy,
+        ))?;
+        cache_bytes.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+        cache_bytes.extend_from_slice(&metadata);
+    }
+    Ok(cache_bytes)
+}
+
 pub(crate) fn prepared_placement(
     reference: &ReferenceRecord,
     base: Option<&BaseRecord>,
@@ -211,6 +239,7 @@ pub(crate) fn prepared_semantic(
 ) -> PreparedSemantic {
     let actor = PreparedActor {
         base_template_form_id: base.and_then(|base| base.base_template_form_id),
+        ..Default::default()
     };
     match reference.kind {
         // Issue #120 (F119.1): a source-authored dead NPC is a lootable
@@ -371,13 +400,15 @@ pub(crate) struct PlacementStage {
 pub(crate) fn stage_placements(
     references: Vec<ReferenceRecord>,
     bases: &HashMap<u32, BaseRecord>,
-    actor_models: &HashMap<u32, Vec<String>>,
+    actor_models: &HashMap<u32, PreparedActorAppearance>,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     staging_dir: &Path,
     assets_dir: &Path,
     diagnostics: &mut Vec<Diagnostic>,
     rebuild_assets: bool,
+    static_converter_revision: &str,
+    actor_converter_revision: &str,
 ) -> Result<PlacementStage> {
     let model_static_usage = model_static_usage(&references, bases);
     let mut jobs: Vec<BlenderAssetJob> = Vec::new();
@@ -428,17 +459,17 @@ pub(crate) fn stage_placements(
                 initially_enabled: reference.initially_enabled,
             });
         }
-        let actor_model_list =
+        let actor_appearance =
             if reference.kind == ReferenceKind::Npc || reference.kind == ReferenceKind::Creature {
-                actor_models
-                    .get(&reference.form_id)
-                    .cloned()
-                    .unwrap_or_default()
+                actor_models.get(&reference.form_id).cloned()
             } else {
-                Vec::new()
+                None
             };
-        let model = if !actor_model_list.is_empty() {
-            actor_model_list.first().map(String::as_str)
+        let actor_assembly = actor_appearance
+            .as_ref()
+            .and_then(|appearance| appearance.descriptor.clone());
+        let model = if actor_appearance.is_some() {
+            actor_assembly.as_ref().map(|actor| actor.skeleton.as_str())
         } else {
             (reference.kind != ReferenceKind::Npc)
                 .then_some(base.model.as_ref())
@@ -462,18 +493,17 @@ pub(crate) fn stage_placements(
             ));
             continue;
         };
-        let mut model_paths = if !actor_model_list.is_empty() {
-            actor_model_list
-                .iter()
-                .map(|model| normalize_asset_path(model))
-                .collect::<Vec<_>>()
+        let mut model_paths = if let Some(actor) = actor_assembly.as_ref() {
+            actor.visual_inputs.clone()
         } else {
             vec![normalize_asset_path(model)]
         };
-        model_paths.sort();
-        model_paths.dedup();
+        if actor_assembly.is_none() {
+            model_paths.sort();
+            model_paths.dedup();
+        }
         let normalized_model = model_paths[0].clone();
-        if is_editor_marker(&normalized_model) {
+        if actor_assembly.is_none() && is_editor_marker(&normalized_model) {
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
                 message: format!("skipping non-rendering editor marker {normalized_model}"),
@@ -489,7 +519,10 @@ pub(crate) fn stage_placements(
             }
             continue;
         }
-        if is_non_rendering_effect(&normalized_model) {
+        // An actor assembly's first input is an explicit rig reference and may
+        // intentionally have no render geometry (for example Protectron's
+        // skeleton.nif). Its remaining visual inputs are the renderable body.
+        if actor_assembly.is_none() && is_non_rendering_effect(&normalized_model) {
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
                 message: format!("skipping non-rendering effect {normalized_model}"),
@@ -522,7 +555,7 @@ pub(crate) fn stage_placements(
             continue;
         }
         let nif_bytes = &model_bytes[0];
-        let assembly = model_paths.len() > 1;
+        let assembly = actor_assembly.is_some();
         let conversion = asset_conversion(
             model_static_usage
                 .get(&normalized_model)
@@ -531,16 +564,12 @@ pub(crate) fn stage_placements(
         );
         let root_transform_policy = root_transform_policy(&normalized_model);
         let conversion_profile = conversion.profile_tag().to_owned();
-        let mut cache_bytes = Vec::new();
-        for bytes in &model_bytes {
-            cache_bytes.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            cache_bytes.extend_from_slice(bytes);
-        }
+        let cache_bytes = actor_cache_input_bytes(&model_bytes, actor_appearance.as_ref())?;
         let cache_profile = if assembly {
-            format!("{NIF_CONVERTER_REVISION}-actor-bindpose-v1")
+            actor_converter_revision.to_owned()
         } else {
             format!(
-                "{NIF_CONVERTER_REVISION}-{conversion_profile}-{}",
+                "{static_converter_revision}-{conversion_profile}-{}",
                 root_transform_policy.tag()
             )
         };
@@ -549,7 +578,11 @@ pub(crate) fn stage_placements(
         let physics_name = physics_sidecar_name(&asset_name);
         let physics_asset_path = format!("assets/{physics_name}");
         let model_key = if assembly {
-            format!("actor:{}", model_paths.join("|"))
+            // Actor cache identity includes the converter descriptor as well
+            // as its NIF bytes. Two references can share source paths but use
+            // different part/material selections and therefore need distinct
+            // content-addressed outputs.
+            format!("actor:{asset_name}")
         } else {
             normalized_model.clone()
         };
@@ -569,6 +602,7 @@ pub(crate) fn stage_placements(
                     fs::create_dir_all(parent)?;
                 }
                 let mut inputs = Vec::with_capacity(model_paths.len());
+                let mut staged_paths = HashMap::new();
                 for (index, (model_path, bytes)) in model_paths.iter().zip(&model_bytes).enumerate()
                 {
                     let path = if index == 0 {
@@ -582,12 +616,62 @@ pub(crate) fn stage_placements(
                         stage_textures(bytes, data_root, archives, staging_dir, diagnostics)?;
                         path
                     };
-                    inputs.push(path.to_string_lossy().to_string());
+                    let staged_path = path.to_string_lossy().to_string();
+                    staged_paths.insert(normalize_asset_path(model_path), staged_path.clone());
+                    inputs.push(staged_path);
                 }
-                fs::write(
-                    &assembly_path,
-                    serde_json::json!({"inputs": inputs}).to_string(),
-                )?;
+                let actor = actor_assembly
+                    .as_ref()
+                    .expect("assembly staging requires an actor descriptor");
+                if let Some(texture) = actor.eye_texture.as_deref() {
+                    stage_actor_texture(texture, data_root, archives, staging_dir, diagnostics)?;
+                }
+                let staged = ActorAssemblyDescriptor {
+                    skeleton: inputs[0].clone(),
+                    visual_inputs: inputs,
+                    body_parts: actor
+                        .body_parts
+                        .iter()
+                        .filter_map(|part| {
+                            staged_paths
+                                .get(&normalize_asset_path(&part.path))
+                                .map(|path| ActorBodyPartInput {
+                                    path: path.clone(),
+                                    index: part.index,
+                                })
+                        })
+                        .collect(),
+                    apparel: actor
+                        .apparel
+                        .iter()
+                        .filter_map(|item| {
+                            staged_paths
+                                .get(&normalize_asset_path(&item.path))
+                                .map(|path| ActorApparelInput {
+                                    path: path.clone(),
+                                    form_id: item.form_id,
+                                    biped_slot_mask: item.biped_slot_mask,
+                                })
+                        })
+                        .collect(),
+                    head_parts: actor
+                        .head_parts
+                        .iter()
+                        .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
+                        .collect(),
+                    head_anim_parts: actor
+                        .head_anim_parts
+                        .iter()
+                        .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
+                        .collect(),
+                    eye_geometry: actor
+                        .eye_geometry
+                        .iter()
+                        .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
+                        .collect(),
+                    eye_texture: actor.eye_texture.clone(),
+                };
+                fs::write(&assembly_path, serde_json::to_string(&staged)?)?;
                 assembly_path
             } else {
                 staging_nif.clone()
@@ -597,12 +681,18 @@ pub(crate) fn stage_placements(
             let outputs_exist = output.exists() || physics_output.exists();
             let cache_valid = output.exists()
                 && physics_output.exists()
-                && validate_asset_cache_pair(&output, &physics_output).is_ok();
+                && validate_asset_cache_pair(&output, &physics_output).is_ok()
+                && (!assembly || validate_actor_glb(&output).is_ok());
             match asset_cache_decision(outputs_exist, cache_valid, rebuild_assets) {
                 AssetCacheDecision::Reuse => cache_hits += 1,
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,
@@ -633,6 +723,11 @@ pub(crate) fn stage_placements(
                         ),
                     });
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,
@@ -656,6 +751,11 @@ pub(crate) fn stage_placements(
                 AssetCacheDecision::RebuildRequested => {
                     cache_explicit_rebuilds += 1;
                     jobs.push(BlenderAssetJob {
+                        kind: if assembly {
+                            AssetJobKind::ActorAssembly
+                        } else {
+                            AssetJobKind::StaticNif
+                        },
                         input,
                         output,
                         physics_output,
@@ -705,6 +805,19 @@ pub(crate) fn stage_placements(
         continue;
     }
 
+    for placement in &mut placements {
+        let Some(appearance) = actor_models.get(&placement.reference_form_id) else {
+            continue;
+        };
+        match &mut placement.semantic {
+            PreparedSemantic::Npc(actor) | PreparedSemantic::Creature(actor) => {
+                actor.assembly = Some(appearance.blueprint.clone());
+                placement.inventory = appearance.inventory.clone();
+            }
+            _ => {}
+        }
+    }
+
     let leveled_lists = collect_leveled_lists(&placements, bases);
 
     Ok(PlacementStage {
@@ -718,4 +831,93 @@ pub(crate) fn stage_placements(
         cache_explicit_rebuilds,
         leveled_lists,
     })
+}
+
+fn stage_actor_texture(
+    texture: &str,
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    staging_dir: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let texture = normalize_asset_path(texture);
+    let texture = if texture.starts_with("textures/") {
+        texture
+    } else {
+        format!("textures/{texture}")
+    };
+    let Some(bytes) = resolve_asset(data_root, archives, &texture)? else {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: format!("missing selected actor eye texture {texture}"),
+        });
+        return Ok(());
+    };
+    let destination = staging_dir.join(texture.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(destination, bytes)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod actor_cache_tests {
+    use super::*;
+    use bevyout_core::actor::{ActorFallbackDecision, ActorFallbackLevel};
+
+    fn appearance(level: ActorFallbackLevel) -> PreparedActorAppearance {
+        PreparedActorAppearance {
+            descriptor: Some(ActorAssemblyDescriptor {
+                skeleton: "characters/skeleton.nif".into(),
+                visual_inputs: vec!["characters/skeleton.nif".into()],
+                body_parts: Vec::new(),
+                apparel: Vec::new(),
+                head_parts: Vec::new(),
+                head_anim_parts: Vec::new(),
+                eye_geometry: Vec::new(),
+                eye_texture: None,
+            }),
+            blueprint: bevyout_core::actor::ActorAssemblyBlueprint {
+                skeleton_path: Some("characters/skeleton.nif".into()),
+                fallback: ActorFallbackDecision {
+                    level,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            inventory: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn actor_cache_input_includes_the_fallback_selection_metadata() {
+        let bytes = vec![b"same-nif".to_vec()];
+        let exact =
+            actor_cache_input_bytes(&bytes, Some(&appearance(ActorFallbackLevel::AuthoredExact)))
+                .unwrap();
+        let fallback = actor_cache_input_bytes(
+            &bytes,
+            Some(&appearance(ActorFallbackLevel::RaceSexSpecific)),
+        )
+        .unwrap();
+
+        assert_ne!(fingerprint(&exact), fingerprint(&fallback));
+    }
+
+    #[test]
+    fn actor_cache_input_includes_the_selected_eye_texture() {
+        let bytes = vec![b"same-nif".to_vec()];
+        let mut brown = appearance(ActorFallbackLevel::RaceSexSpecific);
+        brown.descriptor.as_mut().unwrap().eye_texture =
+            Some("textures/characters/eyes/brown.dds".into());
+        let mut blue = brown.clone();
+        blue.descriptor.as_mut().unwrap().eye_texture =
+            Some("textures/characters/eyes/blue.dds".into());
+
+        let brown = actor_cache_input_bytes(&bytes, Some(&brown)).unwrap();
+        let blue = actor_cache_input_bytes(&bytes, Some(&blue)).unwrap();
+
+        assert_ne!(fingerprint(&brown), fingerprint(&blue));
+    }
 }

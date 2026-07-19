@@ -80,3 +80,82 @@ fn dynamic_scope_rejects_concave_and_constrained_bodies() {
         PreparedPhysicsClassification::Static
     );
 }
+
+fn articulated_asset(joint: PreparedPhysicsJoint) -> PreparedPhysicsAsset {
+    let mut root = body(8, 0, false);
+    root.group_id = 0;
+    let mut limb = body(8, 0, false);
+    limb.group_id = 1;
+    PreparedPhysicsAsset {
+        schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
+        source: PreparedPhysicsSource::AuthoredHavok,
+        bodies: vec![root, limb],
+        joints: vec![joint],
+    }
+}
+
+#[test]
+fn authored_joint_frames_and_distinct_swing_twist_limits_validate() {
+    let asset = articulated_asset(PreparedPhysicsJoint {
+        kind: "spherical".into(),
+        body_a: 0,
+        body_b: 1,
+        frame_a_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        frame_b_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        cone_limit: Some(std::f32::consts::FRAC_PI_4),
+        plane_lower_limit: Some(-0.879_646),
+        plane_upper_limit: Some(0.523_597),
+        twist_lower_limit: Some(-0.174_533),
+        twist_upper_limit: Some(0.174_533),
+        malleable_strength: Some(0.9),
+        source: PreparedPhysicsJointSource::Authored,
+        ..Default::default()
+    });
+
+    validate_physics_asset(&asset).unwrap();
+    assert_eq!(asset.joints[0].source, PreparedPhysicsJointSource::Authored);
+    assert_ne!(
+        asset.joints[0].plane_lower_limit,
+        asset.joints[0].twist_lower_limit
+    );
+}
+
+#[test]
+fn joint_validation_rejects_non_unit_frames_and_inverted_twist_limits() {
+    let invalid_frame = articulated_asset(PreparedPhysicsJoint {
+        body_a: 0,
+        body_b: 1,
+        frame_a_rotation_xyzw: [0.0, 0.0, 0.0, 2.0],
+        ..Default::default()
+    });
+    assert!(validate_physics_asset(&invalid_frame).is_err());
+
+    let inverted_twist = articulated_asset(PreparedPhysicsJoint {
+        body_a: 0,
+        body_b: 1,
+        twist_lower_limit: Some(0.5),
+        twist_upper_limit: Some(-0.5),
+        ..Default::default()
+    });
+    assert!(validate_physics_asset(&inverted_twist).is_err());
+}
+
+#[test]
+fn validation_rejects_duplicate_body_group_ids() {
+    let mut first = body(8, 0, false);
+    first.group_id = 7;
+    let mut second = body(8, 0, false);
+    second.group_id = 7;
+    let asset = PreparedPhysicsAsset {
+        schema_version: PHYSICS_ASSET_SCHEMA_VERSION,
+        source: PreparedPhysicsSource::AuthoredHavok,
+        bodies: vec![first, second],
+        joints: Vec::new(),
+    };
+
+    let error = validate_physics_asset(&asset).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate body group IDs"),
+        "unexpected validation error: {error:#}"
+    );
+}

@@ -6,6 +6,54 @@ use std::io::Write;
 const BLENDER_CONVERSION_SCRIPT: &str = include_str!("../blender_script.py");
 
 #[test]
+fn directx_normal_conversion_flips_only_green() {
+    let mut texel = [12, 34, 56, 78];
+    flip_directx_normal_y_texel(&mut texel);
+    assert_eq!(texel, [12, 221, 56, 78]);
+}
+
+#[test]
+fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("1.5 * (2.0 / (exponent + 2.0)) ** 0.25"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("Material.import_material_gloss = staticmethod(import_material_gloss_ggx)")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("actor_shape_glossiness(nifnode)"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_diffuse_texture_path"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_perceptual_roughness"));
+}
+
+#[test]
+fn blender_normal_conversion_is_green_only_and_rebuilds_stale_pngs() {
+    let dds = Path::new(r"textures\architecture\Wall_N.DDS");
+    let output = Path::new(r"textures\architecture\Wall.normal-y.tmp.png");
+    let arguments = imagemagick_texture_arguments(dds, output, true);
+    let arguments = arguments
+        .iter()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        arguments,
+        vec![
+            dds.to_string_lossy(),
+            "-channel".into(),
+            "G".into(),
+            "-negate".into(),
+            "+channel".into(),
+            "-strip".into(),
+            output.to_string_lossy(),
+        ]
+    );
+    assert!(staged_texture_conversion_required(dds, true));
+    assert!(!staged_texture_conversion_required(
+        Path::new("textures/architecture/wall.dds"),
+        true
+    ));
+}
+
+#[test]
 fn finds_length_adjacent_texture_names_in_nif_bytes() {
     let references = texture_references(b"textures\\clutter\\machine\\panel.dds4");
     assert!(references.contains(&"textures/clutter/machine/panel.dds".to_string()));
@@ -33,6 +81,21 @@ fn content_addressed_glb_names_are_stable_and_revision_sensitive() {
         content_addressed_glb_name("converter-v1", b"changed-nif")
     );
     assert!(first.ends_with(".glb"));
+}
+
+#[test]
+fn material_policy_content_participates_in_converter_identity() {
+    let identity = material_policy_identity("converter-v1");
+    assert!(identity.starts_with("converter-v1+material-policy-"));
+    assert_ne!(identity, "converter-v1");
+    assert_eq!(identity, material_policy_identity("converter-v1"));
+    assert_ne!(
+        identity,
+        material_policy_identity_with_csv(
+            "converter-v1",
+            "diffuse_texture,object_name,metallic\ntextures/fixtures/metal.dds,Metal Fixture,1\n"
+        )
+    );
 }
 
 #[test]
@@ -130,7 +193,7 @@ fn cache_pair_rebuilds_when_sidecar_is_missing_or_invalid() {
     fs::write(&glb, glb_bytes).unwrap();
 
     assert!(validate_asset_cache_pair(&glb, &physics).is_err());
-    let valid = br#"{"schema_version":2,"source":"GeneratedRender","bodies":[],"joints":[]}"#;
+    let valid = br#"{"schema_version":3,"source":"GeneratedRender","bodies":[],"joints":[]}"#;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(valid).unwrap();
     fs::write(&physics, encoder.finish().unwrap()).unwrap();
@@ -265,6 +328,7 @@ fn material_emission_policy_preserves_source_strength_and_override_precedence() 
 #[test]
 fn blender_job_json_carries_quick_ao_profile() {
     let json = blender_jobs_json(&[BlenderAssetJob {
+        kind: AssetJobKind::StaticNif,
         input: PathBuf::from("C:\\staging\\mesh.nif"),
         output: PathBuf::from("C:\\cache\\mesh.glb"),
         physics_output: PathBuf::from("C:\\cache\\mesh.physics.json.gz"),
@@ -457,4 +521,77 @@ fn buffer_view_extending_past_the_glb_is_rejected() {
     let error = validate_glb_images(&path).unwrap_err();
     assert!(error.to_string().contains("extends beyond GLB"));
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn actor_conversion_retries_creature_assemblies_through_niftools() {
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("actor PyNifly import failed; retrying NIFTools compatibility path")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("source_paths=assembly_inputs"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("assembly_inputs is not None and not assembly_used_niftools_fallback")
+    );
+}
+
+#[test]
+fn actor_conversion_applies_the_selected_eyes_texture_only_to_eye_sources() {
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("eye_sources = {actor_source_key(path)"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("is_selected_eye and eye_texture"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("selected, [eye_texture] + list(texture_values)"));
+}
+
+#[test]
+fn actor_glb_audit_accepts_a_textured_weighted_skin() {
+    let document = serde_json::json!({
+        "accessors": [
+            {"count": 3},
+            {"count": 3},
+            {"count": 3},
+            {"count": 1}
+        ],
+        "images": [{"uri": "skin.png"}],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
+            "material": 0
+        }]}],
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Bip01"}],
+        "skins": [{"joints": [1], "inverseBindMatrices": 3}]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-valid-actor-audit-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let audit = validate_actor_glb(&path).unwrap();
+    assert_eq!(audit.skins, 1);
+    assert_eq!(audit.skinned_primitives, 1);
+    assert_eq!(audit.textured_primitives, 1);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn actor_glb_audit_rejects_missing_weights_and_base_color_texture() {
+    let document = serde_json::json!({
+        "accessors": [{"count": 3}, {"count": 3}, {"count": 1}],
+        "materials": [{}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "JOINTS_0": 1},
+            "material": 0
+        }]}],
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Bip01"}],
+        "skins": [{"joints": [1], "inverseBindMatrices": 2}]
+    });
+    let path = std::env::temp_dir().join(format!(
+        "bevyout-invalid-actor-audit-{}.glb",
+        std::process::id()
+    ));
+    fs::write(&path, glb_with_json_document(document)).unwrap();
+    let error = validate_actor_glb(&path).unwrap_err();
+    assert!(error.to_string().contains("WEIGHTS_0"));
+    let _ = fs::remove_file(path);
 }

@@ -141,6 +141,12 @@ fn developer_commands_and_aliases_are_registered_and_structured() {
     assert!(exec(&mut app, "help toggleflycam").ok);
     assert!(exec(&mut app, "help togglecollisiongeometry").ok);
     assert!(exec(&mut app, "help fov").ok);
+    let ragdoll_probe_help = exec(&mut app, "help ragdollprobe");
+    assert!(ragdoll_probe_help.ok);
+    assert_eq!(ragdoll_probe_help.value["mutating"], false);
+    let actor_inspect_help = exec(&mut app, "help actorinspect");
+    assert!(actor_inspect_help.ok);
+    assert_eq!(actor_inspect_help.value["mutating"], false);
     let free_camera = exec(&mut app, "toggleflycam");
     assert_eq!(free_camera.value["camera_mode"], "free");
     assert_eq!(free_camera.log, ["Free camera enabled."]);
@@ -442,6 +448,170 @@ fn error_code(output: &crate::console::ConsoleOutput) -> String {
         .expect("expected an error")
         .code
         .clone()
+}
+
+fn register_actor_placement(app: &mut App) -> bevyout_core::item_transaction::ItemInstanceId {
+    use bevyout_core::actor::{
+        ActorAssemblyBlueprint, ActorAttachmentPoint, ActorFallbackDecision, ActorFallbackLevel,
+        ActorFallbackReason, ActorKind, ActorMeshRole, ActorProxyKind, AssembledApparel,
+        AssembledMeshPart, AssembledWeapon, FaceGenPolicy,
+    };
+
+    register_placement(app, "Npc((base_template_form_id: None, assembly: None))");
+    let root = app
+        .world_mut()
+        .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+        .single(app.world())
+        .unwrap();
+    let assembly = ActorAssemblyBlueprint {
+        source_base_form_id: 1,
+        resolved_base_form_id: 2,
+        reference_form_id: 16,
+        kind: ActorKind::Humanoid,
+        female: true,
+        race_form_id: Some(3),
+        root_scale: 1.125,
+        skeleton_path: Some("meshes/characters/_male/skeleton.nif".into()),
+        mesh_parts: vec![AssembledMeshPart {
+            name: "head".into(),
+            source_form_id: Some(4),
+            model_path: "meshes/characters/head.nif".into(),
+            attachment_point: ActorAttachmentPoint::Head,
+            role: ActorMeshRole::Head(0),
+            is_visible: true,
+        }],
+        apparel: vec![AssembledApparel {
+            item_form_id: 5,
+            model_path: Some("assets/armor.glb".into()),
+            biped_slot_mask: 4,
+            model_available: true,
+        }],
+        eye_form_id: Some(7),
+        eye_texture_path: Some("textures/characters/eyes/brown.dds".into()),
+        equipped_weapon: Some(AssembledWeapon {
+            item_form_id: 6,
+            model_path: Some("assets/rifle.glb".into()),
+            attachment_point: ActorAttachmentPoint::RightHand,
+            model_available: true,
+        }),
+        fallback: ActorFallbackDecision {
+            base_form_id: 2,
+            reference_form_id: 16,
+            level: ActorFallbackLevel::RaceSexSpecific,
+            facegen_policy: FaceGenPolicy::RestPoseFallback,
+            proxy_kind: ActorProxyKind::None,
+            reasons: vec![ActorFallbackReason::MissingFaceGen],
+        },
+    };
+    let holder = HolderId::Actor {
+        reference_form_id: 16,
+    };
+    let item_id = {
+        let mut canonical = app
+            .world_mut()
+            .resource_mut::<interaction::CanonicalItemLedger>();
+        canonical
+            .ledger
+            .insert_holder(
+                holder,
+                bevyout_core::item_transaction::ItemHolderState::default(),
+            )
+            .unwrap();
+        let item_id = canonical
+            .ledger
+            .insert_new_item(
+                holder,
+                6,
+                1,
+                bevyout_core::item_transaction::ItemState::default(),
+            )
+            .unwrap();
+        canonical.ledger.equip(holder, item_id).unwrap();
+        item_id
+    };
+    app.world_mut().entity_mut(root).insert((
+        actor::ActorRuntime {
+            base_form_id: 2,
+            reference_form_id: 16,
+            kind: ActorKind::Humanoid,
+            assembly: Some(assembly),
+        },
+        actor::ActorRuntimeState {
+            holder,
+            holder_seeded: true,
+            proxy_entity: None,
+            bound_item_form_id: Some(6),
+            weapon_model: Some(actor::ActorWeaponModel {
+                item_form_id: 6,
+                model_path: "assets/rifle.glb".into(),
+            }),
+            weapon: actor::ActorWeaponRuntimeState::MissingAttachmentNode {
+                expected: "RightHand/Weapon".into(),
+            },
+            diagnostics: vec![actor::ActorRuntimeDiagnostic {
+                code: "missing_weapon_attachment_node",
+                message: "weapon socket is missing".into(),
+            }],
+        },
+    ));
+    item_id
+}
+
+#[test]
+fn actorinspect_reports_prepared_and_runtime_assembly_state() {
+    let mut app = test_app();
+    let item_id = register_actor_placement(&mut app);
+
+    let output = exec(&mut app, "actorinspect 00000010");
+    assert!(output.ok, "actorinspect failed: {:?}", output.error);
+    assert_eq!(output.value["reference_form_id"], 16);
+    assert_eq!(output.value["source_base_form_id"], 1);
+    assert_eq!(output.value["base_form_id"], 2);
+    assert_eq!(output.value["kind"], "humanoid");
+    assert_eq!(output.value["scale"], 1.125);
+    assert_eq!(output.value["fallback"]["tier"], "RaceSexSpecific");
+    assert_eq!(
+        output.value["fallback"]["reasons"][0]["code"],
+        "missing_facegen"
+    );
+    assert_eq!(output.value["parts"][0]["role"], "Head(0)");
+    assert_eq!(output.value["eyes"]["form_id"], 7);
+    assert_eq!(
+        output.value["eyes"]["texture_path"],
+        "textures/characters/eyes/brown.dds"
+    );
+    assert_eq!(output.value["apparel"][0]["item_form_id"], 5);
+    assert_eq!(output.value["weapon"]["prepared"]["item_form_id"], 6);
+    assert_eq!(
+        output.value["weapon"]["runtime"]["state"]["status"],
+        "missing_attachment_node"
+    );
+    assert_eq!(output.value["runtime"]["holder_seeded"], true);
+    assert_eq!(output.value["runtime"]["canonical"]["present"], true);
+    assert_eq!(
+        output.value["runtime"]["canonical"]["equipped_instance_id"],
+        item_id.0
+    );
+    assert_eq!(
+        output.value["runtime"]["canonical"]["items"][0]["base_form_id"],
+        6
+    );
+    assert_eq!(
+        output.value["runtime"]["diagnostics"][0]["code"],
+        "missing_weapon_attachment_node"
+    );
+    assert!(output.log[0].contains("tier=RaceSexSpecific"));
+}
+
+#[test]
+fn actorinspect_rejects_bad_arity_and_non_actor_references() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "actorinspect")), "bad_arity");
+    register_placement(&mut app, "Static");
+    assert_eq!(
+        error_code(&exec(&mut app, "actorinspect 00000010")),
+        "not_actor"
+    );
 }
 
 #[test]

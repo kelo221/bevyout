@@ -182,24 +182,6 @@ pub struct StandardMaterial {
     #[doc(alias = "specular_intensity")]
     pub reflectance: f32,
 
-    /// Derive perceptual roughness from the alpha channel of the specular
-    /// texture when no authored metallic/roughness texture is present.
-    ///
-    /// This is intended for source formats that pack a gloss/specular mask in
-    /// the same image as the normal map. It is disabled by default so generic
-    /// glTF materials retain Bevy's standard roughness behavior.
-    pub specular_alpha_roughness: bool,
-
-    /// Minimum perceptual roughness used by the specular-alpha proxy.
-    pub specular_alpha_roughness_min: f32,
-
-    /// Maximum perceptual roughness used by the specular-alpha proxy.
-    pub specular_alpha_roughness_max: f32,
-
-    /// Exponent applied to inverted specular alpha before the proxy range is
-    /// remapped. Values above one bias more pixels toward the minimum.
-    pub specular_alpha_roughness_curve: f32,
-
     /// A color with which to modulate the [`StandardMaterial::reflectance`] for
     /// non-metals.
     ///
@@ -888,10 +870,6 @@ impl Default for StandardMaterial {
             // Expressed in a linear scale and equivalent to 4% reflectance see
             // <https://google.github.io/filament/Material%20Properties.pdf>
             reflectance: 0.5,
-            specular_alpha_roughness: false,
-            specular_alpha_roughness_min: 0.089,
-            specular_alpha_roughness_max: 0.9,
-            specular_alpha_roughness_curve: 1.0,
             diffuse_transmission: 0.0,
             #[cfg(feature = "pbr_transmission_textures")]
             diffuse_transmission_channel: UvChannel::Uv0,
@@ -1011,7 +989,6 @@ bitflags::bitflags! {
         const ANISOTROPY_TEXTURE         = 1 << 17;
         const SPECULAR_TEXTURE           = 1 << 18;
         const SPECULAR_TINT_TEXTURE      = 1 << 19;
-        const SPECULAR_ALPHA_ROUGHNESS   = 1 << 20;
         const ALPHA_MODE_RESERVED_BITS   = Self::ALPHA_MODE_MASK_BITS << Self::ALPHA_MODE_SHIFT_BITS; // ← Bitmask reserving bits for the `AlphaMode`
         const ALPHA_MODE_OPAQUE          = 0 << Self::ALPHA_MODE_SHIFT_BITS;                          // ← Values are just sequential values bitshifted into
         const ALPHA_MODE_MASK            = 1 << Self::ALPHA_MODE_SHIFT_BITS;                          //   the bitmask, and can range from 0 to 7.
@@ -1084,9 +1061,6 @@ pub struct StandardMaterialUniform {
     pub max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     pub deferred_lighting_pass_id: u32,
-    pub specular_alpha_roughness_min: f32,
-    pub specular_alpha_roughness_max: f32,
-    pub specular_alpha_roughness_curve: f32,
 }
 
 impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
@@ -1148,10 +1122,6 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
                 flags |= StandardMaterialFlags::SPECULAR_TINT_TEXTURE;
             }
         }
-        if self.specular_alpha_roughness {
-            flags |= StandardMaterialFlags::SPECULAR_ALPHA_ROUGHNESS;
-        }
-
         #[cfg(feature = "pbr_multi_layer_material_textures")]
         {
             if self.clearcoat_texture.is_some() {
@@ -1237,68 +1207,7 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
             uv_transform: self.uv_transform.into(),
-            specular_alpha_roughness_min: sanitize_specular_alpha_roughness_min(
-                self.specular_alpha_roughness_min,
-                self.specular_alpha_roughness_max,
-            ),
-            specular_alpha_roughness_max: sanitize_specular_alpha_roughness_max(
-                self.specular_alpha_roughness_min,
-                self.specular_alpha_roughness_max,
-            ),
-            specular_alpha_roughness_curve: sanitize_specular_alpha_roughness_curve(
-                self.specular_alpha_roughness_curve,
-            ),
         }
-    }
-}
-
-fn sanitize_specular_alpha_roughness_min(min: f32, max: f32) -> f32 {
-    let min = if min.is_finite() { min } else { 0.089 };
-    let max = if max.is_finite() { max } else { 0.9 };
-    min.clamp(0.089, 1.0).min(max.clamp(0.089, 1.0))
-}
-
-fn sanitize_specular_alpha_roughness_max(min: f32, max: f32) -> f32 {
-    let min = if min.is_finite() { min } else { 0.089 };
-    let max = if max.is_finite() { max } else { 0.9 };
-    max.clamp(0.089, 1.0).max(min.clamp(0.089, 1.0))
-}
-
-fn sanitize_specular_alpha_roughness_curve(curve: f32) -> f32 {
-    if curve.is_finite() {
-        curve.clamp(0.1, 4.0)
-    } else {
-        1.0
-    }
-}
-
-#[cfg(test)]
-mod specular_alpha_roughness_tests {
-    use super::{
-        sanitize_specular_alpha_roughness_curve, sanitize_specular_alpha_roughness_max,
-        sanitize_specular_alpha_roughness_min,
-    };
-
-    #[test]
-    fn bounds_are_clamped_and_ordered() {
-        assert_eq!(sanitize_specular_alpha_roughness_min(-1.0, 0.5), 0.089);
-        assert_eq!(sanitize_specular_alpha_roughness_max(-1.0, 0.5), 0.5);
-        assert_eq!(sanitize_specular_alpha_roughness_min(0.8, 0.2), 0.2);
-        assert_eq!(sanitize_specular_alpha_roughness_max(0.8, 0.2), 0.8);
-    }
-
-    #[test]
-    fn non_finite_values_fall_back_to_safe_defaults() {
-        assert_eq!(sanitize_specular_alpha_roughness_min(f32::NAN, f32::NAN), 0.089);
-        assert_eq!(sanitize_specular_alpha_roughness_max(f32::NAN, f32::NAN), 0.9);
-        assert_eq!(sanitize_specular_alpha_roughness_curve(f32::NAN), 1.0);
-        assert_eq!(sanitize_specular_alpha_roughness_curve(f32::INFINITY), 1.0);
-    }
-
-    #[test]
-    fn curve_is_kept_in_the_supported_range() {
-        assert_eq!(sanitize_specular_alpha_roughness_curve(0.0), 0.1);
-        assert_eq!(sanitize_specular_alpha_roughness_curve(9.0), 4.0);
     }
 }
 

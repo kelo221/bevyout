@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bevyout": {
+      "command": "bun",
+      "args": [
+        "run",
+        "tools/bevyout-mcp/src/server.ts"
+      ]
+    }
+  }
+}

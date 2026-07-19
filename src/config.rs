@@ -109,7 +109,17 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
+        CommandLine::RagdollLab(args) => {
+            if args.cache_dir.is_none() {
+                args.cache_dir = config.output.cache_dir.clone();
+            }
+        }
         CommandLine::View(_) | CommandLine::Script(_) => {}
+        CommandLine::NifConvert(args) => {
+            if args.game_root.is_none() {
+                args.game_root = config.fallout3.game_root.clone();
+            }
+        }
         CommandLine::Cells(args) => {
             if args.game_root.is_none() {
                 args.game_root = config.fallout3.game_root.clone();
@@ -357,6 +367,28 @@ mod tests {
             panic!("expected view command");
         };
         assert_eq!(args.manifest, Path::new("scene.ron"));
+    }
+
+    #[test]
+    fn ragdoll_lab_uses_configured_cache_without_touching_prepared_data() {
+        let config = TempConfigFile::new(SAMPLE_CONFIG);
+        let mut cli = Cli::try_parse_from([
+            "bevyout",
+            "ragdoll-lab",
+            "SuperDuperMart",
+            "--actor",
+            "00041606",
+            "--config",
+            config.path().to_str().unwrap(),
+        ])
+        .unwrap();
+
+        apply(&mut cli).unwrap();
+
+        let CommandLine::RagdollLab(args) = &cli.command else {
+            panic!("expected ragdoll-lab command");
+        };
+        assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
     }
 
     #[test]

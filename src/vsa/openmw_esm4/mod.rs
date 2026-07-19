@@ -62,6 +62,10 @@ pub(crate) struct BaseRecord {
     pub(crate) editor_id: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) model: Option<String>,
+    /// Fallout 3 ARMO keeps worn and world models in separate fields. `model`
+    /// remains the standalone world model used by pickup preparation; actor
+    /// appearance consumes this sex-specific set instead.
+    pub(crate) apparel_models: Option<ApparelModelSet>,
     pub(crate) icon: Option<String>,
     pub(crate) mini_icon: Option<String>,
     pub(crate) value: Option<i32>,
@@ -80,6 +84,14 @@ pub(crate) struct BaseRecord {
     /// (`prepare::orchestrator::actor_record_input`).
     pub(crate) actor: Option<ActorData>,
     ignored_subrecords: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ApparelModelSet {
+    pub(crate) male_worn: Option<String>,
+    pub(crate) male_world: Option<String>,
+    pub(crate) female_worn: Option<String>,
+    pub(crate) female_world: Option<String>,
 }
 
 /// Item fields decoded from the exact OpenMW ESM4 layouts listed in

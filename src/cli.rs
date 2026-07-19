@@ -28,6 +28,9 @@ pub enum CommandLine {
     /// Open a prepared scene manifest in the Bevy viewer.
     #[command(name = "view")]
     View(ViewArgs),
+    /// Compare one prepared actor ragdoll in an isolated physics laboratory.
+    #[command(name = "ragdoll-lab")]
+    RagdollLab(RagdollLabArgs),
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
@@ -37,6 +40,91 @@ pub enum CommandLine {
     /// Run deterministic Gamebryo-style console scripts.
     #[command(name = "script")]
     Script(ScriptArgs),
+    /// Experimentally convert one FO3/FNV NIF 20.2.0.7 asset to a self-contained GLB.
+    #[command(name = "nif-convert")]
+    NifConvert(NifConvertArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("source")
+        .required(true)
+        .args(["input", "asset"])
+))]
+pub struct NifConvertArgs {
+    /// Read a NIF directly from this filesystem path.
+    #[arg(long, value_name = "FILE", conflicts_with = "asset")]
+    pub(crate) input: Option<PathBuf>,
+    /// Resolve a Data-relative NIF path from loose files or Fallout BSAs.
+    #[arg(long, value_name = "meshes/PATH.nif", conflicts_with = "input")]
+    pub(crate) asset: Option<String>,
+    /// Write the self-contained binary glTF here.
+    #[arg(long, value_name = "FILE.glb")]
+    pub(crate) output: PathBuf,
+    /// Fallout 3 / New Vegas installation root; required by --asset and used for textures.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) game_root: Option<PathBuf>,
+    /// Optional authored-collision sidecar output path.
+    #[arg(long, value_name = "FILE.physics.json.gz")]
+    pub(crate) physics_output: Option<PathBuf>,
+    /// Optional deterministic JSON conversion report.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) report: Option<PathBuf>,
+    /// Vertex-color conversion policy.
+    #[arg(long, value_enum, default_value_t = NifConversionMode::Preserve)]
+    pub(crate) conversion: NifConversionMode,
+    /// Emit the usable subset while reporting unsupported or missing content.
+    #[arg(long)]
+    pub(crate) allow_lossy: bool,
+    /// Replace existing output files.
+    #[arg(long)]
+    pub(crate) force: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NifConversionMode {
+    Preserve,
+    QuickAo,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrepareConverter {
+    Blender,
+    Native,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RagdollLabBackend {
+    Avian,
+    Boxddd,
+}
+
+impl std::fmt::Display for RagdollLabBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Avian => "avian",
+            Self::Boxddd => "boxddd",
+        })
+    }
+}
+
+impl Default for PrepareConverter {
+    fn default() -> Self {
+        match crate::converter_policy::resolve_converter_backend(None) {
+            crate::converter_policy::ConverterBackend::Native => Self::Native,
+            crate::converter_policy::ConverterBackend::Blender => Self::Blender,
+        }
+    }
+}
+
+impl std::fmt::Display for PrepareConverter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backend = match self {
+            Self::Blender => crate::converter_policy::ConverterBackend::Blender,
+            Self::Native => crate::converter_policy::ConverterBackend::Native,
+        };
+        formatter.write_str(backend.as_str())
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -110,6 +198,9 @@ pub struct PrepareArgs {
     /// Blender executable path.
     #[arg(long)]
     pub(crate) blender: Option<PathBuf>,
+    /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
+    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
+    pub(crate) converter: PrepareConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -176,6 +267,31 @@ pub struct ViewArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct RagdollLabArgs {
+    /// Prepared scene GECK EditorID or eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Actor reference FormID from the prepared scene.
+    #[arg(long, value_name = "FORM_ID")]
+    pub(crate) actor: String,
+    /// Physics solver used only by the isolated laboratory.
+    #[arg(long, value_enum, default_value_t = RagdollLabBackend::Avian)]
+    pub(crate) backend: RagdollLabBackend,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Expose the laboratory to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
+    /// Exit after this many seconds; useful for bounded solver captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
+}
+
+#[derive(Parser, Debug)]
 pub struct RenderArgs {
     /// GECK EditorID, or an eight-digit hexadecimal FormID.
     #[arg(value_name = "EDITOR_ID")]
@@ -189,6 +305,9 @@ pub struct RenderArgs {
     /// Blender executable used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) blender: Option<PathBuf>,
+    /// NIF-to-GLB backend used if render needs to prepare or refresh the cell.
+    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
+    pub(crate) converter: PrepareConverter,
     /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
     #[arg(long, hide = true)]
     pub(crate) irradiance_blender: Option<PathBuf>,

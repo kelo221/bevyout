@@ -263,7 +263,7 @@ pub(crate) struct PreparedCollisionWorld {
     /// `dynamic_bodies` for existing persistence/transform code; the full
     /// list is torn down atomically when the toggle is cleared.
     ragdoll_bodies: HashMap<Entity, Vec<BodyId>>,
-    ragdoll_joints: HashMap<Entity, Vec<JointId>>,
+    ragdoll_joints: HashMap<Entity, Vec<collision::RagdollJointBinding>>,
     /// Body-to-scene-node bindings used to deform an actor's shared GLTF
     /// skeleton while the developer ragdoll is active.
     ragdoll_nodes: HashMap<BodyId, collision::RagdollNodeBinding>,

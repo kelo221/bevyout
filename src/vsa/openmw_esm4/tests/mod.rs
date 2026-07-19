@@ -74,6 +74,10 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
     let armor = parse_base(
         "ARMO",
         &[
+            direct_subrecord("MODL", b"armor/m/outfit.nif\0".to_vec()),
+            direct_subrecord("MOD2", b"armor/m/go.nif\0".to_vec()),
+            direct_subrecord("MOD3", b"armor/f/outfit.nif\0".to_vec()),
+            direct_subrecord("MOD4", b"armor/f/go.nif\0".to_vec()),
             direct_subrecord("MICO", b"interface/icons/armor_small.dds\0".to_vec()),
             direct_subrecord("DATA", armor_data),
             direct_subrecord("DNAM", 18_u16.to_le_bytes().to_vec()),
@@ -83,6 +87,16 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
     )
     .unwrap();
     assert_eq!(armor.icon, None);
+    assert_eq!(armor.model.as_deref(), Some("armor/m/go.nif"));
+    assert_eq!(
+        armor.apparel_models,
+        Some(ApparelModelSet {
+            male_worn: Some("armor/m/outfit.nif".into()),
+            male_world: Some("armor/m/go.nif".into()),
+            female_worn: Some("armor/f/outfit.nif".into()),
+            female_world: Some("armor/f/go.nif".into()),
+        })
+    );
     assert_eq!(
         armor.mini_icon.as_deref(),
         Some("interface/icons/armor_small.dds")
@@ -238,6 +252,28 @@ fn decodes_fo3_note_text_only_for_text_type_notes() {
         no_type_note.item_stats,
         OpenMwItemStats::Note { text: None }
     );
+}
+
+#[test]
+fn armor_model_fields_tolerate_absent_and_empty_paths() {
+    let resolver = direct_resolver();
+    let absent = parse_base("ARMO", &[], &resolver).unwrap();
+    assert_eq!(absent.model, None);
+    assert_eq!(absent.apparel_models, Some(ApparelModelSet::default()));
+
+    let empty = parse_base(
+        "ARMO",
+        &[
+            direct_subrecord("MODL", Vec::new()),
+            direct_subrecord("MOD2", vec![0]),
+            direct_subrecord("MOD3", vec![0]),
+            direct_subrecord("MOD4", Vec::new()),
+        ],
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(empty.model, None);
+    assert_eq!(empty.apparel_models, Some(ApparelModelSet::default()));
 }
 
 #[test]

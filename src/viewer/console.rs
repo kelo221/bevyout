@@ -28,7 +28,7 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::{RealtimeShadowSettings, shadow_cache_status};
-use super::{diagnostics, interaction, nav, nav_overlay, player};
+use super::{actor, diagnostics, interaction, nav, nav_overlay, player};
 
 mod common;
 mod item_commands;

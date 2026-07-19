@@ -23,6 +23,14 @@ pub struct TransactionId(pub u64);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum HolderId {
     Player,
+    /// Canonical inventory owned by a living actor placement.
+    ///
+    /// The reference FormID, rather than the actor base FormID, keeps two
+    /// placements of the same NPC or creature independent and stable across
+    /// runtime respawns and save/load reconstruction.
+    Actor {
+        reference_form_id: u32,
+    },
     FixtureContainer {
         reference_form_id: u32,
     },
@@ -715,6 +723,55 @@ mod tests {
 
     fn item(id: u64, form: u32, count: u32, condition: Option<u32>) -> ItemInstance {
         ItemInstance::new(ItemInstanceId(id), form, count, state(condition)).unwrap()
+    }
+
+    #[test]
+    fn actor_holder_identity_is_the_stable_reference_form_id() {
+        let holder = HolderId::Actor {
+            reference_form_id: 0x0004_1600,
+        };
+        let reconstructed = HolderId::Actor {
+            reference_form_id: 0x0004_1600,
+        };
+        let other_placement = HolderId::Actor {
+            reference_form_id: 0x0004_1601,
+        };
+
+        assert_eq!(holder, reconstructed);
+        assert_ne!(holder, other_placement);
+
+        let encoded = ron::to_string(&holder).unwrap();
+        assert_eq!(ron::from_str::<HolderId>(&encoded).unwrap(), holder);
+    }
+
+    #[test]
+    fn canonical_transactions_can_transfer_and_equip_an_actor_item() {
+        let actor = HolderId::Actor {
+            reference_form_id: 0x0004_1600,
+        };
+        let weapon_id = ItemInstanceId(7);
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(
+                HolderId::Player,
+                holder(vec![item(7, 0x0000_4322, 1, None)], 0),
+            )
+            .unwrap();
+        ledger.insert_holder(actor, holder(vec![], 0)).unwrap();
+
+        ledger
+            .execute(TransactionRequest::Transfer {
+                source: HolderId::Player,
+                destination: actor,
+                item_id: weapon_id,
+                count: 1,
+            })
+            .unwrap();
+        ledger.equip(actor, weapon_id).unwrap();
+
+        assert!(ledger.holders()[&HolderId::Player].items.is_empty());
+        assert_eq!(ledger.holders()[&actor].items[0].base_form_id, 0x0000_4322);
+        assert_eq!(ledger.bindings()[&actor].equipped, Some(weapon_id));
     }
 
     #[test]

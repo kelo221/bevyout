@@ -7,7 +7,9 @@ pub(super) struct WorldCommandProvider;
 impl ConsoleCommandProvider for WorldCommandProvider {
     fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
         for command in [
+            ConsoleCommand::new("actorinspect", "actorinspect <actor-reference>", "Report a prepared actor's identity, assembly, fallback tier/reasons, scale, canonical holder, proxy, and weapon attachment state.", actor_inspect),
             ConsoleCommand::new("ragdoll", "ragdoll <actor-reference> [on|off|reset]", "Toggle a prepared NPC/creature's developer ragdoll body; actors stay locked in T-pose by default.", ragdoll).mutating(),
+            ConsoleCommand::new("ragdollprobe", "ragdollprobe <actor-reference>", "Report live ragdoll constraint, velocity, sleep, and visual-node errors without changing the actor.", ragdoll_probe),
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
             ConsoleCommand::new(
                 "tp",
@@ -21,6 +23,254 @@ impl ConsoleCommandProvider for WorldCommandProvider {
         }
         Ok(())
     }
+}
+
+pub(super) fn actor_inspect(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "actorinspect requires exactly one actor reference",
+        ));
+    };
+    let entity = resolve_reference(world, selector)?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement()
+        .clone();
+    let (semantic_kind, prepared) = match &placement.semantic {
+        PreparedSemantic::Npc(prepared) => ("humanoid", prepared),
+        PreparedSemantic::Creature(prepared) => ("creature", prepared),
+        _ => {
+            return Err(ConsoleError::new(
+                "not_actor",
+                "actorinspect only accepts NPC or creature references",
+            ));
+        }
+    };
+    let runtime = world.get::<actor::ActorRuntime>(entity).cloned();
+    let runtime_state = world.get::<actor::ActorRuntimeState>(entity).cloned();
+    let assembly = runtime
+        .as_ref()
+        .and_then(|runtime| runtime.assembly.as_ref())
+        .or(prepared.assembly.as_ref());
+
+    let (source_base_form_id, prepared_base_form_id, prepared_kind, root_scale) =
+        if let Some(assembly) = assembly {
+            (
+                assembly.source_base_form_id,
+                assembly.resolved_base_form_id,
+                match assembly.kind {
+                    bevyout_core::actor::ActorKind::Humanoid => "humanoid",
+                    bevyout_core::actor::ActorKind::Creature => "creature",
+                },
+                assembly.root_scale,
+            )
+        } else {
+            (
+                placement.base_form_id,
+                placement.base_form_id,
+                semantic_kind,
+                placement.scale,
+            )
+        };
+    let resolved_base_form_id = runtime
+        .as_ref()
+        .map_or(prepared_base_form_id, |runtime| runtime.base_form_id);
+    let kind = runtime
+        .as_ref()
+        .map_or(prepared_kind, |runtime| match runtime.kind {
+            bevyout_core::actor::ActorKind::Humanoid => "humanoid",
+            bevyout_core::actor::ActorKind::Creature => "creature",
+        });
+
+    let fallback = assembly.map_or_else(
+        || {
+            json!({
+                "tier": "missing_blueprint",
+                "facegen_policy": null,
+                "proxy_kind": if placement.asset_path.is_none() { "Bounds" } else { "None" },
+                "reasons": [{
+                    "code": "missing_actor_blueprint",
+                    "detail": "prepared actor has no assembly blueprint",
+                }],
+            })
+        },
+        |assembly| {
+            json!({
+                "tier": assembly.fallback.level.label(),
+                "facegen_policy": assembly.fallback.facegen_policy.label(),
+                "proxy_kind": assembly.fallback.proxy_kind.label(),
+                "reasons": assembly.fallback.reasons.iter().map(|reason| json!({
+                    "code": reason.code(),
+                    "detail": format!("{reason:?}"),
+                })).collect::<Vec<_>>(),
+            })
+        },
+    );
+    let parts = assembly.map_or_else(Vec::new, |assembly| {
+        assembly
+            .mesh_parts
+            .iter()
+            .map(|part| {
+                json!({
+                    "role": part.role.label(),
+                    "source_form_id": part.source_form_id,
+                    "model_path": part.model_path,
+                    "attachment_point": format!("{:?}", part.attachment_point),
+                    "visible": part.is_visible,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let apparel = assembly.map_or_else(Vec::new, |assembly| {
+        assembly
+            .apparel
+            .iter()
+            .map(|item| {
+                json!({
+                    "item_form_id": item.item_form_id,
+                    "model_path": item.model_path,
+                    "model_available": item.model_available,
+                    "biped_slot_mask": item.biped_slot_mask,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let eyes = assembly.map(|assembly| {
+        json!({
+            "form_id": assembly.eye_form_id,
+            "texture_path": assembly.eye_texture_path,
+            "geometry_parts": assembly.mesh_parts.iter().filter(|part| {
+                matches!(part.role, bevyout_core::actor::ActorMeshRole::Eyes)
+            }).count(),
+        })
+    });
+    let prepared_weapon = assembly
+        .and_then(|assembly| assembly.equipped_weapon.as_ref())
+        .map(|weapon| {
+            json!({
+                "item_form_id": weapon.item_form_id,
+                "model_path": weapon.model_path,
+                "model_available": weapon.model_available,
+                "attachment_point": format!("{:?}", weapon.attachment_point),
+            })
+        });
+    let weapon_runtime = match runtime_state.as_ref().map(|state| &state.weapon) {
+        None => json!({ "status": "not_projected" }),
+        Some(actor::ActorWeaponRuntimeState::Attached { entity, node }) => {
+            let visual = world.get::<actor::ActorWeaponVisual>(*entity);
+            json!({
+                "status": "attached",
+                "entity": entity.to_bits(),
+                "node": node,
+                "item_form_id": visual.map(|visual| visual.item_form_id),
+                "actor_reference_form_id": visual.map(|visual| visual.actor_reference_form_id),
+            })
+        }
+        Some(actor::ActorWeaponRuntimeState::MissingAttachmentNode { expected }) => json!({
+            "status": "missing_attachment_node",
+            "expected": expected,
+        }),
+        Some(state) => json!({ "status": state.label() }),
+    };
+    let diagnostics = runtime_state.as_ref().map_or_else(Vec::new, |state| {
+        state
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                json!({
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let canonical_holder = runtime_state.as_ref().map_or_else(
+        || json!({ "present": false, "items": [], "equipped_instance_id": null }),
+        |state| {
+            let canonical = world.get_resource::<interaction::CanonicalItemLedger>();
+            let holder_state = canonical
+                .and_then(|canonical| canonical.ledger.holders().get(&state.holder));
+            let equipped = canonical
+                .and_then(|canonical| canonical.ledger.bindings().get(&state.holder))
+                .and_then(|bindings| bindings.equipped);
+            json!({
+                "present": holder_state.is_some(),
+                "items": holder_state.map_or_else(Vec::new, |holder| holder.items.iter().map(|item| json!({
+                    "instance_id": item.id.0,
+                    "base_form_id": item.base_form_id,
+                    "count": item.count,
+                    "equipped": Some(item.id) == equipped,
+                })).collect::<Vec<_>>()),
+                "equipped_instance_id": equipped.map(|item| item.0),
+            })
+        },
+    );
+    let fallback_tier = assembly.map_or("missing_blueprint", |assembly| {
+        assembly.fallback.level.label()
+    });
+    let reason_codes = assembly.map_or_else(
+        || vec!["missing_actor_blueprint".to_owned()],
+        |assembly| {
+            assembly
+                .fallback
+                .reasons
+                .iter()
+                .map(|reason| reason.code().to_owned())
+                .collect::<Vec<_>>()
+        },
+    );
+    let summary = format!(
+        "actorinspect {:08x} base={:08x} kind={kind} tier={fallback_tier} scale={root_scale:.4} parts={} apparel={} weapon={} reasons={}",
+        placement.reference_form_id,
+        resolved_base_form_id,
+        parts.len(),
+        apparel.len(),
+        prepared_weapon
+            .as_ref()
+            .and_then(|weapon| weapon["item_form_id"].as_u64())
+            .map_or_else(|| "none".to_owned(), |form_id| format!("{form_id:08x}")),
+        if reason_codes.is_empty() {
+            "none".to_owned()
+        } else {
+            reason_codes.join(",")
+        },
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": placement.reference_form_id,
+            "source_base_form_id": source_base_form_id,
+            "base_form_id": resolved_base_form_id,
+            "kind": kind,
+            "scale": root_scale,
+            "skeleton_path": assembly.and_then(|assembly| assembly.skeleton_path.as_ref()),
+            "parts": parts,
+            "eyes": eyes,
+            "apparel": apparel,
+            "weapon": {
+                "prepared": prepared_weapon,
+                "runtime": {
+                    "state": weapon_runtime,
+                    "bound_item_form_id": runtime_state.as_ref().and_then(|state| state.bound_item_form_id),
+                    "model_path": runtime_state.as_ref().and_then(|state| state.weapon_model.as_ref()).map(|model| model.model_path.as_str()),
+                },
+            },
+            "fallback": fallback,
+            "runtime": {
+                "present": runtime.is_some(),
+                "holder_seeded": runtime_state.as_ref().is_some_and(|state| state.holder_seeded),
+                "holder": runtime_state.as_ref().map(|state| format!("{:?}", state.holder)),
+                "canonical": canonical_holder,
+                "proxy_entity": runtime_state.as_ref().and_then(|state| state.proxy_entity).map(|entity| entity.to_bits()),
+                "diagnostics": diagnostics,
+            },
+        }),
+        vec![summary],
+    ))
 }
 
 /// Scripted door activation for the agent bridge (M2 wave 2 acceptance):
@@ -135,6 +385,64 @@ pub(super) fn activate_reference(
     ))
 }
 
+pub(super) fn ragdoll_probe(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() != 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "ragdollprobe requires exactly one actor reference",
+        ));
+    }
+    let entity = resolve_reference(world, &invocation.args[0])?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement()
+        .clone();
+    if !matches!(
+        placement.semantic,
+        PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+    ) {
+        return Err(ConsoleError::new(
+            "not_actor",
+            "ragdollprobe only accepts NPC or creature references",
+        ));
+    }
+    let enabled = world
+        .get::<player::RagdollToggle>(entity)
+        .is_some_and(|toggle| toggle.0);
+    let probe = player::probe_ragdoll(world, entity);
+    let summary = format!(
+        "ragdollprobe {:08x} enabled={} instantiated={} bodies={} awake={} sleep_disabled={} joints={} max_joint_linear={:.5}m max_joint_angular={:.5}rad max_node_position={:.5}m max_node_angle={:.5}rad max_linear_speed={:.5}m/s max_angular_speed={:.5}rad/s",
+        placement.reference_form_id,
+        enabled,
+        probe.instantiated,
+        probe.body_count,
+        probe.awake_count,
+        probe.sleep_disabled_count,
+        probe.joint_count,
+        probe.max_joint_linear_separation,
+        probe.max_joint_angular_separation,
+        probe.max_node_position_error,
+        probe.max_node_angle_error,
+        probe.max_linear_speed,
+        probe.max_angular_speed,
+    );
+    let value = serde_json::to_value(&probe).map_err(|error| {
+        ConsoleError::new("serialization_failed", format!("ragdoll probe: {error}"))
+    })?;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": placement.reference_form_id,
+            "enabled": enabled,
+            "probe": value,
+        }),
+        vec![summary],
+    ))
+}
+
 pub(super) fn ragdoll(
     world: &mut World,
     invocation: &ConsoleInvocation,
@@ -175,6 +483,10 @@ pub(super) fn ragdoll(
                 .insert(player::RagdollToggle(false));
         }
         "reset" => {
+            let actor_scale = world
+                .get::<actor::ActorRuntime>(entity)
+                .and_then(|runtime| runtime.assembly.as_ref())
+                .map_or(placement.scale, |assembly| assembly.root_scale);
             world.entity_mut(entity).remove::<player::RagdollToggle>();
             if let Some(mut transform) = world.get_mut::<Transform>(entity) {
                 transform.translation = Vec3::from_array(placement.translation);
@@ -184,7 +496,7 @@ pub(super) fn ragdoll(
                     placement.rotation_xyzw[2],
                     placement.rotation_xyzw[3],
                 );
-                transform.scale = Vec3::splat(placement.scale);
+                transform.scale = Vec3::splat(actor_scale);
             }
         }
         "toggle" => {

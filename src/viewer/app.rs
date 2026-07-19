@@ -11,9 +11,9 @@ pub(crate) fn run_view(
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
-    ensure_prepared_manifest_compatible(
+    ensure_prepared_manifest_compatible_any(
         &manifest,
-        NIF_CONVERTER_REVISION,
+        SUPPORTED_PREPARED_CONVERTER_REVISIONS,
         PHYSICS_ASSET_SCHEMA_VERSION,
     )?;
     ensure_baked_scene_compatible(&manifest)?;

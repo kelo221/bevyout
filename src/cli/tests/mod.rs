@@ -1,4 +1,153 @@
 use super::*;
+use std::path::Path;
+
+#[test]
+fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "ragdoll-lab",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+    ])
+    .unwrap();
+    let CommandLine::RagdollLab(args) = cli.command else {
+        panic!("expected ragdoll-lab command");
+    };
+    assert_eq!(args.selector, "SuperDuperMart");
+    assert_eq!(args.actor, "00041606");
+    assert_eq!(args.backend, RagdollLabBackend::Avian);
+    assert_eq!(args.agent_port, 15_702);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "ragdoll-lab",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+        "--backend",
+        "boxddd",
+        "--agent-bridge",
+        "--agent-port",
+        "16000",
+    ])
+    .unwrap();
+    let CommandLine::RagdollLab(args) = cli.command else {
+        panic!("expected ragdoll-lab command");
+    };
+    assert_eq!(args.backend, RagdollLabBackend::Boxddd);
+    assert!(args.agent_bridge);
+    assert_eq!(args.agent_port, 16_000);
+
+    assert!(Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "ragdoll-lab",
+            "SuperDuperMart",
+            "--actor",
+            "00041606",
+            "--agent-port",
+            "16000",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn nif_convert_requires_one_source_and_parses_conversion_options() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "nif-convert",
+        "--input",
+        "mesh.nif",
+        "--output",
+        "out.glb",
+        "--conversion",
+        "quick-ao",
+        "--allow-lossy",
+        "--force",
+    ])
+    .unwrap();
+    let CommandLine::NifConvert(args) = cli.command else {
+        panic!("expected nif-convert command");
+    };
+    assert_eq!(args.input.as_deref(), Some(Path::new("mesh.nif")));
+    assert_eq!(args.output, PathBuf::from("out.glb"));
+    assert_eq!(args.conversion, NifConversionMode::QuickAo);
+    assert!(args.allow_lossy);
+    assert!(args.force);
+
+    assert!(Cli::try_parse_from(["bevyout", "nif-convert", "--output", "out.glb"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "nif-convert",
+            "--input",
+            "mesh.nif",
+            "--asset",
+            "meshes/mesh.nif",
+            "--output",
+            "out.glb",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn native_converter_is_default_and_blender_remains_explicit() {
+    let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Native);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "SuperDuperMart",
+        "--converter",
+        "blender",
+        "--jobs",
+        "8",
+    ])
+    .unwrap();
+    let CommandLine::Prepare(args) = cli.command else {
+        panic!("expected prepare command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Blender);
+    assert_eq!(args.jobs, Some(8));
+
+    let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Native);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--converter",
+        "blender",
+    ])
+    .unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.converter, PrepareConverter::Blender);
+
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "prepare",
+            "SuperDuperMart",
+            "--converter",
+            "unknown",
+        ])
+        .is_err()
+    );
+}
 
 #[test]
 fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {

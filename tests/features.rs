@@ -133,12 +133,6 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
-// Material shading policy is intentionally std-only so the executable spec can
-// pin the same eligibility decision used by the runtime material event system.
-#[path = "../src/viewer/material_shading_policy.rs"]
-#[allow(dead_code, unused_imports)]
-mod material_shading_policy;
-
 // Hybrid point-shadow composition is intentionally Bevy-free so the
 // executable specification drives the same source-selection policy as the
 // runtime shader contract.
@@ -187,6 +181,14 @@ mod ledger_policy;
 #[allow(dead_code, unused_imports)]
 mod movement_policy;
 
+#[path = "../src/converter_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod converter_policy;
+
+#[path = "../src/vsa/bake/gltf_extension_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod gltf_extension_policy;
+
 // `vsa::prepare::selectors` reuses the selector grammar from `vsa::paths`
 // via a relative `super::super::paths` import, and `vsa::prepare::batch_cache`
 // (issue #47) similarly reuses `vsa::cell_map` via a relative
@@ -219,6 +221,10 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod fingerprints;
 
+    #[path = "../src/vsa/prepare/native_policy.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod native_policy;
+
     #[path = "../src/vsa/prepare/container_audio_policy.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod container_audio_policy;
@@ -234,6 +240,10 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod actor_catalog;
 
+    #[path = "../src/vsa/prepare/actor_appearance.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod actor_appearance;
+
     // `vsa::prepare::nav_graph` (issue #111, M4 wave 2) reuses
     // `vsa::paths::{FO3_SCALE, fingerprint}` via relative `super::super::`
     // imports, so it is nested here too -- same pattern as `actor_catalog`
@@ -243,11 +253,13 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod nav_graph;
 }
+use prepare::actor_appearance;
 use prepare::actor_catalog;
 use prepare::batch_cache;
 use prepare::container_audio_policy;
 use prepare::fingerprints;
 use prepare::jobs;
+use prepare::native_policy;
 use prepare::nav_graph;
 use prepare::selectors;
 
@@ -348,13 +360,13 @@ use viewer_player::player::equipment;
 mod recipe_policy;
 
 use assets::AssetConversion;
+use bevyout_core::actor;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
     TransactionError, TransactionRequest,
 };
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
-use material_shading_policy::specular_alpha_roughness_eligible;
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
 use selectors::{CellSummary, SelectionSpec, resolve_selection};
 
@@ -383,12 +395,16 @@ struct BevyoutWorld {
     bulb_emission_override: bool,
     glow_emission_override: bool,
     emission_policy: Option<assets::MaterialEmissionPolicy>,
-    material_has_normal_map: bool,
-    material_has_specular_map: bool,
-    material_shared_texture: bool,
-    material_has_roughness_map: bool,
-    material_is_non_opaque: bool,
-    material_roughness_proxy_eligible: Option<bool>,
+    material_glossiness: Option<Option<f32>>,
+    metallic_csv: Option<String>,
+    metallic_csv_rejected: bool,
+    material_diffuse_texture: Option<String>,
+    material_roughness: Option<f32>,
+    material_metallic: Option<f32>,
+    directx_normal_texel: Option<[u8; 4]>,
+    converted_normal_texel: Option<[u8; 4]>,
+    staged_texture_path: Option<String>,
+    staged_texture_is_normal: Option<bool>,
 
     // -- cell_map.feature --
     cell_map_cells: Vec<cell_map::CellMapEntry>,
@@ -563,6 +579,16 @@ struct BevyoutWorld {
     actor_catalog_inputs: actor_catalog::ActorCatalogInputs,
     actor_catalog_result: Option<actor_catalog::PreparedActorCatalog>,
 
+    // -- actor_conversion.feature --
+    actor_skeleton: String,
+    actor_visual_inputs: Vec<String>,
+    actor_assembly: Option<assets::ActorAssemblyDescriptor>,
+    actor_gear_kinds: Vec<String>,
+    retained_actor_gear_kinds: Vec<String>,
+    actor_apparel_candidates: Vec<actor_appearance::ApparelCandidate>,
+    unavailable_actor_models: std::collections::HashSet<String>,
+    actor_outfit: Option<actor_appearance::SpawnOutfit>,
+
     // -- nav_graph.feature (issue #111, M4 wave 2) --
     nav_cell_form_id: u32,
     nav_navm_form_id: u32,
@@ -651,6 +677,40 @@ struct BevyoutWorld {
     /// reference's).
     corpse_npc_bases: Vec<(u32, bool)>,
     corpse_parsed: Option<openmw_esm4::ParsedPlugin>,
+
+
+    // -- actor_conversion.feature (authored ragdoll sidecar v3) --
+    actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
+    actor_physics_asset: Option<physics::PreparedPhysicsAsset>,
+
+    // -- native_conversion.feature --
+    native_outcomes: Vec<native_policy::NativeJobOutcome>,
+    native_summary: Option<native_policy::NativeBatchSummary>,
+    native_sorted_indices: Vec<usize>,
+    native_asset_count: usize,
+    native_requested_workers: Option<usize>,
+    native_host_workers: usize,
+    native_worker_count: Option<usize>,
+    requested_converter: Option<converter_policy::ConverterBackend>,
+    resolved_converter: Option<converter_policy::ConverterBackend>,
+    required_gltf_extensions: Vec<String>,
+    unsupported_gltf_extensions: Vec<String>,
+
+    // -- actor_assembly.feature / actor_fallback.feature (#107, #108) --
+    actor_mesh_parts: Vec<actor::AssembledMeshPart>,
+    actor_occupied_slots: u32,
+    actor_hair_visible: Option<bool>,
+    actor_eyes_visible: Option<bool>,
+    actor_weapon_candidates: Vec<actor::ActorWeaponCandidate>,
+    actor_selected_weapon: Option<actor::AssembledWeapon>,
+    actor_scale_kind: actor::ActorKind,
+    actor_reference_scale: f32,
+    actor_race_scale: Option<f32>,
+    actor_base_scale: Option<f32>,
+    actor_resolved_scale: Option<f32>,
+    actor_fallback_input: actor::ActorAppearanceAvailability,
+    actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
+    actor_fallback_decision: Option<actor::ActorFallbackDecision>,
 }
 
 fn find_placement<'a>(
@@ -1057,47 +1117,134 @@ async fn then_selected_emission_source(world: &mut BevyoutWorld, expected: Strin
     assert!(matches, "expected {expected}, got {actual:?}");
 }
 
-#[given("an imported material has a shared normal and specular image")]
-async fn given_shared_normal_specular_image(world: &mut BevyoutWorld) {
-    world.material_has_normal_map = true;
-    world.material_has_specular_map = true;
-    world.material_shared_texture = true;
+#[given(regex = r"^a NIF material glossiness exponent ([\d.]+)$")]
+async fn given_material_glossiness_exponent(world: &mut BevyoutWorld, value: String) {
+    world.material_glossiness = Some(Some(value.parse().unwrap()));
 }
 
-#[given("it has no authored metallic roughness map")]
-async fn given_no_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
-    world.material_has_roughness_map = false;
+#[given(regex = r#"^a NIF material glossiness value "([^"]+)"$"#)]
+async fn given_material_glossiness_value(world: &mut BevyoutWorld, value: String) {
+    world.material_glossiness = Some(match value.as_str() {
+        "missing" => None,
+        "negative" => Some(-1.0),
+        "nan" => Some(f32::NAN),
+        "infinite" => Some(f32::INFINITY),
+        other => panic!("unknown glossiness fixture {other}"),
+    });
 }
 
-#[given("it has an authored metallic roughness map")]
-async fn given_authored_metallic_roughness_map(world: &mut BevyoutWorld) {
-    world.material_has_roughness_map = true;
+#[given(regex = r#"(?s)^metallic material CSV "(.*)"$"#)]
+async fn given_metallic_material_csv(world: &mut BevyoutWorld, csv: String) {
+    world.metallic_csv = Some(csv.replace("\\n", "\n"));
 }
 
-#[given("it is a non-opaque decal")]
-async fn given_non_opaque_decal(world: &mut BevyoutWorld) {
-    world.material_is_non_opaque = true;
+#[given(regex = r#"^a material diffuse texture "([^"]+)"$"#)]
+async fn given_material_diffuse_texture(world: &mut BevyoutWorld, path: String) {
+    world.material_diffuse_texture = Some(path);
 }
 
-#[when("its roughness proxy policy is evaluated")]
-async fn when_roughness_proxy_policy_evaluated(world: &mut BevyoutWorld) {
-    world.material_roughness_proxy_eligible = Some(specular_alpha_roughness_eligible(
-        world.material_has_normal_map,
-        world.material_has_specular_map,
-        world.material_shared_texture,
-        world.material_has_roughness_map,
-        world.material_is_non_opaque,
+#[when("the metallic material CSV is parsed")]
+async fn when_metallic_material_csv_is_parsed(world: &mut BevyoutWorld) {
+    world.metallic_csv_rejected =
+        assets::MetallicMaterialTable::parse(world.metallic_csv.as_deref().unwrap()).is_err();
+}
+
+#[when("its PBR material policy is evaluated")]
+async fn when_pbr_material_policy_is_evaluated(world: &mut BevyoutWorld) {
+    world.material_roughness = Some(assets::perceptual_roughness_from_glossiness(
+        world.material_glossiness.flatten(),
     ));
+    if let Some(csv) = &world.metallic_csv {
+        let table = assets::MetallicMaterialTable::parse(csv).unwrap();
+        world.material_metallic =
+            Some(table.metallic_factor(world.material_diffuse_texture.as_deref()));
+    }
 }
 
-#[then("specular-alpha roughness is enabled")]
-async fn then_specular_alpha_roughness_enabled(world: &mut BevyoutWorld) {
-    assert_eq!(world.material_roughness_proxy_eligible, Some(true));
+#[then(regex = r"^its perceptual roughness is approximately ([\d.]+)$")]
+async fn then_perceptual_roughness_is(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected.parse::<f32>().unwrap();
+    let actual = world.material_roughness.unwrap();
+    assert!(
+        (actual - expected).abs() < 0.000_01,
+        "{actual} != {expected}"
+    );
 }
 
-#[then("specular-alpha roughness is disabled")]
-async fn then_specular_alpha_roughness_disabled(world: &mut BevyoutWorld) {
-    assert_eq!(world.material_roughness_proxy_eligible, Some(false));
+#[then(regex = r"^its metallic factor is ([01])$")]
+async fn then_metallic_factor_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.material_metallic, Some(expected.parse().unwrap()));
+}
+
+#[then("the metallic material CSV is rejected")]
+async fn then_metallic_material_csv_is_rejected(world: &mut BevyoutWorld) {
+    assert!(world.metallic_csv_rejected);
+}
+
+#[given(regex = r"^a DirectX normal texel \((\d+), (\d+), (\d+), (\d+)\)$")]
+async fn given_directx_normal_texel(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+    alpha: String,
+) {
+    world.directx_normal_texel = Some([
+        red.parse().unwrap(),
+        green.parse().unwrap(),
+        blue.parse().unwrap(),
+        alpha.parse().unwrap(),
+    ]);
+}
+
+#[when("its normal convention is converted for Bevy")]
+async fn when_normal_convention_is_converted(world: &mut BevyoutWorld) {
+    let mut texel = world
+        .directx_normal_texel
+        .expect("DirectX normal texel was not provided");
+    assets::flip_directx_normal_y_texel(&mut texel);
+    world.converted_normal_texel = Some(texel);
+}
+
+#[then(regex = r"^the converted normal texel is \((\d+), (\d+), (\d+), (\d+)\)$")]
+async fn then_converted_normal_texel_is(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+    alpha: String,
+) {
+    assert_eq!(
+        world.converted_normal_texel,
+        Some([
+            red.parse().unwrap(),
+            green.parse().unwrap(),
+            blue.parse().unwrap(),
+            alpha.parse().unwrap(),
+        ])
+    );
+}
+
+#[given(regex = r#"^the staged texture path "([^"]+)"$"#)]
+async fn given_staged_texture_path(world: &mut BevyoutWorld, path: String) {
+    world.staged_texture_path = Some(path);
+}
+
+#[when("its Blender texture role is classified")]
+async fn when_blender_texture_role_is_classified(world: &mut BevyoutWorld) {
+    let path = world
+        .staged_texture_path
+        .as_deref()
+        .expect("staged texture path was not provided");
+    world.staged_texture_is_normal = Some(assets::is_blender_normal_texture_path(path));
+}
+
+#[then(regex = r"^it (is|is not) converted as a normal map$")]
+async fn then_normal_map_conversion_classification(
+    world: &mut BevyoutWorld,
+    classification: String,
+) {
+    assert_eq!(world.staged_texture_is_normal, Some(classification == "is"));
 }
 
 // ---------------------------------------------------------------------
@@ -4569,6 +4716,32 @@ async fn given_actor_template(
     }
 }
 
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) is female$")]
+async fn given_actor_is_female(world: &mut BevyoutWorld, hex: String) {
+    actor_catalog_actor_mut(world, parse_hex(&hex))
+        .traits
+        .female = true;
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_actor_inventory_item(
+    world: &mut BevyoutWorld,
+    actor_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    actor_catalog_actor_mut(world, parse_hex(&actor_hex))
+        .inventory
+        .push(manifest::PreparedInventoryEntry {
+            base_form_id: parse_hex(&item_hex),
+            count,
+            record_kind: "ARMO".into(),
+            editor_id: None,
+            display_name: None,
+            leveled: false,
+        });
+}
+
 #[given(regex = r"^actor 0x([0-9a-fA-F]+) class is 0x([0-9a-fA-F]+)$")]
 async fn given_actor_class(world: &mut BevyoutWorld, hex: String, class_hex: String) {
     let form_id = parse_hex(&hex);
@@ -4746,6 +4919,41 @@ async fn then_blueprint_leveled_template(
     assert_eq!(blueprint.template_candidates, parse_hex_list(&candidates));
 }
 
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) resolves base 0x([0-9a-fA-F]+)$")]
+async fn then_blueprint_resolved_base(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+) {
+    assert_eq!(
+        actor_catalog_blueprint(world, &reference_hex).resolved_base_form_id,
+        Some(parse_hex(&base_hex))
+    );
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is female$")]
+async fn then_blueprint_is_female(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(actor_catalog_blueprint(world, &reference_hex).female);
+}
+
+#[then(
+    regex = r"^blueprint for reference 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$"
+)]
+async fn then_blueprint_inventory_item(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let item_form_id = parse_hex(&item_hex);
+    assert!(
+        actor_catalog_blueprint(world, &reference_hex)
+            .inventory
+            .iter()
+            .any(|entry| entry.base_form_id == item_form_id && entry.count == count)
+    );
+}
+
 #[then(
     regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) title "([^"]*)"$"#
 )]
@@ -4889,6 +5097,180 @@ async fn then_actor_catalog_ron_deterministic(world: &mut BevyoutWorld) {
     let a = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     let b = ron::ser::to_string_pretty(catalog, ron::ser::PrettyConfig::default()).unwrap();
     assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------
+// actor_conversion.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^actor skeleton \"([^\"]*)\"$"#)]
+async fn given_actor_skeleton(world: &mut BevyoutWorld, skeleton: String) {
+    world.actor_skeleton = skeleton;
+}
+
+#[given(regex = r#"^actor visual inputs \"([^\"]*)\"$"#)]
+async fn given_actor_visual_inputs(world: &mut BevyoutWorld, inputs: String) {
+    world.actor_visual_inputs = inputs
+        .split(',')
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+}
+
+#[when("the actor conversion inputs are canonicalized")]
+async fn when_actor_conversion_inputs_are_canonicalized(world: &mut BevyoutWorld) {
+    world.actor_assembly = assets::canonical_actor_assembly(
+        (!world.actor_skeleton.is_empty()).then(|| world.actor_skeleton.clone()),
+        world.actor_visual_inputs.clone(),
+    );
+}
+
+#[then(regex = r#"^the actor reference skeleton is \"([^\"]*)\"$"#)]
+async fn then_actor_reference_skeleton_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .actor_assembly
+            .as_ref()
+            .map(|value| value.skeleton.as_str()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the actor visual inputs are \"([^\"]*)\"$"#)]
+async fn then_actor_visual_inputs_are(world: &mut BevyoutWorld, expected: String) {
+    let expected = expected.split(',').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(
+        world
+            .actor_assembly
+            .as_ref()
+            .map(|value| value.visual_inputs.as_slice()),
+        Some(expected.as_slice())
+    );
+}
+
+#[then(regex = r#"^the actor converter profile is \"([^\"]*)\"$"#)]
+async fn then_actor_converter_profile_is(_world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(assets::ACTOR_CONVERTER_REVISION, expected);
+}
+
+#[given(regex = r#"^actor gear record kinds \"([^\"]*)\"$"#)]
+async fn given_actor_gear_record_kinds(world: &mut BevyoutWorld, kinds: String) {
+    world.actor_gear_kinds = kinds.split(',').map(str::to_owned).collect();
+}
+
+#[when("actor visual gear is selected")]
+async fn when_actor_visual_gear_is_selected(world: &mut BevyoutWorld) {
+    world.retained_actor_gear_kinds = world
+        .actor_gear_kinds
+        .iter()
+        .filter(|kind| assets::actor_visual_gear_kind(kind))
+        .cloned()
+        .collect();
+}
+
+#[then(regex = r#"^the retained actor gear record kinds are \"([^\"]*)\"$"#)]
+async fn then_retained_actor_gear_record_kinds_are(world: &mut BevyoutWorld, kinds: String) {
+    let expected = kinds.split(',').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(world.retained_actor_gear_kinds, expected);
+}
+
+#[given(
+    regex = r#"^apparel 0x([0-9a-fA-F]+) has male worn \"([^\"]*)\" female worn \"([^\"]*)\" male world \"([^\"]*)\" female world \"([^\"]*)\" mask 0x([0-9a-fA-F]+) rating ([0-9.]+) max condition (\d+) current condition (\S+) value (-?\d+)$"#
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_actor_apparel(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    male_worn: String,
+    female_worn: String,
+    male_world: String,
+    female_world: String,
+    mask: String,
+    rating: f32,
+    max_condition: u32,
+    current_condition: String,
+    value: i32,
+) {
+    world
+        .actor_apparel_candidates
+        .push(actor_appearance::ApparelCandidate {
+            form_id: parse_hex(&form_id),
+            male_worn: (!male_worn.is_empty()).then_some(male_worn),
+            female_worn: (!female_worn.is_empty()).then_some(female_worn),
+            male_world: (!male_world.is_empty()).then_some(male_world),
+            female_world: (!female_world.is_empty()).then_some(female_world),
+            biped_slot_mask: u32::from_str_radix(&mask, 16).unwrap(),
+            base_armor_rating: rating,
+            max_condition: Some(max_condition),
+            current_condition: (current_condition != "full")
+                .then(|| current_condition.parse().unwrap()),
+            value,
+        });
+}
+
+#[given(regex = r#"^worn model \"([^\"]*)\" is unavailable$"#)]
+async fn given_worn_model_unavailable(world: &mut BevyoutWorld, model: String) {
+    world.unavailable_actor_models.insert(model);
+}
+
+#[when(regex = r"^spawn apparel is selected for a (male|female) actor$")]
+async fn when_spawn_apparel_is_selected(world: &mut BevyoutWorld, sex: String) {
+    world.actor_outfit = Some(actor_appearance::select_spawn_outfit(
+        &world.actor_apparel_candidates,
+        sex == "female",
+        |model| !world.unavailable_actor_models.contains(model),
+    ));
+}
+
+#[then(regex = r#"^worn apparel models are \"([^\"]*)\"$"#)]
+async fn then_worn_apparel_models_are(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_outfit
+        .as_ref()
+        .expect("spawn outfit must be selected")
+        .worn
+        .iter()
+        .map(|item| item.model_path.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^occupied actor biped slots are 0x([0-9a-fA-F]+)$")]
+async fn then_occupied_actor_biped_slots_are(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .actor_outfit
+            .as_ref()
+            .expect("spawn outfit must be selected")
+            .occupied_slots,
+        u32::from_str_radix(&expected, 16).unwrap()
+    );
+}
+
+#[then(regex = r"^race body part (\d+) is (visible|hidden) (?:under|by) the outfit$")]
+async fn then_race_body_part_visibility(world: &mut BevyoutWorld, index: u32, expected: String) {
+    let visible = actor_appearance::race_body_part_visible(
+        index,
+        world
+            .actor_outfit
+            .as_ref()
+            .expect("spawn outfit must be selected")
+            .occupied_slots,
+    );
+    assert_eq!(visible, expected == "visible");
+}
+
+#[then(regex = r"^actor partition flags 0x([0-9a-fA-F]+) are (visible|hidden)$")]
+async fn then_actor_partition_visibility(
+    _world: &mut BevyoutWorld,
+    flags: String,
+    expected: String,
+) {
+    assert_eq!(
+        actor_appearance::partition_is_editor_visible(u16::from_str_radix(&flags, 16).unwrap()),
+        expected == "visible"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -7251,4 +7633,629 @@ fn main() {
             .run_and_exit("features")
             .await;
     });
+}
+
+// ---------------------------------------------------------------------
+// native_conversion.feature -- bounded native worker policy.
+// ---------------------------------------------------------------------
+
+#[given("no NIF converter was explicitly requested")]
+async fn given_no_converter_requested(world: &mut BevyoutWorld) {
+    world.requested_converter = None;
+}
+
+#[when("the preparation converter is resolved")]
+async fn when_converter_is_resolved(world: &mut BevyoutWorld) {
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+}
+
+#[when(regex = r#"^the \"([^\"]*)\" NIF converter is explicitly requested$"#)]
+async fn when_converter_is_explicitly_requested(world: &mut BevyoutWorld, converter: String) {
+    world.requested_converter = Some(match converter.as_str() {
+        "native" => converter_policy::ConverterBackend::Native,
+        "blender" => converter_policy::ConverterBackend::Blender,
+        other => panic!("unknown converter {other:?}"),
+    });
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+}
+
+#[then(regex = r#"^the resolved preparation converter is \"([^\"]*)\"$"#)]
+async fn then_resolved_converter_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_converter
+            .expect("resolved converter")
+            .as_str(),
+        expected
+    );
+}
+
+#[given(regex = r#"^a native GLB requires extensions \"([^\"]*)\"$"#)]
+async fn given_native_glb_required_extensions(world: &mut BevyoutWorld, extensions: String) {
+    world.required_gltf_extensions = extensions
+        .split(',')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned)
+        .collect();
+}
+
+#[when("the Rust bake validates its required glTF extensions")]
+async fn when_rust_bake_validates_extensions(world: &mut BevyoutWorld) {
+    world.unsupported_gltf_extensions = gltf_extension_policy::unsupported_required_extensions(
+        world.required_gltf_extensions.iter().map(String::as_str),
+    );
+}
+
+#[then("no required glTF extensions are unsupported")]
+async fn then_no_required_extensions_are_unsupported(world: &mut BevyoutWorld) {
+    assert!(world.unsupported_gltf_extensions.is_empty());
+}
+
+#[given(regex = r#"^native conversion outcomes \"([^\"]*)\"$"#)]
+async fn given_native_conversion_outcomes(world: &mut BevyoutWorld, outcomes: String) {
+    world.native_outcomes = outcomes
+        .split(',')
+        .map(|entry| {
+            let (index, status) = entry.split_once(':').expect("index:status outcome");
+            let status = match status {
+                "converted" => native_policy::NativeJobStatus::Converted,
+                "failed" => native_policy::NativeJobStatus::Failed,
+                "unsupported" => native_policy::NativeJobStatus::Unsupported,
+                other => panic!("unknown native status {other:?}"),
+            };
+            native_policy::NativeJobOutcome {
+                index: index.parse().expect("numeric native job index"),
+                model: entry.into(),
+                status,
+                stage: String::new(),
+                error: None,
+            }
+        })
+        .collect();
+}
+
+#[when("the native conversion batch is summarized")]
+async fn when_native_batch_is_summarized(world: &mut BevyoutWorld) {
+    world.native_summary = Some(native_policy::summarize_native_jobs(&world.native_outcomes));
+    world.native_sorted_indices = native_policy::sorted_native_outcomes(&world.native_outcomes)
+        .into_iter()
+        .map(|outcome| outcome.index)
+        .collect();
+}
+
+#[then(regex = r#"^the native conversion summary is \"([^\"]*)\"$"#)]
+async fn then_native_summary_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.native_summary.expect("native summary").line(),
+        expected
+    );
+}
+
+#[then(regex = r#"^the native conversion outcome order is \"([^\"]*)\"$"#)]
+async fn then_native_outcome_order_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .native_sorted_indices
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r"^(\d+) native conversion assets and (\d+) requested workers$")]
+async fn given_native_asset_and_worker_count(
+    world: &mut BevyoutWorld,
+    assets: usize,
+    workers: usize,
+) {
+    world.native_asset_count = assets;
+    world.native_requested_workers = Some(workers);
+    world.native_host_workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+}
+
+#[given(
+    regex = r"^(\d+) native conversion assets, no requested workers, and (\d+) host processors$"
+)]
+async fn given_native_asset_and_host_worker_count(
+    world: &mut BevyoutWorld,
+    assets: usize,
+    host_workers: usize,
+) {
+    world.native_asset_count = assets;
+    world.native_requested_workers = None;
+    world.native_host_workers = host_workers;
+}
+
+#[when("the native worker count is resolved")]
+async fn when_native_worker_count_is_resolved(world: &mut BevyoutWorld) {
+    world.native_worker_count = Some(native_policy::native_worker_count_with_host(
+        world.native_requested_workers,
+        world.native_asset_count,
+        world.native_host_workers.max(1),
+    ));
+}
+
+#[then(regex = r"^(\d+) native conversion workers are used$")]
+async fn then_native_workers_are_used(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(world.native_worker_count, Some(expected));
+}
+
+// ---------------------------------------------------------------------
+// actor_conversion.feature -- authored ragdoll sidecar v3. Appended
+// section; do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^an authored spherical actor joint with cone ([\d.]+) plane (-?[\d.]+) to (-?[\d.]+) twist (-?[\d.]+) to (-?[\d.]+) strength ([\d.]+)$"
+)]
+async fn given_authored_spherical_actor_joint(
+    world: &mut BevyoutWorld,
+    cone: f32,
+    plane_lower: f32,
+    plane_upper: f32,
+    twist_lower: f32,
+    twist_upper: f32,
+    strength: f32,
+) {
+    world.actor_ragdoll_joint = Some(physics::PreparedPhysicsJoint {
+        kind: "spherical".into(),
+        body_a: 0,
+        body_b: 1,
+        anchor_a: [0.0, 1.0, 0.0],
+        anchor_b: [0.0, 1.0, 0.0],
+        frame_a_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        frame_b_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        cone_limit: Some(cone),
+        plane_lower_limit: Some(plane_lower),
+        plane_upper_limit: Some(plane_upper),
+        twist_lower_limit: Some(twist_lower),
+        twist_upper_limit: Some(twist_upper),
+        malleable_strength: Some(strength),
+        source: physics::PreparedPhysicsJointSource::Authored,
+        ..Default::default()
+    });
+}
+
+#[given("a synthetic fallback actor joint")]
+async fn given_synthetic_fallback_actor_joint(world: &mut BevyoutWorld) {
+    world.actor_ragdoll_joint = Some(physics::PreparedPhysicsJoint {
+        source: physics::PreparedPhysicsJointSource::SyntheticFallback,
+        ..Default::default()
+    });
+}
+
+#[then("the actor physics sidecar schema is 3")]
+async fn then_actor_physics_sidecar_schema_is_three(_world: &mut BevyoutWorld) {
+    assert_eq!(physics::PHYSICS_ASSET_SCHEMA_VERSION, 3);
+}
+
+#[then("the actor joint has complete local frames")]
+async fn then_actor_joint_has_complete_local_frames(world: &mut BevyoutWorld) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    assert_eq!(joint.frame_a_rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(joint.frame_b_rotation_xyzw, [0.0, 0.0, 0.0, 1.0]);
+}
+
+#[then(
+    regex = r"^the actor joint keeps plane (-?[\d.]+) to (-?[\d.]+) separate from twist (-?[\d.]+) to (-?[\d.]+)$"
+)]
+async fn then_actor_joint_keeps_plane_separate_from_twist(
+    world: &mut BevyoutWorld,
+    plane_lower: f32,
+    plane_upper: f32,
+    twist_lower: f32,
+    twist_upper: f32,
+) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    assert_eq!(joint.plane_lower_limit, Some(plane_lower));
+    assert_eq!(joint.plane_upper_limit, Some(plane_upper));
+    assert_eq!(joint.twist_lower_limit, Some(twist_lower));
+    assert_eq!(joint.twist_upper_limit, Some(twist_upper));
+}
+
+#[then(regex = r#"^the actor joint source is "([^"]*)"$"#)]
+async fn then_actor_joint_source_is(world: &mut BevyoutWorld, expected: String) {
+    let joint = world
+        .actor_ragdoll_joint
+        .as_ref()
+        .expect("actor ragdoll joint fixture");
+    let actual = match joint.source {
+        physics::PreparedPhysicsJointSource::Authored => "Authored",
+        physics::PreparedPhysicsJointSource::SyntheticFallback => "SyntheticFallback",
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("Blender ragdoll bodies and constraints use stable NIF source identities")]
+async fn then_blender_ragdoll_uses_stable_source_identity(_world: &mut BevyoutWorld) {
+    let script = assets::blender_conversion_script();
+    assert!(script.contains("bevyout_nif_body_block"));
+    assert!(script.contains("body_a_key"));
+    assert!(script.contains("body_b_key"));
+    assert!(script.contains("resolve_authored_joint_body_groups"));
+    assert!(!script.contains("_bevyout_body_group"));
+}
+
+#[given("an actor physics sidecar with duplicate body group IDs")]
+async fn given_actor_sidecar_with_duplicate_body_ids(world: &mut BevyoutWorld) {
+    let body = physics::PreparedPhysicsBody {
+        group_id: 7,
+        shapes: vec![physics::PreparedPhysicsShape::Sphere {
+            center: [0.0; 3],
+            radius: 0.25,
+        }],
+        ..Default::default()
+    };
+    world.actor_physics_asset = Some(physics::PreparedPhysicsAsset {
+        schema_version: physics::PHYSICS_ASSET_SCHEMA_VERSION,
+        source: physics::PreparedPhysicsSource::AuthoredHavok,
+        bodies: vec![body.clone(), body],
+        joints: Vec::new(),
+    });
+}
+
+#[then("actor physics sidecar validation rejects duplicate body group IDs")]
+async fn then_actor_sidecar_rejects_duplicate_body_ids(world: &mut BevyoutWorld) {
+    let error = physics::validate_physics_asset(
+        world
+            .actor_physics_asset
+            .as_ref()
+            .expect("actor physics sidecar fixture"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate body group IDs"));
+}
+
+#[then("non-ragdoll actor skin weights collapse to their nearest authored body ancestor")]
+async fn then_actor_skin_weights_follow_authored_ragdoll(_world: &mut BevyoutWorld) {
+    let script = assets::blender_conversion_script();
+    assert!(script.contains("actor_ragdoll_weight_target"));
+    assert!(script.contains("collapse_actor_ragdoll_weights"));
+    assert!(script.contains("target_group.add([vertex.index], weight, 'ADD')"));
+    assert!(script.contains("source_group.remove([vertex.index])"));
+}
+
+// ---------------------------------------------------------------------
+// actor_assembly.feature / actor_fallback.feature (#107, #108) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r#"^actor mesh part (Body|Head|Hair|Eyes) index (\d+) form 0x([0-9a-fA-F]+) model \"([^\"]+)\"$"#
+)]
+async fn given_actor_mesh_part(
+    world: &mut BevyoutWorld,
+    role: String,
+    index: u32,
+    form_id: String,
+    model_path: String,
+) {
+    let role = match role.as_str() {
+        "Body" => actor::ActorMeshRole::Body(index),
+        "Head" => actor::ActorMeshRole::Head(index),
+        "Hair" => actor::ActorMeshRole::Hair,
+        "Eyes" => actor::ActorMeshRole::Eyes,
+        other => panic!("unknown actor mesh role {other}"),
+    };
+    world.actor_mesh_parts.push(actor::AssembledMeshPart {
+        name: format!("{role:?}"),
+        source_form_id: Some(parse_hex(&form_id)),
+        model_path,
+        attachment_point: actor::ActorAttachmentPoint::Head,
+        role,
+        is_visible: true,
+    });
+}
+
+#[when("actor mesh parts are canonicalized")]
+async fn when_actor_mesh_parts_are_canonicalized(world: &mut BevyoutWorld) {
+    actor::canonicalize_mesh_parts(&mut world.actor_mesh_parts);
+}
+
+#[then(regex = r#"^actor mesh roles are \"([^\"]*)\"$"#)]
+async fn then_actor_mesh_roles_are(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_mesh_parts
+        .iter()
+        .map(|part| part.role.label())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then("every actor mesh part attaches to Head")]
+async fn then_every_actor_mesh_part_attaches_to_head(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .actor_mesh_parts
+            .iter()
+            .all(|part| part.attachment_point == actor::ActorAttachmentPoint::Head)
+    );
+}
+
+#[given(regex = r"^occupied actor apparel slots 0x([0-9a-fA-F]+)$")]
+async fn given_occupied_actor_apparel_slots(world: &mut BevyoutWorld, slots: String) {
+    world.actor_occupied_slots = parse_hex(&slots);
+}
+
+#[when("actor optional-part visibility is evaluated")]
+async fn when_actor_optional_part_visibility_is_evaluated(world: &mut BevyoutWorld) {
+    world.actor_hair_visible = Some(actor::hair_visible(world.actor_occupied_slots));
+    world.actor_eyes_visible = Some(actor::eyes_visible(world.actor_occupied_slots));
+}
+
+#[then(regex = r"^actor hair is (visible|hidden)$")]
+async fn then_actor_hair_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.actor_hair_visible, Some(expected == "visible"));
+}
+
+#[then(regex = r"^actor eyes are (visible|hidden)$")]
+async fn then_actor_eyes_are(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.actor_eyes_visible, Some(expected == "visible"));
+}
+
+#[given(
+    regex = r#"^actor weapon 0x([0-9a-fA-F]+) model \"([^\"]+)\" damage (\d+) value (-?\d+) available (yes|no)$"#
+)]
+async fn given_actor_weapon_candidate(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    model_path: String,
+    damage: u16,
+    value: i32,
+    available: String,
+) {
+    world
+        .actor_weapon_candidates
+        .push(actor::ActorWeaponCandidate {
+            item_form_id: parse_hex(&form_id),
+            model_path: Some(model_path),
+            damage,
+            value,
+            available: available == "yes",
+        });
+}
+
+#[when("the actor starting weapon is selected")]
+async fn when_actor_starting_weapon_is_selected(world: &mut BevyoutWorld) {
+    world.actor_selected_weapon = actor::select_starting_weapon(&world.actor_weapon_candidates);
+}
+
+#[then(regex = r"^actor weapon 0x([0-9a-fA-F]+) is selected at (RightHand)$")]
+async fn then_actor_weapon_is_selected(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    attachment: String,
+) {
+    let selected = world
+        .actor_selected_weapon
+        .as_ref()
+        .expect("actor starting weapon must be selected");
+    assert_eq!(selected.item_form_id, parse_hex(&form_id));
+    assert_eq!(attachment, "RightHand");
+    assert_eq!(
+        selected.attachment_point,
+        actor::ActorAttachmentPoint::RightHand
+    );
+}
+
+#[then("the selected actor weapon model is unavailable")]
+async fn then_selected_actor_weapon_model_is_unavailable(world: &mut BevyoutWorld) {
+    assert!(
+        !world
+            .actor_selected_weapon
+            .as_ref()
+            .expect("actor starting weapon must be selected")
+            .model_available
+    );
+}
+
+fn parse_scale_component(value: &str) -> f32 {
+    if value.eq_ignore_ascii_case("nan") {
+        f32::NAN
+    } else {
+        value.parse().expect("scale component must be a float")
+    }
+}
+
+#[given(regex = r"^humanoid scale reference (\S+) race (\S+) actor (\S+)$")]
+async fn given_humanoid_scale(
+    world: &mut BevyoutWorld,
+    reference: String,
+    race: String,
+    actor_height: String,
+) {
+    world.actor_scale_kind = actor::ActorKind::Humanoid;
+    world.actor_reference_scale = parse_scale_component(&reference);
+    world.actor_race_scale = Some(parse_scale_component(&race));
+    world.actor_base_scale = Some(parse_scale_component(&actor_height));
+}
+
+#[given(regex = r"^creature scale reference (\S+) base (\S+)$")]
+async fn given_creature_scale(world: &mut BevyoutWorld, reference: String, base: String) {
+    world.actor_scale_kind = actor::ActorKind::Creature;
+    world.actor_reference_scale = parse_scale_component(&reference);
+    world.actor_race_scale = None;
+    world.actor_base_scale = Some(parse_scale_component(&base));
+}
+
+#[when("actor root scale is resolved")]
+async fn when_actor_root_scale_is_resolved(world: &mut BevyoutWorld) {
+    world.actor_resolved_scale = Some(actor::resolve_actor_root_scale(
+        world.actor_scale_kind,
+        world.actor_reference_scale,
+        world.actor_race_scale,
+        world.actor_base_scale,
+    ));
+}
+
+#[then(regex = r"^actor root scale is ([0-9.]+)$")]
+async fn then_actor_root_scale_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .actor_resolved_scale
+        .expect("actor root scale must be resolved");
+    assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+}
+
+#[given(
+    regex = r"^a (Humanoid|Creature) appearance for base 0x([0-9a-fA-F]+) reference 0x([0-9a-fA-F]+)$"
+)]
+async fn given_actor_fallback_identity(
+    world: &mut BevyoutWorld,
+    kind: String,
+    base_form_id: String,
+    reference_form_id: String,
+) {
+    world.actor_fallback_input = actor::ActorAppearanceAvailability {
+        kind: match kind.as_str() {
+            "Humanoid" => actor::ActorKind::Humanoid,
+            "Creature" => actor::ActorKind::Creature,
+            other => panic!("unknown actor kind {other}"),
+        },
+        base_form_id: parse_hex(&base_form_id),
+        reference_form_id: parse_hex(&reference_form_id),
+        ..actor::ActorAppearanceAvailability::default()
+    };
+}
+
+#[given(regex = r"^(exact|race sex|race default|generic) actor assets are available$")]
+async fn given_actor_assets_available(world: &mut BevyoutWorld, tier: String) {
+    match tier.as_str() {
+        "exact" => world.actor_fallback_input.exact_available = true,
+        "race sex" => world.actor_fallback_input.race_sex_available = true,
+        "race default" => world.actor_fallback_input.race_default_available = true,
+        "generic" => world.actor_fallback_input.generic_available = true,
+        other => panic!("unknown fallback availability {other}"),
+    }
+}
+
+#[given("FaceGen is not authored")]
+async fn given_facegen_not_authored(world: &mut BevyoutWorld) {
+    world.actor_fallback_input.facegen = actor::FaceGenAvailability::NotAuthored;
+}
+
+#[given("FaceGen is authored but incompatible")]
+async fn given_facegen_authored_incompatible(world: &mut BevyoutWorld) {
+    world.actor_fallback_input.facegen = actor::FaceGenAvailability::Incompatible;
+}
+
+fn fallback_reason(code: &str) -> actor::ActorFallbackReason {
+    match code {
+        "missing_facegen" => actor::ActorFallbackReason::MissingFaceGen,
+        "missing_equipment" => actor::ActorFallbackReason::MissingEquipmentModel {
+            item_form_id: 0,
+            path: String::new(),
+        },
+        "missing_skeleton" => actor::ActorFallbackReason::MissingSkeleton {
+            path: "fixture/skeleton.nif".into(),
+        },
+        "missing_head_model" => actor::ActorFallbackReason::MissingHeadModel {
+            path: "fixture/head.nif".into(),
+        },
+        "incompatible_skin" => actor::ActorFallbackReason::IncompatibleSkin {
+            path: "fixture/skin.nif".into(),
+        },
+        other => panic!("unsupported fallback reason fixture {other}"),
+    }
+}
+
+#[given(regex = r#"^actor fallback reason \"([^\"]+)\" is supplied$"#)]
+async fn given_actor_fallback_reason_supplied(world: &mut BevyoutWorld, code: String) {
+    world
+        .actor_fallback_supplied_reasons
+        .push(fallback_reason(&code));
+}
+
+#[when("actor appearance fallback is resolved")]
+async fn when_actor_appearance_fallback_is_resolved(world: &mut BevyoutWorld) {
+    world.actor_fallback_decision = Some(actor::resolve_actor_fallback(
+        &world.actor_fallback_input,
+        world.actor_fallback_supplied_reasons.clone(),
+    ));
+}
+
+#[then(
+    regex = r"^actor fallback level is (AuthoredExact|RaceSexSpecific|RaceDefault|GenericProjectBody|ProxyMesh)$"
+)]
+async fn then_actor_fallback_level_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .level;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r"^actor FaceGen policy is (NotAuthored|Authored|RestPoseFallback)$")]
+async fn then_actor_facegen_policy_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .facegen_policy;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r"^actor proxy kind is (None|GenericHumanoid|Bounds)$")]
+async fn then_actor_proxy_kind_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .proxy_kind;
+    assert_eq!(actual.label(), expected);
+}
+
+#[then(regex = r#"^actor fallback reason \"([^\"]+)\" is recorded$"#)]
+async fn then_actor_fallback_reason_is_recorded(world: &mut BevyoutWorld, code: String) {
+    assert!(
+        world
+            .actor_fallback_decision
+            .as_ref()
+            .expect("actor fallback must be resolved")
+            .reasons
+            .iter()
+            .any(|reason| reason.code() == code)
+    );
+}
+
+#[then(regex = r#"^actor fallback reasons are \"([^\"]*)\"$"#)]
+async fn then_actor_fallback_reasons_are(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved")
+        .reasons
+        .iter()
+        .map(|reason| reason.code())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^fallback identity remains base 0x([0-9a-fA-F]+) reference 0x([0-9a-fA-F]+)$")]
+async fn then_fallback_identity_remains(
+    world: &mut BevyoutWorld,
+    base_form_id: String,
+    reference_form_id: String,
+) {
+    let decision = world
+        .actor_fallback_decision
+        .as_ref()
+        .expect("actor fallback must be resolved");
+    assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
+    assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
 }
