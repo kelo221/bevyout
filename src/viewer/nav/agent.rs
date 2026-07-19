@@ -1356,6 +1356,58 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
     }
 }
 
+/// Issue #163 (`setlock`): the narrow external mutation point for a door's
+/// prepared lock level, callable from `console::world_commands` without
+/// exposing `NavArchipelagoState` itself. Inserts/replaces the door's
+/// `door_lock_info` entry -- the exact shape `ensure_archipelago` populates
+/// from the manifest above -- preserving whatever `key_form_id` was already
+/// recorded (a runtime lock change never invents a new key requirement). A
+/// missing resource (no archipelago built yet for this cell, or a console
+/// harness without the nav plugin) is a no-op: there is no `door_usable`
+/// entry to flip either in that case, and the interaction-side write in the
+/// same console command is still the ultimate consistent state for anything
+/// reading only `PlacementRoot`. Once the resource exists,
+/// `door_availability_system`'s next poll (`door_usable_now` ->
+/// `door_open_and_locked`) reads this updated map and treats a runtime lock
+/// exactly like an authored one -- no separate repath plumbing needed.
+pub(crate) fn set_door_lock_level(world: &mut World, door_form_id: u32, lock_level: Option<i8>) {
+    let Some(mut state) = world.get_resource_mut::<NavArchipelagoState>() else {
+        return;
+    };
+    let key_form_id = state
+        .door_lock_info
+        .get(&door_form_id)
+        .and_then(|info| info.key_form_id);
+    state.door_lock_info.insert(
+        door_form_id,
+        DoorLockInfo {
+            lock_level,
+            key_form_id,
+        },
+    );
+}
+
+/// Test-only support for `console::world_commands`'s `setlock` tests, which
+/// run in the lighter console harness (`test_app` in
+/// `console::tests`) that never builds a real archipelago. Neither
+/// `NavArchipelagoState` nor `DoorLockInfo` is nameable outside this module,
+/// so a console test cannot construct or inspect them directly.
+#[cfg(test)]
+pub(crate) fn init_test_archipelago_state(world: &mut World) {
+    world.init_resource::<NavArchipelagoState>();
+}
+
+/// Test-only companion to [`init_test_archipelago_state`]: the locked-level
+/// currently recorded for `door_form_id`, or `None` if it is absent or
+/// recorded unlocked -- either way, "not locked" for route planning.
+#[cfg(test)]
+pub(crate) fn door_lock_level_for_test(world: &World, door_form_id: u32) -> Option<i8> {
+    world
+        .get_resource::<NavArchipelagoState>()
+        .and_then(|state| state.door_lock_info.get(&door_form_id))
+        .and_then(|info| info.lock_level)
+}
+
 fn player_transform_query(world: &mut World) -> Option<Vec3> {
     let mut query = world.query_filtered::<&GlobalTransform, With<player::FpsPlayer>>();
     query.single(world).ok().map(|t| t.translation())
@@ -4650,6 +4702,114 @@ mod tests {
         door_availability_system(&mut world);
         door_availability_system(&mut world);
         assert_eq!(world.resource::<NavArchipelagoState>().links.len(), 2);
+    }
+
+    /// Issue #163 (`setlock`): the narrow `set_door_lock_level` mutation
+    /// point behaves exactly like a manifest-authored lock for
+    /// `door_availability_system`'s change detection -- inserting a level
+    /// records it (preserving any existing `key_form_id`), and clearing it
+    /// (`None`) flips a previously-locked door usable and drives the exact
+    /// same one-repath link-spawn `a_door_state_change_triggers_exactly_one_
+    /// repath` exercises via a direct field poke, this time through the
+    /// console-facing setter instead.
+    #[test]
+    fn set_door_lock_level_propagates_through_door_availability_system() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let archipelago = world.spawn_empty().id();
+        // The door starts usable with a real link pair already spawned
+        // (mirroring what `ensure_archipelago`/an earlier unblock would have
+        // produced), so locking it has a link to remove.
+        let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.archipelago = Some(archipelago);
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: None,
+                    key_form_id: Some(0x1234),
+                },
+            );
+            state.door_usable.insert(0x99, true);
+            for link_entity in link_entities {
+                state
+                    .link_kinds
+                    .insert(link_entity, LinkKind::Door { form_id: 0x99 });
+                state.links.push(link_entity);
+            }
+        }
+
+        // Locking the door records the level and preserves the existing key
+        // requirement, without needing to pass it again.
+        set_door_lock_level(&mut world, 0x99, Some(50));
+        assert_eq!(door_lock_level_for_test(&world, 0x99), Some(50));
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_lock_info
+                .get(&0x99)
+                .unwrap()
+                .key_form_id,
+            Some(0x1234)
+        );
+
+        // The next poll sees the flip: the door becomes unusable and its
+        // link is removed (recorded as blocked) -- one repath.
+        door_availability_system(&mut world);
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_usable
+                .get(&0x99),
+            Some(&false)
+        );
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .len(),
+            1
+        );
+
+        // Clearing the lock (level 0 in the console command maps to `None`
+        // here) makes the door usable again on the following poll.
+        set_door_lock_level(&mut world, 0x99, None);
+        assert_eq!(door_lock_level_for_test(&world, 0x99), None);
+        door_availability_system(&mut world);
+        assert_eq!(
+            world
+                .resource::<NavArchipelagoState>()
+                .door_usable
+                .get(&0x99),
+            Some(&true)
+        );
+        assert!(
+            world
+                .resource::<NavArchipelagoState>()
+                .blocked_door_links
+                .is_empty()
+        );
+    }
+
+    /// Issue #163: a door with no `door_usable` entry (no in-cell nav
+    /// triangles) still records the lock level -- the pure state mutation
+    /// the issue calls out as the fallback when the flip itself isn't
+    /// observable through `door_availability_system` (nothing tracks that
+    /// door for availability polling in the first place).
+    #[test]
+    fn set_door_lock_level_records_state_for_a_door_with_no_nav_triangles() {
+        let mut world = harness_world();
+        assert_eq!(door_lock_level_for_test(&world, 0x77), None);
+        set_door_lock_level(&mut world, 0x77, Some(25));
+        assert_eq!(door_lock_level_for_test(&world, 0x77), Some(25));
+        set_door_lock_level(&mut world, 0x77, None);
+        assert_eq!(door_lock_level_for_test(&world, 0x77), None);
     }
 
     /// Plan #137 minimal-App test (real-data-corrected): a `goto` past a
