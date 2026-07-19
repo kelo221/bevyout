@@ -66,3 +66,20 @@ Feature: Asset conversion profile selection
     And it has no authored metallic roughness map
     When its roughness proxy policy is evaluated
     Then specular-alpha roughness is disabled
+
+  Scenario: DirectX normal Y is converted without changing specular alpha
+    Given a DirectX normal texel (12, 34, 56, 78)
+    When its normal convention is converted for Bevy
+    Then the converted normal texel is (12, 221, 56, 78)
+
+  Scenario Outline: Blender staging recognizes only normal-map filenames
+    Given the staged texture path "<path>"
+    When its Blender texture role is classified
+    Then it <classification> converted as a normal map
+
+    Examples:
+      | path                                      | classification |
+      | textures/architecture/Wall_N.DDS          | is             |
+      | textures/characters/face_normal.dds       | is             |
+      | textures/architecture/wall.dds            | is not         |
+      | textures/effects/terminal_g.dds            | is not         |

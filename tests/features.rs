@@ -408,6 +408,10 @@ struct BevyoutWorld {
     material_has_roughness_map: bool,
     material_is_non_opaque: bool,
     material_roughness_proxy_eligible: Option<bool>,
+    directx_normal_texel: Option<[u8; 4]>,
+    converted_normal_texel: Option<[u8; 4]>,
+    staged_texture_path: Option<String>,
+    staged_texture_is_normal: Option<bool>,
 
     // -- cell_map.feature --
     cell_map_cells: Vec<cell_map::CellMapEntry>,
@@ -1132,6 +1136,72 @@ async fn then_specular_alpha_roughness_enabled(world: &mut BevyoutWorld) {
 #[then("specular-alpha roughness is disabled")]
 async fn then_specular_alpha_roughness_disabled(world: &mut BevyoutWorld) {
     assert_eq!(world.material_roughness_proxy_eligible, Some(false));
+}
+
+#[given(regex = r"^a DirectX normal texel \((\d+), (\d+), (\d+), (\d+)\)$")]
+async fn given_directx_normal_texel(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+    alpha: String,
+) {
+    world.directx_normal_texel = Some([
+        red.parse().unwrap(),
+        green.parse().unwrap(),
+        blue.parse().unwrap(),
+        alpha.parse().unwrap(),
+    ]);
+}
+
+#[when("its normal convention is converted for Bevy")]
+async fn when_normal_convention_is_converted(world: &mut BevyoutWorld) {
+    let mut texel = world
+        .directx_normal_texel
+        .expect("DirectX normal texel was not provided");
+    assets::flip_directx_normal_y_texel(&mut texel);
+    world.converted_normal_texel = Some(texel);
+}
+
+#[then(regex = r"^the converted normal texel is \((\d+), (\d+), (\d+), (\d+)\)$")]
+async fn then_converted_normal_texel_is(
+    world: &mut BevyoutWorld,
+    red: String,
+    green: String,
+    blue: String,
+    alpha: String,
+) {
+    assert_eq!(
+        world.converted_normal_texel,
+        Some([
+            red.parse().unwrap(),
+            green.parse().unwrap(),
+            blue.parse().unwrap(),
+            alpha.parse().unwrap(),
+        ])
+    );
+}
+
+#[given(regex = r#"^the staged texture path "([^"]+)"$"#)]
+async fn given_staged_texture_path(world: &mut BevyoutWorld, path: String) {
+    world.staged_texture_path = Some(path);
+}
+
+#[when("its Blender texture role is classified")]
+async fn when_blender_texture_role_is_classified(world: &mut BevyoutWorld) {
+    let path = world
+        .staged_texture_path
+        .as_deref()
+        .expect("staged texture path was not provided");
+    world.staged_texture_is_normal = Some(assets::is_blender_normal_texture_path(path));
+}
+
+#[then(regex = r"^it (is|is not) converted as a normal map$")]
+async fn then_normal_map_conversion_classification(
+    world: &mut BevyoutWorld,
+    classification: String,
+) {
+    assert_eq!(world.staged_texture_is_normal, Some(classification == "is"));
 }
 
 // ---------------------------------------------------------------------

@@ -23,27 +23,27 @@ use super::physics::read_physics_asset;
 /// It is part of the content-addressed GLB name so stale conversions cannot
 /// silently survive a converter fix.
 pub(crate) const NIF_CONVERTER_REVISION: &str =
-    "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29";
+    "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v30-normal-y-v1";
 
 /// Native static conversion cache identity. Keep independent from Blender so
 /// the two backends can coexist in one asset cache without false hits.
-pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v4-normal-y-v1-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
 pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-actor-assembly-v9-selective-head-anims-0dfd052";
+    "nifty-fo3-native-actor-assembly-v10-normal-y-v1-selective-head-anims-0dfd052";
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
 pub(crate) const ACTOR_CONVERTER_REVISION: &str =
-    "pynifly-v28-actor-bindpose-v22-eyes-creature-primary-fallback";
+    "pynifly-v29-normal-y-v1-actor-bindpose-v22-eyes-creature-primary-fallback";
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v22-eyes-creature-primary-fallback";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v30-normal-y-v1+pynifly-v29-normal-y-v1-actor-bindpose-v22-eyes-creature-primary-fallback";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v9-selective-head-anims-0dfd052";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v4-normal-y-v1-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v10-normal-y-v1-selective-head-anims-0dfd052";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,
