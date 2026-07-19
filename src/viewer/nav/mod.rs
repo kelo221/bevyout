@@ -17,6 +17,7 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
 pub(crate) mod door_link;
+pub(crate) mod erosion_policy;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;
@@ -91,8 +92,12 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
 }
 
 /// Boundary conversion: `PreparedNavGraph::mesh_merges` (prepare-time
-/// spatial cross-mesh connections, issue #113 feature 2) -> plain
+/// spatial cross-mesh connections, issue #113 feature 2; validated portal
+/// intervals added issue #154 feature 1) -> plain
 /// `landmass_graph::MergeInput`s. Same split rationale as `mesh_inputs`.
+/// `edge_a`/`edge_b` (the matched edges' vertex-index identity) stay
+/// prepare-side only -- nothing at runtime needs to re-derive geometry from
+/// them, only the already-resolved `interval_a`/`interval_b` world points.
 pub(crate) fn merge_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MergeInput> {
     graph
         .mesh_merges
@@ -102,6 +107,8 @@ pub(crate) fn merge_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::Merg
             triangle_a: merge.triangle_a,
             mesh_b_form_id: merge.mesh_b_form_id,
             triangle_b: merge.triangle_b,
+            interval_a: merge.interval_a,
+            interval_b: merge.interval_b,
         })
         .collect()
 }

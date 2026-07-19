@@ -24,6 +24,25 @@ impl PlacementRoot {
     pub(crate) fn placement(&self) -> &PreparedPlacement {
         &self.placement
     }
+
+    /// Issue #163 (`setlock`): mutates this door's runtime lock level in
+    /// place -- the exact `PreparedDoor` the player's own E-activation path
+    /// (`activation::activate_focused_placement` -> `door_is_locked`) reads
+    /// off this same component, so a re-lock is visible on the very next
+    /// activation attempt. `None` (or a level `<= 0`) clears the lock,
+    /// matching `door_is_locked`'s own `lock_level.is_none_or(|level| level
+    /// <= 0)` rule. Returns `false` (no-op) for a non-door placement so
+    /// `console::world_commands::setlock` can report a clean error instead
+    /// of silently doing nothing.
+    pub(crate) fn set_door_lock_level(&mut self, lock_level: Option<i8>) -> bool {
+        match &mut self.placement.semantic {
+            PreparedSemantic::Door(door) => {
+                door.lock_level = lock_level;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// `open` is pub(crate) for issues #60/#61: `world::persist` captures

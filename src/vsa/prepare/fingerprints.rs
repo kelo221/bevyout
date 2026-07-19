@@ -33,8 +33,15 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// compatibility for the viewer). Bump whenever `prepare_cell`'s staging,
 /// lighting, or manifest-assembly logic changes in a way that should
 /// invalidate a previously prepared cell even though its plugin content,
-/// converter, and physics pipeline are unchanged.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v2-nested-actor-resolution";
+/// converter, and physics pipeline are unchanged. This revision combines
+/// two independent bumps that raced on parallel branches: issue #120 (M4
+/// wave 6) reclassifies source-dead NPC references as
+/// `PreparedSemantic::Corpse` instead of `Npc`, and M4 wave 7 (#160)
+/// corrected nested actor appearance resolution — both change what
+/// `prepare_cell` produces from the same source content, so a resumable
+/// *batch* prepare run must not skip a cell completed under either old
+/// logic.
+pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v3-corpse-nested-actors";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,6 +21,13 @@ impl ConsoleCommandProvider for UiCommandProvider {
                 toggle_diagnostic_ui,
             )
             .mutating(),
+            ConsoleCommand::new(
+                "tdi",
+                "tdi",
+                "Toggle the debug info HUD (player position, active cell, test nav agents).",
+                toggle_debug_info,
+            )
+            .mutating(),
         ] {
             registry.register(command)?;
         }
@@ -61,6 +68,26 @@ pub(super) fn toggle_diagnostic_ui(
         json!({ "visible": visible }),
         "Diagnostic UI",
         visible,
+    ))
+}
+
+/// Issue #151: toggles `diagnostics::DebugInfoState`, mirroring `tdt`'s
+/// `toggle_diagnostic_ui` shape exactly (no world side effect beyond the
+/// flag; `diagnostics::update_debug_info_hud` reads it every frame).
+pub(super) fn toggle_debug_info(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let enabled = {
+        let mut state = world.resource_mut::<diagnostics::DebugInfoState>();
+        state.enabled = !state.enabled;
+        state.enabled
+    };
+    Ok(toggle_result(
+        json!({ "enabled": enabled }),
+        "Debug info",
+        enabled,
     ))
 }
 

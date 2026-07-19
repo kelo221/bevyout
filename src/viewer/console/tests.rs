@@ -1,6 +1,6 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
-use crate::vsa::{PreparedItemCategory, PreparedItemDefinition};
+use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
 fn test_app() -> App {
@@ -784,6 +784,110 @@ fn activate_door_with_destination_writes_a_travel_request() {
     assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
 }
 
+// -- setlock (issue #163: GECK lock/unlock console parity) -------------
+
+#[test]
+fn setlock_requires_reference_and_level() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "setlock")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "setlock 00000010")), "bad_arity");
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5 6")),
+        "bad_arity"
+    );
+}
+
+#[test]
+fn setlock_rejects_unknown_and_non_door_references() {
+    let mut app = test_app();
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5")),
+        "reference_not_found"
+    );
+
+    register_placement(&mut app, "Static");
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5")),
+        "not_a_door"
+    );
+}
+
+#[test]
+fn setlock_rejects_non_integer_and_out_of_range_levels() {
+    let mut app = test_app();
+    register_placement(&mut app, DOOR_WITH_DESTINATION);
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 abc")),
+        "bad_type"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 -1")),
+        "bad_type"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 128")),
+        "bad_type"
+    );
+}
+
+/// Issue #163: setting a level updates both consumers' state from the one
+/// command -- the interaction-side `PlacementRoot` component the player's
+/// own E-activation reads, and the nav-side `door_lock_info` snapshot
+/// `door_availability_system` polls -- and level 0 clears both, preserving
+/// the door's key requirement rather than discarding it.
+#[test]
+fn setlock_sets_and_clears_the_interaction_and_nav_lock_state_together() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: None, key_form_id: Some(200), destination: None))",
+    );
+
+    let output = exec(&mut app, "setlock 00000010 50");
+    assert!(output.ok, "setlock failed: {:?}", output.error);
+    assert_eq!(output.value["reference_form_id"], 16);
+    assert_eq!(output.value["lock_level"], 50);
+    assert_eq!(output.log, vec!["setlock 00000010 level 50"]);
+    assert_eq!(
+        nav::agent::door_lock_level_for_test(app.world(), 0x10),
+        Some(50)
+    );
+
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+        .single(app.world())
+        .unwrap();
+    let door_state = |app: &mut App| {
+        let placement = app
+            .world()
+            .get::<interaction::PlacementRoot>(entity)
+            .unwrap()
+            .placement()
+            .clone();
+        match placement.semantic {
+            crate::vsa::PreparedSemantic::Door(door) => door,
+            _ => panic!("expected a door placement"),
+        }
+    };
+    let door = door_state(&mut app);
+    assert_eq!(door.lock_level, Some(50));
+    assert_eq!(door.key_form_id, Some(200), "the key requirement is kept");
+
+    let output = exec(&mut app, "setlock 00000010 0");
+    assert!(output.ok, "setlock failed: {:?}", output.error);
+    assert_eq!(output.value["lock_level"], Value::Null);
+    assert_eq!(output.log, vec!["setlock 00000010 unlocked"]);
+    assert_eq!(
+        nav::agent::door_lock_level_for_test(app.world(), 0x10),
+        None
+    );
+    let door = door_state(&mut app);
+    assert_eq!(door.lock_level, None);
+    assert_eq!(door.key_form_id, Some(200));
+}
+
 // -- save (issue #60, F60.3) ------------------------------------------
 
 #[test]
@@ -1239,4 +1343,174 @@ fn canonical_instance_commands_fail_without_partial_mutation() {
             .get_resource::<super::super::bindings::HotkeyBindings>()
             .is_none()
     );
+}
+
+// -- tdi (issue #151) --------------------------------------------------
+
+#[test]
+fn tdi_toggles_debug_info_state_and_defaults_off() {
+    let mut app = test_app();
+    assert!(
+        !app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+    let output = exec(&mut app, "tdi");
+    assert!(output.ok, "tdi failed: {:?}", output.error);
+    assert_eq!(output.log, ["Debug info enabled."]);
+    assert!(
+        app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+    let output = exec(&mut app, "tdi");
+    assert!(output.ok, "tdi failed: {:?}", output.error);
+    assert_eq!(output.log, ["Debug info disabled."]);
+    assert!(
+        !app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+}
+
+#[test]
+fn tdi_rejects_arguments() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tdi now")), "bad_arity");
+}
+
+// -- tp (issue #152) -----------------------------------------------------
+
+fn fixture_manifest() -> PreparedSceneManifest {
+    ron::de::from_str(include_str!("../../../features/fixtures/scene.ron"))
+        .expect("synthetic scene fixture should parse")
+}
+
+#[test]
+fn tp_rejects_bad_arity() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 4 5")), "bad_arity");
+}
+
+#[test]
+fn tp_rejects_non_finite_coordinates() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp nope 2 3")), "bad_type");
+    assert_eq!(error_code(&exec(&mut app, "tp 1 NaN 3")), "bad_type");
+}
+
+#[test]
+fn tp_rejects_a_bad_cell_form_id() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 zzzz")), "bad_type");
+}
+
+// T152.1: the 3-arg form sets all three axes in a single write (never a
+// partial, one-axis-at-a-time state) and drives the same
+// `console_transform_mutated` reset `[player.]setpos` triggers.
+#[test]
+fn tp_with_three_args_atomically_repositions_the_player() {
+    let mut app = test_app();
+    let player = app
+        .world_mut()
+        .query_filtered::<Entity, With<player::FpsPlayer>>()
+        .single(app.world())
+        .unwrap();
+    let output = exec(&mut app, "tp 4 5 6");
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    assert_eq!(output.value["x"], 4.0);
+    assert_eq!(output.value["y"], 5.0);
+    assert_eq!(output.value["z"], 6.0);
+    assert_eq!(
+        output.log,
+        ["tp: teleported player to (4.000, 5.000, 6.000)."]
+    );
+    let transform = app.world().get::<Transform>(player).unwrap();
+    assert_eq!(transform.translation, Vec3::new(4.0, 5.0, 6.0));
+}
+
+#[test]
+fn tp_with_a_destination_equal_to_the_active_cell_skips_the_swap() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let manifest = fixture_manifest();
+    let active_cell = manifest.cell.form_id;
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(active_cell));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, &format!("tp 7 8 9 {active_cell:08x}"));
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(
+        requests.iter_current_update_messages().count(),
+        0,
+        "a same-cell tp must not request a swap"
+    );
+}
+
+#[test]
+fn tp_to_an_unprepared_cell_fails_deterministically() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let manifest = fixture_manifest();
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(manifest.cell.form_id));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    // The fixture's asset_root ("cache/00017f37") exists nowhere, so
+    // any destination other than the active cell is unprepared.
+    assert_eq!(
+        error_code(&exec(&mut app, "tp 1 2 3 000badd0")),
+        "cell_not_found"
+    );
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(requests.iter_current_update_messages().count(), 0);
+}
+
+#[test]
+fn tp_to_a_prepared_different_cell_writes_a_travel_request_at_the_given_position() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let mut manifest = fixture_manifest();
+    let source_cell = manifest.cell.form_id;
+    let destination_cell = 0x0002_0002u32;
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-console-tp-test-{}-{destination_cell:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root
+        .join("scenes")
+        .join(format!("{destination_cell:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+    std::fs::write(scene_dir.join("scene.ron"), "()")
+        .expect("write synthetic prepared-cell fixture file");
+    manifest.asset_root = temp_root.to_string_lossy().into_owned();
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(source_cell));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "tp 4 5 6 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    assert_eq!(output.value["cell_form_id"], destination_cell);
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    let request = requests
+        .iter_current_update_messages()
+        .next()
+        .expect("expected a DoorTravelRequested message");
+    assert_eq!(request.destination_cell_form_id, destination_cell);
+    assert_eq!(request.translation, Vec3::new(4.0, 5.0, 6.0));
+    assert_eq!(request.door_form_id, 0);
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
 }

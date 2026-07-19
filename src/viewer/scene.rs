@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::controls::{AmbientScale, FogStrength, LightingScale};
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
+use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::light::NotShadowCaster;
@@ -69,6 +70,8 @@ pub(super) fn fallout_bloom() -> Bloom {
 pub(crate) fn spawn_prepared_scene(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut compensation_curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
     lighting: Res<LightingScale>,
@@ -339,6 +342,8 @@ pub(crate) fn spawn_prepared_scene(
     let (content, _next) = spawn_cell_placements_chunk(
         &mut commands,
         &asset_server,
+        &mut meshes,
+        &mut materials,
         &manifest,
         root,
         Some(&mut references),
@@ -420,9 +425,12 @@ pub(crate) fn spawn_cell_lights(
 /// preloader drains large cells through this a bounded chunk per frame so a
 /// background preload never spawns a thousand entities in one frame spike;
 /// callers wanting everything at once pass `usize::MAX`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_cell_placements_chunk(
     commands: &mut Commands,
     asset_server: &AssetServer,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     manifest: &PreparedSceneManifest,
     root: Entity,
     mut references: Option<&mut crate::console::RefRegistry>,
@@ -447,8 +455,17 @@ pub(crate) fn spawn_cell_placements_chunk(
         // A missing mesh must not erase a living actor's stable reference.
         // ActorPlugin will project its prepared identity and spawn the bounds
         // proxy selected by the fallback policy. Other asset-less placements
-        // retain the pre-wave behavior and are skipped.
+        // retain the pre-wave behavior and are skipped -- except a
+        // source-authored dead actor (issue #120, `PreparedSemantic::Corpse`,
+        // outside `is_actor_semantic`): it has no resolved GLB and no
+        // ActorPlugin projection, but must still be present and
+        // raycast-targetable, so it gets the placeholder body.
         if placement.asset_path.is_none() && !super::actor::is_actor_semantic(&placement.semantic) {
+            if placement.semantic == PreparedSemantic::Corpse {
+                let entity = spawn_corpse_placeholder(commands, meshes, materials, placement, root);
+                register_placement_reference(references.as_deref_mut(), entity, placement);
+                placement_count += 1;
+            }
             continue;
         }
         let mut entity_commands = commands.spawn((
@@ -488,6 +505,78 @@ pub(crate) fn spawn_cell_placements_chunk(
         },
         end,
     )
+}
+
+fn register_placement_reference(
+    references: Option<&mut crate::console::RefRegistry>,
+    entity: Entity,
+    placement: &PreparedPlacement,
+) {
+    if let Some(references) = references {
+        references.register(
+            entity,
+            placement.reference_form_id,
+            placement.editor_id.as_deref(),
+        );
+    }
+}
+
+/// Prone capsule roughly matching human proportions (radius plus cylinder
+/// length totalling ~1.7 m).
+const CORPSE_PLACEHOLDER_RADIUS: f32 = 0.25;
+const CORPSE_PLACEHOLDER_CYLINDER_LENGTH: f32 = 1.2;
+
+/// A source-authored dead actor (issue #120, #118's
+/// `PreparedSemantic::Corpse`) has no resolved GLB. Until #106-#108 land
+/// real skeleton+parts actor bodies, this gives the corpse a real `Mesh3d`
+/// so it is present and raycast-targetable (`update_focused_placement` in
+/// `interaction.rs` is `MeshRayCast`-only) through the exact same
+/// `PlacementRoot`/`ChildOf` wiring every resolved-asset placement gets.
+// ponytail: placeholder prone primitive until #106-#108 actor bodies
+fn spawn_corpse_placeholder(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    placement: &PreparedPlacement,
+    root: Entity,
+) -> Entity {
+    let mesh = meshes.add(Capsule3d::new(
+        CORPSE_PLACEHOLDER_RADIUS,
+        CORPSE_PLACEHOLDER_CYLINDER_LENGTH,
+    ));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.18, 0.16),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let placement_rotation = Quat::from_xyzw(
+        placement.rotation_xyzw[0],
+        placement.rotation_xyzw[1],
+        placement.rotation_xyzw[2],
+        placement.rotation_xyzw[3],
+    );
+    // `Capsule3d` stands upright along local Y by default; rotating 90
+    // degrees about X lays it down flat (prone) in local space first, then
+    // the placement's own yaw carries that orientation to the authored
+    // facing direction.
+    let rotation = placement_rotation * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    // Lifted by one radius so the lying body's underside rests on the
+    // ground plane instead of clipping through it -- placements carry a
+    // feet/ground-level origin.
+    let translation = Vec3::from_array(placement.translation) + Vec3::Y * CORPSE_PLACEHOLDER_RADIUS;
+    commands
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform {
+                translation,
+                rotation,
+                scale: Vec3::splat(placement.scale),
+            },
+            interaction::PlacementRoot::new(placement.clone()),
+            ChildOf(root),
+        ))
+        .id()
 }
 
 pub(crate) fn effective_lighting(cell: &CellInfo) -> PreparedCellLighting {
@@ -791,4 +880,236 @@ pub(crate) fn transition_camera_position(manifest: &PreparedSceneManifest) -> Op
             )
             .then_some(Vec3::from_array(placement.translation) + Vec3::Y * player::EYE_HEIGHT)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::world::CommandQueue;
+
+    /// A minimal placement matching `world::persist::tests::placement`'s
+    /// shape (same crate, different module -- kept local since that one is
+    /// private), overridden per test with `asset_path: None` and a chosen
+    /// semantic.
+    fn placement(reference_form_id: u32, semantic: PreparedSemantic) -> PreparedPlacement {
+        PreparedPlacement {
+            reference_form_id,
+            base_form_id: 0x0001_2345,
+            asset_path: None,
+            translation: [1.0, 0.0, 2.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: Default::default(),
+            step_support: false,
+            mutability: Default::default(),
+            mutability_root_form_id: None,
+            reference_kind: "ACHR".into(),
+            base_kind: "NPC_".into(),
+            editor_id: Some("CG04DeadOldLady".into()),
+            display_name: Some("Old Lady".into()),
+            count: 1,
+            semantic,
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            inventory: Vec::new(),
+            audio: Default::default(),
+            ao_mode: "ao-none".into(),
+        }
+    }
+
+    /// Mirrors `world::persist::tests::minimal_manifest` (private to that
+    /// module) with the one field this suite drives.
+    fn minimal_manifest(placements: Vec<PreparedPlacement>) -> PreparedSceneManifest {
+        PreparedSceneManifest {
+            schema_version: 13,
+            prepare_revision: None,
+            converter_revision: None,
+            physics_schema_version: None,
+            asset_root: ".".into(),
+            source_plugin: "Fallout3.esm".into(),
+            source_fingerprint: "content-hash".into(),
+            item_catalog_path: None,
+            item_catalog_revision: None,
+            item_catalog_hash: None,
+            recipe_catalog_path: None,
+            recipe_catalog_revision: None,
+            recipe_catalog_hash: None,
+            actor_catalog_path: None,
+            actor_catalog_revision: None,
+            actor_catalog_hash: None,
+            source_plugins: Vec::new(),
+            visual_issues: Vec::new(),
+            cell: CellInfo {
+                form_id: 0x0002_8138,
+                editor_id: None,
+                name: None,
+                interior: true,
+                ambient_rgba: [0.0; 4],
+                directional_rgba: [0.0; 4],
+                image_space_form_id: None,
+                image_space: None,
+                lighting_template_form_id: None,
+                lighting_template_flags: 0,
+                lighting_template: None,
+                raw_lighting: None,
+                effective_lighting: None,
+                water_form_id: None,
+                water_height: None,
+                grid: None,
+                worldspace_form_id: None,
+            },
+            placements,
+            lights: Vec::new(),
+            diagnostics: Vec::new(),
+            navmeshes: Vec::new(),
+            nav_graph: None,
+            cell_audio: Default::default(),
+            audio_clips: Vec::new(),
+            footstep_sets: Vec::new(),
+            hard_landing_clips: Vec::new(),
+            bake: None,
+            static_point_shadows: None,
+            mutability_summary: Default::default(),
+            leveled_lists: Default::default(),
+        }
+    }
+
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((bevy::MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app
+    }
+
+    /// Runs `spawn_cell_placements_chunk` against a bare app world:
+    /// `Assets<Mesh>`/`Assets<StandardMaterial>` are pulled out of the world
+    /// as owned locals for the call (the function takes `&mut Assets<..>`,
+    /// which conflicts with borrowing `&World` for `Commands` from the same
+    /// world at the same time) and the queued spawns are flushed before
+    /// returning.
+    fn spawn_chunk(
+        app: &mut App,
+        manifest: &PreparedSceneManifest,
+        root: Entity,
+    ) -> SpawnedCellContent {
+        let mut meshes = app
+            .world_mut()
+            .remove_resource::<Assets<Mesh>>()
+            .expect("test_app initializes Assets<Mesh>");
+        let mut materials = app
+            .world_mut()
+            .remove_resource::<Assets<StandardMaterial>>()
+            .expect("test_app initializes Assets<StandardMaterial>");
+        let asset_server = app.world().resource::<AssetServer>().clone();
+
+        let world = app.world_mut();
+        let mut queue = CommandQueue::default();
+        let (content, next) = {
+            let mut commands = Commands::new(&mut queue, world);
+            spawn_cell_placements_chunk(
+                &mut commands,
+                &asset_server,
+                &mut meshes,
+                &mut materials,
+                manifest,
+                root,
+                None,
+                0,
+                usize::MAX,
+            )
+        };
+        queue.apply(world);
+        assert_eq!(next, manifest.placements.len());
+        content
+    }
+
+    // Issue #120 (F119.2): a source-dead actor's `PreparedSemantic::Corpse`
+    // placement has no resolved GLB (FO3 actors have no standalone world
+    // model), yet must still be present and targetable in the running
+    // viewer -- `spawn_cell_placements_chunk` used to unconditionally skip
+    // every placement without an `asset_path`, which would have silently
+    // dropped the corpse from the scene entirely despite #118/#120's
+    // prepare-side classification. This pins the placeholder spawn that
+    // closes that gap: a real `Mesh3d` (so `update_focused_placement`'s
+    // `MeshRayCast` can find it) plus the exact `PlacementRoot` component
+    // #118's activation seam matches on.
+    #[test]
+    fn a_corpse_placement_without_an_asset_spawns_a_placeholder_with_activation_components() {
+        let mut app = test_app();
+        let manifest = minimal_manifest(vec![placement(0x0005_4398, PreparedSemantic::Corpse)]);
+        let root = app
+            .world_mut()
+            .spawn((Transform::default(), Visibility::Visible))
+            .id();
+
+        let content = spawn_chunk(&mut app, &manifest, root);
+        assert_eq!(content.placement_count, 1);
+        assert!(
+            content.scene_handles.is_empty(),
+            "the placeholder has no async GLB to await"
+        );
+
+        let mut query = app.world_mut().query::<(
+            &interaction::PlacementRoot,
+            &Mesh3d,
+            &MeshMaterial3d<StandardMaterial>,
+            &ChildOf,
+        )>();
+        let (root_component, _mesh, _material, child_of) = query
+            .single(app.world())
+            .expect("exactly one placeholder entity");
+        assert_eq!(root_component.placement().reference_form_id, 0x0005_4398);
+        assert_eq!(
+            root_component.placement().display_name.as_deref(),
+            Some("Old Lady"),
+            "display identity must reach the activation/transfer UI through PlacementRoot"
+        );
+        assert_eq!(child_of.parent(), root);
+    }
+
+    // The counterpart regression guard: a living `Npc` placement (no
+    // resolved GLB either, since FO3 actors never have a standalone world
+    // model) must stay unspawned exactly as before this issue -- real actor
+    // bodies are the #106-#108 track, not this placeholder.
+    #[test]
+    fn an_npc_placement_without_an_asset_spawns_an_actor_root_not_a_corpse_placeholder() {
+        // Pre-merge (#120) an asset-less living Npc spawned nothing; M4
+        // wave 7 (#107/#108, merged from master) now deliberately spawns a
+        // bare `PlacementRoot` for living actors so ActorPlugin can project
+        // their identity. The #120 invariant that survives the merge: a
+        // living actor never receives the corpse placeholder mesh.
+        let mut app = test_app();
+        let manifest = minimal_manifest(vec![placement(
+            0x0005_4399,
+            PreparedSemantic::Npc(crate::vsa::PreparedActor {
+                base_template_form_id: None,
+                assembly: None,
+            }),
+        )]);
+        let root = app
+            .world_mut()
+            .spawn((Transform::default(), Visibility::Visible))
+            .id();
+
+        let content = spawn_chunk(&mut app, &manifest, root);
+        assert_eq!(content.placement_count, 1);
+
+        let mut roots = app
+            .world_mut()
+            .query::<(&interaction::PlacementRoot, Option<&Mesh3d>)>();
+        let (_, mesh) = roots
+            .iter(app.world())
+            .next()
+            .expect("the living actor's placement root must spawn");
+        assert!(
+            mesh.is_none(),
+            "a living actor must not receive the corpse placeholder mesh"
+        );
+    }
 }
