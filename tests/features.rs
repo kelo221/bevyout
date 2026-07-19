@@ -747,6 +747,11 @@ struct BevyoutWorld {
     nav_travel_lock_destination: Option<door_link::LinkDestination>,
     nav_travel_lock_physically_open: bool,
     nav_travel_lock_locked: bool,
+
+    // -- nav_collision_clearance.feature (issue #153, M4 wave 10) --
+    nav_clearance_mesh: nav_clearance::NavClearanceMeshInput,
+    nav_clearance_collision: Vec<nav_clearance::CollisionTriangle>,
+    nav_clearance_result: Option<nav_clearance::NavClearanceResult>,
 }
 
 fn find_placement<'a>(
@@ -9188,4 +9193,186 @@ async fn when_door_link_ticks_n_open_and_locked(world: &mut BevyoutWorld, count:
             door_link::DoorLinkEvent::Tick { door_open },
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// --- #153 collision-derived navmesh clearance steps (M4 wave 10) ---
+// nav_collision_clearance.feature -- appended section, do not interleave.
+// `vsa::prepare::nav_clearance` is std-only (no `super::` imports), so it is
+// flat top-level included here the same way `erosion_policy`/`door_link` are.
+// Also hosts the `no eroded vertex moved` step nav_erosion.feature's retired
+// no-op scenarios use.
+// ---------------------------------------------------------------------
+
+#[path = "../src/vsa/prepare/nav_clearance.rs"]
+#[allow(dead_code, unused_imports)]
+mod nav_clearance;
+
+#[then("no eroded vertex moved")]
+async fn then_no_eroded_vertex_moved(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert_eq!(
+        result.vertices, world.erosion_mesh.vertices,
+        "erosion is retired to a no-op; no vertex may move"
+    );
+}
+
+#[given("a clearance mesh")]
+async fn given_clearance_mesh(world: &mut BevyoutWorld) {
+    world.nav_clearance_mesh = nav_clearance::NavClearanceMeshInput::default();
+    world.nav_clearance_collision = Vec::new();
+    world.nav_clearance_result = None;
+}
+
+#[given(regex = r"^clearance mesh has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_clearance_vertex(world: &mut BevyoutWorld, index: usize, x: f32, y: f32, z: f32) {
+    assert_eq!(
+        world.nav_clearance_mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    world.nav_clearance_mesh.vertices.push([x, y, z]);
+}
+
+#[given(regex = r"^clearance mesh has polygon (\d+) with vertices (\d+),(\d+),(\d+)$")]
+async fn given_clearance_polygon(world: &mut BevyoutWorld, index: usize, a: u32, b: u32, c: u32) {
+    assert_eq!(
+        world.nav_clearance_mesh.polygons.len(),
+        index,
+        "polygons must be given in order starting at 0"
+    );
+    world.nav_clearance_mesh.polygons.push([a, b, c]);
+}
+
+#[given(regex = r"^clearance mesh has protected edge (\d+),(\d+)$")]
+async fn given_clearance_protected_edge(world: &mut BevyoutWorld, a: u32, b: u32) {
+    world.nav_clearance_mesh.protected_edges.push((a, b));
+}
+
+#[given(
+    regex = r"^a collision floor from (-?[\d.]+), (-?[\d.]+) by (-?[\d.]+), (-?[\d.]+) at height (-?[\d.]+)$"
+)]
+async fn given_collision_floor(
+    world: &mut BevyoutWorld,
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32,
+    y: f32,
+) {
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y, z0], [x1, y, z0], [x1, y, z1]],
+        });
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y, z0], [x1, y, z1], [x0, y, z1]],
+        });
+}
+
+#[given(
+    regex = r"^a collision wall from (-?[\d.]+), (-?[\d.]+) at z (-?[\d.]+) from (-?[\d.]+) to (-?[\d.]+)$"
+)]
+async fn given_collision_wall(
+    world: &mut BevyoutWorld,
+    x0: f32,
+    x1: f32,
+    z: f32,
+    y0: f32,
+    y1: f32,
+) {
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y0, z], [x1, y0, z], [x1, y1, z]],
+        });
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y0, z], [x1, y1, z], [x0, y1, z]],
+        });
+}
+
+#[when("the clearance pass runs")]
+async fn when_clearance_pass_runs(world: &mut BevyoutWorld) {
+    world.nav_clearance_result = Some(nav_clearance::validate_and_clear(
+        &world.nav_clearance_mesh,
+        &world.nav_clearance_collision,
+        nav_clearance::NavClearanceParams::default(),
+    ));
+}
+
+fn clearance_result(world: &BevyoutWorld) -> &nav_clearance::NavClearanceResult {
+    world
+        .nav_clearance_result
+        .as_ref()
+        .expect("the clearance pass must run first")
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) removed as unsupported$")]
+async fn then_clearance_removed(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.removed_unsupported, expected, "{result:?}");
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) cut as obstructed$")]
+async fn then_clearance_cut(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.cut_obstructed, expected, "{result:?}");
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) disconnected as narrow$")]
+async fn then_clearance_disconnected_exact(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.disconnected_narrow, expected, "{result:?}");
+}
+
+#[then(regex = r"^at least (\d+) polygons? (?:is|are) disconnected as narrow$")]
+async fn then_clearance_disconnected_at_least(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert!(
+        result.disconnected_narrow >= expected,
+        "expected >= {expected} disconnected, got {result:?}"
+    );
+}
+
+#[then(regex = r"^clearance polygon (\d+) is walkable$")]
+async fn then_clearance_polygon_walkable(world: &mut BevyoutWorld, index: usize) {
+    let result = clearance_result(world);
+    assert!(result.walkable[index], "polygon {index}: {result:?}");
+}
+
+#[then(regex = r"^clearance polygon (\d+) is not walkable$")]
+async fn then_clearance_polygon_not_walkable(world: &mut BevyoutWorld, index: usize) {
+    let result = clearance_result(world);
+    assert!(!result.walkable[index], "polygon {index}: {result:?}");
+}
+
+#[then("at least one clearance polygon is walkable")]
+async fn then_clearance_any_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().any(|&w| w), "{result:?}");
+}
+
+#[then("at least one clearance polygon is not walkable")]
+async fn then_clearance_any_not_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().any(|&w| !w), "{result:?}");
+}
+
+#[then("every clearance polygon is walkable")]
+async fn then_clearance_every_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().all(|&w| w), "{result:?}");
+}
+
+#[then("at least one polygon was offset by clearance")]
+async fn then_clearance_offset(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.offset_count > 0, "{result:?}");
 }

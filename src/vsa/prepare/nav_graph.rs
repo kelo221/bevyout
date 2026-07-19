@@ -28,11 +28,14 @@ use super::super::paths::FO3_SCALE;
 
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
-/// precedent. Bumped to v4 for issue #156: `PreparedNavMeshMerge::
-/// authored_evidence`, `PreparedNavPolygon::authored_external`, and the new
-/// `NavGraphCounters` fields (merge-candidate authored/geometric split, NVEX/
-/// NVCI correlation counts).
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v4";
+/// precedent. Bumped to v5 for issue #153 (M4 wave 10): collision-derived
+/// validation + clearance bakes a per-polygon `PreparedNavPolygon::walkable`
+/// flag and clearance-offset vertex positions into the graph, plus new
+/// `NavGraphCounters` clearance fields (removed/cut/disconnected/offset).
+/// Bumped to v4 for issue #156: `PreparedNavMeshMerge::authored_evidence`,
+/// `PreparedNavPolygon::authored_external`, and the merge-candidate
+/// authored/geometric split + NVEX/NVCI correlation counters.
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v5";
 
 /// `NVTR` per-edge "external" flag bits (fopdoc FalloutNV `Records/NAVM.html`,
 /// "Flag Values"), restated locally per this module's no-`openmw_esm4`-import
@@ -182,6 +185,22 @@ pub(crate) struct PreparedNavPolygon {
     /// independent of (and not implied by) `adjacency[n].is_none()`, which
     /// only says this mesh has no same-mesh neighbour on that edge.
     pub(crate) authored_external: [bool; 3],
+    /// Issue #153 (M4 wave 10): `false` when the collision-derived
+    /// validation/clearance pass (`nav_clearance`, run prepare-side after
+    /// physics classification) dropped this polygon -- removed for lacking
+    /// collision support (F153.1), cut by an interior wall-like collider
+    /// (F153.2), or disconnected as a sub-diameter corridor throat under
+    /// agent-radius clearance (F153.3). The runtime seam (`viewer::nav::
+    /// mesh_inputs`) excludes `!walkable` polygons from the landmass
+    /// navigation mesh, so a route into a dropped region is `unreachable` at
+    /// query time. Defaults `true` (serde-missing = walkable) so the flag is
+    /// additive; the revision bump above rejects stale caches regardless.
+    #[serde(default = "default_walkable")]
+    pub(crate) walkable: bool,
+}
+
+fn default_walkable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +350,15 @@ pub(crate) struct NavGraphCounters {
     pub(crate) nvci_entries: usize,
     pub(crate) nvci_door_matches: usize,
     pub(crate) nvci_navmesh_matches: usize,
+    /// Issue #153 (M4 wave 10) collision-derived clearance counters, summed
+    /// over every mesh once `apply_nav_clearance` has run. All zero on a
+    /// freshly built graph (before clearance) and on cells with no cooked
+    /// static collision.
+    pub(crate) clearance_removed_unsupported: usize,
+    pub(crate) clearance_cut_obstructed: usize,
+    pub(crate) clearance_disconnected_narrow: usize,
+    pub(crate) clearance_offset_polygons: usize,
+    pub(crate) clearance_collision_triangles: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -433,6 +461,14 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         nvci_entries: navi_correlation_counts.nvci_entries,
         nvci_door_matches: navi_correlation_counts.nvci_door_matches,
         nvci_navmesh_matches: navi_correlation_counts.nvci_navmesh_matches,
+        // Populated later by `navmesh::apply_nav_clearance` (issue #153),
+        // which runs after physics classification; zero on the freshly built
+        // graph.
+        clearance_removed_unsupported: 0,
+        clearance_cut_obstructed: 0,
+        clearance_disconnected_narrow: 0,
+        clearance_offset_polygons: 0,
+        clearance_collision_triangles: 0,
     };
 
     PreparedNavGraph {
@@ -1138,6 +1174,10 @@ fn build_mesh(
             is_preferred_pathing: triangle.flags & 0x0000_0040 != 0,
             contains_door: triangle.flags & 0x0000_0400 != 0,
             authored_external: EDGE_EXTERNAL_FLAGS.map(|bit| triangle.flags & bit != 0),
+            // Every authored polygon starts walkable; the collision-derived
+            // clearance pass (issue #153) flips this off prepare-side after
+            // physics classification (see `navmesh::apply_nav_clearance`).
+            walkable: true,
         });
     }
 
@@ -1474,7 +1514,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v4");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v5");
     }
 
     #[test]
