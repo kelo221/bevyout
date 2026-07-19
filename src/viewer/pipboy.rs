@@ -1,6 +1,14 @@
-//! Flat Pip-Boy Items surface for M3 wave 1 (issue #71).
+//! Fallout 3-style Pip-Boy 3000 screen: the Stats status view (issue #71's
+//! Items surface and issue #100's Data view beside it), framed by the
+//! reference hardware's look -- a dim phosphor CRT with a radial glow, corner
+//! brackets, the LVL/HP/AP/XP stat bar up top, section tabs along the bottom
+//! of the screen, and the STATS/ITEMS/DATA button bank on the bezel.
 
 use bevy::prelude::*;
+use bevy::ui::{
+    BackgroundGradient, ColorStop, RadialGradient, RadialGradientShape, UiPosition,
+    widget::TextShadow,
+};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::GameplayModal;
@@ -16,6 +24,11 @@ use super::{
     CellInfo, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemStats,
     cell_label,
 };
+
+mod stats;
+#[cfg(test)]
+use stats::quick_aid_line;
+use stats::spawn_stats_body;
 
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
 const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
@@ -38,7 +51,21 @@ fn is_equip_eligible(category: PreparedItemCategory) -> bool {
 
 const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
 const GREEN_DIM: Color = Color::srgba(0.08, 0.45, 0.22, 0.85);
+/// Secondary labels and inactive controls: readable, but clearly not the
+/// bright primary phosphor.
+const GREEN_FAINT: Color = Color::srgba(0.1, 0.55, 0.26, 0.9);
 const SCREEN: Color = Color::srgba(0.005, 0.025, 0.012, 0.97);
+/// The CRT's radial phosphor bloom behind everything else.
+const SCREEN_GLOW: Color = Color::srgba(0.1, 0.55, 0.26, 0.14);
+/// Soft offset duplicate behind text, faking phosphor bleed.
+const TEXT_GLOW: Color = Color::srgba(0.18, 1.0, 0.48, 0.5);
+
+fn glow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::new(1.0, 1.0),
+        color: TEXT_GLOW,
+    }
+}
 
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct DropInventoryStackRequested {
@@ -46,12 +73,64 @@ pub(crate) struct DropInventoryStackRequested {
     pub(crate) count: i32,
 }
 
-/// F100.1: which top-level Pip-Boy surface is showing -- the wave-1 Items
-/// surface or issue #100's Data view beside it.
+/// Which top-level Pip-Boy surface is showing: the Stats status view, the
+/// wave-1 Items surface, or issue #100's Data view. Matches the three
+/// physical STATS/ITEMS/DATA buttons of the reference hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PipBoyView {
+    Stats,
     Items,
     Data,
+}
+
+fn view_label(view: PipBoyView) -> &'static str {
+    match view {
+        PipBoyView::Stats => "STATS",
+        PipBoyView::Items => "ITEMS",
+        PipBoyView::Data => "DATA",
+    }
+}
+
+/// Display-only player status behind the header stat bar and the Stats
+/// view's caption. There is no health/XP gameplay system in scope yet, so
+/// these are the factory defaults; a future stats slice owns those rules and
+/// overwrites this resource -- the Pip-Boy only ever renders it.
+#[derive(Resource, Debug, Clone)]
+struct PlayerStatus {
+    name: String,
+    level: u32,
+    hp_current: u32,
+    hp_max: u32,
+    ap_current: u32,
+    ap_max: u32,
+    xp_current: u32,
+    xp_next: u32,
+}
+
+impl Default for PlayerStatus {
+    fn default() -> Self {
+        Self {
+            name: "Player".into(),
+            level: 1,
+            hp_current: 100,
+            hp_max: 100,
+            ap_current: 85,
+            ap_max: 85,
+            xp_current: 0,
+            xp_next: 200,
+        }
+    }
+}
+
+/// The header bar's four stat segments, in display order, as (label, value)
+/// pairs -- kept pure so the exact formatting is unit-testable.
+fn stat_segments(status: &PlayerStatus) -> [(&'static str, String); 4] {
+    [
+        ("LVL", status.level.to_string()),
+        ("HP", format!("{}/{}", status.hp_current, status.hp_max)),
+        ("AP", format!("{}/{}", status.ap_current, status.ap_max)),
+        ("XP", format!("{}/{}", status.xp_current, status.xp_next)),
+    ]
 }
 
 /// F100.2/F100.3: the Data view's sections. Deliberately only these two --
@@ -74,7 +153,7 @@ struct PipBoyState {
 impl Default for PipBoyState {
     fn default() -> Self {
         Self {
-            view: PipBoyView::Items,
+            view: PipBoyView::Stats,
             category: PreparedItemCategory::Weapons,
             selected: None,
             data_section: DataSection::Notes,
@@ -150,6 +229,7 @@ struct ScreenSources<'w> {
     assets: Res<'w, AssetServer>,
     manifest: Option<Res<'w, crate::viewer::LoadedSceneManifest>>,
     time: Res<'w, Time>,
+    status: Res<'w, PlayerStatus>,
 }
 
 pub(crate) struct PipBoyPlugin;
@@ -162,6 +242,7 @@ impl Plugin for PipBoyPlugin {
 
 fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
+        .init_resource::<PlayerStatus>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
         // and `add_message` are both no-ops when already registered, so this
@@ -368,10 +449,10 @@ fn handle_category_tabs(
     }
 }
 
-/// F100.1: the top-level Items/Data switcher -- `handle_category_tabs`'
-/// interaction pattern one level up. Switching back to Items re-normalizes
-/// the selection so the view is never left pointing at a stack that was
-/// consumed or dropped while Data was showing.
+/// The top-level Stats/Items/Data switcher (the bezel button bank) --
+/// `handle_category_tabs`' interaction pattern one level up. Switching back
+/// to Items re-normalizes the selection so the view is never left pointing
+/// at a stack that was consumed or dropped while Data was showing.
 fn handle_view_tabs(
     mut commands: Commands,
     tabs: Query<(&Interaction, &ViewTab), Changed<Interaction>>,
@@ -669,7 +750,6 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                padding: UiRect::all(Val::Px(48.0)),
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
@@ -678,96 +758,357 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
         ))
         .with_children(|root| {
             root.spawn((
-                Node {
-                    height: Val::Px(56.0),
-                    width: Val::Percent(100.0),
-                    justify_content: JustifyContent::SpaceBetween,
-                    align_items: AlignItems::Center,
-                    border: UiRect::bottom(Val::Px(2.0)),
+                ImageNode {
+                    image: sources
+                        .assets
+                        .load("staging/interface/shared/background/pipboy.png"),
+                    color: Color::srgba(0.18, 1.0, 0.48, 0.35),
                     ..default()
                 },
-                BorderColor::all(GREEN_DIM),
-            ))
-            .with_children(|header| {
-                header
-                    .spawn(Node {
-                        column_gap: Val::Px(18.0),
-                        ..default()
-                    })
-                    .with_children(|views| {
-                        for (view, label) in
-                            [(PipBoyView::Items, "ITEMS"), (PipBoyView::Data, "DATA")]
-                        {
-                            let active = state.view == view;
-                            views
-                                .spawn((
-                                    Button,
-                                    ViewTab(view),
-                                    Node {
-                                        padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
-                                        border: UiRect::all(Val::Px(if active {
-                                            2.0
-                                        } else {
-                                            0.0
-                                        })),
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+            ));
+            // CRT phosphor bloom behind everything, brightest toward the
+            // upper middle like the reference screen.
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundGradient::from(RadialGradient::new(
+                    UiPosition::anchor(Vec2::new(0.0, -0.35)),
+                    RadialGradientShape::FarthestCorner,
+                    vec![
+                        ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
+                        ColorStop::new(Color::NONE, Val::Percent(100.0)),
+                    ],
+                )),
+            ));
+            root.spawn(Node {
+                flex_grow: 1.0,
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(Val::Px(40.0), Val::Px(16.0)),
+                ..default()
+            })
+            .with_children(|screen| {
+                spawn_header(screen, state, &sources.status);
+                match state.view {
+                    PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
+                    PipBoyView::Items => spawn_items_body(screen, sources, state),
+                    PipBoyView::Data => spawn_data_body(screen, sources, state),
+                }
+                spawn_footer(screen, state, weight);
+            });
+            spawn_view_buttons(root, state);
+            spawn_corner_brackets(root);
+        });
+}
+
+/// The stat bar along the top of the screen: the active view's name on the
+/// left, then the framed LVL/HP/AP/XP segments from the reference layout.
+fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: &PlayerStatus) {
+    screen
+        .spawn((
+            Node {
+                height: Val::Px(64.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                border: UiRect::bottom(Val::Px(2.0)),
+                padding: UiRect::bottom(Val::Px(6.0)),
+                ..default()
+            },
+            BorderColor::all(GREEN_DIM),
+        ))
+        .with_children(|header| {
+            header.spawn((
+                Text::new(view_label(state.view)),
+                TextColor(GREEN),
+                TextFont {
+                    font_size: FontSize::Px(40.0),
+                    ..default()
+                },
+                glow(),
+            ));
+            header
+                .spawn(Node {
+                    column_gap: Val::Px(24.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|segments| {
+                    for (label, value) in stat_segments(status) {
+                        segments
+                            .spawn((
+                                Node {
+                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(3.0)),
+                                    border: UiRect {
+                                        top: Val::Px(2.0),
+                                        bottom: Val::Px(2.0),
                                         ..default()
                                     },
-                                    BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
-                                    BorderColor::all(GREEN),
-                                ))
-                                .with_child((
+                                    column_gap: Val::Px(12.0),
+                                    align_items: AlignItems::Baseline,
+                                    ..default()
+                                },
+                                BorderColor::all(GREEN_DIM),
+                            ))
+                            .with_children(|segment| {
+                                segment.spawn((
                                     Text::new(label),
-                                    TextColor(GREEN),
+                                    TextColor(GREEN_FAINT),
                                     TextFont {
-                                        font_size: FontSize::Px(32.0),
+                                        font_size: FontSize::Px(18.0),
                                         ..default()
                                     },
                                 ));
-                        }
-                    });
-                header.spawn((
-                    Text::new(format!("WG {weight:.1}")),
-                    TextColor(GREEN),
-                    TextFont {
-                        font_size: FontSize::Px(32.0),
-                        ..default()
-                    },
-                ));
-            });
-            match state.view {
-                PipBoyView::Items => spawn_items_body(root, sources, state),
-                PipBoyView::Data => spawn_data_body(root, sources, state),
-            }
-            root.spawn(Node {
-                height: Val::Px(64.0),
+                                segment.spawn((
+                                    Text::new(value),
+                                    TextColor(GREEN),
+                                    TextFont {
+                                        font_size: FontSize::Px(30.0),
+                                        ..default()
+                                    },
+                                    glow(),
+                                ));
+                            });
+                    }
+                });
+        });
+}
+
+/// The section-tab strip above the button bank. Items shows the reference
+/// screen's bottom-left carry weight; Stats has exactly one section in scope
+/// (Status), rendered as the boxed active label from the reference.
+fn spawn_footer(screen: &mut ChildSpawnerCommands, state: &PipBoyState, weight: f32) {
+    screen
+        .spawn((
+            Node {
+                height: Val::Px(56.0),
                 width: Val::Percent(100.0),
-                justify_content: JustifyContent::SpaceAround,
+                align_items: AlignItems::Center,
                 border: UiRect::top(Val::Px(2.0)),
+                padding: UiRect::top(Val::Px(6.0)),
                 ..default()
-            })
-            .with_children(|tabs| match state.view {
-                PipBoyView::Items => {
-                    for (category, label) in categories() {
-                        footer_tab(
-                            tabs,
-                            label,
-                            state.category == category,
-                            CategoryTab(category),
-                        );
+            },
+            BorderColor::all(GREEN_DIM),
+        ))
+        .with_children(|footer| {
+            footer
+                .spawn(Node {
+                    width: Val::Percent(20.0),
+                    ..default()
+                })
+                .with_children(|left| {
+                    if state.view == PipBoyView::Items {
+                        left.spawn((
+                            Text::new(format!("WG {weight:.1}")),
+                            TextColor(GREEN_FAINT),
+                            TextFont {
+                                font_size: FontSize::Px(22.0),
+                                ..default()
+                            },
+                        ));
                     }
-                }
-                PipBoyView::Data => {
-                    for (section, label) in data_sections() {
-                        footer_tab(
-                            tabs,
-                            label,
-                            state.data_section == section,
-                            DataSectionTab(section),
-                        );
+                });
+            footer
+                .spawn(Node {
+                    width: Val::Percent(60.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(14.0),
+                    ..default()
+                })
+                .with_children(|tabs| match state.view {
+                    PipBoyView::Stats => {
+                        tabs.spawn((
+                            Node {
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                ..default()
+                            },
+                            BorderColor::all(GREEN),
+                            BackgroundColor(GREEN_DIM),
+                        ))
+                        .with_child((
+                            Text::new("Status"),
+                            TextColor(GREEN),
+                            TextFont {
+                                font_size: FontSize::Px(24.0),
+                                ..default()
+                            },
+                            glow(),
+                        ));
                     }
-                }
+                    PipBoyView::Items => {
+                        let entries: Vec<_> = categories()
+                            .into_iter()
+                            .map(|(category, label)| {
+                                (CategoryTab(category), label, state.category == category)
+                            })
+                            .collect();
+                        footer_tabs(tabs, entries);
+                    }
+                    PipBoyView::Data => {
+                        let entries: Vec<_> = data_sections()
+                            .into_iter()
+                            .map(|(section, label)| {
+                                (
+                                    DataSectionTab(section),
+                                    label,
+                                    state.data_section == section,
+                                )
+                            })
+                            .collect();
+                        footer_tabs(tabs, entries);
+                    }
+                });
+            footer.spawn(Node {
+                width: Val::Percent(20.0),
+                ..default()
             });
         });
+}
+
+/// Shared body for the Items/Data footer strips: tabs joined by the short
+/// dim rules the reference draws between section names.
+fn footer_tabs(
+    tabs: &mut ChildSpawnerCommands,
+    entries: Vec<(impl Component, &'static str, bool)>,
+) {
+    let last = entries.len().saturating_sub(1);
+    for (index, (marker, label, active)) in entries.into_iter().enumerate() {
+        footer_tab(tabs, label, active, marker);
+        if index != last {
+            tabs.spawn((
+                Node {
+                    width: Val::Px(26.0),
+                    height: Val::Px(2.0),
+                    ..default()
+                },
+                BackgroundColor(GREEN_DIM),
+            ));
+        }
+    }
+}
+
+/// The physical button bank on the bezel below the screen: three large
+/// STATS/ITEMS/DATA buttons, the active one lit like the reference lamp.
+fn spawn_view_buttons(root: &mut ChildSpawnerCommands, state: &PipBoyState) {
+    root.spawn(Node {
+        height: Val::Px(88.0),
+        width: Val::Percent(100.0),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(56.0),
+        ..default()
+    })
+    .with_children(|bank| {
+        for view in [PipBoyView::Stats, PipBoyView::Items, PipBoyView::Data] {
+            let active = state.view == view;
+            bank.spawn((
+                Button,
+                ViewTab(view),
+                Node {
+                    width: Val::Px(190.0),
+                    height: Val::Px(54.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(3.0)),
+                    border_radius: BorderRadius::all(Val::Px(12.0)),
+                    ..default()
+                },
+                BorderColor::all(if active { GREEN } else { GREEN_FAINT }),
+                BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
+            ))
+            .with_child((
+                Text::new(view_label(view)),
+                TextColor(if active { GREEN } else { GREEN_FAINT }),
+                TextFont {
+                    font_size: FontSize::Px(26.0),
+                    ..default()
+                },
+                glow(),
+            ));
+        }
+    });
+}
+
+/// The L-shaped bracket marks at the screen's four corners.
+fn spawn_corner_brackets(root: &mut ChildSpawnerCommands) {
+    const OFFSET: f32 = 10.0;
+    const SIZE: f32 = 42.0;
+    const WIDTH: f32 = 3.0;
+    for (left, right, top, bottom, border) in [
+        (
+            Some(OFFSET),
+            None,
+            Some(OFFSET),
+            None,
+            UiRect {
+                left: Val::Px(WIDTH),
+                top: Val::Px(WIDTH),
+                ..default()
+            },
+        ),
+        (
+            None,
+            Some(OFFSET),
+            Some(OFFSET),
+            None,
+            UiRect {
+                right: Val::Px(WIDTH),
+                top: Val::Px(WIDTH),
+                ..default()
+            },
+        ),
+        (
+            Some(OFFSET),
+            None,
+            None,
+            Some(OFFSET),
+            UiRect {
+                left: Val::Px(WIDTH),
+                bottom: Val::Px(WIDTH),
+                ..default()
+            },
+        ),
+        (
+            None,
+            Some(OFFSET),
+            None,
+            Some(OFFSET),
+            UiRect {
+                right: Val::Px(WIDTH),
+                bottom: Val::Px(WIDTH),
+                ..default()
+            },
+        ),
+    ] {
+        root.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: left.map(Val::Px).unwrap_or_default(),
+                right: right.map(Val::Px).unwrap_or_default(),
+                top: top.map(Val::Px).unwrap_or_default(),
+                bottom: bottom.map(Val::Px).unwrap_or_default(),
+                width: Val::Px(SIZE),
+                height: Val::Px(SIZE),
+                border,
+                ..default()
+            },
+            BorderColor::all(GREEN),
+        ));
+    }
 }
 
 fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, state: &PipBoyState) {
@@ -830,6 +1171,7 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                         font_size: FontSize::Px(24.0),
                         ..default()
                     },
+                    glow(),
                 ));
             }
         });
@@ -843,19 +1185,28 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
         .with_children(|details| {
             if let Some((stack, item)) = selected_item {
                 if let Some(path) = item.icon_asset_path.as_deref() {
-                    details.spawn((
-                        ImageNode {
-                            image: sources.assets.load(path.to_owned()),
-                            color: GREEN,
-                            ..default()
-                        },
-                        Node {
-                            width: Val::Px(256.0),
-                            height: Val::Px(256.0),
-                            margin: UiRect::bottom(Val::Px(24.0)),
-                            ..default()
-                        },
-                    ));
+                    details
+                        .spawn((
+                            Node {
+                                padding: UiRect::all(Val::Px(14.0)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                margin: UiRect::bottom(Val::Px(24.0)),
+                                ..default()
+                            },
+                            BorderColor::all(GREEN_DIM),
+                        ))
+                        .with_child((
+                            ImageNode {
+                                image: sources.assets.load(path.to_owned()),
+                                color: GREEN,
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(228.0),
+                                height: Val::Px(228.0),
+                                ..default()
+                            },
+                        ));
                 } else {
                     warn!("pipboy missing icon base={:08x}", item.base_form_id);
                     details.spawn((
@@ -879,6 +1230,7 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                         font_size: FontSize::Px(22.0),
                         ..default()
                     },
+                    glow(),
                     Node {
                         width: Val::Percent(100.0),
                         border: UiRect::top(Val::Px(2.0)),
@@ -894,14 +1246,23 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                             action,
                             Node {
                                 margin: UiRect::top(Val::Px(16.0)),
-                                padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
-                                border: UiRect::all(Val::Px(1.0)),
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(6.0)),
+                                border: UiRect::all(Val::Px(2.0)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
                                 ..default()
                             },
                             BorderColor::all(GREEN),
                             BackgroundColor(GREEN_DIM),
                         ))
-                        .with_child((Text::new(label), TextColor(GREEN)));
+                        .with_child((
+                            Text::new(label),
+                            TextColor(GREEN),
+                            TextFont {
+                                font_size: FontSize::Px(20.0),
+                                ..default()
+                            },
+                            glow(),
+                        ));
                 }
             }
         });
@@ -946,6 +1307,7 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                             font_size: FontSize::Px(24.0),
                             ..default()
                         },
+                        glow(),
                     ));
                 }
             });
@@ -972,6 +1334,7 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                             font_size: FontSize::Px(24.0),
                             ..default()
                         },
+                        glow(),
                     ));
                 }
             });
@@ -992,7 +1355,7 @@ fn footer_tab(
             Button,
             marker,
             Node {
-                padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
                 border: UiRect::all(Val::Px(if active { 2.0 } else { 0.0 })),
                 ..default()
             },
@@ -1001,11 +1364,12 @@ fn footer_tab(
         ))
         .with_child((
             Text::new(label.to_owned()),
-            TextColor(GREEN),
+            TextColor(if active { GREEN } else { GREEN_FAINT }),
             TextFont {
                 font_size: FontSize::Px(24.0),
                 ..default()
             },
+            glow(),
         ));
 }
 
@@ -1024,6 +1388,7 @@ fn spawn_quantity_picker(commands: &mut Commands, quantity: i32, max: i32) {
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::SpaceAround,
                 border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(10.0)),
                 ..default()
             },
             BackgroundColor(SCREEN),
@@ -1308,6 +1673,7 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
+            .init_asset::<Image>()
             .init_state::<GameplayModal>()
             .insert_resource(PlayerInventory::default())
             .insert_resource(PlayerEquipment::default())
@@ -1389,6 +1755,7 @@ mod tests {
     fn aid_test_app(quest_item: bool) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
+            .init_asset::<Image>()
             .init_state::<GameplayModal>()
             .insert_resource(PlayerInventory::from_stack_states([
                 super::super::inventory::InventoryStack {
@@ -1410,6 +1777,7 @@ mod tests {
         app.world_mut()
             .spawn((CursorOptions::default(), PrimaryWindow));
         install(&mut app);
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Aid;
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
@@ -1492,6 +1860,7 @@ mod tests {
     fn pressing_e_writes_an_equip_toggle_request_for_the_selected_row() {
         let mut app = test_app();
         seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
@@ -1519,6 +1888,7 @@ mod tests {
     fn pressing_a_digit_binds_the_selected_row_to_that_hotkey_slot() {
         let mut app = test_app();
         seed_item(&mut app, 2, PreparedItemCategory::Weapons, "Test Rifle");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
             .set(GameplayModal::PipBoy);
@@ -1542,10 +1912,12 @@ mod tests {
     fn ineligible_categories_do_not_bind_hotkeys_or_equip() {
         let mut app = test_app();
         seed_item(&mut app, 3, PreparedItemCategory::Misc, "Junk");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
+        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Misc;
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
             .set(GameplayModal::PipBoy);
-        app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Misc;
+        app.update();
         app.update();
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -1574,6 +1946,7 @@ mod tests {
             .resource_mut::<PlayerEquipment>()
             .toggle(key, EquipKind::Apparel { biped_slot_mask: 1 })
             .unwrap();
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
         app.world_mut()
             .resource_mut::<NextState<GameplayModal>>()
@@ -2023,6 +2396,7 @@ mod tests {
         let mut app = test_app();
         seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Alpha Armor");
         seed_item(&mut app, 2, PreparedItemCategory::Apparel, "Beta Armor");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
         open_pipboy(&mut app);
         let key_2 = StackKey {
@@ -2052,6 +2426,7 @@ mod tests {
     fn clicking_an_already_selected_row_still_triggers_its_action() {
         let mut app = test_app();
         seed_item(&mut app, 1, PreparedItemCategory::Apparel, "Test Armor");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Apparel;
         open_pipboy(&mut app);
         let key = StackKey {
@@ -2103,6 +2478,7 @@ mod tests {
     fn clicking_a_row_with_no_primary_action_only_selects() {
         let mut app = test_app();
         seed_item(&mut app, 3, PreparedItemCategory::Misc, "Junk");
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
         app.world_mut().resource_mut::<PipBoyState>().category = PreparedItemCategory::Misc;
         open_pipboy(&mut app);
         let key = StackKey {
@@ -2124,6 +2500,177 @@ mod tests {
                 .iter_current_update_messages()
                 .count(),
             0
+        );
+    }
+
+    // -- Stats view, header stat bar, and the bezel button bank -------------
+
+    fn screen_texts(app: &mut App) -> Vec<String> {
+        app.world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .map(|text| text.0.clone())
+            .collect()
+    }
+
+    #[test]
+    fn stat_segments_format_level_vitals_and_xp() {
+        let status = PlayerStatus {
+            name: "A".into(),
+            level: 2,
+            hp_current: 159,
+            hp_max: 210,
+            ap_current: 85,
+            ap_max: 85,
+            xp_current: 263,
+            xp_next: 550,
+        };
+        assert_eq!(
+            stat_segments(&status),
+            [
+                ("LVL", "2".to_string()),
+                ("HP", "159/210".to_string()),
+                ("AP", "85/85".to_string()),
+                ("XP", "263/550".to_string()),
+            ]
+        );
+    }
+
+    /// An Aid-category catalog item with a custom display name (`aid_item`
+    /// is always "Stimpak").
+    fn named_aid_item(base_form_id: u32, name: &str) -> PreparedItemDefinition {
+        let mut item = aid_item(base_form_id, false);
+        item.display_name = Some(name.into());
+        item
+    }
+
+    #[test]
+    fn quick_aid_line_prefers_stimpak_named_stacks() {
+        let inventory = PlayerInventory::from_stack_states([stack(1, 9), stack(2, 13)]);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![named_aid_item(1, "Buffout"), named_aid_item(2, "Stimpak")],
+        };
+        // Even though Buffout has the larger stack for the count fallback,
+        // the Stimpak name wins.
+        assert_eq!(
+            quick_aid_line(&inventory, &catalog),
+            Some("(13) Stimpak".to_string())
+        );
+    }
+
+    #[test]
+    fn quick_aid_line_falls_back_to_the_largest_aid_stack() {
+        let inventory = PlayerInventory::from_stack_states([stack(1, 2), stack(2, 5), stack(3, 7)]);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![
+                named_aid_item(1, "Bandages"),
+                named_aid_item(2, "Med-X"),
+                // Not an Aid stack: never eligible for the quick-use line.
+                stats_item(3, "Wrench", PreparedItemStats::Misc, false),
+            ],
+        };
+        assert_eq!(
+            quick_aid_line(&inventory, &catalog),
+            Some("(5) Med-X".to_string())
+        );
+    }
+
+    #[test]
+    fn quick_aid_line_is_none_without_aid_stacks() {
+        let inventory = PlayerInventory::from_stack_states([stack(1, 3)]);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![stats_item(1, "Wrench", PreparedItemStats::Misc, false)],
+        };
+        assert_eq!(quick_aid_line(&inventory, &catalog), None);
+    }
+
+    #[test]
+    fn opening_the_pipboy_shows_the_stats_status_screen() {
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<PlayerInventory>()
+            .add_stack(stack(0x77, 13));
+        app.world_mut()
+            .resource_mut::<PreparedItemCatalog>()
+            .items
+            .push(aid_item(0x77, false));
+        open_pipboy(&mut app);
+        assert_eq!(
+            app.world().resource::<PipBoyState>().view,
+            PipBoyView::Stats
+        );
+        let texts = screen_texts(&mut app);
+        for expected in [
+            "LVL",
+            "HP",
+            "AP",
+            "XP",
+            "CND",
+            "RAD",
+            "EFF",
+            "Status",
+            "Player - Level 1",
+            "(13) Stimpak",
+        ] {
+            assert!(
+                texts.iter().any(|text| text == expected),
+                "expected '{expected}' on the status screen, got {texts:?}"
+            );
+        }
+        // The bezel button bank renders one button per top-level view.
+        assert_eq!(
+            app.world_mut()
+                .query::<&ViewTab>()
+                .iter(app.world())
+                .count(),
+            3
+        );
+        assert!(
+            texts.iter().filter(|text| text.as_str() == "STATS").count() >= 2,
+            "the header label and the bezel button should both read STATS, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn bezel_buttons_switch_between_all_three_views() {
+        let mut app = test_app();
+        open_pipboy(&mut app);
+        press_view_tab(&mut app, PipBoyView::Items);
+        assert_eq!(
+            app.world().resource::<PipBoyState>().view,
+            PipBoyView::Items
+        );
+        press_view_tab(&mut app, PipBoyView::Data);
+        assert_eq!(app.world().resource::<PipBoyState>().view, PipBoyView::Data);
+        press_view_tab(&mut app, PipBoyView::Stats);
+        assert_eq!(
+            app.world().resource::<PipBoyState>().view,
+            PipBoyView::Stats
+        );
+    }
+
+    #[test]
+    fn items_footer_shows_the_carry_weight() {
+        let mut app = test_app();
+        open_pipboy(&mut app);
+        assert!(
+            !screen_texts(&mut app)
+                .iter()
+                .any(|text| text.starts_with("WG ")),
+            "the Stats view has no carry-weight readout"
+        );
+        press_view_tab(&mut app, PipBoyView::Items);
+        assert!(
+            screen_texts(&mut app)
+                .iter()
+                .any(|text| text.starts_with("WG ")),
+            "the Items footer should carry the WG readout"
         );
     }
 }
