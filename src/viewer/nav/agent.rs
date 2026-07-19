@@ -5551,11 +5551,13 @@ mod tests {
                     index: 0,
                     vertex_indices: [0, 1, 2],
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
                 landmass_graph::PolygonInput {
                     index: 1,
                     vertex_indices: [1, 3, 2],
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
             ],
             doors: Vec::new(),
@@ -5964,22 +5966,26 @@ mod tests {
                 index: 0,
                 vertex_indices: [0, 1, 2],
                 is_water: false,
+                is_preferred_pathing: false,
             },
             landmass_graph::PolygonInput {
                 index: 1,
                 vertex_indices: [1, 3, 2],
                 is_water: false,
+                is_preferred_pathing: false,
             },
             // Room B (SW/NE halves).
             landmass_graph::PolygonInput {
                 index: 2,
                 vertex_indices: [4, 5, 6],
                 is_water: false,
+                is_preferred_pathing: false,
             },
             landmass_graph::PolygonInput {
                 index: 3,
                 vertex_indices: [5, 7, 6],
                 is_water: false,
+                is_preferred_pathing: false,
             },
             // Door corridor: Room A's south edge (0,1) <-> Room B's south
             // edge (4,5).
@@ -5987,11 +5993,13 @@ mod tests {
                 index: 4,
                 vertex_indices: [0, 1, 4],
                 is_water: false,
+                is_preferred_pathing: false,
             },
             landmass_graph::PolygonInput {
                 index: 5,
                 vertex_indices: [1, 5, 4],
                 is_water: false,
+                is_preferred_pathing: false,
             },
         ];
         if with_bypass {
@@ -6004,11 +6012,13 @@ mod tests {
                 index: 6,
                 vertex_indices: [2, 3, 6],
                 is_water: false,
+                is_preferred_pathing: false,
             });
             polygons.push(landmass_graph::PolygonInput {
                 index: 7,
                 vertex_indices: [3, 7, 6],
                 is_water: false,
+                is_preferred_pathing: false,
             });
         }
         landmass_graph::MeshInput {
