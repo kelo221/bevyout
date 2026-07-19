@@ -721,6 +721,57 @@ pub(crate) struct MergeLinkDescriptor {
     pub(crate) distance: f32,
 }
 
+/// The `landmass` animation-link "kind" a validated merge-link candidate at
+/// position `validated_index` in this build's own deterministic
+/// `merge_link_descriptors` order gets (issue #162 feature 1): kind `0` is
+/// reserved for every ordinary/door animation link (`spawn_link_pair`'s
+/// existing flat default -- see `door_link_descriptors`), so merge kinds
+/// start at `1` and never collide with it. Unlike door locking's polygon
+/// *type-index* scheme (#155's `door_type_indices`), a merge portal has no
+/// polygon to type -- `bevy_landmass::AnimationLink3d::kind` is a property
+/// of the off-mesh link itself, so per-link exclusion via
+/// `landmass::PermittedAnimationLinks::Kinds` achieves exact single-link
+/// granularity for free, with no risk of two links sharing an entry
+/// polygon the way a polygon-typing scheme would have to worry about (see
+/// [`permitted_animation_link_kinds`]'s doc comment). Only meaningful
+/// within one archipelago build: kind numbers are not stable across
+/// rebuilds, and nothing needs them to be -- a quarantine
+/// (`nav::agent::AgentRuntime::quarantined_merge_link_kinds`) is cleared on
+/// every retarget/despawn (module doc comment, issue #162 feature 2) well
+/// before a cell ever rebuilds its archipelago.
+pub(crate) fn merge_link_kind(validated_index: usize) -> usize {
+    validated_index + 1
+}
+
+/// The animation-link kinds an agent with quarantine set `quarantined` may
+/// still use, given this archipelago build assigned merge portals kinds
+/// `1..=merge_link_kind_count` (see [`merge_link_kind`]). Kind `0` (every
+/// door link, `door_link_descriptors`) is always included -- a blocked
+/// merge portal must never make an unrelated door impassable, since
+/// `landmass::PermittedAnimationLinks::Kinds` is an *allow-list*, not a
+/// deny-list, so a quarantine has to enumerate everything it still permits
+/// rather than just the one thing it excludes.
+///
+/// Returns `None` when `quarantined` is empty: `bevy_landmass::
+/// PermittedAnimationLinks::All` is the correct component value for an
+/// unquarantined agent (the overwhelmingly common case), and callers
+/// should use it directly rather than materializing the equivalent full
+/// `0..=merge_link_kind_count` set on every tick.
+pub(crate) fn permitted_animation_link_kinds(
+    quarantined: &BTreeSet<usize>,
+    merge_link_kind_count: usize,
+) -> Option<BTreeSet<usize>> {
+    if quarantined.is_empty() {
+        return None;
+    }
+    Some(
+        std::iter::once(0)
+            .chain(1..=merge_link_kind_count)
+            .filter(|kind| !quarantined.contains(kind))
+            .collect(),
+    )
+}
+
 fn interval_midpoint(interval: [[f32; 3]; 2]) -> [f32; 3] {
     [
         (interval[0][0] + interval[1][0]) / 2.0,
@@ -1488,5 +1539,64 @@ mod tests {
             NavAgentStatus::Unreachable
         );
         assert_eq!(map_agent_state(AgentState::Paused), NavAgentStatus::Paused);
+    }
+
+    // -------------------------------------------------------------
+    // merge_link_kind / permitted_animation_link_kinds (issue #162)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn merge_link_kinds_start_at_one_and_never_collide_with_the_reserved_door_kind() {
+        assert_eq!(merge_link_kind(0), 1);
+        assert_eq!(merge_link_kind(1), 2);
+        assert_eq!(merge_link_kind(4), 5);
+    }
+
+    #[test]
+    fn an_unquarantined_agent_gets_no_kind_restriction() {
+        assert_eq!(
+            permitted_animation_link_kinds(&BTreeSet::new(), 3),
+            None,
+            "an empty quarantine must signal `PermittedAnimationLinks::All`, not an explicit full set"
+        );
+    }
+
+    #[test]
+    fn a_quarantined_link_is_excluded_but_everything_else_including_doors_stays_permitted() {
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(2);
+        let permitted = permitted_animation_link_kinds(&quarantined, 3)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        // Door kind 0 and every other merge kind (1, 3) stay permitted;
+        // only the quarantined merge kind (2) is excluded.
+        assert_eq!(permitted, BTreeSet::from([0, 1, 3]));
+    }
+
+    #[test]
+    fn quarantining_every_merge_kind_still_leaves_doors_permitted() {
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(1);
+        quarantined.insert(2);
+        let permitted = permitted_animation_link_kinds(&quarantined, 2)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        assert_eq!(
+            permitted,
+            BTreeSet::from([0]),
+            "every merge portal is blocked, but door links (kind 0) must remain usable"
+        );
+    }
+
+    #[test]
+    fn a_quarantined_kind_past_this_builds_own_range_is_harmless() {
+        // Defensive: a stale quarantine entry from a torn-down archipelago
+        // (should never happen given issue #162 feature 2's clear-on-
+        // retarget/despawn lifecycle, but this function has no way to know
+        // that) must not panic or corrupt the allow-list for kinds that do
+        // exist in this build.
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(99);
+        let permitted = permitted_animation_link_kinds(&quarantined, 2)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        assert_eq!(permitted, BTreeSet::from([0, 1, 2]));
     }
 }

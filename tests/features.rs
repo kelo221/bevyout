@@ -747,6 +747,14 @@ struct BevyoutWorld {
     nav_travel_lock_destination: Option<door_link::LinkDestination>,
     nav_travel_lock_physically_open: bool,
     nav_travel_lock_locked: bool,
+
+    // -- nav_portal_quarantine.feature (issue #162, M4 wave 10: per-link
+    // merge-portal quarantine) --
+    nav_quarantine_candidate_index: Option<usize>,
+    nav_quarantine_resolved_kind: Option<usize>,
+    nav_quarantine_kind_count: usize,
+    nav_quarantine_excluded_kinds: std::collections::BTreeSet<usize>,
+    nav_quarantine_permitted: Option<Option<std::collections::BTreeSet<usize>>>,
 }
 
 fn find_placement<'a>(
@@ -9188,4 +9196,78 @@ async fn when_door_link_ticks_n_open_and_locked(world: &mut BevyoutWorld, count:
             door_link::DoorLinkEvent::Tick { door_open },
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// nav_portal_quarantine.feature (issue #162, M4 wave 10) -- appended
+// section, do not interleave. Drives `viewer::nav::landmass_graph`'s pure
+// `merge_link_kind`/`permitted_animation_link_kinds` directly -- the
+// Bevy-side timeout/quarantine/repath wiring lives in `nav/agent.rs`'s own
+// `#[cfg(test)]` unit tests (see this feature's own doc comment for why).
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^merge-link candidate index (\d+)$")]
+async fn given_merge_link_candidate_index(world: &mut BevyoutWorld, index: usize) {
+    world.nav_quarantine_candidate_index = Some(index);
+}
+
+#[when("the merge-link kind is resolved")]
+async fn when_merge_link_kind_resolved(world: &mut BevyoutWorld) {
+    let index = world
+        .nav_quarantine_candidate_index
+        .expect("a merge-link candidate index must be given first");
+    world.nav_quarantine_resolved_kind = Some(landmass_graph::merge_link_kind(index));
+}
+
+#[then(regex = r"^the merge-link kind is (\d+)$")]
+async fn then_merge_link_kind(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(
+        world.nav_quarantine_resolved_kind,
+        Some(expected),
+        "merge-link kind must resolve deterministically from its candidate index"
+    );
+}
+
+#[given(regex = r"^(\d+) merge-link kinds exist$")]
+async fn given_merge_link_kind_count(world: &mut BevyoutWorld, count: usize) {
+    world.nav_quarantine_kind_count = count;
+}
+
+#[given(regex = r"^merge-link kind (\d+) is quarantined$")]
+async fn given_merge_link_kind_quarantined(world: &mut BevyoutWorld, kind: usize) {
+    world.nav_quarantine_excluded_kinds.insert(kind);
+}
+
+#[when("the permitted animation link kinds are computed")]
+async fn when_permitted_animation_link_kinds_computed(world: &mut BevyoutWorld) {
+    world.nav_quarantine_permitted = Some(landmass_graph::permitted_animation_link_kinds(
+        &world.nav_quarantine_excluded_kinds,
+        world.nav_quarantine_kind_count,
+    ));
+}
+
+#[then("every animation link kind is permitted")]
+async fn then_every_animation_link_kind_permitted(world: &mut BevyoutWorld) {
+    let permitted = world
+        .nav_quarantine_permitted
+        .take()
+        .expect("the permitted animation link kinds must be computed first");
+    assert_eq!(
+        permitted, None,
+        "an empty quarantine must signal `PermittedAnimationLinks::All` (`None`), not an explicit full set"
+    );
+}
+
+#[then(regex = r"^the permitted animation link kinds are (.+)$")]
+async fn then_permitted_animation_link_kinds(world: &mut BevyoutWorld, expected: String) {
+    let permitted = world
+        .nav_quarantine_permitted
+        .take()
+        .expect("the permitted animation link kinds must be computed first")
+        .expect("a non-empty quarantine must produce an explicit allow-list, not `All`");
+    let expected: std::collections::BTreeSet<usize> = expected
+        .split(',')
+        .map(|value| value.trim().parse().expect("valid kind number"))
+        .collect();
+    assert_eq!(permitted, expected);
 }

@@ -180,7 +180,61 @@
 //! sides' interval midpoints (not triangle centroids) with a real
 //! traversal-distance `AnimationLink3d` cost (`spawn_link_pair`'s new
 //! `cost` parameter), in place of the previous flat `1.0` every link used.
-use std::collections::{BTreeMap, HashMap};
+//!
+//! M4 wave 10 (#162, #168, #169), landing together against this same seam:
+//!
+//! - **Preferred-path base cost** (#168): issue #156 typed every authored
+//!   preferred-pathing polygon (`landmass_graph::preferred_pathing_type_
+//!   index`) but never priced the type, so routing behaviour was
+//!   unchanged. `ensure_archipelago` now calls `Archipelago::
+//!   set_type_index_cost` with [`PREFERRED_PATHING_TYPE_INDEX_COST`] (a
+//!   fixed `< 1.0` multiplier, see that constant's own doc comment) once
+//!   per build -- a shared terrain preference every agent in the
+//!   archipelago gets, unlike the two per-agent mechanisms below.
+//! - **Lock overrides derived at build** (#169): `ensure_archipelago`
+//!   used to rebuild `door_lock_info` purely from the manifest's authored
+//!   data on every (re)build, silently discarding any `setlock` recorded
+//!   in `NavArchipelagoState.door_lock_info` before that build ran -- an
+//!   early `setlock` (issued before the very first `tna spawn`, since
+//!   `NavArchipelagoState` is `init_resource`d and writable well before
+//!   that) was lost, leaving the door's query-time cost override at its
+//!   stale authored value. The freshly-read authored map is now overlaid
+//!   with whatever the *current* resource already holds, per door FormID,
+//!   before the resource is reset -- runtime always wins over authored for
+//!   any door a `setlock` has actually touched.
+//! - **Per-link portal quarantine** (#162): `merge_traversal_system`'s
+//!   timeout branch used to clear the agent's `AgentTarget3d`/
+//!   `travel_intent` outright on a blocked merge crossing (the wave-8
+//!   minimum-viable mitigation) so the solver could not immediately
+//!   re-select the same bad link -- effective, but it threw the real
+//!   destination away instead of routing around the one bad seam. Every
+//!   validated merge candidate now gets its own `landmass` animation-link
+//!   `kind` (`landmass_graph::merge_link_kind`, distinct from door
+//!   locking's polygon *type-index* scheme -- a merge portal has no
+//!   polygon to type, but `AnimationLink3d::kind` is a property of the
+//!   off-mesh link itself, so this achieves exact single-link granularity
+//!   for free). A timed-out crossing adds that one kind to the agent's own
+//!   `AgentRuntime::quarantined_merge_link_kinds` and rebuilds its
+//!   `PermittedAnimationLinks` (`permitted_animation_links_for`) to
+//!   exclude just it -- kind `0` (every door link) is never touched, so a
+//!   blocked merge seam can never lock an unrelated door. The real target
+//!   is kept, not cleared: `AgentTarget3d` is blanked to `None` for
+//!   exactly one tick (`PendingMergeRepath`, `resume_pending_merge_repath_
+//!   system`) to force landmass's own solver to discard the now-stale
+//!   corridor and search again with the updated exclusion (see that
+//!   system's doc comment for why a per-agent field change alone is not
+//!   enough), instead of resuming the identical path through the same
+//!   blocked link. The quarantine is per-agent and lives only as long as
+//!   the routing intent it excludes something from: cleared to empty on
+//!   every new `tna goto`/`tna travel` target (`clear_merge_link_
+//!   quarantine`) and implicitly on despawn/hand-off (it is ordinary
+//!   `AgentRuntime`/`PermittedAnimationLinks` component state, gone with
+//!   the entity) -- never a global or persistent portal blacklist. When no
+//!   alternate route exists, landmass's own solve reports `NoPath`
+//!   through the existing `AgentState::NoPath -> NavAgentStatus::
+//!   Unreachable` mapping, the same fail-fast surface every other
+//!   unreachable-route case already uses.
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use bevy::math::Vec2;
@@ -190,8 +244,8 @@ use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::prelude::*;
 use bevy_landmass::{
-    AgentTypeIndexCostOverrides, NavMeshHandle, PauseAgent, PointSampleDistance3d,
-    TargetReachedCondition, UsingAnimationLink,
+    AgentTypeIndexCostOverrides, NavMeshHandle, PauseAgent, PermittedAnimationLinks,
+    PointSampleDistance3d, TargetReachedCondition, UsingAnimationLink,
 };
 use serde_json::json;
 
@@ -414,6 +468,55 @@ struct MergeTraversal {
     /// unsuitable here regardless -- a portal crossing is a distinct,
     /// much shorter-lived motion regime from ordinary route following).
     timeout: f32,
+    /// This specific link's `landmass` animation-link kind (issue #162,
+    /// `landmass_graph::merge_link_kind`), captured from the matched
+    /// `LinkKind::Merge` at crossing start -- the identity
+    /// `merge_traversal_system`'s timeout branch quarantines for this
+    /// agent alone if the crossing fails, instead of clearing the whole
+    /// route.
+    link_kind: usize,
+}
+
+/// A capture of `AgentTarget3d`'s two meaningful variants (issue #162):
+/// `AgentTarget3d` itself is not `Clone` (`bevy_landmass::AgentTarget`'s
+/// derive is `Component, Default` only), so this is the plain-data stand-in
+/// [`PendingMergeRepath`] holds across the one-tick target-blank window
+/// `resume_pending_merge_repath_system` closes. `None` is deliberately not
+/// representable here: `merge_traversal_system`'s timeout branch only ever
+/// captures a target worth restoring, never a blank one (see its call
+/// site).
+#[derive(Debug, Clone, Copy)]
+enum AgentTargetSnapshot {
+    Point(Vec3),
+    Entity(Entity),
+}
+
+impl AgentTargetSnapshot {
+    fn capture(target: &AgentTarget3d) -> Option<Self> {
+        match target {
+            AgentTarget3d::Point(point) => Some(Self::Point(*point)),
+            AgentTarget3d::Entity(entity) => Some(Self::Entity(*entity)),
+            AgentTarget3d::None => None,
+        }
+    }
+
+    fn to_agent_target(self) -> AgentTarget3d {
+        match self {
+            Self::Point(point) => AgentTarget3d::Point(point),
+            Self::Entity(entity) => AgentTarget3d::Entity(entity),
+        }
+    }
+}
+
+/// Present on an agent entity for exactly one fixed tick after
+/// `merge_traversal_system`'s timeout branch (issue #162) deliberately
+/// blanks `AgentTarget3d` to `AgentTarget3d::None` -- see
+/// `resume_pending_merge_repath_system`'s doc comment for why that blank
+/// tick is necessary to force a genuine repath rather than a per-agent
+/// field change alone.
+#[derive(Component)]
+struct PendingMergeRepath {
+    target: AgentTargetSnapshot,
 }
 
 /// Per-agent physics-authoritative KCC state (issue #114): the capsule
@@ -475,10 +578,15 @@ struct AgentDesiredVelocityBlend {
 /// What an off-mesh animation-link entity represents (issue #113): a
 /// same-cell cross-mesh merge seam (always open, crossed without any door
 /// interaction) or an intra-cell two-sided door link (wave 3's pause ->
-/// open -> traverse lifecycle).
+/// open -> traverse lifecycle). `Merge`'s `kind` (issue #162) is this
+/// specific portal's `landmass` animation-link kind
+/// (`landmass_graph::merge_link_kind`), the identity a per-agent quarantine
+/// excludes -- carried alongside the variant (not looked up separately)
+/// so `drive_door_link_for_agent` can stash it straight onto the
+/// `MergeTraversal` it starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkKind {
-    Merge,
+    Merge { kind: usize },
     Door { form_id: u32 },
 }
 
@@ -560,6 +668,15 @@ struct NavArchipelagoState {
     /// door's lock state into the matching `AgentTypeIndexCostOverrides`
     /// entry without recomputing it from the raw mesh inputs every time.
     door_type_indices: BTreeMap<u32, usize>,
+    /// How many distinct merge-portal `landmass` animation-link kinds this
+    /// build assigned (issue #162 feature 1, `landmass_graph::
+    /// merge_link_kind`): every validated merge candidate this build
+    /// spawned a link pair for got kind `1..=merge_link_kind_count`, in
+    /// spawn order. `permitted_animation_links_for` needs this to build
+    /// the "everything except the quarantined kinds" allow-list
+    /// `landmass::PermittedAnimationLinks::Kinds` requires. `0` when this
+    /// cell has no merge portals at all.
+    merge_link_kind_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -610,6 +727,17 @@ struct AgentRuntime {
     /// Last `AgentState` `log_agent_state_changes` reported, so the stable
     /// evidence lines fire once per actual change instead of every frame.
     last_logged_state: Option<AgentState>,
+    /// Per-agent merge-portal quarantine (issue #162 feature 2): every
+    /// `landmass_graph::merge_link_kind` this agent has timed out crossing,
+    /// excluded from its own subsequent repaths via `PermittedAnimationLinks`
+    /// (`merge_traversal_system`'s timeout branch adds to this;
+    /// `permitted_animation_links_for` derives the component from it).
+    /// Deliberately per-agent, never global/persistent: cleared to empty on
+    /// every new `tna goto`/`tna travel` target (`clear_merge_link_
+    /// quarantine`, called from `goto_agent`/`request_travel`) and
+    /// implicitly on despawn/hand-off, since this field -- like the rest of
+    /// `AgentRuntime` -- lives only as long as the entity itself.
+    quarantined_merge_link_kinds: BTreeSet<usize>,
 }
 
 /// The bounded roster of spawned test-agent entities, indexed by agent
@@ -808,6 +936,19 @@ impl Plugin for NavBackendPlugin {
             .add_systems(
                 FixedPreUpdate,
                 update_agent_desired_velocity_blend.after(LandmassSystems::Output),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                // Issue #162: gated on the same `nav_solve_gate` condition
+                // as `LandmassSystems::Update` itself (not every fixed
+                // tick) -- see `resume_pending_merge_repath_system`'s doc
+                // comment for why its one-tick-later restore must line up
+                // with an actual solve tick, not an arbitrary movement
+                // tick, when `NavSolveRate` throttles the solve below the
+                // fixed-tick cadence.
+                resume_pending_merge_repath_system
+                    .after(LandmassSystems::Output)
+                    .run_if(nav_solve_gate),
             )
             .add_systems(
                 FixedUpdate,
@@ -1057,15 +1198,24 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         candidate_merge_descriptors
     };
 
-    for descriptor in validated_merge_descriptors {
+    // Issue #162 feature 1: each validated merge candidate gets its own
+    // `landmass` animation-link kind (`landmass_graph::merge_link_kind`,
+    // deterministic by position in this already-deterministic order), the
+    // identity a per-agent quarantine (`PermittedAnimationLinks`) can
+    // exclude without touching any other link -- see that function's doc
+    // comment for why this achieves exact single-link granularity, unlike
+    // door locking's polygon type-index scheme.
+    let merge_link_kind_count = validated_merge_descriptors.len();
+    for (index, descriptor) in validated_merge_descriptors.into_iter().enumerate() {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
         // Issue #154 feature 3: real traversal-distance cost, floored well
         // above zero -- `AnimationLink3d::cost` must stay strictly positive
         // regardless of how tight a validated portal's overlap ended up.
         let cost = descriptor.distance.max(0.01);
-        for link_entity in spawn_link_pair(world, archipelago_entity, start, end, cost) {
-            link_kinds.insert(link_entity, LinkKind::Merge);
+        let kind = landmass_graph::merge_link_kind(index);
+        for link_entity in spawn_link_pair(world, archipelago_entity, start, end, cost, kind) {
+            link_kinds.insert(link_entity, LinkKind::Merge { kind });
             links.push(link_entity);
         }
     }
@@ -1080,7 +1230,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         let usable = door_usable_now(world, descriptor.door_form_id, &door_lock_info);
         door_usable.insert(descriptor.door_form_id, usable);
         if usable {
-            for link_entity in spawn_link_pair(world, archipelago_entity, start, end, 1.0) {
+            // Kind 0 (issue #162): every door link shares the reserved
+            // "never quarantined" kind, so a blocked merge portal can never
+            // make a door impassable for an agent that has nothing to do
+            // with it.
+            for link_entity in spawn_link_pair(world, archipelago_entity, start, end, 1.0, 0) {
                 link_kinds.insert(
                     link_entity,
                     LinkKind::Door {
@@ -1159,6 +1313,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_usable,
         door_lock_info,
         door_type_indices,
+        merge_link_kind_count,
     };
     Ok(())
 }
@@ -1170,13 +1325,13 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 /// being priced. Called once per archipelago build (`ensure_archipelago`,
 /// right after the entity is spawned), not per-agent: this is a shared
 /// terrain preference every agent in this archipelago gets, unlike door
-/// locking (#155) or merge-portal quarantine (a future issue), which are
-/// per-agent `AgentTypeIndexCostOverrides` exceptions to this shared
-/// baseline. `set_type_index_cost` only errors on a non-positive cost
-/// (`landmass` 0.9.2's `SetTypeIndexCostError::NonPositiveCost`, see the
-/// constant's own doc comment for the verification) -- unreachable for
-/// this fixed, positive, compile-time constant, so the `Result` is
-/// discarded rather than propagated.
+/// locking (#155) or merge-portal quarantine (#162), which are per-agent
+/// `AgentTypeIndexCostOverrides`/`PermittedAnimationLinks` exceptions to
+/// this shared baseline. `set_type_index_cost` only errors on a
+/// non-positive cost (`landmass` 0.9.2's `SetTypeIndexCostError::
+/// NonPositiveCost`, see the constant's own doc comment for the
+/// verification) -- unreachable for this fixed, positive, compile-time
+/// constant, so the `Result` is discarded rather than propagated.
 fn apply_preferred_pathing_base_cost(
     world: &mut World,
     archipelago_entity: Entity,
@@ -1210,12 +1365,20 @@ fn apply_preferred_pathing_base_cost(
 /// traversal distance between the two portal-interval midpoints) so
 /// landmass's route cost reflects how far a crossing actually moves the
 /// agent instead of treating every merge seam as equally cheap.
+///
+/// `kind` (issue #162 feature 1): every door link passes the reserved `0`
+/// (never quarantined); a merge link passes its own deterministic
+/// `landmass_graph::merge_link_kind`, giving `PermittedAnimationLinks` a
+/// per-link identity to exclude for one agent without touching any other
+/// link -- both unidirectional links of one logical portal get the *same*
+/// `kind`, so a quarantine excludes the whole crossing in either direction.
 fn spawn_link_pair(
     world: &mut World,
     archipelago_entity: Entity,
     start: Vec3,
     end: Vec3,
     cost: f32,
+    kind: usize,
 ) -> [Entity; 2] {
     let mut spawn_one = |from: Vec3, to: Vec3| {
         world
@@ -1223,7 +1386,7 @@ fn spawn_link_pair(
                 link: AnimationLink3d {
                     start_edge: (from, from),
                     end_edge: (to, to),
-                    kind: 0,
+                    kind,
                     cost,
                     bidirectional: false,
                 },
@@ -1852,6 +2015,9 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
         ));
     };
     world.entity_mut(agent_entity).insert(target);
+    // Issue #162 feature 2: a fresh target is a new routing intent -- any
+    // merge-portal quarantine from a previous route no longer applies.
+    clear_merge_link_quarantine(world, agent_entity);
     let elapsed = world.resource::<Time>().elapsed_secs();
     if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
         runtime.goto_started_at = Some(elapsed);
@@ -2022,7 +2188,7 @@ pub(crate) fn hud_agent_status_lines(world: &World) -> Vec<String> {
 /// seam, `door <formid>` through a door lifecycle), else `None`.
 fn active_link_description(runtime: &AgentRuntime) -> Option<String> {
     match runtime.active_link {
-        Some(LinkKind::Merge) => Some("merge".to_string()),
+        Some(LinkKind::Merge { .. }) => Some("merge".to_string()),
         Some(LinkKind::Door { form_id }) => Some(format!("door {form_id:08x}")),
         None => match runtime.door_link {
             door_link::DoorLinkState::TravelReached {
@@ -2453,7 +2619,7 @@ fn door_traversal_system(
                 // clear the link) rather than treated as an invariant
                 // violation, the same conservative stance this match
                 // already took for the "no active link" case.
-                Some(LinkKind::Merge) | None => {
+                Some(LinkKind::Merge { .. }) | None => {
                     runtime.active_link = None;
                 }
                 Some(LinkKind::Door { .. }) => {
@@ -2533,9 +2699,42 @@ type MergeTraversalQuery<'w, 's> = Query<
         &'static mut AgentKcc,
         &'static mut MergeTraversal,
         &'static mut AgentRuntime,
+        Option<&'static AgentTarget3d>,
     ),
     With<TestNavAgentMarker>,
 >;
+
+/// Rebuilds an agent's `PermittedAnimationLinks` from its current
+/// `AgentRuntime::quarantined_merge_link_kinds` (issue #162): thin wrapper
+/// over the pure `landmass_graph::permitted_animation_link_kinds` that
+/// converts its `Option<BTreeSet<usize>>` into the actual `bevy_landmass`
+/// component -- `None` (nothing quarantined) becomes the cheap `All`
+/// default rather than materializing an equivalent full allow-list.
+fn permitted_animation_links_for(
+    quarantined: &BTreeSet<usize>,
+    merge_link_kind_count: usize,
+) -> PermittedAnimationLinks {
+    match landmass_graph::permitted_animation_link_kinds(quarantined, merge_link_kind_count) {
+        None => PermittedAnimationLinks::All,
+        Some(kinds) => PermittedAnimationLinks::Kinds(Arc::new(kinds.into_iter().collect())),
+    }
+}
+
+/// Issue #162 feature 2: resets `agent_entity`'s merge-portal quarantine to
+/// empty, called whenever the agent gets a genuinely new destination
+/// (`goto_agent`/`request_travel`) -- a fresh `tna goto`/`tna travel` is a
+/// new routing intent, so whatever previously blocked links this agent
+/// steered around no longer apply to it. Despawn/hand-off need no
+/// equivalent call: `AgentRuntime`/`PermittedAnimationLinks` are ordinary
+/// components on the agent entity, gone the moment it despawns.
+fn clear_merge_link_quarantine(world: &mut World, agent_entity: Entity) {
+    if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
+        runtime.quarantined_merge_link_kinds.clear();
+    }
+    if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
+        entity.insert(PermittedAnimationLinks::All);
+    }
+}
 
 /// Sweeps every agent currently crossing a same-cell merge portal (issue
 /// #154 feature 4) toward the far portal point with the same
@@ -2558,6 +2757,7 @@ fn merge_traversal_system(
     physics_disabled: Res<PhysicsDisabled>,
     cell_physics: Res<CellPhysicsReadiness>,
     roster: Res<TestNavAgentState>,
+    archipelago_state: Res<NavArchipelagoState>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut agents: MergeTraversalQuery<'_, '_>,
     mut commands: Commands,
@@ -2581,7 +2781,8 @@ fn merge_traversal_system(
     let collision_filter = player::player_collision_filter();
     let support_filter = player::stair_support_filter();
 
-    for (entity, mut transform, mut kcc, mut traversal, mut runtime) in &mut agents {
+    for (entity, mut transform, mut kcc, mut traversal, mut runtime, current_target) in &mut agents
+    {
         if movement_policy::nav_point_reached(
             transform.translation.to_array(),
             traversal.target.to_array(),
@@ -2606,30 +2807,43 @@ fn merge_traversal_system(
                 .remove::<MergeTraversal>()
                 .remove::<UsingAnimationLink>();
             runtime.active_link = None;
-            // Minimum viable mitigation for a blocked-portal repath loop
-            // (issue #154 review correction, feature 4): the agent's
-            // current route/travel-door target is cleared outright rather
-            // than left in place, so `LandmassSystems::Update`'s next solve
-            // has nothing left to path across the same blocked link with --
-            // an idle agent that goes nowhere, instead of one that
-            // silently re-selects the identical invalid link and repeats
-            // this exact failure forever.
-            //
-            // ponytail: this is not per-portal-link quarantine (excluding
-            // just the blocked seam while keeping the agent's real
-            // destination, so a repath can route *around* it) -- that
-            // needs a landmass-side mechanism to exclude one specific
-            // off-mesh link from a route, which does not exist yet for
-            // merge links (F155's door work adds a per-polygon *type-index*
-            // cost override, but merge-link polygons have no type tagging).
-            // Left for a follow-up once that infra exists; flagged to the
-            // orchestrator for its own issue.
-            commands.entity(entity).remove::<AgentTarget3d>();
-            runtime.travel_intent = None;
+
+            // Issue #162: per-agent portal quarantine, not a wholesale
+            // route clear. Excludes just this link's kind
+            // (`landmass_graph::merge_link_kind`, assigned per validated
+            // merge candidate at archipelago build) from this agent's own
+            // `PermittedAnimationLinks` -- kind 0 (every door link) is
+            // never touched, so a blocked merge seam can never lock an
+            // unrelated door. The real destination is kept: `AgentTarget3d`
+            // is blanked for exactly one tick (`PendingMergeRepath`,
+            // `resume_pending_merge_repath_system`) to force landmass's own
+            // solver to discard the now-stale corridor (which still points
+            // through the blocked link) and search again with the updated
+            // exclusion, instead of resuming the identical path. An absent
+            // or already-`None` target has nothing worth restoring, so it
+            // is left as-is.
+            runtime
+                .quarantined_merge_link_kinds
+                .insert(traversal.link_kind);
+            let permitted = permitted_animation_links_for(
+                &runtime.quarantined_merge_link_kinds,
+                archipelago_state.merge_link_kind_count,
+            );
+            commands.entity(entity).insert(permitted);
+            if let Some(snapshot) = current_target.and_then(AgentTargetSnapshot::capture) {
+                commands
+                    .entity(entity)
+                    .insert(AgentTarget3d::None)
+                    .insert(PendingMergeRepath { target: snapshot });
+            }
             if !was_reported && let Some(index) = roster.index_of(entity) {
                 warn!(
-                    "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s; agent stopped mid-portal and its route was cleared",
+                    "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s",
                     traversal.timeout
+                );
+                info!(
+                    "nav agent portal quarantined {index} link={}",
+                    traversal.link_kind
                 );
                 info!("nav agent collision-blocked {index}");
                 info!("nav agent stuck {index}");
@@ -2658,6 +2872,46 @@ fn merge_traversal_system(
         transform.translation = new_position;
         kcc.velocity = new_velocity;
         kcc.grounded = grounded;
+    }
+}
+
+/// Issue #162: restores the real `AgentTarget3d` one fixed tick after
+/// `merge_traversal_system`'s timeout branch deliberately blanked it to
+/// `AgentTarget3d::None`.
+///
+/// Why the blank tick is needed at all: `landmass`'s own repath decision
+/// (`landmass::agent::does_agent_need_repath`) only recomputes a path when
+/// either the target transitions from absent to present, or the existing
+/// corridor is structurally invalidated (an island/link actually
+/// added/removed from the graph). Merely swapping this agent's
+/// `PermittedAnimationLinks` does neither -- the just-failed portal step
+/// was already behind the corridor's tracked progress, so the *existing*
+/// path would simply be resumed unchanged and the agent would walk straight
+/// back into the same blocked link. Blanking the target for exactly one
+/// tick forces `RepathResult::ClearPathNoTarget` that tick (observed by
+/// `LandmassSystems::Update` in `FixedPreUpdate`, which this system runs
+/// `.after`); restoring it here lets the *next* tick's `Update` see
+/// `current_path: None` plus a real target again, which is
+/// `does_agent_need_repath`'s unconditional `NeedsRepath` case -- a genuine
+/// fresh solve that honours the just-updated quarantine.
+///
+/// Skips the restore (but still removes the marker) when `AgentTarget3d` is
+/// no longer `None`: a `tna goto`/`tna travel` issued during the one-tick
+/// gap already retargeted the agent (and, via `clear_merge_link_
+/// quarantine`, reset its quarantine too), so there is nothing stale left
+/// to restore -- overwriting the fresh target with the stale captured one
+/// would silently discard that newer command.
+fn resume_pending_merge_repath_system(
+    mut commands: Commands,
+    agents: Query<(Entity, &PendingMergeRepath, Option<&AgentTarget3d>)>,
+) {
+    for (entity, pending, current_target) in &agents {
+        commands.entity(entity).remove::<PendingMergeRepath>();
+        if matches!(current_target, Some(AgentTarget3d::None) | None) {
+            commands
+                .entity(entity)
+                .insert(pending.target.to_agent_target());
+        }
     }
 }
 
@@ -2906,7 +3160,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 return;
             };
             match link_kind {
-                LinkKind::Merge => {
+                LinkKind::Merge { kind } => {
                     // A merge seam has no door to wait on (issue #154
                     // feature 4): sweep the agent to the far portal point
                     // with the physics KCC (`merge_traversal_system`)
@@ -2933,12 +3187,13 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                             target: end_point,
                             elapsed: 0.0,
                             timeout: merge_traversal_timeout(initial_distance),
+                            link_kind: kind,
                         },
                     ));
                     world
                         .get_mut::<AgentRuntime>(agent_entity)
                         .unwrap()
-                        .active_link = Some(LinkKind::Merge);
+                        .active_link = Some(LinkKind::Merge { kind });
                 }
                 LinkKind::Door {
                     form_id: door_form_id,
@@ -3137,7 +3392,7 @@ fn door_availability_system(world: &mut World) {
                     .archipelago
                     .expect("availability tracking implies a built archipelago");
                 for link_entity in
-                    spawn_link_pair(world, archipelago_entity, link.start, link.end, 1.0)
+                    spawn_link_pair(world, archipelago_entity, link.start, link.end, 1.0, 0)
                 {
                     let mut state = world.resource_mut::<NavArchipelagoState>();
                     state.link_kinds.insert(
@@ -3278,6 +3533,10 @@ pub(crate) fn request_travel(
     world
         .entity_mut(agent_entity)
         .insert(AgentTarget3d::Point(link.triangle_midpoint));
+    // Issue #162 feature 2: a fresh travel request is a new routing intent
+    // -- any merge-portal quarantine from a previous route no longer
+    // applies.
+    clear_merge_link_quarantine(world, agent_entity);
     if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
         runtime.travel_intent = Some(door_form_id);
     }
@@ -3585,6 +3844,8 @@ fn restore_ledgered_agent(world: &mut World, index: usize, entry: ledger_policy:
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::console::ConsoleSessionId;
     use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
@@ -3886,6 +4147,7 @@ mod tests {
 
         let mut world = World::new();
         world.init_resource::<TestNavAgentState>();
+        world.init_resource::<NavArchipelagoState>();
         world.insert_resource(PhysicsDisabled(false));
         world.insert_resource(CellPhysicsReadiness::Ready);
         world.init_resource::<Time>();
@@ -3918,13 +4180,14 @@ mod tests {
                 },
                 Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 AgentRuntime {
-                    active_link: Some(LinkKind::Merge),
+                    active_link: Some(LinkKind::Merge { kind: 1 }),
                     ..default()
                 },
                 MergeTraversal {
                     target,
                     elapsed: 0.0,
                     timeout: merge_traversal_timeout(2.0),
+                    link_kind: 1,
                 },
                 UsingAnimationLink,
             ))
@@ -3958,18 +4221,33 @@ mod tests {
         assert!(!kcc.collision_blocked);
     }
 
-    /// Issue #154 feature 4: a merge-portal crossing whose far side is
-    /// walled off must fail visibly through the existing stuck/blocked
-    /// reporting (`kcc.stuck`/`kcc.collision_blocked`, the same fields
-    /// `tna status` and the stable `nav agent stuck <id>`/`nav agent
-    /// collision-blocked <id>` log lines already use) rather than
-    /// teleporting the agent through the wall via a scripted lerp.
+    /// Issue #154 feature 4 / issue #162: a merge-portal crossing whose far
+    /// side is walled off must fail visibly through the existing
+    /// stuck/blocked reporting (`kcc.stuck`/`kcc.collision_blocked`, the
+    /// same fields `tna status` and the stable `nav agent stuck <id>`/`nav
+    /// agent collision-blocked <id>` log lines already use) rather than
+    /// teleporting the agent through the wall via a scripted lerp. Issue
+    /// #162 replaced the wave-8 wholesale route clear with per-agent
+    /// quarantine: this test now also pins that the specific link's kind
+    /// gets quarantined, `PermittedAnimationLinks` excludes exactly that
+    /// kind (never kind 0, the reserved door kind), the real target is
+    /// captured (not discarded) behind a one-tick `PendingMergeRepath`
+    /// blank, and -- unlike the old behaviour this replaces -- an in-
+    /// progress `travel_intent` survives untouched.
     #[test]
-    fn merge_traversal_system_reports_stuck_when_the_portal_is_walled_off() {
+    fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destination() {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut world = World::new();
         world.init_resource::<TestNavAgentState>();
+        world.init_resource::<NavArchipelagoState>();
+        // Three merge kinds exist in this build (1..=3); the blocked
+        // crossing below uses kind 2, so the surviving allow-list must be
+        // {0 (door), 1, 3} -- proof the quarantine is exactly this one
+        // link, not every merge portal.
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .merge_link_kind_count = 3;
         world.insert_resource(PhysicsDisabled(false));
         world.insert_resource(CellPhysicsReadiness::Ready);
         world.init_resource::<Time>();
@@ -4010,13 +4288,17 @@ mod tests {
                 },
                 Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 AgentRuntime {
-                    active_link: Some(LinkKind::Merge),
+                    active_link: Some(LinkKind::Merge { kind: 2 }),
+                    // A live travel intent, to prove #162 preserves it
+                    // (the pre-#162 behaviour cleared it unconditionally).
+                    travel_intent: Some(0x77),
                     ..default()
                 },
                 MergeTraversal {
                     target,
                     elapsed: 0.0,
                     timeout: merge_traversal_timeout(5.0),
+                    link_kind: 2,
                 },
                 UsingAnimationLink,
                 AgentTarget3d::Point(target),
@@ -4061,20 +4343,248 @@ mod tests {
             position.x < target.x - 1.0,
             "the agent must never teleport through the wall to the far portal point, got {position:?}"
         );
-        // Review correction (issue #154 feature 4): the blocked crossing's
-        // route must be cleared, not left in place -- otherwise the next
-        // landmass solve re-selects the exact same invalid link and the
-        // agent repeats this failure forever.
-        assert!(
-            world.get::<AgentTarget3d>(agent).is_none(),
-            "a blocked portal crossing must clear the agent's target so it does not immediately re-select the same blocked link"
+
+        // Issue #162: exactly this one link's kind is quarantined.
+        assert_eq!(
+            world
+                .get::<AgentRuntime>(agent)
+                .unwrap()
+                .quarantined_merge_link_kinds,
+            BTreeSet::from([2]),
+            "only the specific blocked link's kind must be quarantined"
         );
+        // The allow-list keeps every other kind, including the reserved
+        // door kind 0 -- a blocked merge portal must never lock a door.
+        let permitted = world.get::<PermittedAnimationLinks>(agent).unwrap();
+        match permitted {
+            PermittedAnimationLinks::Kinds(kinds) => {
+                assert_eq!(kinds.as_ref(), &HashSet::from([0, 1, 3]));
+            }
+            PermittedAnimationLinks::All => panic!("a quarantine must restrict, not stay `All`"),
+        }
+
+        // The real target/destination is kept, not cleared: it is
+        // transiently blanked to force a genuine repath
+        // (`resume_pending_merge_repath_system`'s doc comment) and
+        // captured in `PendingMergeRepath` for that system to restore.
+        assert!(
+            matches!(world.get::<AgentTarget3d>(agent), Some(AgentTarget3d::None)),
+            "the target is transiently blanked to force a repath, not removed outright"
+        );
+        let pending = world
+            .get::<PendingMergeRepath>(agent)
+            .expect("the real target must be captured for the next tick to restore");
+        assert!(matches!(
+            pending.target,
+            AgentTargetSnapshot::Point(point) if point == target
+        ));
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().travel_intent,
+            Some(0x77),
+            "issue #162: an in-progress travel intent is the real destination and must survive a quarantine, unlike the pre-#162 wholesale clear"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Issue #162: resume_pending_merge_repath_system /
+    // clear_merge_link_quarantine.
+    // -------------------------------------------------------------
+
+    /// The normal case: nothing retargeted the agent during the one-tick
+    /// gap, so the real target `merge_traversal_system`'s timeout branch
+    /// captured is restored verbatim and the marker is consumed.
+    #[test]
+    fn resume_pending_merge_repath_system_restores_the_captured_target() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let target = Vec3::new(3.0, 1.0, 4.0);
+        let agent = world
+            .spawn((
+                PendingMergeRepath {
+                    target: AgentTargetSnapshot::Point(target),
+                },
+                AgentTarget3d::None,
+            ))
+            .id();
+
+        world
+            .run_system_once(resume_pending_merge_repath_system)
+            .expect("system runs");
+
+        assert!(
+            matches!(
+                world.get::<AgentTarget3d>(agent),
+                Some(AgentTarget3d::Point(point)) if *point == target
+            ),
+            "the real target must be restored exactly"
+        );
+        assert!(
+            world.get::<PendingMergeRepath>(agent).is_none(),
+            "the marker must be consumed regardless of outcome"
+        );
+    }
+
+    /// An `Entity` target (e.g. `tna goto player`) round-trips through the
+    /// snapshot the same way a `Point` does.
+    #[test]
+    fn resume_pending_merge_repath_system_restores_an_entity_target() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let followed = world.spawn_empty().id();
+        let agent = world
+            .spawn((
+                PendingMergeRepath {
+                    target: AgentTargetSnapshot::Entity(followed),
+                },
+                AgentTarget3d::None,
+            ))
+            .id();
+
+        world
+            .run_system_once(resume_pending_merge_repath_system)
+            .expect("system runs");
+
+        assert!(matches!(
+            world.get::<AgentTarget3d>(agent),
+            Some(AgentTarget3d::Entity(entity)) if *entity == followed
+        ));
+    }
+
+    /// A `tna goto`/`tna travel` issued during the one-tick gap already
+    /// retargeted the agent (`AgentTarget3d` is no longer `None`) -- the
+    /// stale captured target must not clobber it.
+    #[test]
+    fn resume_pending_merge_repath_system_does_not_clobber_a_fresh_retarget() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        let stale_target = Vec3::new(3.0, 1.0, 4.0);
+        let fresh_target = Vec3::new(9.0, 1.0, 9.0);
+        let agent = world
+            .spawn((
+                PendingMergeRepath {
+                    target: AgentTargetSnapshot::Point(stale_target),
+                },
+                AgentTarget3d::Point(fresh_target),
+            ))
+            .id();
+
+        world
+            .run_system_once(resume_pending_merge_repath_system)
+            .expect("system runs");
+
+        assert!(
+            matches!(
+                world.get::<AgentTarget3d>(agent),
+                Some(AgentTarget3d::Point(point)) if *point == fresh_target
+            ),
+            "a retarget issued during the gap must win over the stale captured target"
+        );
+        assert!(
+            world.get::<PendingMergeRepath>(agent).is_none(),
+            "the marker must still be consumed even when the restore is skipped"
+        );
+    }
+
+    /// Issue #162 feature 2: `clear_merge_link_quarantine` resets both the
+    /// tracked kind set and the live `PermittedAnimationLinks` component
+    /// back to `All`. `goto_agent`/`request_travel` call this on every new
+    /// target so a previous route's quarantine never leaks into a
+    /// completely different one.
+    #[test]
+    fn clear_merge_link_quarantine_resets_tracked_kinds_and_the_component() {
+        let mut world = World::new();
+        let mut runtime = AgentRuntime::default();
+        runtime.quarantined_merge_link_kinds.insert(2);
+        runtime.quarantined_merge_link_kinds.insert(3);
+        let agent = world
+            .spawn((
+                runtime,
+                PermittedAnimationLinks::Kinds(Arc::new(HashSet::from([0, 1]))),
+            ))
+            .id();
+
+        clear_merge_link_quarantine(&mut world, agent);
+
         assert!(
             world
                 .get::<AgentRuntime>(agent)
                 .unwrap()
-                .travel_intent
-                .is_none()
+                .quarantined_merge_link_kinds
+                .is_empty(),
+            "the tracked kind set must be reset to empty"
+        );
+        assert!(matches!(
+            world.get::<PermittedAnimationLinks>(agent),
+            Some(PermittedAnimationLinks::All)
+        ));
+    }
+
+    /// `tna goto` clears a live quarantine (issue #162 feature 2's
+    /// lifecycle rule): a new goto is a new routing intent, so whatever
+    /// links a previous route quarantined no longer apply.
+    #[test]
+    fn goto_agent_clears_a_live_merge_link_quarantine() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        let mut runtime = AgentRuntime::default();
+        runtime.quarantined_merge_link_kinds.insert(1);
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                runtime,
+                AgentKcc::default(),
+                PermittedAnimationLinks::Kinds(Arc::new(HashSet::from([0]))),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+        tna_command(&mut world, &invocation(&["goto", "5", "6", "7"])).expect("goto succeeds");
+
+        assert!(
+            world
+                .get::<AgentRuntime>(agent)
+                .unwrap()
+                .quarantined_merge_link_kinds
+                .is_empty()
+        );
+        assert!(matches!(
+            world.get::<PermittedAnimationLinks>(agent),
+            Some(PermittedAnimationLinks::All)
+        ));
+    }
+
+    /// `tna travel` clears a live quarantine the same way `tna goto` does.
+    #[test]
+    fn request_travel_clears_a_live_merge_link_quarantine() {
+        let mut world = harness_world();
+        let mut runtime = AgentRuntime::default();
+        runtime.quarantined_merge_link_kinds.insert(1);
+        let agent = world.spawn((TestNavAgentMarker, runtime)).id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .travel_doors
+            .insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::ZERO,
+                    door_position: Vec3::ZERO,
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+
+        request_travel(&mut world, 0, 0x99).expect("travel request succeeds");
+
+        assert!(
+            world
+                .get::<AgentRuntime>(agent)
+                .unwrap()
+                .quarantined_merge_link_kinds
+                .is_empty()
         );
     }
 
@@ -4939,7 +5449,7 @@ mod tests {
         // The door starts usable with a real link pair already spawned
         // (mirroring what `ensure_archipelago`/an earlier unblock would have
         // produced), so locking it has a link to remove.
-        let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0);
+        let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0, 0);
         {
             let mut state = world.resource_mut::<NavArchipelagoState>();
             state.archipelago = Some(archipelago);
@@ -5492,7 +6002,7 @@ mod tests {
         let mut runtime = AgentRuntime::default();
         assert_eq!(active_link_description(&runtime), None);
 
-        runtime.active_link = Some(LinkKind::Merge);
+        runtime.active_link = Some(LinkKind::Merge { kind: 1 });
         assert_eq!(active_link_description(&runtime), Some("merge".to_string()));
 
         runtime.active_link = Some(LinkKind::Door { form_id: 0x99 });
