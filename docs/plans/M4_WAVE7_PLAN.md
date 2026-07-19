@@ -185,14 +185,18 @@ conversion job and later requested a nonexistent physics sidecar. Actor
 de-duplication now uses the content-addressed actor asset name, so every unique
 blueprint has a matching GLB/physics pair.
 
-### A4. Windows-only actor conversion boundary
+### A4. Windows-only comparison boundary
 
 Blender itself is cross-platform, but the PyNifly actor route exercised here
-depends on native Windows DLLs. The wave does not claim that actor backend is
-portable. Native actor assembly and non-Windows support remain separately
-scoped.
+depends on native Windows DLLs. It is retained only as a Windows comparison
+tool. Native `nifty` actor assembly is the production path and must carry the
+portable acceptance result.
 
-### A5. Acceptance results
+### A5. Historical acceptance results (superseded by A8)
+
+These measurements established catalog and runtime plumbing, but they did not
+prove the player-visible actor result. Metadata counters and embedded GLB
+fields are not visual acceptance for gender, armor coverage, or hair.
 
 - Real preparation: `000151e3`, `00024511`, and `00017f37` completed `3 done,
   0 failed`; immediate rerun reported `3 cells valid, 0 stale` and skipped all
@@ -210,3 +214,57 @@ scoped.
   process 2,863 MiB working set / 5,529 MiB private bytes.
 - Gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` pass. Cucumber: 42 features, 320 scenarios, 1,451 steps.
+
+### A6. Nested actor leveled lists resolve to concrete leaves
+
+Real Super-Duper Mart raider `00041600` is placed from NPC shell `0002f6e2`,
+whose template path reaches a nested actor leveled list. Actor preparation now
+recursively walks `LVLN`/`LVLC` records to concrete matching `NPC_`/`CREA`
+leaves with a 32-level bound and active-path cycle detection. Candidate order
+and duplicates cannot change selection. Invalid, missing, cyclic, and
+wrong-kind branches are diagnosed while valid leaves remain eligible.
+
+`template_candidates` deliberately retains the root list's immediate entries
+for diagnostics. `resolved_base_form_id` owns the selected concrete actor, and
+all delegated template groups plus inventory/apparel consume that same seeded
+identity. `00041600` therefore keeps source shell `0002f6e2` while resolving
+to concrete female raider `0002f6d8`.
+
+### A7. Native actor skins retain authored inverse bind matrices
+
+The corrected descriptor exposed a native-only deformation/flicker regression:
+the adapter recomputed every merged part's inverse bind matrices from the
+shared skeleton. Bethesda actor parts carry authoritative part-local bind
+matrices, so that reconstruction stretched triangles across the intact armor.
+Native assembly now remaps joint nodes while retaining each part's authored
+matrices. A focused `nifty` merge regression locks that contract, and the root
+pins the corrected `native-fo3-glb` revision. Both native actor converter
+revisions were bumped so ordinary preparation cannot reuse affected GLBs.
+
+### A7b. Head parts keep their authored coordinate frames
+
+Live close-up acceptance found that rigid head parts cannot share one blanket
+transform. Eyes, mouth, teeth, and tongue already carry the rotation that
+cancels the animated head bone's authored frame, while hair roots are authored
+directly in `HeadAnims`. Native assembly now parents only `Hair` through
+`HeadAnims`; the remaining face parts retain their own transforms under
+`Bip01 Head`. This keeps hair on the scalp and eyes/mouth in the face. The
+staging-only assembly descriptor records this distinction without changing the
+prepared manifest schema.
+
+The same acceptance run exposed per-frame weapon attachment churn: an attached
+weapon could be reset before its deferred spawn became queryable, creating an
+unbounded stream of duplicate weapon entities, log spam, overdraw, and visible
+flicker. Attached state is now stable across that deferred-command boundary,
+with a focused regression test.
+
+### A8. Corrected visual acceptance
+
+Acceptance is now native-first and player-visible. For `00041600`, preparation
+must report source `0002f6e2`, concrete resolved actor `0002f6d8`, `female=true`,
+nonempty canonical apparel/inventory, and native armor input
+`armor/raiderarmor02/outfitf.nif`. The viewport must show the female raider in
+complete armor with continuous body coverage and no stretched/flickering
+triangles. Vault utility worker `00054432` separately proves authored hair is
+visible when apparel does not mask the Hair/Hat slots. Blender/PyNifly may be
+used only on Windows to compare a disagreement; it cannot satisfy the gate.

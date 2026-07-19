@@ -55,6 +55,22 @@ Feature: Actor catalog template resolution
     When the actor catalog is built
     Then blueprint for reference 0x00000001 is a leveled template with candidates "00000010,00000020,00000030"
 
+  Scenario: A nested leveled template resolves one concrete actor for traits and inventory
+    Given an NPC_ actor 0x00000010 with race 0x000000AA
+    And actor 0x00000010 has template 0x00000090 using traits,inventory
+    And a leveled list 0x00000090 with entries "00000091"
+    And a leveled list 0x00000091 with entries "00000020"
+    And an NPC_ actor 0x00000020 with race 0x000000BB
+    And actor 0x00000020 is female
+    And actor 0x00000020 has inventory item 0x00000500 x1
+    And a placement 0x00000001 of base 0x00000010 as Npc
+    When the actor catalog is built
+    Then blueprint for reference 0x00000001 is a leveled template with candidates "00000091"
+    And blueprint for reference 0x00000001 resolves base 0x00000020
+    And blueprint for reference 0x00000001 is female
+    And blueprint for reference 0x00000001 has race 0x000000BB
+    And blueprint for reference 0x00000001 has inventory item 0x00000500 x1
+
   Scenario: Unresolved race, class, faction, and package links are diagnosed
     Given an NPC_ actor 0x00000010 with race 0x00000001
     And actor 0x00000010 class is 0x00000002

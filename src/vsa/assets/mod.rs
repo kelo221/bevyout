@@ -29,11 +29,10 @@ pub(crate) const NIF_CONVERTER_REVISION: &str =
 /// the two backends can coexist in one asset cache without false hits.
 pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
-/// Native actor assembly is deliberately unsupported in the first worker
-/// milestone. Its own cache identity prevents an existing Blender actor GLB
-/// from being mistaken for a native result.
+/// Native actor assembly cache identity. Keep this separate from static NIFs
+/// so skin-binding fixes rebuild actors without invalidating the world.
 pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str =
-    "nifty-fo3-native-actor-assembly-v3-blueprint-cache-havok-joints-v1-com-frame-v1";
+    "nifty-fo3-native-actor-assembly-v9-selective-head-anims-0dfd052";
 
 /// Actor assemblies use PyNifly independently of the general NIFTools path.
 /// Keep this revision separate so actor fixes do not invalidate static GLBs.
@@ -44,7 +43,7 @@ pub(crate) const ACTOR_CONVERTER_REVISION: &str =
 /// completed cell stale while each asset family retains its own cache key.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v29+pynifly-v28-actor-bindpose-v22-eyes-creature-primary-fallback";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v3-blueprint-cache-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v3-material-parity-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1+actor-assembly-v9-selective-head-anims-0dfd052";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,
@@ -62,6 +61,13 @@ pub(crate) struct ActorAssemblyDescriptor {
     pub(crate) body_parts: Vec<ActorBodyPartInput>,
     #[serde(default)]
     pub(crate) apparel: Vec<ActorApparelInput>,
+    /// Visual inputs whose independent NIF roots belong to the animated head.
+    #[serde(default)]
+    pub(crate) head_parts: Vec<String>,
+    /// Head visuals authored directly in the `HeadAnims` frame. FO3 hair
+    /// roots omit the compensating rotation carried by eyes and mouth parts.
+    #[serde(default)]
+    pub(crate) head_anim_parts: Vec<String>,
     /// Staged source NIFs for the race's left/right eye geometry.
     #[serde(default)]
     pub(crate) eye_geometry: Vec<String>,
@@ -124,6 +130,8 @@ pub(crate) fn canonical_actor_assembly(
         visual_inputs,
         body_parts: Vec::new(),
         apparel: Vec::new(),
+        head_parts: Vec::new(),
+        head_anim_parts: Vec::new(),
         eye_geometry: Vec::new(),
         eye_texture: None,
     })

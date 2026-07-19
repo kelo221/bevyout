@@ -603,6 +603,16 @@ pub(crate) fn stage_placements(
                                 })
                         })
                         .collect(),
+                    head_parts: actor
+                        .head_parts
+                        .iter()
+                        .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
+                        .collect(),
+                    head_anim_parts: actor
+                        .head_anim_parts
+                        .iter()
+                        .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
+                        .collect(),
                     eye_geometry: actor
                         .eye_geometry
                         .iter()
@@ -812,6 +822,8 @@ mod actor_cache_tests {
                 visual_inputs: vec!["characters/skeleton.nif".into()],
                 body_parts: Vec::new(),
                 apparel: Vec::new(),
+                head_parts: Vec::new(),
+                head_anim_parts: Vec::new(),
                 eye_geometry: Vec::new(),
                 eye_texture: None,
             }),

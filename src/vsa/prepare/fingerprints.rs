@@ -33,7 +33,7 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// lighting, or manifest-assembly logic changes in a way that should
 /// invalidate a previously prepared cell even though its plugin content,
 /// converter, and physics pipeline are unchanged.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-nav-graph-v1";
+pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v2-nested-actor-resolution";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

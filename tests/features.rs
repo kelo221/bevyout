@@ -4603,6 +4603,32 @@ async fn given_actor_template(
     }
 }
 
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) is female$")]
+async fn given_actor_is_female(world: &mut BevyoutWorld, hex: String) {
+    actor_catalog_actor_mut(world, parse_hex(&hex))
+        .traits
+        .female = true;
+}
+
+#[given(regex = r"^actor 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$")]
+async fn given_actor_inventory_item(
+    world: &mut BevyoutWorld,
+    actor_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    actor_catalog_actor_mut(world, parse_hex(&actor_hex))
+        .inventory
+        .push(manifest::PreparedInventoryEntry {
+            base_form_id: parse_hex(&item_hex),
+            count,
+            record_kind: "ARMO".into(),
+            editor_id: None,
+            display_name: None,
+            leveled: false,
+        });
+}
+
 #[given(regex = r"^actor 0x([0-9a-fA-F]+) class is 0x([0-9a-fA-F]+)$")]
 async fn given_actor_class(world: &mut BevyoutWorld, hex: String, class_hex: String) {
     let form_id = parse_hex(&hex);
@@ -4778,6 +4804,41 @@ async fn then_blueprint_leveled_template(
     let blueprint = actor_catalog_blueprint(world, &reference_hex);
     assert!(blueprint.is_leveled_template);
     assert_eq!(blueprint.template_candidates, parse_hex_list(&candidates));
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) resolves base 0x([0-9a-fA-F]+)$")]
+async fn then_blueprint_resolved_base(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+) {
+    assert_eq!(
+        actor_catalog_blueprint(world, &reference_hex).resolved_base_form_id,
+        Some(parse_hex(&base_hex))
+    );
+}
+
+#[then(regex = r"^blueprint for reference 0x([0-9a-fA-F]+) is female$")]
+async fn then_blueprint_is_female(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(actor_catalog_blueprint(world, &reference_hex).female);
+}
+
+#[then(
+    regex = r"^blueprint for reference 0x([0-9a-fA-F]+) has inventory item 0x([0-9a-fA-F]+) x(-?\d+)$"
+)]
+async fn then_blueprint_inventory_item(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    item_hex: String,
+    count: i32,
+) {
+    let item_form_id = parse_hex(&item_hex);
+    assert!(
+        actor_catalog_blueprint(world, &reference_hex)
+            .inventory
+            .iter()
+            .any(|entry| entry.base_form_id == item_form_id && entry.count == count)
+    );
 }
 
 #[then(

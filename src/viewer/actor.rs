@@ -535,27 +535,28 @@ fn reconcile_canonical_weapon_binding(
         };
         let state_matches = state.bound_item_form_id == bound_item
             && state.weapon_model == desired_model
-            && match (&resolution, &state.weapon) {
-                (BoundWeaponResolution::Unequipped, ActorWeaponRuntimeState::None)
-                | (BoundWeaponResolution::MissingModel(_), ActorWeaponRuntimeState::MissingModel)
-                | (
+            && matches!(
+                (&resolution, &state.weapon),
+                (
+                    BoundWeaponResolution::Unequipped,
+                    ActorWeaponRuntimeState::None
+                ) | (
+                    BoundWeaponResolution::MissingModel(_),
+                    ActorWeaponRuntimeState::MissingModel
+                ) | (
                     BoundWeaponResolution::UnsupportedItem(_),
                     ActorWeaponRuntimeState::UnsupportedItem,
-                ) => true,
-                (
+                ) | (
                     BoundWeaponResolution::Known(_),
                     ActorWeaponRuntimeState::PendingAttachment { .. },
-                )
-                | (
+                ) | (
                     BoundWeaponResolution::Known(_),
                     ActorWeaponRuntimeState::MissingAttachmentNode { .. },
-                ) => true,
-                (
+                ) | (
                     BoundWeaponResolution::Known(_),
-                    ActorWeaponRuntimeState::Attached { entity, .. },
-                ) => live_visuals.contains(*entity),
-                _ => false,
-            };
+                    ActorWeaponRuntimeState::Attached { .. }
+                )
+            );
         if state_matches {
             continue;
         }
@@ -975,5 +976,70 @@ mod tests {
         assert_eq!(state.bound_item_form_id, None);
         assert!(matches!(state.weapon, ActorWeaponRuntimeState::None));
         assert!(app.world().get_entity(visual).is_err());
+    }
+
+    #[test]
+    fn attached_weapon_is_not_reset_while_its_deferred_spawn_is_not_queryable() {
+        let holder = HolderId::Actor {
+            reference_form_id: 0x20,
+        };
+        let mut canonical = CanonicalItemLedger::default();
+        canonical
+            .ledger
+            .insert_holder(holder, ItemHolderState::default())
+            .unwrap();
+        let instance = canonical
+            .ledger
+            .insert_new_item(holder, 0x30, 1, ItemState::default())
+            .unwrap();
+        canonical.ledger.equip(holder, instance).unwrap();
+
+        let deferred_entity = Entity::from_raw_u32(900).unwrap();
+        let mut app = App::new();
+        app.insert_resource(canonical)
+            .insert_resource(PreparedItemCatalog::default())
+            .add_systems(Update, reconcile_canonical_weapon_binding);
+        let actor = app
+            .world_mut()
+            .spawn((
+                ActorRuntime {
+                    base_form_id: 0x10,
+                    reference_form_id: 0x20,
+                    kind: ActorKind::Humanoid,
+                    assembly: Some(ActorAssemblyBlueprint {
+                        reference_form_id: 0x20,
+                        equipped_weapon: Some(AssembledWeapon {
+                            item_form_id: 0x30,
+                            model_path: Some("assets/weapon.glb".into()),
+                            attachment_point: ActorAttachmentPoint::RightHand,
+                            model_available: true,
+                        }),
+                        ..Default::default()
+                    }),
+                },
+                ActorRuntimeState {
+                    holder,
+                    holder_seeded: true,
+                    proxy_entity: None,
+                    bound_item_form_id: Some(0x30),
+                    weapon_model: Some(ActorWeaponModel {
+                        item_form_id: 0x30,
+                        model_path: "assets/weapon.glb".into(),
+                    }),
+                    weapon: ActorWeaponRuntimeState::Attached {
+                        entity: deferred_entity,
+                        node: "Weapon".into(),
+                    },
+                    diagnostics: Vec::new(),
+                },
+            ))
+            .id();
+
+        app.update();
+
+        assert!(matches!(
+            app.world().get::<ActorRuntimeState>(actor).unwrap().weapon,
+            ActorWeaponRuntimeState::Attached { entity, .. } if entity == deferred_entity
+        ));
     }
 }

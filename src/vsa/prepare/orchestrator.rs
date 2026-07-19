@@ -1988,6 +1988,18 @@ fn build_actor_appearance_models(
         if let Some(assembly) = descriptor.as_mut() {
             assembly.body_parts = body_inputs;
             assembly.apparel = apparel_inputs;
+            assembly.head_parts = mesh_parts
+                .iter()
+                .filter(|part| {
+                    part.is_visible && part.attachment_point == ActorAttachmentPoint::Head
+                })
+                .map(|part| part.model_path.clone())
+                .collect();
+            assembly.head_anim_parts = mesh_parts
+                .iter()
+                .filter(|part| part.is_visible && part.role == ActorMeshRole::Hair)
+                .map(|part| part.model_path.clone())
+                .collect();
             assembly.eye_geometry = mesh_parts
                 .iter()
                 .filter(|part| part.role == ActorMeshRole::Eyes)
@@ -2199,32 +2211,36 @@ fn resolve_actor_gear_candidates(
     reference_form_id: u32,
     source_fingerprint: &str,
 ) -> Vec<ApparelCandidate> {
-    let mut candidates = actor_gear_model_candidates(parsed, root_form_id, &mut HashSet::new(), 0);
-    candidates.sort_by_key(|candidate| candidate.0);
-    candidates.dedup_by_key(|candidate| candidate.0);
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    let index = (appearance_selection_seed(source_fingerprint, reference_form_id, root_form_id)
-        as usize)
-        % candidates.len();
-    vec![candidates[index].1.clone()]
+    resolve_actor_gear_candidates_inner(
+        parsed,
+        root_form_id,
+        reference_form_id,
+        source_fingerprint,
+        &mut HashSet::new(),
+        0,
+    )
 }
 
-fn actor_gear_model_candidates(
+fn resolve_actor_gear_candidates_inner(
     parsed: &ParsedPlugin,
     form_id: u32,
-    visited: &mut HashSet<u32>,
+    reference_form_id: u32,
+    source_fingerprint: &str,
+    active: &mut HashSet<u32>,
     depth: usize,
-) -> Vec<(u32, ApparelCandidate)> {
-    if depth >= 32 || !visited.insert(form_id) {
+) -> Vec<ApparelCandidate> {
+    const LEVELED_USE_ALL: u8 = 0x04;
+
+    if depth >= 32 || !active.insert(form_id) {
         return Vec::new();
     }
     let Some(base) = parsed.bases.get(&form_id) else {
+        active.remove(&form_id);
         return Vec::new();
     };
     if crate::vsa::assets::actor_visual_gear_kind(&base.kind) {
         let Some(models) = base.apparel_models.as_ref() else {
+            active.remove(&form_id);
             return Vec::new();
         };
         let OpenMwItemStats::Apparel {
@@ -2233,36 +2249,59 @@ fn actor_gear_model_candidates(
             biped_slot_mask,
         } = &base.item_stats
         else {
+            active.remove(&form_id);
             return Vec::new();
         };
-        return vec![(
+        let candidate = ApparelCandidate {
             form_id,
-            ApparelCandidate {
-                form_id,
-                male_worn: models.male_worn.clone(),
-                female_worn: models.female_worn.clone(),
-                male_world: models.male_world.clone(),
-                female_world: models.female_world.clone(),
-                biped_slot_mask: biped_slot_mask.unwrap_or_default(),
-                base_armor_rating: armor_rating.unwrap_or_default(),
-                max_condition: *max_condition,
-                current_condition: None,
-                value: base.value.unwrap_or_default(),
-            },
-        )];
+            male_worn: models.male_worn.clone(),
+            female_worn: models.female_worn.clone(),
+            male_world: models.male_world.clone(),
+            female_world: models.female_world.clone(),
+            biped_slot_mask: biped_slot_mask.unwrap_or_default(),
+            base_armor_rating: armor_rating.unwrap_or_default(),
+            max_condition: *max_condition,
+            current_condition: None,
+            value: base.value.unwrap_or_default(),
+        };
+        active.remove(&form_id);
+        return vec![candidate];
     }
     let Some(leveled) = base.leveled.as_ref() else {
+        active.remove(&form_id);
         return Vec::new();
     };
+
+    let seed = appearance_selection_seed(source_fingerprint, reference_form_id, form_id);
+    if leveled.chance_none != 0 && seed % 100 < u64::from(leveled.chance_none) {
+        active.remove(&form_id);
+        return Vec::new();
+    }
+
+    let mut entries = leveled.entries.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.item_form_id, entry.level, entry.count));
+    let selected_entries = if leveled.flags & LEVELED_USE_ALL != 0 {
+        entries
+    } else if entries.is_empty() {
+        Vec::new()
+    } else {
+        vec![entries[(seed as usize) % entries.len()]]
+    };
+
     let mut candidates = Vec::new();
-    for entry in &leveled.entries {
-        candidates.extend(actor_gear_model_candidates(
+    for entry in selected_entries {
+        candidates.extend(resolve_actor_gear_candidates_inner(
             parsed,
             entry.item_form_id,
-            visited,
+            reference_form_id,
+            source_fingerprint,
+            active,
             depth + 1,
         ));
     }
+    active.remove(&form_id);
+    candidates.sort_by_key(|candidate| candidate.form_id);
+    candidates.dedup_by_key(|candidate| candidate.form_id);
     candidates
 }
 
@@ -2322,13 +2361,50 @@ fn appearance_selection_seed(
 #[cfg(test)]
 mod actor_assembly_policy_tests {
     use super::*;
-    use crate::vsa::openmw_esm4::RacePartEntry;
+    use crate::vsa::openmw_esm4::{
+        ApparelModelSet, BaseRecord, LeveledListData, LeveledListEntry, RacePartEntry,
+    };
 
     fn race_part(index: u32, model_path: Option<&str>) -> RacePartEntry {
         RacePartEntry {
             index,
             model_path: model_path.map(str::to_owned),
         }
+    }
+
+    fn apparel(form_id: u32) -> (u32, BaseRecord) {
+        let mut record = BaseRecord::default();
+        record.kind = "ARMO".into();
+        record.apparel_models = Some(ApparelModelSet {
+            male_worn: Some(format!("armor/m/{form_id:08x}.nif")),
+            female_worn: Some(format!("armor/f/{form_id:08x}.nif")),
+            ..ApparelModelSet::default()
+        });
+        record.item_stats = OpenMwItemStats::Apparel {
+            armor_rating: Some(10.0),
+            max_condition: Some(100),
+            biped_slot_mask: Some(4),
+        };
+        (form_id, record)
+    }
+
+    fn leveled(form_id: u32, flags: u8, entries: &[u32]) -> (u32, BaseRecord) {
+        let mut record = BaseRecord::default();
+        record.kind = "LVLI".into();
+        record.leveled = Some(LeveledListData {
+            flags,
+            entries: entries
+                .iter()
+                .copied()
+                .map(|item_form_id| LeveledListEntry {
+                    level: 1,
+                    item_form_id,
+                    count: 1,
+                })
+                .collect(),
+            ..LeveledListData::default()
+        });
+        (form_id, record)
     }
 
     #[test]
@@ -2377,5 +2453,63 @@ mod actor_assembly_policy_tests {
             reversed[select_creature_main_model(&reversed).unwrap()].1,
             "creatures/gutsy/misterhandy.nif"
         );
+    }
+
+    #[test]
+    fn actor_outfit_use_all_keeps_one_candidate_from_each_direct_entry() {
+        let parsed = ParsedPlugin {
+            bases: HashMap::from([
+                leveled(0x10, 0x04, &[0x20, 0x30]),
+                leveled(0x20, 0, &[0x100, 0x101]),
+                leveled(0x30, 0, &[0x200, 0x201]),
+                apparel(0x100),
+                apparel(0x101),
+                apparel(0x200),
+                apparel(0x201),
+            ]),
+            ..ParsedPlugin::default()
+        };
+
+        let selected = resolve_actor_gear_candidates(&parsed, 0x10, 1, "fp");
+        assert_eq!(selected.len(), 2);
+        assert!(
+            selected
+                .iter()
+                .any(|item| matches!(item.form_id, 0x100 | 0x101))
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|item| matches!(item.form_id, 0x200 | 0x201))
+        );
+    }
+
+    #[test]
+    fn actor_outfit_without_use_all_selects_only_one_candidate() {
+        let parsed = ParsedPlugin {
+            bases: HashMap::from([
+                leveled(0x10, 0, &[0x100, 0x200]),
+                apparel(0x100),
+                apparel(0x200),
+            ]),
+            ..ParsedPlugin::default()
+        };
+
+        assert_eq!(
+            resolve_actor_gear_candidates(&parsed, 0x10, 1, "fp").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn actor_outfit_honors_guaranteed_chance_none() {
+        let mut root = leveled(0x10, 0, &[0x100]).1;
+        root.leveled.as_mut().expect("leveled fixture").chance_none = 100;
+        let parsed = ParsedPlugin {
+            bases: HashMap::from([(0x10, root), apparel(0x100)]),
+            ..ParsedPlugin::default()
+        };
+
+        assert!(resolve_actor_gear_candidates(&parsed, 0x10, 1, "fp").is_empty());
     }
 }
