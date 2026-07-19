@@ -6777,6 +6777,11 @@ async fn given_prepared_merge(
     mesh_b_hex: String,
     triangle_b: u32,
 ) {
+    // Issue #154 widened `MergeInput` with the validated portal interval;
+    // this scenario only exercises `merge_link_descriptors`' mesh/triangle
+    // plumbing (`then_merge_link_descriptor` below checks `mesh_form_id`/
+    // `polygon_index`, not `midpoint`/`distance`), so a zeroed interval is
+    // fine here.
     world
         .nav_adapter_merge_inputs
         .push(landmass_graph::MergeInput {
@@ -6784,6 +6789,8 @@ async fn given_prepared_merge(
             triangle_a,
             mesh_b_form_id: parse_hex(&mesh_b_hex),
             triangle_b,
+            interval_a: [[0.0; 3]; 2],
+            interval_b: [[0.0; 3]; 2],
         });
 }
 
@@ -8257,4 +8264,96 @@ async fn then_fallback_identity_remains(
         .expect("actor fallback must be resolved");
     assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
     assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
+}
+
+// ---------------------------------------------------------------------
+// nav_portals.feature (issue #154, M4 wave 8) -- appended section, do not
+// interleave. Reuses `nav_graph.feature`'s "a nav graph mesh"/"has source
+// vertex"/"has triangle"/"the nav graph is built" steps (prepare-side
+// portal validation, `vsa::prepare::nav_graph::compute_mesh_merges`) and
+// `nav_backend.feature`/`nav_adapter.feature`'s "landmass mesh"/"a prepared
+// merge connects"/"the merge-link descriptors are resolved" steps (runtime
+// interval-to-link conversion, `viewer::nav::landmass_graph::
+// merge_link_descriptors`) rather than re-declaring either seam. New steps
+// below only cover what #154 actually added: matched-edge identity, a
+// portal's recorded vertical drop, and interval-aware merge inputs/cost.
+// ---------------------------------------------------------------------
+
+#[then(regex = r"^cross-mesh merge (\d+) has edge_a (\d+),(\d+) and edge_b (\d+),(\d+)$")]
+async fn then_nav_portals_merge_edge_identity(
+    world: &mut BevyoutWorld,
+    index: usize,
+    edge_a_start: u32,
+    edge_a_end: u32,
+    edge_b_start: u32,
+    edge_b_end: u32,
+) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let merge = graph.mesh_merges[index];
+    assert_eq!(merge.edge_a, [edge_a_start, edge_a_end]);
+    assert_eq!(merge.edge_b, [edge_b_start, edge_b_end]);
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) has a vertical drop of about ([\d.]+) metres$")]
+async fn then_nav_portals_merge_vertical_drop(world: &mut BevyoutWorld, index: usize, drop: f32) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    let merge = graph.mesh_merges[index];
+    let actual = (merge.interval_a[0][1] - merge.interval_b[0][1]).abs();
+    assert!(
+        (actual - drop).abs() < 0.01,
+        "expected a vertical drop near {drop} m, got {actual} m ({:?})",
+        merge
+    );
+}
+
+#[given(
+    regex = r"^a prepared merge connects mesh 0x([0-9a-fA-F]+) triangle (\d+) to mesh 0x([0-9a-fA-F]+) triangle (\d+) with interval ([-\d.,\s]+) to ([-\d.,\s]+) and interval ([-\d.,\s]+) to ([-\d.,\s]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_prepared_merge_with_interval(
+    world: &mut BevyoutWorld,
+    mesh_a_hex: String,
+    triangle_a: u32,
+    mesh_b_hex: String,
+    triangle_b: u32,
+    interval_a_start: String,
+    interval_a_end: String,
+    interval_b_start: String,
+    interval_b_end: String,
+) {
+    world
+        .nav_adapter_merge_inputs
+        .push(landmass_graph::MergeInput {
+            mesh_a_form_id: parse_hex(&mesh_a_hex),
+            triangle_a,
+            mesh_b_form_id: parse_hex(&mesh_b_hex),
+            triangle_b,
+            interval_a: [
+                nav_adapter_parse_f32_triple(&interval_a_start),
+                nav_adapter_parse_f32_triple(&interval_a_end),
+            ],
+            interval_b: [
+                nav_adapter_parse_f32_triple(&interval_b_start),
+                nav_adapter_parse_f32_triple(&interval_b_end),
+            ],
+        });
+}
+
+#[then(regex = r"^merge-link descriptor (\d+) has a cost of about ([\d.]+)$")]
+async fn then_nav_portals_merge_link_cost(world: &mut BevyoutWorld, index: usize, cost: f32) {
+    let links = world
+        .nav_adapter_merge_links
+        .as_ref()
+        .expect("merge links must be resolved first");
+    let actual = links[index].distance;
+    assert!(
+        (actual - cost).abs() < 0.01,
+        "expected cost near {cost}, got {actual}"
+    );
 }
