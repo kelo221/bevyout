@@ -10,8 +10,8 @@ use bevy::prelude::*;
 use crate::app_state::AppStatePlugin;
 
 use super::{
-    agent_bridge, animation, audio, bindings, console, console_ui, interaction, material_shading,
-    nav, pipboy, pipboy_reader, player, world, world_items,
+    actor, agent_bridge, animation, audio, bindings, console, console_ui, interaction,
+    material_shading, nav, pipboy, pipboy_reader, player, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -69,6 +69,7 @@ impl PluginGroup for ViewerPlugins {
             .add(audio::ViewerAudioPlugin)
             .add(material_shading::MaterialShadingPlugin)
             .add(interaction::InteractionPlugin)
+            .add(actor::ActorPlugin)
             .add(pipboy::PipBoyPlugin)
             .add(pipboy_reader::PipBoyReaderPlugin)
             .add(animation::PlacementAnimationPlugin)
@@ -101,6 +102,7 @@ mod tests {
 
         assert!(app.is_plugin_added::<player::PlayerPlugin>());
         assert!(app.is_plugin_added::<interaction::InteractionPlugin>());
+        assert!(app.is_plugin_added::<actor::ActorPlugin>());
         assert!(app.is_plugin_added::<world::WorldPlugin>());
         assert!(app.is_plugin_added::<nav::NavPlugin>());
         assert!(app.world().resource::<player::PhysicsDisabled>().0);

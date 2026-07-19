@@ -45,6 +45,7 @@ use crate::vsa::{
 #[derive(Resource, Clone, Debug, Deref, DerefMut)]
 pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
 
+mod actor;
 mod animation;
 mod audio;
 mod interaction;

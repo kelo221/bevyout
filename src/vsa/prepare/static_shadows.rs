@@ -867,9 +867,11 @@ mod tests {
             PreparedSemantic::Furniture,
             PreparedSemantic::Npc(PreparedActor {
                 base_template_form_id: None,
+                ..Default::default()
             }),
             PreparedSemantic::Creature(PreparedActor {
                 base_template_form_id: None,
+                ..Default::default()
             }),
             PreparedSemantic::Unsupported,
         ];

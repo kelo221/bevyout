@@ -444,27 +444,33 @@ pub(crate) fn spawn_cell_placements_chunk(
         .filter(|placement| placement.initially_enabled)
         .filter(|placement| !exclude_bake_static || !is_bake_static(placement))
     {
-        let Some(path) = placement.asset_path.as_ref() else {
+        // A missing mesh must not erase a living actor's stable reference.
+        // ActorPlugin will project its prepared identity and spawn the bounds
+        // proxy selected by the fallback policy. Other asset-less placements
+        // retain the pre-wave behavior and are skipped.
+        if placement.asset_path.is_none() && !super::actor::is_actor_semantic(&placement.semantic) {
             continue;
-        };
-        let handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
-        let entity = commands
-            .spawn((
-                WorldAssetRoot(handle.clone()),
-                interaction::PlacementRoot::new(placement.clone()),
-                Transform {
-                    translation: Vec3::from_array(placement.translation),
-                    rotation: Quat::from_xyzw(
-                        placement.rotation_xyzw[0],
-                        placement.rotation_xyzw[1],
-                        placement.rotation_xyzw[2],
-                        placement.rotation_xyzw[3],
-                    ),
-                    scale: Vec3::splat(placement.scale),
-                },
-                ChildOf(root),
-            ))
-            .id();
+        }
+        let mut entity_commands = commands.spawn((
+            interaction::PlacementRoot::new(placement.clone()),
+            Transform {
+                translation: Vec3::from_array(placement.translation),
+                rotation: Quat::from_xyzw(
+                    placement.rotation_xyzw[0],
+                    placement.rotation_xyzw[1],
+                    placement.rotation_xyzw[2],
+                    placement.rotation_xyzw[3],
+                ),
+                scale: Vec3::splat(super::actor::placement_root_scale(placement)),
+            },
+            ChildOf(root),
+        ));
+        if let Some(path) = placement.asset_path.as_ref() {
+            let handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+            entity_commands.insert(WorldAssetRoot(handle.clone()));
+            scene_handles.push(handle);
+        }
+        let entity = entity_commands.id();
         if let Some(references) = references.as_deref_mut() {
             references.register(
                 entity,
@@ -472,7 +478,6 @@ pub(crate) fn spawn_cell_placements_chunk(
                 placement.editor_id.as_deref(),
             );
         }
-        scene_handles.push(handle);
         placement_count += 1;
     }
 

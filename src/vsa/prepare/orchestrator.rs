@@ -1,5 +1,12 @@
 use super::*;
 use crate::vsa::catalog::{CellCatalog, build_cell_map};
+use bevyout_core::actor::{
+    ActorAppearanceAvailability, ActorAssemblyBlueprint as CoreActorAssemblyBlueprint,
+    ActorAttachmentPoint, ActorFallbackLevel, ActorFallbackReason, ActorKind, ActorMeshRole,
+    ActorWeaponCandidate, AssembledApparel, AssembledMeshPart, FaceGenAvailability,
+    canonicalize_mesh_parts, hair_visible, resolve_actor_fallback, resolve_actor_root_scale,
+    select_starting_weapon,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
@@ -618,15 +625,23 @@ fn prepare_cell(
         .filter(|reference| matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature))
         .cloned()
         .collect::<Vec<_>>();
+    let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
+    let mut actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
     let mut references = std::mem::take(&mut parsed.references);
     let actor_models = build_actor_appearance_models(
         &parsed,
         &actor_references,
+        &actor_catalog,
         &source_fingerprint,
         &data_root,
         &session.archives,
         &mut diagnostics,
     )?;
+    let actor_assemblies = actor_models
+        .iter()
+        .map(|(reference_form_id, appearance)| (*reference_form_id, appearance.blueprint.clone()))
+        .collect::<HashMap<_, _>>();
+    attach_actor_assemblies(&mut actor_catalog, &actor_assemblies);
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
     references.extend(catalog_references);
@@ -903,6 +918,18 @@ fn prepare_cell(
         &physics_assets,
         &source_fingerprint,
     );
+    apply_actor_weapon_assets(&mut placements, &item_catalog);
+    let finalized_actor_assemblies = placements
+        .iter()
+        .filter_map(|placement| match &placement.semantic {
+            PreparedSemantic::Npc(actor) | PreparedSemantic::Creature(actor) => actor
+                .assembly
+                .as_ref()
+                .map(|assembly| (placement.reference_form_id, assembly.clone())),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    attach_actor_assemblies(&mut actor_catalog, &finalized_actor_assemblies);
     let (catalog_path, catalog_hash) = write_item_catalog(&cache_dir, &item_catalog)?;
     output.push(format!(
         "item catalog: {} records, {} icons, {} world assets -> {}",
@@ -950,8 +977,6 @@ fn prepare_cell(
         message: recipe_summary.clone(),
     });
     output.push(recipe_summary);
-    let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
-    let actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
     // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
     // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
     // recipe catalogs it must not share one fingerprint-keyed file across
@@ -988,7 +1013,22 @@ fn prepare_cell(
     output.push(mutability_log);
     let failures = placements.iter().filter(|p| p.error.is_some()).count();
     enforce_strict_visual_completeness(args.strict, failures, &visual_issues)?;
-    if placements.iter().all(|p| p.asset_path.is_none()) && lights.is_empty() {
+    let has_runtime_actor_visual = placements.iter().any(|placement| {
+        matches!(
+            &placement.semantic,
+            PreparedSemantic::Npc(PreparedActor {
+                assembly: Some(_),
+                ..
+            }) | PreparedSemantic::Creature(PreparedActor {
+                assembly: Some(_),
+                ..
+            })
+        )
+    });
+    if placements.iter().all(|p| p.asset_path.is_none())
+        && lights.is_empty()
+        && !has_runtime_actor_visual
+    {
         bail!(
             "no renderable assets were found in {}",
             super::super::manifest::cell_label(&cell)
@@ -1211,6 +1251,10 @@ fn actor_record_input(
             .as_ref()
             .map(|creature| creature.animation_files.clone())
             .unwrap_or_default(),
+        creature_base_scale: actor
+            .creature
+            .as_ref()
+            .and_then(|creature| creature.base_scale),
     };
     let base_data = ActorBaseData {
         name: base.name.clone(),
@@ -1260,10 +1304,8 @@ fn actor_record_input(
 /// `parsed.bases` (task A/B's parser puts every decoded base record kind in
 /// the same map), `races`/`classes`/`factions`/`packages` come from their
 /// own maps for existence checks and faction rank titles, and
-/// `known_bases` is every decoded base FormID (used for hair/eyes/
-/// head-part existence checks -- see `ActorCatalogInputs::known_bases`'s
-/// doc comment for why those links are honestly diagnosed unresolved until
-/// `HAIR`/`EYES`/`HDPT` get their own decode task).
+/// `known_bases` is every decoded base FormID, including the appearance
+/// `HAIR`/`EYES`/`HDPT` records used for model/texture-link checks.
 fn build_actor_catalog_inputs(
     parsed: &ParsedPlugin,
     actor_references: &[ReferenceRecord],
@@ -1351,163 +1393,801 @@ fn build_actor_catalog_inputs(
 fn build_actor_appearance_models(
     parsed: &ParsedPlugin,
     references: &[ReferenceRecord],
+    catalog: &PreparedActorCatalog,
     source_fingerprint: &str,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     diagnostics: &mut Vec<Diagnostic>,
-) -> Result<HashMap<u32, ActorAssemblyDescriptor>> {
+) -> Result<HashMap<u32, PreparedActorAppearance>> {
     let mut result = HashMap::new();
     for reference in references {
-        let Some(base) = resolve_actor_appearance_base(
-            parsed,
-            reference.base_form_id,
-            reference.kind,
-            reference.form_id,
-            source_fingerprint,
-        ) else {
+        let catalog_blueprint = catalog.entries.iter().find_map(|entry| match entry {
+            ActorCatalogEntry::Prepared(blueprint)
+                if blueprint.reference_form_id == reference.form_id =>
+            {
+                Some(blueprint.as_ref())
+            }
+            _ => None,
+        });
+        let Some(actor) = catalog_blueprint else {
+            let kind = match reference.kind {
+                ReferenceKind::Npc => ActorKind::Humanoid,
+                ReferenceKind::Creature => ActorKind::Creature,
+                ReferenceKind::Object => continue,
+            };
+            let fallback = resolve_actor_fallback(
+                &ActorAppearanceAvailability {
+                    kind,
+                    base_form_id: reference.base_form_id,
+                    reference_form_id: reference.form_id,
+                    ..Default::default()
+                },
+                vec![ActorFallbackReason::MissingSkeleton {
+                    path: "<unresolved actor blueprint>".into(),
+                }],
+            );
+            result.insert(
+                reference.form_id,
+                PreparedActorAppearance {
+                    descriptor: None,
+                    inventory: Vec::new(),
+                    blueprint: CoreActorAssemblyBlueprint {
+                        source_base_form_id: reference.base_form_id,
+                        resolved_base_form_id: reference.base_form_id,
+                        reference_form_id: reference.form_id,
+                        kind,
+                        root_scale: resolve_actor_root_scale(kind, reference.scale, None, None),
+                        fallback,
+                        ..Default::default()
+                    },
+                },
+            );
             continue;
         };
-        let Some(actor) = base.actor.as_ref() else {
-            continue;
+
+        let kind = if actor.record_kind == "CREA" {
+            ActorKind::Creature
+        } else {
+            ActorKind::Humanoid
         };
-        let skeleton = base.model.clone();
-        let mut visual_inputs = Vec::new();
-        let mut body_parts = Vec::new();
-        let mut apparel_inputs = Vec::new();
-        match reference.kind {
-            ReferenceKind::Creature => {
-                // The CREA model list contains visual attachments relative to
-                // the skeleton path. The canonical descriptor below retains
-                // the skeleton as both the explicit reference and the first
-                // visual input because creature skeleton NIFs may render too.
-                if let Some(creature) = actor.creature.as_ref() {
-                    let model_directory = base.model.as_ref().and_then(|model| {
-                        model
-                            .rfind('\\')
-                            .or_else(|| model.rfind('/'))
-                            .map(|index| model[..index].to_owned())
-                    });
-                    visual_inputs.extend(creature.model_list.iter().map(|model| {
-                        if model.contains('\\') || model.contains('/') {
-                            model.clone()
-                        } else if let Some(directory) = model_directory.as_ref() {
-                            format!("{directory}\\{model}")
-                        } else {
-                            model.clone()
-                        }
-                    }));
+        let source_base_form_id = if actor.source_base_form_id == 0 {
+            actor.base_form_id
+        } else {
+            actor.source_base_form_id
+        };
+        let resolved_base_form_id = actor.resolved_base_form_id.unwrap_or(actor.base_form_id);
+        let mut reasons = Vec::new();
+        let mut availability_cache = HashMap::new();
+        let race = actor.race_form_id.and_then(|id| parsed.races.get(&id));
+        let race_scale = race.map(|race| {
+            if actor.female {
+                race.female_height
+            } else {
+                race.male_height
+            }
+        });
+        let root_scale = resolve_actor_root_scale(
+            kind,
+            actor.scale,
+            race_scale,
+            if kind == ActorKind::Creature {
+                actor.creature_base_scale
+            } else {
+                actor.height
+            },
+        );
+
+        let skeleton = if kind == ActorKind::Creature {
+            actor
+                .model_path
+                .as_deref()
+                .and_then(normalized_actor_reference_nif)
+        } else {
+            let mut candidates = actor
+                .model_path
+                .as_deref()
+                .and_then(normalized_actor_reference_nif)
+                .into_iter()
+                .chain(humanoid_skeleton_candidates(actor.female).map(str::to_owned));
+            let mut selected = None;
+            for path in candidates.by_ref() {
+                if actor_model_available(data_root, archives, &path, &mut availability_cache)? {
+                    selected = Some(path);
+                    break;
                 }
             }
-            ReferenceKind::Npc => {
-                let female = actor
-                    .base_config
-                    .is_some_and(|config| config.flags & 1 != 0);
-                // Body-part NIFs carry only partial armatures. Include the
-                // actor skeleton as the shared bone/physics source so the
-                // assembled GLB can drive every part and the ragdoll sidecar
-                // contains the authored articulated bodies.
-                if let Some(race) = actor.race_form_id.and_then(|id| parsed.races.get(&id)) {
-                    let body = if female {
-                        &race.body_parts_female
-                    } else {
-                        &race.body_parts_male
-                    };
-                    let head = if female {
-                        &race.head_parts_female
-                    } else {
-                        &race.head_parts_male
-                    };
-                    body_parts.extend(body.iter().filter_map(|part| {
-                        part.model_path.clone().map(|path| ActorBodyPartInput {
-                            path,
-                            index: part.index,
-                        })
-                    }));
-                    visual_inputs.extend(body_parts.iter().map(|part| part.path.clone()));
-                    visual_inputs.extend(head.iter().filter_map(|part| part.model_path.clone()));
+            selected
+        };
+        let skeleton_available = if let Some(path) = skeleton.as_deref() {
+            actor_model_available(data_root, archives, path, &mut availability_cache)?
+        } else {
+            false
+        };
+        if !skeleton_available {
+            reasons.push(ActorFallbackReason::MissingSkeleton {
+                path: skeleton.clone().unwrap_or_else(|| "<none>".into()),
+            });
+        }
+
+        let mut exact_parts = Vec::new();
+        let mut race_sex_parts = Vec::new();
+        let mut race_default_parts = Vec::new();
+        let mut exact_body_inputs = Vec::new();
+        let mut race_body_inputs = Vec::new();
+        let mut default_body_inputs = Vec::new();
+        let mut apparel_inputs = Vec::new();
+        let mut assembled_apparel = Vec::new();
+        let mut selected_eye_form_id = None;
+        let mut selected_eye_texture_path = None;
+        let mut exact_complete = skeleton_available;
+        let mut race_sex_complete = false;
+        let mut race_default_complete = false;
+
+        if kind == ActorKind::Humanoid {
+            let gear = actor
+                .inventory
+                .iter()
+                .flat_map(|entry| {
+                    resolve_actor_gear_candidates(
+                        parsed,
+                        entry.base_form_id,
+                        reference.form_id,
+                        source_fingerprint,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut available_apparel = HashSet::new();
+            for candidate in &gear {
+                let Some(model) = candidate.worn_model(actor.female) else {
+                    continue;
+                };
+                let normalized = normalize_asset_path(model);
+                if actor_model_available(data_root, archives, &normalized, &mut availability_cache)?
+                {
+                    available_apparel.insert(normalized);
+                } else {
+                    reasons.push(ActorFallbackReason::MissingEquipmentModel {
+                        item_form_id: candidate.form_id,
+                        path: normalized,
+                    });
                 }
-                // Worn apparel is appearance-only in this slice. Weapons are
-                // runtime attachments; baking inventory weapons into the actor
-                // body makes every carried weapon visible and corrupts ragdolls.
-                let gear = base
-                    .inventory
-                    .iter()
-                    .flat_map(|entry| {
-                        resolve_actor_gear_candidates(
-                            parsed,
-                            entry.item_form_id,
-                            reference.form_id,
-                            source_fingerprint,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let mut available_models = HashSet::new();
-                for candidate in &gear {
-                    let Some(model) = candidate.worn_model(female) else {
-                        continue;
-                    };
-                    if resolve_asset(data_root, archives, model)?.is_some() {
-                        available_models.insert(normalize_asset_path(model));
-                    }
-                }
-                let outfit = select_spawn_outfit(&gear, female, |model| {
-                    available_models.contains(&normalize_asset_path(model))
-                });
-                diagnostics.extend(outfit.diagnostics.into_iter().map(|message| Diagnostic {
-                    severity: "warning".into(),
-                    message: format!("actor {:08x}: {message}", reference.form_id),
-                }));
-                apparel_inputs.extend(outfit.worn.into_iter().map(|item| ActorApparelInput {
-                    path: item.model_path,
+            }
+            let outfit = select_spawn_outfit(&gear, actor.female, |model| {
+                available_apparel.contains(&normalize_asset_path(model))
+            });
+            diagnostics.extend(outfit.diagnostics.iter().map(|message| Diagnostic {
+                severity: "warning".into(),
+                message: format!("actor {:08x}: {message}", reference.form_id),
+            }));
+            for item in &outfit.worn {
+                let path = normalize_asset_path(&item.model_path);
+                apparel_inputs.push(ActorApparelInput {
+                    path: path.clone(),
                     form_id: item.form_id,
                     biped_slot_mask: item.biped_slot_mask,
-                }));
-                visual_inputs.extend(apparel_inputs.iter().map(|item| item.path.clone()));
+                });
+                assembled_apparel.push(AssembledApparel {
+                    item_form_id: item.form_id,
+                    model_path: Some(path),
+                    biped_slot_mask: item.biped_slot_mask,
+                    model_available: true,
+                });
             }
-            ReferenceKind::Object => continue,
+
+            if let Some(race) = race {
+                let (sex_body, sex_head, default_body, default_head) = if actor.female {
+                    (
+                        &race.body_parts_female,
+                        &race.head_parts_female,
+                        &race.body_parts_male,
+                        &race.head_parts_male,
+                    )
+                } else {
+                    (
+                        &race.body_parts_male,
+                        &race.head_parts_male,
+                        &race.body_parts_female,
+                        &race.head_parts_female,
+                    )
+                };
+
+                let mut sex_body_complete = required_race_body_parts_present(sex_body);
+                for part in sex_body {
+                    let Some(path) = part.model_path.as_deref().and_then(normalized_actor_nif)
+                    else {
+                        if race_body_part_requires_model(part.index) {
+                            sex_body_complete = false;
+                            reasons.push(ActorFallbackReason::MissingBodyPart {
+                                index: part.index,
+                                path: "<none>".into(),
+                            });
+                        }
+                        continue;
+                    };
+                    if actor_model_available(data_root, archives, &path, &mut availability_cache)? {
+                        race_body_inputs.push(ActorBodyPartInput {
+                            path: path.clone(),
+                            index: part.index,
+                        });
+                        race_sex_parts.push(AssembledMeshPart {
+                            name: format!("RaceBody{}", part.index),
+                            source_form_id: actor.race_form_id,
+                            model_path: path,
+                            attachment_point: ActorAttachmentPoint::Root,
+                            role: ActorMeshRole::Body(part.index),
+                            is_visible: true,
+                        });
+                    } else {
+                        if race_body_part_requires_model(part.index) {
+                            sex_body_complete = false;
+                            reasons.push(ActorFallbackReason::MissingBodyPart {
+                                index: part.index,
+                                path,
+                            });
+                        }
+                    }
+                }
+
+                let mut sex_head_complete = required_race_head_parts_present(sex_head);
+                for part in sex_head {
+                    let Some(path) = part.model_path.as_deref().and_then(normalized_actor_nif)
+                    else {
+                        if race_head_part_requires_model(part.index) {
+                            sex_head_complete = false;
+                            reasons.push(ActorFallbackReason::MissingHeadModel {
+                                path: "<none>".into(),
+                            });
+                        }
+                        continue;
+                    };
+                    if actor_model_available(data_root, archives, &path, &mut availability_cache)? {
+                        race_sex_parts.push(AssembledMeshPart {
+                            name: format!("RaceHead{}", part.index),
+                            source_form_id: actor.race_form_id,
+                            model_path: path,
+                            attachment_point: ActorAttachmentPoint::Head,
+                            role: race_head_mesh_role(part.index),
+                            is_visible: true,
+                        });
+                    } else {
+                        if race_head_part_requires_model(part.index) {
+                            sex_head_complete = false;
+                            reasons.push(ActorFallbackReason::MissingHeadModel { path });
+                        }
+                    }
+                }
+                race_sex_complete = skeleton_available && sex_body_complete && sex_head_complete;
+
+                let mut default_body_complete = required_race_body_parts_present(default_body);
+                for part in default_body {
+                    let Some(path) = part.model_path.as_deref().and_then(normalized_actor_nif)
+                    else {
+                        if race_body_part_requires_model(part.index) {
+                            default_body_complete = false;
+                        }
+                        continue;
+                    };
+                    if actor_model_available(data_root, archives, &path, &mut availability_cache)? {
+                        default_body_inputs.push(ActorBodyPartInput {
+                            path: path.clone(),
+                            index: part.index,
+                        });
+                        race_default_parts.push(AssembledMeshPart {
+                            name: format!("RaceDefaultBody{}", part.index),
+                            source_form_id: actor.race_form_id,
+                            model_path: path,
+                            attachment_point: ActorAttachmentPoint::Root,
+                            role: ActorMeshRole::Body(part.index),
+                            is_visible: true,
+                        });
+                    } else {
+                        if race_body_part_requires_model(part.index) {
+                            default_body_complete = false;
+                        }
+                    }
+                }
+                let mut default_head_complete = required_race_head_parts_present(default_head);
+                for part in default_head {
+                    let Some(path) = part.model_path.as_deref().and_then(normalized_actor_nif)
+                    else {
+                        if race_head_part_requires_model(part.index) {
+                            default_head_complete = false;
+                        }
+                        continue;
+                    };
+                    if actor_model_available(data_root, archives, &path, &mut availability_cache)? {
+                        race_default_parts.push(AssembledMeshPart {
+                            name: format!("RaceDefaultHead{}", part.index),
+                            source_form_id: actor.race_form_id,
+                            model_path: path,
+                            attachment_point: ActorAttachmentPoint::Head,
+                            role: race_head_mesh_role(part.index),
+                            is_visible: true,
+                        });
+                    } else {
+                        if race_head_part_requires_model(part.index) {
+                            default_head_complete = false;
+                        }
+                    }
+                }
+                race_default_complete =
+                    skeleton_available && default_body_complete && default_head_complete;
+                if !race_sex_complete && race_default_complete {
+                    reasons.push(ActorFallbackReason::IncompatibleSkin {
+                        path: format!(
+                            "race:{:08x}:{}",
+                            actor.race_form_id.unwrap_or_default(),
+                            if actor.female { "female" } else { "male" }
+                        ),
+                    });
+                }
+
+                exact_parts.extend(race_sex_parts.iter().cloned());
+                exact_body_inputs.extend(race_body_inputs.iter().cloned());
+                if !actor.head_part_form_ids.is_empty() {
+                    exact_parts.retain(|part| !matches!(part.role, ActorMeshRole::Head(_)));
+                    let mut explicit_head_complete = true;
+                    for (index, form_id) in actor.head_part_form_ids.iter().copied().enumerate() {
+                        let path = parsed
+                            .bases
+                            .get(&form_id)
+                            .and_then(|base| base.model.as_deref())
+                            .and_then(normalized_actor_nif);
+                        let Some(path) = path else {
+                            explicit_head_complete = false;
+                            reasons.push(ActorFallbackReason::MissingHeadModel {
+                                path: format!("form:{form_id:08x}"),
+                            });
+                            continue;
+                        };
+                        if actor_model_available(
+                            data_root,
+                            archives,
+                            &path,
+                            &mut availability_cache,
+                        )? {
+                            exact_parts.push(AssembledMeshPart {
+                                name: format!("HeadPart{index}"),
+                                source_form_id: Some(form_id),
+                                model_path: path,
+                                attachment_point: ActorAttachmentPoint::Head,
+                                role: ActorMeshRole::Head(index as u32),
+                                is_visible: true,
+                            });
+                        } else {
+                            explicit_head_complete = false;
+                            reasons.push(ActorFallbackReason::MissingHeadModel { path });
+                        }
+                    }
+                    exact_complete &= explicit_head_complete;
+                }
+
+                let hair_form_id = actor.hair_form_id.or(if actor.female {
+                    race.female_default_hair_form_id
+                } else {
+                    race.male_default_hair_form_id
+                });
+                if let Some(form_id) = hair_form_id {
+                    let path = parsed
+                        .bases
+                        .get(&form_id)
+                        .and_then(|base| base.model.as_deref())
+                        .and_then(normalized_actor_nif);
+                    match path {
+                        Some(path)
+                            if actor_model_available(
+                                data_root,
+                                archives,
+                                &path,
+                                &mut availability_cache,
+                            )? =>
+                        {
+                            let part = AssembledMeshPart {
+                                name: "Hair".into(),
+                                source_form_id: Some(form_id),
+                                model_path: path,
+                                attachment_point: ActorAttachmentPoint::Head,
+                                role: ActorMeshRole::Hair,
+                                is_visible: hair_visible(outfit.occupied_slots),
+                            };
+                            exact_parts.push(part.clone());
+                            race_sex_parts.push(part.clone());
+                            race_default_parts.push(part);
+                        }
+                        Some(path) => {
+                            reasons.push(ActorFallbackReason::MissingHairModel { path });
+                        }
+                        None => {
+                            reasons.push(ActorFallbackReason::MissingHairModel {
+                                path: format!("form:{form_id:08x}"),
+                            });
+                        }
+                    }
+                }
+
+                let eyes_form_id = actor
+                    .eyes_form_id
+                    .or_else(|| race.eye_form_ids.first().copied());
+                if let Some(form_id) = eyes_form_id {
+                    let path = parsed
+                        .bases
+                        .get(&form_id)
+                        .and_then(|base| base.icon.as_deref())
+                        .map(normalize_asset_path);
+                    match path {
+                        Some(path)
+                            if actor_model_available(
+                                data_root,
+                                archives,
+                                &path,
+                                &mut availability_cache,
+                            )? =>
+                        {
+                            // EYES selects the diffuse texture for the race's
+                            // index 6/7 eye geometry; it is not another NIF.
+                            selected_eye_form_id = Some(form_id);
+                            selected_eye_texture_path = Some(path);
+                        }
+                        Some(path) => {
+                            reasons.push(ActorFallbackReason::MissingEyeModel { path });
+                        }
+                        None => {
+                            reasons.push(ActorFallbackReason::MissingEyeModel {
+                                path: format!("form:{form_id:08x}"),
+                            });
+                        }
+                    }
+                }
+            } else {
+                exact_complete = false;
+                reasons.push(ActorFallbackReason::IncompatibleSkin {
+                    path: actor.race_form_id.map_or_else(
+                        || "race:<none>".into(),
+                        |form_id| format!("race:{form_id:08x}"),
+                    ),
+                });
+            }
+            exact_complete &= race_sex_complete;
+        } else if skeleton_available {
+            let model_directory = skeleton.as_ref().and_then(|model| {
+                model
+                    .rfind('\\')
+                    .or_else(|| model.rfind('/'))
+                    .map(|index| model[..index].to_owned())
+            });
+            let mut available_parts = Vec::new();
+            for (index, model) in actor.creature_model_list.iter().enumerate() {
+                let model = if model.contains('\\') || model.contains('/') {
+                    model.clone()
+                } else if let Some(directory) = model_directory.as_ref() {
+                    format!("{directory}\\{model}")
+                } else {
+                    model.clone()
+                };
+                let Some(path) = normalized_actor_nif(&model) else {
+                    continue;
+                };
+                if let Some(bytes) = resolve_asset(data_root, archives, &path)? {
+                    available_parts.push((
+                        index,
+                        path.clone(),
+                        bytes.len(),
+                        creature_path_is_main_model(&path),
+                    ));
+                    availability_cache.insert(path, true);
+                } else {
+                    availability_cache.insert(path.clone(), false);
+                    reasons.push(ActorFallbackReason::MissingCreatureModel { path });
+                }
+            }
+            let main_part = select_creature_main_model(&available_parts);
+            for (part_index, (source_index, path, _, _)) in available_parts.into_iter().enumerate()
+            {
+                let is_main_model = Some(part_index) == main_part;
+                exact_parts.push(AssembledMeshPart {
+                    name: if is_main_model {
+                        "CreatureRoot".into()
+                    } else {
+                        format!("CreaturePart{}", source_index + 1)
+                    },
+                    source_form_id: Some(resolved_base_form_id),
+                    model_path: path,
+                    attachment_point: ActorAttachmentPoint::Root,
+                    role: ActorMeshRole::CreaturePart(if is_main_model {
+                        0
+                    } else {
+                        (source_index + 1) as u32
+                    }),
+                    is_visible: true,
+                });
+            }
+            let main_model_available = main_part.is_some();
+            exact_complete &= main_model_available;
+            if !main_model_available {
+                reasons.push(ActorFallbackReason::MissingCreatureModel {
+                    path: "<main creature model>".into(),
+                });
+            }
         }
-        visual_inputs = visual_inputs
-            .into_iter()
-            .map(|model| normalize_asset_path(&model))
-            .filter(|model| {
-                model.to_ascii_lowercase().ends_with(".nif")
-                    && !is_editor_marker(model)
-                    && !is_non_rendering_effect(model)
-            })
-            .collect();
-        let skeleton = skeleton
-            .map(|model| normalize_asset_path(&model))
-            .filter(|model| {
-                model.to_ascii_lowercase().ends_with(".nif")
-                    && !is_editor_marker(model)
-                    && !is_non_rendering_effect(model)
-            });
-        if let Some(mut assembly) = canonical_actor_assembly(skeleton, visual_inputs) {
-            body_parts.retain(|part| part.path.to_ascii_lowercase().ends_with(".nif"));
-            for part in &mut body_parts {
-                part.path = normalize_asset_path(&part.path);
+
+        let mut weapon_candidates = Vec::new();
+        for entry in &actor.inventory {
+            let mut candidates =
+                actor_weapon_model_candidates(parsed, entry.base_form_id, &mut HashSet::new(), 0);
+            candidates.sort_by_key(|candidate| candidate.item_form_id);
+            candidates.dedup_by_key(|candidate| candidate.item_form_id);
+            if !candidates.is_empty() {
+                let index = (appearance_selection_seed(
+                    source_fingerprint,
+                    reference.form_id,
+                    entry.base_form_id,
+                ) as usize)
+                    % candidates.len();
+                let mut candidate = candidates.swap_remove(index);
+                candidate.available = if let Some(path) = candidate.model_path.as_deref() {
+                    actor_model_available(data_root, archives, path, &mut availability_cache)?
+                } else {
+                    false
+                };
+                weapon_candidates.push(candidate);
             }
-            body_parts.sort_by(|left, right| {
-                left.index
-                    .cmp(&right.index)
-                    .then_with(|| left.path.cmp(&right.path))
+        }
+        let equipped_weapon = select_starting_weapon(&weapon_candidates);
+        if let Some(weapon) = equipped_weapon.as_ref()
+            && !weapon.model_available
+        {
+            reasons.push(ActorFallbackReason::MissingEquipmentModel {
+                item_form_id: weapon.item_form_id,
+                path: weapon.model_path.clone().unwrap_or_else(|| "<none>".into()),
             });
-            body_parts.dedup();
-            for item in &mut apparel_inputs {
-                item.path = normalize_asset_path(&item.path);
+        }
+
+        let facegen = if actor.facegen_present {
+            FaceGenAvailability::Incompatible
+        } else {
+            FaceGenAvailability::NotAuthored
+        };
+        let availability = ActorAppearanceAvailability {
+            kind,
+            base_form_id: resolved_base_form_id,
+            reference_form_id: reference.form_id,
+            exact_available: exact_complete,
+            race_sex_available: race_sex_complete,
+            race_default_available: race_default_complete,
+            // This project does not yet ship a skeleton-compatible generic
+            // humanoid GLB. Do not mislabel the viewer's bounds proxy as tier
+            // four; callers may select GenericProjectBody only when they can
+            // provide an actual compatible generic assembly.
+            generic_available: false,
+            facegen,
+        };
+        let fallback = resolve_actor_fallback(&availability, reasons);
+        let (mut mesh_parts, body_inputs) = match fallback.level {
+            ActorFallbackLevel::AuthoredExact => (exact_parts, exact_body_inputs),
+            ActorFallbackLevel::RaceSexSpecific => (race_sex_parts, race_body_inputs),
+            ActorFallbackLevel::RaceDefault => (race_default_parts, default_body_inputs),
+            ActorFallbackLevel::GenericProjectBody | ActorFallbackLevel::ProxyMesh => {
+                (Vec::new(), Vec::new())
             }
-            apparel_inputs.sort_by(|left, right| {
-                left.path
-                    .cmp(&right.path)
-                    .then_with(|| left.form_id.cmp(&right.form_id))
-            });
-            apparel_inputs.dedup();
-            assembly.body_parts = body_parts;
+        };
+        canonicalize_mesh_parts(&mut mesh_parts);
+        let mut visual_inputs = mesh_parts
+            .iter()
+            .filter(|part| part.is_visible)
+            .map(|part| part.model_path.clone())
+            .collect::<Vec<_>>();
+        visual_inputs.extend(apparel_inputs.iter().map(|item| item.path.clone()));
+        let mut descriptor = if matches!(
+            fallback.level,
+            ActorFallbackLevel::GenericProjectBody | ActorFallbackLevel::ProxyMesh
+        ) {
+            None
+        } else {
+            canonical_actor_assembly(skeleton.clone(), visual_inputs)
+        };
+        if let Some(assembly) = descriptor.as_mut() {
+            assembly.body_parts = body_inputs;
             assembly.apparel = apparel_inputs;
-            result.insert(reference.form_id, assembly);
+            assembly.eye_geometry = mesh_parts
+                .iter()
+                .filter(|part| part.role == ActorMeshRole::Eyes)
+                .map(|part| part.model_path.clone())
+                .collect();
+            assembly.eye_texture = selected_eye_texture_path.as_ref().map(|path| {
+                if path.starts_with("textures/") {
+                    path.clone()
+                } else {
+                    format!("textures/{path}")
+                }
+            });
         }
+
+        let blueprint = CoreActorAssemblyBlueprint {
+            source_base_form_id,
+            resolved_base_form_id,
+            reference_form_id: reference.form_id,
+            kind,
+            female: actor.female,
+            race_form_id: actor.race_form_id,
+            root_scale,
+            skeleton_path: skeleton,
+            mesh_parts,
+            apparel: assembled_apparel,
+            eye_form_id: selected_eye_form_id,
+            eye_texture_path: selected_eye_texture_path,
+            equipped_weapon,
+            fallback,
+        };
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: format!(
+                "actor assembly ref={:08x} source={source_base_form_id:08x} resolved={resolved_base_form_id:08x} tier={} parts={} apparel={} weapon={} scale={root_scale:.6}",
+                reference.form_id,
+                blueprint.fallback.level.label(),
+                blueprint.mesh_parts.len(),
+                blueprint.apparel.len(),
+                blueprint
+                    .equipped_weapon
+                    .as_ref()
+                    .map_or_else(|| "none".into(), |weapon| format!("{:08x}", weapon.item_form_id)),
+            ),
+        });
+        diagnostics.extend(blueprint.fallback.reasons.iter().map(|reason| Diagnostic {
+            severity: "warning".into(),
+            message: format!(
+                "actor fallback ref={:08x} base={resolved_base_form_id:08x} tier={} reason={}",
+                reference.form_id,
+                blueprint.fallback.level.label(),
+                reason.code()
+            ),
+        }));
+        result.insert(
+            reference.form_id,
+            PreparedActorAppearance {
+                descriptor,
+                inventory: actor.inventory.clone(),
+                blueprint,
+            },
+        );
     }
     Ok(result)
+}
+
+fn normalized_actor_nif(path: &str) -> Option<String> {
+    let path = normalize_asset_path(path);
+    (path.to_ascii_lowercase().ends_with(".nif")
+        && !is_editor_marker(&path)
+        && !is_non_rendering_effect(&path))
+    .then_some(path)
+}
+
+fn normalized_actor_reference_nif(path: &str) -> Option<String> {
+    let path = normalize_asset_path(path);
+    (path.ends_with(".nif") && !is_editor_marker(&path)).then_some(path)
+}
+
+fn humanoid_skeleton_candidates(female: bool) -> impl Iterator<Item = &'static str> {
+    let sex_specific = if female {
+        "characters/_female/skeleton.nif"
+    } else {
+        "characters/_male/skeleton.nif"
+    };
+    [
+        sex_specific,
+        "characters/_male/skeleton.nif",
+        "characters/skeleton.nif",
+    ]
+    .into_iter()
+}
+
+fn race_body_part_requires_model(index: u32) -> bool {
+    index <= 2
+}
+
+fn race_head_part_requires_model(index: u32) -> bool {
+    index == 0
+}
+
+fn race_head_mesh_role(index: u32) -> ActorMeshRole {
+    if matches!(index, 6 | 7) {
+        ActorMeshRole::Eyes
+    } else {
+        ActorMeshRole::Head(index)
+    }
+}
+
+fn required_race_body_parts_present(parts: &[crate::vsa::openmw_esm4::RacePartEntry]) -> bool {
+    (0..=2).all(|required| parts.iter().any(|part| part.index == required))
+}
+
+fn required_race_head_parts_present(parts: &[crate::vsa::openmw_esm4::RacePartEntry]) -> bool {
+    parts.iter().any(|part| part.index == 0)
+}
+
+fn creature_path_is_main_model(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let mut components = normalized.rsplit('/');
+    let Some(file) = components.next() else {
+        return false;
+    };
+    let Some(parent) = components.next() else {
+        return false;
+    };
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+    stem.eq_ignore_ascii_case(parent)
+}
+
+fn select_creature_main_model(parts: &[(usize, String, usize, bool)]) -> Option<usize> {
+    parts
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            left.3
+                .cmp(&right.3)
+                .then_with(|| left.2.cmp(&right.2))
+                // Prefer the lexicographically lowest normalized path when
+                // two candidates have the same authored-name and size rank.
+                .then_with(|| right.1.cmp(&left.1))
+        })
+        .map(|(index, _)| index)
+}
+
+fn actor_model_available(
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    path: &str,
+    cache: &mut HashMap<String, bool>,
+) -> Result<bool> {
+    let path = normalize_asset_path(path);
+    if let Some(available) = cache.get(&path) {
+        return Ok(*available);
+    }
+    let available = resolve_asset(data_root, archives, &path)?.is_some();
+    cache.insert(path, available);
+    Ok(available)
+}
+
+fn apply_actor_weapon_assets(
+    placements: &mut [PreparedPlacement],
+    item_catalog: &PreparedItemCatalog,
+) {
+    let world_assets = item_catalog
+        .items
+        .iter()
+        .filter_map(|item| {
+            item.world_asset_path
+                .as_ref()
+                .map(|path| (item.base_form_id, path.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    for placement in placements {
+        let assembly = match &mut placement.semantic {
+            PreparedSemantic::Npc(actor) | PreparedSemantic::Creature(actor) => {
+                actor.assembly.as_mut()
+            }
+            _ => None,
+        };
+        let Some(assembly) = assembly else {
+            continue;
+        };
+        let Some(weapon) = assembly.equipped_weapon.as_mut() else {
+            continue;
+        };
+        let source_path = weapon.model_path.clone().unwrap_or_else(|| "<none>".into());
+        weapon.model_path = world_assets.get(&weapon.item_form_id).cloned();
+        weapon.model_available = weapon.model_path.is_some();
+        if !weapon.model_available {
+            assembly
+                .fallback
+                .reasons
+                .push(ActorFallbackReason::MissingEquipmentModel {
+                    item_form_id: weapon.item_form_id,
+                    path: source_path,
+                });
+            assembly.fallback.reasons.sort();
+            assembly.fallback.reasons.dedup();
+        }
+    }
 }
 
 /// Resolves one authored inventory entry to a deterministic visual item. NPC
@@ -1586,96 +2266,44 @@ fn actor_gear_model_candidates(
     candidates
 }
 
-fn actor_kind_matches(base: &BaseRecord, kind: ReferenceKind) -> bool {
-    base.actor.as_ref().is_some_and(|actor| {
-        matches!(
-            (kind, actor.creature.is_some()),
-            (ReferenceKind::Creature, true) | (ReferenceKind::Npc, false)
-        )
-    })
-}
-
-/// Flattens an LVLN/LVLC target into concrete actors while retaining stable
-/// FormID ordering. Template shells such as `LvlRaiderGun` point at one of
-/// these lists through `TPLT`; their own inventory is intentionally empty.
-fn actor_candidate_ids(
+fn actor_weapon_model_candidates(
     parsed: &ParsedPlugin,
-    target_form_id: u32,
-    kind: ReferenceKind,
+    form_id: u32,
     visited: &mut HashSet<u32>,
     depth: usize,
-) -> Vec<u32> {
-    if depth >= 32 || !visited.insert(target_form_id) {
+) -> Vec<ActorWeaponCandidate> {
+    if depth >= 32 || !visited.insert(form_id) {
         return Vec::new();
     }
-    let Some(base) = parsed.bases.get(&target_form_id) else {
+    let Some(base) = parsed.bases.get(&form_id) else {
         return Vec::new();
     };
-    if actor_kind_matches(base, kind) {
-        return vec![target_form_id];
+    if base.kind == "WEAP" {
+        let damage = match &base.item_stats {
+            OpenMwItemStats::Weapon { damage, .. } => damage.unwrap_or_default(),
+            _ => 0,
+        };
+        return vec![ActorWeaponCandidate {
+            item_form_id: form_id,
+            model_path: base.model.as_deref().and_then(normalized_actor_nif),
+            damage,
+            value: base.value.unwrap_or_default(),
+            available: false,
+        }];
     }
     let Some(leveled) = base.leveled.as_ref() else {
         return Vec::new();
     };
     let mut candidates = Vec::new();
     for entry in &leveled.entries {
-        candidates.extend(actor_candidate_ids(
+        candidates.extend(actor_weapon_model_candidates(
             parsed,
             entry.item_form_id,
-            kind,
             visited,
             depth + 1,
         ));
     }
-    candidates.sort_unstable();
-    candidates.dedup();
     candidates
-}
-
-/// Resolves both direct leveled placements and NPC/CREA template shells to a
-/// concrete actor for appearance work. The actor catalog keeps the source
-/// FormID for gameplay bookkeeping; this helper only chooses the deterministic
-/// visual/inventory source used by the assembled GLB.
-fn resolve_actor_appearance_base<'a>(
-    parsed: &'a ParsedPlugin,
-    start_form_id: u32,
-    kind: ReferenceKind,
-    reference_form_id: u32,
-    source_fingerprint: &str,
-) -> Option<&'a BaseRecord> {
-    let mut current_form_id = start_form_id;
-    let mut visited = HashSet::new();
-    for _ in 0..32 {
-        if !visited.insert(current_form_id) {
-            return None;
-        }
-        let base = parsed.bases.get(&current_form_id)?;
-        if !actor_kind_matches(base, kind) {
-            let candidates =
-                actor_candidate_ids(parsed, current_form_id, kind, &mut HashSet::new(), 0);
-            let selected = candidates.get(
-                (appearance_selection_seed(source_fingerprint, reference_form_id, current_form_id)
-                    as usize)
-                    % candidates.len().max(1),
-            )?;
-            current_form_id = *selected;
-            continue;
-        }
-        if let Some(template_form_id) = base.base_template_form_id {
-            let candidates =
-                actor_candidate_ids(parsed, template_form_id, kind, &mut HashSet::new(), 0);
-            if let Some(selected) = candidates.get(
-                (appearance_selection_seed(source_fingerprint, reference_form_id, template_form_id)
-                    as usize)
-                    % candidates.len().max(1),
-            ) {
-                current_form_id = *selected;
-                continue;
-            }
-        }
-        return Some(base);
-    }
-    None
 }
 
 fn appearance_selection_seed(
@@ -1689,4 +2317,65 @@ fn appearance_selection_seed(
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod actor_assembly_policy_tests {
+    use super::*;
+    use crate::vsa::openmw_esm4::RacePartEntry;
+
+    fn race_part(index: u32, model_path: Option<&str>) -> RacePartEntry {
+        RacePartEntry {
+            index,
+            model_path: model_path.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn upper_body_texture_slot_is_not_required_geometry() {
+        let parts = [
+            race_part(0, Some("upper.nif")),
+            race_part(1, Some("left.nif")),
+            race_part(2, Some("right.nif")),
+            race_part(3, None),
+        ];
+        assert!(required_race_body_parts_present(&parts));
+        assert!(!race_body_part_requires_model(3));
+    }
+
+    #[test]
+    fn base_head_is_required_but_supplemental_head_slots_are_optional() {
+        let parts = [race_part(0, Some("head.nif")), race_part(3, None)];
+        assert!(required_race_head_parts_present(&parts));
+        assert!(race_head_part_requires_model(0));
+        assert!(!race_head_part_requires_model(3));
+        assert_eq!(race_head_mesh_role(6), ActorMeshRole::Eyes);
+        assert_eq!(race_head_mesh_role(7), ActorMeshRole::Eyes);
+    }
+
+    #[test]
+    fn creature_main_model_matches_its_resolved_directory() {
+        assert!(creature_path_is_main_model(
+            "creatures/protectron/protectron.nif"
+        ));
+        assert!(!creature_path_is_main_model(
+            "creatures/protectron/blowawaydome.nif"
+        ));
+    }
+
+    #[test]
+    fn creature_primary_falls_back_to_largest_visual_without_using_source_order() {
+        let parts = vec![
+            (0, "creatures/gutsy/buzzsaw.nif".into(), 200, false),
+            (1, "creatures/gutsy/misterhandy.nif".into(), 2_000, false),
+            (2, "creatures/gutsy/flamer.nif".into(), 300, false),
+        ];
+        assert_eq!(select_creature_main_model(&parts), Some(1));
+
+        let reversed = parts.into_iter().rev().collect::<Vec<_>>();
+        assert_eq!(
+            reversed[select_creature_main_model(&reversed).unwrap()].1,
+            "creatures/gutsy/misterhandy.nif"
+        );
+    }
 }

@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use bevyout_core::actor::ActorAssemblyBlueprint;
 use serde::{Deserialize, Serialize};
 
 use super::super::manifest::PreparedInventoryEntry;
@@ -36,7 +37,7 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v2-appearance-seeded-levels";
+pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v3-assembly-blueprint";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -164,6 +165,7 @@ pub(crate) struct ActorModelAnimation {
     pub(crate) model_path: Option<String>,
     pub(crate) creature_model_list: Vec<String>,
     pub(crate) creature_animation_files: Vec<String>,
+    pub(crate) creature_base_scale: Option<f32>,
 }
 
 /// `USE_BASE_DATA` group: display name plus the raw `ACBS.flags` (essential/
@@ -283,10 +285,10 @@ pub(crate) struct ActorCatalogInputs {
     pub(crate) factions: HashMap<u32, FactionInput>,
     pub(crate) packages: HashSet<u32>,
     /// FormIDs of every decoded base record, used to check hair/eyes/
-    /// head-part links. `HAIR`/`EYES`/`HDPT` are not yet decoded record
-    /// kinds (see `openmw_esm4::records::is_supported_base`), so those
-    /// links are honestly diagnosed unresolved today; this set is forward
-    /// compatible with a future task that adds them.
+    /// head-part links. `HAIR`/`HDPT` are model-bearing and `EYES` is
+    /// texture-bearing; all three remain appearance base records so their
+    /// references resolve through the same load-order map as every other
+    /// actor input.
     pub(crate) known_bases: HashSet<u32>,
     pub(crate) placements: Vec<ActorPlacementInput>,
 }
@@ -330,7 +332,11 @@ pub(crate) struct ActorBlueprint {
     pub(crate) hair_form_id: Option<u32>,
     pub(crate) eyes_form_id: Option<u32>,
     pub(crate) head_part_form_ids: Vec<u32>,
+    #[serde(default)]
+    pub(crate) facegen_present: bool,
     pub(crate) voice_form_id: Option<u32>,
+    #[serde(default)]
+    pub(crate) creature_base_scale: Option<f32>,
     pub(crate) level_or_mult: i16,
     pub(crate) calc_min_level: u16,
     pub(crate) calc_max_level: u16,
@@ -372,6 +378,11 @@ pub(crate) struct ActorBlueprint {
     pub(crate) rotation_xyzw: [f32; 4],
     pub(crate) scale: f32,
     pub(crate) initially_enabled: bool,
+    /// Canonical preparation/runtime appearance decision. Filled after asset
+    /// availability is resolved; serde-default keeps old artifacts readable
+    /// long enough for the catalog revision gate to reject them explicitly.
+    #[serde(default)]
+    pub(crate) assembly: Option<ActorAssemblyBlueprint>,
     /// Stable diagnostic strings: template cycles, missing/unresolved
     /// template targets, unresolved race/class/faction/package/hair/eyes/
     /// head-part links, and unsupported template flag bits. Sorted and
@@ -621,7 +632,7 @@ pub(crate) fn build_actor_catalog(
     for placement in &inputs.placements {
         let entry = match inputs.actors.get(&placement.base_form_id) {
             Some(actor) if actor.kind == placement.kind => {
-                let blueprint = build_blueprint(actor, placement, inputs);
+                let blueprint = build_blueprint(actor, placement, inputs, source_fingerprint);
                 counters.prepared += 1;
                 if blueprint.inherited {
                     counters.inherited += 1;
@@ -671,7 +682,8 @@ pub(crate) fn build_actor_catalog(
                     );
                     let selected = candidates[(selection_seed as usize) % candidates.len()];
                     let actor = &inputs.actors[&selected];
-                    let mut blueprint = build_blueprint(actor, placement, inputs);
+                    let mut blueprint =
+                        build_blueprint(actor, placement, inputs, source_fingerprint);
                     blueprint.base_form_id = selected;
                     blueprint.source_base_form_id = placement.base_form_id;
                     blueprint.resolved_base_form_id = Some(selected);
@@ -725,6 +737,7 @@ fn build_blueprint(
     actor: &ActorRecordInput,
     placement: &ActorPlacementInput,
     inputs: &ActorCatalogInputs,
+    source_fingerprint: &str,
 ) -> ActorBlueprint {
     let mut diagnostics = Vec::new();
     if actor.template_usage.unsupported_bits != 0 {
@@ -734,7 +747,7 @@ fn build_blueprint(
         ));
     }
 
-    let chain = if actor.template_usage.any() {
+    let mut chain = if actor.template_usage.any() {
         build_chain(actor.form_id, &inputs.actors, &inputs.leveled)
     } else {
         TemplateChain::trivial(actor.form_id)
@@ -744,6 +757,53 @@ fn build_blueprint(
         ChainEnd::Leveled { candidates, .. } => (true, candidates.clone()),
         _ => (false, Vec::new()),
     };
+
+    // A template shell that delegates a field group to LVLN/LVLC must use
+    // the same concrete candidate for every delegated group. Extending the
+    // chain once here makes the catalog the sole identity resolver consumed
+    // by appearance preparation, rather than letting visuals independently
+    // roll a second candidate.
+    let mut resolved_base_form_id = None;
+    let mut selection_seed = None;
+    if let ChainEnd::Leveled {
+        target_form_id,
+        candidates,
+    } = chain.end.clone()
+    {
+        let mut concrete = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                inputs
+                    .actors
+                    .get(candidate)
+                    .is_some_and(|candidate_actor| candidate_actor.kind == actor.kind)
+            })
+            .collect::<Vec<_>>();
+        concrete.sort_unstable();
+        concrete.dedup();
+        if !concrete.is_empty() {
+            let seed = stable_selection_seed(
+                source_fingerprint,
+                placement.reference_form_id,
+                target_form_id,
+            );
+            let selected = concrete[(seed as usize) % concrete.len()];
+            let selected_chain = build_chain(selected, &inputs.actors, &inputs.leveled);
+            for node in selected_chain.nodes {
+                if !chain.nodes.contains(&node) {
+                    chain.nodes.push(node);
+                }
+            }
+            chain.end = selected_chain.end;
+            resolved_base_form_id = Some(selected);
+            selection_seed = Some(seed);
+            diagnostics.push(format!(
+                "leveled template {:08x} selected candidate {selected:08x} with seed {seed:016x}",
+                target_form_id
+            ));
+        }
+    }
 
     let mut inherited = false;
     macro_rules! resolve_group {
@@ -854,8 +914,8 @@ fn build_blueprint(
     ActorBlueprint {
         base_form_id: actor.form_id,
         source_base_form_id: placement.base_form_id,
-        resolved_base_form_id: None,
-        selection_seed: None,
+        resolved_base_form_id,
+        selection_seed,
         reference_form_id: placement.reference_form_id,
         record_kind: actor.kind.as_record_signature().to_string(),
         editor_id: actor.editor_id.clone(),
@@ -870,7 +930,9 @@ fn build_blueprint(
         hair_form_id: traits.hair_form_id,
         eyes_form_id: traits.eyes_form_id,
         head_part_form_ids: traits.head_part_form_ids.clone(),
+        facegen_present: traits.facegen_present,
         voice_form_id: traits.voice_form_id,
+        creature_base_scale: model_animation.creature_base_scale,
         level_or_mult: stats.level_or_mult,
         calc_min_level: stats.calc_min_level,
         calc_max_level: stats.calc_max_level,
@@ -904,7 +966,20 @@ fn build_blueprint(
         rotation_xyzw: placement.rotation_xyzw,
         scale: placement.scale,
         initially_enabled: placement.initially_enabled,
+        assembly: None,
         diagnostics,
+    }
+}
+
+pub(crate) fn attach_actor_assemblies(
+    catalog: &mut PreparedActorCatalog,
+    assemblies: &HashMap<u32, ActorAssemblyBlueprint>,
+) {
+    for entry in &mut catalog.entries {
+        let ActorCatalogEntry::Prepared(blueprint) = entry else {
+            continue;
+        };
+        blueprint.assembly = assemblies.get(&blueprint.reference_form_id).cloned();
     }
 }
 
@@ -988,7 +1063,7 @@ mod tests {
     fn revision_is_pinned() {
         assert_eq!(
             ACTOR_CATALOG_REVISION,
-            "openmw-actors-v2-appearance-seeded-levels"
+            "openmw-actors-v3-assembly-blueprint"
         );
     }
 
@@ -1123,6 +1198,45 @@ mod tests {
         };
         assert!(blueprint.is_leveled_template);
         assert_eq!(blueprint.template_candidates, vec![0x10, 0x20, 0x30]);
+    }
+
+    #[test]
+    fn leveled_template_resolves_flagged_groups_from_one_seeded_actor() {
+        let mut shell = npc(0x10);
+        shell.base_template_form_id = Some(0x99);
+        shell.template_usage.traits = true;
+        shell.template_usage.model_animation = true;
+        shell.traits.race_form_id = Some(0xAA);
+        shell.model_animation.model_path = Some("characters/shell.nif".into());
+
+        let mut concrete = npc(0x20);
+        concrete.traits.race_form_id = Some(0xBB);
+        concrete.model_animation.model_path = Some("characters/concrete.nif".into());
+
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x10, shell), (0x20, concrete)]),
+            leveled: HashMap::from([(
+                0x99,
+                LeveledInput {
+                    form_id: 0x99,
+                    entries: vec![0x20],
+                },
+            )]),
+            placements: vec![placement(1, 0x10, ActorRecordKind::Npc)],
+            races: HashSet::from([0xBB]),
+            ..ActorCatalogInputs::default()
+        };
+
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected a prepared blueprint");
+        };
+        assert_eq!(blueprint.resolved_base_form_id, Some(0x20));
+        assert_eq!(blueprint.race_form_id, Some(0xBB));
+        assert_eq!(
+            blueprint.model_path.as_deref(),
+            Some("characters/concrete.nif")
+        );
     }
 
     #[test]

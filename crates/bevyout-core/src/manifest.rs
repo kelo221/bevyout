@@ -640,9 +640,14 @@ pub struct PreparedPickup {
     pub weight: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PreparedActor {
     pub base_template_form_id: Option<u32>,
+    /// The sole prepared identity/presentation decision for this placement.
+    /// `None` is retained only so pre-wave manifests can be decoded and
+    /// rejected by the application revision gate with a useful message.
+    #[serde(default)]
+    pub assembly: Option<crate::actor::ActorAssemblyBlueprint>,
 }
 
 impl PreparedSemantic {

@@ -184,9 +184,11 @@ fn non_static_semantics_are_excluded_from_the_bake() {
         PreparedSemantic::Furniture,
         PreparedSemantic::Npc(super::super::manifest::PreparedActor {
             base_template_form_id: None,
+            ..Default::default()
         }),
         PreparedSemantic::Creature(super::super::manifest::PreparedActor {
             base_template_form_id: None,
+            ..Default::default()
         }),
         PreparedSemantic::Unsupported,
     ] {

@@ -4160,7 +4160,7 @@ mod tests {
 
     fn minimal_manifest(cell_form_id: u32) -> PreparedSceneManifest {
         PreparedSceneManifest {
-            schema_version: 16,
+            schema_version: 17,
             prepare_revision: None,
             converter_revision: None,
             physics_schema_version: None,
