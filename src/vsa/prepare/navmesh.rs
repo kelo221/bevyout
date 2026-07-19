@@ -24,7 +24,7 @@ pub(crate) fn stage_navmeshes(
     let graph_inputs = nav_graph_inputs(cell_form_id, navmeshes, navigation);
     let graph = build_nav_graph(&graph_inputs);
     let summary = format!(
-        "nav graph: meshes {}, polygons {}, vertices {}, doors {}, external {}, merges {} (rejected {}), diagnostics warn {} error {}",
+        "nav graph: meshes {}, polygons {}, vertices {}, doors {}, external {}, merges {} (rejected {}, authored {} geometric {}, candidates authored {} geometric {}), diagnostics warn {} error {}, nvex correlation (outside-cell {} inside-cell {}), nvci correlation (subrecords {} entries {} door-matches {} navmesh-matches {})",
         graph.counters.meshes,
         graph.counters.polygons,
         graph.counters.vertices,
@@ -32,8 +32,18 @@ pub(crate) fn stage_navmeshes(
         graph.counters.external_connections,
         graph.counters.mesh_merges,
         graph.counters.mesh_merges_rejected,
+        graph.counters.mesh_merges_authored,
+        graph.counters.mesh_merges_geometric,
+        graph.counters.merge_candidates_authored,
+        graph.counters.merge_candidates_geometric,
         graph.counters.diagnostics_warning,
-        graph.counters.diagnostics_error
+        graph.counters.diagnostics_error,
+        graph.counters.nvex_targets_outside_cell,
+        graph.counters.nvex_targets_inside_cell,
+        graph.counters.nvci_subrecords,
+        graph.counters.nvci_entries,
+        graph.counters.nvci_door_matches,
+        graph.counters.nvci_navmesh_matches,
     );
 
     if navmeshes.is_empty() {
@@ -167,6 +177,27 @@ fn nav_graph_inputs(
                         location_form_id: entry.location_form_id,
                         grid_x: entry.grid_x,
                         grid_y: entry.grid_y,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Issue #156 feature 3: correlation-only, boundary-converted 1:1
+        // from `openmw_esm4::navmesh::NaviCorrelation`/`NaviCorrelationEntry`.
+        navi_correlations: navigation
+            .map(|navi| {
+                navi.correlations
+                    .iter()
+                    .map(|correlation| NavGraphNaviCorrelationInput {
+                        leading_navmesh_form_id: correlation.leading_navmesh_form_id,
+                        entries: correlation
+                            .entries
+                            .iter()
+                            .map(|entry| NavGraphNaviCorrelationEntryInput {
+                                navmesh_form_id: entry.navmesh_form_id,
+                                other_navmesh_form_id: entry.other_navmesh_form_id,
+                                door_form_id: entry.door_form_id,
+                            })
+                            .collect(),
                     })
                     .collect()
             })

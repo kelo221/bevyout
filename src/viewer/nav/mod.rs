@@ -77,6 +77,7 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
                     index: polygon.index,
                     vertex_indices: polygon.vertex_indices,
                     is_water: polygon.is_water,
+                    is_preferred_pathing: polygon.is_preferred_pathing,
                 })
                 .collect(),
             doors: mesh

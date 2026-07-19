@@ -62,6 +62,11 @@ pub(crate) struct PolygonInput {
     pub(crate) index: u32,
     pub(crate) vertex_indices: [u32; 3],
     pub(crate) is_water: bool,
+    /// `NVTR`'s `PREFERRED_PATHING` flag (issue #156 feature 1): resolved to
+    /// a cheaper-cost landmass polygon type by `resolve_polygon_type_index`
+    /// -- see that function's doc comment for the precedence rule when a
+    /// triangle is both a door and preferred-pathing.
+    pub(crate) is_preferred_pathing: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -181,6 +186,54 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
         .collect()
 }
 
+/// The single landmass polygon type index every preferred-pathing triangle
+/// (issue #156 feature 1, `NVTR`'s `PREFERRED_PATHING` flag) that is not
+/// itself a door triangle resolves to: one past the highest door type index
+/// this archipelago-wide `door_type_indices` map assigned (issue #155
+/// feature 1), so it can never collide with a door's own type index
+/// regardless of how many distinct doors this cell's meshes reference.
+/// Deterministic: depends only on `door_type_indices`'s own contents, and
+/// that map is itself computed deterministically once per archipelago build
+/// (`door_type_indices`'s own doc comment) and passed unchanged to every
+/// mesh's `build_navigation_mesh` call, so every mesh in one build agrees on
+/// the same preferred-pathing index. `1` when there are no doors at all
+/// (the type-index space starts fresh at `1`, same as `door_type_indices`
+/// itself).
+pub(crate) fn preferred_pathing_type_index(door_type_indices: &BTreeMap<u32, usize>) -> usize {
+    door_type_indices.values().max().copied().unwrap_or(0) + 1
+}
+
+/// Resolves one triangle's landmass polygon type index (issue #156 feature
+/// 1 / issue #155 feature 1's coexistence rule): a door-typed triangle
+/// always wins over a preferred-pathing triangle when a triangle is both,
+/// falling back to ordinary walkable ground (`0`) when neither applies.
+///
+/// landmass 0.9.2 stores exactly one `type_index` per polygon
+/// (`ValidPolygon::type_index`, fed by `NavigationMesh::polygon_type_indices`
+/// -- see `build_navigation_mesh`'s doc comment) -- there is no way to stack
+/// a door's lockable type and a preferred-path's cheaper-cost type on the
+/// same triangle, so precedence has to pick one. Door wins: a locked door
+/// must always block the route through that exact triangle regardless of
+/// its preferred-pathing flag (a preferred-pathing type's whole purpose is a
+/// *cheaper*, not an *infinite*, cost -- letting it silently override the
+/// door's lockable type would reopen a "locked" doorway), and real FO3 NAVM
+/// data already treats a door triangle as special-purposed distinctly from
+/// ordinary preferred-path corridor filler.
+fn resolve_polygon_type_index(
+    polygon_index: u32,
+    is_preferred_pathing: bool,
+    door_type_index_by_triangle: &HashMap<u32, usize>,
+    preferred_pathing_type_index: usize,
+) -> usize {
+    if let Some(&type_index) = door_type_index_by_triangle.get(&polygon_index) {
+        return type_index;
+    }
+    if is_preferred_pathing {
+        return preferred_pathing_type_index;
+    }
+    0
+}
+
 /// Converts `mesh` into a validated `bevy_landmass` navigation mesh.
 ///
 /// Non-walkable exclusion: `is_water` polygons are dropped rather than
@@ -226,12 +279,18 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
 /// `door_type_indices` (issue #155 feature 1): every door-associated
 /// triangle (`mesh.doors`) gets the polygon type index its door FormID
 /// resolves to in this map, instead of the flat `0` every polygon used
-/// before -- everything else stays type `0`. This only changes which
+/// before. `is_preferred_pathing` (issue #156 feature 1): every non-door
+/// preferred-pathing triangle gets the single shared
+/// `preferred_pathing_type_index` -- everything else stays type `0`. A
+/// triangle that is both resolves via `resolve_polygon_type_index`'s
+/// documented precedence (door wins). This only changes which
 /// `landmass::pathfinding` cost a polygon looks up (`type_index_to_cost`,
 /// overridden per agent by `nav/agent.rs`'s `AgentTypeIndexCostOverrides`
-/// when a door is locked); it does not remove the polygon or touch its
-/// vertices/winding, so a typed door triangle stays exactly as connected to
-/// its neighbours as before -- confirmed against `landmass` 0.9.2's own
+/// when a door is locked, or -- for the preferred-pathing type, issue #156 --
+/// by a base `Archipelago::set_type_index_cost` a future wave wires up on
+/// the archipelago itself); it does not remove the polygon or touch its
+/// vertices/winding, so a typed triangle stays exactly as connected to its
+/// neighbours as before -- confirmed against `landmass` 0.9.2's own
 /// `NavigationMesh::validate()` (`nav_mesh.rs`): region/adjacency
 /// (`DisjointSet`/`connectivity`) is computed purely from shared vertex
 /// indices between polygons, and `polygon_type_indices[i]` only ever feeds
@@ -262,6 +321,11 @@ pub(crate) fn build_navigation_mesh(
             door_type_index_by_triangle.insert(door.triangle_index, type_index);
         }
     }
+    // Issue #156 feature 1: computed once from the same archipelago-wide
+    // `door_type_indices` map every mesh in this build shares, so every
+    // mesh agrees on the same preferred-pathing index (see
+    // `preferred_pathing_type_index`'s doc comment).
+    let preferred_pathing_index = preferred_pathing_type_index(door_type_indices);
 
     let mut included_polygons: Vec<&PolygonInput> = Vec::new();
     let mut included_type_indices: Vec<usize> = Vec::new();
@@ -288,12 +352,12 @@ pub(crate) fn build_navigation_mesh(
             )));
             continue;
         }
-        included_type_indices.push(
-            door_type_index_by_triangle
-                .get(&polygon.index)
-                .copied()
-                .unwrap_or(0),
-        );
+        included_type_indices.push(resolve_polygon_type_index(
+            polygon.index,
+            polygon.is_preferred_pathing,
+            &door_type_index_by_triangle,
+            preferred_pathing_index,
+        ));
         included_polygons.push(polygon);
     }
 
@@ -823,11 +887,13 @@ mod tests {
                     index: 0,
                     vertex_indices: vertex_indices_a,
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
                 PolygonInput {
                     index: 1,
                     vertex_indices: vertex_indices_b,
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
             ],
             doors: Vec::new(),
@@ -936,6 +1002,7 @@ mod tests {
                 index: triangle_index,
                 vertex_indices: [0, 1, 2],
                 is_water: false,
+                is_preferred_pathing: false,
             }],
             doors: vec![DoorInput {
                 triangle_index,
@@ -1082,6 +1149,98 @@ mod tests {
         assert_eq!(indices.get(&0x99), Some(&1));
         let typed = build_navigation_mesh(&mesh, &[], &indices);
         let untyped = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
+        assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
+    }
+
+    // -------------------------------------------------------------
+    // preferred_pathing_type_index / resolve_polygon_type_index
+    // (issue #156 feature 1)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn preferred_pathing_type_index_is_one_past_the_highest_door_index() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x50);
+        let door_indices = door_type_indices(&[mesh_a, mesh_b]);
+        // Doors got 1 (0x50) and 2 (0x99) -- see
+        // `each_distinct_door_gets_its_own_type_index_starting_at_one`.
+        assert_eq!(preferred_pathing_type_index(&door_indices), 3);
+    }
+
+    #[test]
+    fn preferred_pathing_type_index_is_one_when_there_are_no_doors() {
+        assert_eq!(preferred_pathing_type_index(&BTreeMap::new()), 1);
+    }
+
+    #[test]
+    fn an_ordinary_polygon_resolves_to_type_zero() {
+        let door_type_index_by_triangle = HashMap::new();
+        assert_eq!(
+            resolve_polygon_type_index(0, false, &door_type_index_by_triangle, 5),
+            0
+        );
+    }
+
+    #[test]
+    fn a_preferred_pathing_polygon_resolves_to_the_preferred_pathing_type() {
+        let door_type_index_by_triangle = HashMap::new();
+        assert_eq!(
+            resolve_polygon_type_index(0, true, &door_type_index_by_triangle, 5),
+            5
+        );
+    }
+
+    #[test]
+    fn a_door_polygon_resolves_to_its_own_door_type() {
+        let mut door_type_index_by_triangle = HashMap::new();
+        door_type_index_by_triangle.insert(0, 2);
+        assert_eq!(
+            resolve_polygon_type_index(0, false, &door_type_index_by_triangle, 5),
+            2
+        );
+    }
+
+    #[test]
+    fn a_triangle_that_is_both_a_door_and_preferred_pathing_keeps_its_door_type() {
+        // The exact coexistence rule issue #156 feature 1 documents: landmass
+        // 0.9.2 stores one type index per polygon, so when a triangle is
+        // both, the door's lockable type must win -- a preferred-pathing
+        // type only ever means a *cheaper* cost, never an override that
+        // could silently reopen a locked door.
+        let mut door_type_index_by_triangle = HashMap::new();
+        door_type_index_by_triangle.insert(0, 2);
+        assert_eq!(
+            resolve_polygon_type_index(0, true, &door_type_index_by_triangle, 5),
+            2
+        );
+    }
+
+    fn mesh_with_preferred_pathing_polygon(form_id: u32) -> MeshInput {
+        MeshInput {
+            form_id,
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            polygons: vec![PolygonInput {
+                index: 0,
+                vertex_indices: [0, 1, 2],
+                is_water: false,
+                is_preferred_pathing: true,
+            }],
+            doors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_preferred_pathing_mesh_still_validates_and_keeps_its_polygon_count() {
+        // CONSTRAINT pin (issue #156 feature 1), the same shape as #155's own
+        // `a_typed_door_triangle_still_validates_and_keeps_its_polygon_count`:
+        // typing a preferred-pathing triangle must not remove or alter
+        // adjacency, only which cost `landmass::pathfinding` looks up.
+        let mesh = mesh_with_preferred_pathing_polygon(0x10);
+        let typed = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let mut untyped_mesh = mesh;
+        untyped_mesh.polygons[0].is_preferred_pathing = false;
+        let untyped = build_navigation_mesh(&untyped_mesh, &[], &BTreeMap::new());
         assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
         assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
     }

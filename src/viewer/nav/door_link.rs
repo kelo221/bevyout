@@ -220,6 +220,39 @@ pub(crate) fn crossing_gate(observation: CrossingObservation) -> CrossingGate {
     }
 }
 
+// ---------------------------------------------------------------------
+// Travel hand-off lock authority (issue #165, real-data acceptance
+// follow-up)
+// ---------------------------------------------------------------------
+
+/// What a `Paused` agent's `Tick` event should report as `door_open`,
+/// given the door's raw physical open flag (`InteractionState.open`) and
+/// its current lock observation. `crossing_gate`'s "already open passes
+/// regardless of lock" rule (mirroring `repath::door_usable`) is correct
+/// for an ordinary `IntraCell` mid-route crossing -- walking through a
+/// door that is standing open is a physical act the lock record cannot
+/// retroactively undo. It is *not* correct for a `Travel` destination's
+/// hand-off: that is a scripted cell transition, not a physical
+/// walk-through, and a *prior* successful travel through the very same
+/// door leaves it physically open forever (a hand-off never closes it).
+/// Without this override, `setlock`-ing that door and reissuing `tna
+/// travel` would reach this arm with `physically_open == true` on the
+/// very first tick, skip straight to `Traversing`, and hand the agent off
+/// through a locked door -- the real-data measurement this function
+/// fixes. Lock state is authoritative for a `Travel` destination
+/// regardless of the door's physical open state; an `IntraCell` crossing
+/// keeps the ordinary physical-open rule unchanged.
+pub(crate) fn effective_door_open(
+    destination: LinkDestination,
+    physically_open: bool,
+    door_locked: bool,
+) -> bool {
+    match destination {
+        LinkDestination::Travel { .. } => physically_open && !door_locked,
+        LinkDestination::IntraCell => physically_open,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +462,51 @@ mod tests {
             }),
             CrossingGate::Blocked
         );
+    }
+
+    // -------------------------------------------------------------
+    // `effective_door_open` (issue #165, real-data acceptance follow-up:
+    // a travel target left physically open by a *prior* hand-off must
+    // still fail when locked).
+    // -------------------------------------------------------------
+
+    fn travel_to(cell: u32) -> LinkDestination {
+        LinkDestination::Travel {
+            destination_cell_form_id: cell,
+        }
+    }
+
+    #[test]
+    fn a_physically_open_locked_travel_destination_is_not_effectively_open() {
+        // The exact real-data shape: a prior hand-off left the door open;
+        // `setlock` locked it again. Lock is authoritative for the
+        // hand-off despite the door still standing open.
+        assert!(!effective_door_open(travel_to(0xC0DE), true, true));
+    }
+
+    #[test]
+    fn a_physically_open_unlocked_travel_destination_is_effectively_open() {
+        assert!(effective_door_open(travel_to(0xC0DE), true, false));
+    }
+
+    #[test]
+    fn a_physically_closed_travel_destination_is_never_effectively_open_regardless_of_lock() {
+        assert!(!effective_door_open(travel_to(0xC0DE), false, true));
+        assert!(!effective_door_open(travel_to(0xC0DE), false, false));
+    }
+
+    #[test]
+    fn an_intra_cell_crossing_keeps_the_physical_open_rule_regardless_of_lock() {
+        // Unlike `Travel`, an ordinary mid-route crossing passes through
+        // an already-open door regardless of its lock record -- mirrors
+        // `crossing_gate`'s own `an_open_door_passes_even_if_its_lock_
+        // record_is_still_locked` rule.
+        assert!(effective_door_open(LinkDestination::IntraCell, true, true));
+        assert!(effective_door_open(LinkDestination::IntraCell, true, false));
+        assert!(!effective_door_open(
+            LinkDestination::IntraCell,
+            false,
+            true
+        ));
     }
 }
