@@ -280,6 +280,32 @@ const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 /// so would mean giving up on `NoPath` for the one-route-only case, this
 /// feature's actual requirement.
 const LOCKED_DOOR_TYPE_INDEX_COST: f32 = f32::INFINITY;
+/// Archipelago-wide base cost for every authored preferred-pathing polygon
+/// (issue #168): `landmass_graph::preferred_pathing_type_index`'s type index
+/// gets this via `Archipelago::set_type_index_cost` in `ensure_archipelago`,
+/// the base-cost wiring issue #156 (feature 1, typing only) left for a
+/// future wave. `1.0` is `landmass`'s implicit cost for any type index
+/// nothing has overridden (`landmass::pathfinding::type_index_to_cost`,
+/// confirmed by `nav_data.rs`'s own `HashMap::new()` default lookup) -- a
+/// value strictly less than that makes distance-weighted route selection
+/// favour a preferred corridor over a same-length ordinary one, matching
+/// GECK `PREFERRED_PATHING` semantics (NPCs are drawn to these paths, not
+/// forced onto them the way a locked door is forced off one). `0.5`:
+/// meaningfully cheaper (half the per-metre cost) without approaching the
+/// near-zero costs that would pathologically attract routing regardless of
+/// how long a preferred-path detour actually is. Verified against
+/// `landmass` 0.9.2's only `set_type_index_cost` validation
+/// (`nav_data.rs::set_type_index_cost`: `cost <= 0.0` is rejected via
+/// `SetTypeIndexCostError::NonPositiveCost`; `NaN`/`f32::INFINITY` both
+/// otherwise pass unchecked, unlike that guard) -- `0.5` is comfortably a
+/// positive, finite, ordinary multiplier, nothing like
+/// [`LOCKED_DOOR_TYPE_INDEX_COST`]'s deliberate sentinel-infinity shape.
+/// Applied once per archipelago build via `Archipelago::set_type_index_cost`
+/// (a base cost every agent shares), not per-agent
+/// `AgentTypeIndexCostOverrides` -- that mechanism stays reserved for door
+/// lock exclusion (#155) and merge-portal quarantine (#162), both
+/// per-agent exceptions to the shared baseline this constant sets.
+const PREFERRED_PATHING_TYPE_INDEX_COST: f32 = 0.5;
 /// How close (metres, horizontal) a swept merge-portal crossing (issue
 /// #154 feature 4) must get to its far portal point before it counts as
 /// complete. Same value/rationale as `AGENT_TARGET_REACHED_DISTANCE`.
@@ -902,6 +928,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
     options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
     let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
+    apply_preferred_pathing_base_cost(world, archipelago_entity, &door_type_indices);
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
@@ -1118,6 +1145,34 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_type_indices,
     };
     Ok(())
+}
+
+/// Issue #168: applies [`PREFERRED_PATHING_TYPE_INDEX_COST`] as the
+/// archipelago-wide base cost for `landmass_graph::preferred_pathing_type_
+/// index`'s type index, so authored preferred-pathing polygons (#156
+/// feature 1) actually route cheaper instead of the type existing but never
+/// being priced. Called once per archipelago build (`ensure_archipelago`,
+/// right after the entity is spawned), not per-agent: this is a shared
+/// terrain preference every agent in this archipelago gets, unlike door
+/// locking (#155) or merge-portal quarantine (a future issue), which are
+/// per-agent `AgentTypeIndexCostOverrides` exceptions to this shared
+/// baseline. `set_type_index_cost` only errors on a non-positive cost
+/// (`landmass` 0.9.2's `SetTypeIndexCostError::NonPositiveCost`, see the
+/// constant's own doc comment for the verification) -- unreachable for
+/// this fixed, positive, compile-time constant, so the `Result` is
+/// discarded rather than propagated.
+fn apply_preferred_pathing_base_cost(
+    world: &mut World,
+    archipelago_entity: Entity,
+    door_type_indices: &BTreeMap<u32, usize>,
+) {
+    let preferred_pathing_index = landmass_graph::preferred_pathing_type_index(door_type_indices);
+    if let Ok(mut entity) = world.get_entity_mut(archipelago_entity)
+        && let Some(mut archipelago) = entity.get_mut::<Archipelago3d>()
+    {
+        let _ = archipelago
+            .set_type_index_cost(preferred_pathing_index, PREFERRED_PATHING_TYPE_INDEX_COST);
+    }
 }
 
 /// Spawns one logical off-mesh link as *two* unidirectional
@@ -6345,6 +6400,171 @@ mod tests {
             state,
             Some(AgentState::NoPath),
             "a typed-but-unlocked door triangle must still connect its neighbours, got {state:?}"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Issue #168: preferred-path base cost, exercised against a real
+    // `Archipelago3d` solve (this file owns the live-Bevy tests -- see
+    // `landmass_graph.rs`'s own module doc comment for why it stays
+    // Bevy-engine-free).
+    // -------------------------------------------------------------
+
+    /// A two-room mesh with two independent, geometrically congruent
+    /// corridors (issue #168): south (ordinary) and north (issue #156's
+    /// `NVTR` `PREFERRED_PATHING` flag, `is_preferred_pathing: true`) --
+    /// each corridor is the other translated by exactly `+8` in Z, so a
+    /// route through either is the identical length. `PREFERRED_PATH_
+    /// START`/`PREFERRED_PATH_TARGET` sit at each room's own Z-midpoint,
+    /// equidistant from both corridors by construction: only
+    /// `PREFERRED_PATHING_TYPE_INDEX_COST` (never distance) can make one
+    /// strictly cheaper than the other. Room B is offset `+0.5` in Z from
+    /// Room A at the corridor-connection edges -- the same non-degenerate-
+    /// triangle requirement `door_topology_mesh`'s own doc comment
+    /// explains (three vertices at the identical Z would make a
+    /// zero-area triangle) -- and both corridors carry the identical
+    /// offset, preserving their congruence.
+    fn preferred_path_mesh() -> landmass_graph::MeshInput {
+        landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: vec![
+                [0.0, 0.0, 0.0],  // 0: Room A SW
+                [2.0, 0.0, 0.0],  // 1: Room A SE
+                [0.0, 0.0, 8.0],  // 2: Room A NW
+                [2.0, 0.0, 8.0],  // 3: Room A NE
+                [8.0, 0.0, 0.5],  // 4: Room B SW
+                [10.0, 0.0, 0.5], // 5: Room B SE
+                [8.0, 0.0, 8.5],  // 6: Room B NW
+                [10.0, 0.0, 8.5], // 7: Room B NE
+            ],
+            polygons: vec![
+                landmass_graph::PolygonInput {
+                    index: 0,
+                    vertex_indices: [0, 1, 2],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 1,
+                    vertex_indices: [1, 3, 2],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 2,
+                    vertex_indices: [4, 5, 6],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 3,
+                    vertex_indices: [5, 7, 6],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                // South corridor (Room A/B south edges): ordinary.
+                landmass_graph::PolygonInput {
+                    index: 4,
+                    vertex_indices: [0, 1, 4],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                landmass_graph::PolygonInput {
+                    index: 5,
+                    vertex_indices: [1, 5, 4],
+                    is_water: false,
+                    is_preferred_pathing: false,
+                },
+                // North corridor (Room A/B north edges): preferred pathing.
+                landmass_graph::PolygonInput {
+                    index: 6,
+                    vertex_indices: [2, 3, 6],
+                    is_water: false,
+                    is_preferred_pathing: true,
+                },
+                landmass_graph::PolygonInput {
+                    index: 7,
+                    vertex_indices: [3, 7, 6],
+                    is_water: false,
+                    is_preferred_pathing: true,
+                },
+            ],
+            doors: Vec::new(),
+        }
+    }
+
+    const PREFERRED_PATH_START: Vec3 = Vec3::new(1.0, 0.0, 4.0);
+    const PREFERRED_PATH_TARGET: Vec3 = Vec3::new(9.0, 0.0, 4.5);
+
+    #[test]
+    fn a_preferred_corridor_is_chosen_over_an_equal_length_ordinary_one() {
+        let mesh = preferred_path_mesh();
+        let door_type_indices = BTreeMap::new();
+        let preferred_index = landmass_graph::preferred_pathing_type_index(&door_type_indices);
+        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let valid = build_result.nav_mesh.unwrap_or_else(|| {
+            panic!(
+                "preferred_path_mesh always validates: {:?}",
+                build_result.diagnostics
+            )
+        });
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            Landmass3dPlugin::default(),
+        ));
+        let nav_mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+        let mut archipelago_component = Archipelago3d::new(options);
+        // The exact production call under test (issue #168,
+        // `apply_preferred_pathing_base_cost`).
+        archipelago_component
+            .set_type_index_cost(preferred_index, PREFERRED_PATHING_TYPE_INDEX_COST)
+            .expect("PREFERRED_PATHING_TYPE_INDEX_COST is a positive finite documented constant");
+        let archipelago = app.world_mut().spawn(archipelago_component).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(nav_mesh_handle),
+        });
+        let agent = app
+            .world_mut()
+            .spawn((
+                Agent3dBundle {
+                    agent: default(),
+                    settings: AgentSettings {
+                        radius: AGENT_RADIUS,
+                        desired_speed: AGENT_DESIRED_SPEED,
+                        max_speed: AGENT_MAX_SPEED,
+                    },
+                    archipelago_ref: ArchipelagoRef3d::new(archipelago),
+                },
+                Transform::from_translation(PREFERRED_PATH_START),
+                AgentTarget3d::Point(PREFERRED_PATH_TARGET),
+            ))
+            .id();
+
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+
+        assert_ne!(
+            app.world().get::<AgentState>(agent).copied(),
+            Some(AgentState::NoPath),
+            "both corridors are open; a path must be found"
+        );
+        let desired = app.world().get::<AgentDesiredVelocity3d>(agent).unwrap();
+        assert!(
+            desired.velocity().z > 0.0,
+            "the cheaper preferred (north, +Z) corridor must be chosen over the \
+             equal-length ordinary (south, -Z) one, got desired velocity {:?}",
+            desired.velocity()
         );
     }
 
