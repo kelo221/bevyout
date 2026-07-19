@@ -784,6 +784,110 @@ fn activate_door_with_destination_writes_a_travel_request() {
     assert_eq!(request.translation, Vec3::new(1.0, 2.0, 3.0));
 }
 
+// -- setlock (issue #163: GECK lock/unlock console parity) -------------
+
+#[test]
+fn setlock_requires_reference_and_level() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "setlock")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "setlock 00000010")), "bad_arity");
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5 6")),
+        "bad_arity"
+    );
+}
+
+#[test]
+fn setlock_rejects_unknown_and_non_door_references() {
+    let mut app = test_app();
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5")),
+        "reference_not_found"
+    );
+
+    register_placement(&mut app, "Static");
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 5")),
+        "not_a_door"
+    );
+}
+
+#[test]
+fn setlock_rejects_non_integer_and_out_of_range_levels() {
+    let mut app = test_app();
+    register_placement(&mut app, DOOR_WITH_DESTINATION);
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 abc")),
+        "bad_type"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 -1")),
+        "bad_type"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 128")),
+        "bad_type"
+    );
+}
+
+/// Issue #163: setting a level updates both consumers' state from the one
+/// command -- the interaction-side `PlacementRoot` component the player's
+/// own E-activation reads, and the nav-side `door_lock_info` snapshot
+/// `door_availability_system` polls -- and level 0 clears both, preserving
+/// the door's key requirement rather than discarding it.
+#[test]
+fn setlock_sets_and_clears_the_interaction_and_nav_lock_state_together() {
+    let mut app = test_app();
+    nav::agent::init_test_archipelago_state(app.world_mut());
+    register_placement(
+        &mut app,
+        "Door((lock_level: None, key_form_id: Some(200), destination: None))",
+    );
+
+    let output = exec(&mut app, "setlock 00000010 50");
+    assert!(output.ok, "setlock failed: {:?}", output.error);
+    assert_eq!(output.value["reference_form_id"], 16);
+    assert_eq!(output.value["lock_level"], 50);
+    assert_eq!(output.log, vec!["setlock 00000010 level 50"]);
+    assert_eq!(
+        nav::agent::door_lock_level_for_test(app.world(), 0x10),
+        Some(50)
+    );
+
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<interaction::PlacementRoot>>()
+        .single(app.world())
+        .unwrap();
+    let door_state = |app: &mut App| {
+        let placement = app
+            .world()
+            .get::<interaction::PlacementRoot>(entity)
+            .unwrap()
+            .placement()
+            .clone();
+        match placement.semantic {
+            crate::vsa::PreparedSemantic::Door(door) => door,
+            _ => panic!("expected a door placement"),
+        }
+    };
+    let door = door_state(&mut app);
+    assert_eq!(door.lock_level, Some(50));
+    assert_eq!(door.key_form_id, Some(200), "the key requirement is kept");
+
+    let output = exec(&mut app, "setlock 00000010 0");
+    assert!(output.ok, "setlock failed: {:?}", output.error);
+    assert_eq!(output.value["lock_level"], Value::Null);
+    assert_eq!(output.log, vec!["setlock 00000010 unlocked"]);
+    assert_eq!(
+        nav::agent::door_lock_level_for_test(app.world(), 0x10),
+        None
+    );
+    let door = door_state(&mut app);
+    assert_eq!(door.lock_level, None);
+    assert_eq!(door.key_form_id, Some(200));
+}
+
 // -- save (issue #60, F60.3) ------------------------------------------
 
 #[test]

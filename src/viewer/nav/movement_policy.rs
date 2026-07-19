@@ -7,6 +7,46 @@
 //! itself. Mirrors `src/viewer/world/policy.rs`'s established pure
 //! decision-table pattern: `std`-only (no `bevy`/`bevy_landmass` import) so
 //! `tests/features.rs` can include it verbatim via `#[path]`.
+//!
+//! Progress signal choice (issue #157): `decide_stuck` (below) is a generic
+//! "is this monotone metric still improving" decision table -- it was fed
+//! monotone *distance-to-the-final-`AgentTarget3d`* through M4 wave 5/6, but
+//! that measure regresses for whole detour legs on any valid route that must
+//! initially move away from the final target (around a long wall, doubling
+//! back through a doorway), false-triggering recovery/failure on a perfectly
+//! healthy route. Of the candidate corridor-progress signals (distance to
+//! the current landmass steering waypoint, decreasing remaining path
+//! length, windowed net displacement), this module picks the simplest one
+//! actually available without reaching into `bevy_landmass`'s archipelago
+//! internals: `route_progress_delta` projects each tick's real, KCC-
+//! resolved achieved horizontal velocity onto whatever direction landmass
+//! is *currently* steering toward (its desired horizontal velocity this
+//! tick) -- reusing exactly the `desired`/`achieved` pair
+//! `decide_collision_outcome` already samples. `nav/agent.rs` integrates
+//! this over time into a running total and negates it into the same
+//! monotone-minimum-tracked "distance" shape `decide_stuck` already
+//! expects, so the decision table itself needs no changes: a detour leg
+//! keeps registering fresh progress every tick it is actually walking,
+//! because the projection follows the corridor's current steering
+//! direction, not the straight-line final target. A genuinely wedged agent
+//! (KCC sweep achieves near-zero motion regardless of direction) still
+//! flatlines this signal exactly as it flatlined the old one, so the
+//! existing wedge/blocked recovery behaviour is unchanged.
+//!
+//! Known limitation (external architecture review, issue #157 follow-up):
+//! because `route_progress_delta` only ever compares this tick's achieved
+//! motion against *this same tick's* desired direction, an agent whose
+//! desired direction keeps flipping under oscillating avoidance steering --
+//! and which fully achieves each flip -- reads as perpetual corridor
+//! progress here, even though its net position barely moves (it is
+//! effectively orbiting in place). The old distance-to-final-target signal
+//! would eventually have caught that case; this one does not. This is an
+//! accepted trade-off, not an oversight: the field failure mode this signal
+//! exists to catch is a genuine collision wedge (the KCC sweep achieves
+//! near-zero motion regardless of the desired direction), and that case
+//! still flatlines the signal exactly as before. Pinned by
+//! `tests/features.rs`'s `nav_stuck_progress.feature` step section (the
+//! oscillating-route scenario) rather than left implicit.
 
 /// Ticks (fixed-cadence movement observations) without net progress toward
 /// the current waypoint before a stuck agent first attempts recovery.
@@ -177,10 +217,46 @@ pub(crate) fn decide_collision_outcome(observation: VelocityObservation) -> Coll
     }
 }
 
-/// Observation feeding `decide_stuck`: current distance to the active
-/// waypoint, the best (smallest) distance recorded so far along this
-/// route, how many consecutive ticks have passed with no net progress, and
-/// whether a recovery attempt (e.g. a forced repath) is already active.
+/// This tick's real (KCC-resolved) horizontal displacement, projected onto
+/// whatever direction landmass is *currently* asking the agent to move in
+/// (issue #157): positive when the achieved motion carries the agent
+/// forward along its current steering direction, negative when collision or
+/// avoidance pushes it backward along that same axis, and exactly `0.0`
+/// when `desired` carries no horizontal motion at all -- there is nothing
+/// to project onto, so this tick contributes neither progress nor regress
+/// (mirrors `decide_collision_outcome`'s own "no desired motion is never
+/// blocked" rule).
+///
+/// Both vectors are `[x, z]` horizontal-plane pairs, matching every other
+/// site in this module (see `horizontal_distance`'s doc comment for why Y is
+/// excluded). This is a rate (metres/second, the same units `desired` and
+/// `achieved` already are as velocities) -- the caller integrates it by
+/// `dt` into a running corridor-progress total, exactly like `achieved`
+/// itself is already `(new_position - old_position) / dt` before being fed
+/// back to landmass. Unlike distance-to-the-final-target, this keeps
+/// registering progress on a route leg that must move *away* from the final
+/// target (around a wall, through a doorway) as long as the agent is
+/// actually walking the corridor landmass just steered it onto.
+pub(crate) fn route_progress_delta(desired: [f32; 2], achieved: [f32; 2]) -> f32 {
+    let desired_len = (desired[0] * desired[0] + desired[1] * desired[1]).sqrt();
+    if desired_len <= f32::EPSILON {
+        return 0.0;
+    }
+    let direction = [desired[0] / desired_len, desired[1] / desired_len];
+    achieved[0] * direction[0] + achieved[1] * direction[1]
+}
+
+/// Observation feeding `decide_stuck`: a monotone progress metric this
+/// module treats generically -- smaller is better, and the decision table
+/// below only cares whether it keeps beating its own running minimum, never
+/// what it physically measures. Through M4 wave 5/6 `nav/agent.rs` fed
+/// literal horizontal distance to the final `AgentTarget3d`; since issue
+/// #157 it feeds the negated, integrated `route_progress_delta` instead (see
+/// this module's doc comment) so a detour leg that must move away from the
+/// final target does not read as "no progress." `ticks_without_progress`
+/// counts consecutive ticks with no new minimum, and `recovery_active`
+/// reports whether a recovery attempt (e.g. a forced repath) is already in
+/// flight.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct StuckObservation {
     pub(crate) distance_to_target: f32,
@@ -300,6 +376,30 @@ mod tests {
             }),
             CollisionOutcome::Clear
         );
+    }
+
+    #[test]
+    fn route_progress_delta_rewards_achieved_motion_along_the_desired_direction() {
+        assert_eq!(route_progress_delta([2.0, 0.0], [1.5, 0.0]), 1.5);
+    }
+
+    #[test]
+    fn route_progress_delta_is_zero_when_nothing_is_desired() {
+        // No steering direction to project onto -- real achieved motion
+        // (e.g. residual momentum) counts as neither progress nor regress.
+        assert_eq!(route_progress_delta([0.0, 0.0], [3.0, 3.0]), 0.0);
+    }
+
+    #[test]
+    fn route_progress_delta_penalizes_achieved_motion_opposite_the_desired_direction() {
+        assert_eq!(route_progress_delta([1.0, 0.0], [-0.5, 0.0]), -0.5);
+    }
+
+    #[test]
+    fn route_progress_delta_only_counts_the_component_along_the_desired_direction() {
+        // Desired straight along +x; achieved motion is purely lateral
+        // (+z) -- none of it is progress toward where landmass is steering.
+        assert_eq!(route_progress_delta([1.0, 0.0], [0.0, 5.0]), 0.0);
     }
 
     #[test]

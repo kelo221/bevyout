@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bevyout Scene Pipeline"
+  short_description: "Prepare, bake, render, and verify scenes"
+  default_prompt: "Use $bevyout-scene-pipeline to prepare, bake, render, and verify a bevyout scene."
