@@ -25,6 +25,11 @@ use super::{
     cell_label,
 };
 
+mod stats;
+#[cfg(test)]
+use stats::quick_aid_line;
+use stats::spawn_stats_body;
+
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
 const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
     (KeyCode::Digit1, 1),
@@ -752,6 +757,21 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
             GlobalZIndex(500),
         ))
         .with_children(|root| {
+            root.spawn((
+                ImageNode {
+                    image: sources
+                        .assets
+                        .load("staging/interface/shared/background/pipboy.png"),
+                    color: Color::srgba(0.18, 1.0, 0.48, 0.35),
+                    ..default()
+                },
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+            ));
             // CRT phosphor bloom behind everything, brightest toward the
             // upper middle like the reference screen.
             root.spawn((
@@ -1089,259 +1109,6 @@ fn spawn_corner_brackets(root: &mut ChildSpawnerCommands) {
             BorderColor::all(GREEN),
         ));
     }
-}
-
-/// One capsule condition bar from the Status figure: a framed outline with
-/// the filled portion inside. No limb-damage system exists yet, so every bar
-/// is full; the fraction parameter keeps the shape honest for when one does.
-fn limb_bar(parent: &mut ChildSpawnerCommands, fraction: f32) {
-    parent
-        .spawn((
-            Node {
-                width: Val::Px(130.0),
-                height: Val::Px(18.0),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::MAX,
-                padding: UiRect::all(Val::Px(2.0)),
-                ..default()
-            },
-            BorderColor::all(GREEN),
-        ))
-        .with_child((
-            Node {
-                width: Val::Percent(fraction.clamp(0.0, 1.0) * 100.0),
-                height: Val::Percent(100.0),
-                border_radius: BorderRadius::MAX,
-                ..default()
-            },
-            BackgroundColor(GREEN),
-        ));
-}
-
-/// A rounded outline segment of the status figure (head, torso, arms, legs).
-fn figure_segment(parent: &mut ChildSpawnerCommands, width: f32, height: f32, radius: f32) {
-    parent.spawn((
-        Node {
-            width: Val::Px(width),
-            height: Val::Px(height),
-            border: UiRect::all(Val::Px(4.0)),
-            border_radius: BorderRadius::all(Val::Px(radius)),
-            ..default()
-        },
-        BorderColor::all(GREEN),
-    ));
-}
-
-/// The Stats view's Status section: CND/RAD/EFF labels on the left, the
-/// line-art dweller with its six limb condition bars in the middle, the
-/// quick-use Aid line on the right, and the name/level caption below --
-/// the reference STATS > Status screen.
-fn spawn_stats_body(
-    screen: &mut ChildSpawnerCommands,
-    sources: &ScreenSources,
-    status: &PlayerStatus,
-) {
-    screen
-        .spawn(Node {
-            flex_grow: 1.0,
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Row,
-            ..default()
-        })
-        .with_children(|body| {
-            body.spawn(Node {
-                width: Val::Percent(15.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::FlexStart,
-                row_gap: Val::Px(20.0),
-                padding: UiRect {
-                    left: Val::Px(12.0),
-                    top: Val::Px(40.0),
-                    ..default()
-                },
-                ..default()
-            })
-            .with_children(|labels| {
-                labels
-                    .spawn((
-                        Node {
-                            padding: UiRect::axes(Val::Px(14.0), Val::Px(4.0)),
-                            border: UiRect::all(Val::Px(2.0)),
-                            ..default()
-                        },
-                        BorderColor::all(GREEN),
-                    ))
-                    .with_child((
-                        Text::new("CND"),
-                        TextColor(GREEN),
-                        TextFont {
-                            font_size: FontSize::Px(26.0),
-                            ..default()
-                        },
-                        glow(),
-                    ));
-                for label in ["RAD", "EFF"] {
-                    labels.spawn((
-                        Text::new(label),
-                        TextColor(GREEN),
-                        TextFont {
-                            font_size: FontSize::Px(26.0),
-                            ..default()
-                        },
-                        glow(),
-                        Node {
-                            padding: UiRect::axes(Val::Px(14.0), Val::Px(4.0)),
-                            ..default()
-                        },
-                    ));
-                }
-            });
-            body.spawn(Node {
-                width: Val::Percent(60.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(16.0),
-                ..default()
-            })
-            .with_children(|figure| {
-                limb_bar(figure, 1.0);
-                figure_segment(figure, 110.0, 110.0, 55.0);
-                figure
-                    .spawn(Node {
-                        align_items: AlignItems::Center,
-                        column_gap: Val::Px(16.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        limb_bar(row, 1.0);
-                        figure_segment(row, 118.0, 18.0, 9.0);
-                        row.spawn((
-                            Node {
-                                width: Val::Px(122.0),
-                                height: Val::Px(132.0),
-                                border: UiRect::all(Val::Px(4.0)),
-                                border_radius: BorderRadius::all(Val::Px(18.0)),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                padding: UiRect::all(Val::Px(10.0)),
-                                ..default()
-                            },
-                            BorderColor::all(GREEN),
-                        ))
-                        .with_children(|torso| {
-                            torso
-                                .spawn((
-                                    Node {
-                                        width: Val::Percent(100.0),
-                                        height: Val::Px(16.0),
-                                        border: UiRect::all(Val::Px(2.0)),
-                                        border_radius: BorderRadius::MAX,
-                                        padding: UiRect::all(Val::Px(2.0)),
-                                        ..default()
-                                    },
-                                    BorderColor::all(GREEN),
-                                ))
-                                .with_child((
-                                    Node {
-                                        width: Val::Percent(100.0),
-                                        height: Val::Percent(100.0),
-                                        border_radius: BorderRadius::MAX,
-                                        ..default()
-                                    },
-                                    BackgroundColor(GREEN),
-                                ));
-                        });
-                        figure_segment(row, 118.0, 18.0, 9.0);
-                        limb_bar(row, 1.0);
-                    });
-                figure
-                    .spawn(Node {
-                        column_gap: Val::Px(48.0),
-                        ..default()
-                    })
-                    .with_children(|legs| {
-                        for _ in 0..2 {
-                            legs.spawn(Node {
-                                flex_direction: FlexDirection::Column,
-                                align_items: AlignItems::Center,
-                                row_gap: Val::Px(14.0),
-                                ..default()
-                            })
-                            .with_children(|leg| {
-                                figure_segment(leg, 36.0, 132.0, 12.0);
-                                limb_bar(leg, 1.0);
-                            });
-                        }
-                    });
-                figure.spawn((
-                    Text::new(format!("{} - Level {}", status.name, status.level)),
-                    TextColor(GREEN),
-                    TextFont {
-                        font_size: FontSize::Px(28.0),
-                        ..default()
-                    },
-                    glow(),
-                    Node {
-                        margin: UiRect::top(Val::Px(14.0)),
-                        ..default()
-                    },
-                ));
-            });
-            body.spawn(Node {
-                width: Val::Percent(25.0),
-                justify_content: JustifyContent::FlexEnd,
-                padding: UiRect {
-                    right: Val::Px(12.0),
-                    top: Val::Px(48.0),
-                    ..default()
-                },
-                ..default()
-            })
-            .with_children(|quick| {
-                if let Some(line) = quick_aid_line(&sources.inventory, &sources.catalog) {
-                    quick.spawn((
-                        Text::new(line),
-                        TextColor(GREEN),
-                        TextFont {
-                            font_size: FontSize::Px(22.0),
-                            ..default()
-                        },
-                        glow(),
-                    ));
-                }
-            });
-        });
-}
-
-/// The Status screen's quick-use line. The reference shows the assigned
-/// healing item; there is no heal-slot concept here, so prefer a
-/// Stimpak-named Aid stack, otherwise the largest Aid stack in the pack.
-fn quick_aid_line(inventory: &PlayerInventory, catalog: &PreparedItemCatalog) -> Option<String> {
-    let mut aid: Vec<(i32, &PreparedItemDefinition)> = inventory
-        .stack_states()
-        .into_iter()
-        .filter_map(|stack| {
-            catalog
-                .items
-                .iter()
-                .find(|item| {
-                    item.base_form_id == stack.base_form_id
-                        && item.category == PreparedItemCategory::Aid
-                })
-                .map(|item| (stack.count, item))
-        })
-        .collect();
-    aid.sort_by(|(a_count, a), (b_count, b)| {
-        let a_stimpak = item_name(a).to_ascii_lowercase().contains("stimpak");
-        let b_stimpak = item_name(b).to_ascii_lowercase().contains("stimpak");
-        b_stimpak
-            .cmp(&a_stimpak)
-            .then(b_count.cmp(a_count))
-            .then(a.base_form_id.cmp(&b.base_form_id))
-    });
-    aid.first()
-        .map(|(count, item)| format!("({count}) {}", item_name(item)))
 }
 
 fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, state: &PipBoyState) {
@@ -1906,6 +1673,7 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
+            .init_asset::<Image>()
             .init_state::<GameplayModal>()
             .insert_resource(PlayerInventory::default())
             .insert_resource(PlayerEquipment::default())
@@ -1987,6 +1755,7 @@ mod tests {
     fn aid_test_app(quest_item: bool) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
+            .init_asset::<Image>()
             .init_state::<GameplayModal>()
             .insert_resource(PlayerInventory::from_stack_states([
                 super::super::inventory::InventoryStack {

@@ -698,9 +698,15 @@ fn prepare_cell(
             &source_fingerprint,
             &mut diagnostics,
         )?;
+        stage_pipboy_sprites(
+            &data_root,
+            &session.archives,
+            &staging_dir,
+            &mut diagnostics,
+        )?;
+        convert_staged_textures(&staging_dir, &mut diagnostics)?;
         match args.converter {
             PrepareConverter::Blender => {
-                convert_staged_textures(&staging_dir, &mut diagnostics)?;
                 if !jobs.is_empty() {
                     run_blender_batch(
                         blender.as_deref().expect("Blender backend resolved above"),
