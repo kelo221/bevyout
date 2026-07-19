@@ -17,6 +17,7 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
 pub(crate) mod door_link;
+pub(crate) mod erosion_policy;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;

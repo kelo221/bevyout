@@ -39,7 +39,7 @@ mod render_commands;
 mod ui_commands;
 mod world_commands;
 
-use common::{no_args, toggle_result};
+use common::{no_args, parse_item_form_id, toggle_result};
 #[cfg(test)]
 use render_commands::*;
 
@@ -84,11 +84,18 @@ fn install(app: &mut App) {
         .init_resource::<DiagnosticUiState>()
         .init_resource::<RealtimeShadowSettings>()
         .init_resource::<nav_overlay::NavMeshOverlayState>()
+        .init_resource::<nav_overlay::NavOverlayExposureLock>()
+        // Issue #151: the `tdi`-toggled debug info HUD -- state lives with
+        // the HUD it drives in `diagnostics.rs`; spawn/update follow the
+        // same Startup+Update split as `player::mod`'s collider/step HUDs.
+        .init_resource::<diagnostics::DebugInfoState>()
+        .add_systems(Startup, diagnostics::spawn_debug_info_hud)
         .add_systems(
             Update,
             (
                 ui_commands::sync_ui_visibility,
                 nav_overlay::despawn_stale_nav_overlay,
+                diagnostics::update_debug_info_hud,
             )
                 .in_set(super::plugins::ViewerSet::Ui),
         );

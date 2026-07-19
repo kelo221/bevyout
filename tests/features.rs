@@ -650,6 +650,34 @@ struct BevyoutWorld {
     nav_solve_blend_interval: u32,
     nav_solve_blend_fraction: Option<f32>,
 
+    // -- nav_erosion.feature (issue #136, M4 wave 6) --
+    erosion_mesh: erosion_policy::ErosionMeshInput,
+    erosion_result: Option<erosion_policy::ErosionResult>,
+
+    // -- note_text.feature (issue #123) --
+    // Raw concatenated subrecord bytes (built with `nav_subrecord`) for the
+    // synthetic NOTE record's body: `openmw_esm4::Subrecord`'s fields are
+    // module-private, so this suite drives the real byte-level ESM4 decode
+    // the same way `nav_graph.feature`'s steps do rather than constructing
+    // decoded types directly.
+    note_record_data: Vec<u8>,
+    note_base: Option<openmw_esm4::BaseRecord>,
+    note_prepared_stats: Option<manifest::PreparedItemStats>,
+
+    // -- real_corpses.feature (issue #120, M4 wave 6) --
+    corpse_cell_form_id: u32,
+    /// Pending synthetic ACHR fixtures (reference FormID, base FormID,
+    /// starts-dead), assembled into one synthetic plugin byte stream by the
+    /// When step.
+    corpse_achr_entries: Vec<(u32, u32, bool)>,
+    /// Pending synthetic `NPC_` base-record fixtures (base FormID,
+    /// starts-dead), assembled into the same synthetic plugin byte stream
+    /// by the When step (issue #120 rework: the real FO3 starts-dead
+    /// signal lives on the base record's header flags, not the ACHR
+    /// reference's).
+    corpse_npc_bases: Vec<(u32, bool)>,
+    corpse_parsed: Option<openmw_esm4::ParsedPlugin>,
+
     // -- actor_conversion.feature (authored ragdoll sidecar v3) --
     actor_ragdoll_joint: Option<physics::PreparedPhysicsJoint>,
     actor_physics_asset: Option<physics::PreparedPhysicsAsset>,
@@ -6187,7 +6215,7 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         .first()
         .expect("a landmass mesh must be given first")
         .clone();
-    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh));
+    world.nav_backend_build_result = Some(landmass_graph::build_navigation_mesh(&mesh, &[]));
 }
 
 #[then("the landmass conversion produces a navigation mesh")]
@@ -7173,6 +7201,428 @@ async fn when_solve_blend_fraction_computed(world: &mut BevyoutWorld) {
 #[then(regex = r"^the solve blend fraction is ([\d.]+)$")]
 async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
     assert_eq!(world.nav_solve_blend_fraction, Some(expected));
+}
+
+// `viewer::nav::erosion_policy` (issue #136, M4 wave 6) is std-only, same
+// flat top-level include rationale as `door_link`/`repath`/`ledger_policy`/
+// `movement_policy` above -- declared down here rather than alongside that
+// block because this issue's `tests/features.rs` file ownership is
+// append-only (three other wave-6 executors merge into this same file), not
+// because nesting/order matters to the module resolution itself (a `mod`
+// declaration's position in the file does not affect what `super::` resolves
+// to for its siblings).
+#[path = "../src/viewer/nav/erosion_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod erosion_policy;
+
+// ---------------------------------------------------------------------
+// --- #136 nav erosion steps ---
+// nav_erosion.feature (issue #136, M4 wave 6) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+fn erosion_signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
+    0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
+}
+
+#[given("an erosion mesh")]
+async fn given_erosion_mesh(world: &mut BevyoutWorld) {
+    world.erosion_mesh = erosion_policy::ErosionMeshInput::default();
+    world.erosion_result = None;
+}
+
+#[given(regex = r"^erosion mesh has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_erosion_vertex(world: &mut BevyoutWorld, index: usize, x: f32, y: f32, z: f32) {
+    assert_eq!(
+        world.erosion_mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    world.erosion_mesh.vertices.push([x, y, z]);
+}
+
+#[given(regex = r"^erosion mesh has polygon (\d+) with vertices (\d+),(\d+),(\d+)$")]
+async fn given_erosion_polygon(world: &mut BevyoutWorld, index: usize, a: u32, b: u32, c: u32) {
+    assert_eq!(
+        world.erosion_mesh.polygons.len(),
+        index,
+        "polygons must be given in order starting at 0"
+    );
+    world.erosion_mesh.polygons.push([a, b, c]);
+}
+
+#[when(regex = r"^the erosion mesh is eroded by radius ([\d.]+)$")]
+async fn when_erosion_mesh_eroded(world: &mut BevyoutWorld, radius: f32) {
+    world.erosion_result = Some(erosion_policy::erode(&world.erosion_mesh, radius));
+}
+
+#[then(regex = r"^eroded vertex (\d+) moved into the room on both the x and z axes$")]
+async fn then_eroded_vertex_moved_into_room(world: &mut BevyoutWorld, index: usize) {
+    let original = world.erosion_mesh.vertices[index];
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    let eroded = result.vertices[index];
+    assert!(
+        eroded[0] > original[0] && eroded[2] > original[2],
+        "expected vertex {index} to move into the room on both axes: {original:?} -> {eroded:?}"
+    );
+}
+
+#[then(regex = r"^the erosion pinch guard count is (\d+)$")]
+async fn then_erosion_pinch_guard_count(world: &mut BevyoutWorld, expected: usize) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert_eq!(result.pinch_guard_count, expected);
+}
+
+#[then("the erosion pinch guard count is greater than 0")]
+async fn then_erosion_pinch_guard_count_positive(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert!(
+        result.pinch_guard_count > 0,
+        "expected the pinch guard to engage, got {result:?}"
+    );
+}
+
+#[then("every eroded polygon keeps its original winding sign")]
+async fn then_every_eroded_polygon_keeps_winding_sign(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    for (poly_index, triangle) in world.erosion_mesh.polygons.iter().enumerate() {
+        let original = erosion_signed_area_xz(
+            world.erosion_mesh.vertices[triangle[0] as usize],
+            world.erosion_mesh.vertices[triangle[1] as usize],
+            world.erosion_mesh.vertices[triangle[2] as usize],
+        );
+        let eroded = erosion_signed_area_xz(
+            result.vertices[triangle[0] as usize],
+            result.vertices[triangle[1] as usize],
+            result.vertices[triangle[2] as usize],
+        );
+        assert!(
+            (eroded > 0.0) == (original > 0.0),
+            "polygon {poly_index} inverted: original area {original}, eroded area {eroded}"
+        );
+        assert!(
+            eroded.abs() > 1.0e-6,
+            "polygon {poly_index} degenerated: eroded area {eroded}"
+        );
+    }
+}
+
+// --- #123 note text steps ---
+//
+// `openmw_esm4::Subrecord`/`FormIdResolver` fields are module-private, so
+// (unlike a `#[cfg(test)]` module living inside `openmw_esm4` itself) this
+// suite cannot construct them directly. It instead builds a minimal
+// synthetic plugin (a `CELL` plus one `NOTE` base record) out of raw ESM4
+// bytes -- the same `nav_subrecord`/`nav_record`/`nav_tes4` byte-level
+// helpers `nav_graph.feature`'s steps already use -- and drives the real
+// `openmw_esm4::parse_content_set` decode path end to end. The final
+// scenario mirrors `vsa::prepare::items::prepared_stats`'s `Note` arm
+// inline rather than calling it directly: `vsa::prepare::items` pulls in
+// the full prepare-module dependency graph (`PreparedPlacement`, physics
+// assets, …), which this suite does not otherwise include (see the module
+// doc comment at the top of this file for the narrow-inclusion rationale).
+// The real `prepared_stats` mapping is covered by
+// `vsa::prepare::items::tests::note_text_carries_into_prepared_stats`.
+
+const NOTE_TEXT_CELL_FORM_ID: u32 = 0x0090_0100;
+const NOTE_TEXT_NOTE_FORM_ID: u32 = 0x0090_0101;
+
+#[given(regex = r#"^a synthetic NOTE record with DATA type (\d+) and TNAM text "(.*)"$"#)]
+async fn given_note_text_type(world: &mut BevyoutWorld, note_type: u8, text: String) {
+    let mut tnam = text.into_bytes();
+    tnam.push(0);
+    world.note_record_data = [
+        nav_subrecord(b"DATA", &[note_type]),
+        nav_subrecord(b"TNAM", &tnam),
+    ]
+    .concat();
+}
+
+#[given(regex = r"^a synthetic NOTE record with DATA type (\d+) and TNAM formid 0x([0-9A-Fa-f]+)$")]
+async fn given_note_formid_type(world: &mut BevyoutWorld, note_type: u8, form_id_hex: String) {
+    let form_id = u32::from_str_radix(&form_id_hex, 16).expect("hex form id");
+    world.note_record_data = [
+        nav_subrecord(b"DATA", &[note_type]),
+        nav_subrecord(b"TNAM", &form_id.to_le_bytes()),
+    ]
+    .concat();
+}
+
+#[given(regex = r#"^a synthetic NOTE record with no DATA subrecord and TNAM text "(.*)"$"#)]
+async fn given_note_no_data(world: &mut BevyoutWorld, text: String) {
+    let mut tnam = text.into_bytes();
+    tnam.push(0);
+    world.note_record_data = nav_subrecord(b"TNAM", &tnam);
+}
+
+#[when("the NOTE record is decoded")]
+async fn when_note_decoded(world: &mut BevyoutWorld) {
+    let mut plugin = nav_tes4(&[]);
+    plugin.extend(nav_record(
+        b"CELL",
+        0,
+        NOTE_TEXT_CELL_FORM_ID,
+        &[
+            nav_subrecord(b"EDID", b"NoteTextCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    plugin.extend(nav_record(
+        b"NOTE",
+        0,
+        NOTE_TEXT_NOTE_FORM_ID,
+        &world.note_record_data,
+    ));
+    let sources = vec![openmw_esm4::PluginSource {
+        name: "Fallout3.esm",
+        bytes: &plugin,
+    }];
+    let parsed =
+        openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(NOTE_TEXT_CELL_FORM_ID))
+            .expect("synthetic NOTE plugin must parse");
+    world.note_base = parsed.bases.get(&NOTE_TEXT_NOTE_FORM_ID).cloned();
+}
+
+#[then(regex = r#"^the decoded note text is "(.*)"$"#)]
+async fn then_note_text_is(world: &mut BevyoutWorld, expected: String) {
+    match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => {
+            assert_eq!(text.as_deref(), Some(expected.as_str()));
+        }
+        other => panic!("expected Note item stats, got {other:?}"),
+    }
+}
+
+#[then("the decoded note text is absent")]
+async fn then_note_text_absent(world: &mut BevyoutWorld) {
+    match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => assert!(text.is_none()),
+        other => panic!("expected Note item stats, got {other:?}"),
+    }
+}
+
+#[when("the decoded base record is prepared into item catalog stats")]
+async fn when_note_prepared_into_catalog_stats(world: &mut BevyoutWorld) {
+    let stats = match &world
+        .note_base
+        .as_ref()
+        .expect("NOTE must be decoded")
+        .item_stats
+    {
+        openmw_esm4::OpenMwItemStats::Note { text } => {
+            manifest::PreparedItemStats::Note { text: text.clone() }
+        }
+        other => panic!("expected Note item stats, got {other:?}"),
+    };
+    world.note_prepared_stats = Some(stats);
+}
+
+#[then(regex = r#"^the prepared catalog note text is "(.*)"$"#)]
+async fn then_prepared_catalog_note_text_is(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .note_prepared_stats
+        .as_ref()
+        .expect("catalog stats must be prepared")
+    {
+        manifest::PreparedItemStats::Note { text } => {
+            assert_eq!(text.as_deref(), Some(expected.as_str()));
+        }
+        other => panic!("expected Note prepared stats, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// real_corpses.feature (issue #120, M4 wave 6). Appended section, do not
+// interleave.
+// --- #120 real corpses steps ---
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a real-corpses cell 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_cell(world: &mut BevyoutWorld, cell_hex: String) {
+    world.corpse_cell_form_id = parse_hex(&cell_hex);
+}
+
+#[given(regex = r"^an ACHR reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) that starts dead$")]
+async fn given_corpse_achr_dead(world: &mut BevyoutWorld, reference_hex: String, base_hex: String) {
+    world
+        .corpse_achr_entries
+        .push((parse_hex(&reference_hex), parse_hex(&base_hex), true));
+}
+
+#[given(regex = r"^a living ACHR reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_achr_living(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+) {
+    world
+        .corpse_achr_entries
+        .push((parse_hex(&reference_hex), parse_hex(&base_hex), false));
+}
+
+// Issue #120 rework: the real FO3 starts-dead signal lives on the base
+// `NPC_` record's own header flags, not the ACHR reference's (see
+// features/real_corpses.feature's header comment for the real-data
+// survey).
+#[given(regex = r"^an NPC_ base 0x([0-9a-fA-F]+) that starts dead$")]
+async fn given_corpse_npc_base_dead(world: &mut BevyoutWorld, base_hex: String) {
+    world.corpse_npc_bases.push((parse_hex(&base_hex), true));
+}
+
+#[given(regex = r"^a living NPC_ base 0x([0-9a-fA-F]+)$")]
+async fn given_corpse_npc_base_living(world: &mut BevyoutWorld, base_hex: String) {
+    world.corpse_npc_bases.push((parse_hex(&base_hex), false));
+}
+
+#[when("the real-corpses content set is parsed")]
+async fn when_corpse_content_set_parsed(world: &mut BevyoutWorld) {
+    let mut bytes = nav_tes4(&[]);
+    bytes.extend(nav_record(
+        b"CELL",
+        0,
+        world.corpse_cell_form_id,
+        &[
+            nav_subrecord(b"EDID", b"RealCorpsesTestCell\0"),
+            nav_subrecord(b"DATA", &[1]),
+        ]
+        .concat(),
+    ));
+    // `NPC_` base records are content-set-wide, not cell-scoped (unlike
+    // ACHR/ACRE/REFR references), so they are emitted top-level here --
+    // same as `fabricated_content`'s STAT/MISC/etc. bases in
+    // `src/vsa/prepare/tests/mod.rs`, no GRUP wrapping needed.
+    for (base_form_id, starts_dead) in &world.corpse_npc_bases {
+        // 0x00080000 is the FO3-specific NPC_ record-header "starts dead"
+        // bit (vsa::prepare::placements::NPC_STARTS_DEAD -- see that
+        // constant's doc comment for the real-data survey against
+        // Fallout3.esm) -- same inline-literal convention
+        // `when_nav_content_set_parsed` above uses for `RECORD_DELETED`.
+        let flags = if *starts_dead { 0x0008_0000 } else { 0 };
+        let edid = nav_subrecord(b"EDID", b"CorpseFixture\0");
+        bytes.extend(nav_record(b"NPC_", flags, *base_form_id, &edid));
+    }
+    let mut children = Vec::new();
+    for (reference_form_id, base_form_id, starts_dead) in &world.corpse_achr_entries {
+        // ACHR `DATA`: position (3x f32) + rotation (3x f32), 24 bytes --
+        // `parse_reference` requires at least that length.
+        let mut data = nav_subrecord(b"NAME", &base_form_id.to_le_bytes());
+        data.extend(nav_subrecord(b"DATA", &[0_u8; 24]));
+        // 0x00000200 is the ESM4 record-header bit OpenMW documents as
+        // "starts dead" for ACHR (openmw_esm4's `RECORD_STARTS_DEAD` /
+        // `Rec_StartDead`, `components/esm4/common.hpp`) -- kept here as
+        // the secondary/harmless path's own round-trip coverage (real FO3
+        // data never sets it; see `NPC_STARTS_DEAD`'s doc comment) -- same
+        // inline-literal convention `when_nav_content_set_parsed` above
+        // uses for `RECORD_DELETED`.
+        let flags = if *starts_dead { 0x0000_0200 } else { 0 };
+        children.extend(nav_record(b"ACHR", flags, *reference_form_id, &data));
+    }
+    bytes.extend(nav_group(world.corpse_cell_form_id, 6, &children));
+
+    let sources = [openmw_esm4::PluginSource {
+        name: "RealCorpses.esm",
+        bytes: &bytes,
+    }];
+    let parsed =
+        openmw_esm4::parse_content_set(&sources, &CellSelector::FormId(world.corpse_cell_form_id))
+            .expect("synthetic real-corpses content set must parse");
+    world.corpse_parsed = Some(parsed);
+}
+
+fn corpse_parsed_reference(world: &BevyoutWorld, form_id: u32) -> &openmw_esm4::ReferenceRecord {
+    world
+        .corpse_parsed
+        .as_ref()
+        .expect("the real-corpses content set must be parsed first")
+        .references
+        .iter()
+        .find(|reference| reference.form_id == form_id)
+        .unwrap_or_else(|| panic!("reference {form_id:08x} was not parsed"))
+}
+
+fn corpse_parsed_base(world: &BevyoutWorld, form_id: u32) -> &openmw_esm4::BaseRecord {
+    world
+        .corpse_parsed
+        .as_ref()
+        .expect("the real-corpses content set must be parsed first")
+        .bases
+        .get(&form_id)
+        .unwrap_or_else(|| panic!("NPC_ base {form_id:08x} was not parsed"))
+}
+
+#[then(regex = r"^the parsed reference 0x([0-9a-fA-F]+) starts dead$")]
+async fn then_parsed_reference_starts_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let reference = corpse_parsed_reference(world, parse_hex(&form_hex));
+    assert_ne!(
+        reference.flags & 0x0000_0200,
+        0,
+        "reference {form_hex} did not decode the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed reference 0x([0-9a-fA-F]+) does not start dead$")]
+async fn then_parsed_reference_does_not_start_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let reference = corpse_parsed_reference(world, parse_hex(&form_hex));
+    assert_eq!(
+        reference.flags & 0x0000_0200,
+        0,
+        "reference {form_hex} unexpectedly decoded the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed NPC_ base 0x([0-9a-fA-F]+) starts dead$")]
+async fn then_parsed_npc_base_starts_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let base = corpse_parsed_base(world, parse_hex(&form_hex));
+    assert_ne!(
+        base.record_flags & 0x0008_0000,
+        0,
+        "NPC_ base {form_hex} did not decode the starts-dead flag"
+    );
+}
+
+#[then(regex = r"^the parsed NPC_ base 0x([0-9a-fA-F]+) does not start dead$")]
+async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form_hex: String) {
+    let base = corpse_parsed_base(world, parse_hex(&form_hex));
+    assert_eq!(
+        base.record_flags & 0x0008_0000,
+        0,
+        "NPC_ base {form_hex} unexpectedly decoded the starts-dead flag"
+    );
+}
+
+#[then("the erosion relax passes is greater than 0")]
+async fn then_erosion_relax_passes_positive(world: &mut BevyoutWorld) {
+    let result = world
+        .erosion_result
+        .as_ref()
+        .expect("mesh must be eroded first");
+    assert!(
+        result.relax_passes > 0,
+        "expected at least one corrective pass, got {result:?}"
+    );
 }
 
 fn main() {

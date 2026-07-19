@@ -44,16 +44,61 @@
 //!   dark interior to black the instant `tnm` was toggled on. `AutoExposure`
 //!   only offers a screen-space `metering_mask` (see `scene.rs`'s
 //!   `camera_post_processing`), which can't track a 3D overlay's
-//!   ever-changing screen footprint without a new per-frame render system --
-//!   so the smallest fix is dimming the overlay material itself rather than
-//!   trying to exclude it from metering.
+//!   ever-changing screen footprint without a new per-frame render system.
+//!   Dimming the material constants alone (#138's first pass at 0.28/0.22,
+//!   then this follow-up's 0.12/0.12) turned out not to be fixable by a
+//!   constant at all: `AutoExposure`'s adaptation is applied to the
+//!   *rendered* image after the overlay's colors are already resolved, and
+//!   Bevy 0.19's implementation is GPU-side histogram metering with no
+//!   CPU-readable adapted value -- in a dark interior the exposure gain can
+//!   be 8x or more, so any fixed material color eventually saturates on
+//!   screen regardless of how low it is set. The actual fix
+//!   (`lock_exposure_for_overlay`/`unlock_exposure_for_overlay`) neutralizes
+//!   exposure entirely while the overlay is visible: `AutoExposure` is
+//!   removed from the camera and `Exposure` is pinned to the same fixed
+//!   baseline the camera spawns with (`scene.rs`'s `Exposure { ev100: 12.0
+//!   }`), restoring the camera's exact prior `Exposure`/`AutoExposure` the
+//!   moment the overlay is hidden again (`NavOverlayExposureLock`). This is
+//!   a deliberate debug-overlay UX tradeoff: the rest of the scene stops
+//!   adapting to brightness changes for as long as `tnm` is on, in exchange
+//!   for the overlay's own colors finally rendering at a predictable,
+//!   fixed brightness instead of at whatever the current auto-exposure
+//!   gain happens to be. The fixed-white route polyline (`PATH_LINE_COLOR`)
+//!   is untouched by any of this -- it is the thing actually being read and
+//!   can stay brighter than the triangle fill beneath it.
+//! - Even with exposure locked, a real-data screenshot still showed the
+//!   fill fully opaque and saturated at the 0.12/0.12 constants above --
+//!   floor texture not visible through it at all. The transparency had
+//!   been carried entirely by `Mesh::ATTRIBUTE_COLOR`'s per-vertex alpha
+//!   channel, which was not reliably blending on screen for this unlit
+//!   material (per-vertex *hue* clearly was working -- distinct colors per
+//!   triangle rendered correctly -- so this was specifically an
+//!   alpha-channel pitfall, not a missing `VERTEX_COLORS` pipeline
+//!   feature). The fix moves the actual transparency into the *material's*
+//!   `base_color` alpha instead (`spawn_nav_mesh_overlay`'s fill material
+//!   is now `Color::WHITE.with_alpha(OVERLAY_ALPHA)`, with
+//!   `build_triangle_mesh`'s vertex colors always fully opaque) --
+//!   `bevy_pbr`'s fragment shader (`pbr_input.material.base_color *=
+//!   base_color`) unconditionally multiplies the material's own base color
+//!   into every pixel regardless of vertex-color pipeline behavior, so
+//!   this is the one alpha path guaranteed to actually apply. With that
+//!   real bug fixed, real-data screenshots (agent bridge + a window
+//!   capture bypassing this sandbox's screen-occlusion quirk) drove
+//!   `OVERLAY_ALPHA`/`TRIANGLE_LIGHTNESS` down further still (0.1/0.015):
+//!   even a "dim" 0.12 lightness unlit color reads as a strong, saturated
+//!   fill once blended over an already near-black floor and put through
+//!   `AcesFitted` tonemapping's shadow lift, so the constants needed
+//!   another real reduction, not just the exposure fix, to leave the floor
+//!   texture actually visible through the fill.
 
 use std::path::Path;
 
 use anyhow::Context;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::Exposure;
 use bevy::material::AlphaMode;
 use bevy::mesh::PrimitiveTopology;
+use bevy::post_process::auto_exposure::AutoExposure;
 use bevy::prelude::*;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::debug::{
@@ -73,14 +118,20 @@ use crate::vsa::{PreparedNavGraph, PreparedNavMesh};
 /// sequentially.
 const HUE_STEP: f32 = 0.618_034;
 /// Some transparency so the geometry underneath the overlay stays readable.
-/// Lowered from #128's 0.55 (issue #138 feature 2): see the module doc
-/// comment -- this, combined with `TRIANGLE_LIGHTNESS`, is what stops the
-/// overlay from crushing dark interiors via auto-exposure.
-const OVERLAY_ALPHA: f32 = 0.28;
+/// Lowered from #128's 0.55 (issue #138 feature 2), then twice more in the
+/// #138 follow-up: first to 0.28 (still "way too bright" on human
+/// acceptance), then -- after fixing the real bug (see the module doc
+/// comment: this is now the *material's* `base_color` alpha, not vertex
+/// alpha) and locking exposure -- to this value, chosen by iterating
+/// against real agent-bridge screenshots of Vault 101 Entrance until the
+/// floor texture was clearly visible through the fill.
+const OVERLAY_ALPHA: f32 = 0.1;
 /// HSL lightness used for every triangle's hue (issue #138 feature 2,
-/// down from #128's fixed 0.5). Saturation stays at 1.0 so polygons remain
-/// visually distinct; only the overall brightness is dimmed.
-const TRIANGLE_LIGHTNESS: f32 = 0.22;
+/// down from #128's fixed 0.5, then dimmed twice more in the #138
+/// follow-up -- same real-screenshot iteration as
+/// `OVERLAY_ALPHA`). Saturation stays at 1.0 so polygons remain visually
+/// distinct; only the overall brightness is dimmed.
+const TRIANGLE_LIGHTNESS: f32 = 0.015;
 /// Offset against z-fighting with the floor/nav-mesh-adjacent geometry.
 const OVERLAY_Y_OFFSET: f32 = 0.02;
 /// Additional height (relative to the triangle mesh, i.e. on top of
@@ -94,6 +145,14 @@ const PATH_Y_OFFSET: f32 = 0.03;
 /// triangle overlay's large screen-covering area, not a handful of 1px
 /// line pixels.
 const PATH_LINE_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// Fixed camera exposure the `tnm` overlay locks to while visible (#138
+/// follow-up): the same baseline `scene.rs`'s `spawn_scene_camera` gives the
+/// camera at spawn time, before any `AutoExposure` adaptation
+/// (`Exposure { ev100: 12.0 }`). Locking to this specific value (rather
+/// than, say, a brighter or darker fixed EV chosen just for the overlay)
+/// keeps the rest of the scene's baseline look consistent with what it
+/// would render as if `AutoExposure` were simply absent.
+const OVERLAY_LOCKED_EV100: f32 = 12.0;
 
 /// Marks the overlay's root entity (and its per-mesh children) for the
 /// benefit of tests and any future diagnostics query; not otherwise queried
@@ -128,6 +187,76 @@ struct NavAgentPathState {
 pub(crate) struct NavMeshOverlayState {
     overlay: Option<NavMeshOverlay>,
     path: Option<NavAgentPathState>,
+}
+
+/// The camera's exposure state as it was the moment the `tnm` overlay last
+/// locked it (issue #138 follow-up). `None` means exposure is not currently
+/// locked -- either the overlay has never been toggled on, or it was toggled
+/// off again and the saved state already restored.
+#[derive(Resource, Default)]
+pub(crate) struct NavOverlayExposureLock {
+    saved: Option<SavedExposure>,
+}
+
+struct SavedExposure {
+    camera: Entity,
+    exposure: Exposure,
+    auto_exposure: Option<AutoExposure>,
+}
+
+/// Locks the camera's exposure to a fixed baseline while the overlay is
+/// visible: see the module doc comment for why constant material dimming
+/// alone cannot compensate for `AutoExposure`'s GPU-side adaptation. Removes
+/// `AutoExposure` from the (lowest-`Entity`, matching the rest of this
+/// module's "agent 0"/"first camera found" convention) `Camera3d` entity and
+/// pins `Exposure` to `OVERLAY_LOCKED_EV100`, saving whatever was there
+/// before so `unlock_exposure_for_overlay` can restore it exactly. A no-op
+/// if exposure is already locked (repeated visibility toggles within the
+/// same overlay lifetime must not clobber the originally-saved state) or no
+/// camera entity exists yet (e.g. a test `World` with no camera spawned).
+fn lock_exposure_for_overlay(world: &mut World) {
+    if world.resource::<NavOverlayExposureLock>().saved.is_some() {
+        return;
+    }
+    let Some(camera) = world
+        .query_filtered::<Entity, With<Camera3d>>()
+        .iter(world)
+        .next()
+    else {
+        return;
+    };
+    let Ok(mut entity) = world.get_entity_mut(camera) else {
+        return;
+    };
+    let exposure = entity.get::<Exposure>().copied().unwrap_or(Exposure {
+        ev100: OVERLAY_LOCKED_EV100,
+    });
+    let auto_exposure = entity.get::<AutoExposure>().cloned();
+    entity.remove::<AutoExposure>();
+    entity.insert(Exposure {
+        ev100: OVERLAY_LOCKED_EV100,
+    });
+    world.resource_mut::<NavOverlayExposureLock>().saved = Some(SavedExposure {
+        camera,
+        exposure,
+        auto_exposure,
+    });
+}
+
+/// Restores whatever `lock_exposure_for_overlay` saved. A no-op if exposure
+/// was never locked (already restored, or never locked in the first place),
+/// or the camera entity has since been despawned.
+fn unlock_exposure_for_overlay(world: &mut World) {
+    let Some(saved) = world.resource_mut::<NavOverlayExposureLock>().saved.take() else {
+        return;
+    };
+    let Ok(mut entity) = world.get_entity_mut(saved.camera) else {
+        return;
+    };
+    entity.insert(saved.exposure);
+    if let Some(auto_exposure) = saved.auto_exposure {
+        entity.insert(auto_exposure);
+    }
 }
 
 /// Deterministic per-polygon hue fraction in `[0, 1)` (issue #128's spec:
@@ -174,7 +303,17 @@ fn build_triangle_mesh(mesh: &PreparedNavMesh) -> (Mesh, usize) {
         {
             continue;
         }
-        let color = triangle_color(polygon.index, OVERLAY_ALPHA);
+        // Issue #138 follow-up (visual verification found the fill still
+        // rendering fully opaque/saturated even at OVERLAY_ALPHA 0.12):
+        // vertex-color alpha alone was not reliably blending on screen for
+        // this unlit material/mesh combination. The transparency now lives
+        // in the *material's* `base_color` alpha instead (see
+        // `spawn_nav_mesh_overlay`), which `pbr_fragment.wgsl` always
+        // multiplies into the final pixel unconditionally
+        // (`pbr_input.material.base_color *= base_color`) regardless of
+        // any vertex-color pipeline behavior -- so per-vertex color here
+        // only ever needs to carry full opacity.
+        let color = triangle_color(polygon.index, 1.0);
         for vertex_index in polygon.vertex_indices {
             positions.push(mesh.vertices[vertex_index as usize]);
             colors.push(color);
@@ -211,10 +350,15 @@ fn spawn_nav_mesh_overlay(
             Visibility::Inherited,
         ))
         .id();
+    // Issue #138 follow-up: the fill's transparency lives in the
+    // *material's* `base_color` alpha, not per-vertex `ATTRIBUTE_COLOR`
+    // alpha (see `build_triangle_mesh`'s doc comment for why) -- white RGB
+    // (so it never tints the per-triangle hue, which vertex colors already
+    // carry at full strength) at `OVERLAY_ALPHA`.
     let material = world
         .resource_mut::<Assets<StandardMaterial>>()
         .add(StandardMaterial {
-            base_color: Color::WHITE,
+            base_color: Color::WHITE.with_alpha(OVERLAY_ALPHA),
             unlit: true,
             cull_mode: None,
             alpha_mode: AlphaMode::Blend,
@@ -440,6 +584,11 @@ pub(crate) fn toggle_nav_mesh(
             }
             world.resource_mut::<NavMeshOverlayState>().overlay =
                 Some(NavMeshOverlay { visible, ..overlay });
+            if visible {
+                lock_exposure_for_overlay(world);
+            } else {
+                unlock_exposure_for_overlay(world);
+            }
             return Ok(nav_mesh_toggle_reply(
                 visible,
                 overlay.mesh_count,
@@ -456,6 +605,7 @@ pub(crate) fn toggle_nav_mesh(
         let mut state = world.resource_mut::<NavMeshOverlayState>();
         state.overlay = None;
         state.path = None;
+        unlock_exposure_for_overlay(world);
     }
 
     let Some(source) = nav_graph_source else {
@@ -487,6 +637,7 @@ pub(crate) fn toggle_nav_mesh(
         mesh: path_mesh,
         last_segments: Vec::new(),
     });
+    lock_exposure_for_overlay(world);
     Ok(nav_mesh_toggle_reply(true, mesh_count, triangle_count))
 }
 
@@ -504,7 +655,9 @@ pub(crate) fn toggle_nav_mesh(
 /// a manifest must not panic. An exclusive `&mut World` system (rather than
 /// typed `Query`/`Res` params) so it can share `active_agent_corridor`'s
 /// `World`-based query construction without a second, parallel parameter
-/// list.
+/// list. Also restores the camera's exposure (`unlock_exposure_for_overlay`,
+/// #138 follow-up) on a cell-swap despawn -- from the player's perspective
+/// the overlay is now off, so its exposure lock must not outlive it.
 pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
     let Some(overlay) = world.resource::<NavMeshOverlayState>().overlay else {
         return;
@@ -518,6 +671,7 @@ pub(crate) fn despawn_stale_nav_overlay(world: &mut World) {
         let mut state = world.resource_mut::<NavMeshOverlayState>();
         state.overlay = None;
         state.path = None;
+        unlock_exposure_for_overlay(world);
         return;
     }
     if overlay.visible {
@@ -673,6 +827,7 @@ mod tests {
         world.init_resource::<Assets<Mesh>>();
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<NavMeshOverlayState>();
+        world.init_resource::<NavOverlayExposureLock>();
         world
     }
 
@@ -718,6 +873,65 @@ mod tests {
             world.get::<Visibility>(built_entity),
             Some(&Visibility::Inherited)
         );
+    }
+
+    // #138 follow-up: toggling the overlay on must lock the camera's
+    // exposure (remove `AutoExposure`, pin `Exposure` to the fixed
+    // baseline) since constant material dimming alone cannot compensate
+    // for `AutoExposure`'s GPU-side adaptation (see the module doc
+    // comment); toggling off must restore the exact prior `Exposure`/
+    // `AutoExposure` rather than some new default.
+    #[test]
+    fn toggling_on_locks_exposure_and_toggling_off_restores_it() {
+        let graph = two_triangle_graph();
+        let manifest = manifest_with_nav_graph(0xC0DE, &graph);
+        let mut world = test_world_with_manifest(manifest);
+
+        let original_auto_exposure = AutoExposure {
+            speed_brighten: 1.23,
+            ..default()
+        };
+        let camera = world
+            .spawn((
+                Camera3d::default(),
+                Exposure { ev100: 9.5 },
+                original_auto_exposure.clone(),
+            ))
+            .id();
+
+        toggle_nav_mesh(&mut world, &invocation()).expect("first toggle locks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(OVERLAY_LOCKED_EV100),
+            "exposure must be pinned to the fixed baseline while the overlay is visible"
+        );
+        assert!(
+            world.get::<AutoExposure>(camera).is_none(),
+            "AutoExposure must be removed while the overlay is visible"
+        );
+
+        toggle_nav_mesh(&mut world, &invocation()).expect("second toggle unlocks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(9.5),
+            "the camera's exact prior Exposure must be restored, not some new default"
+        );
+        let restored = world
+            .get::<AutoExposure>(camera)
+            .expect("AutoExposure must be restored once the overlay is hidden again");
+        assert_eq!(
+            restored.speed_brighten,
+            original_auto_exposure.speed_brighten
+        );
+
+        // A third toggle (back on) must lock again from the *current*
+        // (restored) state, not leak the first lock's saved values.
+        toggle_nav_mesh(&mut world, &invocation()).expect("third toggle re-locks exposure");
+        assert_eq!(
+            world.get::<Exposure>(camera).map(|e| e.ev100),
+            Some(OVERLAY_LOCKED_EV100)
+        );
+        assert!(world.get::<AutoExposure>(camera).is_none());
     }
 
     // T128.2: a cell whose manifest carries no `nav_graph` at all replies
@@ -851,23 +1065,28 @@ mod tests {
         // any regression a compile error, which is stronger than a test
         // failure anyway.
         const _: () = assert!(
-            OVERLAY_ALPHA <= 0.3,
-            "overlay alpha regressed toward #128's pre-#138 0.55"
+            OVERLAY_ALPHA <= 0.15,
+            "overlay alpha regressed toward #138's own first pass (0.28) or #128's pre-#138 0.55"
         );
         const _: () = assert!(
-            TRIANGLE_LIGHTNESS <= 0.25,
-            "triangle HSL lightness regressed toward #128's pre-#138 0.5"
+            TRIANGLE_LIGHTNESS <= 0.15,
+            "triangle HSL lightness regressed toward #138's own first pass (0.22) or #128's pre-#138 0.5"
         );
 
         // The brightest a triangle can render at is hue-independent (full
         // saturation, fixed lightness) -- Rec. 709 luma of that color,
         // weighted by the blend alpha, bounds how much any single triangle
-        // can contribute to the metered scene brightness.
-        let brightest = triangle_color(0, OVERLAY_ALPHA);
+        // can contribute to the metered scene brightness. The rendered
+        // pixel's alpha is `vertex_alpha (always 1.0, see
+        // `build_triangle_mesh`) * material base_color alpha
+        // (`OVERLAY_ALPHA`, see `spawn_nav_mesh_overlay`)` -- multiplied
+        // explicitly here rather than baked into `triangle_color`'s own
+        // alpha parameter, since that call now always passes `1.0`.
+        let brightest = triangle_color(0, 1.0);
         let luma = 0.2126 * brightest[0] + 0.7152 * brightest[1] + 0.0722 * brightest[2];
-        let contribution = luma * brightest[3];
+        let contribution = luma * OVERLAY_ALPHA;
         assert!(
-            contribution <= 0.2,
+            contribution <= 0.03,
             "dimmed overlay still contributes too much luminance ({contribution}) to be safe for auto-exposure metering"
         );
     }
@@ -879,9 +1098,13 @@ mod tests {
     #[test]
     fn path_line_color_is_opaque_white_and_never_produced_by_triangle_color() {
         assert_eq!(PATH_LINE_COLOR, [1.0, 1.0, 1.0, 1.0]);
+        // Vertex color alpha is always 1.0 now (transparency lives in the
+        // fill material's `base_color`, see `build_triangle_mesh`'s doc
+        // comment) -- so this compares the actual per-vertex RGBA value
+        // against the route color, hue by hue.
         for index in 0..16_u32 {
             assert_ne!(
-                triangle_color(index, OVERLAY_ALPHA),
+                triangle_color(index, 1.0),
                 PATH_LINE_COLOR,
                 "polygon {index}'s triangle color must never coincide with the route color"
             );
@@ -1059,7 +1282,7 @@ mod tests {
             ],
             doors: Vec::new(),
         };
-        let valid = landmass_graph::build_navigation_mesh(&mesh_input)
+        let valid = landmass_graph::build_navigation_mesh(&mesh_input, &[])
             .nav_mesh
             .expect("synthetic square validates");
         let nav_mesh_handle = app

@@ -2,12 +2,15 @@
 
 use super::*;
 
-/// Bump whenever the catalog shape changes, even when the new fields are
-/// serde-defaulted: a stale cached `items.ron` would otherwise deserialize
-/// silently with those fields defaulted and downstream rules degrade
+/// Bump whenever the catalog shape *or* the decoded meaning of an existing
+/// field changes, even when the shape itself is unchanged: a stale cached
+/// `items.ron` would otherwise deserialize silently with degraded data
 /// (issue #98 added `WEAP.ammo_form_id`/`ARMO.biped_slot_mask` that way --
-/// v3 makes `view` reject pre-#98 catalogs instead).
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v3";
+/// v3 makes `view` reject pre-#98 catalogs instead). Issue #123 fixed
+/// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
+/// cached catalogs pick up real holotape/note text instead of a stale
+/// `None` that would otherwise deserialize cleanly and hide the fix.
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v4";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -288,8 +291,8 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v3");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v3");
+        assert_eq!(catalog.revision, "openmw-items-v4");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v4");
     }
 
     #[test]
@@ -420,6 +423,31 @@ mod tests {
                 biped_slot_mask: Some(0x0000_0005),
                 ..
             }
+        ));
+    }
+
+    // Issue #123: the decoded FO3 NOTE text carries through into the same
+    // prepared field the Pip-Boy reader already consumes for books.
+    #[test]
+    fn note_text_carries_into_prepared_stats() {
+        let mut note = BaseRecord::default();
+        note.kind = "NOTE".into();
+        note.item_stats = OpenMwItemStats::Note {
+            text: Some("Synthetic holotape text".into()),
+        };
+        let bases = HashMap::from([(1, note)]);
+        let catalog = build_item_catalog(&bases, &HashMap::new(), &[], &HashMap::new(), "abc");
+        let note_stats = &catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 1)
+            .unwrap()
+            .stats;
+        assert!(matches!(
+            note_stats,
+            PreparedItemStats::Note {
+                text: Some(text),
+            } if text == "Synthetic holotape text"
         ));
     }
 

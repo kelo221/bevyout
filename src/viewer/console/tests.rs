@@ -1,6 +1,6 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
-use crate::vsa::{PreparedItemCategory, PreparedItemDefinition};
+use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
 fn test_app() -> App {
@@ -1239,4 +1239,174 @@ fn canonical_instance_commands_fail_without_partial_mutation() {
             .get_resource::<super::super::bindings::HotkeyBindings>()
             .is_none()
     );
+}
+
+// -- tdi (issue #151) --------------------------------------------------
+
+#[test]
+fn tdi_toggles_debug_info_state_and_defaults_off() {
+    let mut app = test_app();
+    assert!(
+        !app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+    let output = exec(&mut app, "tdi");
+    assert!(output.ok, "tdi failed: {:?}", output.error);
+    assert_eq!(output.log, ["Debug info enabled."]);
+    assert!(
+        app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+    let output = exec(&mut app, "tdi");
+    assert!(output.ok, "tdi failed: {:?}", output.error);
+    assert_eq!(output.log, ["Debug info disabled."]);
+    assert!(
+        !app.world()
+            .resource::<diagnostics::DebugInfoState>()
+            .enabled
+    );
+}
+
+#[test]
+fn tdi_rejects_arguments() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tdi now")), "bad_arity");
+}
+
+// -- tp (issue #152) -----------------------------------------------------
+
+fn fixture_manifest() -> PreparedSceneManifest {
+    ron::de::from_str(include_str!("../../../features/fixtures/scene.ron"))
+        .expect("synthetic scene fixture should parse")
+}
+
+#[test]
+fn tp_rejects_bad_arity() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 4 5")), "bad_arity");
+}
+
+#[test]
+fn tp_rejects_non_finite_coordinates() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp nope 2 3")), "bad_type");
+    assert_eq!(error_code(&exec(&mut app, "tp 1 NaN 3")), "bad_type");
+}
+
+#[test]
+fn tp_rejects_a_bad_cell_form_id() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "tp 1 2 3 zzzz")), "bad_type");
+}
+
+// T152.1: the 3-arg form sets all three axes in a single write (never a
+// partial, one-axis-at-a-time state) and drives the same
+// `console_transform_mutated` reset `[player.]setpos` triggers.
+#[test]
+fn tp_with_three_args_atomically_repositions_the_player() {
+    let mut app = test_app();
+    let player = app
+        .world_mut()
+        .query_filtered::<Entity, With<player::FpsPlayer>>()
+        .single(app.world())
+        .unwrap();
+    let output = exec(&mut app, "tp 4 5 6");
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    assert_eq!(output.value["x"], 4.0);
+    assert_eq!(output.value["y"], 5.0);
+    assert_eq!(output.value["z"], 6.0);
+    assert_eq!(
+        output.log,
+        ["tp: teleported player to (4.000, 5.000, 6.000)."]
+    );
+    let transform = app.world().get::<Transform>(player).unwrap();
+    assert_eq!(transform.translation, Vec3::new(4.0, 5.0, 6.0));
+}
+
+#[test]
+fn tp_with_a_destination_equal_to_the_active_cell_skips_the_swap() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let manifest = fixture_manifest();
+    let active_cell = manifest.cell.form_id;
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(active_cell));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, &format!("tp 7 8 9 {active_cell:08x}"));
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(
+        requests.iter_current_update_messages().count(),
+        0,
+        "a same-cell tp must not request a swap"
+    );
+}
+
+#[test]
+fn tp_to_an_unprepared_cell_fails_deterministically() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let manifest = fixture_manifest();
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(manifest.cell.form_id));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    // The fixture's asset_root ("cache/00017f37") exists nowhere, so
+    // any destination other than the active cell is unprepared.
+    assert_eq!(
+        error_code(&exec(&mut app, "tp 1 2 3 000badd0")),
+        "cell_not_found"
+    );
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    assert_eq!(requests.iter_current_update_messages().count(), 0);
+}
+
+#[test]
+fn tp_to_a_prepared_different_cell_writes_a_travel_request_at_the_given_position() {
+    let mut app = test_app();
+    app.add_message::<interaction::DoorTravelRequested>();
+    let mut manifest = fixture_manifest();
+    let source_cell = manifest.cell.form_id;
+    let destination_cell = 0x0002_0002u32;
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-console-tp-test-{}-{destination_cell:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root
+        .join("scenes")
+        .join(format!("{destination_cell:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+    std::fs::write(scene_dir.join("scene.ron"), "()")
+        .expect("write synthetic prepared-cell fixture file");
+    manifest.asset_root = temp_root.to_string_lossy().into_owned();
+    app.world_mut()
+        .insert_resource(super::super::world::ActiveCell(source_cell));
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "tp 4 5 6 00020002");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "tp failed: {:?}", output.error);
+    assert_eq!(output.value["cell_form_id"], destination_cell);
+    let requests = app
+        .world()
+        .resource::<Messages<interaction::DoorTravelRequested>>();
+    let request = requests
+        .iter_current_update_messages()
+        .next()
+        .expect("expected a DoorTravelRequested message");
+    assert_eq!(request.destination_cell_form_id, destination_cell);
+    assert_eq!(request.translation, Vec3::new(4.0, 5.0, 6.0));
+    assert_eq!(request.door_form_id, 0);
+    cleanup.expect("remove synthetic prepared-cell fixture dir");
 }

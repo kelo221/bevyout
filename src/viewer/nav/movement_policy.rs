@@ -226,6 +226,32 @@ pub(crate) fn decide_stuck(observation: StuckObservation) -> StuckDecision {
     }
 }
 
+/// Whether the agent counts as arrived and should have its stuck-detection
+/// state fully reset this tick -- either its own recomputed horizontal
+/// distance is within `reached_distance` of the target (the original
+/// check), OR `bevy_landmass` itself already reports
+/// `AgentState::ReachedTarget` (`landmass_reached`).
+///
+/// Regression fix (issue #136 follow-up): before navmesh erosion existed,
+/// these two signals always agreed closely enough that only the distance
+/// check was needed. Eroding the walkable boundary inward by the agent
+/// radius moves the navmesh's constrained/sampled point for a raw
+/// (un-sampled) `tna goto` target, so the literal requested coordinate's
+/// nearest *reachable* point can end up farther than `reached_distance`
+/// away even though the agent is genuinely as close as it can physically
+/// get and landmass has already stopped issuing meaningful movement.
+/// Without also trusting `landmass_reached`, `decide_stuck`'s no-progress
+/// window would eventually (and incorrectly) latch `Stuck` on a route that
+/// had already finished -- "reached" and "stuck" must stay mutually
+/// exclusive outcomes.
+pub(crate) fn arrival_resets_stuck(
+    distance_to_target: f32,
+    reached_distance: f32,
+    landmass_reached: bool,
+) -> bool {
+    distance_to_target <= reached_distance || landmass_reached
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +371,29 @@ mod tests {
             }),
             StuckDecision::Stuck
         );
+    }
+
+    #[test]
+    fn close_distance_alone_resets_stuck_without_landmass_agreeing() {
+        // Pre-existing behaviour: the recomputed horizontal distance being
+        // within range is sufficient on its own.
+        assert!(arrival_resets_stuck(0.3, 0.5, false));
+    }
+
+    #[test]
+    fn landmass_reached_alone_resets_stuck_even_far_from_target() {
+        // Regression (issue #136 follow-up): after erosion, a raw
+        // (un-sampled) goto target's nearest reachable point can sit
+        // farther than `reached_distance` from the literal requested
+        // coordinate even though landmass has already stopped the agent.
+        // `landmass_reached` must reset stuck detection on its own,
+        // independent of how far the recomputed distance says it is.
+        assert!(arrival_resets_stuck(0.64, 0.5, true));
+    }
+
+    #[test]
+    fn neither_signal_does_not_reset_stuck() {
+        assert!(!arrival_resets_stuck(0.64, 0.5, false));
     }
 
     #[test]

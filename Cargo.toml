@@ -41,6 +41,18 @@ toml = "0.8"
 # version landmass itself pins internally; see the module doc comment).
 bevy_landmass = "=0.12.0"
 glam = "=0.32.1"
+# Issue #136 (M4 wave 6): `landmass_graph.rs`'s navmesh-erosion conversion
+# step logs a stable diagnostic line (`nav erosion: polys ... eroded ...
+# pinch-guard ...`) per the project's tracing-only logging rule (AGENTS.md
+# "Logging"). `bevy::prelude::info!`/`warn!` are the same `tracing` macros
+# re-exported through `bevy_log`, but pulling in the full `bevy` crate here
+# would break `landmass_graph.rs`'s deliberate no-full-Bevy-import shape
+# (see that file's module doc comment) and its verbatim `#[path]` inclusion
+# by `tests/features.rs`. `tracing` itself is already resolved in
+# `Cargo.lock` as a transitive dependency of `bevy`/`bevy_landmass`, so
+# adding it directly here does not change what gets built, only what this
+# one file may call.
+tracing = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

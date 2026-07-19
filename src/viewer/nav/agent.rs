@@ -636,7 +636,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
-        let result = landmass_graph::build_navigation_mesh(mesh);
+        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs);
         for diagnostic in &result.diagnostics {
             warn!(
                 "nav landmass conversion mesh {:08x}: {}",
@@ -1338,6 +1338,47 @@ fn resolve_status(
     landmass_graph::map_agent_state(landmass_state)
 }
 
+/// Issue #151: one deterministic line per currently-spawned test nav agent
+/// for the console debug-info HUD, reusing the exact same
+/// status/grounded/stuck/blocked fields `tna status` (`agent_status` above)
+/// reports -- read-only, so this can run from a plain `Update` HUD system
+/// instead of needing the console command's `&mut World`/`ConsoleInvocation`
+/// plumbing.
+pub(crate) fn hud_agent_status_lines(world: &World) -> Vec<String> {
+    let Some(state) = world.get_resource::<TestNavAgentState>() else {
+        return Vec::new();
+    };
+    state
+        .entities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entity)| {
+            let entity = (*entity)?;
+            let position = world
+                .get::<GlobalTransform>(entity)
+                .map(|transform| transform.translation())
+                .unwrap_or_default();
+            let landmass_state = world.get::<AgentState>(entity).copied().unwrap_or_default();
+            let door_link_state = world
+                .get::<AgentRuntime>(entity)
+                .map(|runtime| runtime.door_link)
+                .unwrap_or_default();
+            let (grounded, stuck, collision_blocked) = world
+                .get::<AgentKcc>(entity)
+                .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
+                .unwrap_or_default();
+            let status = resolve_status(landmass_state, door_link_state);
+            Some(format!(
+                "nav agent {index} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
+                status.as_str(),
+                position.x,
+                position.y,
+                position.z,
+            ))
+        })
+        .collect()
+}
+
 /// The `link=` suffix for `tna status` (issue #113 feature 5): the active
 /// link kind while interacting with one (`merge` while crossing a merge
 /// seam, `door <formid>` through a door lifecycle), else `None`.
@@ -1494,6 +1535,7 @@ type AgentPhysicsQuery<'w, 's> = Query<
         &'static AgentDesiredVelocityBlend,
         &'static mut AgentKcc,
         Option<&'static AgentTarget3d>,
+        Option<&'static AgentState>,
     ),
     (With<TestNavAgentMarker>, Without<DoorTraversal>),
 >;
@@ -1537,7 +1579,7 @@ fn apply_agent_physics_movement(
         return;
     }
     if physics_disabled.0 || !cell_physics.static_collision_ready() {
-        for (_, _, mut velocity, _, mut kcc, _) in &mut agents {
+        for (_, _, mut velocity, _, mut kcc, _, _) in &mut agents {
             velocity.velocity = Vec3::ZERO;
             kcc.velocity = Vec3::ZERO;
             kcc.grounded = false;
@@ -1563,7 +1605,7 @@ fn apply_agent_physics_movement(
         solve_rate.0,
     );
 
-    for (entity, mut transform, mut velocity, blend, mut kcc, target) in &mut agents {
+    for (entity, mut transform, mut velocity, blend, mut kcc, target, agent_state) in &mut agents {
         let desired_velocity = blend.previous.lerp(blend.latest, solve_blend_fraction);
         let desired_horizontal = Vec2::new(desired_velocity.x, desired_velocity.z);
         let (new_position, new_kcc_velocity, grounded) = step_agent_kcc(
@@ -1626,18 +1668,37 @@ fn apply_agent_physics_movement(
         if kcc.best_distance == f32::MAX {
             kcc.best_distance = distance;
         }
-        // Genuinely at the target (the same horizontal-proximity threshold
-        // `AGENT_TARGET_REACHED_DISTANCE` uses elsewhere, mirroring
-        // landmass's own `TargetReachedCondition`): "reached" and "stuck"
-        // are mutually exclusive outcomes, not independent facts. Without
-        // this short-circuit, `decide_stuck`'s "no further improvement
-        // possible" window (`STUCK_RECOVERY_TICKS + STUCK_FAILURE_TICKS`,
-        // ~2 s at 64 Hz) would eventually latch `stuck` for *any* agent that
-        // simply arrives and stops -- once at the closest point it can get,
+        // Genuinely at the target: "reached" and "stuck" are mutually
+        // exclusive outcomes, not independent facts. Without this
+        // short-circuit, `decide_stuck`'s "no further improvement possible"
+        // window (`STUCK_RECOVERY_TICKS + STUCK_FAILURE_TICKS`, ~2 s at
+        // 64 Hz) would eventually latch `stuck` for *any* agent that simply
+        // arrives and stops -- once at the closest point it can get,
         // distance stops strictly decreasing regardless of *why* (blocked,
         // or done). A `Stuck` latch from a previous route also clears here:
         // reaching a (possibly re-issued) target is unambiguous progress.
-        if distance <= AGENT_TARGET_REACHED_DISTANCE {
+        //
+        // Two independent signals feed this, not just the horizontal
+        // distance threshold (issue #136 follow-up): `bevy_landmass`'s own
+        // `AgentState::ReachedTarget` is authoritative ground truth for
+        // "landmass itself has stopped issuing meaningful movement toward
+        // this target" and must reset stuck detection even when this
+        // system's own recomputed distance disagrees. Post-erosion, a raw
+        // (un-sampled) `AgentTarget3d::Point` from `tna goto` can have its
+        // nearest reachable point end up farther than
+        // `AGENT_TARGET_REACHED_DISTANCE` from the literal requested
+        // coordinate (the walkable boundary shrank inward by the agent
+        // radius) even though the agent is genuinely as close as it can
+        // physically get -- without also trusting landmass's own state
+        // here, the no-progress window would eventually (and incorrectly)
+        // latch `stuck` on a route that had already finished. See
+        // `movement_policy::arrival_resets_stuck`'s doc comment.
+        let landmass_reached = matches!(agent_state, Some(AgentState::ReachedTarget));
+        if movement_policy::arrival_resets_stuck(
+            distance,
+            AGENT_TARGET_REACHED_DISTANCE,
+            landmass_reached,
+        ) {
             kcc.best_distance = distance;
             kcc.ticks_without_progress = 0;
             kcc.recovery_active = false;
@@ -4348,7 +4409,7 @@ mod tests {
             ],
             doors: Vec::new(),
         };
-        let valid = landmass_graph::build_navigation_mesh(&mesh_input)
+        let valid = landmass_graph::build_navigation_mesh(&mesh_input, &[])
             .nav_mesh
             .expect("synthetic square validates");
         let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {

@@ -299,6 +299,173 @@ fn prepared_semantic_actor_kinds_ignore_the_base_record() {
     ));
 }
 
+// Issue #120 (F119.1 rework): the real FO3 signal is on the base `NPC_`
+// record's own header flags (`NPC_STARTS_DEAD`, see its doc comment for
+// the real-data survey against `Fallout3.esm` that found this), not the
+// ACHR reference-level bit the first attempt used -- a source-dead NPC
+// reference whose base has `NPC_STARTS_DEAD` prepares as a lootable
+// `PreparedSemantic::Corpse`, not `Npc`.
+#[test]
+fn prepared_semantic_a_dead_npc_base_record_prepares_as_a_corpse() {
+    let npc_form_id = 0x0001_2345;
+    let content = fabricated_actor_content(npc_form_id, 0x0000_2222, NPC_STARTS_DEAD);
+    let reference = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        base_form_id: npc_form_id,
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared_semantic(&reference, content.bases.get(&npc_form_id)),
+        PreparedSemantic::Corpse
+    ));
+}
+
+// The same base record with the flag unset -- a living actor -- must keep
+// preparing as `Npc`.
+#[test]
+fn prepared_semantic_a_living_npc_base_record_still_prepares_as_npc() {
+    let npc_form_id = 0x0001_2345;
+    let content = fabricated_actor_content(npc_form_id, 0x0000_2222, 0);
+    let reference = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        base_form_id: npc_form_id,
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared_semantic(&reference, content.bases.get(&npc_form_id)),
+        PreparedSemantic::Npc(_)
+    ));
+}
+
+#[test]
+fn prepared_semantic_a_living_npc_reference_still_prepares_as_npc() {
+    let living = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        flags: 0,
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared_semantic(&living, None),
+        PreparedSemantic::Npc(_)
+    ));
+}
+
+// The ACHR-level `RECORD_STARTS_DEAD` bit is kept as a harmless secondary
+// OR-condition (real FO3 data never sets it -- see that constant's doc
+// comment -- but nothing stops honoring it if some other content did).
+// This pins that fallback path with no base record at all.
+#[test]
+fn prepared_semantic_the_secondary_achr_flag_still_prepares_as_a_corpse_with_no_base() {
+    let dead = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        flags: RECORD_STARTS_DEAD,
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared_semantic(&dead, None),
+        PreparedSemantic::Corpse
+    ));
+}
+
+// The "starts dead" bit is documented only for `ACHR` (NPC) references;
+// `ACRE` (creature) references reusing the same header-flags bit for an
+// undocumented meaning must not be reinterpreted as a corpse.
+#[test]
+fn prepared_semantic_the_starts_dead_bit_is_not_read_for_creature_references() {
+    let creature = ReferenceRecord {
+        kind: ReferenceKind::Creature,
+        flags: RECORD_STARTS_DEAD,
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared_semantic(&creature, None),
+        PreparedSemantic::Creature(_)
+    ));
+}
+
+/// `BaseRecord` carries a module-private field (`ignored_subrecords`)
+/// inside `openmw_esm4`, so -- like `fabricated_content` above -- it
+/// cannot be built with a struct literal from this module. Builds a
+/// minimal synthetic `NPC_` base (editor ID, display name, one `CNTO`
+/// inventory item, and the given record-header flags) plus its `MISC` item
+/// base, and parses them through the real `parse_content_set` entry point.
+fn fabricated_actor_content(
+    npc_form_id: u32,
+    item_form_id: u32,
+    npc_record_flags: u32,
+) -> ParsedPlugin {
+    let mut bytes = record(b"TES4", 0, &[]);
+    bytes.extend(record(
+        b"MISC",
+        item_form_id,
+        &subrecord(b"FULL", b"Corpse Loot Item\0"),
+    ));
+    let mut npc_data = subrecord(b"EDID", b"CG04DeadOldLady\0");
+    npc_data.extend(subrecord(b"FULL", b"Old Lady\0"));
+    let mut cnto = item_form_id.to_le_bytes().to_vec();
+    cnto.extend_from_slice(&3_u32.to_le_bytes());
+    npc_data.extend(subrecord(b"CNTO", &cnto));
+    bytes.extend(record_with_flags(
+        b"NPC_",
+        npc_form_id,
+        npc_record_flags,
+        &npc_data,
+    ));
+
+    parse_content_set(
+        &[PluginSource {
+            name: "DeadActor.esm",
+            bytes: &bytes,
+        }],
+        &parse_cell_selector("0").unwrap(),
+    )
+    .expect("fabricated dead-actor plugin bytes must parse")
+}
+
+// F119.2: the corpse's stable reference, transform, display identity, and
+// inventory come straight from the same generic `prepared_placement`
+// fields every other semantic uses -- nothing corpse-specific is dropped
+// once classification flips to `Corpse`. Exercises the real end-to-end
+// path: the base `NPC_` record's own header carries `NPC_STARTS_DEAD`, and
+// the ACHR reference itself carries no starts-dead flag at all (matching
+// real `Fallout3.esm` data, per that constant's survey).
+#[test]
+fn prepared_placement_preserves_identity_transform_and_inventory_for_a_dead_actor() {
+    let npc_form_id = 0x0001_2345;
+    let item_form_id = 0x0000_2222;
+    let content = fabricated_actor_content(npc_form_id, item_form_id, NPC_STARTS_DEAD);
+    let reference = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        form_id: 0x0005_4398,
+        base_form_id: npc_form_id,
+        flags: 0,
+        position: [12.0, -4.5, 7.0],
+        rotation: [0.0, 0.0, std::f32::consts::FRAC_PI_2],
+        scale: 1.0,
+        count: 1,
+        initially_enabled: true,
+        ..Default::default()
+    };
+    let base = content.bases.get(&npc_form_id);
+    let placement = prepared_placement(&reference, base, None, None, &content.bases);
+
+    assert!(matches!(placement.semantic, PreparedSemantic::Corpse));
+    assert_eq!(placement.reference_form_id, reference.form_id);
+    assert_eq!(placement.base_form_id, reference.base_form_id);
+    // `placement_transform` applies the same FO3-units-to-metres/axis
+    // conversion every other semantic gets; a corpse must not bypass it.
+    assert_eq!(placement.translation, placement_transform(&reference).0);
+    assert_eq!(placement.display_name.as_deref(), Some("Old Lady"));
+    assert_eq!(placement.editor_id.as_deref(), Some("CG04DeadOldLady"));
+    assert_eq!(placement.inventory.len(), 1);
+    assert_eq!(placement.inventory[0].base_form_id, item_form_id);
+    assert_eq!(placement.inventory[0].count, 3);
+    assert_eq!(
+        placement.inventory[0].display_name.as_deref(),
+        Some("Corpse Loot Item")
+    );
+}
+
 #[test]
 fn prepared_semantic_object_without_a_base_record_is_unsupported() {
     assert!(matches!(
