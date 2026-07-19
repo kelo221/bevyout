@@ -20,14 +20,32 @@
 //! `placement_transform_parts`) -- applied exactly once, here, to every
 //! `NVVX` vertex.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::super::paths::FO3_SCALE;
 
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
-/// precedent.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v3";
+/// precedent. Bumped to v4 for issue #156: `PreparedNavMeshMerge::
+/// authored_evidence`, `PreparedNavPolygon::authored_external`, and the new
+/// `NavGraphCounters` fields (merge-candidate authored/geometric split, NVEX/
+/// NVCI correlation counts).
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v4";
+
+/// `NVTR` per-edge "external" flag bits (fopdoc FalloutNV `Records/NAVM.html`,
+/// "Flag Values"), restated locally per this module's no-`openmw_esm4`-import
+/// rule -- the same precedent as `is_water`/`is_preferred_pathing`/
+/// `contains_door` below (see `openmw_esm4::navmesh::NavMeshTriangle`'s own
+/// constants, the format-side source of truth). Edge slot `n` runs from
+/// `vertex_indices[n]` to `vertex_indices[(n + 1) % 3]`, the same slot
+/// convention `adjacency` already uses. Issue #156 feature 2: an edge with
+/// this bit set is *authored* evidence that the edge is meant to connect
+/// outside this mesh (a doorway/seam), as opposed to `adjacency`'s purely
+/// geometric "no same-mesh neighbour" inference, which cannot distinguish an
+/// authored seam from a genuine dead-end wall.
+const EDGE_EXTERNAL_FLAGS: [u32; 3] = [0x0000_0001, 0x0000_0002, 0x0000_0004];
 
 // ---------------------------------------------------------------------
 // Plain input types (boundary conversion happens in navmesh.rs)
@@ -84,11 +102,35 @@ pub(crate) struct NavGraphNaviEntryInput {
     pub(crate) grid_y: i16,
 }
 
+/// One decoded `NAVI` `NVCI` correlation entry (issue #156 feature 3;
+/// boundary conversion from `openmw_esm4::navmesh::NaviCorrelationEntry`
+/// happens in `navmesh.rs`'s `stage_navmeshes`). Correlation evidence only --
+/// never consumed for runtime pathing, see [`navi_correlation`]'s doc
+/// comment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NavGraphNaviCorrelationEntryInput {
+    pub(crate) navmesh_form_id: Option<u32>,
+    pub(crate) other_navmesh_form_id: Option<u32>,
+    pub(crate) door_form_id: Option<u32>,
+}
+
+/// One decoded `NAVI` `NVCI` subrecord (issue #156 feature 3); boundary
+/// conversion from `openmw_esm4::navmesh::NaviCorrelation`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct NavGraphNaviCorrelationInput {
+    pub(crate) leading_navmesh_form_id: Option<u32>,
+    pub(crate) entries: Vec<NavGraphNaviCorrelationEntryInput>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct NavGraphInputs {
     pub(crate) cell_form_id: u32,
     pub(crate) meshes: Vec<NavGraphMeshInput>,
     pub(crate) navi_entries: Vec<NavGraphNaviEntryInput>,
+    /// Decoded `NAVI` `NVCI` subrecords for this cell's content set (issue
+    /// #156 feature 3), independent of `navi_entries` (`NVMI`'s reduced
+    /// grid-coordinate fields).
+    pub(crate) navi_correlations: Vec<NavGraphNaviCorrelationInput>,
 }
 
 // ---------------------------------------------------------------------
@@ -133,6 +175,13 @@ pub(crate) struct PreparedNavPolygon {
     pub(crate) is_water: bool,
     pub(crate) is_preferred_pathing: bool,
     pub(crate) contains_door: bool,
+    /// Per-edge `NVTR` "external" flag bits (issue #156 feature 2), aligned
+    /// with `adjacency`'s slot convention: `authored_external[n]` is the edge
+    /// from `vertex_indices[n]` to `vertex_indices[(n + 1) % 3]`. Authored
+    /// evidence that the edge is meant to connect outside this mesh,
+    /// independent of (and not implied by) `adjacency[n].is_none()`, which
+    /// only says this mesh has no same-mesh neighbour on that edge.
+    pub(crate) authored_external: [bool; 3],
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +247,13 @@ pub(crate) struct PreparedNavMeshMerge {
     pub(crate) interval_a: [[f32; 3]; 2],
     /// Bevy-metre portal interval on `mesh_b`'s side of the seam.
     pub(crate) interval_b: [[f32; 3]; 2],
+    /// Issue #156 feature 2: `true` when `edge_a` or `edge_b` (or both)
+    /// carries the authored `NVTR` external-edge flag (`PreparedNavPolygon::
+    /// authored_external`), rather than being inferred purely from
+    /// `adjacency` geometry. `compute_mesh_merges` also prioritizes authored
+    /// candidates over purely geometric ones when resolving conflicting
+    /// portal claims on the same edge -- see that function's doc comment.
+    pub(crate) authored_evidence: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -247,6 +303,34 @@ pub(crate) struct NavGraphCounters {
     pub(crate) mesh_merges_rejected: usize,
     pub(crate) diagnostics_warning: usize,
     pub(crate) diagnostics_error: usize,
+    /// Issue #156 feature 2: of `mesh_merges` (accepted merges), how many
+    /// carry authored `NVTR` external-edge evidence on at least one side
+    /// (`PreparedNavMeshMerge::authored_evidence`) versus how many were
+    /// accepted purely on geometric proximity. `mesh_merges_authored +
+    /// mesh_merges_geometric == mesh_merges` always.
+    pub(crate) mesh_merges_authored: usize,
+    pub(crate) mesh_merges_geometric: usize,
+    /// Same authored/geometric split, but over every portal *candidate*
+    /// `compute_mesh_merges` generated before the reciprocal-overlap
+    /// resolution pass accepted or rejected it (a superset of the accepted
+    /// `mesh_merges_authored`/`mesh_merges_geometric` counts above).
+    pub(crate) merge_candidates_authored: usize,
+    pub(crate) merge_candidates_geometric: usize,
+    /// Issue #156 feature 3: `NVEX` external-connection correlation counts
+    /// (never consumed for runtime pathing -- see `navi_correlation`'s doc
+    /// comment). `nvex_targets_inside_cell` is unexpected (a supposedly
+    /// "external" connection resolving to a NAVM already in this cell's own
+    /// graph); `nvex_targets_outside_cell` is the expected shape (an
+    /// exterior-tile stitching candidate for a future milestone).
+    pub(crate) nvex_targets_inside_cell: usize,
+    pub(crate) nvex_targets_outside_cell: usize,
+    /// Issue #156 feature 3: `NAVI` `NVCI` correlation counts (see
+    /// `navi_correlation`'s doc comment for the decode's verification
+    /// caveat).
+    pub(crate) nvci_subrecords: usize,
+    pub(crate) nvci_entries: usize,
+    pub(crate) nvci_door_matches: usize,
+    pub(crate) nvci_navmesh_matches: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -292,6 +376,13 @@ fn error(message: String) -> NavGraphDiagnostic {
     }
 }
 
+fn info(message: String) -> NavGraphDiagnostic {
+    NavGraphDiagnostic {
+        severity: "info".into(),
+        message,
+    }
+}
+
 /// Builds the full graph from `inputs`, in deterministic
 /// (mesh `form_id`, polygon/entry index) order.
 pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
@@ -307,9 +398,16 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
     }
 
     let bounds = whole_graph_bounds(&meshes);
-    let (mesh_merges, merge_diagnostics) = compute_mesh_merges(&meshes);
+    let (mesh_merges, merge_diagnostics, merge_candidate_counts) = compute_mesh_merges(&meshes);
     let mesh_merges_rejected = merge_diagnostics.len();
     diagnostics.extend(merge_diagnostics);
+    let mesh_merges_authored = mesh_merges.iter().filter(|m| m.authored_evidence).count();
+    let mesh_merges_geometric = mesh_merges.len() - mesh_merges_authored;
+
+    let (navi_correlation_counts, navi_correlation_diagnostics) =
+        navi_correlation(&meshes, &inputs.navi_correlations);
+    diagnostics.extend(navi_correlation_diagnostics);
+
     let diagnostics_warning = diagnostics
         .iter()
         .filter(|d| d.severity == "warning")
@@ -325,6 +423,16 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         mesh_merges_rejected,
         diagnostics_warning,
         diagnostics_error,
+        mesh_merges_authored,
+        mesh_merges_geometric,
+        merge_candidates_authored: merge_candidate_counts.authored,
+        merge_candidates_geometric: merge_candidate_counts.geometric,
+        nvex_targets_inside_cell: navi_correlation_counts.nvex_targets_inside_cell,
+        nvex_targets_outside_cell: navi_correlation_counts.nvex_targets_outside_cell,
+        nvci_subrecords: navi_correlation_counts.nvci_subrecords,
+        nvci_entries: navi_correlation_counts.nvci_entries,
+        nvci_door_matches: navi_correlation_counts.nvci_door_matches,
+        nvci_navmesh_matches: navi_correlation_counts.nvci_navmesh_matches,
     };
 
     PreparedNavGraph {
@@ -336,6 +444,103 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         counters,
         mesh_merges,
     }
+}
+
+/// Result of [`navi_correlation`]'s FormID cross-referencing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NaviCorrelationCounts {
+    nvex_targets_inside_cell: usize,
+    nvex_targets_outside_cell: usize,
+    nvci_subrecords: usize,
+    nvci_entries: usize,
+    nvci_door_matches: usize,
+    nvci_navmesh_matches: usize,
+}
+
+/// Issue #156 feature 3: correlates already-decoded `NVEX` external
+/// connections (`meshes[..].external_connections`, unchanged from issue
+/// #111) and `NAVI` `NVCI` correlation subrecords (new this issue, see
+/// `openmw_esm4::navmesh::decode_navi_correlation`'s doc comment for the
+/// decode's verification caveat) against this cell's own known NAVM/door
+/// FormIDs. Correlation only -- neither output feeds pathing or mesh-merge
+/// resolution; this is evidence for a future exterior-stitching milestone
+/// (see the module doc comment's `PreparedNavMeshMerge` reference and issue
+/// #13/#87), surfaced today only as counters and diagnostics.
+///
+/// A `target`/`navmesh`/`other_navmesh` FormID resolving to one of this
+/// cell's own NAVM `form_id`s is *inside* this cell already (an NVEX pointing
+/// back into the same cell is unexpected -- NVEX's whole purpose is
+/// presumably cross-cell/cross-worldspace linkage); anything else is
+/// *outside* (the expected shape for both fields, since this cell's graph
+/// has no visibility into other cells' NAVM FormIDs to positively confirm
+/// them). Never panics: every lookup is a plain FormID set membership check,
+/// no indexing.
+fn navi_correlation(
+    meshes: &[PreparedNavMesh],
+    navi_correlations: &[NavGraphNaviCorrelationInput],
+) -> (NaviCorrelationCounts, Vec<NavGraphDiagnostic>) {
+    let known_navmesh_form_ids: BTreeSet<u32> = meshes.iter().map(|mesh| mesh.form_id).collect();
+    let known_door_form_ids: BTreeSet<u32> = meshes
+        .iter()
+        .flat_map(|mesh| {
+            mesh.doors
+                .iter()
+                .filter_map(|door| door.door_reference_form_id)
+        })
+        .collect();
+
+    let mut counts = NaviCorrelationCounts::default();
+    for mesh in meshes {
+        for connection in &mesh.external_connections {
+            let Some(target) = connection.target_navmesh_form_id else {
+                continue;
+            };
+            if known_navmesh_form_ids.contains(&target) {
+                counts.nvex_targets_inside_cell += 1;
+            } else {
+                counts.nvex_targets_outside_cell += 1;
+            }
+        }
+    }
+
+    for correlation in navi_correlations {
+        counts.nvci_subrecords += 1;
+        let mut navmesh_candidates: Vec<u32> =
+            correlation.leading_navmesh_form_id.into_iter().collect();
+        for entry in &correlation.entries {
+            counts.nvci_entries += 1;
+            navmesh_candidates.extend(entry.navmesh_form_id);
+            navmesh_candidates.extend(entry.other_navmesh_form_id);
+            if let Some(door) = entry.door_form_id
+                && known_door_form_ids.contains(&door)
+            {
+                counts.nvci_door_matches += 1;
+            }
+        }
+        counts.nvci_navmesh_matches += navmesh_candidates
+            .iter()
+            .filter(|form_id| known_navmesh_form_ids.contains(form_id))
+            .count();
+    }
+
+    let mut diagnostics = Vec::new();
+    if counts.nvex_targets_inside_cell > 0 || counts.nvex_targets_outside_cell > 0 {
+        diagnostics.push(info(format!(
+            "NVEX correlation: {} target(s) outside this cell's own NAVM set (exterior stitching evidence), {} target(s) already inside this cell (unexpected)",
+            counts.nvex_targets_outside_cell, counts.nvex_targets_inside_cell
+        )));
+    }
+    if counts.nvci_subrecords > 0 {
+        diagnostics.push(info(format!(
+            "NVCI correlation: {} subrecord(s), {} entrie(s), {} door FormID match(es) against this cell's own NAVM doors, {} NAVM FormID match(es) against this cell's own NAVM records",
+            counts.nvci_subrecords,
+            counts.nvci_entries,
+            counts.nvci_door_matches,
+            counts.nvci_navmesh_matches
+        )));
+    }
+
+    (counts, diagnostics)
 }
 
 /// bevy-metre distance below which two different meshes' unconnected
@@ -398,6 +603,12 @@ struct BoundaryEdge {
     vertex_indices: [u32; 2],
     start: [f32; 3],
     end: [f32; 3],
+    /// Issue #156 feature 2: this edge's own `PreparedNavPolygon::
+    /// authored_external` slot -- authored `NVTR` evidence that this
+    /// boundary edge is meant to connect outside this mesh, independent of
+    /// the purely geometric "no same-mesh neighbour" fact that put it in
+    /// `boundary_edges` at all.
+    authored_external: bool,
 }
 
 fn boundary_edges(mesh: &PreparedNavMesh) -> Vec<BoundaryEdge> {
@@ -421,6 +632,7 @@ fn boundary_edges(mesh: &PreparedNavMesh) -> Vec<BoundaryEdge> {
                 vertex_indices: [a, b],
                 start: va,
                 end: vb,
+                authored_external: polygon.authored_external[slot],
             });
         }
     }
@@ -661,37 +873,48 @@ fn ranges_overlap(a: (f32, f32), b: (f32, f32)) -> bool {
 ///    projected interval) independently -- an edge can appear in any
 ///    number of candidates, not just one.
 /// 2. **Reciprocal, non-overlapping resolution.** Candidates are visited in
-///    a deterministic priority order (longest overlap first, tie-broken by
-///    edge index) and greedily accepted only when neither side's own
-///    `[min, max]` distance-along-the-edge range overlaps a range already
-///    accepted on that *same* edge (`ranges_overlap`) -- this is what
-///    replaces mutual-nearest-only matching: it allows disjoint intervals
-///    on one long edge to each pair with a different shorter opposing edge
-///    (one-to-many), while still rejecting two candidates that would
-///    double-claim the same stretch of an edge (the real-data defect an
-///    external review found in the original one-directional
-///    nearest-midpoint matching, where every edge of a facing triangle
-///    independently claimed the same destination edge).
+///    a deterministic priority order -- authored `NVTR` external-edge
+///    evidence first (issue #156 feature 2: a candidate where `edge_a` or
+///    `edge_b` carries the flag outranks one where neither does, and a
+///    candidate flagged on *both* sides outranks one flagged on only one),
+///    then longest overlap, then tie-broken by edge index -- and greedily
+///    accepted only when neither side's own `[min, max]` distance-along-the-
+///    edge range overlaps a range already accepted on that *same* edge
+///    (`ranges_overlap`) -- this is what replaces mutual-nearest-only
+///    matching: it allows disjoint intervals on one long edge to each pair
+///    with a different shorter opposing edge (one-to-many), while still
+///    rejecting two candidates that would double-claim the same stretch of
+///    an edge (the real-data defect an external review found in the
+///    original one-directional nearest-midpoint matching, where every edge
+///    of a facing triangle independently claimed the same destination
+///    edge).
 ///
 /// Deterministic (`meshes` is already form_id-sorted, boundary edges are
 /// visited in stable polygon/vertex order, candidates are sorted by a
 /// total order before the greedy resolution pass, and the result is
 /// explicitly sorted+deduped by full mesh/triangle/edge identity) and never
 /// panics (invalid vertex indices are skipped by `boundary_edges`, never
-/// indexed). Returns the accepted merges plus one diagnostic for each
-/// candidate rejected by a per-pair geometric check (direction/overlap) or
-/// by the overlap-resolution pass; a boundary-edge pair that never became a
-/// candidate at all (outside `MESH_MERGE_DISTANCE`, or geometrically
-/// non-overlapping) is not diagnosed -- most nearby boundary-edge pairs on
-/// a busy seam are not the matching edge, and logging every one of them
-/// would drown the signal a real rejection (a near-miss that *did* pass the
-/// distance gate) is meant to surface.
+/// indexed). Returns the accepted merges, one diagnostic for each candidate
+/// rejected by a per-pair geometric check (direction/overlap) or by the
+/// overlap-resolution pass, and the authored-vs-geometric split over every
+/// candidate generated (issue #156 feature 2's evidence for the prepare
+/// summary line); a boundary-edge pair that never became a candidate at all
+/// (outside `MESH_MERGE_DISTANCE`, or geometrically non-overlapping) is not
+/// diagnosed and not counted -- most nearby boundary-edge pairs on a busy
+/// seam are not the matching edge, and logging every one of them would drown
+/// the signal a real rejection (a near-miss that *did* pass the distance
+/// gate) is meant to surface.
 fn compute_mesh_merges(
     meshes: &[PreparedNavMesh],
-) -> (Vec<PreparedNavMeshMerge>, Vec<NavGraphDiagnostic>) {
+) -> (
+    Vec<PreparedNavMeshMerge>,
+    Vec<NavGraphDiagnostic>,
+    MergeCandidateCounts,
+) {
     let threshold_sq = MESH_MERGE_DISTANCE * MESH_MERGE_DISTANCE;
     let mut merges = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut candidate_counts = MergeCandidateCounts::default();
     for a_index in 0..meshes.len() {
         for b_index in (a_index + 1)..meshes.len() {
             let mesh_a = &meshes[a_index];
@@ -703,6 +926,11 @@ fn compute_mesh_merges(
                 a_edge_index: usize,
                 b_edge_index: usize,
                 candidate: PortalCandidate,
+                /// Issue #156 feature 2: how many of this candidate's two
+                /// edges carry the authored `NVTR` external-edge flag (`0`,
+                /// `1`, or `2`) -- the priority key `compute_mesh_merges`
+                /// sorts candidates by before overlap length.
+                authored_tier: u8,
             }
             let mut candidates: Vec<IndexedCandidate> = Vec::new();
             for (a_edge_index, edge_a) in edges_a.iter().enumerate() {
@@ -711,11 +939,21 @@ fn compute_mesh_merges(
                         continue;
                     }
                     match validate_portal_candidate(edge_a, edge_b) {
-                        Ok(candidate) => candidates.push(IndexedCandidate {
-                            a_edge_index,
-                            b_edge_index,
-                            candidate,
-                        }),
+                        Ok(candidate) => {
+                            let authored_tier = u8::from(edge_a.authored_external)
+                                + u8::from(edge_b.authored_external);
+                            if authored_tier > 0 {
+                                candidate_counts.authored += 1;
+                            } else {
+                                candidate_counts.geometric += 1;
+                            }
+                            candidates.push(IndexedCandidate {
+                                a_edge_index,
+                                b_edge_index,
+                                candidate,
+                                authored_tier,
+                            });
+                        }
                         // A pure "these two nearby edges don't actually
                         // overlap along their length" outcome is the
                         // expected common case, not a defect -- only a
@@ -735,17 +973,20 @@ fn compute_mesh_merges(
                 }
             }
 
-            // Longest overlap first: the most unambiguous portal match on
-            // any contested stretch of an edge should win it. Ties broken
-            // by edge index for full determinism.
+            // Authored evidence first (issue #156 feature 2), then longest
+            // overlap -- the most unambiguous portal match on any contested
+            // stretch of an edge should win it among equally-authored
+            // candidates. Ties broken by edge index for full determinism.
             candidates.sort_by(|left, right| {
                 let left_len = left.candidate.a_range.1 - left.candidate.a_range.0;
                 let right_len = right.candidate.a_range.1 - right.candidate.a_range.0;
-                right_len
-                    .partial_cmp(&left_len)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(left.a_edge_index.cmp(&right.a_edge_index))
-                    .then(left.b_edge_index.cmp(&right.b_edge_index))
+                right.authored_tier.cmp(&left.authored_tier).then(
+                    right_len
+                        .partial_cmp(&left_len)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(left.a_edge_index.cmp(&right.a_edge_index))
+                        .then(left.b_edge_index.cmp(&right.b_edge_index)),
+                )
             });
 
             let mut accepted_a_ranges: Vec<Vec<(f32, f32)>> = vec![Vec::new(); edges_a.len()];
@@ -781,6 +1022,7 @@ fn compute_mesh_merges(
                     edge_b: edge_b.vertex_indices,
                     interval_a: indexed.candidate.interval_a,
                     interval_b: indexed.candidate.interval_b,
+                    authored_evidence: indexed.authored_tier > 0,
                 });
             }
         }
@@ -808,7 +1050,18 @@ fn compute_mesh_merges(
     // duplicates should not arise) -- kept so a future refactor bug fails
     // safe (a dropped duplicate) rather than shipping a doubled link.
     merges.dedup();
-    (merges, diagnostics)
+    (merges, diagnostics, candidate_counts)
+}
+
+/// Issue #156 feature 2: authored-vs-geometric split over every portal
+/// candidate [`compute_mesh_merges`] generated (accepted or rejected) --
+/// `authored` counts a candidate where at least one of its two edges carries
+/// the `NVTR` external-edge flag, `geometric` counts a candidate backed by
+/// pure proximity/opposing-direction/overlap geometry alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MergeCandidateCounts {
+    authored: usize,
+    geometric: usize,
 }
 
 fn build_mesh(
@@ -884,6 +1137,7 @@ fn build_mesh(
             is_water: triangle.flags & 0x0000_0200 != 0,
             is_preferred_pathing: triangle.flags & 0x0000_0040 != 0,
             contains_door: triangle.flags & 0x0000_0400 != 0,
+            authored_external: EDGE_EXTERNAL_FLAGS.map(|bit| triangle.flags & bit != 0),
         });
     }
 
@@ -1220,7 +1474,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v3");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v4");
     }
 
     #[test]
@@ -1508,6 +1762,7 @@ mod tests {
                 grid_x: 3,
                 grid_y: -4,
             }],
+            ..NavGraphInputs::default()
         };
         let graph = build_nav_graph(&inputs);
         assert_eq!(graph.meshes[0].grid, Some(PreparedNavGrid { x: 3, y: -4 }));
@@ -1916,5 +2171,259 @@ mod tests {
         let graph = build_nav_graph(&inputs);
         assert_eq!(graph.bounds.min, [0.0, -10.0, -10.0]);
         assert_eq!(graph.bounds.max, [10.0, 0.0, 0.0]);
+    }
+
+    // -------------------------------------------------------------
+    // Authored NVTR external-edge evidence for portals (issue #156
+    // feature 2).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn a_merge_authored_on_both_sides_is_marked_authored_evidence() {
+        let mut meshes = seam_meshes(0.5);
+        meshes[0].triangles[0].flags |= EDGE_EXTERNAL_FLAGS[0];
+        meshes[1].triangles[0].flags |= EDGE_EXTERNAL_FLAGS[0];
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes,
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        assert!(
+            graph.mesh_merges[0].authored_evidence,
+            "{:?}",
+            graph.mesh_merges
+        );
+        assert_eq!(graph.counters.mesh_merges_authored, 1);
+        assert_eq!(graph.counters.mesh_merges_geometric, 0);
+        assert_eq!(graph.counters.merge_candidates_authored, 1);
+        assert_eq!(graph.counters.merge_candidates_geometric, 0);
+    }
+
+    #[test]
+    fn a_merge_authored_on_only_one_side_is_still_marked_authored_evidence() {
+        // OR semantics: the two NAVM records are independently authored, so
+        // there is no guarantee both sides of a real seam carry the flag.
+        let mut meshes = seam_meshes(0.5);
+        meshes[0].triangles[0].flags |= EDGE_EXTERNAL_FLAGS[0];
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes,
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        assert!(
+            graph.mesh_merges[0].authored_evidence,
+            "{:?}",
+            graph.mesh_merges
+        );
+        assert_eq!(graph.counters.mesh_merges_authored, 1);
+    }
+
+    #[test]
+    fn a_purely_geometric_merge_is_not_marked_authored_evidence() {
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: seam_meshes(0.5),
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        assert!(
+            !graph.mesh_merges[0].authored_evidence,
+            "{:?}",
+            graph.mesh_merges
+        );
+        assert_eq!(graph.counters.mesh_merges_authored, 0);
+        assert_eq!(graph.counters.mesh_merges_geometric, 1);
+        assert_eq!(graph.counters.merge_candidates_authored, 0);
+        assert_eq!(graph.counters.merge_candidates_geometric, 1);
+    }
+
+    #[test]
+    fn an_authored_candidate_is_prioritized_over_a_longer_purely_geometric_conflicting_candidate() {
+        // Issue #156 feature 2: authored `NVTR` external-edge evidence
+        // outranks pure geometric overlap length when two candidates
+        // conflict on the same edge -- the mirror image of
+        // `a_conflicting_candidate_is_rejected_leaving_one_accepted_interval`
+        // (identical geometry: a shorter `loser` candidate and a longer
+        // `winner` candidate both facing `mesh_a`'s single long edge), but
+        // this time `loser` carries the authored flag and `winner` does
+        // not, so `loser` wins despite its shorter overlap.
+        let mesh_a = quad_mesh(
+            0x10,
+            [
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, -3.0],
+                [0.0, 0.0, -3.0],
+            ],
+        );
+        let gap = 0.5;
+        let winner = quad_mesh(
+            0x20,
+            [
+                [2.0, 0.0, gap],
+                [0.0, 0.0, gap],
+                [0.0, 0.0, gap + 3.0],
+                [2.0, 0.0, gap + 3.0],
+            ],
+        );
+        let mut loser = quad_mesh(
+            0x20,
+            [
+                [1.5, 0.0, gap],
+                [0.5, 0.0, gap],
+                [0.5, 0.0, gap + 3.0],
+                [1.5, 0.0, gap + 3.0],
+            ],
+        );
+        loser.triangles[0].flags |= EDGE_EXTERNAL_FLAGS[0];
+        let mesh_b = combine_mesh_pieces(0x20, vec![winner, loser]);
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a, mesh_b],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.mesh_merges.len(), 1, "{:?}", graph.mesh_merges);
+        let merge = graph.mesh_merges[0];
+        assert!(merge.authored_evidence, "{merge:?}");
+        // `loser`'s own triangle (combined index 2, since `winner`
+        // contributed triangles 0/1 first) is the one accepted, not
+        // `winner`'s (0), despite its shorter overlap.
+        assert_eq!(merge.triangle_b, 2, "{:?}", graph.mesh_merges);
+        assert_eq!(graph.counters.mesh_merges_authored, 1);
+        assert_eq!(graph.counters.mesh_merges_geometric, 0);
+        assert!(
+            graph.diagnostics.iter().any(|d| d
+                .message
+                .contains("overlaps another accepted portal interval")),
+            "{:?}",
+            graph.diagnostics
+        );
+    }
+
+    // -------------------------------------------------------------
+    // NVEX/NVCI correlation (issue #156 feature 3): correlation-only, no
+    // runtime behavior.
+    // -------------------------------------------------------------
+
+    fn single_triangle_mesh(form_id: u32) -> NavGraphMeshInput {
+        let mut m = mesh(form_id);
+        m.vertices = vec![
+            NavGraphVertexInput { source: [0.0; 3] },
+            NavGraphVertexInput {
+                source: [70.0, 0.0, 0.0],
+            },
+            NavGraphVertexInput {
+                source: [0.0, 70.0, 0.0],
+            },
+        ];
+        m.triangles = vec![triangle([0, 1, 2], [-1, -1, -1])];
+        m
+    }
+
+    #[test]
+    fn nvex_targets_are_split_between_inside_and_outside_this_cells_navm_set() {
+        let mut mesh_a = single_triangle_mesh(0x10);
+        mesh_a.external_connections = vec![
+            NavGraphExternalInput {
+                target_navmesh_form_id: Some(0x10), // this cell's own NAVM
+                triangle_index: 0,
+            },
+            NavGraphExternalInput {
+                target_navmesh_form_id: Some(0x999), // not in this cell
+                triangle_index: 0,
+            },
+        ];
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.counters.nvex_targets_inside_cell, 1);
+        assert_eq!(graph.counters.nvex_targets_outside_cell, 1);
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == "info" && d.message.contains("NVEX correlation")),
+            "{:?}",
+            graph.diagnostics
+        );
+    }
+
+    #[test]
+    fn nvci_entries_are_correlated_against_this_cells_doors_and_navmeshes() {
+        let mut mesh_a = single_triangle_mesh(0x10);
+        mesh_a.doors.push(NavGraphDoorInput {
+            door_reference_form_id: Some(0x99),
+            triangle_index: 0,
+        });
+
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![mesh_a],
+            navi_correlations: vec![NavGraphNaviCorrelationInput {
+                leading_navmesh_form_id: Some(0x10), // matches this cell's own NAVM
+                entries: vec![
+                    NavGraphNaviCorrelationEntryInput {
+                        navmesh_form_id: Some(0x10),        // matches
+                        other_navmesh_form_id: Some(0x999), // does not match
+                        door_form_id: Some(0x99),           // matches this cell's own door
+                    },
+                    NavGraphNaviCorrelationEntryInput {
+                        navmesh_form_id: Some(0x999),
+                        other_navmesh_form_id: Some(0x888),
+                        door_form_id: Some(0x111), // does not match
+                    },
+                ],
+            }],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.counters.nvci_subrecords, 1);
+        assert_eq!(graph.counters.nvci_entries, 2);
+        assert_eq!(graph.counters.nvci_door_matches, 1);
+        // leading (0x10, matches) + entry1.navmesh_form_id (0x10, matches) =
+        // 2 matches; entry1.other_navmesh_form_id (0x999),
+        // entry2.navmesh_form_id (0x999), entry2.other_navmesh_form_id
+        // (0x888) do not.
+        assert_eq!(graph.counters.nvci_navmesh_matches, 2);
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == "info" && d.message.contains("NVCI correlation")),
+            "{:?}",
+            graph.diagnostics
+        );
+    }
+
+    #[test]
+    fn no_nvex_or_nvci_data_produces_no_correlation_counts_or_diagnostics() {
+        let inputs = NavGraphInputs {
+            cell_form_id: 0x10,
+            meshes: vec![single_triangle_mesh(0x10)],
+            ..NavGraphInputs::default()
+        };
+        let graph = build_nav_graph(&inputs);
+        assert_eq!(graph.counters.nvex_targets_inside_cell, 0);
+        assert_eq!(graph.counters.nvex_targets_outside_cell, 0);
+        assert_eq!(graph.counters.nvci_subrecords, 0);
+        assert_eq!(graph.counters.nvci_entries, 0);
+        assert!(
+            !graph
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("correlation")),
+            "{:?}",
+            graph.diagnostics
+        );
     }
 }

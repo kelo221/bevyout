@@ -6210,6 +6210,7 @@ async fn given_landmass_polygon(
         index,
         vertex_indices: [a, b, c],
         is_water: false,
+        is_preferred_pathing: false,
     });
 }
 
@@ -8889,4 +8890,234 @@ async fn then_fall_guard_fell_out(world: &mut BevyoutWorld) {
         world.nav_fall_guard_verdict,
         Some(fall_guard::FallVerdict::FellOutOfWorld)
     );
+}
+
+// ---------------------------------------------------------------------
+// nav_authored_semantics.feature (issue #156, M4 wave 9) -- appended
+// section, do not interleave. No new `BevyoutWorld` fields: every scenario
+// drives the existing `nav_graph_inputs`/`nav_graph_result`/
+// `nav_backend_meshes` state via `nav_graph_mesh_input_mut`/
+// `nav_graph_result_mesh`/`nav_backend_mesh_mut`, reusing nav_graph.feature's
+// mesh/triangle steps and nav_portals.feature's cross-mesh merge steps.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) triangle (\d+) has flags 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_triangle_flags(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    triangle_index: usize,
+    flags_hex: String,
+) {
+    let flags = parse_hex(&flags_hex);
+    let mesh = nav_graph_mesh_input_mut(world, &form_hex);
+    let triangle = mesh.triangles.get_mut(triangle_index).unwrap_or_else(|| {
+        panic!("mesh {form_hex} triangle {triangle_index} was not created first")
+    });
+    triangle.flags = flags;
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) is marked preferred-pathing$")]
+async fn then_nav_graph_polygon_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        mesh.polygons[polygon].is_preferred_pathing,
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) is not marked preferred-pathing$")]
+async fn then_nav_graph_polygon_not_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        !mesh.polygons[polygon].is_preferred_pathing,
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) is authored-external$")]
+async fn then_nav_graph_edge_authored_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        mesh.polygons[polygon].authored_external[edge],
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) is not authored-external$")]
+async fn then_nav_graph_edge_not_authored_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        !mesh.polygons[polygon].authored_external[edge],
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+fn nav_graph_merge(world: &BevyoutWorld, index: usize) -> &nav_graph::PreparedNavMeshMerge {
+    &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .mesh_merges[index]
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) is authored$")]
+async fn then_nav_graph_merge_authored(world: &mut BevyoutWorld, index: usize) {
+    let merge = nav_graph_merge(world, index);
+    assert!(merge.authored_evidence, "{merge:?}");
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) is geometric$")]
+async fn then_nav_graph_merge_geometric(world: &mut BevyoutWorld, index: usize) {
+    let merge = nav_graph_merge(world, index);
+    assert!(!merge.authored_evidence, "{merge:?}");
+}
+
+#[then(regex = r"^the nav graph counters report merges authored (\d+) geometric (\d+)$")]
+async fn then_nav_graph_counters_merges_authored(
+    world: &mut BevyoutWorld,
+    authored: usize,
+    geometric: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.mesh_merges_authored, authored);
+    assert_eq!(counters.mesh_merges_geometric, geometric);
+}
+
+#[then(regex = r"^the nav graph counters report merge candidates authored (\d+) geometric (\d+)$")]
+async fn then_nav_graph_counters_candidates_authored(
+    world: &mut BevyoutWorld,
+    authored: usize,
+    geometric: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.merge_candidates_authored, authored);
+    assert_eq!(counters.merge_candidates_geometric, geometric);
+}
+
+#[then(regex = r"^the nav graph counters report nvex outside-cell (\d+) inside-cell (\d+)$")]
+async fn then_nav_graph_counters_nvex(world: &mut BevyoutWorld, outside: usize, inside: usize) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.nvex_targets_outside_cell, outside);
+    assert_eq!(counters.nvex_targets_inside_cell, inside);
+}
+
+#[then(
+    regex = r"^the nav graph counters report nvci subrecords (\d+) entries (\d+) door-matches (\d+) navmesh-matches (\d+)$"
+)]
+async fn then_nav_graph_counters_nvci(
+    world: &mut BevyoutWorld,
+    subrecords: usize,
+    entries: usize,
+    door_matches: usize,
+    navmesh_matches: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.nvci_subrecords, subrecords);
+    assert_eq!(counters.nvci_entries, entries);
+    assert_eq!(counters.nvci_door_matches, door_matches);
+    assert_eq!(counters.nvci_navmesh_matches, navmesh_matches);
+}
+
+#[then(regex = r#"^the nav graph has an "info" diagnostic containing "([^"]*)"$"#)]
+async fn then_nav_graph_info_diagnostic(world: &mut BevyoutWorld, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(
+        graph
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "info"
+                && diagnostic.message.contains(expected.as_str())),
+        "expected an info diagnostic containing {expected:?} in {:?}",
+        graph.diagnostics
+    );
+}
+
+#[given(regex = r"^a nav graph NAVI correlation with leading NAVM 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_navi_correlation(world: &mut BevyoutWorld, navm_hex: String) {
+    world
+        .nav_graph_inputs
+        .navi_correlations
+        .push(nav_graph::NavGraphNaviCorrelationInput {
+            leading_navmesh_form_id: Some(parse_hex(&navm_hex)),
+            entries: Vec::new(),
+        });
+}
+
+#[given(
+    regex = r"^that NAVI correlation has an entry linking NAVM 0x([0-9a-fA-F]+) and NAVM 0x([0-9a-fA-F]+) via door 0x([0-9a-fA-F]+)$"
+)]
+async fn given_nav_graph_navi_correlation_entry(
+    world: &mut BevyoutWorld,
+    navm_a_hex: String,
+    navm_b_hex: String,
+    door_hex: String,
+) {
+    let correlation = world
+        .nav_graph_inputs
+        .navi_correlations
+        .last_mut()
+        .expect("a NAVI correlation must be given first");
+    correlation
+        .entries
+        .push(nav_graph::NavGraphNaviCorrelationEntryInput {
+            navmesh_form_id: Some(parse_hex(&navm_a_hex)),
+            other_navmesh_form_id: Some(parse_hex(&navm_b_hex)),
+            door_form_id: Some(parse_hex(&door_hex)),
+        });
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) polygon (\d+) is preferred-pathing$")]
+async fn given_landmass_polygon_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: u32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    let polygon = mesh
+        .polygons
+        .iter_mut()
+        .find(|polygon| polygon.index == index)
+        .expect("polygon must be given first");
+    polygon.is_preferred_pathing = true;
 }

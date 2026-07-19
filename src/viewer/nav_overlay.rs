@@ -1273,11 +1273,13 @@ mod tests {
                     index: 0,
                     vertex_indices: [0, 1, 2],
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
                 landmass_graph::PolygonInput {
                     index: 1,
                     vertex_indices: [1, 3, 2],
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
             ],
             doors: Vec::new(),

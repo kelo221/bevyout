@@ -304,11 +304,11 @@ fn navi_tail_truncation_is_diagnosed_never_panics_and_retains_the_remainder() {
 }
 
 #[test]
-fn short_nvmi_and_unsupported_nvci_are_diagnosed() {
+fn short_nvmi_and_unsupported_subrecords_are_diagnosed() {
     let resolver = direct_resolver();
     let subs = vec![
         direct_subrecord("NVMI", vec![0; 15]), // header needs 16
-        direct_subrecord("NVCI", vec![0; 16]),
+        direct_subrecord("NVSI", vec![0; 4]),  // still undocumented for FO3/FNV
     ];
     let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
     assert!(navi.entries.is_empty());
@@ -320,6 +320,90 @@ fn short_nvmi_and_unsupported_nvci_are_diagnosed() {
     assert!(
         diagnostics
             .iter()
-            .any(|message| message.contains("ignored unsupported NAVI.NVCI subrecord"))
+            .any(|message| message.contains("ignored unsupported NAVI.NVSI subrecord"))
     );
+}
+
+// -------------------------------------------------------------
+// NVCI (issue #156, F156.3): correlation-only decode, following fopdoc's
+// literal documented byte layout (not real-data-verified -- see
+// `decode_navi_correlation`'s doc comment).
+// -------------------------------------------------------------
+
+#[test]
+fn decodes_nvci_leading_field_and_repeating_entries() {
+    let resolver = master_resolver();
+    let mut nvci = 0x0100_0900_u32.to_le_bytes().to_vec(); // leading: file index 1
+    nvci.extend_from_slice(&0x0000_0a00_u32.to_le_bytes()); // entry.navmesh: master
+    nvci.extend_from_slice(&0x0100_0b00_u32.to_le_bytes()); // entry.other_navmesh: this plugin
+    nvci.extend_from_slice(&0x0000_0c00_u32.to_le_bytes()); // entry.door: master
+    let subs = vec![direct_subrecord("NVCI", nvci)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(navi.correlations.len(), 1);
+    let correlation = &navi.correlations[0];
+    assert_eq!(correlation.leading_navmesh_form_id, Some(0x0100_0900));
+    assert_eq!(correlation.entries.len(), 1);
+    assert_eq!(correlation.entries[0].navmesh_form_id, Some(0x0000_0a00));
+    assert_eq!(
+        correlation.entries[0].other_navmesh_form_id,
+        Some(0x0100_0b00)
+    );
+    assert_eq!(correlation.entries[0].door_form_id, Some(0x0000_0c00));
+}
+
+#[test]
+fn nvci_with_no_entries_decodes_the_leading_field_only() {
+    let resolver = direct_resolver();
+    let nvci = 0x500_u32.to_le_bytes().to_vec();
+    let subs = vec![direct_subrecord("NVCI", nvci)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(navi.correlations.len(), 1);
+    assert_eq!(navi.correlations[0].leading_navmesh_form_id, Some(0x500));
+    assert!(navi.correlations[0].entries.is_empty());
+}
+
+#[test]
+fn null_nvci_form_ids_decode_as_none() {
+    let resolver = direct_resolver();
+    let mut nvci = 0_u32.to_le_bytes().to_vec();
+    nvci.extend_from_slice(&0_u32.to_le_bytes());
+    nvci.extend_from_slice(&0_u32.to_le_bytes());
+    nvci.extend_from_slice(&0_u32.to_le_bytes());
+    let subs = vec![direct_subrecord("NVCI", nvci)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(navi.correlations[0].leading_navmesh_form_id, None);
+    assert_eq!(navi.correlations[0].entries[0].navmesh_form_id, None);
+    assert_eq!(navi.correlations[0].entries[0].other_navmesh_form_id, None);
+    assert_eq!(navi.correlations[0].entries[0].door_form_id, None);
+}
+
+#[test]
+fn malformed_nvci_is_diagnosed_never_panics_and_retains_the_leading_field() {
+    let resolver = direct_resolver();
+    // Too short even for the leading FormID.
+    let too_short = direct_subrecord("NVCI", vec![1, 2, 3]);
+    // Leading field plus a partial (non-12-byte-multiple) trailing entry.
+    let mut partial_entry = 0x500_u32.to_le_bytes().to_vec();
+    partial_entry.extend_from_slice(&[1, 2, 3, 4, 5]);
+    let subs = vec![too_short, direct_subrecord("NVCI", partial_entry)];
+    let (navi, diagnostics) = parse_navi(&subs, 0xE00, 0, &resolver);
+    assert_eq!(
+        navi.correlations.len(),
+        2,
+        "malformed NVCI is never dropped"
+    );
+    assert_eq!(navi.correlations[0], NaviCorrelation::default());
+    assert_eq!(navi.correlations[1].leading_navmesh_form_id, Some(0x500));
+    assert!(navi.correlations[1].entries.is_empty());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|message| message == "NVCI 0: malformed: expected at least 4 bytes, got 3")
+    );
+    assert!(diagnostics.iter().any(|message| message.contains("NVCI 1:")
+        && message.contains("5 trailing byte(s)")
+        && message.contains("do not form a complete 12-byte correlation entry")));
 }
