@@ -2615,6 +2615,31 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     .then_some((door_form_id, link))
                 });
             if let Some((door_form_id, link)) = travel_arrival {
+                // Issue #165: consult the same lock/open source of truth the
+                // mid-route crossing gate (`crossing_gate`, just below) and
+                // `request_door_open`'s own internal `door_usable_now` check
+                // already use, instead of relying solely on the latter's
+                // implicit refusal -- the decision is now explicit and
+                // symmetric with the mid-route gate rather than something a
+                // reader has to trust `request_door_open` enforces
+                // correctly. A locked door still routes through the normal
+                // `Paused` -> `MAX_WAIT_TICKS` -> `Failed` terminal (`gate`
+                // only changes whether `request_door_open` is even worth
+                // calling this tick, mirroring the mid-route gate's own
+                // `gate != Pass` guard), never an immediate short-circuit --
+                // see `door_link::MAX_WAIT_TICKS`'s doc comment for why that
+                // deterministic wait bound is the contract, not a fast
+                // fail.
+                let lock_info = world
+                    .resource::<NavArchipelagoState>()
+                    .door_lock_info
+                    .clone();
+                let (door_open, door_locked) =
+                    door_open_and_locked(world, door_form_id, &lock_info);
+                let gate = door_link::crossing_gate(door_link::CrossingObservation {
+                    door_open,
+                    door_locked,
+                });
                 let new_state = door_link::transition(
                     current_state,
                     door_link::DoorLinkEvent::LinkReached {
@@ -2625,7 +2650,9 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     },
                 );
                 world.entity_mut(agent_entity).insert(PauseAgent);
-                request_door_open(world, door_form_id);
+                if gate != door_link::CrossingGate::Pass {
+                    request_door_open(world, door_form_id);
+                }
                 info!("nav agent door wait {door_form_id:08x}");
                 let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
                 runtime.door_link = new_state;
@@ -2848,6 +2875,30 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     "nav agent door {door_form_id:08x}: gave up waiting for it to open; agent stopped at the link"
                 );
                 info!("nav agent unreachable");
+                // Issue #165: clearing `travel_intent` alone left
+                // `AgentTarget3d` still pointed at this exact door's
+                // triangle. The very next tick, `drive_door_link_for_agent`
+                // re-enters this `Idle | Failed | TravelReached` match arm
+                // (current state is now `Failed`), finds no travel arrival
+                // (intent is gone), but the mid-route crossing gate no
+                // longer excludes this door either -- its exclusion is keyed
+                // on `travel_intent`, which is now `None` -- so it
+                // "re-discovers" the agent standing in the door's own
+                // triangle and restarts the *whole* pause -> wait ->
+                // `Failed` cycle via the `IntraCell` destination, forever:
+                // `tna status` observed alternating between `Paused` and
+                // `Unreachable` on a live locked travel door instead of
+                // settling at the documented deterministic terminal
+                // (confirmed with a real `NavBackendPlugin` schedule, not
+                // just the FSM in isolation -- see this file's
+                // `locked_travel_arrival_settles_at_a_stable_unreachable_
+                // terminal_not_an_oscillation` test below). A door-link
+                // failure has nowhere useful left to walk regardless of
+                // which destination type it failed as,
+                // so clearing the target here (not just the intent) is the
+                // fix: `has_target` in the mid-route check below then
+                // reads false and the gate leaves a failed agent alone.
+                world.entity_mut(agent_entity).insert(AgentTarget3d::None);
                 let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
                 runtime.active_link = None;
                 runtime.travel_intent = None;
@@ -6193,5 +6244,225 @@ mod tests {
             Some(AgentState::NoPath),
             "a typed-but-unlocked door triangle must still connect its neighbours, got {state:?}"
         );
+    }
+
+    // -------------------------------------------------------------
+    // Issue #165: locked travel-target door respects runtime lock state.
+    // -------------------------------------------------------------
+
+    /// Real-data root cause (found by driving `locked_travel_door_fails_
+    /// deterministically_without_opening`'s shape through the actual
+    /// `NavBackendPlugin` schedule instead of hand-calling `door_link_
+    /// system`): `request_door_open`'s internal lock check already refused
+    /// to open the door, so the door genuinely never opened -- but the
+    /// `Failed` transition only cleared `travel_intent`, leaving
+    /// `AgentTarget3d` still pointed at the door's own triangle. Every real
+    /// travel door is also a `mid_route_doors` candidate (`nav/agent.rs`'s
+    /// module doc: `single_sided_doors` populates both sets), and the
+    /// mid-route gate's travel-intent exclusion is keyed on `travel_intent`
+    /// alone -- once that clears, the very next tick the gate "rediscovers"
+    /// the agent standing in the door's own triangle with a target still
+    /// set, and restarts the whole pause -> wait -> `Failed` cycle via
+    /// `IntraCell`, forever: `tna status` observed alternating between
+    /// `Paused` and `Unreachable` on a real locked travel door instead of
+    /// settling at the documented terminal. This test pins that exact
+    /// shape (the door registered in both `travel_doors` and
+    /// `mid_route_doors`, as every real one is) and proves the fix holds
+    /// across many more ticks than `MAX_WAIT_TICKS`, not just the first
+    /// `Failed` transition.
+    #[test]
+    fn locked_travel_arrival_settles_at_a_stable_unreachable_terminal_not_an_oscillation() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+            // Every real travel door is also a mid-route crossing-gate
+            // candidate (see the module doc) -- reproducing the bug
+            // requires this door to be registered on both sets, not just
+            // `travel_doors`.
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(25),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        request_travel(&mut world, 0, 0x99).expect("routing to a locked door is allowed");
+
+        // Drive well past `MAX_WAIT_TICKS` -- long enough for the
+        // pre-fix code to complete a full Paused -> Failed -> Paused
+        // oscillation cycle at least once.
+        for _ in 0..(door_link::MAX_WAIT_TICKS * 3) {
+            door_link_system(&mut world);
+        }
+
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 },
+            "a locked travel door must settle at the documented deterministic Failed terminal"
+        );
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a locked door must never be scripted open by the nav agent"
+        );
+        assert!(
+            world.get_entity(agent).is_ok(),
+            "a locked travel target must never hand the agent off"
+        );
+        assert!(
+            matches!(world.get::<AgentTarget3d>(agent), Some(AgentTarget3d::None)),
+            "F165 fix: the failed target must be cleared so the mid-route \
+             gate does not treat this agent as still routed through its own \
+             just-failed door"
+        );
+
+        // Regression pin for the oscillation itself: further ticks must
+        // not flip the status back to `Paused` -- the exact bug this test
+        // is named for.
+        for _ in 0..(door_link::MAX_WAIT_TICKS * 2) {
+            door_link_system(&mut world);
+            assert_eq!(
+                world.get::<AgentRuntime>(agent).unwrap().door_link,
+                door_link::DoorLinkState::Failed { door_form_id: 0x99 },
+                "the Failed terminal must be stable, not an oscillation back into Paused"
+            );
+        }
+    }
+
+    /// F165.2: unlocking the door and reissuing the travel (the existing
+    /// one-repath retry contract -- `request_travel` only refuses a
+    /// concurrent request, and `door_link::transition`'s own table already
+    /// restarts the lifecycle cleanly from `Failed` on a fresh
+    /// `LinkReached`) completes the hand-off normally.
+    #[test]
+    fn unlocking_after_a_failed_travel_arrival_and_reissuing_travel_hands_off_normally() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(25),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        request_travel(&mut world, 0, 0x99).expect("routing to a locked door is allowed");
+        // One call transitions the arrival into `Paused` (waited_ticks=0);
+        // `MAX_WAIT_TICKS` further `Tick` calls exhaust the wait bound.
+        door_link_system(&mut world);
+        for _ in 0..door_link::MAX_WAIT_TICKS {
+            door_link_system(&mut world);
+        }
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 }
+        );
+
+        // Unlock (mirrors `setlock 0x99 0`) and reissue the travel: the
+        // agent is still standing exactly at the door, so this is the
+        // pure-FSM half of the retry; `request_travel` re-arms
+        // `travel_intent` since it was cleared on failure.
+        set_door_lock_level(&mut world, 0x99, None);
+        request_travel(&mut world, 0, 0x99)
+            .expect("a fresh travel request after failure is allowed");
+
+        door_link_system(&mut world);
+        assert!(is_paused(&world, agent));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "the now-unlocked door must be scripted open by the reissued travel"
+        );
+
+        door_link_system(&mut world);
+        assert!(door_link::is_traversing(
+            world.get::<AgentRuntime>(agent).unwrap().door_link
+        ));
+
+        use bevy::ecs::system::RunSystemOnce;
+        world.get_mut::<DoorTraversal>(agent).unwrap().elapsed = 10.0;
+        world
+            .run_system_once(door_traversal_system)
+            .expect("traversal system runs");
+
+        assert!(
+            world.get_entity(agent).is_err(),
+            "the agent must be handed off once the retried travel completes"
+        );
+        let entry = world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(agent_ledger_id(0))
+            .expect("the agent must be ledgered on handoff");
+        assert_eq!(entry.cell_form_id, 0xC0DE);
     }
 }
