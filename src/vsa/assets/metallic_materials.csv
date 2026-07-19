@@ -151,4 +151,11 @@ textures/architecture/urban/firehydrant01.dds,Cast Iron Fire Hydrant,1
 textures/architecture/urban/streetlight01.dds,Steel Streetlight,1
 textures/architecture/urban/trusswork01.dds,Structural Metal Truss Work,1
 textures/architecture/citadel/citadelfloodligts.dds,Citadel Metal Floodlights,1
+textures/dungeons/vault/vaulttransformer01.dds,Vault Transformer Unit,1
+textures/dungeons/vault/lockervault01.dds,Vault Metal Storage Locker,1
+textures/dungeons/vault/vacunit01.dds,Vault AC Ventilation Unit,1
+textures/dungeons/vault/vceilingfan01.dds,Vault Ceiling Fan,1
+textures/dungeons/vault/vcontrolpanels01.dds,Vault Control Panels 01,1
+textures/dungeons/vault/vmesh01.dds,Vault Metal Wire Mesh,1
+textures/dungeons/vault/vlight01.dds,Vault Metal Light Fixture,1
 

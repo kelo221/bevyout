@@ -3,18 +3,18 @@
 use std::collections::BTreeMap;
 
 pub(crate) const DEFAULT_GLOSSINESS_EXPONENT: f32 = 10.0;
-pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v2-double-roughness";
+pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v3-1.5x-roughness";
 pub(crate) const METALLIC_MATERIALS_CSV: &str = include_str!("metallic_materials.csv");
 
 /// Converts a Blinn-Phong exponent into tuned glTF/Bevy perceptual GGX roughness.
 ///
-/// Fallout's authored exponent conversion is doubled to avoid overly glossy
+/// Fallout's authored exponent conversion is scaled by 1.5 to adjust glossy
 /// surfaces, then clamped to glTF's scalar range.
 pub(crate) fn perceptual_roughness_from_glossiness(glossiness: Option<f32>) -> f32 {
     let exponent = glossiness
         .filter(|value| value.is_finite() && *value >= 0.0)
         .unwrap_or(DEFAULT_GLOSSINESS_EXPONENT);
-    (2.0 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
+    (1.5 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
 }
 
 pub(crate) fn normalize_diffuse_texture_path(path: &str) -> Result<String, String> {
@@ -125,9 +125,9 @@ mod tests {
     fn known_blinn_phong_exponents_map_to_perceptual_ggx_roughness() {
         for (exponent, expected) in [
             (0.0, 1.0),
-            (10.0, 1.0),
-            (70.0, 0.816_496_6),
-            (100.0, 0.748_406_35),
+            (10.0, 0.958_414_66),
+            (70.0, 0.612_372_44),
+            (100.0, 0.561_304_8),
         ] {
             let actual = perceptual_roughness_from_glossiness(Some(exponent));
             assert!((actual - expected).abs() < 0.000_001);

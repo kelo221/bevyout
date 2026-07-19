@@ -56,14 +56,14 @@ Feature: Asset conversion profile selection
     Examples:
       | glossiness | roughness |
       | 0           | 1.000000  |
-      | 10          | 1.000000  |
-      | 70          | 0.816497  |
-      | 100         | 0.748407  |
+      | 10          | 0.958415  |
+      | 70          | 0.612372  |
+      | 100         | 0.561305  |
 
   Scenario Outline: Missing or invalid glossiness uses exponent ten
     Given a NIF material glossiness value "<glossiness>"
     When its PBR material policy is evaluated
-    Then its perceptual roughness is approximately 1.000000
+    Then its perceptual roughness is approximately 0.958415
 
     Examples:
       | glossiness |
