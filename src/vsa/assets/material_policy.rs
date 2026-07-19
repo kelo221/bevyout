@@ -125,8 +125,8 @@ mod tests {
     fn known_blinn_phong_exponents_map_to_perceptual_ggx_roughness() {
         for (exponent, expected) in [
             (0.0, 1.0),
-            (10.0, 0.958_414_66),
-            (70.0, 0.612_372_44),
+            (10.0, 0.958_414_7),
+            (70.0, 0.612_372_4),
             (100.0, 0.561_304_8),
         ] {
             let actual = perceptual_roughness_from_glossiness(Some(exponent));
