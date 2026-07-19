@@ -5,9 +5,9 @@
 //! route used by `prepare` intentionally remains unchanged.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    io::Write,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
 };
 
@@ -17,7 +17,10 @@ use serde::Serialize;
 
 use crate::cli::{NifConversionMode, NifConvertArgs};
 
-use super::assets::{RootTransformPolicy, load_archives, resolve_asset};
+use super::assets::{
+    MetallicMaterialTable, RootTransformPolicy, flip_directx_normal_y_texel, load_archives,
+    patch_glb_material_policy, perceptual_roughness_from_glossiness, resolve_asset,
+};
 use super::physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsJoint,
     PreparedPhysicsJointSource, PreparedPhysicsShape, PreparedPhysicsSource,
@@ -26,7 +29,7 @@ use super::physics::{
 
 #[derive(Debug, Serialize)]
 struct ConversionReport {
-    converter: &'static str,
+    converter: String,
     source: String,
     output: String,
     conversion: &'static str,
@@ -56,7 +59,7 @@ struct ReportIssue {
     message: String,
 }
 
-pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v3-material-parity-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -160,6 +163,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         document.blocks.len()
     ));
     let mut scene = nif::fo3::extract_scene(&document).context("extracting NIF scene")?;
+    apply_native_material_roughness(&document, &mut scene)?;
     let record_zero_non_identity = scene
         .nodes
         .iter()
@@ -211,7 +215,8 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         bail!("NIF scene contains no renderable props-first meshes");
     }
 
-    let textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    let mut textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    prepare_native_normal_textures(&mut scene.materials, &mut textures)?;
     let mut output = nif::fo3::encode_glb(
         &scene,
         &textures,
@@ -226,6 +231,10 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         request.root_transform_policy,
         record_zero_non_identity,
         usize::from(corrected_root_transform),
+    )?;
+    output.bytes = patch_glb_material_policy(
+        &output.bytes,
+        &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
     )?;
     lines.push(format!(
         "nif-convert: textures embedded={} missing={}",
@@ -282,7 +291,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
     let lossy_scene_issues = scene.issues.len();
     let report_bytes = if request.report.is_some() {
         let report = ConversionReport {
-            converter: NATIVE_NIF_REPORT_REVISION,
+            converter: super::assets::material_policy_identity(NATIVE_NIF_REPORT_REVISION),
             source: request.source_name.to_owned(),
             output: request.output.display().to_string(),
             conversion: conversion_name(request.conversion),
@@ -385,7 +394,8 @@ pub(crate) fn convert_actor_scene(
     if !scene.has_visible_geometry() {
         bail!("actor assembly contains no visible geometry");
     }
-    let textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    let mut textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    prepare_native_normal_textures(&mut scene.materials, &mut textures)?;
     let mut output = nif::fo3::encode_glb(
         &scene,
         &textures,
@@ -400,6 +410,10 @@ pub(crate) fn convert_actor_scene(
         RootTransformPolicy::PreserveVerified,
         false,
         0,
+    )?;
+    output.bytes = patch_glb_material_policy(
+        &output.bytes,
+        &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
     )?;
 
     let physics_scene = nif::fo3::extract_physics(request.skeleton_document)
@@ -600,6 +614,91 @@ fn resolve_textures(
     Ok(textures)
 }
 
+pub(crate) fn apply_native_material_roughness(
+    document: &nif::fo3::Document,
+    scene: &mut nif::fo3::Scene,
+) -> Result<()> {
+    for material in &mut scene.materials {
+        material.roughness = perceptual_roughness_from_glossiness(None);
+    }
+    for node in &scene.nodes {
+        let Some(material_index) = node.mesh.as_ref().and_then(|mesh| mesh.material) else {
+            continue;
+        };
+        let geometry = match document.decode_block(node.source_block).with_context(|| {
+            format!("decoding geometry block {} for material", node.source_block)
+        })? {
+            nif::fo3::TypedBlock::Geometry(geometry) => geometry,
+            _ => continue,
+        };
+        let mut glossiness = None;
+        for property in geometry
+            .base
+            .properties
+            .into_iter()
+            .filter(|index| *index >= 0)
+        {
+            if let nif::fo3::TypedBlock::MaterialProperty(material) = document
+                .decode_block(property as usize)
+                .with_context(|| format!("decoding material property block {property}"))?
+            {
+                glossiness = Some(material.glossiness);
+                break;
+            }
+        }
+        let material = scene.materials.get_mut(material_index).with_context(|| {
+            format!("scene mesh references invalid material index {material_index}")
+        })?;
+        material.roughness = perceptual_roughness_from_glossiness(glossiness);
+    }
+    Ok(())
+}
+
+/// Builds a distinct glTF image for every normal-map source. A same-source
+/// specular slot follows the converted image because its alpha is unchanged;
+/// this preserves Fallout's authored specular-strength payload. Diffuse and
+/// glow slots retain the original image. The material slot, not the filename,
+/// is the authority in the native converter.
+fn prepare_native_normal_textures(
+    materials: &mut [nif::fo3::SceneMaterial],
+    textures: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    let normal_paths = materials
+        .iter()
+        .filter_map(|material| material.normal_texture.clone())
+        .collect::<BTreeSet<_>>();
+
+    for source_path in normal_paths {
+        let Some(source_bytes) = textures.get(&source_path) else {
+            continue;
+        };
+        let mut rgba = image::load_from_memory(source_bytes)
+            .with_context(|| format!("decoding DirectX normal texture {source_path}"))?
+            .to_rgba8();
+        for pixel in rgba.pixels_mut() {
+            flip_directx_normal_y_texel(&mut pixel.0);
+        }
+
+        let derived_path = format!("{source_path}#bevyout-normal-y-v1");
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(rgba)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .with_context(|| format!("encoding Bevy normal texture {source_path}"))?;
+        textures.insert(derived_path.clone(), encoded.into_inner());
+
+        for material in materials
+            .iter_mut()
+            .filter(|material| material.normal_texture.as_deref() == Some(source_path.as_str()))
+        {
+            material.normal_texture = Some(derived_path.clone());
+            if material.specular_texture.as_deref() == Some(source_path.as_str()) {
+                material.specular_texture = Some(derived_path.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_conversion_mode(scene: &mut nif::fo3::Scene, mode: NifConversionMode) {
     if mode != NifConversionMode::QuickAo {
         return;
@@ -739,6 +838,58 @@ fn atomic_write(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_normal_conversion_separates_normal_from_shared_specular_source() {
+        let source_path = "textures/shared_payload.dds".to_string();
+        let mut source = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([12, 34, 56, 78]),
+        ))
+        .write_to(&mut source, image::ImageFormat::Png)
+        .unwrap();
+        let source = source.into_inner();
+        let mut textures = BTreeMap::from([(source_path.clone(), source.clone())]);
+        let mut materials = vec![nif::fo3::SceneMaterial {
+            name: "shared normal/specular".into(),
+            base_color: [1.0; 4],
+            emissive: [0.0; 3],
+            emissive_multiplier: 1.0,
+            roughness: 0.5,
+            alpha_mode: nif::fo3::SceneAlphaMode::Opaque,
+            alpha_cutoff: None,
+            double_sided: false,
+            unlit: false,
+            diffuse_texture: Some(source_path.clone()),
+            normal_texture: Some(source_path.clone()),
+            specular_texture: Some(source_path.clone()),
+            glow_texture: None,
+        }];
+
+        prepare_native_normal_textures(&mut materials, &mut textures).unwrap();
+
+        let derived_path = materials[0]
+            .normal_texture
+            .as_deref()
+            .expect("normal path is retained");
+        assert_ne!(derived_path, source_path);
+        assert_eq!(
+            materials[0].diffuse_texture.as_deref(),
+            Some(source_path.as_str())
+        );
+        assert_eq!(materials[0].specular_texture.as_deref(), Some(derived_path));
+        assert_eq!(textures.get(&source_path), Some(&source));
+        let converted = image::load_from_memory(
+            textures
+                .get(derived_path)
+                .expect("derived normal image was inserted"),
+        )
+        .unwrap()
+        .to_rgba8();
+        assert_eq!(converted.get_pixel(0, 0).0, [12, 221, 56, 78]);
+    }
 
     #[test]
     fn asset_paths_are_data_relative_and_portable() {

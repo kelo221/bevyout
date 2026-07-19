@@ -1,0 +1,161 @@
+diffuse_texture,object_name,metallic
+textures/architecture/urban/doorstore.dds,Urban Store Front Door,0
+textures/dungeons/office/offdoorsm01.dds,Office Interior Door 01,0
+textures/dungeons/office/offdoorsm02.dds,Office Interior Door 02,0
+textures/dungeons/office/signsofficedoorrect01.dds,Office Door Sign 01,0
+textures/dungeons/office/signsofficedoorrect02.dds,Office Door Sign 02,0
+textures/dungeons/vault/vdoor01.dds,Vault Gear Door,1
+textures/dungeons/vault/vdoorpaneloff01.dds,Vault Door Control Panel,0
+textures/dungeons/vault/vdoorsliding01.dds,Vault Interior Sliding Door,1
+textures/dungeons/vault/vdoorwindowglow01.dds,Vault Door Window Glow,0
+textures/creatures/misterhandy/mrhandy01.dds,Mister Handy Body,1
+textures/creatures/mistergutsy/mistergutsyweapons.dds,Mister Gutsy Weapons,1
+textures/creatures/protectron/protectron.dds,Protectron Robot Body,1
+textures/creatures/protectron/protectronglass.dds,Protectron Head Glass Dome,0
+textures/creatures/libertyprime/libertyprimebody_d.dds,Liberty Prime Body,1
+textures/clutter/protectronpod/protectronpod.dds,Protectron Pod Unit,1
+textures/clutter/protectronpod/protectronglass.dds,Protectron Pod Glass,0
+textures/armor/headgear/eyebothelmet.dds,Eyebot Helmet,1
+textures/creatures/sentrybot/sentrybot.dds,Sentry Bot Body,1
+textures/creatures/robobrain/robobrain.dds,Robobrain Metal Body,1
+textures/creatures/robobrain/robobrainglass.dds,Robobrain Glass Dome,0
+textures/creatures/eyebot/eyebot.dds,Eyebot Robot Body,1
+textures/creatures/turret/turret.dds,Automated Turret,1
+textures/clutter/junk/shoppingcart01.dds,Super-Duper Mart Shopping Cart,1
+textures/furniture/shelvesmetal01.dds,Metal Store Shelving,1
+textures/dungeons/vaultruined/shelvesmetalr01.dds,Ruined Metal Shelving,1
+textures/clutter/office/metalshelving.dds,Metal Office Shelving Unit,1
+textures/clutter/office/metalbox01.dds,Metal Security Box,1
+textures/weapons/2handrifle/308ammobox.dds,Ammunition Box (.308),1
+textures/clutter/fridge/fridge01.dds,Store Refrigerator,0
+textures/clutter/junk/checkoutsign.dds,Store Checkout Lane Sign,0
+textures/clutter/vendingmachine/vendingmachine.dds,Nuka-Cola Vending Machine,0
+textures/clutter/junk/toolbox.dds,Metal Toolbox,1
+textures/clutter/junk/tincan01.dds,Tin Can,1
+textures/clutter/junk/scrapmetal01.dds,Scrap Metal Chunk,1
+textures/clutter/junk/bucket.dds,Metal Bucket,1
+textures/clutter/toaster/toaster.dds,Chrome Toaster,1
+textures/clutter/toaster/toasteraged.dds,Aged Metal Toaster,1
+textures/clutter/floorbuffer/floorbuffer01.dds,Industrial Floor Buffer,1
+textures/clutter/office/coffeemaker01.dds,Commercial Coffee Machine,1
+textures/clutter/junk/conductor.dds,Electrical Conductor Part,1
+textures/clutter/junk/hammer01.dds,Claw Hammer,1
+textures/clutter/junk/wrench.dds,Hand Wrench,1
+textures/clutter/junk/nukacolacap.dds,Nuka-Cola Bottlecap (Caps),1
+textures/clutter/fusiongenerator/fusiongenerator01.dds,Industrial Fusion Generator,1
+textures/weapons/1handpistol/10mmpistol.dds,10mm Pistol Body,1
+textures/weapons/1handpistol/10mmclip.dds,10mm Pistol Magazine,1
+textures/weapons/1handpistol/10mmsubmachinegun.dds,10mm Submachine Gun,1
+textures/weapons/1handpistol/10mmsubmachineclip.dds,10mm Submachine Gun Magazine,1
+textures/weapons/2handautomatic/assaultrifle01.dds,Assault Rifle Body,1
+textures/weapons/2handautomatic/assaultrifle02.dds,Assault Rifle Frame,1
+textures/weapons/2handautomatic/assaultriflemag01.dds,Assault Rifle Magazine,1
+textures/weapons/2handautomatic/g3assaultrifle.dds,Chinese Assault Rifle,1
+textures/weapons/2handautomatic/g3assaultrifleclip.dds,Chinese Assault Rifle Magazine,1
+textures/weapons/2handrifle/combatshotgun.dds,Combat Shotgun,1
+textures/weapons/2handrifle/combatshotgundrum.dds,Combat Shotgun Drum Magazine,1
+textures/weapons/2handrifle/huntingrifle.dds,Hunting Rifle Receiver,1
+textures/weapons/2handrifle/huntingrifleclip.dds,Hunting Rifle Magazine,1
+textures/weapons/1handpistol/laserpistol.dds,Laser Pistol,1
+textures/weapons/2handrifle/laserrifle01.dds,Laser Rifle,1
+textures/weapons/1handpistol/plasmapistol.dds,Plasma Pistol,1
+textures/weapons/2handrifle/plasmarifle01.dds,Plasma Rifle,1
+textures/weapons/2handrifle/sniperrifle.dds,Sniper Rifle,1
+textures/weapons/2handrifle/sniperrifleclip.dds,Sniper Rifle Magazine,1
+textures/weapons/1handpistol/32snubnose.dds,.32 Revolver,1
+textures/weapons/1handpistol/magnumpistol.dds,.44 Magnum Revolver,1
+textures/weapons/1handpistol/sawedoffshotgun.dds,Sawed-Off Shotgun Barrels,1
+textures/weapons/2handhandle/minigun.dds,Minigun Body & Barrels,1
+textures/weapons/1handmelee/1stpersoncombatknife.dds,Combat Knife,1
+textures/weapons/1handmelee/chineseofficersword.dds,Chinese Officer Sword,1
+textures/weapons/1handmelee/switchblade.dds,Switchblade,1
+textures/weapons/1handmelee/kitchenknife.dds,Kitchen Knife,1
+textures/weapons/1handmelee/rustykitchenknife.dds,Rusty Kitchen Knife,1
+textures/weapons/1handmelee/leadpipe.dds,Lead Pipe,1
+textures/weapons/1handmelee/tireiron.dds,Tire Iron,1
+textures/weapons/1handmelee/ripper.dds,Ripper Chain Blade,1
+textures/weapons/1handmelee/shishkebab.dds,Shishkebab Sword,1
+textures/weapons/2handmelee/1stpersonsledgehammer.dds,Sledgehammer Head,1
+textures/weapons/2handmelee/supersledge.dds,Super Sledge Head & Jet,1
+textures/weapons/hand2hand/1stpersonbrassknuckles.dds,Brass Knuckles,1
+textures/weapons/hand2hand/1stpersonspikedknuckles.dds,Spiked Knuckles,1
+textures/weapons/hand2hand/powerfist.dds,Power Fist Assembly,1
+textures/weapons/2handmelee/baseballbat.dds,Wooden Baseball Bat,0
+textures/weapons/2handmelee/poolcue.dds,Wooden Pool Cue,0
+textures/weapons/1handmelee/rollingpin.dds,Wooden Rolling Pin,0
+textures/weapons/1handmelee/treebranch.dds,Wooden Tree Branch,0
+textures/weapons/2handmelee/nailboard.dds,Wooden Nail Board,0
+textures/weapons/hand2hand/deathclawgauntlet.dds,Deathclaw Gauntlet Bone & Leather,0
+textures/weapons/1handpistol/10mmammo.dds,10mm Ammunition,1
+textures/weapons/1handpistol/32pistolcasing.dds,.32 Bullet Casings,1
+textures/weapons/1handpistol/44magnumammo.dds,.44 Magnum Ammunition,1
+textures/weapons/1handpistol/shotgunshell.dds,Shotgun Shell Metal Base,1
+textures/weapons/1handgrenadethrow/grenade.dds,Frag Grenade Casing,1
+textures/weapons/1handminedrop/minefrag.dds,Frag Mine Body,1
+textures/weapons/1handgrenadethrow/pulsegrenade.dds,Pulse Grenade Casing,1
+textures/weapons/1handminedrop/minepulse.dds,Pulse Mine Body,1
+textures/weapons/1handminedrop/bottlecapmine.dds,Bottlecap Mine Lunchbox & Caps,1
+textures/clutter/junk/steamgauge01.dds,Steam Gauge Assembly,1
+textures/clutter/junk/9voltbattery.dds,9-Volt Battery Casing,1
+textures/clutter/junk/camera01.dds,Vintage Camera Metal Casing,1
+textures/clutter/junk/harmonica.dds,Harmonica Metal Plate,1
+textures/clutter/junk/key01.dds,Metal Key,1
+textures/clutter/junk/kitchenutensils01.dds,Metal Kitchen Utensils,1
+textures/clutter/junk/lunchbox.dds,Metal Vault-Tec Lunchbox,1
+textures/clutter/junk/ophthalmoscope.dds,Medical Ophthalmoscope,1
+textures/clutter/junk/ovenlamp.dds,Metal Oven Lamp Fixture,1
+textures/clutter/questitems/ms06lincolnpennies.dds,Lincoln Copper Pennies,1
+textures/clutter/questitems/ms06phonautograph.dds,Phonautograph Brass Cylinder,1
+textures/clutter/questitems/ms17loudspeakers.dds,Metal Loudspeakers,1
+textures/clutter/questitems/mq05fusebox01.dds,Metal Fuse Box,1
+textures/clutter/questitems/mq08geckbriefcase01.dds,G.E.C.K. Metal Briefcase,1
+textures/clutter/questitems/holodogtags01.dds,Metal Dog Tags,1
+textures/clutter/hospital/anesthesiamachine01.dds,Anesthesia Machine Frame,1
+textures/clutter/projector/projector01.dds,Film Projector Housing,1
+textures/clutter/hamradio/hamradio.dds,HAM Radio Chassis,1
+textures/architecture/megaton/metalpiperusted02.dds,Megaton Metal Rusted Steam Pipe,1
+textures/architecture/megaton/metalpowerlines01.dds,Megaton Metal Power Lines,1
+textures/architecture/megaton/metalscrapbeams01.dds,Megaton Structural Scrap Metal Beams,1
+textures/architecture/megaton/metalscrapdoor02.dds,Megaton Scrap Metal Door 02,1
+textures/architecture/megaton/metalscrapdoor03.dds,Megaton Scrap Metal Door 03,1
+textures/architecture/megaton/metalscrapfencing01.dds,Megaton Scrap Metal Fencing,1
+textures/architecture/megaton/metalscraplight01.dds,Megaton Scrap Metal Light Fixture,1
+textures/architecture/megaton/metalscrappanels03.dds,Megaton Corrugated Metal Wall Panels 03,1
+textures/architecture/megaton/metalscrappanels04.dds,Megaton Corrugated Metal Wall Panels 04,1
+textures/architecture/megaton/metalscrapshingle08.dds,Megaton Scrap Metal Roof Shingles 08,1
+textures/architecture/megaton/metalscrapshingles04.dds,Megaton Scrap Metal Roof Shingles 04,1
+textures/architecture/megaton/metalscrapshingles05.dds,Megaton Scrap Metal Roof Shingles 05,1
+textures/architecture/megaton/metalscrapshingles06.dds,Megaton Scrap Metal Roof Shingles 06,1
+textures/architecture/megaton/genericpaperdebris01.dds,Megaton Paper Debris,0
+textures/furniture/workbench.dds,Crafting Workbench,1
+textures/furniture/locker01.dds,Metal Storage Locker,1
+textures/furniture/fan01.dds,Electric Desk Fan,1
+textures/furniture/hotellamp.dds,Metal Desk Lamp,1
+textures/furniture/desk01.dds,Steel Executive Desk,1
+textures/furniture/cabinet01.dds,Metal File Cabinet,1
+textures/furniture/suburban_hatstand.dds,Metal Hat Stand,1
+textures/furniture/shelveswooden01.dds,Wooden Shelves,0
+textures/furniture/tv_set_clean.dds,Retro Television Set,0
+textures/clutter/console01.dds,Control Console 01,1
+textures/clutter/consoles/console02.dds,Control Console 02,1
+textures/clutter/metalconsolebase01.dds,Metal Console Base 01,1
+textures/clutter/metalconsolebase02.dds,Metal Console Base 02,1
+textures/clutter/ivstand01.dds,Medical IV Stand,1
+textures/clutter/garbagecan/garbagecanurban01.dds,Urban Metal Garbage Can,1
+textures/dungeons/vault/vcontrolpanels02.dds,Vault Control Panels 02,1
+textures/dungeons/vault/vtechbox01.dds,Vault Tech Box,1
+textures/dungeons/vault/vmetal01.dds,Vault Interior Sheet Metal,1
+textures/dungeons/vault/vpipecap01.dds,Vault Metal Pipe Cap,1
+textures/dungeons/vault/vfangrill01.dds,Vault Metal Fan Grill,1
+textures/architecture/urban/firehydrant01.dds,Cast Iron Fire Hydrant,1
+textures/architecture/urban/streetlight01.dds,Steel Streetlight,1
+textures/architecture/urban/trusswork01.dds,Structural Metal Truss Work,1
+textures/architecture/citadel/citadelfloodligts.dds,Citadel Metal Floodlights,1
+textures/dungeons/vault/vaulttransformer01.dds,Vault Transformer Unit,1
+textures/dungeons/vault/lockervault01.dds,Vault Metal Storage Locker,1
+textures/dungeons/vault/vacunit01.dds,Vault AC Ventilation Unit,1
+textures/dungeons/vault/vceilingfan01.dds,Vault Ceiling Fan,1
+textures/dungeons/vault/vcontrolpanels01.dds,Vault Control Panels 01,1
+textures/dungeons/vault/vmesh01.dds,Vault Metal Wire Mesh,1
+textures/dungeons/vault/vlight01.dds,Vault Metal Light Fixture,1
+

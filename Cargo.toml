@@ -22,7 +22,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1"
 gltf = { version = "1.4", default-features = false, features = ["names", "utils"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["dds", "png"] }
 nalgebra = "0.34"
 nif = { git = "https://github.com/kelo221/nifty.git", rev = "0dfd052005f8e630ecc997bb462d3b88226efe65", default-features = false, features = ["fo3_glb"] }
 rayon = "1.10"
