@@ -126,3 +126,49 @@ route still ends `blocked=true` (genuine wedge is still detected).
 real-data acceptance above. Wave manual: `M4_WAVE8_MANUAL.md` before
 the PR. One PR closes #154, #155, #157; #148 re-measured and commented
 after merge.
+
+## Shipped amendments
+
+- **A1 — External architecture review (2026-07-19, mid-wave).** A Codex
+  (gpt-5.6-sol xhigh) audit of epic #9 endorsed the wave direction
+  (keep landmass; authored semantics over geometric guessing; physics
+  authoritative) and produced corrections that were verified by the
+  orchestrator and dispatched to the running executors. Rejected from
+  the review after verification: pulling NVTR evidence into #154
+  mid-flight (unproven mapping — stays #156), and mandating literal
+  `f32::INFINITY` lock costs for #155 (landmass only validates
+  `cost > 0.0`; `0 × inf = NaN` risk — requirement recorded as
+  "verified-safe exclusion semantics" on #155 instead).
+- **A2 — F154.2 respecified.** "Mutual-nearest one-to-one" replaced by
+  reciprocal, non-overlapping portal intervals with one-to-many edge
+  subdivision (one long edge may match several short tessellated
+  edges); shipped as full pairwise candidate generation + greedy
+  longest-overlap-first resolution. Agent-class constants (step height)
+  moved out of the universal prepared graph into the runtime landmass
+  conversion (`MERGE_PORTAL_STEP_HEIGHT`). Adversarial fixtures added:
+  parallel walls, stacked floors, mis-wound edges, one-long-to-two-short
+  subdivision.
+- **A3 — F154.4 quarantine scope.** Full per-link quarantine needs
+  landmass-side per-link exclusion that does not exist for merge links;
+  shipped minimum-viable mitigation clears the agent's route/travel
+  intent on a blocked crossing (no repath loop, agent idles). Follow-up
+  filed as its own issue rather than expanding the wave.
+- **A4 — F157.1 option struck.** "Windowed net displacement" removed as
+  a candidate signal per the review (oscillation = displacement without
+  progress). Shipped signal: achieved velocity projected onto landmass's
+  current steering direction, integrated; its own oscillation ceiling
+  (fully-achieved oscillating steering never latches stuck) is
+  documented in `movement_policy.rs` and pinned by a named
+  known-limitation scenario, alongside avoidance-pause and
+  repath-rebaseline pins.
+- **A5 — Model routing (recorded per AGENTS.md).** Claude runtime:
+  Fable orchestrator, Sonnet executors for #154/#155/#157. The review's
+  Sol X-High recommendation applies to the Codex runtime only.
+- **A6 — Real-data flag for acceptance.** FranklinMetro02 prepare:
+  `merges 11 (rejected 89)`. Two `tna goto` targets across the merge
+  cluster near (-15..-21, 103.3, -57..-59) ended
+  `nav agent portal blocked` (swept crossing timeout) — correct failure
+  reporting (no teleport), but the crossings did not complete. To
+  investigate before sign-off: genuinely unwalkable seam accepted by
+  geometric validation (evidence for #156's authored-NVTR refinement)
+  vs. straight-line sweep limitation.
