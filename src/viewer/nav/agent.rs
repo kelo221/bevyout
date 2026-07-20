@@ -269,6 +269,9 @@ mod fall_guard;
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
 const AGENT_DESIRED_SPEED: f32 = 2.5;
+/// Contact normals at or above this Y are floor-like; below it they are
+/// walls/steep faces, i.e. the things that actually block an agent.
+const WALKABLE_CONTACT_NORMAL_Y: f32 = std::f32::consts::FRAC_1_SQRT_2;
 const AGENT_MAX_SPEED: f32 = 3.5;
 const AGENT_TARGET_REACHED_DISTANCE: f32 = 0.5;
 /// Fixed kinematic crossing duration for a door-link traversal (spike
@@ -2329,6 +2332,57 @@ fn step_agent_kcc(
     (player::from_box_vec3(position), velocity, grounded)
 }
 
+/// Issue #148 diagnostic: summarises what a blocked agent's capsule is
+/// actually touching, as a single stable log field. Emits every
+/// non-walkable contact plane (normal + world contact point) plus the
+/// fraction of this tick's desired motion the sweep could achieve, so a
+/// wedge can be attributed to a real surface instead of guessed at from a
+/// scene-manifest footprint scan. Footprint scans keyed on the capsule
+/// *centre* miss the blocker by exactly `AGENT_RADIUS`, which is how
+/// #148's metro wedge stayed misattributed across four builds.
+fn world_contact_report(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    position: Vec3,
+    collision_filter: boxddd::QueryFilter,
+    desired_horizontal: Vec2,
+) -> String {
+    let origin = player::to_box_vec3(position);
+    let planes = world
+        .collide_mover(origin, mover, collision_filter)
+        .unwrap_or_default();
+    let mut blocking = planes
+        .iter()
+        .filter(|plane| plane.plane.normal.y < WALKABLE_CONTACT_NORMAL_Y)
+        .map(|plane| {
+            format!(
+                "n=({:.2},{:.2},{:.2})@({:.2},{:.2},{:.2})",
+                plane.plane.normal.x,
+                plane.plane.normal.y,
+                plane.plane.normal.z,
+                plane.point.x,
+                plane.point.y,
+                plane.point.z,
+            )
+        })
+        .collect::<Vec<_>>();
+    blocking.sort();
+    blocking.dedup();
+    let step = desired_horizontal / 60.0;
+    let fraction = world
+        .cast_mover(
+            origin,
+            mover,
+            boxddd::Vec3::new(step.x, 0.0, step.y),
+            collision_filter,
+        )
+        .unwrap_or(1.0);
+    format!(
+        "sweep_fraction={fraction:.3} blocking_planes=[{}]",
+        blocking.join(" ")
+    )
+}
+
 type AgentPhysicsQuery<'w, 's> = Query<
     'w,
     's,
@@ -2447,6 +2501,21 @@ fn apply_agent_physics_movement(
             && let Some(index) = roster.index_of(entity)
         {
             info!("nav agent collision-blocked {index}");
+            // Issue #148: "blocked" alone never said *what* blocked, which
+            // sent two waves chasing the wrong collider. Report the
+            // obstructing contact geometry on the rising edge: the
+            // non-walkable contact normals and world points locate the
+            // offending surface directly (a wall face at
+            // `point +/- AGENT_RADIUS` along its normal). Rising edge only,
+            // so a permanently wedged agent logs this once, not per tick.
+            let contacts = world_contact_report(
+                world,
+                &mover,
+                transform.translation,
+                collision_filter,
+                desired_horizontal,
+            );
+            info!("nav agent collision-blocked {index} contacts {contacts}");
         }
 
         // Stuck detection needs a live target distance -- an agent with no
@@ -8056,5 +8125,251 @@ mod tests {
             last.z < 2.0,
             "the agent must come to rest in front of the ledge, got {last:?}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #148 wedge investigation harness (env-gated, no committed
+    // game data). Rebuilds a prepared cell's collision through the *real*
+    // `player::create_prepared_shape` cook, keeps a shape -> placement
+    // map the runtime does not keep, and replays `step_agent_kcc` so a
+    // wedge can be attributed to a named collider.
+    //
+    //   BEVYOUT_WEDGE_SCENE=/abs/path/scene.ron \
+    //   BEVYOUT_WEDGE_START=9.6,106,-73.1 \
+    //   BEVYOUT_WEDGE_TARGET=5,106,-73 \
+    //   cargo test-dev --lib wedge_replay -- --nocapture --ignored
+    // ---------------------------------------------------------------
+
+    fn wedge_vec(name: &str, fallback: Vec3) -> Vec3 {
+        let Ok(raw) = std::env::var(name) else {
+            return fallback;
+        };
+        let parts = raw
+            .split(',')
+            .map(|part| part.trim().parse::<f32>().expect("numeric wedge vector"))
+            .collect::<Vec<_>>();
+        assert_eq!(parts.len(), 3, "{name} must be x,y,z");
+        Vec3::new(parts[0], parts[1], parts[2])
+    }
+
+    struct WedgeWorld {
+        world: boxddd::World,
+        owners: HashMap<u32, String>,
+    }
+
+    impl WedgeWorld {
+        fn owner(&self, shape: boxddd::ShapeId) -> String {
+            self.owners
+                .get(&shape_key(shape))
+                .cloned()
+                .unwrap_or_else(|| format!("<unmapped shape {:?}>", shape))
+        }
+    }
+
+    fn shape_key(shape: boxddd::ShapeId) -> u32 {
+        // `ShapeId` is opaque; its Debug form is stable enough to key on
+        // within one world, and cheaper than threading a parallel index.
+        let text = format!("{shape:?}");
+        let digits = text
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>();
+        digits.parse().unwrap_or(0)
+    }
+
+    /// Cooks every enabled placement's prepared collision exactly the way
+    /// `player::build_prepared_colliders` does (same shapes, same
+    /// categories/masks), recording which placement each shape came from.
+    fn build_wedge_world(scene: &std::path::Path, skip: &[u32]) -> WedgeWorld {
+        let text = std::fs::read_to_string(scene).expect("scene manifest");
+        let manifest: crate::vsa::PreparedSceneManifest =
+            ron::de::from_str(&text).expect("valid scene manifest");
+        let asset_root = scene.parent().unwrap().parent().unwrap().parent().unwrap();
+
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        let static_body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        let mut owners = HashMap::new();
+
+        for placement in &manifest.placements {
+            if !placement.initially_enabled || skip.contains(&placement.reference_form_id) {
+                continue;
+            }
+            if matches!(
+                placement.semantic,
+                crate::vsa::PreparedSemantic::Npc(_) | crate::vsa::PreparedSemantic::Creature(_)
+            ) {
+                continue;
+            }
+            let Some(relative) = placement.physics_asset_path.as_ref() else {
+                continue;
+            };
+            let path = asset_root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let Ok(asset) = crate::vsa::read_physics_asset(&path) else {
+                continue;
+            };
+            let dynamic = placement.physics_classification
+                == crate::vsa::PreparedPhysicsClassification::Dynamic;
+            for body in &asset.bodies {
+                let body_id = if dynamic {
+                    world.create_body(BodyDef::builder().body_type(BodyType::Dynamic).build())
+                } else {
+                    static_body
+                };
+                for shape in &body.shapes {
+                    let created = player::create_prepared_shape(
+                        &mut world,
+                        body_id,
+                        body,
+                        shape,
+                        placement,
+                        player::PreparedShapeOptions {
+                            dynamic,
+                            local_space: false,
+                            collision_group: 0,
+                        },
+                    );
+                    if let Some((shape_id, _)) = created {
+                        owners.insert(
+                            shape_key(shape_id),
+                            format!(
+                                "{} ({:08x}) {:?}/{}",
+                                placement.editor_id.as_deref().unwrap_or("<no editor id>"),
+                                placement.reference_form_id,
+                                placement.physics_classification,
+                                shape.kind(),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        WedgeWorld { world, owners }
+    }
+
+    #[test]
+    #[ignore = "requires a prepared cell: set BEVYOUT_WEDGE_SCENE"]
+    fn wedge_replay() {
+        let Ok(scene) = std::env::var("BEVYOUT_WEDGE_SCENE") else {
+            return;
+        };
+        let scene = std::path::PathBuf::from(scene);
+        let start = wedge_vec("BEVYOUT_WEDGE_START", Vec3::new(9.6, 106.0, -73.1));
+        let target = wedge_vec("BEVYOUT_WEDGE_TARGET", Vec3::new(5.0, 106.0, -73.0));
+
+        let skip = std::env::var("BEVYOUT_WEDGE_SKIP")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .filter(|part| !part.trim().is_empty())
+                    .map(|part| {
+                        u32::from_str_radix(part.trim().trim_start_matches("0x"), 16)
+                            .expect("hex reference form id")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut wedge = build_wedge_world(&scene, &skip);
+        {
+            let mover = fixture_capsule();
+            let cf = player::player_collision_filter();
+            for (label, probe) in [
+                ("spawn", start + Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0)),
+                ("target", target + Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0)),
+            ] {
+                let bp = player::to_box_vec3(probe);
+                let planes = wedge
+                    .world
+                    .collide_mover(bp, &mover, cf)
+                    .unwrap_or_default();
+                let ground = wedge
+                    .world
+                    .cast_mover(bp, &mover, boxddd::Vec3::new(0.0, -1.2, 0.0), cf)
+                    .unwrap_or(1.0);
+                println!(
+                    "{label} ({:.2},{:.2},{:.2}): contacts={} ground_cast={ground:.3}",
+                    probe.x,
+                    probe.y,
+                    probe.z,
+                    planes.len()
+                );
+                for plane in planes.iter().take(4) {
+                    println!(
+                        "    n=({:.2},{:.2},{:.2}) <- {}",
+                        plane.plane.normal.x,
+                        plane.plane.normal.y,
+                        plane.plane.normal.z,
+                        wedge.owner(plane.shape_id)
+                    );
+                }
+            }
+        }
+        println!("cooked {} shapes (skipped {skip:08x?})", wedge.owners.len());
+
+        let mover = fixture_capsule();
+        let collision_filter = player::player_collision_filter();
+        let support_filter = player::stair_support_filter();
+
+        let mut position = start + Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0);
+        let mut velocity = Vec3::ZERO;
+        let mut grounded = false;
+        for tick in 0..600 {
+            let to_target = Vec2::new(target.x - position.x, target.z - position.z);
+            let desired = to_target.normalize_or_zero() * AGENT_DESIRED_SPEED;
+            let (p, v, g) = step_agent_kcc(
+                &mut wedge.world,
+                &mover,
+                collision_filter,
+                support_filter,
+                position,
+                velocity,
+                grounded,
+                desired,
+                1.0 / 60.0,
+            );
+            let moved = (p - position).length();
+            if tick < 5 || tick % 60 == 0 {
+                println!(
+                    "t{tick}: ({:.3},{:.3},{:.3}) grounded={g} moved={moved:.4}",
+                    p.x, p.y, p.z
+                );
+            }
+            position = p;
+            velocity = v;
+            grounded = g;
+        }
+        println!(
+            "REST ({:.3},{:.3},{:.3}) grounded={grounded}",
+            position.x, position.y, position.z
+        );
+
+        // Who is touching the capsule at rest?
+        let box_pos = player::to_box_vec3(position);
+        let planes = wedge
+            .world
+            .collide_mover(box_pos, &mover, collision_filter)
+            .unwrap_or_default();
+        println!("contacts at rest: {}", planes.len());
+        for plane in &planes {
+            println!(
+                "  normal=({:.3},{:.3},{:.3}) point=({:.2},{:.2},{:.2}) <- {}",
+                plane.plane.normal.x,
+                plane.plane.normal.y,
+                plane.plane.normal.z,
+                plane.point.x,
+                plane.point.y,
+                plane.point.z,
+                wedge.owner(plane.shape_id)
+            );
+        }
+
+        // What stops the forward sweep?
+        let to_target = Vec2::new(target.x - position.x, target.z - position.z);
+        let step = to_target.normalize_or_zero() * AGENT_DESIRED_SPEED / 60.0;
+        let delta = boxddd::Vec3::new(step.x, 0.0, step.y);
+        let fraction = wedge
+            .world
+            .cast_mover(box_pos, &mover, delta, collision_filter)
+            .unwrap_or(1.0);
+        println!("forward sweep fraction={fraction:.4} (1.0 = unobstructed)");
     }
 }
