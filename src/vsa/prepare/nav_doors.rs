@@ -54,12 +54,6 @@ pub(crate) const BLOCKER_FLOOR_TOLERANCE: f32 = 0.5;
 /// face by the clearance pass (issue #171) -- are not overlapping.
 const OVERLAP_EPSILON: f32 = 1.0e-4;
 
-/// Slack (metres) allowed when testing whether a polygon vertex lies inside a
-/// blocker footprint, so a vertex sitting numerically *on* the footprint
-/// boundary still counts as inside. Same robustness role as
-/// [`OVERLAP_EPSILON`].
-const CONTAINMENT_EPSILON: f32 = 1.0e-4;
-
 /// One blocking placement's collision footprint in Bevy-metre world space:
 /// the XZ convex hull of every player-blocking shape triangle it contributes,
 /// plus that geometry's vertical extent.
@@ -182,9 +176,12 @@ pub(crate) fn derive_door_associations(
                     continue;
                 }
                 let contained = !mesh.authored_door_polygons.contains(&polygon.index)
-                    && triangle
-                        .iter()
-                        .all(|point| point_in_convex_polygon(*point, &blocker.footprint));
+                    && triangle.iter().all(|point| {
+                        bevyout_core::geometry::point_in_convex_polygon_xz(
+                            *point,
+                            &blocker.footprint,
+                        )
+                    });
                 if !blocker.gated && !contained {
                     continue;
                 }
@@ -207,10 +204,6 @@ pub(crate) fn derive_door_associations(
     });
     associations.dedup();
     associations
-}
-
-fn cross(origin: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-    (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
 }
 
 /// Whether two convex XZ polygons genuinely overlap (separating-axis test
@@ -250,22 +243,10 @@ fn project(shape: &[[f32; 2]], axis: [f32; 2]) -> (f32, f32) {
     (min, max)
 }
 
-/// Whether `point` lies inside the counter-clockwise convex `polygon`
-/// (boundary counts as inside, per [`CONTAINMENT_EPSILON`]).
-fn point_in_convex_polygon(point: [f32; 2], polygon: &[[f32; 2]]) -> bool {
-    for index in 0..polygon.len() {
-        let start = polygon[index];
-        let end = polygon[(index + 1) % polygon.len()];
-        if cross(start, end, point) < -CONTAINMENT_EPSILON {
-            return false;
-        }
-    }
-    true
-}
-
 // ---------------------------------------------------------------------
 // The invariant check -- an INDEPENDENT verification path (issue #189
-// feature 3). Nothing below this line may call `point_in_convex_polygon`,
+// feature 3). Nothing below this line may call the shared convex-polygon
+// primitive `bevyout_core::geometry::point_in_convex_polygon_xz`,
 // `convex_shapes_overlap`, or read `BlockerVolume::footprint` for a
 // containment decision: those are `derive_door_associations`' primitives and
 // its input, i.e. the subject under test.
@@ -302,8 +283,9 @@ const FLAT_SOLID_AREA: f32 = 1.0e-6;
 /// boundaries directly onto collider faces, so lying exactly on a collision
 /// edge is the common case here, not an oddity.
 ///
-/// Numerically equal to [`CONTAINMENT_EPSILON`], the slack the derivation's
-/// own half-plane test gives its boundary, so the two paths agree on how much
+/// Numerically equal to `bevyout_core::geometry::CONTAINMENT_EPSILON`, the
+/// slack the derivation's shared convex-polygon primitive gives its boundary
+/// (issue #189 feature 4), so the two paths agree on how much
 /// f32 noise counts as "on the surface" while still deciding containment by
 /// different means. That is a shared *convention*, not a shared primitive: at
 /// 0.1 mm it cannot turn ground the derivation could not have claimed into a
@@ -397,7 +379,7 @@ fn point_inside_solid_xz(point: [f32; 2], blocker: &BlockerVolume) -> bool {
 ///
 /// Verified independently of its subject (issue #189 feature 3): containment
 /// is decided by [`point_inside_solid_xz`] against the blocker's raw collision
-/// triangles, never by the `point_in_convex_polygon` /
+/// triangles, never by the shared `geometry::point_in_convex_polygon_xz` /
 /// `BlockerVolume::footprint` pair `derive_door_associations` runs on. A check
 /// that shares its primitive with the code it validates can only ever agree
 /// with that code -- see this module's section header above.

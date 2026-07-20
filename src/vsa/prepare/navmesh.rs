@@ -703,15 +703,12 @@ fn report_nav_probe(
             ) else {
                 return None;
             };
-            let det = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
-            if det.abs() < 1.0e-9 {
-                return None;
-            }
-            let beta = ((x - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (z - a[2])) / det;
-            let gamma = ((b[0] - a[0]) * (z - a[2]) - (x - a[0]) * (b[2] - a[2])) / det;
-            let alpha = 1.0 - beta - gamma;
-            (alpha >= -1.0e-4 && beta >= -1.0e-4 && gamma >= -1.0e-4)
-                .then(|| (index, alpha * a[1] + beta * b[1] + gamma * c[1]))
+            // Issue #189 feature 4: the one shared containment primitive,
+            // rather than the inline barycentric copy this was (with its own
+            // 1e-9/1e-4 tolerances). The weights interpolate the covering
+            // polygon's surface height at the probe point.
+            let [alpha, beta, gamma] = bevyout_core::geometry::barycentric_xz(x, z, a, b, c)?;
+            Some((index, alpha * a[1] + beta * b[1] + gamma * c[1]))
         })
     };
 
