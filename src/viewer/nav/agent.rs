@@ -438,6 +438,68 @@ const AGENT_POINT_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d
     animation_link_max_vertical_distance: 1.0,
 };
 
+/// How far ahead (seconds) landmass's local avoidance may look when treating
+/// *navmesh border edges* as ORCA obstacles (issue #184). This **disables**
+/// border avoidance: it is expressed as a negligible positive horizon rather
+/// than `0.0` only because `dodgy_2d` divides by it (`left_cutoff =
+/// (vertex - position) / time_horizon`), so zero would put `inf`/`NaN` into the
+/// linear program. At `AGENT_MAX_SPEED` this is a lookahead well under a
+/// millimetre -- far below any geometric tolerance in the pipeline -- while
+/// keeping every squared quantity comfortably inside `f32` range.
+/// `avoidance_time_horizon` (agent/character avoidance, issue #114 feature 4)
+/// is a separate option and keeps landmass's own `0.5` default; only borders
+/// are switched off here.
+///
+/// Two independent facts make navmesh borders the wrong avoidance authority
+/// for this project:
+///
+/// 1. **Physics owns wall clearance, not the navmesh.** Since issue #114
+///    movement is physics-authoritative -- the agent capsule KCC resolves the
+///    real cooked colliders every tick (`step_agent_kcc`) -- and since issues
+///    #153/#171 the *prepared* mesh boundary is already the agent-radius
+///    clearance boundary (`vsa::prepare::nav_clearance`). Border avoidance is
+///    therefore a second, redundant wall-avoidance layer, and unlike the first
+///    it acts in *velocity space with no contact*, so its failures are
+///    invisible to every collision diagnostic.
+/// 2. **`dodgy_2d` is strictly 2D, and landmass feeds it vertically-separated
+///    geometry.** `landmass::avoidance::nav_mesh_borders_to_dodgy_obstacles`
+///    walks outward through *connected* polygons for `neighbourhood` metres and
+///    projects every border it finds onto the XZ plane. A staircase is walkable
+///    ground connected to the landing above it, so its rail gets flattened onto
+///    the landing's own footprint -- on 00024512, 125 border edges spanning
+///    y 39.17..40.47, up to a metre below the agent's surface, with #171's
+///    sub-triangle re-triangulation contributing many near-collinear slivers.
+///    In any multi-level cell that set simply is not a valid description of
+///    what the agent must avoid, and `dodgy_2d` treats obstacle lines as *hard*
+///    constraints: a degenerate set makes `solve_linear_program` infeasible and
+///    it falls back to "whatever solution we get even if it's infeasible".
+///
+/// The observable failure is a velocity that decays by exactly
+/// `1 - dt / horizon` per tick toward zero. On 00024512 an agent with 1.35 m of
+/// clearance in every direction and a completely free capsule sweep crept to a
+/// permanent halt against borders 2-3.5 m away, reporting
+/// `reason=no_contact_no_progress` -- four waves' worth of collider hunting for
+/// an obstacle that was never physical. Merely shortening the horizon is not
+/// enough: at one fixed tick the decay stops, but a border projected onto the
+/// agent's own position still hard-blocks it (measured on this file's own
+/// `stall_fixture_mesh`, which halts at the projected stair cap until the
+/// horizon goes below ~1e-3).
+const NAV_BORDER_AVOIDANCE_TIME_HORIZON: f32 = 1e-4;
+
+/// The archipelago options every build shares (issue #184): landmass's
+/// `from_agent_radius` avoidance defaults, with the point-sampling envelope
+/// widened to humanoid scale (`AGENT_POINT_SAMPLE_DISTANCE`) and navmesh-border
+/// ORCA avoidance clamped to one tick (`NAV_BORDER_AVOIDANCE_TIME_HORIZON`).
+/// One helper rather than per-call-site literals so `ensure_archipelago` and
+/// every test harness cannot drift apart on exactly the options a stall
+/// regression depends on.
+fn archipelago_options() -> ArchipelagoOptions<ThreeD> {
+    let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+    options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
+    options.obstacle_avoidance_time_horizon = NAV_BORDER_AVOIDANCE_TIME_HORIZON;
+    options
+}
+
 /// Bounded multi-agent cap (issue #114 feature 4): small and fixed so local
 /// avoidance among same-cell test agents is observable without an
 /// unbounded actor budget. Every previously single-agent `tna` command form
@@ -1125,12 +1187,9 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
     let openable_blockers = landmass_graph::openable_blockers(&mesh_inputs);
 
-    // Widen the sample distances to humanoid scale (see
-    // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
-    // evidence); keep the rest of `from_agent_radius`'s avoidance defaults.
-    let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-    options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
-    let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
+    // Widened sample distances plus the clamped border-avoidance horizon --
+    // see `archipelago_options`, which every build (runtime and test) shares.
+    let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
     apply_preferred_pathing_base_cost(
         world,
         archipelago_entity,
@@ -7062,6 +7121,279 @@ mod tests {
         world.run_schedule(FixedUpdate);
     }
 
+    /// Issue #184 regression fixture: a straight walkable corridor the agent
+    /// walks the length of, plus a *connected* side bay chopped into many thin
+    /// sliver triangles whose border edges sit a few metres off the corridor.
+    /// This is the synthetic shape of the 00024512 stall -- a landing joined to
+    /// finely re-triangulated geometry (issue #171 emits exactly these slivers)
+    /// whose borders `landmass::avoidance` flattens into one 2D `dodgy_2d`
+    /// obstacle set. Nothing here is keyed on a cell or a coordinate: it is the
+    /// geometry class, not the instance.
+    ///
+    /// Corridor: `x in [0, 3]`, `z in [0, CORRIDOR_LENGTH]`. Side bay:
+    /// `x in [3, 5.5]`, `z in [4, 8]`, split into `slivers` strips.
+    fn stall_fixture_mesh(slivers: usize) -> landmass_graph::MeshInput {
+        const CORRIDOR_LENGTH: f32 = 14.0;
+        const BAY_START: f32 = 4.0;
+        const BAY_END: f32 = 8.0;
+        let mut vertices: Vec<[f32; 3]> = Vec::new();
+        let mut index_of: HashMap<(i64, i64, i64), u32> = HashMap::new();
+        // Shared vertex grid: landmass connects polygons by identical vertex
+        // *indices*, so every quad corner must resolve to one entry or the
+        // whole mesh degenerates into disconnected triangles with no interior
+        // edges at all. Keyed in full 3D because the switchback below folds
+        // back under the corridor, putting two surfaces at one `(x, z)`.
+        let mut vertex = |vertices: &mut Vec<[f32; 3]>, x: f32, y: f32, z: f32| -> u32 {
+            let key = (
+                (x * 1e4).round() as i64,
+                (y * 1e4).round() as i64,
+                (z * 1e4).round() as i64,
+            );
+            *index_of.entry(key).or_insert_with(|| {
+                vertices.push([x, y, z]);
+                (vertices.len() - 1) as u32
+            })
+        };
+
+        // The z cuts every quad row shares: 1 m steps along the corridor, plus
+        // one cut per sliver through the bay's span so the bay's strips share
+        // real edges with the corridor rather than T-junctioning onto it.
+        let strip = (BAY_END - BAY_START) / slivers as f32;
+        let mut cuts: Vec<f32> = (0..=CORRIDOR_LENGTH as usize).map(|z| z as f32).collect();
+        cuts.extend((0..=slivers).map(|index| BAY_START + index as f32 * strip));
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+        let mut polygons: Vec<landmass_graph::PolygonInput> = Vec::new();
+        let mut quad = |vertices: &mut Vec<[f32; 3]>,
+                        polygons: &mut Vec<landmass_graph::PolygonInput>,
+                        (x0, y0): (f32, f32),
+                        (x1, y1): (f32, f32),
+                        z0: f32,
+                        z1: f32| {
+            let (a, b, c, d) = (
+                vertex(vertices, x0, y0, z0),
+                vertex(vertices, x1, y1, z0),
+                vertex(vertices, x0, y0, z1),
+                vertex(vertices, x1, y1, z1),
+            );
+            for mut indices in [[a, b, c], [b, d, c]] {
+                // One consistent XZ winding across the whole mesh: the lower
+                // flight runs back along -x, which flips a naively-ordered
+                // quad's winding and makes landmass reject the mesh outright.
+                let corner = |index: u32| {
+                    let v = vertices[index as usize];
+                    (v[0], v[2])
+                };
+                let (p, q, r) = (corner(indices[0]), corner(indices[1]), corner(indices[2]));
+                if (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0) < 0.0 {
+                    indices.swap(1, 2);
+                }
+                polygons.push(landmass_graph::PolygonInput {
+                    index: polygons.len() as u32,
+                    vertex_indices: indices,
+                    is_water: false,
+                    is_preferred_pathing: false,
+                });
+            }
+        };
+
+        for pair in cuts.windows(2) {
+            let (z0, z1) = (pair[0], pair[1]);
+            quad(&mut vertices, &mut polygons, (0.0, 0.0), (3.0, 0.0), z0, z1);
+            // A switchback stair descending off the corridor's x = 3 edge and
+            // folding back *underneath* it: genuinely connected walkable ground
+            // (an agent could walk down it), finely re-triangulated the way
+            // issue #171's sub-triangle clip emits real FO3 stairs. This is the
+            // ingredient that matters -- `landmass::avoidance` explores into it
+            // through that shared edge and `dodgy_2d` is strictly 2D, so the
+            // lower flight's borders project straight onto the corridor
+            // footprint the agent is standing on.
+            if z0 >= BAY_START - 1e-4 && z1 <= BAY_END + 1e-4 {
+                quad(
+                    &mut vertices,
+                    &mut polygons,
+                    (3.0, 0.0),
+                    (4.0, -0.5),
+                    z0,
+                    z1,
+                );
+                quad(
+                    &mut vertices,
+                    &mut polygons,
+                    (4.0, -0.5),
+                    (0.0, -1.3),
+                    z0,
+                    z1,
+                );
+            }
+        }
+        landmass_graph::MeshInput {
+            form_id: 0x184,
+            vertices,
+            polygons,
+            doors: Vec::new(),
+            derived_doors: Vec::new(),
+        }
+    }
+
+    /// Builds an app around [`stall_fixture_mesh`] with an explicit border
+    /// avoidance horizon, runs an agent the length of the corridor, and reports
+    /// the furthest `z` it reached plus the lowest desired speed it was ever
+    /// steered at. Everything except `obstacle_avoidance_time_horizon` matches
+    /// the shipped `archipelago_options`.
+    fn run_stall_fixture(horizon: f32) -> (f32, f32) {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+            NavBackendPlugin,
+        ));
+        app.insert_resource(PhysicsDisabled(false));
+        app.insert_resource(CellPhysicsReadiness::Ready);
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(2.75, -0.1, 7.0),
+            boxddd::Vec3::new(6.0, 0.1, 10.0),
+        );
+        app.world_mut()
+            .insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let mesh_input = stall_fixture_mesh(64);
+        let valid = landmass_graph::build_navigation_mesh(
+            &mesh_input,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .nav_mesh
+        .expect("stall fixture validates");
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+        let mut options = archipelago_options();
+        options.obstacle_avoidance_time_horizon = horizon;
+        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(handle),
+        });
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .archipelago = Some(archipelago);
+
+        let centre = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago,
+            Vec3::new(1.5, 0.0, 1.0) + centre,
+            Vec3::new(1.5, 0.0, 13.0) + centre,
+        );
+        let mut furthest = f32::MIN;
+        let mut slowest = f32::MAX;
+        let trace = std::env::var("BEVYOUT_STALL_TRACE").is_ok();
+        for tick in 0..600 {
+            run_one_fixed_tick(app.world_mut());
+            let world = app.world();
+            if trace && tick % 20 == 0 {
+                let position = world.get::<Transform>(agent).unwrap().translation;
+                let desired = world
+                    .get::<AgentDesiredVelocity3d>(agent)
+                    .map(|v| v.velocity())
+                    .unwrap_or(Vec3::ZERO);
+                println!(
+                    "h={horizon} t{tick}: pos=({:.2},{:.2},{:.2}) |d|={:.3} state={:?}",
+                    position.x,
+                    position.y,
+                    position.z,
+                    desired.length(),
+                    world.get::<AgentState>(agent).copied()
+                );
+            }
+            furthest = furthest.max(world.get::<Transform>(agent).unwrap().translation.z);
+            // Only sample steering while the agent is still short of the
+            // target: decelerating on arrival is correct, not a stall.
+            if furthest < 12.0
+                && let Some(desired) = world.get::<AgentDesiredVelocity3d>(agent)
+            {
+                slowest = slowest.min(desired.velocity().length());
+            }
+        }
+        (furthest, slowest)
+    }
+
+    /// Issue #184: an agent must cross a stretch of corridor that has finely
+    /// re-triangulated walkable geometry a few metres to one side, without its
+    /// steering collapsing. Before the fix, `landmass`'s navmesh-border ORCA
+    /// avoidance flattened that side bay's border edges into a `dodgy_2d`
+    /// obstacle set dense enough to drive the *desired* velocity
+    /// asymptotically to zero -- a contactless halt, with the capsule sweep
+    /// completely free, that `apply_agent_physics_movement` could only report
+    /// as `reason=no_contact_no_progress`.
+    ///
+    /// Asserted as a pair so the fixture itself is proven to reproduce: with
+    /// landmass's stock `0.25` horizon the agent creeps to a halt beside the
+    /// stair and is steered at a near-zero speed, and with the shipped
+    /// `NAV_BORDER_AVOIDANCE_TIME_HORIZON` it walks the whole corridor at its
+    /// full desired speed.
+    #[test]
+    fn an_agent_crosses_finely_triangulated_ground_without_its_steering_collapsing() {
+        let (stock_furthest, stock_slowest) = run_stall_fixture(0.25);
+        assert!(
+            stock_slowest < AGENT_DESIRED_SPEED * 0.5,
+            "fixture must reproduce the pre-fix steering collapse, \
+             slowest desired speed was {stock_slowest} (furthest z {stock_furthest})"
+        );
+
+        let (furthest, slowest) = run_stall_fixture(NAV_BORDER_AVOIDANCE_TIME_HORIZON);
+        assert!(
+            furthest > 12.0,
+            "the agent must walk the corridor, reached z {furthest} only"
+        );
+        assert!(
+            slowest > AGENT_DESIRED_SPEED * 0.9,
+            "steering must never collapse on clear ground, \
+             slowest desired speed was {slowest}"
+        );
+    }
+
+    /// Issue #184: the shipped options must keep navmesh-border ORCA avoidance
+    /// clamped to at most one fixed tick -- the property that makes the
+    /// asymptotic `1 - dt / horizon` stall impossible -- while leaving
+    /// agent/character avoidance (issue #114 feature 4) at landmass's own
+    /// default. A regression here is silent: it costs no test but reopens the
+    /// contactless-stall class.
+    #[test]
+    fn archipelago_options_clamp_border_avoidance_but_keep_agent_avoidance() {
+        let options = archipelago_options();
+        let stock = ArchipelagoOptions::<ThreeD>::from_agent_radius(AGENT_RADIUS);
+        assert!(
+            options.obstacle_avoidance_time_horizon > 0.0,
+            "a zero horizon divides by zero inside dodgy_2d"
+        );
+        assert!(
+            options.obstacle_avoidance_time_horizon <= 1e-3,
+            "navmesh-border avoidance must stay disabled; anything this side of \
+             ~1e-3 reopens the contactless-stall class, got {}",
+            options.obstacle_avoidance_time_horizon
+        );
+        assert_eq!(
+            options.avoidance_time_horizon, stock.avoidance_time_horizon,
+            "agent/character avoidance must keep landmass's default"
+        );
+        assert_eq!(
+            options.neighbourhood, stock.neighbourhood,
+            "the avoidance neighbourhood must keep landmass's default"
+        );
+    }
+
     /// Spawns the same synthetic two-triangle 4x4 island fixture
     /// `nav_overlay.rs`'s own landmass harness test uses, wired directly
     /// into `NavArchipelagoState` (bypassing the manifest/
@@ -7104,13 +7436,10 @@ mod tests {
         let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
             nav_mesh: Arc::new(valid),
         });
-        // Same widened envelope `ensure_archipelago` applies for real cells
-        // (see `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment): the physics
-        // capsule's `Transform` is centre-height above the mesh plane, well
-        // outside `from_agent_radius`'s own tight default.
-        let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
-        let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
+        // The exact options `ensure_archipelago` applies for real cells --
+        // widened sampling envelope plus the clamped border-avoidance horizon
+        // (see `archipelago_options`).
+        let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
         world.spawn(Island3dBundle {
             island: Island,
             archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
@@ -7617,8 +7946,10 @@ mod tests {
             .add(NavMesh3d {
                 nav_mesh: Arc::new(valid),
             });
-        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        let archipelago = app
+            .world_mut()
+            .spawn(Archipelago3d::new(archipelago_options()))
+            .id();
         app.world_mut().spawn(Island3dBundle {
             island: Island,
             archipelago_ref: ArchipelagoRef3d::new(archipelago),
@@ -8030,8 +8361,7 @@ mod tests {
             .add(NavMesh3d {
                 nav_mesh: Arc::new(valid),
             });
-        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        let mut archipelago_component = Archipelago3d::new(options);
+        let mut archipelago_component = Archipelago3d::new(archipelago_options());
         // The exact production call under test (issue #168,
         // `apply_preferred_pathing_base_cost`).
         archipelago_component
@@ -8917,5 +9247,143 @@ mod tests {
             .cast_mover(box_pos, &mover, delta, collision_filter)
             .unwrap_or(1.0);
         println!("forward sweep fraction={fraction:.4} (1.0 = unobstructed)");
+    }
+
+    /// Issue #184 investigation harness: the same env-gated replay as
+    /// `wedge_replay`, but with the *real* archipelago (this cell's prepared
+    /// nav graph) driving steering instead of a straight line, so a stall
+    /// can be attributed to landmass rather than the KCC.
+    #[test]
+    #[ignore = "requires a prepared cell: set BEVYOUT_WEDGE_SCENE"]
+    fn stall_replay() {
+        let Ok(scene) = std::env::var("BEVYOUT_WEDGE_SCENE") else {
+            return;
+        };
+        let scene = std::path::PathBuf::from(scene);
+        let start = wedge_vec("BEVYOUT_WEDGE_START", Vec3::new(9.6, 106.0, -73.1));
+        let target = wedge_vec("BEVYOUT_WEDGE_TARGET", Vec3::new(5.0, 106.0, -73.0));
+        let graph_path = scene.parent().unwrap().join("navmesh/navgraph.ron");
+
+        let wedge = build_wedge_world(&scene, &[]);
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+            NavBackendPlugin,
+        ));
+        app.insert_resource(PhysicsDisabled(false));
+        app.insert_resource(CellPhysicsReadiness::Ready);
+        app.world_mut()
+            .insert_non_send(BoxdddPhysicsContext::from_world(wedge.world));
+
+        let graph = super::super::read_nav_graph(&graph_path).expect("nav graph");
+        let mesh_inputs = super::super::mesh_inputs(&graph);
+        let door_type_indices = landmass_graph::door_type_indices(&mesh_inputs);
+        let closed_door_type_indices =
+            landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
+        let mut options = archipelago_options();
+        // Issue #184 kept these two overrides: sweeping them is how the stall
+        // was attributed to border avoidance in the first place (the horizon
+        // sets the decay rate, the neighbourhood the border set).
+        if let Ok(raw) = std::env::var("BEVYOUT_OBSTACLE_HORIZON") {
+            options.obstacle_avoidance_time_horizon = raw.parse().expect("numeric horizon");
+        }
+        if let Ok(raw) = std::env::var("BEVYOUT_NEIGHBOURHOOD") {
+            options.neighbourhood = raw.parse().expect("numeric neighbourhood");
+        }
+        println!(
+            "obstacle_avoidance_time_horizon={} neighbourhood={}",
+            options.obstacle_avoidance_time_horizon, options.neighbourhood
+        );
+        let archipelago_entity = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        apply_preferred_pathing_base_cost(
+            app.world_mut(),
+            archipelago_entity,
+            &door_type_indices,
+            &closed_door_type_indices,
+        );
+        for mesh in &mesh_inputs {
+            let Some(valid) = landmass_graph::build_navigation_mesh(
+                mesh,
+                &[],
+                &door_type_indices,
+                &BTreeMap::new(),
+            )
+            .nav_mesh
+            else {
+                continue;
+            };
+            let handle = app
+                .world_mut()
+                .resource_mut::<Assets<NavMesh3d>>()
+                .add(NavMesh3d {
+                    nav_mesh: Arc::new(valid),
+                });
+            app.world_mut().spawn(Island3dBundle {
+                island: Island,
+                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+                nav_mesh: NavMeshHandle::<ThreeD>(handle),
+            });
+        }
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .archipelago = Some(archipelago_entity);
+
+        let centre = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago_entity,
+            start + centre,
+            target + centre,
+        );
+        for tick in 0..600 {
+            run_one_fixed_tick(app.world_mut());
+            let world = app.world();
+            let position = world.get::<Transform>(agent).unwrap().translation;
+            let desired = world
+                .get::<AgentDesiredVelocity3d>(agent)
+                .map(|value| value.velocity())
+                .unwrap_or(Vec3::ZERO);
+            let state = world.get::<AgentState>(agent).copied();
+            let kcc = world.get::<AgentKcc>(agent).unwrap();
+            let (stuck, blocked, recovery, without) = (
+                kcc.stuck,
+                kcc.collision_blocked,
+                kcc.recovery_active,
+                kcc.ticks_without_progress,
+            );
+            let sampled = world
+                .get::<Archipelago3d>(archipelago_entity)
+                .and_then(|arch| {
+                    arch.sample_point(position, &AGENT_POINT_SAMPLE_DISTANCE)
+                        .ok()
+                        .map(|p| (p.point(), p.type_index()))
+                });
+            if let Some((point, type_index)) = sampled
+                && tick % 20 == 0
+            {
+                println!(
+                    "    sample -> ({:.3},{:.3},{:.3}) type={type_index} dy={:.3} dxz={:.3}",
+                    point.x,
+                    point.y,
+                    point.z,
+                    position.y - point.y,
+                    Vec2::new(point.x - position.x, point.z - position.z).length()
+                );
+            }
+            if tick % 20 == 0 {
+                println!(
+                    "t{tick}: pos=({:.3},{:.3},{:.3}) desired=({:.3},{:.3},{:.3}) |d|={:.3} state={state:?} stuck={stuck} blocked={blocked} rec={recovery} nprog={without}",
+                    position.x,
+                    position.y,
+                    position.z,
+                    desired.x,
+                    desired.y,
+                    desired.z,
+                    desired.length()
+                );
+            }
+        }
     }
 }
