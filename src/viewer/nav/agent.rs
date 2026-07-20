@@ -3316,6 +3316,26 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 // so clearing the target here (not just the intent) is the
                 // fix: `has_target` in the mid-route check below then
                 // reads false and the gate leaves a failed agent alone.
+                //
+                // Real-data correction (M4 wave 10 post-#153 verification):
+                // `PauseAgent` -- inserted when this door-link cycle first
+                // paused the agent (`is_traversing(new_state)`'s own arm
+                // above is the *only* other place this component is
+                // touched) -- was never removed on this `Failed` terminal.
+                // `landmass` treats a `PauseAgent`-carrying entity as
+                // permanently `AgentState::Paused` (skips its own
+                // path/movement solving every tick, `landmass::lib::update`),
+                // so a fresh `tna goto`/`tna travel` reissued after the
+                // failure (e.g. once a `setlock` unblocks this exact door)
+                // set a brand-new `AgentTarget3d` that `landmass` then never
+                // even looked at -- confirmed live on FranklinMetro02
+                // (0001a273): the agent physically froze at the door's own
+                // triangle and stayed `paused` forever after `setlock
+                // 0007f7e3 0` + a reissued `tna goto`, despite the door-link
+                // FSM itself correctly reaching `Idle`/`Traversing` on later
+                // cycles. `PauseAgent` must be removed here too, mirroring
+                // the `is_traversing` arm's own removal.
+                world.entity_mut(agent_entity).remove::<PauseAgent>();
                 world.entity_mut(agent_entity).insert(AgentTarget3d::None);
                 let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
                 runtime.active_link = None;
@@ -5854,9 +5874,24 @@ mod tests {
             world.get::<AgentRuntime>(agent).unwrap().door_link,
             door_link::DoorLinkState::Failed { door_form_id: 0x99 }
         );
+        // Real-data correction (M4 wave 10): the agent stays stopped at the
+        // link because its `AgentTarget3d` is cleared to `None` on this
+        // exact `Failed` terminal (the #165 fix a few lines up this file --
+        // nothing left to route toward), not because `PauseAgent` is kept
+        // attached. `PauseAgent` must NOT survive this terminal: `landmass`
+        // treats it as a standing "never solve this agent again" flag, so
+        // leaving it here would silently freeze the agent even after a
+        // later `tna goto`/`tna travel` sets a fresh target once the lock
+        // clears (confirmed live on FranklinMetro02 0001a273, see
+        // `a_failed_mid_route_door_wait_does_not_leave_the_agent_
+        // permanently_paused`'s doc comment for the real-data trace).
         assert!(
-            world.get::<PauseAgent>(agent).is_some(),
-            "the agent stays stopped at the link instead of clipping through"
+            matches!(world.get::<AgentTarget3d>(agent), Some(AgentTarget3d::None)),
+            "the agent stays stopped at the link because its target is cleared"
+        );
+        assert!(
+            world.get::<PauseAgent>(agent).is_none(),
+            "PauseAgent must not survive the Failed terminal, or a later retarget would silently never move the agent"
         );
     }
 
@@ -5952,6 +5987,157 @@ mod tests {
         assert_eq!(
             world.get::<AgentRuntime>(agent).unwrap().door_link,
             door_link::DoorLinkState::Idle
+        );
+    }
+
+    /// Real-data verification (M4 wave 10, post-#153 merge): a `PauseAgent`
+    /// leak on the door-link `Failed` terminal, found live on
+    /// FranklinMetro02 (0001a273) while chasing a reported "unreachable,
+    /// blocked" symptom near door 0007f7e3. Auditing every polygon
+    /// correlation in `nav/mod.rs::mesh_inputs`/`landmass_graph.rs`
+    /// (`door_type_indices`, `resolve_polygon_type_index`, `door_sides`,
+    /// `merge_link_descriptors`) confirmed all of them key strictly by the
+    /// *authored* `PolygonInput::index`/`DoorInput::triangle_index` value
+    /// via `HashMap`/`.find()`, never by list position -- so `#153`'s new
+    /// `.filter(|polygon| polygon.walkable)` (which does introduce list
+    /// *position* gaps relative to the authored index, since filtering
+    /// happens before `landmass_graph` ever sees the polygons) cannot
+    /// misattribute a door's type index or lock-cost override to the wrong
+    /// polygon. Real-data door 0007f7e3's own triangle (mesh 0005429f,
+    /// index 438) was confirmed `walkable: true`/`contains_door: true` with
+    /// vertex positions exactly matching the reported corridor -- the
+    /// original "unreachable" was door 0007f7e3's genuine authored lock
+    /// (level 25) correctly blocking the only route through it, the
+    /// existing, tested mid-route crossing-gate behaviour (issue #137/
+    /// #155), not an index-misalignment bug.
+    ///
+    /// The *real* defect: once `setlock 0007f7e3 0` unblocked the door and
+    /// a *fresh* `tna goto` was reissued, the agent never actually moved
+    /// again -- frozen at the door's own triangle, `tna status` reporting
+    /// `paused` forever even though the door-link FSM itself correctly
+    /// reached `Idle`. `PauseAgent` (inserted the moment this door-link
+    /// cycle first paused the agent) was only ever removed on the
+    /// `is_traversing` transition; the `Failed` terminal above left it
+    /// attached, and `landmass` treats a `PauseAgent`-carrying entity as
+    /// permanently `AgentState::Paused` -- it skips that agent's own path/
+    /// movement solving every tick regardless of any later `AgentTarget3d`
+    /// a fresh `tna goto`/`tna travel` sets. This test pins the fix:
+    /// `PauseAgent` must be gone once the door-link cycle reaches `Failed`,
+    /// the same as it already is on `Traversing`.
+    #[test]
+    fn a_failed_mid_route_door_wait_does_not_leave_the_agent_permanently_paused() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(25),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        // Walk the agent up to the locked door and exhaust the wait bound.
+        for _ in 0..=door_link::MAX_WAIT_TICKS {
+            door_link_system(&mut world);
+        }
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 },
+            "test setup: the door-link cycle must reach the documented Failed terminal"
+        );
+        assert!(
+            world.get::<PauseAgent>(agent).is_none(),
+            "PauseAgent must not survive the Failed terminal -- a stale PauseAgent silently \
+             freezes every subsequent tna goto/tna travel at the landmass level regardless of \
+             any fresh AgentTarget3d, exactly the real-data symptom this test pins"
+        );
+    }
+
+    /// The travel-arrival counterpart: `PauseAgent` must not survive a
+    /// *travel* door's `Failed` terminal either -- the same code branch
+    /// (`is_failed(new_state)`) handles both `LinkDestination::IntraCell`
+    /// and `LinkDestination::Travel`, so the leak (and its fix) apply
+    /// identically to both. `locked_travel_arrival_settles_at_a_stable_
+    /// unreachable_terminal_not_an_oscillation` above already exercises this
+    /// exact setup for the FSM-only assertions; this test adds the
+    /// `PauseAgent` check that revealed the real-data bug.
+    #[test]
+    fn a_failed_travel_arrival_does_not_leave_the_agent_permanently_paused() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world.spawn_empty().id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                Transform::from_xyz(5.0, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.travel_doors.insert(
+                0x99,
+                TravelDoorLink {
+                    triangle_midpoint: Vec3::new(5.0, 0.0, 0.0),
+                    door_position: Vec3::new(6.0, 0.0, 0.0),
+                    destination_cell_form_id: 0xC0DE,
+                    destination_door_form_id: 0x1234,
+                },
+            );
+            state.mid_route_doors.push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+            state.door_lock_info.insert(
+                0x99,
+                DoorLockInfo {
+                    lock_level: Some(25),
+                    key_form_id: None,
+                },
+            );
+            state.door_usable.insert(0x99, false);
+        }
+
+        request_travel(&mut world, 0, 0x99).expect("routing to a locked door is allowed");
+        for _ in 0..(door_link::MAX_WAIT_TICKS * 2) {
+            door_link_system(&mut world);
+        }
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Failed { door_form_id: 0x99 }
+        );
+        assert!(
+            world.get::<PauseAgent>(agent).is_none(),
+            "PauseAgent must not survive a failed travel arrival either -- the same is_failed \
+             branch handles both destination types"
         );
     }
 
