@@ -226,3 +226,14 @@ appropriate for keeping those contracts aligned.
   `bound_targets=67`; viewport captures show a coherent humanoid pose. Native
   KF conversion remains explicit and does not silently invoke Blender; no
   external repository was modified or published by this continuation.
+- **A11 — Animation-zoo inspection controls.** The zoo now has a bounded
+  status HUD and a right-side control panel instead of rendering the entire
+  source/debug record across the viewport. The panel contains every prepared
+  clip in a scrollable, selectable list, playback buttons, loop and catalog
+  cycling toggles, speed controls, and a compact debug-details toggle. Left
+  mouse drag orbits the camera, right mouse drag rotates the NPC on its
+  pedestal, the wheel zooms, and Q/E rotate the NPC from the keyboard. The
+  selected clip holds at its authored end by default; `Loop` repeats that clip
+  and `Cycle` explicitly enables catalog auto-advance. Loaded mesh bounds
+  ground the actor before the camera is aimed, and the bridge probe exposes the
+  resulting ground offset plus cycle state.

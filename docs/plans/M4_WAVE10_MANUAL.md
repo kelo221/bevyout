@@ -79,9 +79,28 @@ machine that is:
 
    **Expected:** the startup log/probe reports `clips=1380`, `skipped=32`,
    `bound_targets=67`, and `error: null`; the actor remains coherent while
-   cycling native clips. This proves the Nifty path is live independently of
-   the Blender comparison pack. The five legacy clips remain explicitly
-   rejected because they are not FO3 20.2.0.7 assets.
+   holding the selected native clip. This proves the Nifty path is live
+   independently of the Blender comparison pack. The five legacy clips remain
+   explicitly rejected because they are not FO3 20.2.0.7 assets.
+
+## B3. Inspect and control the native zoo
+
+1. The right panel contains an exhaustive, scrollable list of every ready
+   prepared clip. Click a row to select and restart that clip. `Prev`, `Next`,
+   and `Restart` are also available there; the same actions are `Left Arrow`,
+   `Right Arrow`, and `R`.
+2. The selected clip holds its authored final pose by default. `Loop` or `L`
+   repeats only that clip. `Cycle` or `Y` explicitly enables catalog
+   auto-advance when a clip finishes; this is off by default so a selected
+   animation cannot unexpectedly chain into another one.
+3. Drag with the left mouse button over the viewport to orbit the camera
+   around the actor. Drag with the right mouse button to rotate the actor on
+   its pedestal. Scroll to zoom. `Q`/`E` rotate the actor from the keyboard;
+   `C` resets the camera and `X` resets the actor rotation.
+4. The top-left overlay is intentionally compact. Press `D` or click `Debug`
+   to open bounded source metadata, target/controller details, the computed
+   grounding offset, and the most recent 16 zoo events. Press it again to hide
+   the diagnostic panel without losing the current clip list or controls.
 
 ## C. See and control a real humanoid KF
 

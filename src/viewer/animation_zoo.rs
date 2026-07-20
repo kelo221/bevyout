@@ -1,6 +1,6 @@
 //! Isolated laboratory for cycling prepared external-KF actor animations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,8 +8,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use bevy::animation::{AnimatedBy, AnimationTargetId, RepeatAnimation, animated_field};
 use bevy::app::AnimationSystems;
+use bevy::camera::primitives::Aabb;
 use bevy::gltf::{Gltf, GltfAssetLabel, GltfNode};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use bevyout_core::actor_animation::{
     PreparedActorAnimationCatalog, PreparedActorAnimationClip, PreparedActorAnimationClipStatus,
     PreparedActorAnimationLoopMode, PreparedActorAnimationRootMotionPolicy,
@@ -31,6 +34,8 @@ mod policy;
 use policy::{ZooControlAction, ZooPlaybackPolicy};
 
 const FLOOR_CENTER: Vec3 = Vec3::new(0.0, -0.25, 0.0);
+const ZOO_CAMERA_TARGET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+const ZOO_PANEL_WIDTH: f32 = 360.0;
 
 pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
     let cache_dir = args
@@ -74,7 +79,7 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
             .next()
             .unwrap_or("no compatible clip pack was prepared");
         format!(
-            "actor animation set has no clip pack: {reason}; rerun prepare with --actor-animation-converter blender"
+            "actor animation set has no clip pack: {reason}; rerun prepare with --actor-animation-converter native (or blender for comparison)"
         )
     })?;
     require_file(&asset_root.join(&appearance_path), "actor appearance GLB")?;
@@ -146,21 +151,25 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
     app.insert_resource(LoadedSceneManifest(manifest))
         .insert_resource(definition)
         .init_resource::<AnimationZooRuntime>()
+        .init_resource::<AnimationZooViewState>()
         .init_resource::<AnimationZooProbe>()
         .add_systems(Startup, spawn_zoo)
         .add_systems(
             Update,
             (
                 resolve_animation_zoo,
+                zoo_ui_interactions,
                 keyboard_controls,
+                zoo_view_controls,
                 drive_playback,
+                apply_zoo_view,
                 update_probe,
-                update_hud,
-                draw_reference,
-                exit_after_trace,
             )
                 .chain(),
         )
+        .add_systems(Update, update_zoo_ui)
+        .add_systems(Update, draw_reference)
+        .add_systems(Update, exit_after_trace)
         .add_systems(
             PostUpdate,
             retarget_animation_zoo
@@ -298,7 +307,30 @@ struct AnimationZooRuntime {
     pending_controls: Vec<ZooControlAction>,
     last_started_generation: Option<u64>,
     elapsed: f32,
+    ground_offset: f32,
+    event_log: VecDeque<String>,
     error: Option<String>,
+}
+
+#[derive(Resource, Debug, Clone)]
+struct AnimationZooViewState {
+    camera_yaw: f32,
+    camera_pitch: f32,
+    camera_distance: f32,
+    actor_yaw: f32,
+    debug_visible: bool,
+}
+
+impl Default for AnimationZooViewState {
+    fn default() -> Self {
+        Self {
+            camera_yaw: 0.66,
+            camera_pitch: 0.24,
+            camera_distance: 8.2,
+            actor_yaw: 0.0,
+            debug_visible: false,
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Default, Serialize)]
@@ -322,6 +354,7 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) duration: f32,
     pub(crate) speed: f32,
     pub(crate) loop_current: bool,
+    pub(crate) auto_advance: bool,
     pub(crate) completed_cycles: u64,
     pub(crate) missing_targets: Vec<String>,
     pub(crate) bound_targets: usize,
@@ -331,6 +364,7 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) interpolator_types: Vec<String>,
     pub(crate) text_keys: Vec<PreparedActorAnimationTextKey>,
     pub(crate) skipped_clips: usize,
+    pub(crate) ground_offset: f32,
     pub(crate) error: Option<String>,
 }
 
@@ -338,7 +372,47 @@ pub(crate) struct AnimationZooProbe {
 struct ZooActorRoot;
 
 #[derive(Component)]
-struct ZooHud;
+struct ZooCamera;
+
+#[derive(Component)]
+struct ZooStatusText;
+
+#[derive(Component)]
+struct ZooDebugPanel;
+
+#[derive(Component)]
+struct ZooDebugText;
+
+#[derive(Component)]
+struct ZooSelectionText;
+
+#[derive(Component, Clone, Copy)]
+struct ZooClipButton(usize);
+
+#[derive(Component, Clone, Copy)]
+struct ZooActionButton(ZooUiAction);
+
+#[derive(Component)]
+struct ZooButton;
+
+#[derive(Debug, Clone, Copy)]
+enum ZooUiAction {
+    Control(ZooControlAction),
+    ToggleDebug,
+    ResetCamera,
+    ResetActor,
+}
+
+type ZooUiInteractionQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Interaction,
+        Option<&'static ZooActionButton>,
+        Option<&'static ZooClipButton>,
+    ),
+    (Changed<Interaction>, With<ZooButton>),
+>;
 
 fn spawn_zoo(
     mut commands: Commands,
@@ -377,6 +451,7 @@ fn spawn_zoo(
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(4.8, 3.0, 6.2).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        ZooCamera,
     ));
     let root = commands
         .spawn((
@@ -392,16 +467,212 @@ fn spawn_zoo(
     runtime.actor_root = Some(root);
     let pack = asset_server.load::<Gltf>(definition.clip_pack_path.clone());
     runtime.pack = Some(pack);
-    commands.spawn((
-        Text::new("Animation Zoo: loading prepared actor and clip pack..."),
-        ZooHud,
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(12),
-            top: px(12),
-            ..default()
-        },
-    ));
+    spawn_zoo_ui(&mut commands, &definition);
+}
+
+fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(14),
+                top: px(14),
+                max_width: px(520),
+                padding: UiRect::all(px(10)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.03, 0.86)),
+        ))
+        .with_child((
+            Text::new("Animation Zoo | loading actor and clip pack..."),
+            ZooStatusText,
+            TextColor(Color::srgb(0.88, 0.93, 1.0)),
+            TextFont {
+                font_size: FontSize::Px(16.0),
+                ..default()
+            },
+        ));
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(14),
+                bottom: px(14),
+                max_width: px(520),
+                padding: UiRect::all(px(8)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.03, 0.78)),
+        ))
+        .with_child((
+            Text::new(
+                "Mouse: left-drag orbit | right-drag rotate NPC | wheel zoom\n\
+                 Q/E rotate NPC | Space pause | Left/Right previous/next | R restart\n\
+                 L loop | Y cycle catalog | Up/Down speed | D debug details | C reset camera | X reset NPC | Esc exit",
+            ),
+            TextColor(Color::srgb(0.72, 0.78, 0.86)),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+        ));
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(0),
+                top: px(0),
+                bottom: px(0),
+                width: px(ZOO_PANEL_WIDTH),
+                padding: UiRect::all(px(12)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.025, 0.035, 0.05, 0.96)),
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new(format!(
+                    "{} | {:08x}",
+                    definition.actor_name, definition.actor_form_id
+                )),
+                TextColor(Color::srgb(0.94, 0.96, 1.0)),
+                TextFont {
+                    font_size: FontSize::Px(18.0),
+                    ..default()
+                },
+            ));
+            panel
+                .spawn((Node {
+                    width: percent(100),
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(5),
+                    row_gap: px(5),
+                    ..default()
+                },))
+                .with_children(|controls| {
+                    for (label, action) in [
+                        ("Prev", ZooUiAction::Control(ZooControlAction::Previous)),
+                        ("Pause", ZooUiAction::Control(ZooControlAction::TogglePause)),
+                        ("Next", ZooUiAction::Control(ZooControlAction::Next)),
+                        ("Restart", ZooUiAction::Control(ZooControlAction::Restart)),
+                        ("Loop", ZooUiAction::Control(ZooControlAction::ToggleLoop)),
+                        ("Cycle", ZooUiAction::Control(ZooControlAction::ToggleCycle)),
+                        ("Speed −", ZooUiAction::Control(ZooControlAction::SpeedDown)),
+                        ("Speed +", ZooUiAction::Control(ZooControlAction::SpeedUp)),
+                        ("Reset view", ZooUiAction::ResetCamera),
+                        ("Reset NPC", ZooUiAction::ResetActor),
+                        ("Debug", ZooUiAction::ToggleDebug),
+                    ] {
+                        spawn_zoo_button(controls, label, ZooActionButton(action));
+                    }
+                });
+            panel.spawn((
+                Text::new(""),
+                ZooSelectionText,
+                TextColor(Color::srgb(0.68, 0.76, 0.88)),
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
+            ));
+            panel
+                .spawn((
+                    Node {
+                        max_height: px(220),
+                        width: percent(100),
+                        padding: UiRect::all(px(6)),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.01, 0.015, 0.025, 0.96)),
+                    ZooDebugPanel,
+                    Visibility::Hidden,
+                ))
+                .with_child((
+                    Text::new(""),
+                    ZooDebugText,
+                    TextColor(Color::srgb(0.68, 0.76, 0.88)),
+                    TextFont {
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                ));
+            panel.spawn((
+                Text::new(format!("All animations ({})", definition.clips.len())),
+                TextColor(Color::srgb(0.88, 0.91, 0.97)),
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+            ));
+            panel
+                .spawn(Node {
+                    width: percent(100),
+                    flex_grow: 1.0,
+                    flex_direction: FlexDirection::Column,
+                    overflow: Overflow::scroll_y(),
+                    row_gap: px(2),
+                    ..default()
+                })
+                .with_children(|list| {
+                    for (index, clip) in definition.clips.iter().enumerate() {
+                        list.spawn((
+                            Button,
+                            ZooButton,
+                            ZooClipButton(index),
+                            Node {
+                                width: percent(100),
+                                min_height: px(26),
+                                padding: UiRect::horizontal(px(6)),
+                                align_items: AlignItems::Center,
+                                ..default()
+                            },
+                            BackgroundColor(Color::NONE),
+                            BorderColor::all(Color::srgb(0.28, 0.42, 0.62)),
+                        ))
+                        .with_child((
+                            Text::new(format!("{:04}  {}", index + 1, clip.name)),
+                            TextColor(Color::srgb(0.78, 0.84, 0.94)),
+                            TextFont {
+                                font_size: FontSize::Px(13.0),
+                                ..default()
+                            },
+                        ));
+                    }
+                });
+        });
+}
+
+fn spawn_zoo_button(parent: &mut ChildSpawnerCommands, label: &str, action: ZooActionButton) {
+    parent
+        .spawn((
+            Button,
+            ZooButton,
+            action,
+            Node {
+                min_width: px(58),
+                min_height: px(28),
+                padding: UiRect::horizontal(px(7)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.12, 0.18, 0.28, 1.0)),
+            BorderColor::all(Color::srgb(0.28, 0.42, 0.62)),
+        ))
+        .with_child((
+            Text::new(label),
+            TextColor(Color::srgb(0.88, 0.93, 1.0)),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+        ));
 }
 
 fn descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
@@ -507,6 +778,7 @@ fn resolve_animation_zoo(
     names: Query<&Name>,
     transforms: Query<&Transform>,
     global_transforms: Query<&GlobalTransform>,
+    aabbs: Query<&Aabb>,
     gltfs: Res<Assets<Gltf>>,
     nodes: Res<Assets<GltfNode>>,
     clip_assets: Res<Assets<AnimationClip>>,
@@ -616,6 +888,17 @@ fn resolve_animation_zoo(
             Some("clip pack target hierarchy does not match any prepared actor nodes".into());
         return;
     }
+    let min_y = hierarchy
+        .iter()
+        .filter_map(|entity| {
+            let aabb = aabbs.get(*entity).ok()?;
+            let global = global_transforms.get(*entity).ok()?;
+            let center = global.transform_point(Vec3::from(aabb.center));
+            let (scale, _, _) = global.to_scale_rotation_translation();
+            Some(center.y - aabb.half_extents.y * scale.y.abs())
+        })
+        .reduce(f32::min);
+    runtime.ground_offset = min_y.map_or(0.0, |value| -value + 0.015);
     let mut graph = AnimationGraph::new();
     let graph_root = graph.root;
     let mut resolved = Vec::new();
@@ -669,6 +952,15 @@ fn resolve_animation_zoo(
     runtime.clips = resolved;
     runtime.player = Some(player_entity);
     runtime.phase = ZooPhase::Playing;
+    let ready_count = runtime.clips.len();
+    let skipped_count = definition.skipped_clips + missing.len();
+    let ground_offset = runtime.ground_offset;
+    push_zoo_event(
+        &mut runtime,
+        format!(
+            "ready: {ready_count} clips, {skipped_count} skipped, {bound_targets} bound targets, ground offset {ground_offset:+.3}"
+        ),
+    );
     if !missing.is_empty() {
         runtime.error = Some(format!(
             "clip pack omitted {} prepared name(s): {}",
@@ -683,6 +975,45 @@ fn resolve_animation_zoo(
         definition.skipped_clips + missing.len(),
         bound_targets
     );
+}
+
+fn push_zoo_event(runtime: &mut AnimationZooRuntime, event: impl Into<String>) {
+    runtime.event_log.push_back(event.into());
+    while runtime.event_log.len() > 16 {
+        runtime.event_log.pop_front();
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn zoo_ui_interactions(
+    interactions: ZooUiInteractionQuery<'_, '_>,
+    mut runtime: ResMut<AnimationZooRuntime>,
+    mut view: ResMut<AnimationZooViewState>,
+) {
+    for (interaction, action, clip) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let Some(clip) = clip {
+            runtime
+                .pending_controls
+                .push(ZooControlAction::Select(clip.0));
+            continue;
+        }
+        let Some(action) = action else {
+            continue;
+        };
+        match action.0 {
+            ZooUiAction::Control(control) => runtime.pending_controls.push(control),
+            ZooUiAction::ToggleDebug => view.debug_visible = !view.debug_visible,
+            ZooUiAction::ResetCamera => {
+                view.camera_yaw = 0.66;
+                view.camera_pitch = 0.24;
+                view.camera_distance = 8.2;
+            }
+            ZooUiAction::ResetActor => view.actor_yaw = 0.0,
+        }
+    }
 }
 
 fn source_clip_transform(
@@ -786,7 +1117,9 @@ fn retarget_animation_zoo(
 
 fn keyboard_controls(
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
     mut runtime: ResMut<AnimationZooRuntime>,
+    mut view: ResMut<AnimationZooViewState>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
@@ -805,6 +1138,90 @@ fn keyboard_controls(
         if keys.just_pressed(key) {
             runtime.pending_controls.push(action);
         }
+    }
+    if keys.just_pressed(KeyCode::KeyD) {
+        view.debug_visible = !view.debug_visible;
+    }
+    if keys.pressed(KeyCode::KeyQ) {
+        view.actor_yaw += time.delta_secs() * 1.8;
+    }
+    if keys.pressed(KeyCode::KeyE) {
+        view.actor_yaw -= time.delta_secs() * 1.8;
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        view.camera_yaw = 0.66;
+        view.camera_pitch = 0.24;
+        view.camera_distance = 8.2;
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        view.actor_yaw = 0.0;
+    }
+}
+
+fn zoo_view_controls(
+    mut motions: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut view: ResMut<AnimationZooViewState>,
+) {
+    let viewport_active = windows
+        .single()
+        .ok()
+        .and_then(Window::cursor_position)
+        .is_some_and(|position| {
+            position.x
+                < windows
+                    .single()
+                    .ok()
+                    .map_or(0.0, |window| window.resolution.width() - ZOO_PANEL_WIDTH)
+        });
+    for event in motions.read() {
+        if !viewport_active {
+            continue;
+        }
+        if buttons.pressed(MouseButton::Left) {
+            view.camera_yaw -= event.delta.x * 0.008;
+            view.camera_pitch = (view.camera_pitch + event.delta.y * 0.006).clamp(-1.15, 1.25);
+        } else if buttons.pressed(MouseButton::Right) {
+            view.actor_yaw -= event.delta.x * 0.012;
+        }
+    }
+    if viewport_active {
+        for event in wheel.read() {
+            let scale = match event.unit {
+                MouseScrollUnit::Line => 0.8,
+                MouseScrollUnit::Pixel => 0.008,
+            };
+            view.camera_distance = (view.camera_distance - event.y * scale).clamp(2.5, 18.0);
+        }
+    } else {
+        wheel.clear();
+    }
+    view.camera_yaw = view.camera_yaw.rem_euclid(std::f32::consts::TAU);
+    view.actor_yaw = view.actor_yaw.rem_euclid(std::f32::consts::TAU);
+}
+
+fn apply_zoo_view(
+    runtime: Res<AnimationZooRuntime>,
+    view: Res<AnimationZooViewState>,
+    mut cameras: Query<&mut Transform, With<ZooCamera>>,
+    mut actors: Query<&mut Transform, (With<ZooActorRoot>, Without<ZooCamera>)>,
+) {
+    let target = ZOO_CAMERA_TARGET + Vec3::Y * runtime.ground_offset;
+    let horizontal = view.camera_pitch.cos() * view.camera_distance;
+    let camera_position = target
+        + Vec3::new(
+            view.camera_yaw.sin() * horizontal,
+            view.camera_pitch.sin() * view.camera_distance,
+            view.camera_yaw.cos() * horizontal,
+        );
+    if let Ok(mut camera) = cameras.single_mut() {
+        *camera = Transform::from_translation(camera_position).looking_at(target, Vec3::Y);
+    }
+    if let Ok(mut actor) = actors.single_mut() {
+        actor.translation.y = runtime.ground_offset;
+        actor.rotation = Quat::from_rotation_y(view.actor_yaw);
     }
 }
 
@@ -863,6 +1280,17 @@ fn drive_playback(
         }
         runtime.last_started_generation = Some(policy.restart_generation);
         runtime.elapsed = 0.0;
+        push_zoo_event(
+            &mut runtime,
+            format!(
+                "clip {}/{} {} | speed {:.2}x | loop {}",
+                policy.index + 1,
+                policy.clip_count,
+                clip_name,
+                policy.speed,
+                policy.loop_current
+            ),
+        );
         info!(
             "animation-zoo clip {}/{} {} source={} speed={:.2} loop={}",
             policy.index + 1,
@@ -925,6 +1353,7 @@ fn update_probe(
         duration: clip.map_or(0.0, |clip| clip.duration),
         speed: policy.map_or(1.0, |policy| policy.speed),
         loop_current: policy.is_some_and(|policy| policy.loop_current),
+        auto_advance: policy.is_some_and(|policy| policy.auto_advance),
         completed_cycles: policy.map_or(0, |policy| policy.completed_cycles),
         missing_targets: clip
             .map(|clip| clip.catalog.missing_targets.clone())
@@ -946,67 +1375,126 @@ fn update_probe(
             .map(|clip| clip.catalog.text_keys.clone())
             .unwrap_or_default(),
         skipped_clips: definition.skipped_clips,
+        ground_offset: runtime.ground_offset,
         error: runtime.error.clone(),
     };
 }
 
-fn update_hud(
+#[allow(clippy::type_complexity)]
+fn update_zoo_ui(
     probe: Res<AnimationZooProbe>,
     definition: Res<AnimationZooDefinition>,
     runtime: Res<AnimationZooRuntime>,
-    mut text: Single<&mut Text, With<ZooHud>>,
+    view: Res<AnimationZooViewState>,
+    mut texts: ParamSet<(
+        Query<&mut Text, With<ZooStatusText>>,
+        Query<&mut Text, With<ZooSelectionText>>,
+        Query<&mut Text, With<ZooDebugText>>,
+    )>,
+    mut debug_panel: Single<&mut Visibility, With<ZooDebugPanel>>,
+    mut clip_rows: Query<(&ZooClipButton, &mut BackgroundColor)>,
 ) {
     let clip = runtime
         .policy
         .as_ref()
         .and_then(|policy| runtime.clips.get(policy.index));
-    let diagnostics = clip
-        .map(|clip| {
-            clip.catalog
-                .diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.message.as_str())
-                .collect::<Vec<_>>()
-                .join(" | ")
-        })
-        .unwrap_or_default();
-    text.0 = format!(
-        "Animation Zoo | {} | actor {} | {}\nClip {}/{} | {} ({})\nSource: {} | range {:?}..{:?} | source loop {:?}\nDuration {:.3}s | elapsed {:.3}s | speed {:.2}x | playback loop {} | cycles {}\nRoot motion {:?} ({}) | channels {} | targets {}/{} | missing targets {} | text keys {} | skipped clips {}\nSpace pause/resume | Left/Right previous/next | R restart | L loop | Up/Down speed | Esc exit{}{}",
+    let status_text = format!(
+        "{} | {}\nClip {}/{}  |  {}\n{} {:.2}x  |  loop {}  |  cycle {}  |  bound {}/{}  |  skipped {}",
         definition.actor_name,
         probe.actor_form_id,
-        probe.playback_state,
         if probe.count == 0 { 0 } else { probe.index + 1 },
         probe.count,
         probe.current_clip.as_deref().unwrap_or("<loading>"),
-        probe.source_sequence_name.as_deref().unwrap_or("<unnamed>"),
-        probe.source_kf_path.as_deref().unwrap_or("<none>"),
-        probe.source_start_seconds,
-        probe.source_end_seconds,
-        probe.source_loop_mode,
-        probe.duration,
-        probe.elapsed,
+        probe.playback_state,
         probe.speed,
         probe.loop_current,
-        probe.completed_cycles,
-        probe.root_motion_policy,
-        probe.accumulation_root.as_deref().unwrap_or("<none>"),
-        clip.map_or(0, |clip| clip.catalog.animated_channel_count),
-        clip.map_or(0, |clip| clip.catalog.animated_target_count),
-        probe.required_targets.len(),
-        probe.missing_targets.len(),
-        probe.text_keys.len(),
+        probe.auto_advance,
+        probe.bound_targets,
+        clip.map_or(0, |clip| clip.catalog.required_targets.len()),
         probe.skipped_clips,
-        if diagnostics.is_empty() {
-            String::new()
-        } else {
-            format!("\nDiagnostics: {diagnostics}")
-        },
-        probe
-            .error
-            .as_ref()
-            .map(|error| format!("\nERROR: {error}"))
-            .unwrap_or_default(),
     );
+    let selection_text = format!(
+        "Selected: {}\nMouse orbit/rotate on viewport; click any row to play it.",
+        clip.map_or("<loading>", |clip| clip.catalog.name.as_str())
+    );
+    if let Ok(mut status) = texts.p0().single_mut() {
+        status.0 = status_text;
+    }
+    if let Ok(mut selection) = texts.p1().single_mut() {
+        selection.0 = selection_text;
+    }
+    **debug_panel = if view.debug_visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if view.debug_visible {
+        let diagnostics = clip
+            .map(|clip| {
+                clip.catalog
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default();
+        let events = runtime
+            .event_log
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let debug_text = format!(
+            "source: {}\nsequence: {}\nrange: {:?}..{:?} @ {:?} Hz\nduration: {:.3}s | elapsed: {:.3}s | cycles: {}\nloop current: {} | cycle catalog: {} | ground offset: {:+.3}\nroot motion: {:?} ({})\nchannels: {} | animated targets: {} | bound: {}\nrequired: {} | missing: {} | text keys: {}\ncontrollers: {}\ninterpolators: {}\n{}{}\n\nRecent events:\n{}",
+            probe.source_kf_path.as_deref().unwrap_or("<none>"),
+            probe.source_sequence_name.as_deref().unwrap_or("<unnamed>"),
+            probe.source_start_seconds,
+            probe.source_end_seconds,
+            probe.source_frequency,
+            probe.duration,
+            probe.elapsed,
+            probe.completed_cycles,
+            probe.loop_current,
+            probe.auto_advance,
+            probe.ground_offset,
+            probe.root_motion_policy,
+            probe.accumulation_root.as_deref().unwrap_or("<none>"),
+            clip.map_or(0, |clip| clip.catalog.animated_channel_count),
+            probe.animated_targets.len(),
+            probe.bound_targets,
+            probe.required_targets.len(),
+            probe.missing_targets.len(),
+            probe.text_keys.len(),
+            probe.controller_types.join(", "),
+            probe.interpolator_types.join(", "),
+            if diagnostics.is_empty() {
+                "".to_owned()
+            } else {
+                format!("diagnostics: {diagnostics}\n")
+            },
+            probe
+                .error
+                .as_ref()
+                .map(|error| format!("ERROR: {error}\n"))
+                .unwrap_or_default(),
+            events,
+        );
+        if let Ok(mut debug) = texts.p2().single_mut() {
+            debug.0 = debug_text;
+        }
+    } else {
+        if let Ok(mut debug) = texts.p2().single_mut() {
+            debug.0.clear();
+        }
+    }
+    for (button, mut background) in &mut clip_rows {
+        *background = if Some(button.0) == runtime.policy.as_ref().map(|policy| policy.index) {
+            BackgroundColor(Color::srgba(0.18, 0.32, 0.52, 1.0))
+        } else {
+            BackgroundColor(Color::NONE)
+        };
+    }
 }
 
 fn draw_reference(mut gizmos: Gizmos) {
@@ -1044,18 +1532,25 @@ fn exit_after_trace(
 }
 
 pub(crate) fn queue_agent_control(world: &mut World, action: &str) -> Result<(), String> {
-    let action = match action {
-        "previous" => ZooControlAction::Previous,
-        "next" => ZooControlAction::Next,
-        "restart" => ZooControlAction::Restart,
-        "toggle_pause" => ZooControlAction::TogglePause,
-        "toggle_loop" => ZooControlAction::ToggleLoop,
-        "speed_up" => ZooControlAction::SpeedUp,
-        "speed_down" => ZooControlAction::SpeedDown,
-        _ => {
-            return Err(format!(
-                "unknown action '{action}'; expected previous, next, restart, toggle_pause, toggle_loop, speed_up, or speed_down"
-            ));
+    let action = if let Some(index) = action.strip_prefix("select:") {
+        ZooControlAction::Select(index.parse::<usize>().map_err(|_| {
+            format!("select action requires a non-negative clip index, got '{index}'")
+        })?)
+    } else {
+        match action {
+            "previous" => ZooControlAction::Previous,
+            "next" => ZooControlAction::Next,
+            "restart" => ZooControlAction::Restart,
+            "toggle_pause" => ZooControlAction::TogglePause,
+            "toggle_loop" => ZooControlAction::ToggleLoop,
+            "toggle_cycle" => ZooControlAction::ToggleCycle,
+            "speed_up" => ZooControlAction::SpeedUp,
+            "speed_down" => ZooControlAction::SpeedDown,
+            _ => {
+                return Err(format!(
+                    "unknown action '{action}'; expected select:<index>, previous, next, restart, toggle_pause, toggle_loop, toggle_cycle, speed_up, or speed_down"
+                ));
+            }
         }
     };
     let Some(mut runtime) = world.get_resource_mut::<AnimationZooRuntime>() else {
@@ -1131,6 +1626,11 @@ mod tests {
         assert_eq!(
             world.resource::<AnimationZooRuntime>().pending_controls,
             [ZooControlAction::Next]
+        );
+        queue_agent_control(&mut world, "select:12").unwrap();
+        assert_eq!(
+            world.resource::<AnimationZooRuntime>().pending_controls,
+            [ZooControlAction::Next, ZooControlAction::Select(12)]
         );
         assert!(queue_agent_control(&mut world, "dance").is_err());
     }
