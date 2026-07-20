@@ -232,3 +232,41 @@ PR-protected; no direct push.
 
 _(Appended during execution rather than rewriting the above, per
 `docs/plans/README.md`.)_
+
+**A1 — #199 added to lane A mid-wave.** #188's real-data acceptance surfaced a
+pre-existing master panic on Vault101a (`00024512`): `advance_pending_cell_spawns`
+parented a neighbour cell's placements to a `PlacementRoot` spawned the same
+frame via `Commands` and not yet flushed, so Bevy 0.19's `ChildOf::on_insert`
+hook hard-panicked ("Entity not yet spawned"). Reproduced by the orchestrator
+at the wave-branch base commit — not a #188 regression. Because `00024512` is
+#186's headline acceptance cell, the fix was folded into lane A ahead of #186
+rather than deferred: lane A's ownership was extended to
+`src/viewer/world/preload.rs` (uncontended — lane B was in a worktree on
+prepare-side files). Filed as #199, fixed by an `alive`-guard skip-and-retry
+(cause 1: preload legitimately spawns the root), regression-tested, closed in
+commit `adfb80c`.
+
+**A2 — #189 primitives moved to `bevyout-core`.** F189.4's consolidation landed
+as a new `crates/bevyout-core/src/geometry.rs` rather than a viewer-side module,
+so the shared point-in-polygon primitive is reachable from both the prepare and
+viewer sides and from cucumber without a `#[path]` include. No prepared type
+changed serialized shape, so no `*_REVISION` bump (the `BlockerVolume` field
+added for the F189.3 independence path is an in-memory derivation input only).
+
+**A3 — merge + combined acceptance.** Lane B merged into the wave branch with a
+single additive conflict in `tests/features.rs` (both lanes append a step
+section); resolved by concatenation. Combined gates green: fmt, clippy
+(`-D warnings`), `cargo test` 1175 lib + 486 scenarios / 2375 steps. Merged-state
+real-data smoke on `00024512`: cell reaches a live session with no panic (#199),
+`activate 00024710` returns `activator … opened`/`closed` (#186 signal parity,
+was `not_a_door`). The full nav route-flip is pinned by
+`activating_a_blocker_through_the_interaction_boundary_lifts_the_nav_override`
+and was demonstrated on real data by the lane A executor on identical runtime
+code.
+
+**Note for a future editor — verdict §2.7 correction.** The post-mortem's §2.7
+reports the doors wave (#177/#184) landing with no plan or manual script; both
+`docs/plans/M4_DOORS_WAVE_PLAN.md` and `M4_DOORS_WAVE_MANUAL.md` are in fact
+committed, so recommendation §4.8 was already discharged before that branch
+merged. Recorded here and in `M4_WALKING_ACTORS_PROMPT.md`; the post-mortem doc
+itself still says otherwise.
