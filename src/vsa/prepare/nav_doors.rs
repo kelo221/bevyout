@@ -230,6 +230,58 @@ fn point_in_convex_polygon(point: [f32; 2], polygon: &[[f32; 2]]) -> bool {
     true
 }
 
+/// Every walkable polygon that lies wholly inside a blocker's collision
+/// volume without a matching `blocks_when_closed` association -- the
+/// deterministic invariant check `navmesh.rs` reports at prepare time and the
+/// unit/cucumber suites assert is empty. Returns `(mesh_form_id,
+/// triangle_index, reference_form_id)` triples, sorted.
+pub(crate) fn unreported_interior_polygons(
+    meshes: &[BlockerMeshInput],
+    blockers: &[BlockerVolume],
+    associations: &[DerivedDoorAssociation],
+) -> Vec<(u32, u32, u32)> {
+    let reported: std::collections::BTreeSet<(u32, u32, u32)> = associations
+        .iter()
+        .filter(|association| association.blocks_when_closed)
+        .map(|association| {
+            (
+                association.mesh_form_id,
+                association.triangle_index,
+                association.door_reference_form_id,
+            )
+        })
+        .collect();
+    let mut unreported = Vec::new();
+    for blocker in blockers {
+        if blocker.footprint.len() < 3 {
+            continue;
+        }
+        for mesh in meshes {
+            for polygon in &mesh.polygons {
+                let floor = polygon
+                    .vertices
+                    .iter()
+                    .fold(f32::INFINITY, |acc, vertex| acc.min(vertex[1]));
+                if floor < blocker.min_y - BLOCKER_FLOOR_TOLERANCE || floor > blocker.max_y {
+                    continue;
+                }
+                let inside = polygon.vertices.iter().all(|vertex| {
+                    point_in_convex_polygon([vertex[0], vertex[2]], &blocker.footprint)
+                });
+                if !inside {
+                    continue;
+                }
+                let key = (mesh.form_id, polygon.index, blocker.reference_form_id);
+                if !reported.contains(&key) {
+                    unreported.push(key);
+                }
+            }
+        }
+    }
+    unreported.sort_unstable();
+    unreported
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,56 +442,4 @@ mod tests {
             2
         );
     }
-}
-
-/// Every walkable polygon that lies wholly inside a blocker's collision
-/// volume without a matching `blocks_when_closed` association -- the
-/// deterministic invariant check `navmesh.rs` reports at prepare time and the
-/// unit/cucumber suites assert is empty. Returns `(mesh_form_id,
-/// triangle_index, reference_form_id)` triples, sorted.
-pub(crate) fn unreported_interior_polygons(
-    meshes: &[BlockerMeshInput],
-    blockers: &[BlockerVolume],
-    associations: &[DerivedDoorAssociation],
-) -> Vec<(u32, u32, u32)> {
-    let reported: std::collections::BTreeSet<(u32, u32, u32)> = associations
-        .iter()
-        .filter(|association| association.blocks_when_closed)
-        .map(|association| {
-            (
-                association.mesh_form_id,
-                association.triangle_index,
-                association.door_reference_form_id,
-            )
-        })
-        .collect();
-    let mut unreported = Vec::new();
-    for blocker in blockers {
-        if blocker.footprint.len() < 3 {
-            continue;
-        }
-        for mesh in meshes {
-            for polygon in &mesh.polygons {
-                let floor = polygon
-                    .vertices
-                    .iter()
-                    .fold(f32::INFINITY, |acc, vertex| acc.min(vertex[1]));
-                if floor < blocker.min_y - BLOCKER_FLOOR_TOLERANCE || floor > blocker.max_y {
-                    continue;
-                }
-                let inside = polygon.vertices.iter().all(|vertex| {
-                    point_in_convex_polygon([vertex[0], vertex[2]], &blocker.footprint)
-                });
-                if !inside {
-                    continue;
-                }
-                let key = (mesh.form_id, polygon.index, blocker.reference_form_id);
-                if !reported.contains(&key) {
-                    unreported.push(key);
-                }
-            }
-        }
-    }
-    unreported.sort_unstable();
-    unreported
 }
