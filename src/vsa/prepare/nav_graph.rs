@@ -28,7 +28,14 @@ use super::super::paths::FO3_SCALE;
 
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
-/// precedent. Bumped to v6 for issue #171 (M4 wave 11): the clearance pass now
+/// precedent. Bumped to v8 for issue #177 acceptance: derived associations
+/// carry `openable`, which decides whether a closed blocker's interior is
+/// merely expensive or genuinely impassable.
+/// Bumped to v7 for issue #177 (M4 wave 11): every mesh carries
+/// the new `PreparedNavMesh::derived_doors` list of collision-derived
+/// blocker -> polygon associations, which the authored `NVDP` data does not
+/// provide for ordinary in-cell doors.
+/// Bumped to v6 for issue #171 (M4 wave 11): the clearance pass now
 /// re-triangulates each mesh locally against the collision-derived walkability
 /// boundary, so a graph carries clip-introduced vertices and sub-polygons
 /// (authored vertices and unsplit polygons keep their indices), plus the new
@@ -40,7 +47,7 @@ use super::super::paths::FO3_SCALE;
 /// Bumped to v4 for issue #156: `PreparedNavMeshMerge::authored_evidence`,
 /// `PreparedNavPolygon::authored_external`, and the merge-candidate
 /// authored/geometric split + NVEX/NVCI correlation counters.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v6";
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v8";
 
 /// `NVTR` per-edge "external" flag bits (fopdoc FalloutNV `Records/NAVM.html`,
 /// "Flag Values"), restated locally per this module's no-`openmw_esm4`-import
@@ -236,6 +243,27 @@ pub(crate) struct PreparedNavDoor {
     pub(crate) door_reference_form_id: Option<u32>,
 }
 
+/// One derived blocker -> polygon association (issue #177). See
+/// `PreparedNavMesh::derived_doors` and `prepare::nav_doors` for the
+/// geometric rule and the two association classes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct PreparedNavDerivedDoor {
+    pub(crate) triangle_index: u32,
+    /// Always populated: a derived association exists only because a
+    /// blocking placement's reference FormID produced it.
+    pub(crate) door_reference_form_id: u32,
+    /// `true` when the polygon lies wholly inside the blocker's collision
+    /// volume, so it must not be freely traversable while the blocker is
+    /// closed.
+    pub(crate) blocks_when_closed: bool,
+    /// `true` when this blocker owns a runtime open/close FSM (a real `DOOR`
+    /// record). Decides the runtime *cost* of a closed blocker's interior:
+    /// passable-but-expensive when it can be opened, impassable when it
+    /// cannot -- see `viewer::nav::agent::CLOSED_DOOR_TYPE_INDEX_COST`.
+    pub(crate) openable: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct PreparedNavExternalConnection {
@@ -313,6 +341,21 @@ pub(crate) struct PreparedNavMesh {
     pub(crate) vertices: Vec<[f32; 3]>,
     pub(crate) polygons: Vec<PreparedNavPolygon>,
     pub(crate) doors: Vec<PreparedNavDoor>,
+    /// Issue #177 (M4 wave 11): blocker -> polygon associations *derived*
+    /// from collision footprints rather than read from the authored `NVDP`
+    /// door list above. The authored data only associates load/travel doors
+    /// with triangles, so an ordinary in-cell door otherwise gets no polygon
+    /// typing, no crossing gate, and no door link at all -- the navmesh runs
+    /// straight through its closed slab. Kept in its own list, never merged
+    /// into `doors`: the authored list's per-door triangle *count* is load
+    /// bearing at runtime (`landmass_graph::door_link_descriptors` treats
+    /// exactly two as a two-sided link, `single_sided_doors` exactly one as a
+    /// travel/crossing candidate), and folding derived associations in would
+    /// silently reclassify authored doors.
+    ///
+    /// Populated by `navmesh::apply_derived_door_associations`, after the
+    /// clearance pass -- `triangle_index` refers to post-clip polygons.
+    pub(crate) derived_doors: Vec<PreparedNavDerivedDoor>,
     pub(crate) external_connections: Vec<PreparedNavExternalConnection>,
     /// Range-checked `NVCA` triangle-index candidates (see
     /// `NavGraphMeshInput::cover_triangle_ids`'s doc comment on its source
@@ -1349,6 +1392,10 @@ fn build_mesh(
             vertices,
             polygons,
             doors,
+            // Populated later by `navmesh::apply_derived_door_associations`
+            // (issue #177), after the clearance pass has settled polygon
+            // indices.
+            derived_doors: Vec::new(),
             external_connections,
             cover_triangle_indices,
             bounds,
@@ -1557,7 +1604,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v6");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v8");
     }
 
     #[test]

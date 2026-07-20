@@ -808,6 +808,12 @@ struct BevyoutWorld {
     gameplay_actor_cell_active: bool,
     gameplay_actor_visible: bool,
     gameplay_actor_playback_active: Option<bool>,
+
+    // -- nav_derived_doors.feature (issue #177, M4 wave 11) --
+    nav_derived_door_blockers: Vec<nav_doors::BlockerVolume>,
+    nav_derived_door_meshes: Vec<nav_doors::BlockerMeshInput>,
+    nav_derived_door_associations: Option<Vec<nav_doors::DerivedDoorAssociation>>,
+    nav_approach_observation: Option<door_link::ApproachObservation>,
 }
 
 fn find_placement<'a>(
@@ -6318,6 +6324,7 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         &mesh,
         &[],
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
     ));
 }
 
@@ -10403,4 +10410,239 @@ async fn then_gameplay_actor_playback_paused(world: &mut BevyoutWorld) {
 #[then("gameplay actor playback advances")]
 async fn then_gameplay_actor_playback_advances(world: &mut BevyoutWorld) {
     assert_eq!(world.gameplay_actor_playback_active, Some(true));
+}
+
+// ---------------------------------------------------------------------
+// nav_derived_doors.feature (issue #177, M4 wave 11) -- appended section,
+// do not interleave. `vsa::prepare::nav_doors` is std-only (no `super::`
+// imports), so it is flat top-level included here the same way
+// `nav_clearance`/`nav_clip` are.
+// ---------------------------------------------------------------------
+
+#[path = "../src/vsa/prepare/nav_doors.rs"]
+#[allow(dead_code, unused_imports)]
+mod nav_doors;
+
+fn derived_door_blocker(world: &mut BevyoutWorld, form_id: u32) -> &mut nav_doors::BlockerVolume {
+    world
+        .nav_derived_door_blockers
+        .iter_mut()
+        .find(|blocker| blocker.reference_form_id == form_id)
+        .expect("the blocker must be declared first")
+}
+
+#[given(
+    regex = r"^a blocker 0x([0-9a-fA-F]{8}) with footprint from (-?[\d.]+), (-?[\d.]+) to (-?[\d.]+), (-?[\d.]+) spanning height (-?[\d.]+) to (-?[\d.]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_derived_door_blocker(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    min_x: f32,
+    min_z: f32,
+    max_x: f32,
+    max_z: f32,
+    min_y: f32,
+    max_y: f32,
+) {
+    let reference_form_id = u32::from_str_radix(&form_id, 16).expect("hex blocker FormID");
+    world
+        .nav_derived_door_blockers
+        .push(nav_doors::BlockerVolume {
+            reference_form_id,
+            // Counter-clockwise in (x, z), matching `navmesh::convex_hull_xz`'s
+            // winding -- the real footprints come from that hull.
+            footprint: vec![
+                [min_x, min_z],
+                [max_x, min_z],
+                [max_x, max_z],
+                [min_x, max_z],
+            ],
+            min_y,
+            max_y,
+            gated: true,
+        });
+}
+
+#[given(regex = r"^blocker 0x([0-9a-fA-F]{8}) has no open and close controls$")]
+async fn given_derived_door_blocker_ungated(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("hex blocker FormID");
+    derived_door_blocker(world, form_id).gated = false;
+}
+
+#[given(
+    regex = r"^nav mesh 0x([0-9a-fA-F]{8}) has walkable polygon (\d+) with vertices (-?[\d.]+), (-?[\d.]+), (-?[\d.]+) and (-?[\d.]+), (-?[\d.]+), (-?[\d.]+) and (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn given_derived_door_polygon(
+    world: &mut BevyoutWorld,
+    mesh_form_id: String,
+    index: u32,
+    ax: f32,
+    ay: f32,
+    az: f32,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+) {
+    let mesh_form_id = u32::from_str_radix(&mesh_form_id, 16).expect("hex mesh FormID");
+    let polygon = nav_doors::BlockerPolygonInput {
+        index,
+        vertices: [[ax, ay, az], [bx, by, bz], [cx, cy, cz]],
+    };
+    match world
+        .nav_derived_door_meshes
+        .iter_mut()
+        .find(|mesh| mesh.form_id == mesh_form_id)
+    {
+        Some(mesh) => mesh.polygons.push(polygon),
+        None => world
+            .nav_derived_door_meshes
+            .push(nav_doors::BlockerMeshInput {
+                form_id: mesh_form_id,
+                polygons: vec![polygon],
+                authored_door_polygons: std::collections::BTreeSet::new(),
+            }),
+    }
+}
+
+#[when("the derived door associations are resolved")]
+async fn when_derived_door_associations_resolved(world: &mut BevyoutWorld) {
+    world.nav_derived_door_associations = Some(nav_doors::derive_door_associations(
+        &world.nav_derived_door_meshes,
+        &world.nav_derived_door_blockers,
+    ));
+}
+
+fn derived_door_associations(world: &BevyoutWorld) -> &[nav_doors::DerivedDoorAssociation] {
+    world
+        .nav_derived_door_associations
+        .as_deref()
+        .expect("the derived door associations must be resolved first")
+}
+
+#[then(regex = r"^there are exactly (\d+) derived door associations$")]
+async fn then_derived_door_association_count(world: &mut BevyoutWorld, expected: usize) {
+    let associations = derived_door_associations(world);
+    assert_eq!(associations.len(), expected, "{associations:?}");
+}
+
+#[then(regex = r"^there are exactly (\d+) blocking door associations$")]
+async fn then_derived_door_blocking_count(world: &mut BevyoutWorld, expected: usize) {
+    let associations = derived_door_associations(world);
+    let blocking = associations
+        .iter()
+        .filter(|association| association.blocks_when_closed)
+        .count();
+    assert_eq!(blocking, expected, "{associations:?}");
+}
+
+#[then(regex = r"^polygon (\d+) is a (gate|blocking) association for blocker 0x([0-9a-fA-F]{8})$")]
+async fn then_derived_door_association_class(
+    world: &mut BevyoutWorld,
+    index: u32,
+    class: String,
+    form_id: String,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("hex blocker FormID");
+    let associations = derived_door_associations(world);
+    let association = associations
+        .iter()
+        .find(|association| {
+            association.triangle_index == index && association.door_reference_form_id == form_id
+        })
+        .unwrap_or_else(|| panic!("no association for polygon {index}: {associations:?}"));
+    assert_eq!(
+        association.blocks_when_closed,
+        class == "blocking",
+        "{association:?}"
+    );
+}
+
+#[then("no walkable polygon is left unreported inside a closed blocker")]
+async fn then_no_unreported_interior_polygon(world: &mut BevyoutWorld) {
+    let unreported = nav_doors::unreported_interior_polygons(
+        &world.nav_derived_door_meshes,
+        &world.nav_derived_door_blockers,
+        derived_door_associations(world),
+    );
+    assert!(unreported.is_empty(), "{unreported:?}");
+}
+
+#[then(regex = r"^the derived association order is (.+)$")]
+async fn then_derived_door_association_order(world: &mut BevyoutWorld, expected: String) {
+    let actual: Vec<String> = derived_door_associations(world)
+        .iter()
+        .map(|association| {
+            format!(
+                "0x{:08x}/{}",
+                association.door_reference_form_id, association.triangle_index
+            )
+        })
+        .collect();
+    assert_eq!(actual.join(", "), expected);
+}
+
+#[then("resolving the derived door associations again gives the same result")]
+async fn then_derived_door_associations_are_stable(world: &mut BevyoutWorld) {
+    let again = nav_doors::derive_door_associations(
+        &world.nav_derived_door_meshes,
+        &world.nav_derived_door_blockers,
+    );
+    assert_eq!(derived_door_associations(world), again);
+}
+
+#[then(regex = r"^polygon (\d+) is reported as (openable|not openable)$")]
+async fn then_derived_door_association_openable(
+    world: &mut BevyoutWorld,
+    index: u32,
+    expectation: String,
+) {
+    let associations = derived_door_associations(world);
+    let association = associations
+        .iter()
+        .find(|association| association.triangle_index == index)
+        .unwrap_or_else(|| panic!("no association for polygon {index}: {associations:?}"));
+    assert_eq!(
+        association.openable,
+        expectation == "openable",
+        "{association:?}"
+    );
+}
+
+#[given(regex = r"^an agent (stalled|still moving) ([\d.]+) metres from a door crossing$")]
+async fn given_approach_agent(world: &mut BevyoutWorld, progress: String, distance: f32) {
+    world.nav_approach_observation = Some(door_link::ApproachObservation {
+        distance_to_crossing: distance,
+        agent_distance_to_target: 0.0,
+        crossing_distance_to_target: 0.0,
+        stalled: progress == "stalled",
+    });
+}
+
+#[given(
+    regex = r"^the crossing is ([\d.]+) metres from the target and the agent is ([\d.]+) metres from it$"
+)]
+async fn given_approach_distances(world: &mut BevyoutWorld, crossing: f32, agent: f32) {
+    let observation = world
+        .nav_approach_observation
+        .as_mut()
+        .expect("the agent must be placed first");
+    observation.crossing_distance_to_target = crossing;
+    observation.agent_distance_to_target = agent;
+}
+
+#[then(regex = r"^the approach gate (fires|does not fire)$")]
+async fn then_approach_gate(world: &mut BevyoutWorld, outcome: String) {
+    let observation = world
+        .nav_approach_observation
+        .expect("the agent must be placed first");
+    assert_eq!(
+        door_link::approach_gate(observation),
+        outcome == "fires",
+        "{observation:?}"
+    );
 }

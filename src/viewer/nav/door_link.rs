@@ -510,3 +510,114 @@ mod tests {
         ));
     }
 }
+
+// ---------------------------------------------------------------------
+// Stalled-approach crossing gate (issue #177 acceptance)
+// ---------------------------------------------------------------------
+
+/// How close (metres, XZ) to a door's crossing footprint a *stalled* agent
+/// may be and still have that door count as the thing it is stalled against.
+///
+/// The containment gate (`landmass_graph::point_in_door_triangle`) requires
+/// the agent to be standing *on* the crossing polygon, which is the right
+/// trigger whenever the agent actually gets there. Real data showed it does
+/// not always get there: on a doorway whose approach the prepare-side
+/// clearance pass has eroded, an agent routed at a closed door halts short of
+/// the crossing with a completely free collision sweep and simply stops
+/// making progress -- never entering the polygon, so never gating, never
+/// requesting the open, and never continuing. Containment alone is a trigger
+/// that can be starved.
+///
+/// This bound is deliberately generous because it is only ever consulted for
+/// an agent that has *already* stopped making progress toward a target it
+/// still has, and only for a crossing its own route demonstrably continues
+/// past ([`approach_gate`]'s `crossing_is_on_the_way` term). A door the agent
+/// is merely walking past, or one behind it, can never satisfy those terms,
+/// so widening the radius cannot reintroduce issue #155's defect -- the
+/// proximity scan it replaced fired for any door near the *corridor*,
+/// with no stall and no route relationship required.
+pub(crate) const DOOR_CROSSING_APPROACH_DISTANCE: f32 = 3.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ApproachObservation {
+    /// XZ distance from the agent to the crossing polygon's footprint
+    /// (`0.0` when the agent is inside it).
+    pub(crate) distance_to_crossing: f32,
+    /// XZ distance from the agent to its current target.
+    pub(crate) agent_distance_to_target: f32,
+    /// XZ distance from the crossing polygon to that same target.
+    pub(crate) crossing_distance_to_target: f32,
+    /// The agent has stopped making progress (`AgentKcc`'s
+    /// `collision_blocked`/`stuck` latches, which
+    /// `movement_policy::decide_collision_outcome`/`decide_stuck` own).
+    pub(crate) stalled: bool,
+}
+
+/// Whether a stalled agent should gate on a nearby door crossing it has not
+/// managed to reach: it must actually be stalled, the crossing must be within
+/// [`DOOR_CROSSING_APPROACH_DISTANCE`], and the crossing must lie *between*
+/// the agent and its target rather than behind or beside it -- otherwise an
+/// agent stuck for an unrelated reason would start opening whatever door
+/// happened to be nearest.
+pub(crate) fn approach_gate(observation: ApproachObservation) -> bool {
+    if !observation.stalled {
+        return false;
+    }
+    if observation.distance_to_crossing > DOOR_CROSSING_APPROACH_DISTANCE {
+        return false;
+    }
+    observation.crossing_distance_to_target < observation.agent_distance_to_target
+}
+
+#[cfg(test)]
+mod approach_tests {
+    use super::*;
+
+    fn observation() -> ApproachObservation {
+        ApproachObservation {
+            distance_to_crossing: 2.2,
+            agent_distance_to_target: 6.0,
+            crossing_distance_to_target: 4.0,
+            stalled: true,
+        }
+    }
+
+    #[test]
+    fn a_stalled_agent_short_of_a_crossing_on_its_route_gates() {
+        assert!(approach_gate(observation()));
+    }
+
+    #[test]
+    fn an_agent_still_making_progress_never_gates_on_approach() {
+        assert!(!approach_gate(ApproachObservation {
+            stalled: false,
+            ..observation()
+        }));
+    }
+
+    #[test]
+    fn a_crossing_beyond_the_approach_bound_never_gates() {
+        assert!(!approach_gate(ApproachObservation {
+            distance_to_crossing: DOOR_CROSSING_APPROACH_DISTANCE + 0.01,
+            ..observation()
+        }));
+    }
+
+    #[test]
+    fn a_crossing_behind_the_agent_never_gates() {
+        // Further from the target than the agent is: the route does not
+        // continue through it, so it is not what the agent is stalled on.
+        assert!(!approach_gate(ApproachObservation {
+            crossing_distance_to_target: 7.0,
+            ..observation()
+        }));
+    }
+
+    #[test]
+    fn standing_inside_the_crossing_while_stalled_still_gates() {
+        assert!(approach_gate(ApproachObservation {
+            distance_to_crossing: 0.0,
+            ..observation()
+        }));
+    }
+}

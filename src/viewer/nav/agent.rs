@@ -337,6 +337,28 @@ const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 /// so would mean giving up on `NoPath` for the one-route-only case, this
 /// feature's actual requirement.
 const LOCKED_DOOR_TYPE_INDEX_COST: f32 = f32::INFINITY;
+/// Per-agent `landmass` type-index cost applied to a *closed but openable*
+/// blocker's interior polygons (issue #177 acceptance correction): the ground
+/// inside a shut door slab, for a door the agent can actually open.
+///
+/// Deliberately large-but-finite, the exact opposite of
+/// [`LOCKED_DOOR_TYPE_INDEX_COST`]'s reasoning above, because the requirement
+/// is the opposite. A locked door must make its route *fail* (`NoPath`), so
+/// only an unbounded cost will do. A closed-but-unlocked door must remain
+/// **passable**: the crossing gate that opens it only fires once the agent is
+/// standing on the doorway, so a route the solver refuses to plan is a route
+/// the agent never walks, a door it never approaches, and a door it therefore
+/// never opens -- the chicken-and-egg the first cut of this issue shipped,
+/// where every in-cell door became a wall that reported `unreachable` from
+/// the spawn point. This matches FO3/GECK semantics: NPCs path through closed
+/// doors and open them; only locked doors are barriers.
+///
+/// The magnitude makes any genuinely available detour cheaper, so an agent
+/// prefers an open route and only commits to opening a door when that is
+/// really the way through, while staying far below `f32::MAX` so accumulated
+/// path costs cannot overflow to infinity and re-introduce the exclusion this
+/// constant exists to avoid.
+const CLOSED_DOOR_TYPE_INDEX_COST: f32 = 1000.0;
 /// Archipelago-wide base cost for every authored preferred-pathing polygon
 /// (issue #168): `landmass_graph::preferred_pathing_type_index`'s type index
 /// gets this via `Archipelago::set_type_index_cost` in `ensure_archipelago`,
@@ -415,6 +437,68 @@ const AGENT_POINT_SAMPLE_DISTANCE: PointSampleDistance3d = PointSampleDistance3d
     vertical_preference_ratio: 2.0,
     animation_link_max_vertical_distance: 1.0,
 };
+
+/// How far ahead (seconds) landmass's local avoidance may look when treating
+/// *navmesh border edges* as ORCA obstacles (issue #184). This **disables**
+/// border avoidance: it is expressed as a negligible positive horizon rather
+/// than `0.0` only because `dodgy_2d` divides by it (`left_cutoff =
+/// (vertex - position) / time_horizon`), so zero would put `inf`/`NaN` into the
+/// linear program. At `AGENT_MAX_SPEED` this is a lookahead well under a
+/// millimetre -- far below any geometric tolerance in the pipeline -- while
+/// keeping every squared quantity comfortably inside `f32` range.
+/// `avoidance_time_horizon` (agent/character avoidance, issue #114 feature 4)
+/// is a separate option and keeps landmass's own `0.5` default; only borders
+/// are switched off here.
+///
+/// Two independent facts make navmesh borders the wrong avoidance authority
+/// for this project:
+///
+/// 1. **Physics owns wall clearance, not the navmesh.** Since issue #114
+///    movement is physics-authoritative -- the agent capsule KCC resolves the
+///    real cooked colliders every tick (`step_agent_kcc`) -- and since issues
+///    #153/#171 the *prepared* mesh boundary is already the agent-radius
+///    clearance boundary (`vsa::prepare::nav_clearance`). Border avoidance is
+///    therefore a second, redundant wall-avoidance layer, and unlike the first
+///    it acts in *velocity space with no contact*, so its failures are
+///    invisible to every collision diagnostic.
+/// 2. **`dodgy_2d` is strictly 2D, and landmass feeds it vertically-separated
+///    geometry.** `landmass::avoidance::nav_mesh_borders_to_dodgy_obstacles`
+///    walks outward through *connected* polygons for `neighbourhood` metres and
+///    projects every border it finds onto the XZ plane. A staircase is walkable
+///    ground connected to the landing above it, so its rail gets flattened onto
+///    the landing's own footprint -- on 00024512, 125 border edges spanning
+///    y 39.17..40.47, up to a metre below the agent's surface, with #171's
+///    sub-triangle re-triangulation contributing many near-collinear slivers.
+///    In any multi-level cell that set simply is not a valid description of
+///    what the agent must avoid, and `dodgy_2d` treats obstacle lines as *hard*
+///    constraints: a degenerate set makes `solve_linear_program` infeasible and
+///    it falls back to "whatever solution we get even if it's infeasible".
+///
+/// The observable failure is a velocity that decays by exactly
+/// `1 - dt / horizon` per tick toward zero. On 00024512 an agent with 1.35 m of
+/// clearance in every direction and a completely free capsule sweep crept to a
+/// permanent halt against borders 2-3.5 m away, reporting
+/// `reason=no_contact_no_progress` -- four waves' worth of collider hunting for
+/// an obstacle that was never physical. Merely shortening the horizon is not
+/// enough: at one fixed tick the decay stops, but a border projected onto the
+/// agent's own position still hard-blocks it (measured on this file's own
+/// `stall_fixture_mesh`, which halts at the projected stair cap until the
+/// horizon goes below ~1e-3).
+const NAV_BORDER_AVOIDANCE_TIME_HORIZON: f32 = 1e-4;
+
+/// The archipelago options every build shares (issue #184): landmass's
+/// `from_agent_radius` avoidance defaults, with the point-sampling envelope
+/// widened to humanoid scale (`AGENT_POINT_SAMPLE_DISTANCE`) and navmesh-border
+/// ORCA avoidance clamped to one tick (`NAV_BORDER_AVOIDANCE_TIME_HORIZON`).
+/// One helper rather than per-call-site literals so `ensure_archipelago` and
+/// every test harness cannot drift apart on exactly the options a stall
+/// regression depends on.
+fn archipelago_options() -> ArchipelagoOptions<ThreeD> {
+    let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
+    options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
+    options.obstacle_avoidance_time_horizon = NAV_BORDER_AVOIDANCE_TIME_HORIZON;
+    options
+}
 
 /// Bounded multi-agent cap (issue #114 feature 4): small and fixed so local
 /// avoidance among same-cell test agents is observable without an
@@ -671,6 +755,22 @@ struct NavArchipelagoState {
     /// door's lock state into the matching `AgentTypeIndexCostOverrides`
     /// entry without recomputing it from the raw mesh inputs every time.
     door_type_indices: BTreeMap<u32, usize>,
+    /// Blocker FormID -> `landmass` polygon type index for the *blocking*
+    /// derived association class (issue #177, `landmass_graph::
+    /// closed_door_type_indices`): the polygons that lie wholly inside the
+    /// blocker's collision volume. Priced [`LOCKED_DOOR_TYPE_INDEX_COST`]
+    /// whenever the blocker is *closed* -- lock or no lock -- so no route
+    /// can ever be planned through the inside of a closed door slab, which
+    /// is what let an agent walk in and wedge against it in physics.
+    closed_door_type_indices: BTreeMap<u32, usize>,
+    /// Blockers that own a runtime open/close FSM (`landmass_graph::
+    /// openable_blockers`). Decides whether a closed blocker's interior is
+    /// merely expensive ([`CLOSED_DOOR_TYPE_INDEX_COST`]) or impassable.
+    openable_blockers: BTreeSet<u32>,
+    /// Last observed per-door *open* state, the change detector for the
+    /// closed-blocker override above (`door_usable` cannot serve: an
+    /// unlocked door is usable whether it is open or shut).
+    door_open: HashMap<u32, bool>,
     /// How many distinct merge-portal `landmass` animation-link kinds this
     /// build assigned (issue #162 feature 1, `landmass_graph::
     /// merge_link_kind`): every validated merge candidate this build
@@ -1081,18 +1181,30 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // agree on the same door's type index -- see `door_type_indices`'s doc
     // comment).
     let door_type_indices = landmass_graph::door_type_indices(&mesh_inputs);
+    // Issue #177: the blocking derived-association class takes its own
+    // indices, allocated above every `door_type_indices` one.
+    let closed_door_type_indices =
+        landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
+    let openable_blockers = landmass_graph::openable_blockers(&mesh_inputs);
 
-    // Widen the sample distances to humanoid scale (see
-    // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
-    // evidence); keep the rest of `from_agent_radius`'s avoidance defaults.
-    let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-    options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
-    let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
-    apply_preferred_pathing_base_cost(world, archipelago_entity, &door_type_indices);
+    // Widened sample distances plus the clamped border-avoidance horizon --
+    // see `archipelago_options`, which every build (runtime and test) shares.
+    let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
+    apply_preferred_pathing_base_cost(
+        world,
+        archipelago_entity,
+        &door_type_indices,
+        &closed_door_type_indices,
+    );
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
-        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs, &door_type_indices);
+        let result = landmass_graph::build_navigation_mesh(
+            mesh,
+            &merge_inputs,
+            &door_type_indices,
+            &closed_door_type_indices,
+        );
         for diagnostic in &result.diagnostics {
             warn!(
                 "nav landmass conversion mesh {:08x}: {}",
@@ -1134,6 +1246,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let mut link_kinds = HashMap::new();
     let mut blocked_door_links = Vec::new();
     let mut door_usable = HashMap::new();
+    let mut door_open = HashMap::new();
 
     // Same-cell cross-mesh merge links (issue #113 feature 2). Real FO3
     // meshes never share seam vertex positions, so landmass's native island
@@ -1303,6 +1416,37 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         }
     }
 
+    // Derived blocker crossing gates (issue #177). Ordinary in-cell doors
+    // carry no authored `NVDP` triangle association at all, so none of the
+    // loops above ever saw them; `prepare` now derives the association from
+    // the door's own collision footprint and this feeds it into the exact
+    // same `mid_route_doors` crossing-gate set an authored travel-door
+    // triangle uses -- pause -> request open -> wait -> traverse -> resume.
+    // A blocker's *interior* polygons are deliberately absent here: they are
+    // priced impassable while it is closed instead (`closed_door_type_
+    // indices`), so an agent is never asked to stop inside a solid slab.
+    for gate in landmass_graph::derived_door_gates(&mesh_inputs) {
+        door_usable
+            .entry(gate.door_form_id)
+            .or_insert_with(|| door_usable_now(world, gate.door_form_id, &door_lock_info));
+        mid_route_doors.push(MidRouteDoor {
+            door_form_id: gate.door_form_id,
+            vertices: gate.vertices.map(Vec3::from_array),
+        });
+    }
+    // Every blocker with a closed-state override needs an open-state entry,
+    // whether or not it also has a crossing gate: `door_availability_system`
+    // polls exactly the tracked set.
+    for &blocker_form_id in closed_door_type_indices.keys() {
+        door_usable
+            .entry(blocker_form_id)
+            .or_insert_with(|| door_usable_now(world, blocker_form_id, &door_lock_info));
+    }
+    for &door_form_id in door_usable.keys() {
+        let (open, _) = door_open_and_locked(world, door_form_id, &door_lock_info);
+        door_open.insert(door_form_id, open);
+    }
+
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
         cell_form_id: Some(current_cell),
         archipelago: Some(archipelago_entity),
@@ -1316,6 +1460,9 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_usable,
         door_lock_info,
         door_type_indices,
+        closed_door_type_indices,
+        openable_blockers,
+        door_open,
         merge_link_kind_count,
     };
     Ok(())
@@ -1339,8 +1486,10 @@ fn apply_preferred_pathing_base_cost(
     world: &mut World,
     archipelago_entity: Entity,
     door_type_indices: &BTreeMap<u32, usize>,
+    closed_door_type_indices: &BTreeMap<u32, usize>,
 ) {
-    let preferred_pathing_index = landmass_graph::preferred_pathing_type_index(door_type_indices);
+    let preferred_pathing_index =
+        landmass_graph::preferred_pathing_type_index(door_type_indices, closed_door_type_indices);
     if let Ok(mut entity) = world.get_entity_mut(archipelago_entity)
         && let Some(mut archipelago) = entity.get_mut::<Archipelago3d>()
     {
@@ -1658,6 +1807,49 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
         if let Some(&type_index) = state.door_type_indices.get(&door_form_id) {
             overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
         }
+    }
+    // Issue #177: a blocker's *interior* polygons (derived associations that
+    // lie wholly inside its collision volume) are never freely traversable
+    // while it is closed -- pricing them only on `door_usable` (lock) is what
+    // let an agent plan straight through a shut door and wedge against it.
+    //
+    // How expensive depends on whether the blocker can be opened at all,
+    // which is the correction the first cut of this issue needed:
+    //
+    // - **Openable and unlocked** -> [`CLOSED_DOOR_TYPE_INDEX_COST`], a
+    //   strong but finite penalty. The route stays plannable, the agent walks
+    //   to the doorway, and the mid-route crossing gate runs the existing
+    //   pause -> request open -> wait -> traverse -> resume lifecycle. An
+    //   unbounded cost here would stop the agent ever reaching the door it is
+    //   supposed to open.
+    // - **Locked, or not openable at all** (the ungated kinematic-activator
+    //   class, e.g. a vault gear door with no open/close FSM) ->
+    //   [`LOCKED_DOOR_TYPE_INDEX_COST`]. There is no sanctioned crossing, so
+    //   the route must fail fast rather than walk the agent into a solid.
+    //
+    // Opening the blocker clears the entry entirely, through the same
+    // rebuild-the-whole-component path a lock change takes.
+    for (&blocker_form_id, &type_index) in &state.closed_door_type_indices {
+        if state
+            .door_open
+            .get(&blocker_form_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let openable = state.openable_blockers.contains(&blocker_form_id);
+        let usable = state
+            .door_usable
+            .get(&blocker_form_id)
+            .copied()
+            .unwrap_or(true);
+        let cost = if openable && usable {
+            CLOSED_DOOR_TYPE_INDEX_COST
+        } else {
+            LOCKED_DOOR_TYPE_INDEX_COST
+        };
+        overrides.set_type_index_cost(type_index, cost);
     }
     if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
         entity.insert(overrides);
@@ -2377,8 +2569,20 @@ fn world_contact_report(
             collision_filter,
         )
         .unwrap_or(1.0);
+    // Issue #177: the reason is now stated, not left to be inferred. A
+    // shortfall in *achieved* speed is what latches `collision_blocked`
+    // (`movement_policy::decide_collision_outcome` compares desired against
+    // achieved, and never consults contact geometry), so the flag fires just
+    // as readily for an agent whose steering produced no motion as for one
+    // wedged against a wall. Reporting both cases as "collision-blocked" sent
+    // acceptance chasing colliders that were not there.
+    let reason = if blocking.is_empty() && fraction >= 0.999 {
+        "no_contact_no_progress"
+    } else {
+        "obstructed"
+    };
     format!(
-        "sweep_fraction={fraction:.3} blocking_planes=[{}]",
+        "reason={reason} sweep_fraction={fraction:.3} blocking_planes=[{}]",
         blocking.join(" ")
     )
 }
@@ -3176,6 +3380,62 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         })
                         .copied()
                 });
+            // Issue #177: containment is a trigger that can be starved.
+            // Real data (Vault 101, `VDoor01`) showed an agent routed at a
+            // closed in-cell door halting ~2 m short of its crossing with a
+            // completely free collision sweep -- never entering the polygon,
+            // so never gating, never requesting the open, and never
+            // continuing. When the agent has stopped making progress, fall
+            // back to the nearest crossing its own route continues through
+            // (`door_link::approach_gate`), which is the door it is stalled
+            // against. Only consulted when containment found nothing, so the
+            // normal case keeps issue #155's exact corridor semantics.
+            let mid_route_crossing = mid_route_crossing.or_else(|| {
+                let stalled = world
+                    .get::<AgentKcc>(agent_entity)
+                    .is_some_and(|kcc| kcc.collision_blocked || kcc.stuck);
+                if !stalled || !has_target {
+                    return None;
+                }
+                let position = world.get::<Transform>(agent_entity)?.translation;
+                let target = match world.get::<AgentTarget3d>(agent_entity)? {
+                    AgentTarget3d::Point(point) => *point,
+                    AgentTarget3d::Entity(entity) => {
+                        world.get::<GlobalTransform>(*entity)?.translation()
+                    }
+                    AgentTarget3d::None => return None,
+                };
+                let flat = |a: Vec3, b: Vec3| Vec2::new(a.x - b.x, a.z - b.z).length();
+                let agent_distance_to_target = flat(position, target);
+                let mut best: Option<(f32, MidRouteDoor)> = None;
+                for door in &world.resource::<NavArchipelagoState>().mid_route_doors {
+                    if Some(door.door_form_id) == travel_target_door {
+                        continue;
+                    }
+                    let vertices = door.vertices.map(|vertex| vertex.to_array());
+                    let Some(distance) = landmass_graph::distance_to_door_triangle(
+                        position.to_array(),
+                        vertices,
+                        AGENT_HEIGHT,
+                    ) else {
+                        continue;
+                    };
+                    let centroid = (door.vertices[0] + door.vertices[1] + door.vertices[2]) / 3.0;
+                    if !door_link::approach_gate(door_link::ApproachObservation {
+                        distance_to_crossing: distance,
+                        agent_distance_to_target,
+                        crossing_distance_to_target: flat(centroid, target),
+                        stalled,
+                    }) {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|(best, _)| distance < *best) {
+                        best = Some((distance, *door));
+                    }
+                }
+                best.map(|(_, door)| door)
+            });
+
             if let Some(door) = mid_route_crossing {
                 let lock_info = world
                     .resource::<NavArchipelagoState>()
@@ -3446,6 +3706,53 @@ fn door_availability_system(world: &mut World) {
         .resource::<NavArchipelagoState>()
         .door_lock_info
         .clone();
+
+    // Issue #177: open-state poll, tracked separately from usability. An
+    // unlocked door that merely opens or shuts never flips `door_usable`, so
+    // the loop below would miss it entirely -- but it is exactly the state
+    // the closed-blocker cost override keys on. Flips rebuild every active
+    // agent's overrides and re-insert its target, the same one-repath-per-
+    // flip shape the usability loop uses.
+    let open_flips: Vec<(u32, bool)> = tracked
+        .iter()
+        .filter_map(|&(door_form_id, _)| {
+            let (open, _) = door_open_and_locked(world, door_form_id, &lock_info);
+            let was_open = world
+                .resource::<NavArchipelagoState>()
+                .door_open
+                .get(&door_form_id)
+                .copied();
+            (was_open != Some(open)).then_some((door_form_id, open))
+        })
+        .collect();
+    if !open_flips.is_empty() {
+        for (door_form_id, open) in &open_flips {
+            world
+                .resource_mut::<NavArchipelagoState>()
+                .door_open
+                .insert(*door_form_id, *open);
+        }
+        let active_agents: Vec<Entity> = world
+            .resource::<TestNavAgentState>()
+            .active()
+            .map(|(_, entity)| entity)
+            .collect();
+        for agent_entity in &active_agents {
+            apply_door_lock_overrides(world, *agent_entity);
+            let target =
+                world
+                    .get::<AgentTarget3d>(*agent_entity)
+                    .and_then(|target| match target {
+                        AgentTarget3d::None => None,
+                        AgentTarget3d::Point(point) => Some(AgentTarget3d::Point(*point)),
+                        AgentTarget3d::Entity(entity) => Some(AgentTarget3d::Entity(*entity)),
+                    });
+            if let Some(target) = target {
+                world.entity_mut(*agent_entity).insert(target);
+            }
+        }
+    }
+
     for (door_form_id, was_usable) in tracked {
         let now_usable = door_usable_now(world, door_form_id, &lock_info);
         if now_usable == was_usable {
@@ -5731,6 +6038,124 @@ mod tests {
         );
     }
 
+    /// Issue #177 acceptance: the containment gate can be *starved*. Real
+    /// data (Vault 101, `VDoor01`) had an agent routed at a closed in-cell
+    /// door halt ~2 m short of its crossing with a completely free collision
+    /// sweep -- never entering the polygon, so never gating and never
+    /// opening the door. A stalled agent must gate on the crossing its route
+    /// continues through even without standing on it.
+    #[test]
+    fn a_stalled_agent_short_of_a_closed_door_still_opens_it() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                // Stopped 2.2 m short of the crossing, exactly the measured
+                // shortfall, with the target beyond the door.
+                Transform::from_xyz(2.8, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+                AgentKcc::default(),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .mid_route_doors
+            .push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+
+        // Still making progress: short of the crossing is simply short of
+        // the crossing, and must not gate.
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle,
+            "an agent still moving must not gate from a distance"
+        );
+
+        // Progress stops: now the door it is stalled against gets opened.
+        world.get_mut::<AgentKcc>(agent).unwrap().collision_blocked = true;
+        door_link_system(&mut world);
+        assert!(is_paused(&world, agent));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a stalled agent short of a closed door must request it open"
+        );
+
+        // And it resumes on the next tick, exactly like the containment gate.
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle
+        );
+        assert!(world.get::<PauseAgent>(agent).is_none());
+    }
+
+    /// The approach gate must not fire for a door the agent is stalled
+    /// *beside* or *past*: only one its own route continues through.
+    #[test]
+    fn a_stalled_agent_never_opens_a_door_behind_it() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                // The door is behind the agent, away from the target.
+                Transform::from_xyz(2.8, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+                AgentKcc {
+                    collision_blocked: true,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .mid_route_doors
+            .push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(0.6, 0.0, 0.0)),
+            });
+
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle
+        );
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a door behind the agent is not what it is stalled on"
+        );
+    }
+
     /// Regression test (issue #114 added scope, M4 wave 5 real-data
     /// acceptance finding): same shape as
     /// `travel_arrival_tolerates_the_agent_capsule_centre_sitting_above_the_feet_level_door_midpoint`,
@@ -6696,6 +7121,279 @@ mod tests {
         world.run_schedule(FixedUpdate);
     }
 
+    /// Issue #184 regression fixture: a straight walkable corridor the agent
+    /// walks the length of, plus a *connected* side bay chopped into many thin
+    /// sliver triangles whose border edges sit a few metres off the corridor.
+    /// This is the synthetic shape of the 00024512 stall -- a landing joined to
+    /// finely re-triangulated geometry (issue #171 emits exactly these slivers)
+    /// whose borders `landmass::avoidance` flattens into one 2D `dodgy_2d`
+    /// obstacle set. Nothing here is keyed on a cell or a coordinate: it is the
+    /// geometry class, not the instance.
+    ///
+    /// Corridor: `x in [0, 3]`, `z in [0, CORRIDOR_LENGTH]`. Side bay:
+    /// `x in [3, 5.5]`, `z in [4, 8]`, split into `slivers` strips.
+    fn stall_fixture_mesh(slivers: usize) -> landmass_graph::MeshInput {
+        const CORRIDOR_LENGTH: f32 = 14.0;
+        const BAY_START: f32 = 4.0;
+        const BAY_END: f32 = 8.0;
+        let mut vertices: Vec<[f32; 3]> = Vec::new();
+        let mut index_of: HashMap<(i64, i64, i64), u32> = HashMap::new();
+        // Shared vertex grid: landmass connects polygons by identical vertex
+        // *indices*, so every quad corner must resolve to one entry or the
+        // whole mesh degenerates into disconnected triangles with no interior
+        // edges at all. Keyed in full 3D because the switchback below folds
+        // back under the corridor, putting two surfaces at one `(x, z)`.
+        let mut vertex = |vertices: &mut Vec<[f32; 3]>, x: f32, y: f32, z: f32| -> u32 {
+            let key = (
+                (x * 1e4).round() as i64,
+                (y * 1e4).round() as i64,
+                (z * 1e4).round() as i64,
+            );
+            *index_of.entry(key).or_insert_with(|| {
+                vertices.push([x, y, z]);
+                (vertices.len() - 1) as u32
+            })
+        };
+
+        // The z cuts every quad row shares: 1 m steps along the corridor, plus
+        // one cut per sliver through the bay's span so the bay's strips share
+        // real edges with the corridor rather than T-junctioning onto it.
+        let strip = (BAY_END - BAY_START) / slivers as f32;
+        let mut cuts: Vec<f32> = (0..=CORRIDOR_LENGTH as usize).map(|z| z as f32).collect();
+        cuts.extend((0..=slivers).map(|index| BAY_START + index as f32 * strip));
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+        let mut polygons: Vec<landmass_graph::PolygonInput> = Vec::new();
+        let mut quad = |vertices: &mut Vec<[f32; 3]>,
+                        polygons: &mut Vec<landmass_graph::PolygonInput>,
+                        (x0, y0): (f32, f32),
+                        (x1, y1): (f32, f32),
+                        z0: f32,
+                        z1: f32| {
+            let (a, b, c, d) = (
+                vertex(vertices, x0, y0, z0),
+                vertex(vertices, x1, y1, z0),
+                vertex(vertices, x0, y0, z1),
+                vertex(vertices, x1, y1, z1),
+            );
+            for mut indices in [[a, b, c], [b, d, c]] {
+                // One consistent XZ winding across the whole mesh: the lower
+                // flight runs back along -x, which flips a naively-ordered
+                // quad's winding and makes landmass reject the mesh outright.
+                let corner = |index: u32| {
+                    let v = vertices[index as usize];
+                    (v[0], v[2])
+                };
+                let (p, q, r) = (corner(indices[0]), corner(indices[1]), corner(indices[2]));
+                if (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0) < 0.0 {
+                    indices.swap(1, 2);
+                }
+                polygons.push(landmass_graph::PolygonInput {
+                    index: polygons.len() as u32,
+                    vertex_indices: indices,
+                    is_water: false,
+                    is_preferred_pathing: false,
+                });
+            }
+        };
+
+        for pair in cuts.windows(2) {
+            let (z0, z1) = (pair[0], pair[1]);
+            quad(&mut vertices, &mut polygons, (0.0, 0.0), (3.0, 0.0), z0, z1);
+            // A switchback stair descending off the corridor's x = 3 edge and
+            // folding back *underneath* it: genuinely connected walkable ground
+            // (an agent could walk down it), finely re-triangulated the way
+            // issue #171's sub-triangle clip emits real FO3 stairs. This is the
+            // ingredient that matters -- `landmass::avoidance` explores into it
+            // through that shared edge and `dodgy_2d` is strictly 2D, so the
+            // lower flight's borders project straight onto the corridor
+            // footprint the agent is standing on.
+            if z0 >= BAY_START - 1e-4 && z1 <= BAY_END + 1e-4 {
+                quad(
+                    &mut vertices,
+                    &mut polygons,
+                    (3.0, 0.0),
+                    (4.0, -0.5),
+                    z0,
+                    z1,
+                );
+                quad(
+                    &mut vertices,
+                    &mut polygons,
+                    (4.0, -0.5),
+                    (0.0, -1.3),
+                    z0,
+                    z1,
+                );
+            }
+        }
+        landmass_graph::MeshInput {
+            form_id: 0x184,
+            vertices,
+            polygons,
+            doors: Vec::new(),
+            derived_doors: Vec::new(),
+        }
+    }
+
+    /// Builds an app around [`stall_fixture_mesh`] with an explicit border
+    /// avoidance horizon, runs an agent the length of the corridor, and reports
+    /// the furthest `z` it reached plus the lowest desired speed it was ever
+    /// steered at. Everything except `obstacle_avoidance_time_horizon` matches
+    /// the shipped `archipelago_options`.
+    fn run_stall_fixture(horizon: f32) -> (f32, f32) {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+            NavBackendPlugin,
+        ));
+        app.insert_resource(PhysicsDisabled(false));
+        app.insert_resource(CellPhysicsReadiness::Ready);
+        let mut physics_world =
+            boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_player_compatible_floor(
+            &mut physics_world,
+            boxddd::Vec3::new(2.75, -0.1, 7.0),
+            boxddd::Vec3::new(6.0, 0.1, 10.0),
+        );
+        app.world_mut()
+            .insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+        let mesh_input = stall_fixture_mesh(64);
+        let valid = landmass_graph::build_navigation_mesh(
+            &mesh_input,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .nav_mesh
+        .expect("stall fixture validates");
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d {
+                nav_mesh: Arc::new(valid),
+            });
+        let mut options = archipelago_options();
+        options.obstacle_avoidance_time_horizon = horizon;
+        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        app.world_mut().spawn(Island3dBundle {
+            island: Island,
+            archipelago_ref: ArchipelagoRef3d::new(archipelago),
+            nav_mesh: NavMeshHandle::<ThreeD>(handle),
+        });
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .archipelago = Some(archipelago);
+
+        let centre = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago,
+            Vec3::new(1.5, 0.0, 1.0) + centre,
+            Vec3::new(1.5, 0.0, 13.0) + centre,
+        );
+        let mut furthest = f32::MIN;
+        let mut slowest = f32::MAX;
+        let trace = std::env::var("BEVYOUT_STALL_TRACE").is_ok();
+        for tick in 0..600 {
+            run_one_fixed_tick(app.world_mut());
+            let world = app.world();
+            if trace && tick % 20 == 0 {
+                let position = world.get::<Transform>(agent).unwrap().translation;
+                let desired = world
+                    .get::<AgentDesiredVelocity3d>(agent)
+                    .map(|v| v.velocity())
+                    .unwrap_or(Vec3::ZERO);
+                println!(
+                    "h={horizon} t{tick}: pos=({:.2},{:.2},{:.2}) |d|={:.3} state={:?}",
+                    position.x,
+                    position.y,
+                    position.z,
+                    desired.length(),
+                    world.get::<AgentState>(agent).copied()
+                );
+            }
+            furthest = furthest.max(world.get::<Transform>(agent).unwrap().translation.z);
+            // Only sample steering while the agent is still short of the
+            // target: decelerating on arrival is correct, not a stall.
+            if furthest < 12.0
+                && let Some(desired) = world.get::<AgentDesiredVelocity3d>(agent)
+            {
+                slowest = slowest.min(desired.velocity().length());
+            }
+        }
+        (furthest, slowest)
+    }
+
+    /// Issue #184: an agent must cross a stretch of corridor that has finely
+    /// re-triangulated walkable geometry a few metres to one side, without its
+    /// steering collapsing. Before the fix, `landmass`'s navmesh-border ORCA
+    /// avoidance flattened that side bay's border edges into a `dodgy_2d`
+    /// obstacle set dense enough to drive the *desired* velocity
+    /// asymptotically to zero -- a contactless halt, with the capsule sweep
+    /// completely free, that `apply_agent_physics_movement` could only report
+    /// as `reason=no_contact_no_progress`.
+    ///
+    /// Asserted as a pair so the fixture itself is proven to reproduce: with
+    /// landmass's stock `0.25` horizon the agent creeps to a halt beside the
+    /// stair and is steered at a near-zero speed, and with the shipped
+    /// `NAV_BORDER_AVOIDANCE_TIME_HORIZON` it walks the whole corridor at its
+    /// full desired speed.
+    #[test]
+    fn an_agent_crosses_finely_triangulated_ground_without_its_steering_collapsing() {
+        let (stock_furthest, stock_slowest) = run_stall_fixture(0.25);
+        assert!(
+            stock_slowest < AGENT_DESIRED_SPEED * 0.5,
+            "fixture must reproduce the pre-fix steering collapse, \
+             slowest desired speed was {stock_slowest} (furthest z {stock_furthest})"
+        );
+
+        let (furthest, slowest) = run_stall_fixture(NAV_BORDER_AVOIDANCE_TIME_HORIZON);
+        assert!(
+            furthest > 12.0,
+            "the agent must walk the corridor, reached z {furthest} only"
+        );
+        assert!(
+            slowest > AGENT_DESIRED_SPEED * 0.9,
+            "steering must never collapse on clear ground, \
+             slowest desired speed was {slowest}"
+        );
+    }
+
+    /// Issue #184: the shipped options must keep navmesh-border ORCA avoidance
+    /// clamped to at most one fixed tick -- the property that makes the
+    /// asymptotic `1 - dt / horizon` stall impossible -- while leaving
+    /// agent/character avoidance (issue #114 feature 4) at landmass's own
+    /// default. A regression here is silent: it costs no test but reopens the
+    /// contactless-stall class.
+    #[test]
+    fn archipelago_options_clamp_border_avoidance_but_keep_agent_avoidance() {
+        let options = archipelago_options();
+        let stock = ArchipelagoOptions::<ThreeD>::from_agent_radius(AGENT_RADIUS);
+        assert!(
+            options.obstacle_avoidance_time_horizon > 0.0,
+            "a zero horizon divides by zero inside dodgy_2d"
+        );
+        assert!(
+            options.obstacle_avoidance_time_horizon <= 1e-3,
+            "navmesh-border avoidance must stay disabled; anything this side of \
+             ~1e-3 reopens the contactless-stall class, got {}",
+            options.obstacle_avoidance_time_horizon
+        );
+        assert_eq!(
+            options.avoidance_time_horizon, stock.avoidance_time_horizon,
+            "agent/character avoidance must keep landmass's default"
+        );
+        assert_eq!(
+            options.neighbourhood, stock.neighbourhood,
+            "the avoidance neighbourhood must keep landmass's default"
+        );
+    }
+
     /// Spawns the same synthetic two-triangle 4x4 island fixture
     /// `nav_overlay.rs`'s own landmass harness test uses, wired directly
     /// into `NavArchipelagoState` (bypassing the manifest/
@@ -6725,24 +7423,23 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         };
         let valid = landmass_graph::build_navigation_mesh(
             &mesh_input,
             &[],
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .nav_mesh
         .expect("synthetic square validates");
         let nav_mesh_handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
             nav_mesh: Arc::new(valid),
         });
-        // Same widened envelope `ensure_archipelago` applies for real cells
-        // (see `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment): the physics
-        // capsule's `Transform` is centre-height above the mesh plane, well
-        // outside `from_agent_radius`'s own tight default.
-        let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
-        let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
+        // The exact options `ensure_archipelago` applies for real cells --
+        // widened sampling envelope plus the clamped border-avoidance horizon
+        // (see `archipelago_options`).
+        let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
         world.spawn(Island3dBundle {
             island: Island,
             archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
@@ -7199,6 +7896,7 @@ mod tests {
                     door_reference_form_id: Some(0x99),
                 },
             ],
+            derived_doors: Vec::new(),
         }
     }
 
@@ -7227,7 +7925,8 @@ mod tests {
             Some(&1),
             "test setup: the door must resolve to type index 1"
         );
-        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let build_result =
+            landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices, &BTreeMap::new());
         let valid = build_result.nav_mesh.unwrap_or_else(|| {
             panic!(
                 "door_topology_mesh always validates: {:?}",
@@ -7247,8 +7946,10 @@ mod tests {
             .add(NavMesh3d {
                 nav_mesh: Arc::new(valid),
             });
-        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        let archipelago = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        let archipelago = app
+            .world_mut()
+            .spawn(Archipelago3d::new(archipelago_options()))
+            .id();
         app.world_mut().spawn(Island3dBundle {
             island: Island,
             archipelago_ref: ArchipelagoRef3d::new(archipelago),
@@ -7316,6 +8017,176 @@ mod tests {
             state,
             Some(AgentState::NoPath),
             "an alternate route must be found when the door is locked, got {state:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #177: closed-blocker cost overrides compose with lock state
+    // -----------------------------------------------------------------
+
+    /// Bare-`World` fixture for `apply_door_lock_overrides`: one blocker
+    /// FormID with both a gate type index (priced on *usability*, i.e. lock)
+    /// and an interior/blocking type index (priced on *open*, and on whether
+    /// the blocker can be opened at all), so every combination can be
+    /// asserted on one component.
+    fn closed_blocker_override_world(usable: bool, open: bool, openable: bool) -> (World, Entity) {
+        let mut world = harness_world();
+        let agent = world.spawn_empty().id();
+        let mut state = world.resource_mut::<NavArchipelagoState>();
+        state.door_usable.insert(0x99, usable);
+        state.door_open.insert(0x99, open);
+        state.door_type_indices.insert(0x99, 1);
+        state.closed_door_type_indices.insert(0x99, 2);
+        if openable {
+            state.openable_blockers.insert(0x99);
+        }
+        (world, agent)
+    }
+
+    fn override_costs(world: &World, agent: Entity) -> Vec<(usize, f32)> {
+        let mut costs: Vec<(usize, f32)> = world
+            .get::<AgentTypeIndexCostOverrides>(agent)
+            .expect("the agent must carry overrides")
+            .iter()
+            .map(|(&index, &cost)| (index, cost))
+            .collect();
+        costs.sort_by_key(|(index, _)| *index);
+        costs
+    }
+
+    #[test]
+    fn a_closed_unlocked_door_stays_passable_but_expensive() {
+        // The acceptance correction: an unbounded cost here would stop the
+        // agent ever reaching the door it is supposed to open, so a closed
+        // *openable* door's interior is merely expensive. Its doorway
+        // crossing stays ordinary walkable ground.
+        let (mut world, agent) = closed_blocker_override_world(true, false, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, CLOSED_DOOR_TYPE_INDEX_COST)]
+        );
+        assert!(
+            CLOSED_DOOR_TYPE_INDEX_COST.is_finite(),
+            "a closed openable door must stay plannable"
+        );
+    }
+
+    #[test]
+    fn a_closed_blocker_that_cannot_be_opened_is_impassable() {
+        // The ungated kinematic-activator class (a vault gear door with no
+        // open/close FSM): there is no sanctioned crossing, so the route must
+        // fail fast rather than walk the agent into a solid.
+        let (mut world, agent) = closed_blocker_override_world(true, false, false);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)]
+        );
+    }
+
+    #[test]
+    fn an_open_unlocked_door_blocks_nothing() {
+        let (mut world, agent) = closed_blocker_override_world(true, true, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(override_costs(&world, agent), Vec::new());
+    }
+
+    #[test]
+    fn a_closed_locked_door_stays_an_impassable_barrier() {
+        // Wave-9 behaviour, unchanged: locked is a barrier on both the
+        // crossing and the interior, so the route fails at query time rather
+        // than walking the agent to a door it cannot open.
+        let (mut world, agent) = closed_blocker_override_world(false, false, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![
+                (1, LOCKED_DOOR_TYPE_INDEX_COST),
+                (2, LOCKED_DOOR_TYPE_INDEX_COST),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_open_locked_door_blocks_nothing_either() {
+        // `repath::door_usable`'s existing rule: an open door is passable
+        // regardless of its lock record. The interior override must agree --
+        // keying it on `open` rather than `usable` is what makes these two
+        // compose instead of contradicting each other.
+        let (mut world, agent) = closed_blocker_override_world(true, true, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(override_costs(&world, agent), Vec::new());
+    }
+
+    #[test]
+    fn a_blocker_with_no_open_state_recorded_is_treated_as_closed() {
+        // Fail safe: an unknown open state must never leave the inside of a
+        // solid freely traversable.
+        let (mut world, agent) = closed_blocker_override_world(true, false, true);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .door_open
+            .remove(&0x99);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, CLOSED_DOOR_TYPE_INDEX_COST)]
+        );
+    }
+
+    #[test]
+    fn derived_gate_and_blocking_associations_take_distinct_type_indices() {
+        // Issue #177 feature 2: the two classes must never share an index,
+        // or opening a door would clear the wrong override.
+        let mesh = landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: Vec::new(),
+            polygons: Vec::new(),
+            doors: Vec::new(),
+            derived_doors: vec![
+                landmass_graph::DerivedDoorInput {
+                    triangle_index: 1,
+                    door_reference_form_id: 0x99,
+                    blocks_when_closed: false,
+                    openable: true,
+                },
+                landmass_graph::DerivedDoorInput {
+                    triangle_index: 2,
+                    door_reference_form_id: 0x99,
+                    blocks_when_closed: true,
+                    openable: true,
+                },
+            ],
+        };
+        let meshes = [mesh];
+        let door_indices = landmass_graph::door_type_indices(&meshes);
+        let closed_indices = landmass_graph::closed_door_type_indices(&meshes, &door_indices);
+        assert_eq!(door_indices.get(&0x99), Some(&1));
+        assert_eq!(closed_indices.get(&0x99), Some(&2));
+        assert_eq!(
+            landmass_graph::preferred_pathing_type_index(&door_indices, &closed_indices),
+            3
+        );
+    }
+
+    #[test]
+    fn a_closed_door_cost_still_lets_the_only_route_solve_against_a_live_archipelago() {
+        // Issue #177 acceptance, against a real `Archipelago3d` solve on the
+        // same one-route mesh the locked-door invariant above uses: the
+        // closed-but-openable cost must still produce a path, or the agent
+        // never reaches the door the crossing gate is supposed to open. This
+        // is the exact difference between `CLOSED_DOOR_TYPE_INDEX_COST` and
+        // `LOCKED_DOOR_TYPE_INDEX_COST`, pinned end to end rather than only
+        // as an override-table assertion.
+        let (mut app, agent) = door_topology_test_app(false, Some(CLOSED_DOOR_TYPE_INDEX_COST));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        let state = app.world().get::<AgentState>(agent).copied();
+        assert_ne!(
+            state,
+            Some(AgentState::NoPath),
+            "a closed but openable door must stay plannable, got {state:?}"
         );
     }
 
@@ -7456,6 +8327,7 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         }
     }
 
@@ -7466,8 +8338,10 @@ mod tests {
     fn a_preferred_corridor_is_chosen_over_an_equal_length_ordinary_one() {
         let mesh = preferred_path_mesh();
         let door_type_indices = BTreeMap::new();
-        let preferred_index = landmass_graph::preferred_pathing_type_index(&door_type_indices);
-        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let preferred_index =
+            landmass_graph::preferred_pathing_type_index(&door_type_indices, &BTreeMap::new());
+        let build_result =
+            landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices, &BTreeMap::new());
         let valid = build_result.nav_mesh.unwrap_or_else(|| {
             panic!(
                 "preferred_path_mesh always validates: {:?}",
@@ -7487,8 +8361,7 @@ mod tests {
             .add(NavMesh3d {
                 nav_mesh: Arc::new(valid),
             });
-        let options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
-        let mut archipelago_component = Archipelago3d::new(options);
+        let mut archipelago_component = Archipelago3d::new(archipelago_options());
         // The exact production call under test (issue #168,
         // `apply_preferred_pathing_base_cost`).
         archipelago_component
@@ -8374,5 +9247,143 @@ mod tests {
             .cast_mover(box_pos, &mover, delta, collision_filter)
             .unwrap_or(1.0);
         println!("forward sweep fraction={fraction:.4} (1.0 = unobstructed)");
+    }
+
+    /// Issue #184 investigation harness: the same env-gated replay as
+    /// `wedge_replay`, but with the *real* archipelago (this cell's prepared
+    /// nav graph) driving steering instead of a straight line, so a stall
+    /// can be attributed to landmass rather than the KCC.
+    #[test]
+    #[ignore = "requires a prepared cell: set BEVYOUT_WEDGE_SCENE"]
+    fn stall_replay() {
+        let Ok(scene) = std::env::var("BEVYOUT_WEDGE_SCENE") else {
+            return;
+        };
+        let scene = std::path::PathBuf::from(scene);
+        let start = wedge_vec("BEVYOUT_WEDGE_START", Vec3::new(9.6, 106.0, -73.1));
+        let target = wedge_vec("BEVYOUT_WEDGE_TARGET", Vec3::new(5.0, 106.0, -73.0));
+        let graph_path = scene.parent().unwrap().join("navmesh/navgraph.ron");
+
+        let wedge = build_wedge_world(&scene, &[]);
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::transform::TransformPlugin,
+            NavBackendPlugin,
+        ));
+        app.insert_resource(PhysicsDisabled(false));
+        app.insert_resource(CellPhysicsReadiness::Ready);
+        app.world_mut()
+            .insert_non_send(BoxdddPhysicsContext::from_world(wedge.world));
+
+        let graph = super::super::read_nav_graph(&graph_path).expect("nav graph");
+        let mesh_inputs = super::super::mesh_inputs(&graph);
+        let door_type_indices = landmass_graph::door_type_indices(&mesh_inputs);
+        let closed_door_type_indices =
+            landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
+        let mut options = archipelago_options();
+        // Issue #184 kept these two overrides: sweeping them is how the stall
+        // was attributed to border avoidance in the first place (the horizon
+        // sets the decay rate, the neighbourhood the border set).
+        if let Ok(raw) = std::env::var("BEVYOUT_OBSTACLE_HORIZON") {
+            options.obstacle_avoidance_time_horizon = raw.parse().expect("numeric horizon");
+        }
+        if let Ok(raw) = std::env::var("BEVYOUT_NEIGHBOURHOOD") {
+            options.neighbourhood = raw.parse().expect("numeric neighbourhood");
+        }
+        println!(
+            "obstacle_avoidance_time_horizon={} neighbourhood={}",
+            options.obstacle_avoidance_time_horizon, options.neighbourhood
+        );
+        let archipelago_entity = app.world_mut().spawn(Archipelago3d::new(options)).id();
+        apply_preferred_pathing_base_cost(
+            app.world_mut(),
+            archipelago_entity,
+            &door_type_indices,
+            &closed_door_type_indices,
+        );
+        for mesh in &mesh_inputs {
+            let Some(valid) = landmass_graph::build_navigation_mesh(
+                mesh,
+                &[],
+                &door_type_indices,
+                &BTreeMap::new(),
+            )
+            .nav_mesh
+            else {
+                continue;
+            };
+            let handle = app
+                .world_mut()
+                .resource_mut::<Assets<NavMesh3d>>()
+                .add(NavMesh3d {
+                    nav_mesh: Arc::new(valid),
+                });
+            app.world_mut().spawn(Island3dBundle {
+                island: Island,
+                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+                nav_mesh: NavMeshHandle::<ThreeD>(handle),
+            });
+        }
+        app.world_mut()
+            .resource_mut::<NavArchipelagoState>()
+            .archipelago = Some(archipelago_entity);
+
+        let centre = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
+        let agent = spawn_bare_agent(
+            app.world_mut(),
+            archipelago_entity,
+            start + centre,
+            target + centre,
+        );
+        for tick in 0..600 {
+            run_one_fixed_tick(app.world_mut());
+            let world = app.world();
+            let position = world.get::<Transform>(agent).unwrap().translation;
+            let desired = world
+                .get::<AgentDesiredVelocity3d>(agent)
+                .map(|value| value.velocity())
+                .unwrap_or(Vec3::ZERO);
+            let state = world.get::<AgentState>(agent).copied();
+            let kcc = world.get::<AgentKcc>(agent).unwrap();
+            let (stuck, blocked, recovery, without) = (
+                kcc.stuck,
+                kcc.collision_blocked,
+                kcc.recovery_active,
+                kcc.ticks_without_progress,
+            );
+            let sampled = world
+                .get::<Archipelago3d>(archipelago_entity)
+                .and_then(|arch| {
+                    arch.sample_point(position, &AGENT_POINT_SAMPLE_DISTANCE)
+                        .ok()
+                        .map(|p| (p.point(), p.type_index()))
+                });
+            if let Some((point, type_index)) = sampled
+                && tick % 20 == 0
+            {
+                println!(
+                    "    sample -> ({:.3},{:.3},{:.3}) type={type_index} dy={:.3} dxz={:.3}",
+                    point.x,
+                    point.y,
+                    point.z,
+                    position.y - point.y,
+                    Vec2::new(point.x - position.x, point.z - position.z).length()
+                );
+            }
+            if tick % 20 == 0 {
+                println!(
+                    "t{tick}: pos=({:.3},{:.3},{:.3}) desired=({:.3},{:.3},{:.3}) |d|={:.3} state={state:?} stuck={stuck} blocked={blocked} rec={recovery} nprog={without}",
+                    position.x,
+                    position.y,
+                    position.z,
+                    desired.x,
+                    desired.y,
+                    desired.z,
+                    desired.length()
+                );
+            }
+        }
     }
 }

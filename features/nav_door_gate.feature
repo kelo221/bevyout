@@ -50,3 +50,24 @@ Feature: Mid-route door crossing gate
     Then the door is not usable for route planning
     Given a mid-route door that is closed and locked
     Then the crossing gate is blocked
+
+  # Issue #177 (M4 wave 11): the containment gate above is a trigger that can
+  # be starved. Real data (Vault 101, `VDoor01`) had an agent routed at a
+  # closed in-cell door halt ~2 m short of its crossing with a completely free
+  # collision sweep -- never entering the polygon, so never gating, never
+  # requesting the open, and never continuing. `door_link::approach_gate` adds
+  # a second trigger for exactly that case, narrowed so it cannot reintroduce
+  # issue #155's defect: the agent must have *stopped making progress*, and
+  # the crossing must lie between it and its target.
+  Scenario Outline: A stalled agent gates on the crossing its route continues through
+    Given an agent <progress> <distance> metres from a door crossing
+    And the crossing is <crossing_to_target> metres from the target and the agent is <agent_to_target> metres from it
+    Then the approach gate <outcome>
+
+    Examples:
+      | progress          | distance | crossing_to_target | agent_to_target | outcome     |
+      | stalled           | 2.2      | 4.0                | 6.0             | fires       |
+      | still moving      | 2.2      | 4.0                | 6.0             | does not fire |
+      | stalled           | 3.5      | 4.0                | 6.0             | does not fire |
+      | stalled           | 2.2      | 7.0                | 6.0             | does not fire |
+      | stalled           | 0.0      | 4.0                | 6.0             | fires       |
