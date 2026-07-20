@@ -55,6 +55,9 @@ pub(crate) fn run_view(
         })
         .transpose()?
         .unwrap_or_default();
+    let asset_root = PathBuf::from(&manifest.asset_root);
+    let actor_animation_catalog =
+        actor_animation::load_catalog_for_manifest(&manifest, &asset_root)?;
     // Issue #60 (F60.3): load and compatibility-check the save slot before
     // any window exists, so a mismatched save fails fast with a plain error.
     let loaded_save = save_slot
@@ -83,7 +86,6 @@ pub(crate) fn run_view(
             Ok(outcome.save)
         })
         .transpose()?;
-    let asset_root = PathBuf::from(&manifest.asset_root);
     let physics_assets = player::load_prepared_physics_assets(&manifest, &asset_root)?;
     let report_path = render_report_path(&manifest_path);
     let mut app = App::new();
@@ -114,6 +116,11 @@ pub(crate) fn run_view(
     // Don't reintroduce it without re-measuring the full chain.
     app.insert_resource(physics_assets);
     app.insert_resource(item_catalog.clone());
+    let mut actor_animation_catalogs = actor_animation::ActorAnimationCatalogs::default();
+    if let Some(catalog) = actor_animation_catalog {
+        actor_animation_catalogs.insert(manifest.cell.form_id, catalog);
+    }
+    app.insert_resource(actor_animation_catalogs);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
     // user config); `view`'s CLI args have no `--config` override plumbed
     // through yet, so the typed group carries the discovered value into the

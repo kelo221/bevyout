@@ -33,9 +33,9 @@ use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
 #[cfg(test)]
 use crate::vsa::PREPARED_CONVERTER_REVISION;
 use crate::vsa::{
-    CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo, PHYSICS_ASSET_SCHEMA_VERSION,
-    PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition,
-    PreparedItemStats, PreparedSceneManifest, PreparedSemantic,
+    ACTOR_ANIMATION_CATALOG_REVISION, CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo,
+    PHYSICS_ASSET_SCHEMA_VERSION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
+    PreparedItemDefinition, PreparedItemStats, PreparedSceneManifest, PreparedSemantic,
     SUPPORTED_PREPARED_CONVERTER_REVISIONS, bake, cell_label, ensure_baked_scene_compatible,
     ensure_prepared_manifest_compatible_any, find_cached_manifest, fingerprint, is_bake_static,
     prepare, resolve_cached_manifest,
@@ -46,6 +46,7 @@ use crate::vsa::{
 pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
 
 mod actor;
+mod actor_animation;
 mod animation;
 mod animation_zoo;
 mod audio;

@@ -104,6 +104,12 @@ mod reveal_policy;
 #[allow(dead_code, unused_imports)]
 mod animation_policy;
 
+// `viewer::actor_animation::policy` (#106) is the Bevy-free gameplay clip
+// resolver/state machine consumed by the actor-animation runtime plugin.
+#[path = "../src/viewer/actor_animation/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod actor_animation_policy;
+
 #[path = "../src/vsa/bake/policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod bake_policy;
@@ -775,6 +781,19 @@ struct BevyoutWorld {
     nav_quarantine_kind_count: usize,
     nav_quarantine_excluded_kinds: std::collections::BTreeSet<usize>,
     nav_quarantine_permitted: Option<Option<std::collections::BTreeSet<usize>>>,
+
+    // -- actor_animation_gameflow.feature (#106, M4 wave 12) --
+    gameplay_actor_weapon_type: Option<u32>,
+    gameplay_actor_weapon_prefix: Option<Option<&'static str>>,
+    gameplay_actor_kind: actor_animation::PreparedActorAnimationKind,
+    gameplay_actor_female: bool,
+    gameplay_actor_clips: Vec<actor_animation::PreparedActorAnimationClip>,
+    gameplay_actor_requested_state: actor_animation_policy::ActorAnimationState,
+    gameplay_actor_selection: Option<actor_animation_policy::ClipSelection>,
+    gameplay_actor_next_state: Option<actor_animation_policy::ActorAnimationState>,
+    gameplay_actor_cell_active: bool,
+    gameplay_actor_visible: bool,
+    gameplay_actor_playback_active: Option<bool>,
 }
 
 fn find_placement<'a>(
@@ -9762,4 +9781,235 @@ async fn then_permitted_animation_link_kinds(world: &mut BevyoutWorld, expected:
         .map(|value| value.trim().parse().expect("valid kind number"))
         .collect();
     assert_eq!(permitted, expected);
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_gameflow.feature (#106, M4 wave 12) -- appended section.
+// ---------------------------------------------------------------------
+
+fn parse_gameplay_actor_state(value: &str) -> actor_animation_policy::ActorAnimationState {
+    match value {
+        "idle" => actor_animation_policy::ActorAnimationState::Idle,
+        "walk" => actor_animation_policy::ActorAnimationState::Walk,
+        "run" => actor_animation_policy::ActorAnimationState::Run,
+        "turn_left" => actor_animation_policy::ActorAnimationState::TurnLeft,
+        "turn_right" => actor_animation_policy::ActorAnimationState::TurnRight,
+        "equip" => actor_animation_policy::ActorAnimationState::Equip,
+        "unequip" => actor_animation_policy::ActorAnimationState::Unequip,
+        other => panic!("unknown gameplay actor animation state {other:?}"),
+    }
+}
+
+#[given(regex = r"^FO3 weapon animation type (\d+)$")]
+async fn given_fo3_weapon_animation_type(world: &mut BevyoutWorld, value: u32) {
+    world.gameplay_actor_weapon_type = Some(value);
+}
+
+#[when("the actor weapon animation prefix is resolved")]
+async fn when_actor_weapon_animation_prefix_resolved(world: &mut BevyoutWorld) {
+    world.gameplay_actor_weapon_prefix = Some(
+        world
+            .gameplay_actor_weapon_type
+            .and_then(actor_animation_policy::weapon_animation_prefix),
+    );
+}
+
+#[then(regex = r#"^the actor weapon animation prefix is \"([^\"]+)\"$"#)]
+async fn then_actor_weapon_animation_prefix(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.gameplay_actor_weapon_prefix.flatten(),
+        Some(expected.as_str())
+    );
+}
+
+#[then("the actor weapon animation prefix is absent")]
+async fn then_actor_weapon_animation_prefix_absent(world: &mut BevyoutWorld) {
+    assert_eq!(world.gameplay_actor_weapon_prefix, Some(None));
+}
+
+fn parse_gameplay_clips(value: &str) -> Vec<actor_animation::PreparedActorAnimationClip> {
+    value
+        .split(',')
+        .filter(|value| !value.is_empty())
+        .map(|entry| {
+            let (name, source) = entry
+                .split_once('@')
+                .expect("clip fixtures use name@source-path");
+            actor_animation::PreparedActorAnimationClip {
+                name: name.to_owned(),
+                source_kf_path: source.to_owned(),
+                source_sequence_name: Some(
+                    if name.contains("fastforward") {
+                        "FastForward"
+                    } else if name.contains("forward") {
+                        "Forward"
+                    } else if name.contains("turnleft") {
+                        "TurnLeft"
+                    } else if name.contains("turnright") {
+                        "TurnRight"
+                    } else if name.contains("unequip") {
+                        "Unequip"
+                    } else if name.contains("equip") {
+                        "Equip"
+                    } else {
+                        "Idle"
+                    }
+                    .to_owned(),
+                ),
+                status: actor_animation::PreparedActorAnimationClipStatus::Ready,
+                loop_mode: if name.contains("equip") {
+                    actor_animation::PreparedActorAnimationLoopMode::Clamp
+                } else {
+                    actor_animation::PreparedActorAnimationLoopMode::Loop
+                },
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+#[given(regex = r#"^a (male|female) humanoid actor animation set with ready clips \"([^\"]*)\"$"#)]
+async fn given_humanoid_gameplay_animation_set(
+    world: &mut BevyoutWorld,
+    sex: String,
+    clips: String,
+) {
+    world.gameplay_actor_kind = actor_animation::PreparedActorAnimationKind::Npc;
+    world.gameplay_actor_female = sex == "female";
+    world.gameplay_actor_clips = parse_gameplay_clips(&clips);
+}
+
+#[given(regex = r#"^a creature actor animation set with ready clips \"([^\"]*)\"$"#)]
+async fn given_creature_gameplay_animation_set(world: &mut BevyoutWorld, clips: String) {
+    world.gameplay_actor_kind = actor_animation::PreparedActorAnimationKind::Creature;
+    world.gameplay_actor_female = false;
+    world.gameplay_actor_clips = parse_gameplay_clips(&clips);
+}
+
+#[given(regex = r#"^the actor uses weapon animation prefix \"([^\"]+)\"$"#)]
+async fn given_actor_weapon_animation_prefix(world: &mut BevyoutWorld, prefix: String) {
+    world.gameplay_actor_weapon_prefix = Some(Some(match prefix.as_str() {
+        "h2h" => "h2h",
+        "1hm" => "1hm",
+        "2hm" => "2hm",
+        "1hp" => "1hp",
+        "2hr" => "2hr",
+        "2ha" => "2ha",
+        "2hh" => "2hh",
+        "2hl" => "2hl",
+        "1gt" => "1gt",
+        "1lm" => "1lm",
+        "1md" => "1md",
+        other => panic!("unsupported fixture prefix {other}"),
+    }));
+}
+
+#[given(regex = r#"^the actor requests animation state \"([^\"]+)\"$"#)]
+async fn given_actor_requests_animation_state(world: &mut BevyoutWorld, state: String) {
+    world.gameplay_actor_requested_state = parse_gameplay_actor_state(&state);
+}
+
+#[when("the gameplay actor clip is resolved")]
+async fn when_gameplay_actor_clip_resolved(world: &mut BevyoutWorld) {
+    world.gameplay_actor_selection = actor_animation_policy::resolve_clip(
+        &world.gameplay_actor_clips,
+        actor_animation_policy::ActorAnimationContext {
+            kind: world.gameplay_actor_kind,
+            female: world.gameplay_actor_female,
+            weapon_prefix: world.gameplay_actor_weapon_prefix.flatten(),
+        },
+        world.gameplay_actor_requested_state,
+    );
+}
+
+#[then(regex = r#"^the gameplay actor clip is \"([^\"]+)\"$"#)]
+async fn then_gameplay_actor_clip(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .gameplay_actor_selection
+            .as_ref()
+            .map(|selection| selection.clip_name.as_str()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the gameplay actor clip source is \"([^\"]+)\"$"#)]
+async fn then_gameplay_actor_clip_source(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .gameplay_actor_selection
+            .as_ref()
+            .map(|selection| selection.source_path.as_str()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the gameplay actor clip resolution reports fallback from \"([^\"]+)\"$"#)]
+async fn then_gameplay_actor_clip_fallback(world: &mut BevyoutWorld, expected: String) {
+    let expected = parse_gameplay_actor_state(&expected);
+    assert_eq!(
+        world
+            .gameplay_actor_selection
+            .as_ref()
+            .and_then(|selection| selection.fallback_from),
+        Some(expected)
+    );
+}
+
+#[given(regex = r#"^the gameplay actor is playing animation state \"([^\"]+)\"$"#)]
+async fn given_gameplay_actor_playing_state(world: &mut BevyoutWorld, state: String) {
+    world.gameplay_actor_requested_state = parse_gameplay_actor_state(&state);
+}
+
+#[when("the gameplay actor animation finishes")]
+async fn when_gameplay_actor_animation_finishes(world: &mut BevyoutWorld) {
+    world.gameplay_actor_next_state = Some(actor_animation_policy::state_after_completion(
+        world.gameplay_actor_requested_state,
+    ));
+}
+
+#[then(regex = r#"^the next gameplay actor animation state is \"([^\"]+)\"$"#)]
+async fn then_next_gameplay_actor_animation_state(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.gameplay_actor_next_state,
+        Some(parse_gameplay_actor_state(&expected))
+    );
+}
+
+#[given("a gameplay actor belongs to an inactive resident cell")]
+async fn given_gameplay_actor_in_inactive_cell(world: &mut BevyoutWorld) {
+    world.gameplay_actor_cell_active = false;
+}
+
+#[given("a gameplay actor belongs to the active resident cell")]
+async fn given_gameplay_actor_in_active_cell(world: &mut BevyoutWorld) {
+    world.gameplay_actor_cell_active = true;
+}
+
+#[given("the gameplay actor is disabled")]
+async fn given_gameplay_actor_disabled(world: &mut BevyoutWorld) {
+    world.gameplay_actor_visible = false;
+}
+
+#[given("the gameplay actor is visible")]
+async fn given_gameplay_actor_visible(world: &mut BevyoutWorld) {
+    world.gameplay_actor_visible = true;
+}
+
+#[when("gameplay actor activity is resolved")]
+async fn when_gameplay_actor_activity_resolved(world: &mut BevyoutWorld) {
+    world.gameplay_actor_playback_active = Some(actor_animation_policy::should_advance_playback(
+        world.gameplay_actor_cell_active,
+        world.gameplay_actor_visible,
+    ));
+}
+
+#[then("gameplay actor playback is paused")]
+async fn then_gameplay_actor_playback_paused(world: &mut BevyoutWorld) {
+    assert_eq!(world.gameplay_actor_playback_active, Some(false));
+}
+
+#[then("gameplay actor playback advances")]
+async fn then_gameplay_actor_playback_advances(world: &mut BevyoutWorld) {
+    assert_eq!(world.gameplay_actor_playback_active, Some(true));
 }
