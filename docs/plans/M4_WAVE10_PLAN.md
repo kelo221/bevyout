@@ -125,3 +125,42 @@ implementation. `cargo fmt --check`, `cargo clippy --all-targets --
 -D warnings`, `cargo test`, representative `cargo run-dev -- prepare`.
 Manual script `docs/plans/M4_WAVE10_MANUAL.md` before the PR; PR closes
 #153, #148, #162, #168, #169.
+
+## Shipped amendments
+
+- **A1 — #153's clearance shipped as validation + sub-diameter disconnect,
+  without boundary offset.** Three acceptance-driven iterations: (i) the
+  planned miter offset + inversion-based disconnect over-fragmented both
+  cells (Vault doorway/stairs unreachable, metro corridors shredded —
+  the wave-6 regression in stricter form); (ii) rework measured the
+  authored passage width instead of trusting offset arithmetic, added a
+  connectivity guard (un-drop anything stranding a large or seam/door
+  component) and per-drop/island diagnostics — connectivity 99%/100%;
+  (iii) a bounded per-edge adjacency-cut spike (vertex-split severing,
+  mechanism verified against landmass 0.9.2) failed real-data selection
+  — obstruction cuts eroded every perimeter (86%) while missing the
+  MetHallEntrance01 posts, void cuts missed the sub-triangle overhang —
+  and was reverted per the iteration cap. Wall clearance is delegated to
+  the KCC (no vertex movement); the sub-triangle classes moved to #171.
+- **A2 — #148 stays open, carried by #171.** The route plans and the
+  agent still wedges at (9.90, 106.05, −73.84); per-triangle/per-edge
+  granularity provably cannot cut the flanking posts. The restroom
+  void's query-time removal likewise deferred (fall guard backstops it).
+- **A3 — Vault stair wedge re-measured, filed as #172 (KCC step
+  capability).** Routes are plannable post-#153 (no miter regression);
+  the capsule fails the authored riser seam at z≈−80.4 in both wave-9
+  and wave-10 measurements.
+- **A4 — cross-lane defects found by merge/acceptance, fixed in-wave.**
+  `PreparedNavPolygon` derived `Default` disagreed with its serde
+  default (`walkable: false` vs `true`), breaking Rust-side
+  constructors; and `PauseAgent` was never removed on the door-wait
+  `Failed` terminal, freezing any agent that ever failed a door wait as
+  permanently `paused` (found live; the index-misalignment hypothesis it
+  emerged from was disproven with a value-based-lookup audit).
+- **A5 — prepare-side executor edited `orchestrator.rs`** (minimal
+  post-physics hook for the clearance pass) beyond the planned file
+  list; reviewed and accepted.
+- **A6 — #162's real-data forced-block scenario was not exercisable**:
+  post-#154/#153 both cells' surviving portals are physics-validated, so
+  no blocked merge link exists to quarantine on real data. Coverage is
+  the three-layer unit/cucumber composition per the plan's allowance.
