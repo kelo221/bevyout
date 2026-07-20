@@ -1398,6 +1398,56 @@ mod tests {
         }
     }
 
+    /// Issue #175 (F175.2): the ESM's authored `PKID` order is FO3's package
+    /// priority semantics -- `resolve_group!("ai_packages", ..)` must carry
+    /// it through a template chain verbatim (no sorting), and an actor's own
+    /// unused `package_form_ids` must not leak through once inherited.
+    #[test]
+    fn package_priority_order_is_preserved_through_template_inheritance() {
+        let mut template = npc(0x10);
+        template.package_form_ids = vec![0x05, 0x01, 0x03];
+        let mut source = npc(0x20);
+        source.base_template_form_id = Some(0x10);
+        source.template_usage.ai_packages = true;
+        source.package_form_ids = vec![0x99]; // must be ignored once inherited
+
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x10, template), (0x20, source)]),
+            packages: HashSet::from([0x01, 0x03, 0x05]),
+            placements: vec![placement(1, 0x20, ActorRecordKind::Npc)],
+            ..ActorCatalogInputs::default()
+        };
+
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected a prepared blueprint");
+        };
+        assert_eq!(blueprint.package_form_ids, vec![0x05, 0x01, 0x03]);
+        assert!(blueprint.diagnostics.is_empty());
+    }
+
+    /// An actor with no template flag for `ai_packages` keeps its own
+    /// authored order untouched, even when a template exists for other
+    /// groups.
+    #[test]
+    fn package_priority_order_is_not_sorted_when_not_inherited() {
+        let mut a = npc(0x10);
+        a.package_form_ids = vec![0x30, 0x10, 0x20];
+
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x10, a)]),
+            packages: HashSet::from([0x10, 0x20, 0x30]),
+            placements: vec![placement(1, 0x10, ActorRecordKind::Npc)],
+            ..ActorCatalogInputs::default()
+        };
+
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected a prepared blueprint");
+        };
+        assert_eq!(blueprint.package_form_ids, vec![0x30, 0x10, 0x20]);
+    }
+
     #[test]
     fn faction_rank_titles_are_resolved_by_sex() {
         let mut a = npc(0x10);

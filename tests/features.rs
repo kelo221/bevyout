@@ -240,6 +240,15 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod actor_catalog;
 
+    // `vsa::prepare::package_catalog` (issue #175, M4 wave 11 lane C) reuses
+    // `vsa::paths::fingerprint` via a relative `super::super::paths` import,
+    // so it is nested here too -- same pattern as `actor_catalog` above --
+    // to land that path on the `mod paths` include near the top of this
+    // file.
+    #[path = "../src/vsa/prepare/package_catalog.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod package_catalog;
+
     #[path = "../src/vsa/prepare/actor_appearance.rs"]
     #[allow(dead_code, unused_imports)]
     pub mod actor_appearance;
@@ -261,6 +270,7 @@ use prepare::fingerprints;
 use prepare::jobs;
 use prepare::native_policy;
 use prepare::nav_graph;
+use prepare::package_catalog;
 use prepare::selectors;
 
 // `vsa::bake::plan` (issue #62) reuses the resumable job-manifest machinery
@@ -756,6 +766,10 @@ struct BevyoutWorld {
     nav_quarantine_kind_count: usize,
     nav_quarantine_excluded_kinds: std::collections::BTreeSet<usize>,
     nav_quarantine_permitted: Option<Option<std::collections::BTreeSet<usize>>>,
+
+    // -- ai_packages.feature (issue #175, M4 wave 11 lane C) --
+    package_catalog_inputs: package_catalog::PackageCatalogInputs,
+    package_catalog_result: Option<package_catalog::PreparedPackageCatalog>,
 }
 
 fn find_placement<'a>(
@@ -9477,4 +9491,211 @@ async fn then_clearance_removed_at_least(world: &mut BevyoutWorld, expected: usi
 async fn then_clearance_cut_at_least(world: &mut BevyoutWorld, expected: usize) {
     let result = clearance_result(world);
     assert!(result.cut_obstructed >= expected, "{result:?}");
+}
+
+// ---------------------------------------------------------------------
+// ai_packages.feature (issue #175/#176, M4 wave 11 lane C) -- appended
+// section, do not interleave. The template-inheritance priority-order
+// scenario reuses actor_catalog.feature's own step vocabulary (`an NPC_
+// actor ...`, `actor ... has template ... using ...`, `actor ... has
+// package ...`, `a placement ...`, `the actor catalog is built`) plus one
+// new Then step below; every other scenario drives
+// `vsa::prepare::package_catalog` directly.
+// ---------------------------------------------------------------------
+
+#[then(regex = r#"^blueprint for reference 0x([0-9a-fA-F]+) has packages "([^"]*)" in order$"#)]
+async fn then_blueprint_packages_in_order(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let blueprint = actor_catalog_blueprint(world, &reference_hex);
+    assert_eq!(blueprint.package_form_ids, parse_hex_list(&expected));
+}
+
+fn package_catalog_package_mut(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+) -> &mut package_catalog::PackageInput {
+    world
+        .package_catalog_inputs
+        .packages
+        .entry(form_id)
+        .or_insert_with(|| package_catalog::PackageInput {
+            form_id,
+            ..package_catalog::PackageInput::default()
+        })
+}
+
+#[given(regex = r"^a package 0x([0-9a-fA-F]+) with type (\d+)$")]
+async fn given_package_with_type(world: &mut BevyoutWorld, hex: String, package_type: u8) {
+    let form_id = parse_hex(&hex);
+    package_catalog_package_mut(world, form_id).package_type = package_type;
+}
+
+#[given(
+    regex = r"^package 0x([0-9a-fA-F]+) has schedule month (-?\d+) day (-?\d+) date (\d+) time (-?\d+) duration (-?\d+)$"
+)]
+async fn given_package_schedule(
+    world: &mut BevyoutWorld,
+    hex: String,
+    month: i8,
+    day_of_week: i8,
+    date: u8,
+    time: i8,
+    duration: i32,
+) {
+    let form_id = parse_hex(&hex);
+    package_catalog_package_mut(world, form_id).schedule =
+        Some(package_catalog::PackageScheduleInput {
+            month,
+            day_of_week,
+            date,
+            time,
+            duration,
+        });
+}
+
+#[given(regex = r#"^package 0x([0-9a-fA-F]+) has unsupported subrecord "([^"]*)"$"#)]
+async fn given_package_unsupported_subrecord(
+    world: &mut BevyoutWorld,
+    hex: String,
+    subrecord: String,
+) {
+    let form_id = parse_hex(&hex);
+    package_catalog_package_mut(world, form_id)
+        .unsupported_subrecords
+        .push(subrecord);
+}
+
+#[given(
+    regex = r"^package 0x([0-9a-fA-F]+) has location type (\d+) target 0x([0-9a-fA-F]+) radius (-?\d+)$"
+)]
+async fn given_package_location(
+    world: &mut BevyoutWorld,
+    hex: String,
+    location_type: u32,
+    target_hex: String,
+    radius: i32,
+) {
+    let form_id = parse_hex(&hex);
+    let target = parse_hex(&target_hex);
+    package_catalog_package_mut(world, form_id).location =
+        Some(package_catalog::PackageLocationInput {
+            location_type,
+            form_id: Some(target),
+            raw_value: target,
+            radius,
+        });
+}
+
+#[given(
+    regex = r"^package 0x([0-9a-fA-F]+) has target type (-?\d+) target 0x([0-9a-fA-F]+) count (-?\d+)$"
+)]
+async fn given_package_target(
+    world: &mut BevyoutWorld,
+    hex: String,
+    target_type: i32,
+    target_hex: String,
+    count_or_distance: i32,
+) {
+    let form_id = parse_hex(&hex);
+    let target = parse_hex(&target_hex);
+    package_catalog_package_mut(world, form_id).target =
+        Some(package_catalog::PackageTargetInput {
+            target_type,
+            form_id: Some(target),
+            raw_value: target,
+            count_or_distance,
+        });
+}
+
+#[given(regex = r#"^known package FormIDs "([^"]*)"$"#)]
+async fn given_known_package_form_ids(world: &mut BevyoutWorld, hex_list: String) {
+    world
+        .package_catalog_inputs
+        .known_form_ids
+        .extend(parse_hex_list(&hex_list));
+}
+
+#[when("the package catalog is built")]
+async fn when_package_catalog_built(world: &mut BevyoutWorld) {
+    world.package_catalog_result = Some(package_catalog::build_package_catalog(
+        &world.package_catalog_inputs,
+        "fixture-fingerprint",
+    ));
+}
+
+fn package_catalog_entry<'a>(
+    world: &'a BevyoutWorld,
+    hex: &str,
+) -> &'a package_catalog::PreparedPackageEntry {
+    let form_id = parse_hex(hex);
+    world
+        .package_catalog_result
+        .as_ref()
+        .expect("the package catalog must be built first")
+        .packages
+        .iter()
+        .find(|entry| entry.form_id == form_id)
+        .unwrap_or_else(|| panic!("no prepared package entry for {hex}"))
+}
+
+#[then(regex = r"^the package catalog has (\d+) packages?$")]
+async fn then_package_catalog_count(world: &mut BevyoutWorld, expected: usize) {
+    let catalog = world
+        .package_catalog_result
+        .as_ref()
+        .expect("the package catalog must be built first");
+    assert_eq!(catalog.packages.len(), expected);
+}
+
+#[then(regex = r"^package 0x([0-9a-fA-F]+) has no diagnostics$")]
+async fn then_package_no_diagnostics(world: &mut BevyoutWorld, hex: String) {
+    let entry = package_catalog_entry(world, &hex);
+    assert!(
+        entry.diagnostics.is_empty(),
+        "expected no diagnostics, got {:?}",
+        entry.diagnostics
+    );
+}
+
+#[then(regex = r#"^package 0x([0-9a-fA-F]+) has diagnostic containing "([^"]*)"$"#)]
+async fn then_package_diagnostic_containing(
+    world: &mut BevyoutWorld,
+    hex: String,
+    expected: String,
+) {
+    let entry = package_catalog_entry(world, &hex);
+    assert!(
+        entry
+            .diagnostics
+            .iter()
+            .any(|message| message.contains(expected.as_str())),
+        "expected a diagnostic containing {expected:?} in {:?}",
+        entry.diagnostics
+    );
+}
+
+#[then(
+    regex = r"^the package catalog counts unsupported_type (\d+) unsupported_subrecord (\d+) unresolved_location (\d+) unresolved_target (\d+)$"
+)]
+async fn then_package_catalog_counts(
+    world: &mut BevyoutWorld,
+    unsupported_type: usize,
+    unsupported_subrecord: usize,
+    unresolved_location: usize,
+    unresolved_target: usize,
+) {
+    let catalog = world
+        .package_catalog_result
+        .as_ref()
+        .expect("the package catalog must be built first");
+    assert_eq!(catalog.counters.unsupported_type, unsupported_type);
+    assert_eq!(
+        catalog.counters.unsupported_subrecord,
+        unsupported_subrecord
+    );
+    assert_eq!(catalog.counters.unresolved_location, unresolved_location);
+    assert_eq!(catalog.counters.unresolved_target, unresolved_target);
 }
