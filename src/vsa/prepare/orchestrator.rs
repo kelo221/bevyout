@@ -597,7 +597,7 @@ fn prepare_cell(
     let blender = (args.converter == PrepareConverter::Blender)
         .then(|| find_blender(args.blender.clone()))
         .transpose()?;
-    let (navmeshes, nav_graph, nav_graph_summary) = stage_navmeshes(
+    let (navmeshes, mut nav_graph, mut nav_graph_full, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
         cell_id,
@@ -916,6 +916,23 @@ fn prepare_cell(
             severity: "info".into(),
             message,
         });
+    }
+    // Issue #153 (M4 wave 10): collision-derived navmesh validation +
+    // clearance. Runs here -- after physics classification -- so the static
+    // collision shell it validates the authored NAVM against is the same
+    // fixed geometry the player's capsule collides with. Mutates the prepared
+    // nav graph in place, rewrites `navgraph.ron`, and refreshes the manifest
+    // pointer (`nav_graph`).
+    if let Some(graph) = nav_graph_full.as_mut() {
+        let collision = cell_static_collision_triangles(&placements, &physics_assets);
+        let (updated_source, clearance_summary) =
+            apply_nav_clearance(&cache_dir, cell_id, graph, &collision, &mut diagnostics)?;
+        nav_graph = Some(updated_source);
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: clearance_summary.clone(),
+        });
+        output.push(clearance_summary);
     }
     let item_catalog = build_item_catalog(
         &parsed.bases,

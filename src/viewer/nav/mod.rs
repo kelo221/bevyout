@@ -17,7 +17,6 @@ use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
 pub(crate) mod door_link;
-pub(crate) mod erosion_policy;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;
@@ -63,6 +62,15 @@ pub(crate) fn nav_graph_path(manifest: &PreparedSceneManifest) -> Option<PathBuf
 /// `landmass_graph` free of any `vsa`/Bevy import so it stays includable
 /// verbatim by `tests/features.rs` via `#[path]` -- see that module's doc
 /// comment for why this boundary conversion cannot live inside it.
+///
+/// Issue #153 (M4 wave 10): the prepared graph's vertices already carry the
+/// collision-derived agent-radius clearance offset, and each polygon's
+/// `walkable` flag records the prepare-side validation verdict (removed for
+/// lacking collision support, cut by an interior collider, or disconnected as
+/// a sub-diameter corridor throat). `!walkable` polygons are excluded here so
+/// they never reach the landmass navigation mesh -- a route into a dropped
+/// region is then `unreachable` at query time. The interim runtime erosion
+/// pass is retired; clearance now lives entirely prepare-side.
 pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshInput> {
     graph
         .meshes
@@ -73,6 +81,7 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
             polygons: mesh
                 .polygons
                 .iter()
+                .filter(|polygon| polygon.walkable)
                 .map(|polygon| landmass_graph::PolygonInput {
                     index: polygon.index,
                     vertex_indices: polygon.vertex_indices,
