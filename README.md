@@ -87,6 +87,21 @@ backend. Press `Space` to pause/resume the drop and `R` to restore the intact
 pose and rebuild it. Add `--agent-bridge` to expose
 `bevyout.ragdoll_lab_probe` on the usual loopback bridge.
 
+### Isolated animation zoo
+
+Keep native scene conversion and explicitly prepare the Blender/NIFTools KF
+compatibility pack, then cycle every compatible external KF on one actor
+without loading the gameplay viewer:
+
+```powershell
+cargo run-dev -- prepare SuperDuperMart --converter native --actor-animation-converter blender
+cargo run-dev -- animation-zoo SuperDuperMart --actor 00041606
+```
+
+The zoo restores bind pose between clips and supports pause, previous/next,
+restart, looping, and playback-speed controls. `--agent-bridge` exposes
+`bevyout.animation_zoo_probe` and `bevyout.animation_zoo_control`.
+
 ### Experimental native NIF conversion
 
 The OS-agnostic Rust converter is available as an experimental, standalone

@@ -72,6 +72,7 @@ pub(crate) use physics::{
 // resource.
 pub(crate) use prepare::ITEM_CATALOG_REVISION;
 pub(crate) use prepare::{
+    ACTOR_ANIMATION_CATALOG_REVISION, ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION,
     ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, PACKAGE_CATALOG_REVISION,
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };

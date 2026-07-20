@@ -51,6 +51,14 @@ pub struct PreparedSceneManifest {
     pub actor_catalog_revision: Option<String>,
     #[serde(default)]
     pub actor_catalog_hash: Option<String>,
+    /// Per-cell, content-addressed actor animation catalogue. The catalogue
+    /// maps actor references to deduplicated skeleton/KF clip packs.
+    #[serde(default)]
+    pub actor_animation_catalog_path: Option<String>,
+    #[serde(default)]
+    pub actor_animation_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub actor_animation_catalog_hash: Option<String>,
     #[serde(default)]
     pub source_plugins: Vec<PreparedPluginSource>,
     pub cell: CellInfo,
@@ -164,6 +172,10 @@ pub enum PreparedItemStats {
         /// Serde-defaulted so wave 1/2 catalogs keep deserializing.
         #[serde(default)]
         ammo_form_id: Option<u32>,
+        /// Fallout 3 `WEAP.DNAM` animation type. Gameplay animation policy
+        /// maps the authored numeric value to the matching KF prefix.
+        #[serde(default)]
+        animation_type: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,

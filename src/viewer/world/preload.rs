@@ -99,7 +99,14 @@ pub(crate) struct PreloadedSidecar {
     asset: crate::vsa::PreparedPhysicsAsset,
 }
 
-type PreloadParseResult = Result<(PreparedSceneManifest, Vec<PreloadedSidecar>), String>;
+type PreloadParseResult = Result<
+    (
+        PreparedSceneManifest,
+        Vec<PreloadedSidecar>,
+        Option<bevyout_core::actor_animation::PreparedActorAnimationCatalog>,
+    ),
+    String,
+>;
 
 /// Tracks a neighbor manifest being parsed off the main thread.
 #[derive(Component)]
@@ -242,7 +249,10 @@ pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Pat
                 });
             }
         }
-        Ok((manifest, sidecars))
+        let actor_animation_catalog =
+            crate::viewer::actor_animation::load_catalog_for_manifest(&manifest, &asset_root)
+                .map_err(|error| error.to_string())?;
+        Ok((manifest, sidecars, actor_animation_catalog))
     });
     commands.spawn(PendingPreloadParse { form_id, task });
 }
@@ -257,6 +267,7 @@ fn evaluate_preload_plan(
     active_cell: Res<ActiveCell>,
     cell_map_index: Res<CellMapIndex>,
     mut resident_cells: ResMut<ResidentCells>,
+    mut actor_animation_catalogs: ResMut<crate::viewer::actor_animation::ActorAnimationCatalogs>,
     resident_cell_limit: Res<ResidentCellLimit>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut pending_reveal: ResMut<super::reveal::PendingReveal>,
@@ -286,6 +297,7 @@ fn evaluate_preload_plan(
     }
 
     for form_id in plan.evict {
+        actor_animation_catalogs.remove(form_id);
         if let Some(resident) = resident_cells.0.remove(&form_id) {
             // Issue #61 (F61.1): stage the departing cell for capture;
             // `persist::drain_eviction_captures` snapshots its dynamic/
@@ -314,6 +326,7 @@ fn evaluate_preload_plan(
 /// `advance_pending_cell_spawns` to drain a bounded chunk per frame (not
 /// registered as `Ready` until fully spawned and every scene handle finishes
 /// loading, see `check_preload_ready`).
+#[allow(clippy::too_many_arguments)]
 fn poll_preload_parse_tasks(
     mut commands: Commands,
     lighting: Res<LightingScale>,
@@ -321,6 +334,7 @@ fn poll_preload_parse_tasks(
     mut resident_cells: ResMut<ResidentCells>,
     mut pending_spawns: ResMut<PendingCellSpawns>,
     mut physics_assets: ResMut<super::super::player::PreparedPhysicsAssets>,
+    mut actor_animation_catalogs: ResMut<crate::viewer::actor_animation::ActorAnimationCatalogs>,
     mut parse_failed: MessageWriter<PreloadParseFailed>,
 ) {
     for (entity, mut pending_parse) in &mut pending {
@@ -330,13 +344,16 @@ fn poll_preload_parse_tasks(
         let form_id = pending_parse.form_id;
         commands.entity(entity).despawn();
         match result {
-            Ok((manifest, sidecars)) => {
+            Ok((manifest, sidecars, actor_animation_catalog)) => {
                 for sidecar in sidecars {
                     physics_assets.insert_preloaded(
                         sidecar.relative_path,
                         sidecar.byte_len,
                         sidecar.asset,
                     );
+                }
+                if let Some(catalog) = actor_animation_catalog {
+                    actor_animation_catalogs.insert(form_id, catalog);
                 }
                 let root = commands
                     .spawn((Transform::default(), Visibility::Hidden))

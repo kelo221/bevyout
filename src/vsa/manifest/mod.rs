@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 17;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 18;
 /// Gates *manifest schema/meaning* compatibility for a cached `scene.ron`
 /// (checked by `compatibility::ensure_prepared_manifest_compatible` against
 /// `manifest.prepare_revision`, independent of
@@ -14,8 +14,10 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 17;
 /// references as `PreparedSemantic::Corpse` (a meaning change with no new
 /// field -- a stale `scene.ron` would parse cleanly with the wrong
 /// classification, exactly the trap AGENTS.md's "Prepared asset revisions"
-/// section names), and M4 wave 7's actor assembly (#107/#108).
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v3-corpse-actor-assembly";
+/// section names), M4 wave 7's actor assembly (#107/#108), and the actor
+/// animation catalog link added for the KF compatibility spike (#104).
+pub(crate) const CURRENT_PREPARE_REVISION: &str =
+    "prepare-v4-corpse-actor-assembly-animation-catalog";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v13-material-extensions";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 
