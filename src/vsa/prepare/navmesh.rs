@@ -301,10 +301,24 @@ fn static_collision_placement(placement: &PreparedPlacement) -> bool {
         )
 }
 
+/// Number of samples used to approximate a round shape's XZ footprint.
+/// Purely a discretization constant: higher is a closer approximation of the
+/// same circle, and it is not derived from any placement or cell.
+const ROUND_FOOTPRINT_SAMPLES: usize = 12;
+
 /// Appends one prepared physics shape's world-space triangles under
-/// `transform`. `Box`/`TriangleMesh` are emitted exactly; `Sphere`/`Capsule`/
-/// `ConvexHull` fall back to their conservative world-space AABB box (rare for
-/// static room geometry -- floors, walls, and frames are boxes/meshes).
+/// `transform`. `Box`/`TriangleMesh` are emitted exactly.
+///
+/// `Sphere`/`Capsule`/`ConvexHull` have no triangles of their own, so they are
+/// emitted as the vertical prism over their true XZ footprint (issue #171):
+/// the convex hull of the shape's world-space sample points projected to XZ,
+/// extruded over the shape's world height range. The previous conservative
+/// world-space AABB was adequate while clearance judged whole authored
+/// triangles, but sub-triangle clipping erodes the agent radius from every
+/// collider footprint, and an AABB around a *diagonal* capsule or hull covers
+/// an enormous area the collider does not occupy -- a long railing or pipe
+/// would erode the platform it runs along. Over half this cell class's static
+/// shapes are capsules and hulls, so the footprint has to be the real one.
 fn append_shape_world_triangles(
     transform: &Mat4,
     shape: &PreparedPhysicsShape,
@@ -347,47 +361,121 @@ fn append_shape_world_triangles(
             }
         }
         PreparedPhysicsShape::Sphere { center, radius } => {
-            append_aabb_box(&aabb_corners(&[*center], *radius, transform), out);
+            append_footprint_prism(&round_shape_points(&[*center], *radius, transform), out);
         }
         PreparedPhysicsShape::Capsule {
             point1,
             point2,
             radius,
         } => {
-            append_aabb_box(&aabb_corners(&[*point1, *point2], *radius, transform), out);
+            append_footprint_prism(
+                &round_shape_points(&[*point1, *point2], *radius, transform),
+                out,
+            );
         }
         PreparedPhysicsShape::ConvexHull { points } => {
-            append_aabb_box(&aabb_corners(points, 0.0, transform), out);
+            append_footprint_prism(&points.iter().map(|&p| xf(p)).collect::<Vec<_>>(), out);
         }
     }
 }
 
-/// World-space AABB corners enclosing `points` (each inflated by `radius`),
-/// transformed by `transform`. Corners are ordered by the same
-/// `(x, y, z)` sign bit convention `append_box_faces` expects.
-fn aabb_corners(points: &[[f32; 3]], radius: f32, transform: &Mat4) -> [[f32; 3]; 8] {
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
+/// World-space sample points describing a sphere/capsule: a horizontal ring of
+/// [`ROUND_FOOTPRINT_SAMPLES`] points at each centre, plus the poles, all at
+/// the world radius. Hulling these in XZ reproduces the shape's true footprint
+/// (a disc for a sphere, a stadium for a capsule) instead of its bounding box.
+fn round_shape_points(centres: &[[f32; 3]], radius: f32, transform: &Mat4) -> Vec<[f32; 3]> {
+    // The placement transform is a uniform scale + rotation + translation, so
+    // a local radius maps to the world by that single scale factor.
+    let scale = transform.x_axis.truncate().length().max(1.0e-6);
+    let world_radius = radius * scale;
+    let mut points = Vec::with_capacity(centres.len() * (ROUND_FOOTPRINT_SAMPLES + 2));
+    for centre in centres {
+        let c = transform.transform_point3(Vec3::from_array(*centre));
+        for i in 0..ROUND_FOOTPRINT_SAMPLES {
+            let angle = std::f32::consts::TAU * (i as f32) / (ROUND_FOOTPRINT_SAMPLES as f32);
+            points.push([
+                c.x + world_radius * angle.cos(),
+                c.y,
+                c.z + world_radius * angle.sin(),
+            ]);
+        }
+        points.push([c.x, c.y + world_radius, c.z]);
+        points.push([c.x, c.y - world_radius, c.z]);
+    }
+    points
+}
+
+/// Emits the vertical prism over `points`' XZ convex hull, spanning their
+/// world height range: side quads (the wall-like surfaces an agent must clear)
+/// plus a top and bottom fan (the surfaces that can support one).
+fn append_footprint_prism(points: &[[f32; 3]], out: &mut Vec<CollisionTriangle>) {
+    let hull = convex_hull_xz(points);
+    if hull.len() < 3 {
+        return;
+    }
+    let mut y_min = f32::INFINITY;
+    let mut y_max = f32::NEG_INFINITY;
     for point in points {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(point[axis] - radius);
-            max[axis] = max[axis].max(point[axis] + radius);
+        y_min = y_min.min(point[1]);
+        y_max = y_max.max(point[1]);
+    }
+    for i in 0..hull.len() {
+        let a = hull[i];
+        let b = hull[(i + 1) % hull.len()];
+        out.push(CollisionTriangle {
+            vertices: [
+                [a[0], y_min, a[1]],
+                [b[0], y_min, b[1]],
+                [b[0], y_max, b[1]],
+            ],
+        });
+        out.push(CollisionTriangle {
+            vertices: [
+                [a[0], y_min, a[1]],
+                [b[0], y_max, b[1]],
+                [a[0], y_max, a[1]],
+            ],
+        });
+    }
+    for y in [y_min, y_max] {
+        for i in 1..hull.len() - 1 {
+            out.push(CollisionTriangle {
+                vertices: [
+                    [hull[0][0], y, hull[0][1]],
+                    [hull[i][0], y, hull[i][1]],
+                    [hull[i + 1][0], y, hull[i + 1][1]],
+                ],
+            });
         }
     }
-    let mut corners = [[0.0f32; 3]; 8];
-    for (i, corner) in corners.iter_mut().enumerate() {
-        let local = Vec3::new(
-            if i & 1 == 0 { min[0] } else { max[0] },
-            if i & 2 == 0 { min[1] } else { max[1] },
-            if i & 4 == 0 { min[2] } else { max[2] },
-        );
-        *corner = transform.transform_point3(local).to_array();
-    }
-    corners
 }
 
-fn append_aabb_box(corners: &[[f32; 3]; 8], out: &mut Vec<CollisionTriangle>) {
-    append_box_faces(corners, out);
+/// XZ convex hull (Andrew's monotone chain) of `points`. Deterministic: the
+/// input is sorted by `(x, z)` and near-duplicate points are collapsed first.
+fn convex_hull_xz(points: &[[f32; 3]]) -> Vec<[f32; 2]> {
+    let mut sorted: Vec<[f32; 2]> = points.iter().map(|p| [p[0], p[2]]).collect();
+    sorted.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    sorted.dedup_by(|a, b| (a[0] - b[0]).abs() < 1.0e-6 && (a[1] - b[1]).abs() < 1.0e-6);
+    if sorted.len() < 3 {
+        return sorted;
+    }
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
+    let chain = |input: &mut dyn Iterator<Item = [f32; 2]>| -> Vec<[f32; 2]> {
+        let mut out: Vec<[f32; 2]> = Vec::new();
+        for point in input {
+            while out.len() >= 2 && cross(out[out.len() - 2], out[out.len() - 1], point) <= 0.0 {
+                out.pop();
+            }
+            out.push(point);
+        }
+        out.pop();
+        out
+    };
+    let mut hull = chain(&mut sorted.iter().copied());
+    hull.extend(chain(&mut sorted.iter().rev().copied()));
+    hull
 }
 
 /// Emits the 12 triangles of a box given its 8 corners (indexed by the
@@ -569,6 +657,7 @@ pub(crate) fn apply_nav_clearance(
     let mut dropped = 0usize;
     let mut walkable_total = 0usize;
     let mut min_component_share = 100usize;
+    let mut min_authored_share = 100usize;
     let mut clipped_polygons = 0usize;
     let mut added_vertices = 0usize;
     let mut degenerate_discarded = 0usize;
@@ -664,9 +753,16 @@ pub(crate) fn apply_nav_clearance(
         predicate_evaluations += result.predicate_evaluations;
         let share = component_share_pct(result.largest_component, result.walkable_count);
         min_component_share = min_component_share.min(share);
+        let authored_share = component_share_pct(
+            result.authored_in_main_component,
+            result.authored_polygon_count,
+        );
+        min_authored_share = min_authored_share.min(authored_share);
 
-        let baseline_share =
-            component_share_pct(result.baseline_largest_component, result.polygon_count);
+        let baseline_share = component_share_pct(
+            result.baseline_largest_component,
+            result.authored_polygon_count,
+        );
         diagnostics.push(Diagnostic {
             severity: "info".into(),
             message: format!(
@@ -688,13 +784,15 @@ pub(crate) fn apply_nav_clearance(
         diagnostics.push(Diagnostic {
             severity: "info".into(),
             message: format!(
-                "nav clearance clip mesh {:08x}: authored polygons {} re-triangulated to {} ({} clipped), vertices +{}, slivers discarded {}",
+                "nav clearance clip mesh {:08x}: authored polygons {} re-triangulated to {} ({} clipped), vertices +{}, slivers discarded {}, authored polygons reachable in the main component {} = {}%",
                 mesh.form_id,
                 authored_polygon_count,
                 result.polygon_count,
                 result.clipped_polygons,
                 result.added_vertices,
                 result.degenerate_discarded,
+                result.authored_in_main_component,
+                authored_share,
             ),
         });
     }
@@ -712,7 +810,7 @@ pub(crate) fn apply_nav_clearance(
 
     let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
     let summary = format!(
-        "nav clearance: collision triangles {}, meshes {}, polygons {} (clipped {}, vertices +{}, slivers {}), removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%, predicate evaluations {}",
+        "nav clearance: collision triangles {}, meshes {}, polygons {} (clipped {}, vertices +{}, slivers {}), removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%, smallest authored-reachable share {}%, predicate evaluations {}",
         collision.len(),
         graph.counters.meshes,
         graph.counters.polygons,
@@ -724,6 +822,7 @@ pub(crate) fn apply_nav_clearance(
         dropped,
         walkable_total,
         min_component_share,
+        min_authored_share,
         predicate_evaluations,
     );
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);

@@ -227,6 +227,15 @@ pub(crate) struct NavClearanceResult {
     /// Committed per-polygon drop reason (`None` = walkable), aligned with
     /// `walkable`. Lets the caller emit per-drop centroid diagnostics.
     pub(crate) reasons: Vec<Option<DropReason>>,
+    /// Authored polygons in this mesh, before re-triangulation.
+    pub(crate) authored_polygon_count: usize,
+    /// Authored polygons with at least one walkable piece in the main
+    /// (largest) surviving component. Sub-triangle clipping makes the raw
+    /// polygon-level component share incomparable with wave 10's (a clipped
+    /// mesh has ~40x the polygons, all much smaller), so this reports the same
+    /// health question at the authored granularity: what share of the mesh the
+    /// runtime can actually reach from its dominant region.
+    pub(crate) authored_in_main_component: usize,
     /// Every non-main (stranded) walkable component: `(polygon_count,
     /// representative centroid)`. Lets the caller locate any disconnected
     /// island in world space without a viewer.
@@ -526,11 +535,14 @@ pub(crate) fn validate_and_clear(
             largest_component,
             baseline_component_count,
             baseline_largest_component,
+            authored_polygon_count: polygon_count,
+            authored_in_main_component: polygon_count,
             reasons: vec![None; polygon_count],
             nonmain_components: Vec::new(),
         };
     }
 
+    let authored_polygon_count = polygon_count;
     let protected: BTreeSet<u32> = protected_triangle_indices(mesh);
     let protected_count = protected.len();
 
@@ -621,6 +633,18 @@ pub(crate) fn validate_and_clear(
     let component_count = sizes.len();
     let largest_component = sizes.values().copied().max().unwrap_or(0);
     let nonmain_components = nonmain_component_report(mesh, &roots, &sizes);
+    let authored_in_main_component = match main_component_root(&sizes) {
+        Some(main) => {
+            let mut reached: BTreeSet<u32> = BTreeSet::new();
+            for (index, &source) in clipped.sources.iter().enumerate() {
+                if walkable.get(index).copied().unwrap_or(false) && roots[index] == main {
+                    reached.insert(source);
+                }
+            }
+            reached.len()
+        }
+        None => 0,
+    };
 
     NavClearanceResult {
         vertices: clipped_mesh.vertices,
@@ -641,6 +665,8 @@ pub(crate) fn validate_and_clear(
         largest_component,
         baseline_component_count,
         baseline_largest_component,
+        authored_polygon_count,
+        authored_in_main_component,
         reasons: reason,
         nonmain_components,
     }

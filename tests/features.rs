@@ -9324,3 +9324,157 @@ async fn then_permitted_animation_link_kinds(world: &mut BevyoutWorld, expected:
         .collect();
     assert_eq!(permitted, expected);
 }
+
+// --- #171 sub-triangle nav clearance steps (M4 wave 11) ---
+// nav_collision_clearance.feature -- appended section, do not interleave.
+// `vsa::prepare::nav_clip` is std-only (no `super::` imports) and is included
+// here at the crate root so `nav_clearance`'s `use super::nav_clip::..` --
+// `vsa::prepare::nav_clip` in the binary -- resolves the same way here.
+#[path = "../src/vsa/prepare/nav_clip.rs"]
+#[allow(dead_code)]
+mod nav_clip;
+
+/// Barycentric containment of `(x, z)` in a clipped result's polygon, on the
+/// XZ plane. Local to this section so the steps do not depend on
+/// `nav_clearance`'s private helpers.
+fn clearance_polygon_contains(
+    result: &nav_clearance::NavClearanceResult,
+    polygon: usize,
+    x: f32,
+    z: f32,
+) -> bool {
+    let tri = result.polygons[polygon];
+    let (Some(&a), Some(&b), Some(&c)) = (
+        result.vertices.get(tri[0] as usize),
+        result.vertices.get(tri[1] as usize),
+        result.vertices.get(tri[2] as usize),
+    ) else {
+        return false;
+    };
+    let det = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
+    if det.abs() < 1.0e-9 {
+        return false;
+    }
+    let beta = ((x - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (z - a[2])) / det;
+    let gamma = ((b[0] - a[0]) * (z - a[2]) - (x - a[0]) * (b[2] - a[2])) / det;
+    let alpha = 1.0 - beta - gamma;
+    const EPS: f32 = 1.0e-4;
+    alpha >= -EPS && beta >= -EPS && gamma >= -EPS
+}
+
+/// The lowest-index walkable polygon of `result` containing `(x, z)`.
+fn clearance_walkable_polygon_at(
+    result: &nav_clearance::NavClearanceResult,
+    x: f32,
+    z: f32,
+) -> Option<usize> {
+    (0..result.polygons.len())
+        .find(|&index| result.walkable[index] && clearance_polygon_contains(result, index, x, z))
+}
+
+#[then(regex = r"^clearance point (-?[\d.]+), (-?[\d.]+) is walkable$")]
+async fn then_clearance_point_walkable(world: &mut BevyoutWorld, x: f32, z: f32) {
+    let result = clearance_result(world);
+    assert!(
+        clearance_walkable_polygon_at(result, x, z).is_some(),
+        "({x}, {z}) must be walkable after clearance"
+    );
+}
+
+#[then(regex = r"^clearance point (-?[\d.]+), (-?[\d.]+) is not walkable$")]
+async fn then_clearance_point_not_walkable(world: &mut BevyoutWorld, x: f32, z: f32) {
+    let result = clearance_result(world);
+    assert!(
+        clearance_walkable_polygon_at(result, x, z).is_none(),
+        "({x}, {z}) must not be walkable after clearance"
+    );
+}
+
+/// Whether two points sit in the same walkable connected component, over
+/// shared polygon edges -- the routability question the clip has to answer.
+fn clearance_same_component(
+    result: &nav_clearance::NavClearanceResult,
+    from: (f32, f32),
+    to: (f32, f32),
+) -> bool {
+    let (Some(a), Some(b)) = (
+        clearance_walkable_polygon_at(result, from.0, from.1),
+        clearance_walkable_polygon_at(result, to.0, to.1),
+    ) else {
+        return false;
+    };
+    let mut edge_owners: std::collections::BTreeMap<(u32, u32), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, tri) in result.polygons.iter().enumerate() {
+        if !result.walkable[index] {
+            continue;
+        }
+        for &(p, q) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if p <= q { (p, q) } else { (q, p) };
+            edge_owners.entry(key).or_default().push(index);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::from([a]);
+    let mut frontier = vec![a];
+    while let Some(current) = frontier.pop() {
+        if current == b {
+            return true;
+        }
+        let tri = result.polygons[current];
+        for &(p, q) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if p <= q { (p, q) } else { (q, p) };
+            for &owner in edge_owners.get(&key).into_iter().flatten() {
+                if seen.insert(owner) {
+                    frontier.push(owner);
+                }
+            }
+        }
+    }
+    seen.contains(&b)
+}
+
+#[then(
+    regex = r"^clearance points (-?[\d.]+), (-?[\d.]+) and (-?[\d.]+), (-?[\d.]+) are connected$"
+)]
+async fn then_clearance_points_connected(
+    world: &mut BevyoutWorld,
+    ax: f32,
+    az: f32,
+    bx: f32,
+    bz: f32,
+) {
+    let result = clearance_result(world);
+    assert!(
+        clearance_same_component(result, (ax, az), (bx, bz)),
+        "({ax}, {az}) and ({bx}, {bz}) must stay in one walkable component"
+    );
+}
+
+#[then(
+    regex = r"^clearance points (-?[\d.]+), (-?[\d.]+) and (-?[\d.]+), (-?[\d.]+) are not connected$"
+)]
+async fn then_clearance_points_not_connected(
+    world: &mut BevyoutWorld,
+    ax: f32,
+    az: f32,
+    bx: f32,
+    bz: f32,
+) {
+    let result = clearance_result(world);
+    assert!(
+        !clearance_same_component(result, (ax, az), (bx, bz)),
+        "({ax}, {az}) and ({bx}, {bz}) must not stay connected"
+    );
+}
+
+#[then(regex = r"^at least (\d+) polygons? is removed as unsupported$")]
+async fn then_clearance_removed_at_least(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert!(result.removed_unsupported >= expected, "{result:?}");
+}
+
+#[then(regex = r"^at least (\d+) polygons? is cut as obstructed$")]
+async fn then_clearance_cut_at_least(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert!(result.cut_obstructed >= expected, "{result:?}");
+}

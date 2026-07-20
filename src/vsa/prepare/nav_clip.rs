@@ -201,42 +201,58 @@ pub(crate) fn refine_and_clip(
     for _round in 0..params.max_refinement_rounds {
         let mut marked: BTreeSet<(u32, u32)> = BTreeSet::new();
         for (tri, _) in &working {
-            let [ia, ib, ic] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-            let (pa, pb, pc) = (verts[ia], verts[ib], verts[ic]);
-            let longest = dist_xz(pa, pb).max(dist_xz(pb, pc)).max(dist_xz(pc, pa));
-            if longest <= params.resolution {
-                continue;
-            }
-            let edges = [
-                edge_key(tri[0], tri[1]),
-                edge_key(tri[1], tri[2]),
-                edge_key(tri[2], tri[0]),
-            ];
-            if edges.iter().all(|edge| locked_edges.contains(edge)) {
-                continue;
-            }
-            let base = inside[ia];
-            let mut uniform = inside[ib] == base && inside[ic] == base;
-            if uniform {
-                for point in [
-                    midpoint(pa, pb),
-                    midpoint(pb, pc),
-                    midpoint(pc, pa),
-                    centroid(pa, pb, pc),
-                ] {
+            let corners = [tri[0], tri[1], tri[2]];
+            let edges = [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])];
+            let mut boundary_crossing_edge = false;
+            // Split only the edges the boundary actually crosses. Splitting
+            // all three (which is what a per-triangle "is this triangle near
+            // the boundary" rule amounts to) refines the whole triangle down
+            // to `resolution` including the parts nowhere near the boundary,
+            // and the polygon count grows with *area* instead of with
+            // boundary length.
+            for (a, b) in edges {
+                let key = edge_key(a, b);
+                if locked_edges.contains(&key) {
+                    continue;
+                }
+                let (pa, pb) = (verts[a as usize], verts[b as usize]);
+                if dist_xz(pa, pb) <= params.resolution {
+                    continue;
+                }
+                let crosses = if inside[a as usize] != inside[b as usize] {
+                    true
+                } else {
                     evaluations += 1;
-                    if predicate(point) != base {
-                        uniform = false;
-                        break;
-                    }
+                    predicate(midpoint(pa, pb)) != inside[a as usize]
+                };
+                if crosses {
+                    marked.insert(key);
+                    boundary_crossing_edge = true;
                 }
             }
-            if uniform {
+            if boundary_crossing_edge {
                 continue;
             }
-            for edge in edges {
-                if !locked_edges.contains(&edge) {
-                    marked.insert(edge);
+            // No edge straddles the boundary, so a feature entirely inside the
+            // triangle (a freestanding post in a large authored polygon) is
+            // still invisible. The centroid finds it; splitting all three
+            // edges then exposes it to the edge test above next round.
+            let (pa, pb, pc) = (
+                verts[corners[0] as usize],
+                verts[corners[1] as usize],
+                verts[corners[2] as usize],
+            );
+            if dist_xz(pa, pb).max(dist_xz(pb, pc)).max(dist_xz(pc, pa)) <= params.resolution {
+                continue;
+            }
+            evaluations += 1;
+            if predicate(centroid(pa, pb, pc)) == inside[corners[0] as usize] {
+                continue;
+            }
+            for (a, b) in edges {
+                let key = edge_key(a, b);
+                if !locked_edges.contains(&key) {
+                    marked.insert(key);
                 }
             }
         }
@@ -533,7 +549,7 @@ mod tests {
                 *counts.entry(edge).or_insert(0) += 1;
             }
         }
-        for (&(a, b), _) in counts.iter() {
+        for &(a, b) in counts.keys() {
             let (pa, pb) = (output.vertices[a as usize], output.vertices[b as usize]);
             for (index, point) in output.vertices.iter().enumerate() {
                 if index as u32 == a || index as u32 == b {
