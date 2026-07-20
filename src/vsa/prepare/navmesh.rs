@@ -459,6 +459,89 @@ fn component_share_pct(largest_component: usize, walkable_count: usize) -> usize
         .unwrap_or(100)
 }
 
+/// Per-mesh cap on individually listed clearance drops (issue #171). Wave 10's
+/// whole-triangle verdicts produced a handful per cell; sub-triangle clipping
+/// produces far more, far smaller ones, and listing every one would dominate
+/// the prepared manifest. The remainder is reported as a single count line.
+const DROP_DIAGNOSTIC_CAP: usize = 32;
+
+/// Writes one clearance pass's re-triangulated geometry (issue #171) back into
+/// the prepared mesh.
+///
+/// The clip guarantees authored vertices keep their indices and that authored
+/// polygon `i`'s first surviving piece occupies polygon slot `i`, so
+/// everything keyed by either -- `PreparedNavDoor::triangle_index`,
+/// `PreparedNavMeshMerge::triangle_a`/`edge_a`, `cover_triangle_indices` --
+/// stays valid. Protected (door/merge) polygons are additionally never split
+/// at all, so a door polygon is still exactly the authored triangle its
+/// runtime link geometry was derived from.
+///
+/// Each piece inherits its authored polygon's flags. `authored_external` is
+/// only inherited by a piece that *is* the authored triangle: a per-edge
+/// authored flag has no meaning on an edge the authored data never described.
+/// Same-mesh `adjacency` is recomputed from shared vertex indices over the new
+/// polygon list, which is also exactly how the runtime derives it.
+fn apply_clipped_geometry(mesh: &mut PreparedNavMesh, result: &NavClearanceResult) {
+    let authored = std::mem::take(&mut mesh.polygons);
+    mesh.vertices = result.vertices.clone();
+
+    let mut edge_owners: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    let valid = |index: u32| (index as usize) < result.vertices.len();
+    for (index, tri) in result.polygons.iter().enumerate() {
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            if valid(a) && valid(b) {
+                edge_owners
+                    .entry(if a <= b { (a, b) } else { (b, a) })
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
+
+    mesh.polygons = result
+        .polygons
+        .iter()
+        .enumerate()
+        .map(|(index, tri)| {
+            let template = result
+                .sources
+                .get(index)
+                .and_then(|&source| authored.get(source as usize));
+            let identical = template.is_some_and(|source| source.vertex_indices == *tri);
+            let mut adjacency = [None; 3];
+            for (slot, &(a, b)) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])]
+                .iter()
+                .enumerate()
+            {
+                if !valid(a) || !valid(b) {
+                    continue;
+                }
+                let key = if a <= b { (a, b) } else { (b, a) };
+                adjacency[slot] = edge_owners.get(&key).and_then(|owners| {
+                    owners
+                        .iter()
+                        .find(|&&owner| owner != index)
+                        .map(|&owner| owner as u32)
+                });
+            }
+            PreparedNavPolygon {
+                index: index as u32,
+                vertex_indices: *tri,
+                adjacency,
+                flags: template.map(|source| source.flags).unwrap_or_default(),
+                is_water: template.is_some_and(|source| source.is_water),
+                is_preferred_pathing: template.is_some_and(|source| source.is_preferred_pathing),
+                contains_door: template.is_some_and(|source| source.contains_door),
+                authored_external: match template {
+                    Some(source) if identical => source.authored_external,
+                    _ => [false; 3],
+                },
+                walkable: result.walkable.get(index).copied().unwrap_or(true),
+            }
+        })
+        .collect();
+}
+
 /// Runs the collision-derived validation pass (issue #153) over every mesh in
 /// `graph`, mutating each polygon's `walkable` flag in place: triangles with
 /// no collision support are removed (F153.1), interior triangles a
@@ -486,8 +569,13 @@ pub(crate) fn apply_nav_clearance(
     let mut dropped = 0usize;
     let mut walkable_total = 0usize;
     let mut min_component_share = 100usize;
+    let mut clipped_polygons = 0usize;
+    let mut added_vertices = 0usize;
+    let mut degenerate_discarded = 0usize;
+    let mut predicate_evaluations = 0usize;
 
     for mesh in &mut graph.meshes {
+        let authored_polygon_count = mesh.polygons.len();
         let protected_edges = protected_edges_for_prepared_mesh(mesh, &merges);
         let input = NavClearanceMeshInput {
             vertices: mesh.vertices.clone(),
@@ -501,15 +589,25 @@ pub(crate) fn apply_nav_clearance(
         let result = validate_and_clear(&input, collision, params);
 
         // Per-drop centroid diagnostics (Bevy-metre world space): exactly
-        // which triangles the pass dropped and why, so a corridor/route
+        // which polygons the pass dropped and why, so a corridor/route
         // regression is locatable from the prepared manifest without a viewer.
+        // Capped per mesh (issue #171: sub-triangle clipping produces far more,
+        // far smaller drops than wave 10's whole-triangle verdicts, and an
+        // uncapped list would dominate the manifest) with a deterministic
+        // remainder line.
+        let mut emitted = 0usize;
+        let mut suppressed = 0usize;
         for (index, reason) in result.reasons.iter().enumerate() {
             let Some(reason) = reason else { continue };
-            let tri = mesh.polygons[index].vertex_indices;
+            if emitted >= DROP_DIAGNOSTIC_CAP {
+                suppressed += 1;
+                continue;
+            }
+            let tri = result.polygons[index];
             let (Some(&a), Some(&b), Some(&c)) = (
-                mesh.vertices.get(tri[0] as usize),
-                mesh.vertices.get(tri[1] as usize),
-                mesh.vertices.get(tri[2] as usize),
+                result.vertices.get(tri[0] as usize),
+                result.vertices.get(tri[1] as usize),
+                result.vertices.get(tri[2] as usize),
             ) else {
                 continue;
             };
@@ -518,6 +616,7 @@ pub(crate) fn apply_nav_clearance(
                 (a[1] + b[1] + c[1]) / 3.0,
                 (a[2] + b[2] + c[2]) / 3.0,
             ];
+            emitted += 1;
             diagnostics.push(Diagnostic {
                 severity: "info".into(),
                 message: format!(
@@ -528,6 +627,15 @@ pub(crate) fn apply_nav_clearance(
                     centroid[0],
                     centroid[1],
                     centroid[2],
+                ),
+            });
+        }
+        if suppressed > 0 {
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: format!(
+                    "nav clearance drop mesh {:08x}: {} further drop(s) not listed",
+                    mesh.form_id, suppressed,
                 ),
             });
         }
@@ -544,14 +652,16 @@ pub(crate) fn apply_nav_clearance(
             });
         }
 
-        for (polygon, walkable) in mesh.polygons.iter_mut().zip(&result.walkable) {
-            polygon.walkable = *walkable;
-        }
+        apply_clipped_geometry(mesh, &result);
 
         removed += result.removed_unsupported;
         cut += result.cut_obstructed;
         dropped += result.dropped_unfit;
         walkable_total += result.walkable_count;
+        clipped_polygons += result.clipped_polygons;
+        added_vertices += result.added_vertices;
+        degenerate_discarded += result.degenerate_discarded;
+        predicate_evaluations += result.predicate_evaluations;
         let share = component_share_pct(result.largest_component, result.walkable_count);
         min_component_share = min_component_share.min(share);
 
@@ -575,6 +685,18 @@ pub(crate) fn apply_nav_clearance(
                 baseline_share,
             ),
         });
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: format!(
+                "nav clearance clip mesh {:08x}: authored polygons {} re-triangulated to {} ({} clipped), vertices +{}, slivers discarded {}",
+                mesh.form_id,
+                authored_polygon_count,
+                result.polygon_count,
+                result.clipped_polygons,
+                result.added_vertices,
+                result.degenerate_discarded,
+            ),
+        });
     }
 
     graph.counters.clearance_removed_unsupported = removed;
@@ -583,17 +705,26 @@ pub(crate) fn apply_nav_clearance(
     graph.counters.clearance_walkable_total = walkable_total;
     graph.counters.clearance_min_component_share_pct = min_component_share;
     graph.counters.clearance_collision_triangles = collision.len();
+    graph.counters.clearance_clipped_polygons = clipped_polygons;
+    graph.counters.clearance_added_vertices = added_vertices;
+    graph.counters.polygons = graph.meshes.iter().map(|mesh| mesh.polygons.len()).sum();
+    graph.counters.vertices = graph.meshes.iter().map(|mesh| mesh.vertices.len()).sum();
 
     let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
     let summary = format!(
-        "nav clearance: collision triangles {}, meshes {}, removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%",
+        "nav clearance: collision triangles {}, meshes {}, polygons {} (clipped {}, vertices +{}, slivers {}), removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%, predicate evaluations {}",
         collision.len(),
         graph.counters.meshes,
+        graph.counters.polygons,
+        clipped_polygons,
+        added_vertices,
+        degenerate_discarded,
         removed,
         cut,
         dropped,
         walkable_total,
         min_component_share,
+        predicate_evaluations,
     );
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);
     Ok((graph_source, summary))

@@ -22,6 +22,7 @@ mod jobs;
 mod native;
 mod native_policy;
 mod nav_clearance;
+mod nav_clip;
 mod nav_graph;
 mod navmesh;
 mod placements;

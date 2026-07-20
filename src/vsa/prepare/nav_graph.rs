@@ -28,14 +28,19 @@ use super::super::paths::FO3_SCALE;
 
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
-/// precedent. Bumped to v5 for issue #153 (M4 wave 10): collision-derived
+/// precedent. Bumped to v6 for issue #171 (M4 wave 11): the clearance pass now
+/// re-triangulates each mesh locally against the collision-derived walkability
+/// boundary, so a graph carries clip-introduced vertices and sub-polygons
+/// (authored vertices and unsplit polygons keep their indices), plus the new
+/// `clearance_clipped_polygons`/`clearance_added_vertices` counters.
+/// Bumped to v5 for issue #153 (M4 wave 10): collision-derived
 /// validation + clearance bakes a per-polygon `PreparedNavPolygon::walkable`
 /// flag and clearance-offset vertex positions into the graph, plus new
 /// `NavGraphCounters` clearance fields (removed/cut/disconnected/offset).
 /// Bumped to v4 for issue #156: `PreparedNavMeshMerge::authored_evidence`,
 /// `PreparedNavPolygon::authored_external`, and the merge-candidate
 /// authored/geometric split + NVEX/NVCI correlation counters.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v5";
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v6";
 
 /// `NVTR` per-edge "external" flag bits (fopdoc FalloutNV `Records/NAVM.html`,
 /// "Flag Values"), restated locally per this module's no-`openmw_esm4`-import
@@ -387,6 +392,12 @@ pub(crate) struct NavGraphCounters {
     /// dominant component; the fragmentation health signal.
     pub(crate) clearance_min_component_share_pct: usize,
     pub(crate) clearance_collision_triangles: usize,
+    /// Issue #171 (M4 wave 11) local re-triangulation counters: authored
+    /// polygons the clip split into more than one piece, and the vertices it
+    /// appended (refinement midpoints plus boundary crossings). Both zero on
+    /// cells with no cooked static collision.
+    pub(crate) clearance_clipped_polygons: usize,
+    pub(crate) clearance_added_vertices: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -499,6 +510,8 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         clearance_walkable_total: 0,
         clearance_min_component_share_pct: 0,
         clearance_collision_triangles: 0,
+        clearance_clipped_polygons: 0,
+        clearance_added_vertices: 0,
     };
 
     PreparedNavGraph {
@@ -1544,7 +1557,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v5");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v6");
     }
 
     #[test]

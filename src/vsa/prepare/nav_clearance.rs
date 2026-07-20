@@ -1,24 +1,27 @@
 //! Pure collision-derived navmesh validation + clearance (issue #153, M4
-//! wave 10). Given one prepared nav mesh's walkable triangle soup plus this
-//! cell's cooked static collision as world-space triangles, it validates the
-//! authored FO3 NAVM against the cooked collision and drops triangles the
-//! agent capsule cannot legitimately stand on or fit through:
+//! wave 10; sub-triangle re-triangulation added by issue #171, M4 wave 11).
+//! Given one prepared nav mesh's walkable triangle soup plus this cell's
+//! cooked static collision as world-space triangles, it validates the authored
+//! FO3 NAVM against the cooked collision and removes the area the agent
+//! capsule cannot legitimately stand on or fit through.
 //!
-//! 1. **Collision-support validation (F153.1).** Removes any walkable
-//!    triangle with no cooked collision surface under it within the agent's
-//!    step height -- the authored NAVM paves over voids the faithfully cooked
-//!    collision does not fill (issue #164 restroom strip). A route into a
-//!    removed area is then `unreachable` at query time.
-//! 2. **Interior-obstruction cutting (F153.2).** Cuts an *interior* walkable
-//!    triangle when a wall-like static collider that the agent cannot step
-//!    over (rises above the step height, into the agent body band) sits within
-//!    the agent radius of it -- the #148 entrance frame the authored NAVM ran
-//!    straight through. Step-overable colliders (stair risers, low ledges) and
-//!    a room's own perimeter walls are deliberately excluded.
-//! 3. **Sub-diameter disconnection (F153.3).** Drops a walkable triangle only
+//! 1. **Local re-triangulation against the walkability boundary (F171.1 /
+//!    F171.2).** A single pointwise predicate decides walkability anywhere in
+//!    the cell: a point is walkable when cooked collision supports it within
+//!    the agent's step height (F153.1's support test, F171.2's void boundary)
+//!    *and* no wall-like collider the agent cannot step over rises into the
+//!    agent capsule within the agent radius of it (F153.2's obstruction test,
+//!    F171.1's footprint expanded by the agent radius). `nav_clip` then
+//!    re-triangulates every authored polygon conformally against that
+//!    predicate, so the surviving edges lie on the obstruction/void boundary
+//!    itself rather than on authored triangle edges. This is what wave 10's
+//!    whole-triangle tests provably could not express: a collider protruding
+//!    into a triangle's *opening* while its centroid sits clear, and a narrow
+//!    void strip under an otherwise supported triangle.
+//! 2. **Sub-diameter disconnection (F153.3).** Drops a walkable triangle only
 //!    when the *authored passage width* through it -- near-wall distance +
-//!    far-wall distance, measured across the triangle against the
-//!    (post-F153.1/F153.2) walkable boundary -- is below `2 * radius`
+//!    far-wall distance, measured across the triangle against the walkable
+//!    boundary before any obstruction clip -- is below `2 * radius`
 //!    everywhere in it: a genuinely sub-diameter throat the agent capsule
 //!    cannot pass. Crucially it measures the passage, not per-triangle
 //!    clearance, so a wall-adjacent triangle in a wide corridor keeps the
@@ -28,7 +31,19 @@
 //!    stays connected (its passage is `1.0 m > 2 * radius`) instead of
 //!    collapsing under the reverted wave-6 miter's two-sided offset
 //!    arithmetic, while a genuine 0.5 m gap disconnects. Seam/door protected
-//!    triangles are exempt so authored doorways stay traversable.
+//!    triangles are exempt so authored doorways stay traversable. It measures
+//!    against the *pre-obstruction* boundary on purpose: the clip has already
+//!    accounted for the agent radius once, and charging it twice would
+//!    collapse every authored doorway.
+//! 3. **Connectivity-preserving finalization.** Unchanged from wave 10, and
+//!    now operating on the clipped sub-polygons: a drop that strands a large
+//!    or seam/door-bearing component is un-dropped. This is why the clip emits
+//!    *both* sides of every cut (the unwalkable side flagged, not discarded) --
+//!    un-dropping is a flag flip that can never break the re-triangulation's
+//!    conformity.
+//!
+//! Nothing here is keyed on a placement, a cell, or a coordinate: the rule is
+//! the same geometry applied to every polygon and every static collider.
 //!
 //! The pass also reports, per mesh, the connected-component structure of the
 //! surviving walkable set (over shared triangle edges) so the fragmentation
@@ -41,6 +56,8 @@
 //! triangle inputs below lives in `navmesh.rs`, not here.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use super::nav_clip::{ClipParams, refine_and_clip};
 
 /// Agent capsule radius (metres). Matches `nav::agent::AGENT_RADIUS` and
 /// `player::CAPSULE_RADIUS` (0.35 m); held locally rather than imported,
@@ -66,6 +83,28 @@ pub(crate) const WALL_NORMAL_Y_MAX: f32 = 0.5;
 /// Below it, a component is a legitimate small island (the removed restroom
 /// strip, a genuine sub-diameter alcove) left disconnected.
 const LARGE_ISLAND: usize = 6;
+/// How far (metres, XZ) from a sample a cooked collision surface may sit and
+/// still support it. Cooked static collision is assembled from independently
+/// placed meshes that abut without welding, so hairline seams and T-junctions
+/// between two floor placements are void by the letter of the geometry. This
+/// dilates the supported region enough to close those seams while leaving any
+/// genuine void (an overhang, a missing floor strip) intact -- it is a
+/// numerical-robustness tolerance, not a tuned per-cell value.
+const SUPPORT_SEAM_TOLERANCE: f32 = 0.15;
+/// Refinement rounds the re-triangulation may take before it stops halving
+/// edges, regardless of how much predicate detail remains. Bounds prepare cost
+/// on pathological geometry.
+const MAX_REFINEMENT_ROUNDS: usize = 4;
+/// Target XZ cell size (metres) of the collision broadphase grid. Purely a
+/// query-cost tuning knob: results are identical at any cell size.
+const COLLISION_GRID_CELL: f32 = 1.0;
+/// Upper bound on grid cells per axis, so an unusually large collision extent
+/// coarsens the grid instead of allocating without limit.
+const COLLISION_GRID_MAX_DIM: usize = 512;
+/// A collision triangle covering more grid cells than this is held in a
+/// shared oversized list checked by every query, instead of being written into
+/// every cell it spans.
+const COLLISION_GRID_OVERSIZED_CELLS: usize = 1024;
 
 /// Why a triangle was dropped (`None` = walkable). Tracked so the
 /// connectivity-preserving finalization can un-drop a triangle stranding a
@@ -129,13 +168,35 @@ impl Default for NavClearanceParams {
     }
 }
 
-/// Result of one clearance pass: a per-polygon walkable flag (`false` =
-/// removed by validation, cut by an obstruction, or dropped for insufficient
-/// agent-radius clearance) plus deterministic diagnostic counters, including
-/// the connectivity structure of the surviving walkable set. Vertices are
-/// never moved, so they are not returned.
+/// Result of one clearance pass: the re-triangulated mesh (F171.1/F171.2) plus
+/// a per-output-polygon walkable flag (`false` = clipped away for lacking
+/// collision support, clipped away as inside an obstruction's agent-radius
+/// footprint, or dropped for a sub-diameter authored passage) and
+/// deterministic diagnostic counters, including the connectivity structure of
+/// the surviving walkable set.
+///
+/// Authored vertices keep their original indices and authored polygons that
+/// the clip left whole keep their original polygon index, so caller-side data
+/// keyed by either (door/merge triangle indices, merge edge vertex indices)
+/// stays valid. New vertices and additional sub-polygons are appended.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NavClearanceResult {
+    /// Authored vertices followed by every refinement midpoint and boundary
+    /// crossing the re-triangulation introduced.
+    pub(crate) vertices: Vec<[f32; 3]>,
+    /// The re-triangulated polygon cover, aligned with `walkable`/`reasons`.
+    pub(crate) polygons: Vec<[u32; 3]>,
+    /// For each output polygon, the authored polygon index it came from.
+    pub(crate) sources: Vec<u32>,
+    /// Authored polygons the re-triangulation split into more than one piece.
+    pub(crate) clipped_polygons: usize,
+    /// Vertices the re-triangulation appended.
+    pub(crate) added_vertices: usize,
+    /// Sliver sub-triangles the re-triangulation discarded (F171.5).
+    pub(crate) degenerate_discarded: usize,
+    /// Walkability-predicate evaluations, reported so the pass's cost is
+    /// visible in `prepare` output.
+    pub(crate) predicate_evaluations: usize,
     pub(crate) walkable: Vec<bool>,
     pub(crate) polygon_count: usize,
     /// Polygons dropped by F153.1 (no collision support under them).
@@ -268,6 +329,147 @@ fn tri_aabb(t: &CollisionTriangle) -> TriAabb {
     TriAabb { min, max }
 }
 
+// ---------------------------------------------------------------------
+// Collision broadphase (issue #171): the re-triangulation evaluates the
+// walkability predicate orders of magnitude more often than wave 10's
+// per-triangle tests did, so the linear scans those used are replaced by a
+// uniform XZ grid. Purely a cost structure -- it changes no verdict.
+// ---------------------------------------------------------------------
+
+/// Uniform XZ grid over one cell's cooked static collision, split into the
+/// surfaces that can *support* a point (anything with a non-degenerate XZ
+/// projection) and the wall-like surfaces that can *obstruct* one (binned with
+/// their footprint already expanded by the agent radius, so an obstruction
+/// query only ever reads the sample's own cell).
+struct CollisionIndex<'a> {
+    triangles: &'a [CollisionTriangle],
+    aabbs: Vec<TriAabb>,
+    origin: [f32; 2],
+    cell: f32,
+    dims: [usize; 2],
+    support_cells: Vec<Vec<u32>>,
+    support_oversized: Vec<u32>,
+    wall_cells: Vec<Vec<u32>>,
+    wall_oversized: Vec<u32>,
+}
+
+impl<'a> CollisionIndex<'a> {
+    fn build(triangles: &'a [CollisionTriangle], params: NavClearanceParams) -> Self {
+        let aabbs: Vec<TriAabb> = triangles.iter().map(tri_aabb).collect();
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for aabb in &aabbs {
+            min[0] = min[0].min(aabb.min[0]);
+            min[1] = min[1].min(aabb.min[2]);
+            max[0] = max[0].max(aabb.max[0]);
+            max[1] = max[1].max(aabb.max[2]);
+        }
+        if !min[0].is_finite() {
+            min = [0.0, 0.0];
+            max = [0.0, 0.0];
+        }
+        let span = [
+            (max[0] - min[0]).max(0.0) + 1.0,
+            (max[1] - min[1]).max(0.0) + 1.0,
+        ];
+        let cell = COLLISION_GRID_CELL
+            .max(span[0] / COLLISION_GRID_MAX_DIM as f32)
+            .max(span[1] / COLLISION_GRID_MAX_DIM as f32);
+        let dims = [
+            ((span[0] / cell).ceil() as usize).max(1),
+            ((span[1] / cell).ceil() as usize).max(1),
+        ];
+        let mut index = Self {
+            triangles,
+            aabbs,
+            origin: min,
+            cell,
+            dims,
+            support_cells: vec![Vec::new(); dims[0] * dims[1]],
+            support_oversized: Vec::new(),
+            wall_cells: vec![Vec::new(); dims[0] * dims[1]],
+            wall_oversized: Vec::new(),
+        };
+        for (i, triangle) in triangles.iter().enumerate() {
+            let aabb = index.aabbs[i];
+            let [a, b, c] = triangle.vertices;
+            // Support candidate: any surface with a non-degenerate XZ
+            // projection (a vertical wall projects to a line and can never
+            // support, so it is not binned here).
+            if ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])).abs() > 1.0e-9 {
+                index.insert(i as u32, aabb, 0.0, true);
+            }
+            // Obstruction candidate: wall-like normal, binned with the
+            // agent-radius expansion baked into its footprint.
+            if let Some(normal) = triangle_normal(triangle)
+                && normal[1].abs() < WALL_NORMAL_Y_MAX
+            {
+                index.insert(i as u32, aabb, params.agent_radius, false);
+            }
+        }
+        index
+    }
+
+    fn cell_range(&self, aabb: TriAabb, pad: f32) -> ([usize; 2], [usize; 2]) {
+        let to_cell = |value: f32, origin: f32, dim: usize| {
+            (((value - origin) / self.cell).floor().max(0.0) as usize).min(dim - 1)
+        };
+        (
+            [
+                to_cell(aabb.min[0] - pad, self.origin[0], self.dims[0]),
+                to_cell(aabb.min[2] - pad, self.origin[1], self.dims[1]),
+            ],
+            [
+                to_cell(aabb.max[0] + pad, self.origin[0], self.dims[0]),
+                to_cell(aabb.max[2] + pad, self.origin[1], self.dims[1]),
+            ],
+        )
+    }
+
+    fn insert(&mut self, triangle: u32, aabb: TriAabb, pad: f32, support: bool) {
+        let (lo, hi) = self.cell_range(aabb, pad);
+        let covered = (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1);
+        if covered > COLLISION_GRID_OVERSIZED_CELLS {
+            if support {
+                self.support_oversized.push(triangle);
+            } else {
+                self.wall_oversized.push(triangle);
+            }
+            return;
+        }
+        for gz in lo[1]..=hi[1] {
+            for gx in lo[0]..=hi[0] {
+                let slot = gz * self.dims[0] + gx;
+                if support {
+                    self.support_cells[slot].push(triangle);
+                } else {
+                    self.wall_cells[slot].push(triangle);
+                }
+            }
+        }
+    }
+
+    /// Candidate triangle indices for a point query, as the point's own grid
+    /// cell plus the oversized list.
+    fn candidates(&self, x: f32, z: f32, support: bool) -> (&[u32], &[u32]) {
+        let (cells, oversized) = if support {
+            (&self.support_cells, &self.support_oversized)
+        } else {
+            (&self.wall_cells, &self.wall_oversized)
+        };
+        let gx = ((x - self.origin[0]) / self.cell).floor();
+        let gz = ((z - self.origin[1]) / self.cell).floor();
+        if gx < 0.0 || gz < 0.0 {
+            return (&[], oversized);
+        }
+        let (gx, gz) = (gx as usize, gz as usize);
+        if gx >= self.dims[0] || gz >= self.dims[1] {
+            return (&[], oversized);
+        }
+        (&cells[gz * self.dims[0] + gx], oversized)
+    }
+}
+
 fn polygon_centroid(mesh: &NavClearanceMeshInput, tri: [u32; 3]) -> Option<[f32; 3]> {
     let a = *mesh.vertices.get(tri[0] as usize)?;
     let b = *mesh.vertices.get(tri[1] as usize)?;
@@ -281,35 +483,6 @@ fn polygon_centroid(mesh: &NavClearanceMeshInput, tri: [u32; 3]) -> Option<[f32;
 
 fn edge_key(a: u32, b: u32) -> (u32, u32) {
     if a <= b { (a, b) } else { (b, a) }
-}
-
-/// Boundary edges of the currently-walkable region: an edge referenced by
-/// exactly one walkable polygon.
-fn walkable_boundary_edges(
-    mesh: &NavClearanceMeshInput,
-    walkable: &[bool],
-) -> BTreeSet<(u32, u32)> {
-    let mut counts: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-    for (index, tri) in mesh.polygons.iter().enumerate() {
-        if !walkable.get(index).copied().unwrap_or(false) {
-            continue;
-        }
-        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            *counts.entry(edge_key(a, b)).or_insert(0) += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .filter_map(|(edge, count)| (count == 1).then_some(edge))
-        .collect()
-}
-
-/// Whether `tri` is an interior triangle: none of its three edges lies on the
-/// walkable-region `boundary`.
-fn is_interior_triangle(tri: [u32; 3], boundary: &BTreeSet<(u32, u32)>) -> bool {
-    !boundary.contains(&edge_key(tri[0], tri[1]))
-        && !boundary.contains(&edge_key(tri[1], tri[2]))
-        && !boundary.contains(&edge_key(tri[2], tri[0]))
 }
 
 // ---------------------------------------------------------------------
@@ -335,6 +508,13 @@ pub(crate) fn validate_and_clear(
         let (component_count, largest_component) = connected_components(mesh, &walkable);
         let walkable_count = walkable.iter().filter(|&&w| w).count();
         return NavClearanceResult {
+            vertices: mesh.vertices.clone(),
+            polygons: mesh.polygons.clone(),
+            sources: (0..polygon_count as u32).collect(),
+            clipped_polygons: 0,
+            added_vertices: 0,
+            degenerate_discarded: 0,
+            predicate_evaluations: 0,
             walkable,
             polygon_count,
             removed_unsupported: 0,
@@ -354,74 +534,46 @@ pub(crate) fn validate_and_clear(
     let protected: BTreeSet<u32> = protected_triangle_indices(mesh);
     let protected_count = protected.len();
 
-    // Precompute collision-triangle bounds + normals for broadphase.
-    let aabbs: Vec<TriAabb> = collision.iter().map(tri_aabb).collect();
-    let normals: Vec<Option<[f32; 3]>> = collision.iter().map(triangle_normal).collect();
+    // F171.1/F171.2: re-triangulate the authored mesh against the pointwise
+    // walkability predicate, so the surviving edges lie on the
+    // obstruction/void boundary rather than on authored triangle edges. With
+    // no cooked collision to judge against there is nothing to clip: the
+    // authored mesh passes through untouched (never remove walkable area on
+    // no evidence).
+    let clipped = clip_against_collision(mesh, collision, &protected, params);
+    let clipped_mesh = NavClearanceMeshInput {
+        vertices: clipped.vertices,
+        polygons: clipped.polygons,
+        protected_edges: mesh.protected_edges.clone(),
+    };
+    let mesh = &clipped_mesh;
+    let polygon_count = mesh.polygons.len();
+    let protected: BTreeSet<u32> = protected_triangle_indices(mesh);
 
-    // Per-triangle drop reason (`None` = walkable). Tracked so the
-    // connectivity-preserving finalization below can un-drop a triangle that
+    // Per-polygon drop reason (`None` = walkable). Tracked so the
+    // connectivity-preserving finalization below can un-drop a piece that
     // turns out to strand a large reachable region, and so the final counts
     // reflect only committed drops.
-    let mut reason: Vec<Option<DropReason>> = vec![None; polygon_count];
+    let mut reason: Vec<Option<DropReason>> = clipped.reasons;
 
-    // F153.1: collision-support validation (skipped when no collision).
-    // Protected (seam/door) triangles are exempt so a runtime merge/door link
-    // attachment is never removed out from under the off-mesh link. A triangle
-    // is unsupported only when *every* sampled point (centroid + edge
-    // midpoints) is over a void -- a single point landing in a crack/T-junction
-    // of the cooked collision mesh must not sever a corridor, while a triangle
-    // genuinely over a void (the #164 restroom strip) fails every sample.
-    if !collision.is_empty() {
-        for (index, tri) in mesh.polygons.iter().enumerate() {
-            if protected.contains(&(index as u32)) {
-                continue;
-            }
-            if !triangle_supported(mesh, *tri, collision, &aabbs, params) {
-                reason[index] = Some(DropReason::Unsupported);
-            }
-        }
-    }
-
-    // F153.2: interior-obstruction cutting (skipped when no collision). A tall
-    // (non-step-overable) wall-like collider within the agent radius of an
-    // *interior* triangle cuts it -- a freestanding column/clutter the authored
-    // NAVM ran straight through. Restricted to interior triangles (none of
-    // whose edges is on the walkable boundary): cutting boundary triangles
-    // within a radius of every perimeter wall erodes whole rooms, and (as the
-    // #148 entrance frame showed) a centroid-distance test still misses a frame
-    // whose posts flank a nav triangle's opening -- that class needs per-edge
-    // clearance or local re-triangulation, out of scope this wave. Protected
-    // (seam/door) triangles are exempt.
-    if !collision.is_empty() {
-        let walkable_now = reason.iter().map(Option::is_none).collect::<Vec<_>>();
-        let boundary = walkable_boundary_edges(mesh, &walkable_now);
-        for (index, tri) in mesh.polygons.iter().enumerate() {
-            if reason[index].is_some()
-                || protected.contains(&(index as u32))
-                || !is_interior_triangle(*tri, &boundary)
-            {
-                continue;
-            }
-            let Some(centroid) = polygon_centroid(mesh, *tri) else {
-                continue;
-            };
-            if is_obstructed(centroid, collision, &aabbs, &normals, params) {
-                reason[index] = Some(DropReason::Obstructed);
-            }
-        }
-    }
-
-    // F153.3: sub-diameter disconnection on the validated walkable boundary.
-    // A triangle is dropped only when the *authored passage width* through it
-    // (near-wall distance + far-wall distance, measured across the triangle)
-    // is below `2 * radius` everywhere in it -- a genuinely sub-diameter
-    // throat. Wall-adjacent triangles in a wide passage keep the full passage
-    // width (near-wall 0 + far-wall = width) and are never dropped, so the
-    // walkable region stays connected (no erosion-style fragmentation).
-    // Protected triangles are exempt so authored doorways/seams stay traversable.
+    // F153.3: sub-diameter disconnection, measured against the *authored*
+    // passage. A polygon is dropped only when the passage width through it
+    // (near-wall distance + far-wall distance, measured across it) is below
+    // `2 * radius` everywhere in it -- a genuinely sub-diameter throat.
+    // Wall-adjacent polygons in a wide passage keep the full passage width
+    // (near-wall 0 + far-wall = width) and are never dropped, so the walkable
+    // region stays connected (no erosion-style fragmentation). The boundary
+    // deliberately excludes the obstruction clip's own cuts: that clip has
+    // already charged the agent radius once, and charging it a second time
+    // here would collapse every authored doorway. Void removal *is* included,
+    // because it changes where the floor genuinely ends. Protected polygons
+    // are exempt so authored doorways/seams stay traversable.
     {
-        let walkable_now = reason.iter().map(Option::is_none).collect::<Vec<_>>();
-        let boundary = boundary_segments(mesh, &walkable_now);
+        let authored_extent: Vec<bool> = reason
+            .iter()
+            .map(|r| !matches!(r, Some(DropReason::Unsupported)))
+            .collect();
+        let boundary = boundary_segments(mesh, &authored_extent);
         let min_width = 2.0 * params.agent_radius;
         for (index, tri) in mesh.polygons.iter().enumerate() {
             if reason[index].is_some() || protected.contains(&(index as u32)) {
@@ -436,13 +588,13 @@ pub(crate) fn validate_and_clear(
     // Connectivity-preserving finalization. Validation must strand only small
     // dead-ends (the restroom strip, a genuine sub-diameter alcove), never
     // sever a large reachable region -- a real interior has no large area
-    // gated solely by an unsupported/obstructed/sub-diameter triangle, so a
+    // gated solely by an unsupported/obstructed/sub-diameter polygon, so a
     // large stranded component means a drop misread the geometry. Any drop
     // adjacent to a large non-main component is un-dropped, iterated until only
     // small islands remain disconnected. Determinism: fixed index order.
     restore_large_strands(mesh, &mut reason, &protected);
 
-    let mut walkable = walkable; // shadow the all-true init with committed drops.
+    let mut walkable = vec![true; polygon_count];
     let mut removed_unsupported = 0usize;
     let mut cut_obstructed = 0usize;
     let mut dropped_unfit = 0usize;
@@ -471,6 +623,13 @@ pub(crate) fn validate_and_clear(
     let nonmain_components = nonmain_component_report(mesh, &roots, &sizes);
 
     NavClearanceResult {
+        vertices: clipped_mesh.vertices,
+        polygons: clipped_mesh.polygons,
+        sources: clipped.sources,
+        clipped_polygons: clipped.clipped_polygons,
+        added_vertices: clipped.added_vertices,
+        degenerate_discarded: clipped.degenerate_discarded,
+        predicate_evaluations: clipped.predicate_evaluations,
         walkable,
         polygon_count,
         removed_unsupported,
@@ -484,6 +643,169 @@ pub(crate) fn validate_and_clear(
         baseline_largest_component,
         reasons: reason,
         nonmain_components,
+    }
+}
+
+/// The re-triangulated mesh plus the clip's own per-polygon verdict.
+struct ClippedMesh {
+    vertices: Vec<[f32; 3]>,
+    polygons: Vec<[u32; 3]>,
+    sources: Vec<u32>,
+    reasons: Vec<Option<DropReason>>,
+    clipped_polygons: usize,
+    added_vertices: usize,
+    degenerate_discarded: usize,
+    predicate_evaluations: usize,
+}
+
+/// F171.1/F171.2: re-triangulates `mesh` conformally against the pointwise
+/// walkability predicate -- supported by cooked collision within the agent's
+/// step height, and outside every non-step-overable wall-like collider's
+/// footprint expanded by the agent radius -- and labels each resulting
+/// sub-polygon with the reason it failed, if it did.
+///
+/// The output polygon list is laid out so that authored polygon `i` keeps
+/// index `i` (its first piece occupies that slot); any further pieces are
+/// appended. Authored vertices likewise keep their indices. That is what lets
+/// the caller rewrite a prepared mesh in place without invalidating anything
+/// keyed by a triangle or vertex index.
+fn clip_against_collision(
+    mesh: &NavClearanceMeshInput,
+    collision: &[CollisionTriangle],
+    protected: &BTreeSet<u32>,
+    params: NavClearanceParams,
+) -> ClippedMesh {
+    let polygon_count = mesh.polygons.len();
+    if collision.is_empty() {
+        return ClippedMesh {
+            vertices: mesh.vertices.clone(),
+            polygons: mesh.polygons.clone(),
+            sources: (0..polygon_count as u32).collect(),
+            reasons: vec![None; polygon_count],
+            clipped_polygons: 0,
+            added_vertices: 0,
+            degenerate_discarded: 0,
+            predicate_evaluations: 0,
+        };
+    }
+
+    let index = CollisionIndex::build(collision, params);
+    let footprints = protected_footprints(mesh, protected);
+    let supported = |point: [f32; 3]| is_supported(point, &index, params);
+    let obstructed = |point: [f32; 3]| is_obstructed(point, &index, params);
+    let predicate = |point: [f32; 3]| {
+        in_protected_footprint(point, &footprints) || (supported(point) && !obstructed(point))
+    };
+
+    // Protected (seam/door) polygons' edges are locked: they are never split
+    // and never carry a boundary crossing, so those polygons survive
+    // byte-identical and the door/merge triangle indices keyed to them stay
+    // valid.
+    let mut locked: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for &polygon in protected {
+        if let Some(tri) = mesh.polygons.get(polygon as usize) {
+            locked.insert(edge_key(tri[0], tri[1]));
+            locked.insert(edge_key(tri[1], tri[2]));
+            locked.insert(edge_key(tri[2], tri[0]));
+        }
+    }
+
+    let output = refine_and_clip(
+        &mesh.vertices,
+        &mesh.polygons,
+        &locked,
+        &predicate,
+        ClipParams {
+            resolution: params.agent_radius,
+            max_refinement_rounds: MAX_REFINEMENT_ROUNDS,
+            ..ClipParams::default()
+        },
+    );
+
+    // Lay the pieces out so authored polygon `i` keeps slot `i`.
+    let mut slots: Vec<Option<([u32; 3], u32, bool)>> = vec![None; polygon_count];
+    let mut extra: Vec<([u32; 3], u32, bool)> = Vec::new();
+    let mut pieces_per_source = vec![0usize; polygon_count];
+    for triangle in &output.triangles {
+        let source = triangle.source as usize;
+        if source < polygon_count {
+            pieces_per_source[source] += 1;
+        }
+        let entry = (triangle.vertex_indices, triangle.source, triangle.inside);
+        match slots.get_mut(source) {
+            Some(slot) if slot.is_none() => *slot = Some(entry),
+            _ => extra.push(entry),
+        }
+    }
+
+    let mut polygons = Vec::with_capacity(output.triangles.len());
+    let mut sources = Vec::with_capacity(output.triangles.len());
+    let mut inside_flags = Vec::with_capacity(output.triangles.len());
+    for (slot_index, slot) in slots.into_iter().enumerate() {
+        match slot {
+            Some((tri, source, inside)) => {
+                polygons.push(tri);
+                sources.push(source);
+                inside_flags.push(inside);
+            }
+            // Every piece of this authored polygon was a sliver; keep the slot
+            // occupied by a degenerate placeholder marked unwalkable so the
+            // index layout (and anything keyed by it) stays stable.
+            None => {
+                let tri = mesh.polygons[slot_index];
+                polygons.push(tri);
+                sources.push(slot_index as u32);
+                inside_flags.push(false);
+            }
+        }
+    }
+    for (tri, source, inside) in extra {
+        polygons.push(tri);
+        sources.push(source);
+        inside_flags.push(inside);
+    }
+
+    // Attribute each clipped-away piece to the predicate term that rejected
+    // it, so `prepare`'s diagnostics keep distinguishing a void from an
+    // obstruction.
+    let reasons: Vec<Option<DropReason>> = polygons
+        .iter()
+        .zip(&inside_flags)
+        .map(|(tri, &inside)| {
+            if inside {
+                return None;
+            }
+            let (Some(&a), Some(&b), Some(&c)) = (
+                output.vertices.get(tri[0] as usize),
+                output.vertices.get(tri[1] as usize),
+                output.vertices.get(tri[2] as usize),
+            ) else {
+                return Some(DropReason::Unsupported);
+            };
+            let centroid = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            if supported(centroid) {
+                Some(DropReason::Obstructed)
+            } else {
+                Some(DropReason::Unsupported)
+            }
+        })
+        .collect();
+
+    let clipped_polygons = pieces_per_source.iter().filter(|&&n| n > 1).count();
+    let added_vertices = output.vertices.len() - mesh.vertices.len();
+    ClippedMesh {
+        vertices: output.vertices,
+        polygons,
+        sources,
+        reasons,
+        clipped_polygons,
+        added_vertices,
+        degenerate_discarded: output.degenerate_discarded,
+        predicate_evaluations: output.predicate_evaluations,
     }
 }
 
@@ -539,62 +861,14 @@ fn protected_triangle_indices(mesh: &NavClearanceMeshInput) -> BTreeSet<u32> {
     indices
 }
 
-/// F153.1: is `tri` supported? True when a majority of its sampled points
-/// (centroid + three edge midpoints) have a cooked collision surface under
-/// them -- crack/T-junction tolerant, so a single point falling through a seam
-/// in the cooked collision mesh does not spuriously remove a triangle and
-/// sever a corridor.
-fn triangle_supported(
-    mesh: &NavClearanceMeshInput,
-    tri: [u32; 3],
-    collision: &[CollisionTriangle],
-    aabbs: &[TriAabb],
-    params: NavClearanceParams,
-) -> bool {
-    let (Some(&a), Some(&b), Some(&c)) = (
-        mesh.vertices.get(tri[0] as usize),
-        mesh.vertices.get(tri[1] as usize),
-        mesh.vertices.get(tri[2] as usize),
-    ) else {
-        return true; // invalid index already diagnosed upstream; do not drop.
-    };
-    let mid = |p: [f32; 3], q: [f32; 3]| {
-        [
-            (p[0] + q[0]) * 0.5,
-            (p[1] + q[1]) * 0.5,
-            (p[2] + q[2]) * 0.5,
-        ]
-    };
-    let centroid = [
-        (a[0] + b[0] + c[0]) / 3.0,
-        (a[1] + b[1] + c[1]) / 3.0,
-        (a[2] + b[2] + c[2]) / 3.0,
-    ];
-    let samples = [centroid, mid(a, b), mid(b, c), mid(c, a)];
-    // Supported unless *every* sample is over a void: a triangle is only
-    // removed when it is genuinely, wholly unsupported, never for a single
-    // point falling through a collision-mesh crack/T-junction or a ramp/step
-    // my sampling grazes -- over-removal severs through-corridors. (A narrow
-    // void strip covered by triangles that also reach a supported floor is
-    // deliberately kept: removing such a mostly-supported triangle would need
-    // local re-triangulation, out of scope this wave -- the runtime fall guard
-    // still catches a step onto the overhang.)
-    samples
-        .iter()
-        .any(|&p| is_supported(p, collision, aabbs, params))
-}
-
 /// F153.1: is there a cooked collision surface under `point` within the
 /// agent's step height (and a small margin above)?
-fn is_supported(
-    point: [f32; 3],
-    collision: &[CollisionTriangle],
-    aabbs: &[TriAabb],
-    params: NavClearanceParams,
-) -> bool {
+fn is_supported_exact(point: [f32; 3], index: &CollisionIndex, params: NavClearanceParams) -> bool {
     let low = point[1] - params.step_height;
     let high = point[1] + params.support_above_margin;
-    for (tri, aabb) in collision.iter().zip(aabbs) {
+    let (cell, oversized) = index.candidates(point[0], point[2], true);
+    for &i in cell.iter().chain(oversized) {
+        let aabb = index.aabbs[i as usize];
         if point[0] < aabb.min[0] || point[0] > aabb.max[0] {
             continue;
         }
@@ -604,7 +878,7 @@ fn is_supported(
         if aabb.max[1] < low || aabb.min[1] > high {
             continue;
         }
-        let [a, b, c] = tri.vertices;
+        let [a, b, c] = index.triangles[i as usize].vertices;
         let Some(w) = barycentric_xz(point[0], point[2], a, b, c) else {
             continue;
         };
@@ -616,27 +890,42 @@ fn is_supported(
     false
 }
 
+/// F153.1/F171.2: is `point` supported, allowing for the hairline seams and
+/// T-junctions that cooked collision assembled from independently placed
+/// meshes carries? The supported region is dilated by
+/// [`SUPPORT_SEAM_TOLERANCE`] -- sampled as the point itself plus its four
+/// axis-aligned offsets -- so a seam between two abutting floor placements
+/// never reads as a void, while a genuine void strip (wider than the
+/// tolerance) still does.
+fn is_supported(point: [f32; 3], index: &CollisionIndex, params: NavClearanceParams) -> bool {
+    if is_supported_exact(point, index, params) {
+        return true;
+    }
+    let t = SUPPORT_SEAM_TOLERANCE;
+    [[t, 0.0], [-t, 0.0], [0.0, t], [0.0, -t]]
+        .iter()
+        .any(|offset| {
+            is_supported_exact(
+                [point[0] + offset[0], point[1], point[2] + offset[1]],
+                index,
+                params,
+            )
+        })
+}
+
 /// F153.2: does a wall-like collider the agent *cannot step over* rise into
 /// the agent capsule over `point`, within the agent radius (XZ)? A collider
 /// only obstructs if it occupies some height in `(floor + step_height, floor +
 /// agent_height)` -- one entirely below `floor + step_height` is stepped over
 /// (stair risers, low ledges), one entirely above `floor + agent_height` is
 /// walked under (overheads). Floor/ceiling-like triangles never obstruct.
-fn is_obstructed(
-    point: [f32; 3],
-    collision: &[CollisionTriangle],
-    aabbs: &[TriAabb],
-    normals: &[Option<[f32; 3]>],
-    params: NavClearanceParams,
-) -> bool {
+fn is_obstructed(point: [f32; 3], index: &CollisionIndex, params: NavClearanceParams) -> bool {
     let radius = params.agent_radius;
     let step_top = point[1] + params.step_height;
     let band_high = point[1] + params.agent_height;
-    for ((tri, aabb), normal) in collision.iter().zip(aabbs).zip(normals) {
-        match normal {
-            Some(n) if n[1].abs() < WALL_NORMAL_Y_MAX => {}
-            _ => continue,
-        }
+    let (cell, oversized) = index.candidates(point[0], point[2], false);
+    for &i in cell.iter().chain(oversized) {
+        let aabb = index.aabbs[i as usize];
         // Must rise above the step-over height and reach into the body band.
         if aabb.max[1] <= step_top || aabb.min[1] >= band_high {
             continue;
@@ -647,11 +936,41 @@ fn is_obstructed(
         if point[2] < aabb.min[2] - radius || point[2] > aabb.max[2] + radius {
             continue;
         }
-        if point_triangle_dist_xz(point[0], point[2], tri) < radius {
+        if point_triangle_dist_xz(point[0], point[2], &index.triangles[i as usize]) < radius {
             return true;
         }
     }
     false
+}
+
+/// The protected (seam/door) polygons' own XZ footprints. The walkability
+/// predicate reports every point inside one of these as walkable, so an
+/// authored doorway or inter-mesh seam is never clipped: its polygon survives
+/// byte-identical (keeping the door/merge triangle index valid) and, because
+/// both endpoints of every protected edge are then walkable, no boundary
+/// crossing is ever needed on a protected edge -- which is what lets
+/// `nav_clip` lock those edges without leaving a T-junction.
+fn protected_footprints(
+    mesh: &NavClearanceMeshInput,
+    protected: &BTreeSet<u32>,
+) -> Vec<[[f32; 3]; 3]> {
+    protected
+        .iter()
+        .filter_map(|&index| {
+            let tri = *mesh.polygons.get(index as usize)?;
+            Some([
+                *mesh.vertices.get(tri[0] as usize)?,
+                *mesh.vertices.get(tri[1] as usize)?,
+                *mesh.vertices.get(tri[2] as usize)?,
+            ])
+        })
+        .collect()
+}
+
+fn in_protected_footprint(point: [f32; 3], footprints: &[[[f32; 3]; 3]]) -> bool {
+    footprints
+        .iter()
+        .any(|&[a, b, c]| barycentric_xz(point[0], point[2], a, b, c).is_some())
 }
 
 /// A walkable-boundary edge as a world-space XZ segment plus the unit inward
@@ -879,16 +1198,27 @@ fn main_component_root(sizes: &BTreeMap<usize, usize>) -> Option<usize> {
         .map(|(root, _)| *root)
 }
 
-/// Connectivity-preserving finalization: un-drops any triangle adjacent to a
-/// non-main stranded component that is either *large* (>= [`LARGE_ISLAND`]
-/// polygons) or contains a *protected* seam/door triangle, iterated until only
-/// small, unprotected islands remain disconnected. A large stranded component
-/// is a misread drop (a real interior has no large area gated by a single
-/// unsupported/obstructed/sub-diameter triangle); a protected-containing
-/// stranded component is an inter-mesh merge seam or door that must stay
-/// reachable from the main region regardless of size (the #165/#169 travel
-/// hand-off, and the door-corridor parity route). Protected triangles are
-/// never themselves a drop, so they are not touched.
+/// Connectivity-preserving finalization: un-drops a dropped polygon adjacent
+/// to a non-main stranded component when
+///
+/// - the component contains a *protected* seam/door polygon (any drop reason
+///   may be undone): an inter-mesh merge seam or door must stay reachable from
+///   the main region regardless of size -- the #165/#169 travel hand-off and
+///   the door-corridor parity route; or
+/// - the component is *large* (>= [`LARGE_ISLAND`] polygons) **and** the drop
+///   was a [`DropReason::SubDiameter`] one.
+///
+/// The reason restriction is the issue #171 half of the rule. Wave 10 judged
+/// whole authored triangles, so any drop could plausibly be a misread and the
+/// guard undid all three reasons. The re-triangulation replaced the
+/// support/obstruction verdicts with direct pointwise collision evidence: a
+/// region stranded behind an obstruction clip is stranded because the agent
+/// genuinely cannot fit through, and un-dropping that would put the agent
+/// inside a wall (or over a void) purely to keep a graph connected -- the
+/// steering-around-an-obstruction workaround #148 explicitly rules out. The
+/// sub-diameter test is still an inference from authored width rather than
+/// direct evidence, so it stays rescuable. Protected polygons are never
+/// themselves a drop, so they are not touched.
 fn restore_large_strands(
     mesh: &NavClearanceMeshInput,
     reason: &mut [Option<DropReason>],
@@ -907,12 +1237,19 @@ fn restore_large_strands(
             .filter_map(|&index| roots.get(index as usize).copied())
             .filter(|&root| root != usize::MAX)
             .collect();
+        // Stranded components a *sub-diameter* drop may be undone for, and the
+        // (protected-bearing) subset any drop reason may be undone for.
         let large_stranded: BTreeSet<usize> = sizes
             .iter()
             .filter(|(root, size)| {
                 **root != main && (**size >= LARGE_ISLAND || protected_roots.contains(*root))
             })
             .map(|(root, _)| *root)
+            .collect();
+        let protected_stranded: BTreeSet<usize> = large_stranded
+            .iter()
+            .copied()
+            .filter(|root| protected_roots.contains(root))
             .collect();
         if large_stranded.is_empty() {
             break;
@@ -930,18 +1267,29 @@ fn restore_large_strands(
         }
         let mut restored = false;
         for (index, tri) in mesh.polygons.iter().enumerate() {
-            if reason[index].is_none() {
+            let Some(drop_reason) = reason[index] else {
+                continue;
+            };
+            // A drop backed by direct collision evidence may only be undone to
+            // rescue a protected seam/door; an inferred sub-diameter drop may
+            // also be undone to rescue any large stranded region.
+            let rescuable = if matches!(drop_reason, DropReason::SubDiameter) {
+                &large_stranded
+            } else {
+                &protected_stranded
+            };
+            if rescuable.is_empty() {
                 continue;
             }
-            let adjacent_to_large = [
+            let adjacent = [
                 edge_key(tri[0], tri[1]),
                 edge_key(tri[1], tri[2]),
                 edge_key(tri[2], tri[0]),
             ]
             .iter()
             .flat_map(|edge| edge_owners.get(edge).into_iter().flatten())
-            .any(|&neighbor| large_stranded.contains(&roots[neighbor]));
-            if adjacent_to_large {
+            .any(|&neighbor| rescuable.contains(&roots[neighbor]));
+            if adjacent {
                 reason[index] = None;
                 restored = true;
             }
@@ -996,41 +1344,91 @@ mod tests {
         assert_eq!(result.cut_obstructed, 0);
     }
 
+    /// Whether the clipped, validated result reports `(x, z)` walkable: the
+    /// point-level question the sub-triangle re-triangulation exists to answer.
+    fn walkable_at(result: &NavClearanceResult, x: f32, z: f32) -> bool {
+        result
+            .polygons
+            .iter()
+            .zip(&result.walkable)
+            .any(|(tri, &walkable)| {
+                let (Some(&a), Some(&b), Some(&c)) = (
+                    result.vertices.get(tri[0] as usize),
+                    result.vertices.get(tri[1] as usize),
+                    result.vertices.get(tri[2] as usize),
+                ) else {
+                    return false;
+                };
+                walkable && barycentric_xz(x, z, a, b, c).is_some()
+            })
+    }
+
+    /// Whether `(x0, z0)` and `(x1, z1)` sit in the same walkable connected
+    /// component -- the routability question, over shared polygon edges.
+    fn connected(result: &NavClearanceResult, from: (f32, f32), to: (f32, f32)) -> bool {
+        let mesh = NavClearanceMeshInput {
+            vertices: result.vertices.clone(),
+            polygons: result.polygons.clone(),
+            protected_edges: Vec::new(),
+        };
+        let (roots, _) = label_components(&mesh, &result.walkable);
+        let locate = |x: f32, z: f32| {
+            result
+                .polygons
+                .iter()
+                .enumerate()
+                .find(|(index, tri)| {
+                    let (Some(&a), Some(&b), Some(&c)) = (
+                        result.vertices.get(tri[0] as usize),
+                        result.vertices.get(tri[1] as usize),
+                        result.vertices.get(tri[2] as usize),
+                    ) else {
+                        return false;
+                    };
+                    result.walkable[*index] && barycentric_xz(x, z, a, b, c).is_some()
+                })
+                .map(|(index, _)| roots[index])
+        };
+        match (locate(from.0, from.1), locate(to.0, to.1)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
     #[test]
-    fn a_triangle_over_a_void_is_removed_as_unsupported() {
-        // Floor only reaches x=1.5; polygon 0 = [0,1,2] = (0,0),(4,0),(4,2) has
-        // its centroid and every edge midpoint beyond the floor (nearest at
-        // x=2 > 1.5), so every sample is over the void -> removed. Polygon 1
-        // keeps a supported centroid + corner.
+    fn the_void_boundary_is_clipped_out_of_a_straddling_triangle() {
+        // F171.2 / the #164 restroom-overhang class. The floor only reaches
+        // x = 1.5 while the authored nav quad spans x = 0..4, so every
+        // authored triangle straddles floor and void: no whole-triangle
+        // verdict can express this, but the clip cuts each along the floor's
+        // edge. Supported floor stays walkable, the void does not.
         let mesh = nav_quad(0.0, 4.0, 0.0, 2.0, 0.0);
         let collision = floor(0.0, 1.5, -0.5, 2.5, 0.0);
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.removed_unsupported, 1, "{result:?}");
+        assert!(result.clipped_polygons > 0, "{result:?}");
+        assert!(result.removed_unsupported > 0, "{result:?}");
         assert!(
-            !result.walkable[0],
-            "far triangle over void must be removed"
+            walkable_at(&result, 0.5, 1.0),
+            "supported floor must stay walkable"
+        );
+        assert!(
+            !walkable_at(&result, 3.0, 1.0),
+            "the void must be clipped away"
         );
     }
 
     #[test]
-    fn a_single_missing_floor_triangle_does_not_remove_a_supported_polygon() {
-        // Floor tiled as unit cells with one cell missing under polygon 0's
-        // centroid (~2.67, 1.33): the other samples still land on a floor cell,
-        // so the triangle is kept -- a collision-mesh gap must not sever the
-        // mesh.
-        let mut collision = Vec::new();
-        for gx in -1..5 {
-            for gz in -1..5 {
-                if gx == 2 && gz == 1 {
-                    continue; // the missing cell under polygon 0's centroid.
-                }
-                let (x0, z0) = (gx as f32, gz as f32);
-                collision.extend(floor(x0, x0 + 1.0, z0, z0 + 1.0, 0.0));
-            }
-        }
+    fn a_hairline_collision_seam_does_not_read_as_a_void() {
+        // Cooked static collision is assembled from independently placed
+        // meshes that abut without welding, so hairline seams between floor
+        // placements are void by the letter of the geometry. They must not
+        // punch holes in the nav mesh.
+        let mut collision = floor(-1.0, 1.97, -1.0, 5.0, 0.0);
+        collision.extend(floor(2.03, 5.0, -1.0, 5.0, 0.0));
         let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
         assert_eq!(result.removed_unsupported, 0, "{result:?}");
+        assert!(walkable_at(&result, 2.0, 2.0), "{result:?}");
     }
 
     #[test]
@@ -1067,15 +1465,26 @@ mod tests {
     }
 
     #[test]
-    fn a_tall_interior_collider_cuts_only_the_interior_triangle_it_sits_on() {
+    fn a_tall_interior_collider_is_clipped_out_with_an_agent_radius_margin() {
         let mesh = subdivided_triangle();
         let mut collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
-        // A tall wall stub (rises well above the step height) on the centre.
+        // A tall wall stub (rises well above the step height) inside the room.
         collision.extend(wall(1.2, 1.5, 1.33, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
         assert_eq!(result.removed_unsupported, 0, "{result:?}");
-        assert_eq!(result.cut_obstructed, 1, "{result:?}");
-        assert!(!result.walkable[3], "the interior triangle must be cut");
+        assert!(result.cut_obstructed > 0, "{result:?}");
+        assert!(
+            !walkable_at(&result, 1.35, 1.33),
+            "the stub's own footprint must be clipped away"
+        );
+        assert!(
+            !walkable_at(&result, 1.35, 1.15),
+            "and so must the agent-radius margin around it"
+        );
+        assert!(
+            walkable_at(&result, 0.3, 0.3),
+            "floor a clear distance from the stub must survive: {result:?}"
+        );
     }
 
     #[test]
@@ -1090,15 +1499,70 @@ mod tests {
     }
 
     #[test]
-    fn a_boundary_wall_does_not_cut_perimeter_triangles() {
-        // A tall wall on the boundary of a small room is not cut: cutting
-        // every perimeter-adjacent triangle would erode whole rooms. Only
-        // interior obstructions (a freestanding column) are cut.
-        let mesh = nav_quad(0.0, 4.0, 0.0, 1.0, 0.0);
-        let mut collision = floor(-1.0, 5.0, -1.0, 2.0, 0.0);
-        collision.extend(wall(1.1, 1.5, 0.5, 0.0, 2.0));
+    fn a_perimeter_wall_erodes_only_an_agent_radius_strip() {
+        // A room whose nav mesh runs up to its own perimeter wall keeps
+        // everything an agent radius clear of it. Wave 10 could only choose
+        // between cutting a whole perimeter triangle (eroding whole rooms) and
+        // cutting nothing; the clip takes exactly the strip the capsule cannot
+        // occupy, and the room stays one connected component.
+        let mesh = nav_quad(0.0, 4.0, 0.0, 2.0, 0.0);
+        let mut collision = floor(-1.0, 5.0, -1.0, 3.0, 0.0);
+        collision.extend(wall(-1.0, 5.0, 0.0, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.cut_obstructed, 0, "{result:?}");
+        assert!(
+            !walkable_at(&result, 2.0, 0.2),
+            "the strip against the wall must be clipped"
+        );
+        assert!(
+            walkable_at(&result, 2.0, 1.5),
+            "the rest of the room must survive: {result:?}"
+        );
+        assert_eq!(result.component_count, 1, "{result:?}");
+    }
+
+    #[test]
+    fn posts_flanking_a_triangles_opening_leave_a_wide_enough_passage_connected() {
+        // F171.1 / the #148 metro-entrance class: two posts flank an opening
+        // *inside* a nav triangle, so the triangle's centroid stays clear and
+        // no whole-triangle test can see them. The gap between them is 1.4 m --
+        // wider than the 0.7 m agent diameter -- so the clip must leave a
+        // passage that still connects the two sides.
+        let mesh = nav_quad(0.0, 6.0, 0.0, 6.0, 0.0);
+        let mut collision = floor(-1.0, 7.0, -1.0, 7.0, 0.0);
+        collision.extend(wall(0.0, 2.3, 3.0, 0.0, 2.0));
+        collision.extend(wall(3.7, 6.0, 3.0, 0.0, 2.0));
+        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        assert!(result.cut_obstructed > 0, "{result:?}");
+        assert!(
+            walkable_at(&result, 3.0, 3.0),
+            "the gap between the posts must stay walkable: {result:?}"
+        );
+        assert!(
+            connected(&result, (3.0, 1.0), (3.0, 5.0)),
+            "the two sides must stay connected through the gap: {result:?}"
+        );
+    }
+
+    #[test]
+    fn posts_flanking_a_triangles_opening_disconnect_a_sub_diameter_passage() {
+        // The same geometry with a 0.5 m gap -- narrower than the agent
+        // diameter. The clip closes it, and the two sides are honestly
+        // unreachable from one another rather than being reconnected by the
+        // connectivity guard: a route across is `unreachable` at query time
+        // instead of wedging an agent in the frame.
+        let mesh = nav_quad(0.0, 6.0, 0.0, 6.0, 0.0);
+        let mut collision = floor(-1.0, 7.0, -1.0, 7.0, 0.0);
+        collision.extend(wall(0.0, 2.75, 3.0, 0.0, 2.0));
+        collision.extend(wall(3.25, 6.0, 3.0, 0.0, 2.0));
+        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        assert!(
+            !walkable_at(&result, 3.0, 3.0),
+            "a sub-diameter gap must close: {result:?}"
+        );
+        assert!(
+            !connected(&result, (3.0, 1.0), (3.0, 5.0)),
+            "the two sides must not stay connected: {result:?}"
+        );
     }
 
     /// A corridor along X of `half_widths.len()` stations, centred on z=1,
