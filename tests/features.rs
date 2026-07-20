@@ -362,6 +362,12 @@ mod item_rules {
 #[path = "../src/viewer/world_items/drop_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod drop_policy;
+
+// Console transcript/history policy is std-only so the executable feature
+// suite drives the same bounded clear semantics as the Bevy frontend.
+#[path = "../src/console/openmw_ui/mod.rs"]
+#[allow(dead_code, unused_imports)]
+mod console_openmw_ui;
 // `viewer::interaction::item_use` (issue #99) is dependency-free (std only,
 // no Bevy) like `item_rules`, so it is included verbatim too.
 #[path = "../src/viewer/interaction/item_use.rs"]
@@ -838,6 +844,10 @@ struct BevyoutWorld {
     // -- nav_locomotion.feature (issue #188) --
     nav_locomotion_state: locomotion::LocomotionState,
     nav_locomotion_changed: bool,
+
+    // -- console_qol.feature (issue #201) --
+    console_history: console_openmw_ui::CommandHistory,
+    console_transcript: console_openmw_ui::ConsoleTranscript,
 }
 
 fn find_placement<'a>(
@@ -11188,5 +11198,80 @@ async fn then_polygon_is_reported_unreported(
     assert!(
         unreported.contains(&(mesh_form_id, index, blocker_form_id)),
         "{unreported:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// console_qol.feature (issue #201)
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^console history contains \"([^\"]*)\"$"#)]
+async fn given_console_history(world: &mut BevyoutWorld, commands: String) {
+    world.console_history =
+        console_openmw_ui::CommandHistory::from_entries(commands.split(',').map(str::to_owned));
+}
+
+#[given(regex = r#"^the console transcript contains \"([^\"]*)\"$"#)]
+async fn given_console_transcript(world: &mut BevyoutWorld, lines: String) {
+    for line in lines.split(',') {
+        world.console_transcript.push(line);
+    }
+}
+
+#[given("an empty console transcript")]
+async fn given_empty_console_transcript(world: &mut BevyoutWorld) {
+    world.console_transcript.clear();
+}
+
+#[when(regex = r#"^the console submission \"([^\"]*)\" is applied$"#)]
+async fn when_console_submission_applied(world: &mut BevyoutWorld, command: String) {
+    world.console_history.record(&command);
+    if console_openmw_ui::is_clear_submission(&command) {
+        world.console_transcript.clear();
+    }
+}
+
+#[when(regex = r"^(\d+) numbered console lines are appended$")]
+async fn when_numbered_console_lines_appended(world: &mut BevyoutWorld, count: usize) {
+    for index in 0..count {
+        world.console_transcript.push(format!("line {index}"));
+    }
+}
+
+#[then("the console transcript is empty")]
+async fn then_console_transcript_empty(world: &mut BevyoutWorld) {
+    assert!(world.console_transcript.is_empty());
+}
+
+#[then(regex = r#"^console history is \"([^\"]*)\"$"#)]
+async fn then_console_history_is(world: &mut BevyoutWorld, commands: String) {
+    assert_eq!(
+        world
+            .console_history
+            .entries()
+            .collect::<Vec<_>>()
+            .join(","),
+        commands
+    );
+}
+
+#[then(regex = r"^the console transcript contains (\d+) lines$")]
+async fn then_console_transcript_line_count(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(world.console_transcript.len(), count);
+}
+
+#[then(regex = r#"^the first retained console line is \"([^\"]*)\"$"#)]
+async fn then_first_retained_console_line(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.console_transcript.lines().next(),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r#"^the last retained console line is \"([^\"]*)\"$"#)]
+async fn then_last_retained_console_line(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.console_transcript.lines().last(),
+        Some(expected.as_str())
     );
 }
