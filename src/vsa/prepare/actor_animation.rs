@@ -10,8 +10,24 @@ use bevyout_core::actor_animation::{
 
 pub(crate) const ACTOR_ANIMATION_CATALOG_REVISION: &str =
     "actor-animations-v3-normalized-runtime-contract";
-pub(crate) const ACTOR_ANIMATION_CONVERTER_REVISION: &str =
+pub(crate) const ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION: &str =
+    "nifty-native-kf-clip-pack-v4-bspline-source-metadata";
+pub(crate) const ACTOR_ANIMATION_BLENDER_CONVERTER_REVISION: &str =
     "niftools-external-kf-clip-pack-v6-source-metadata";
+
+pub(crate) const fn actor_animation_converter_revision(
+    backend: crate::converter_policy::ActorAnimationBackend,
+) -> &'static str {
+    match backend {
+        crate::converter_policy::ActorAnimationBackend::Native => {
+            ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION
+        }
+        crate::converter_policy::ActorAnimationBackend::Blender => {
+            ACTOR_ANIMATION_BLENDER_CONVERTER_REVISION
+        }
+        crate::converter_policy::ActorAnimationBackend::Disabled => "disabled",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActorAnimationCatalogArtifact {
@@ -29,6 +45,7 @@ pub(crate) struct ActorAnimationConversionSummary {
 
 pub(crate) struct ActorAnimationConversionContext<'a> {
     pub(crate) converter: crate::converter_policy::ActorAnimationBackend,
+    pub(crate) converter_revision: &'static str,
     pub(crate) blender: Option<&'a Path>,
     pub(crate) data_root: &'a Path,
     pub(crate) archives: &'a [crate::vsa::bsa::BsaArchive],
@@ -251,6 +268,7 @@ fn mark_conversion_not_requested(catalog: &mut PreparedActorAnimationCatalog) {
 
 fn stage_pack_job(
     set: &mut PreparedActorAnimationSet,
+    converter_revision: &'static str,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     staging_dir: &Path,
@@ -294,7 +312,7 @@ fn stage_pack_job(
         .map(|(_, name, path, bytes)| (name.as_str(), path.as_str(), bytes.as_slice()))
         .collect::<Vec<_>>();
     let identity = actor_animation_pack_fingerprint(
-        ACTOR_ANIMATION_CONVERTER_REVISION,
+        converter_revision,
         &set.skeleton_path,
         &skeleton_bytes,
         &identity_inputs,
@@ -321,7 +339,7 @@ fn stage_pack_job(
     let report = assets_dir.join(format!("{identity}.animations.json"));
     Ok(Some((
         ActorAnimationPackJob {
-            revision: ACTOR_ANIMATION_CONVERTER_REVISION.to_owned(),
+            revision: converter_revision.to_owned(),
             skeleton_path: set.skeleton_path.clone(),
             skeleton,
             clips,
@@ -338,9 +356,7 @@ fn apply_pack_report(
     identity: &str,
     report: &ActorAnimationPackReport,
 ) -> Result<()> {
-    if report.revision != ACTOR_ANIMATION_CONVERTER_REVISION
-        || report.skeleton_path != set.skeleton_path
-    {
+    if report.revision != job.revision || report.skeleton_path != set.skeleton_path {
         bail!("actor animation report identity does not match its catalog set");
     }
     if let Some(error) = &report.pack_error {
@@ -468,6 +484,7 @@ pub(crate) fn convert_actor_animation_catalog(
     for index in 0..catalog.animation_sets.len() {
         let Some((job, identity)) = stage_pack_job(
             &mut catalog.animation_sets[index],
+            context.converter_revision,
             context.data_root,
             context.archives,
             context.staging_dir,
@@ -526,13 +543,21 @@ pub(crate) fn convert_actor_animation_catalog(
             .iter()
             .map(|(_, job, _)| job.clone())
             .collect::<Vec<_>>();
-        run_actor_animation_batch(
-            context
-                .blender
-                .context("Blender backend was selected but no executable was resolved")?,
-            &jobs,
-            context.staging_dir,
-        )?;
+        match context.converter {
+            crate::converter_policy::ActorAnimationBackend::Native => {
+                run_native_actor_animation_batch(&jobs)?;
+            }
+            crate::converter_policy::ActorAnimationBackend::Blender => {
+                run_actor_animation_batch(
+                    context
+                        .blender
+                        .context("Blender backend was selected but no executable was resolved")?,
+                    &jobs,
+                    context.staging_dir,
+                )?;
+            }
+            crate::converter_policy::ActorAnimationBackend::Disabled => unreachable!(),
+        }
         for (index, job, identity) in pending {
             let report = read_actor_animation_report(&job.report)?;
             apply_pack_report(&mut catalog.animation_sets[index], &job, &identity, &report)?;
@@ -611,6 +636,9 @@ mod tests {
             &mut catalog,
             &ActorAnimationConversionContext {
                 converter: crate::converter_policy::ActorAnimationBackend::Disabled,
+                converter_revision: actor_animation_converter_revision(
+                    crate::converter_policy::ActorAnimationBackend::Disabled,
+                ),
                 blender: None,
                 data_root: Path::new("unused-data"),
                 archives: &[],

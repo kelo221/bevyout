@@ -70,9 +70,9 @@ use super::assets::{
     RootTransformPolicy, actor_animation_pack_fingerprint, asset_conversion, audit_glb_visuals,
     canonical_actor_assembly, content_addressed_glb_name, convert_staged_textures, find_blender,
     load_archives, read_actor_animation_report, read_glb_animation_sound_cues, resolve_asset,
-    root_transform_policy, run_actor_animation_batch, run_blender_batch, stage_textures,
-    validate_actor_animation_glb, validate_actor_glb, validate_asset_cache_pair,
-    validate_glb_images,
+    root_transform_policy, run_actor_animation_batch, run_blender_batch,
+    run_native_actor_animation_batch, stage_textures, validate_actor_animation_glb,
+    validate_actor_glb, validate_asset_cache_pair, validate_glb_images,
 };
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{

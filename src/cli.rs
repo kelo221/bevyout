@@ -100,6 +100,7 @@ pub(crate) enum PrepareConverter {
 pub(crate) enum ActorAnimationConverter {
     #[default]
     Disabled,
+    Native,
     Blender,
 }
 
@@ -141,6 +142,7 @@ impl std::fmt::Display for ActorAnimationConverter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let backend = match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
             Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         };
         formatter.write_str(backend.as_str())
@@ -151,6 +153,7 @@ impl ActorAnimationConverter {
     pub(crate) const fn backend(self) -> crate::converter_policy::ActorAnimationBackend {
         match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
             Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         }
     }
@@ -230,8 +233,8 @@ pub struct PrepareArgs {
     /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
     #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
     pub(crate) converter: PrepareConverter,
-    /// External-KF clip-pack backend. Disabled by default so native prepare
-    /// never requires Blender; select `blender` for the compatibility spike.
+    /// External-KF clip-pack backend. Disabled by default; select `native` to
+    /// decode KF files with Nifty or `blender` for the NIFTools comparison path.
     #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
     pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.

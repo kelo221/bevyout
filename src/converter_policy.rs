@@ -11,6 +11,7 @@ pub(crate) enum ConverterBackend {
 pub(crate) enum ActorAnimationBackend {
     #[default]
     Disabled,
+    Native,
     Blender,
 }
 
@@ -18,6 +19,7 @@ impl ActorAnimationBackend {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::Native => "native",
             Self::Blender => "blender",
         }
     }
@@ -66,6 +68,9 @@ pub(crate) fn prepare_converter_identity(
         ActorAnimationBackend::Disabled => format!(
             "{scene_converter_revision}+actor-animation=disabled@{actor_animation_catalog_revision}"
         ),
+        ActorAnimationBackend::Native => format!(
+            "{scene_converter_revision}+actor-animation=native@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
+        ),
         ActorAnimationBackend::Blender => format!(
             "{scene_converter_revision}+actor-animation=blender@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
         ),
@@ -103,5 +108,14 @@ mod tests {
             ),
             "a Blender-only converter change must not invalidate disabled preparation"
         );
+        let native = prepare_converter_identity(
+            "native-scene-v1",
+            ActorAnimationBackend::Native,
+            "actor-catalog-v1",
+            "actor-kf-native-v1",
+        );
+        assert_ne!(native, disabled);
+        assert_ne!(native, blender);
+        assert!(native.contains("actor-animation=native@actor-catalog-v1+actor-kf-native-v1"));
     }
 }

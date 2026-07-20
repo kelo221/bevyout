@@ -210,3 +210,19 @@ appropriate for keeping those contracts aligned.
   (`bound_targets=48`, 16 clips, no missing targets); the bridge probe exposes
   the bound-target count so this regression cannot hide behind catalog
   metadata again.
+- **A10 — Native Nifty KF bridge (continuation).** Added an explicit
+  `--actor-animation-converter native` backend. It reuses the pinned
+  `native-fo3-glb` Nifty parser/GLB encoder for scene and skeleton assets, then
+  supplies the external-KF skeleton hierarchy and sequence metadata that KF
+  files do not carry as scene roots. The adapter also tolerates the four-byte
+  Bethesda sequence tail that the current Nifty typed decoder rejects, while
+  retaining authored targets, loop mode, accumulation root, and text keys.
+  A real Super-Duper Mart prepare with the native backend produced 1,380 ready
+  clips and 32 explicit failures (27 zero-channel clips also fail in the
+  Blender comparison; five are legacy 20.0.0.4 KFs outside Nifty's FO3
+  20.2.0.7 contract). The adapter decodes compact B-spline transform control
+  points into deterministic GLB channels, so those clips no longer disappear.
+  Native live-zoo startup loaded all 1,380 ready clips with
+  `bound_targets=67`; viewport captures show a coherent humanoid pose. Native
+  KF conversion remains explicit and does not silently invoke Blender; no
+  external repository was modified or published by this continuation.

@@ -198,7 +198,7 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
         selected_scene_converter_revision,
         selected_actor_animation_backend,
         ACTOR_ANIMATION_CATALOG_REVISION,
-        ACTOR_ANIMATION_CONVERTER_REVISION,
+        actor_animation_converter_revision(selected_actor_animation_backend),
     );
     if args.check_fingerprints {
         return report_fingerprints(
@@ -951,6 +951,7 @@ fn prepare_cell(
     )?;
     let conversion_context = ActorAnimationConversionContext {
         converter: actor_animation_backend,
+        converter_revision: actor_animation_converter_revision(actor_animation_backend),
         blender: blender.as_deref(),
         data_root: &data_root,
         archives: &session.archives,

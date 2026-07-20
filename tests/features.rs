@@ -9148,6 +9148,7 @@ async fn given_no_actor_animation_converter(world: &mut BevyoutWorld) {
 async fn given_actor_animation_converter(world: &mut BevyoutWorld, converter: String) {
     world.requested_actor_animation_converter = Some(match converter.as_str() {
         "disabled" => converter_policy::ActorAnimationBackend::Disabled,
+        "native" => converter_policy::ActorAnimationBackend::Native,
         "blender" => converter_policy::ActorAnimationBackend::Blender,
         other => panic!("unknown actor animation converter {other:?}"),
     });

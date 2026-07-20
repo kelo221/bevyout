@@ -19,6 +19,14 @@ Feature: Explicit actor animation compatibility conversion
     And the selected actor animation converter is "blender"
     And actor animation preparation requires Blender
 
+  Scenario: Native clip packs use Nifty without resolving Blender
+    Given no scene converter is requested for actor animation preparation
+    And the "native" actor animation converter is requested
+    When the actor animation converter selections are resolved
+    Then the selected scene converter is "native"
+    And the selected actor animation converter is "native"
+    And actor animation preparation does not require Blender
+
   Scenario: A validated warm clip pack is reused
     Given an actor animation clip pack has an output and report that both validate
     And actor animation clip-pack rebuild is not requested

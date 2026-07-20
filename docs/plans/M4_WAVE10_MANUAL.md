@@ -15,12 +15,22 @@ is intentionally expensive (about 17 minutes, 147 MiB output, and 6.65 GiB
 peak RSS on the acceptance machine); subsequent prepares validate and reuse
 it.
 
+If running from an isolated worktree, Fallout 3 configuration is not inherited
+from another checkout. Either pass `--game-root "<Fallout 3 goty>"` to every
+`prepare` command below, or point `--config` at a config file containing the
+`[fallout3] game_root` and `plugin = "Fallout3.esm"` entries. On the acceptance
+machine that is:
+
+```powershell
+--config /Users/simon/projects/bevyout/.bevyout/config.toml
+```
+
 ## A. Default native preparation does not invoke Blender
 
 1. Run:
 
    ```powershell
-   cargo run-dev -- prepare SuperDuperMart --converter native
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native
    ```
 
 2. **Expected:** preparation succeeds without resolving Blender. The actor
@@ -34,7 +44,7 @@ it.
 1. Run:
 
    ```powershell
-   cargo run-dev -- prepare SuperDuperMart --converter native --actor-animation-converter blender
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter blender
    ```
 
 2. **Expected on the first run:**
@@ -46,12 +56,39 @@ it.
    the inner summary instead reports `packs built 0, reused 1`; either result
    proves the validated warm artifact was not rebuilt.
 
+## B2. Build the native Nifty KF pack (no Blender)
+
+1. Run:
+
+   ```powershell
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter native
+   ```
+
+2. **Expected:** the command never resolves Blender and reports 1,380 ready
+   clips, one native pack built on a cold cache, and 32 failed clips. The
+   failures are explicit: 27 zero-channel actions and five legacy 20.0.0.4 KF
+   files rejected by the FO3 20.2.0.7 parser. Compact B-spline transform
+   channels are decoded natively. A warm rerun
+   validates/reuses the native pack.
+
+3. Launch the same native pack:
+
+   ```powershell
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --start-clip 1hpequip --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
+   ```
+
+   **Expected:** the startup log/probe reports `clips=1380`, `skipped=32`,
+   `bound_targets=67`, and `error: null`; the actor remains coherent while
+   cycling native clips. This proves the Nifty path is live independently of
+   the Blender comparison pack. The five legacy clips remain explicitly
+   rejected because they are not FO3 20.2.0.7 assets.
+
 ## C. See and control a real humanoid KF
 
 1. Launch raider reference `00041600` at its pistol-equip clip:
 
    ```powershell
-   cargo run-dev -- animation-zoo SuperDuperMart --actor 00041600 --start-clip 1hpequip --agent-bridge --agent-port 15702
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --start-clip 1hpequip --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
    ```
 
 2. **Expected within about one second:** the window shows `LvlRaiderGun`,
@@ -88,7 +125,7 @@ it.
    compatibility backend:
 
    ```powershell
-   cargo run-dev -- prepare 00024511 --converter native --actor-animation-converter blender
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare 00024511 --converter native --actor-animation-converter blender
    ```
 
 2. **Expected:** the summary reports 17 actor mappings, two sets, 1,401 ready
@@ -97,7 +134,7 @@ it.
 3. Launch Radroach reference `0005443b` at a real attack clip:
 
    ```powershell
-   cargo run-dev -- animation-zoo 00024511 --actor 0005443b --start-clip h2hattackleft --agent-bridge --agent-port 15702
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo 00024511 --actor 0005443b --start-clip h2hattackleft --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
    ```
 
 4. **Expected:** the window shows `CG04Radroach`, 16 clips, zero skipped, and
@@ -115,7 +152,7 @@ it.
 1. Exit the zoo and run:
 
    ```powershell
-   cargo run-dev -- animation-zoo SuperDuperMart --actor 0006d921
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 0006d921 --cache-dir .bevyout/cache
    ```
 
 2. **Expected:** startup fails clearly with `actor animation set has no clip
