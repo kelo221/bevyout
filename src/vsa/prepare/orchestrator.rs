@@ -1019,13 +1019,23 @@ fn prepare_cell(
     // manifest-carried hash/revision against.
     let (package_catalog_path_relative, _package_catalog_hash) =
         write_package_catalog(&cache_dir, &package_catalog)?;
+    // M4 wave 11 follow-up: real-data acceptance on cell 0001a273 found the
+    // original 4-counter line was 100% noise (3021/3021 packages tripped
+    // "unsupported subrecord"; 2356/718 "unresolved" were almost entirely
+    // out-of-scope PLDT/PTDT FormIDs, not dangling links). `deferred_*`/
+    // `out_of_scope_*` carry that volume separately from the two counters
+    // that remain genuine signal -- see `package_catalog.rs`'s module doc
+    // comment for the measured breakdown.
     let package_catalog_summary = format!(
-        "package catalog: {} packages, {} unsupported type, {} unsupported subrecord, {} unresolved location, {} unresolved target -> {}",
+        "package catalog: {} packages, {} unsupported type, {} unsupported subrecord, {} deferred subrecord, {} unresolved location, {} unresolved target, {} out-of-scope location, {} out-of-scope target -> {}",
         package_catalog.counters.total,
         package_catalog.counters.unsupported_type,
         package_catalog.counters.unsupported_subrecord,
+        package_catalog.counters.deferred_subrecord,
         package_catalog.counters.unresolved_location,
         package_catalog.counters.unresolved_target,
+        package_catalog.counters.out_of_scope_location,
+        package_catalog.counters.out_of_scope_target,
         package_catalog_path_relative
     );
     diagnostics.push(Diagnostic {

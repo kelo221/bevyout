@@ -9678,14 +9678,18 @@ async fn then_package_diagnostic_containing(
 }
 
 #[then(
-    regex = r"^the package catalog counts unsupported_type (\d+) unsupported_subrecord (\d+) unresolved_location (\d+) unresolved_target (\d+)$"
+    regex = r"^the package catalog counts unsupported_type (\d+) unsupported_subrecord (\d+) deferred_subrecord (\d+) unresolved_location (\d+) unresolved_target (\d+) out_of_scope_location (\d+) out_of_scope_target (\d+)$"
 )]
+#[allow(clippy::too_many_arguments)]
 async fn then_package_catalog_counts(
     world: &mut BevyoutWorld,
     unsupported_type: usize,
     unsupported_subrecord: usize,
+    deferred_subrecord: usize,
     unresolved_location: usize,
     unresolved_target: usize,
+    out_of_scope_location: usize,
+    out_of_scope_target: usize,
 ) {
     let catalog = world
         .package_catalog_result
@@ -9696,6 +9700,12 @@ async fn then_package_catalog_counts(
         catalog.counters.unsupported_subrecord,
         unsupported_subrecord
     );
+    assert_eq!(catalog.counters.deferred_subrecord, deferred_subrecord);
     assert_eq!(catalog.counters.unresolved_location, unresolved_location);
     assert_eq!(catalog.counters.unresolved_target, unresolved_target);
+    assert_eq!(
+        catalog.counters.out_of_scope_location,
+        out_of_scope_location
+    );
+    assert_eq!(catalog.counters.out_of_scope_target, out_of_scope_target);
 }
