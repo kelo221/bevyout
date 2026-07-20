@@ -187,6 +187,12 @@ mod ledger_policy;
 #[allow(dead_code, unused_imports)]
 mod movement_policy;
 
+// `viewer::nav::locomotion` (issue #188) is std-only, same flat top-level
+// include rationale as `movement_policy`/`fall_guard` above.
+#[path = "../src/viewer/nav/locomotion.rs"]
+#[allow(dead_code, unused_imports)]
+mod locomotion;
+
 #[path = "../src/converter_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod converter_policy;
@@ -814,6 +820,10 @@ struct BevyoutWorld {
     nav_derived_door_meshes: Vec<nav_doors::BlockerMeshInput>,
     nav_derived_door_associations: Option<Vec<nav_doors::DerivedDoorAssociation>>,
     nav_approach_observation: Option<door_link::ApproachObservation>,
+
+    // -- nav_locomotion.feature (issue #188) --
+    nav_locomotion_state: locomotion::LocomotionState,
+    nav_locomotion_changed: bool,
 }
 
 fn find_placement<'a>(
@@ -10644,5 +10654,124 @@ async fn then_approach_gate(world: &mut BevyoutWorld, outcome: String) {
         door_link::approach_gate(observation),
         outcome == "fires",
         "{observation:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_locomotion.feature (issue #188): the pure achieved-motion ->
+// locomotion-clip policy that drives a nav-bound actor's animation.
+// ---------------------------------------------------------------------
+
+fn parse_locomotion_state(label: &str) -> locomotion::LocomotionState {
+    match label {
+        "idle" => locomotion::LocomotionState::Idle,
+        "walk" => locomotion::LocomotionState::Walk,
+        "run" => locomotion::LocomotionState::Run,
+        "turn_left" => locomotion::LocomotionState::TurnLeft,
+        "turn_right" => locomotion::LocomotionState::TurnRight,
+        other => panic!("unknown locomotion state {other:?}"),
+    }
+}
+
+fn step_locomotion(
+    world: &mut BevyoutWorld,
+    observation: locomotion::LocomotionObservation,
+) -> locomotion::LocomotionState {
+    let previous = world.nav_locomotion_state;
+    let next = locomotion::next_locomotion_state(previous, observation);
+    if next != previous {
+        world.nav_locomotion_changed = true;
+    }
+    world.nav_locomotion_state = next;
+    next
+}
+
+#[given(regex = r"^a bound actor currently in the (\w+) locomotion state$")]
+async fn given_locomotion_state(world: &mut BevyoutWorld, state: String) {
+    world.nav_locomotion_state = parse_locomotion_state(&state);
+    world.nav_locomotion_changed = false;
+}
+
+#[when(regex = r"^its achieved horizontal speed is ([\d.]+) metres per second$")]
+async fn when_locomotion_speed(world: &mut BevyoutWorld, speed: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: speed,
+            yaw_rate: 0.0,
+        },
+    );
+}
+
+#[when(regex = r"^it is stationary and its yaw rate is (-?[\d.]+) radians per second$")]
+async fn when_locomotion_yaw(world: &mut BevyoutWorld, yaw_rate: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: 0.0,
+            yaw_rate,
+        },
+    );
+}
+
+#[when(
+    regex = r"^its achieved horizontal speed is ([\d.]+) metres per second and its yaw rate is (-?[\d.]+) radians per second$"
+)]
+async fn when_locomotion_speed_and_yaw(world: &mut BevyoutWorld, speed: f32, yaw_rate: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: speed,
+            yaw_rate,
+        },
+    );
+}
+
+#[when(regex = r"^navigation desires ([\d.]+) metres per second but the KCC achieves ([\d.]+)$")]
+async fn when_locomotion_wedged(world: &mut BevyoutWorld, _desired: f32, achieved: f32) {
+    // The desired speed is deliberately not an input to the policy: a
+    // wedged agent must not stride on the spot. Accepting it here and
+    // discarding it keeps that fact visible in the scenario.
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: achieved,
+            yaw_rate: 0.0,
+        },
+    );
+}
+
+#[when(
+    regex = r"^its achieved horizontal speed oscillates (\d+) times between ([\d.]+) and ([\d.]+) metres per second$"
+)]
+async fn when_locomotion_oscillates(world: &mut BevyoutWorld, cycles: u32, low: f32, high: f32) {
+    for _ in 0..cycles {
+        for speed in [low, high] {
+            step_locomotion(
+                world,
+                locomotion::LocomotionObservation {
+                    achieved_horizontal_speed: speed,
+                    yaw_rate: 0.0,
+                },
+            );
+        }
+    }
+}
+
+#[then(regex = r"^its locomotion state becomes (\w+)$")]
+async fn then_locomotion_state(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.nav_locomotion_state,
+        parse_locomotion_state(&expected),
+        "locomotion state"
+    );
+}
+
+#[then(regex = r"^its locomotion state never changed$")]
+async fn then_locomotion_never_changed(world: &mut BevyoutWorld) {
+    assert!(
+        !world.nav_locomotion_changed,
+        "the locomotion state flapped: {:?}",
+        world.nav_locomotion_state
     );
 }
