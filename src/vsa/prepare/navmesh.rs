@@ -500,6 +500,50 @@ pub(crate) fn apply_nav_clearance(
         };
         let result = validate_and_clear(&input, collision, params);
 
+        // Per-drop centroid diagnostics (Bevy-metre world space): exactly
+        // which triangles the pass dropped and why, so a corridor/route
+        // regression is locatable from the prepared manifest without a viewer.
+        for (index, reason) in result.reasons.iter().enumerate() {
+            let Some(reason) = reason else { continue };
+            let tri = mesh.polygons[index].vertex_indices;
+            let (Some(&a), Some(&b), Some(&c)) = (
+                mesh.vertices.get(tri[0] as usize),
+                mesh.vertices.get(tri[1] as usize),
+                mesh.vertices.get(tri[2] as usize),
+            ) else {
+                continue;
+            };
+            let centroid = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: format!(
+                    "nav clearance drop mesh {:08x} polygon {} {} at ({:.2}, {:.2}, {:.2})",
+                    mesh.form_id,
+                    index,
+                    reason.label(),
+                    centroid[0],
+                    centroid[1],
+                    centroid[2],
+                ),
+            });
+        }
+
+        // Non-main (stranded) walkable islands: size + a world-space centroid,
+        // so a disconnected corridor/room is locatable from the manifest.
+        for (size, centroid) in &result.nonmain_components {
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: format!(
+                    "nav clearance island mesh {:08x}: {} polygon(s) near ({:.2}, {:.2}, {:.2})",
+                    mesh.form_id, size, centroid[0], centroid[1], centroid[2],
+                ),
+            });
+        }
+
         for (polygon, walkable) in mesh.polygons.iter_mut().zip(&result.walkable) {
             polygon.walkable = *walkable;
         }
