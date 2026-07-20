@@ -206,3 +206,43 @@ Manual script `docs/plans/M4_WAVE11_MANUAL.md` before the PR; PR closes
   mid-route gating. Explicitly *not* a job for #171's clearance pass:
   that validates **static** collision, and a state-dependent blocker
   must never be baked into the prepared navmesh as permanent geometry.
+- **A3 — #171 shipped after four acceptance-driven iterations, with two
+  defects caught only by real-data runs.** (i) The clip's sliver filter
+  was a *shape* filter, not a degeneracy epsilon (1573 spurious discards
+  on 0001a273 → 3), each discard punching an adjacency-severing hole in
+  the conformal cover. (ii) Obstruction was judged at the query point
+  rather than at the collider's own footing, so every stair riser read as
+  a wall — fixing it took Vault 101 from 90%→98% component share and
+  91%→95% authored-reachable (its stranded islands *were* its
+  staircases). (iii) The near-collinear pieces the corrected epsilon
+  retained had no reliable winding, and landmass rejected the **whole
+  mesh**: Vault 101 shipped briefly with *zero navigation* while prepare
+  reported 98% connectivity. Resolved by welding ill-conditioned pieces
+  (conformal, area-conserving, protected vertices win), refusing welds
+  that would flip a neighbour's winding, and a validity gate — plus, on
+  the executor's initiative, running **landmass's own validator at
+  prepare time as a hard build failure**. That last item is the durable
+  fix: replicating the convexity rule catches the class, only the real
+  validator proves the runtime will accept the result.
+- **A4 — three orchestrator measurement errors, corrected by executors.**
+  A collider scan testing the capsule *centre* (missing every wall the
+  capsule rests against, which is how #148 stayed misattributed for four
+  waves); `tna goto` probes issued at a fixed y down a descending ramp
+  (producing a phantom "severance" that did not exist — every corridor
+  point was in the MAIN component); and reading focus-stalls as viewer
+  crashes. The durable outcome is that diagnostics now live in the code —
+  the `BEVYOUT_NAV_PROBE` point-explainer, the prepare validator gate,
+  and the runtime blocking-plane line — rather than in ad-hoc
+  orchestrator scripts.
+- **A5 — #148 does not close.** Its root cause is now known
+  (`MetroGateLoad`, a closed travel door whose interior the navmesh marks
+  walkable; the `tna spawn` point sits 0.041 m from its face, inside the
+  collision) and its stated acceptance criterion is void — the route it
+  specifies crosses a closed door. Carried by #177.
+- **A6 — #180/#181 filed and #180 shipped mid-wave.** Acceptance kept
+  "hanging"; the cause was that no `WinitSettings` was configured, so the
+  app stopped ticking when unfocused and the main-thread agent-bridge
+  methods never ran. Fixed with `WinitSettings::continuous()` plus an
+  `--unfocused` flag implied by `--agent-bridge`; verified 12/12 bridge
+  polls over 60 s while covered. True headless rendering with screenshot
+  capture is #181.
