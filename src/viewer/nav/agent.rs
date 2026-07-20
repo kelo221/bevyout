@@ -2510,8 +2510,20 @@ fn world_contact_report(
             collision_filter,
         )
         .unwrap_or(1.0);
+    // Issue #177: the reason is now stated, not left to be inferred. A
+    // shortfall in *achieved* speed is what latches `collision_blocked`
+    // (`movement_policy::decide_collision_outcome` compares desired against
+    // achieved, and never consults contact geometry), so the flag fires just
+    // as readily for an agent whose steering produced no motion as for one
+    // wedged against a wall. Reporting both cases as "collision-blocked" sent
+    // acceptance chasing colliders that were not there.
+    let reason = if blocking.is_empty() && fraction >= 0.999 {
+        "no_contact_no_progress"
+    } else {
+        "obstructed"
+    };
     format!(
-        "sweep_fraction={fraction:.3} blocking_planes=[{}]",
+        "reason={reason} sweep_fraction={fraction:.3} blocking_planes=[{}]",
         blocking.join(" ")
     )
 }
@@ -3309,6 +3321,62 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         })
                         .copied()
                 });
+            // Issue #177: containment is a trigger that can be starved.
+            // Real data (Vault 101, `VDoor01`) showed an agent routed at a
+            // closed in-cell door halting ~2 m short of its crossing with a
+            // completely free collision sweep -- never entering the polygon,
+            // so never gating, never requesting the open, and never
+            // continuing. When the agent has stopped making progress, fall
+            // back to the nearest crossing its own route continues through
+            // (`door_link::approach_gate`), which is the door it is stalled
+            // against. Only consulted when containment found nothing, so the
+            // normal case keeps issue #155's exact corridor semantics.
+            let mid_route_crossing = mid_route_crossing.or_else(|| {
+                let stalled = world
+                    .get::<AgentKcc>(agent_entity)
+                    .is_some_and(|kcc| kcc.collision_blocked || kcc.stuck);
+                if !stalled || !has_target {
+                    return None;
+                }
+                let position = world.get::<Transform>(agent_entity)?.translation;
+                let target = match world.get::<AgentTarget3d>(agent_entity)? {
+                    AgentTarget3d::Point(point) => *point,
+                    AgentTarget3d::Entity(entity) => {
+                        world.get::<GlobalTransform>(*entity)?.translation()
+                    }
+                    AgentTarget3d::None => return None,
+                };
+                let flat = |a: Vec3, b: Vec3| Vec2::new(a.x - b.x, a.z - b.z).length();
+                let agent_distance_to_target = flat(position, target);
+                let mut best: Option<(f32, MidRouteDoor)> = None;
+                for door in &world.resource::<NavArchipelagoState>().mid_route_doors {
+                    if Some(door.door_form_id) == travel_target_door {
+                        continue;
+                    }
+                    let vertices = door.vertices.map(|vertex| vertex.to_array());
+                    let Some(distance) = landmass_graph::distance_to_door_triangle(
+                        position.to_array(),
+                        vertices,
+                        AGENT_HEIGHT,
+                    ) else {
+                        continue;
+                    };
+                    let centroid = (door.vertices[0] + door.vertices[1] + door.vertices[2]) / 3.0;
+                    if !door_link::approach_gate(door_link::ApproachObservation {
+                        distance_to_crossing: distance,
+                        agent_distance_to_target,
+                        crossing_distance_to_target: flat(centroid, target),
+                        stalled,
+                    }) {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|(best, _)| distance < *best) {
+                        best = Some((distance, *door));
+                    }
+                }
+                best.map(|(_, door)| door)
+            });
+
             if let Some(door) = mid_route_crossing {
                 let lock_info = world
                     .resource::<NavArchipelagoState>()
@@ -5908,6 +5976,124 @@ mod tests {
                 .entry_for(agent_ledger_id(0))
                 .is_none(),
             "crossing a travel door's triangle mid-route (not the agent's own travel_intent) must not ledger a handoff"
+        );
+    }
+
+    /// Issue #177 acceptance: the containment gate can be *starved*. Real
+    /// data (Vault 101, `VDoor01`) had an agent routed at a closed in-cell
+    /// door halt ~2 m short of its crossing with a completely free collision
+    /// sweep -- never entering the polygon, so never gating and never
+    /// opening the door. A stalled agent must gate on the crossing its route
+    /// continues through even without standing on it.
+    #[test]
+    fn a_stalled_agent_short_of_a_closed_door_still_opens_it() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                // Stopped 2.2 m short of the crossing, exactly the measured
+                // shortfall, with the target beyond the door.
+                Transform::from_xyz(2.8, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+                AgentKcc::default(),
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .mid_route_doors
+            .push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(5.0, 0.0, 0.0)),
+            });
+
+        // Still making progress: short of the crossing is simply short of
+        // the crossing, and must not gate.
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle,
+            "an agent still moving must not gate from a distance"
+        );
+
+        // Progress stops: now the door it is stalled against gets opened.
+        world.get_mut::<AgentKcc>(agent).unwrap().collision_blocked = true;
+        door_link_system(&mut world);
+        assert!(is_paused(&world, agent));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a stalled agent short of a closed door must request it open"
+        );
+
+        // And it resumes on the next tick, exactly like the containment gate.
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle
+        );
+        assert!(world.get::<PauseAgent>(agent).is_none());
+    }
+
+    /// The approach gate must not fire for a door the agent is stalled
+    /// *beside* or *past*: only one its own route continues through.
+    #[test]
+    fn a_stalled_agent_never_opens_a_door_behind_it() {
+        let mut world = harness_world();
+        world.init_resource::<Time>();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let door_entity = world
+            .spawn(interaction::PlacementRoot::new(door_placement(0x99)))
+            .id();
+        registry.register(door_entity, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((
+                TestNavAgentMarker,
+                AgentRuntime::default(),
+                // The door is behind the agent, away from the target.
+                Transform::from_xyz(2.8, 0.0, 0.0),
+                AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
+                AgentKcc {
+                    collision_blocked: true,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .mid_route_doors
+            .push(MidRouteDoor {
+                door_form_id: 0x99,
+                vertices: door_triangle_around(Vec3::new(0.6, 0.0, 0.0)),
+            });
+
+        door_link_system(&mut world);
+        assert_eq!(
+            world.get::<AgentRuntime>(agent).unwrap().door_link,
+            door_link::DoorLinkState::Idle
+        );
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&door_entity),
+            "a door behind the agent is not what it is stalled on"
         );
     }
 

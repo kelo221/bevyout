@@ -782,6 +782,53 @@ pub(crate) fn point_in_door_triangle(
     vertical_ok && point_in_triangle_xz(point, triangle)
 }
 
+/// XZ distance from `point` to `triangle`'s footprint -- `0.0` when the point
+/// is inside it, otherwise the distance to the nearest edge. `None` when the
+/// same vertical guard [`point_in_door_triangle`] applies rejects the pair
+/// (a triangle stacked on another storey).
+///
+/// Issue #177: `nav/agent.rs`'s stalled-approach crossing gate
+/// (`door_link::approach_gate`) needs "how far short of this doorway did the
+/// agent stop", which containment alone cannot express -- containment is a
+/// yes/no that a stalled agent short of the crossing answers "no" forever.
+pub(crate) fn distance_to_door_triangle(
+    point: [f32; 3],
+    triangle: [[f32; 3]; 3],
+    max_vertical_gap: f32,
+) -> Option<f32> {
+    let vertical_ok = triangle
+        .iter()
+        .any(|vertex| (point[1] - vertex[1]).abs() <= max_vertical_gap);
+    if !vertical_ok {
+        return None;
+    }
+    if point_in_triangle_xz(point, triangle) {
+        return Some(0.0);
+    }
+    let mut nearest = f32::INFINITY;
+    for index in 0..3 {
+        let a = triangle[index];
+        let b = triangle[(index + 1) % 3];
+        nearest = nearest.min(distance_to_segment_xz(point, a, b));
+    }
+    Some(nearest)
+}
+
+fn distance_to_segment_xz(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
+    let (px, pz) = (point[0], point[2]);
+    let (ax, az) = (a[0], a[2]);
+    let (bx, bz) = (b[0], b[2]);
+    let (dx, dz) = (bx - ax, bz - az);
+    let length_squared = dx * dx + dz * dz;
+    let t = if length_squared <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - ax) * dx + (pz - az) * dz) / length_squared).clamp(0.0, 1.0)
+    };
+    let (cx, cz) = (ax + dx * t, az + dz * t);
+    ((px - cx).powi(2) + (pz - cz).powi(2)).sqrt()
+}
+
 /// Barycentric-sign point-in-triangle containment test, projected onto the
 /// horizontal (XZ) plane -- Y (height) is ignored entirely here;
 /// [`point_in_door_triangle`] applies the separate vertical-gap guard
