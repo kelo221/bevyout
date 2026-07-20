@@ -237,3 +237,14 @@ appropriate for keeping those contracts aligned.
   and `Cycle` explicitly enables catalog auto-advance. Loaded mesh bounds
   ground the actor before the camera is aimed, and the bridge probe exposes the
   resulting ground offset plus cycle state.
+- **A12 — Native playback correctness follow-up.** The native converter now
+  evaluates open-uniform cubic `NiBSpline` curves with the NIF knot basis and
+  applies compact bias/half-range after the weighted sum; raw control points
+  were the source of floaty motion and the extreme root sway seen in the first
+  zoo pass. The native pack revision is bumped to
+  `nifty-native-kf-clip-pack-v5-bspline-evaluation-source-metadata`, forcing a
+  rebuild rather than reusing stale GLBs. The zoo's two overflow panes now own
+  `ScrollPosition` and consume wheel input over the hovered pane. Low-target
+  AimUp/AimDown and matching partial weapon overlays are sampled over their
+  paired full-body clip; the probe and selection line identify the blend base.
+  The selected clip still holds at its end unless catalog cycling is enabled.

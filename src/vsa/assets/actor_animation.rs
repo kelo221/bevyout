@@ -706,12 +706,23 @@ struct NativeSplineSpec {
     stop: f32,
 }
 
+const NATIVE_BSPLINE_DEGREE: usize = 3;
+
 fn native_spline_times(spec: NativeSplineSpec) -> impl Iterator<Item = f32> {
-    (0..spec.control_points).map(move |index| {
-        if spec.control_points <= 1 {
+    // NiBSplineBasisData stores frames + degree - 1 control points. The
+    // authored animation therefore has control_points - degree + 1 samples.
+    // Sampling those frame times preserves the source timing while evaluating
+    // the open, uniform basis instead of exposing control points as keys.
+    let sample_count = spec
+        .control_points
+        .saturating_sub(NATIVE_BSPLINE_DEGREE)
+        .saturating_add(1)
+        .max(2);
+    (0..sample_count).map(move |index| {
+        if sample_count <= 1 {
             spec.start
         } else {
-            spec.start + (spec.stop - spec.start) * index as f32 / (spec.control_points - 1) as f32
+            spec.start + (spec.stop - spec.start) * index as f32 / (sample_count - 1) as f32
         }
     })
 }
@@ -734,7 +745,10 @@ fn native_spline_values(
                 .map(|values| {
                     values
                         .iter()
-                        .map(|value| spec.offset + f32::from(*value) * spec.half_range / 32767.0)
+                        // Keep compact values normalized until after the
+                        // weighted spline sum. Applying the offset to every
+                        // control point before evaluation is incorrect.
+                        .map(|value| f32::from(*value) / 32767.0)
                         .collect()
                 })
                 .collect(),
@@ -750,15 +764,125 @@ fn native_spline_values(
     }
 }
 
+fn native_spline_knot(index: usize, control_points: usize) -> f32 {
+    let n = control_points.saturating_sub(1);
+    let order = NATIVE_BSPLINE_DEGREE + 1;
+    if index < order {
+        0.0
+    } else if index <= n {
+        (index - order + 1) as f32
+    } else {
+        control_points.saturating_sub(NATIVE_BSPLINE_DEGREE) as f32
+    }
+}
+
+fn native_spline_basis(index: usize, order: usize, value: f32, control_points: usize) -> f32 {
+    if order == 1 {
+        let left = native_spline_knot(index, control_points);
+        let right = native_spline_knot(index + 1, control_points);
+        let end = native_spline_knot(control_points + NATIVE_BSPLINE_DEGREE, control_points);
+        return if (left <= value && value < right)
+            || (value >= end && index + 1 == control_points + NATIVE_BSPLINE_DEGREE)
+        {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    let left_denominator = native_spline_knot(index + order - 1, control_points)
+        - native_spline_knot(index, control_points);
+    let right_denominator = native_spline_knot(index + order, control_points)
+        - native_spline_knot(index + 1, control_points);
+    let left = if left_denominator == 0.0 {
+        0.0
+    } else {
+        (value - native_spline_knot(index, control_points)) / left_denominator
+            * native_spline_basis(index, order - 1, value, control_points)
+    };
+    let right = if right_denominator == 0.0 {
+        0.0
+    } else {
+        (native_spline_knot(index + order, control_points) - value) / right_denominator
+            * native_spline_basis(index + 1, order - 1, value, control_points)
+    };
+    left + right
+}
+
+#[cfg(test)]
+fn native_spline_sample(
+    data: &NativeSplineData,
+    components: usize,
+    spec: NativeSplineSpec,
+    time: f32,
+) -> Option<Vec<f32>> {
+    let controls = native_spline_values(data, components, spec)?;
+    native_spline_sample_controls(&controls, spec, time)
+}
+
+fn native_spline_sample_controls(
+    controls: &[Vec<f32>],
+    spec: NativeSplineSpec,
+    time: f32,
+) -> Option<Vec<f32>> {
+    if controls.is_empty() {
+        return None;
+    }
+    let span_count = spec.control_points.saturating_sub(NATIVE_BSPLINE_DEGREE);
+    let interval = if spec.stop > spec.start {
+        ((time - spec.start) / (spec.stop - spec.start) * span_count as f32)
+            .clamp(0.0, span_count as f32)
+    } else {
+        0.0
+    };
+    let mut output = vec![0.0; controls.first()?.len()];
+    if interval >= span_count as f32 {
+        output.copy_from_slice(controls.last()?);
+    } else {
+        let span = interval.floor() as usize + NATIVE_BSPLINE_DEGREE;
+        let first = span.saturating_sub(NATIVE_BSPLINE_DEGREE);
+        for (index, control) in controls
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(NATIVE_BSPLINE_DEGREE + 1)
+        {
+            let weight = native_spline_basis(
+                index,
+                NATIVE_BSPLINE_DEGREE + 1,
+                interval,
+                spec.control_points,
+            );
+            for (output, value) in output.iter_mut().zip(control) {
+                *output += value * weight;
+            }
+        }
+    }
+    if spec.compressed {
+        for value in &mut output {
+            *value = *value * spec.half_range + spec.offset;
+        }
+    }
+    output
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(output)
+}
+
 fn native_spline_vec3_keys(
     data: &NativeSplineData,
     spec: NativeSplineSpec,
 ) -> Result<nif::fo3::AnimationKeyGroup<[f32; 3]>> {
-    let keys = native_spline_values(data, 3, spec)
-        .unwrap_or_default()
-        .into_iter()
-        .zip(native_spline_times(spec))
-        .filter_map(|(value, time)| {
+    let Some(controls) = native_spline_values(data, 3, spec) else {
+        return Ok(nif::fo3::AnimationKeyGroup {
+            interpolation: Some(nif::fo3::KeyType::Linear),
+            keys: Vec::new(),
+        });
+    };
+    let keys = native_spline_times(spec)
+        .filter_map(|time| {
+            native_spline_sample_controls(&controls, spec, time).map(|value| (time, value))
+        })
+        .filter_map(|(time, value)| {
             (value.iter().all(|value| value.is_finite())).then_some(nif::fo3::AnimationKey {
                 time,
                 value: [value[0], value[1], value[2]],
@@ -775,11 +899,14 @@ fn native_spline_quat_keys(
     data: &NativeSplineData,
     spec: NativeSplineSpec,
 ) -> Result<Vec<nif::fo3::AnimationKey<[f32; 4]>>> {
-    let keys = native_spline_values(data, 4, spec)
-        .unwrap_or_default()
-        .into_iter()
-        .zip(native_spline_times(spec))
-        .filter_map(|(value, time)| {
+    let Some(controls) = native_spline_values(data, 4, spec) else {
+        return Ok(Vec::new());
+    };
+    let keys = native_spline_times(spec)
+        .filter_map(|time| {
+            native_spline_sample_controls(&controls, spec, time).map(|value| (time, value))
+        })
+        .filter_map(|(time, value)| {
             if !value.iter().all(|value| value.is_finite()) {
                 return None;
             }
@@ -806,11 +933,17 @@ fn native_spline_scalar_group(
     data: &NativeSplineData,
     spec: NativeSplineSpec,
 ) -> Result<nif::fo3::AnimationKeyGroup<f32>> {
-    let keys = native_spline_values(data, 1, spec)
-        .unwrap_or_default()
-        .into_iter()
-        .zip(native_spline_times(spec))
-        .filter_map(|(value, time)| {
+    let Some(controls) = native_spline_values(data, 1, spec) else {
+        return Ok(nif::fo3::AnimationKeyGroup {
+            interpolation: Some(nif::fo3::KeyType::Linear),
+            keys: Vec::new(),
+        });
+    };
+    let keys = native_spline_times(spec)
+        .filter_map(|time| {
+            native_spline_sample_controls(&controls, spec, time).map(|value| (time, value))
+        })
+        .filter_map(|(time, value)| {
             value
                 .first()
                 .copied()
@@ -1297,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn native_compact_spline_values_apply_bias_and_half_range() {
+    fn native_compact_spline_values_stay_normalized_until_evaluation() {
         let data = NativeSplineData {
             floats: Vec::new(),
             compact: vec![-32767, 0, 32767],
@@ -1316,6 +1449,67 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(values, vec![vec![8.0], vec![10.0], vec![12.0]]);
+        assert_eq!(values, vec![vec![-1.0], vec![0.0], vec![1.0]]);
+    }
+
+    #[test]
+    fn native_open_uniform_spline_hits_end_controls() {
+        let data = NativeSplineData {
+            floats: vec![0.0, 1.0, 2.0, 3.0, 4.0],
+            compact: Vec::new(),
+        };
+        let spec = NativeSplineSpec {
+            handle: 0,
+            control_points: 5,
+            compressed: false,
+            offset: 0.0,
+            half_range: 1.0,
+            start: 0.0,
+            stop: 1.0,
+        };
+        let first = native_spline_sample(&data, 1, spec, 0.0).unwrap();
+        let last = native_spline_sample(&data, 1, spec, 1.0).unwrap();
+        assert!((first[0] - 0.0).abs() < 1.0e-5);
+        assert!((last[0] - 4.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn native_open_uniform_basis_preserves_constant_channels() {
+        let data = NativeSplineData {
+            floats: vec![3.5; 8],
+            compact: Vec::new(),
+        };
+        let spec = NativeSplineSpec {
+            handle: 0,
+            control_points: 8,
+            compressed: false,
+            offset: 0.0,
+            half_range: 1.0,
+            start: 0.0,
+            stop: 1.0,
+        };
+        for time in [0.0, 0.13, 0.5, 0.87, 1.0] {
+            let value = native_spline_sample(&data, 1, spec, time).unwrap();
+            assert!((value[0] - 3.5).abs() < 1.0e-5, "time={time}: {value:?}");
+        }
+    }
+
+    #[test]
+    fn native_compact_spline_applies_bias_after_weighting() {
+        let data = NativeSplineData {
+            floats: Vec::new(),
+            compact: vec![0, 0, 0, 32767, 32767, 32767, 32767, 32767, 32767, 0, 0, 0],
+        };
+        let spec = NativeSplineSpec {
+            handle: 0,
+            control_points: 4,
+            compressed: true,
+            offset: 10.0,
+            half_range: 2.0,
+            start: 0.0,
+            stop: 1.0,
+        };
+        let value = native_spline_sample(&data, 3, spec, 0.5).unwrap();
+        assert!(value.iter().all(|value| (*value - 11.5).abs() < 1.0e-5));
     }
 }

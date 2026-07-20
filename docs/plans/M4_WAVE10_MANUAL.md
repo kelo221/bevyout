@@ -102,6 +102,32 @@ machine that is:
    grounding offset, and the most recent 16 zoo events. Press it again to hide
    the diagnostic panel without losing the current clip list or controls.
 
+## B4. Verify native spline playback and layered clips
+
+1. Rebuild the native pack after the spline evaluator correction (the converter
+   revision deliberately invalidates the old cache):
+
+   ```powershell
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter native --rebuild-assets
+   ```
+
+2. Launch the zoo for raider `00041600` with the native pack:
+
+   ```powershell
+   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
+   ```
+
+3. Scroll the `All animations` pane with the wheel and select rows `0007`
+   (`1hmaim`), `0008` (`1hmaimdown`), `0009` (`1hmaimup`), and `0011`
+   (`1hmattackforwardpower`). The `0008` and `0009` selections must report
+   `blend_base_clip: 1hmaim` and the selection line must say they are layered
+   over `1hmaim`; they should not collapse to a head-only pose.
+4. Select the power-attack row and watch its root motion. The corrected native
+   clip should remain smooth and bounded; it must not exhibit the large
+   sideways/jittering control-point jumps from the stale v4 pack. Open `Debug`
+   and scroll the pane to confirm the source range, controller/interpolator
+   metadata, blend base, ground offset, and recent events remain readable.
+
 ## C. See and control a real humanoid KF
 
 1. Launch raider reference `00041600` at its pistol-equip clip:

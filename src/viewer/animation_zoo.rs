@@ -35,7 +35,7 @@ use policy::{ZooControlAction, ZooPlaybackPolicy};
 
 const FLOOR_CENTER: Vec3 = Vec3::new(0.0, -0.25, 0.0);
 const ZOO_CAMERA_TARGET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
-const ZOO_PANEL_WIDTH: f32 = 360.0;
+const ZOO_PANEL_WIDTH: f32 = 440.0;
 
 pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
     let cache_dir = args
@@ -161,6 +161,7 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
                 zoo_ui_interactions,
                 keyboard_controls,
                 zoo_view_controls,
+                zoo_ui_scroll,
                 drive_playback,
                 apply_zoo_view,
                 update_probe,
@@ -273,6 +274,7 @@ struct ResolvedZooClip {
     handle: Handle<AnimationClip>,
     node: AnimationNodeIndex,
     duration: f32,
+    base_clip_index: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -362,6 +364,7 @@ pub(crate) struct AnimationZooProbe {
     pub(crate) animated_targets: Vec<String>,
     pub(crate) controller_types: Vec<String>,
     pub(crate) interpolator_types: Vec<String>,
+    pub(crate) blend_base_clip: Option<String>,
     pub(crate) text_keys: Vec<PreparedActorAnimationTextKey>,
     pub(crate) skipped_clips: usize,
     pub(crate) ground_offset: f32,
@@ -379,6 +382,9 @@ struct ZooStatusText;
 
 #[derive(Component)]
 struct ZooDebugPanel;
+
+#[derive(Component)]
+struct ZooClipList;
 
 #[derive(Component)]
 struct ZooDebugText;
@@ -526,6 +532,7 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                 top: px(0),
                 bottom: px(0),
                 width: px(ZOO_PANEL_WIDTH),
+                min_height: px(0),
                 padding: UiRect::all(px(12)),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
@@ -583,7 +590,8 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
             panel
                 .spawn((
                     Node {
-                        max_height: px(220),
+                        min_height: px(0),
+                        max_height: px(380),
                         width: percent(100),
                         padding: UiRect::all(px(6)),
                         overflow: Overflow::scroll_y(),
@@ -591,6 +599,7 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                     },
                     BackgroundColor(Color::srgba(0.01, 0.015, 0.025, 0.96)),
                     ZooDebugPanel,
+                    ScrollPosition::default(),
                     Visibility::Hidden,
                 ))
                 .with_child((
@@ -598,7 +607,7 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                     ZooDebugText,
                     TextColor(Color::srgb(0.68, 0.76, 0.88)),
                     TextFont {
-                        font_size: FontSize::Px(12.0),
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
                 ));
@@ -613,12 +622,14 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
             panel
                 .spawn(Node {
                     width: percent(100),
+                    min_height: px(0),
                     flex_grow: 1.0,
                     flex_direction: FlexDirection::Column,
                     overflow: Overflow::scroll_y(),
                     row_gap: px(2),
                     ..default()
                 })
+                .insert((ZooClipList, ScrollPosition::default()))
                 .with_children(|list| {
                     for (index, clip) in definition.clips.iter().enumerate() {
                         list.spawn((
@@ -917,12 +928,21 @@ fn resolve_animation_zoo(
             handle: handle.clone(),
             node,
             duration: clip.duration(),
+            base_clip_index: None,
         });
     }
     if resolved.is_empty() {
         runtime.phase = ZooPhase::Failed;
         runtime.error = Some("clip pack contains no catalog-compatible named animations".into());
         return;
+    }
+    for index in 0..resolved.len() {
+        let Some(base_name) = layer_base_clip_name(&resolved[index].catalog) else {
+            continue;
+        };
+        resolved[index].base_clip_index = resolved
+            .iter()
+            .position(|candidate| candidate.catalog.name.eq_ignore_ascii_case(&base_name));
     }
     let graph_handle = graphs.add(graph);
     commands.entity(player_entity).insert((
@@ -984,6 +1004,27 @@ fn push_zoo_event(runtime: &mut AnimationZooRuntime, event: impl Into<String>) {
     }
 }
 
+fn layer_base_clip_name(clip: &PreparedActorAnimationClip) -> Option<String> {
+    // Bethesda's AimUp/AimDown and a few weapon-up/spin-down KF files are
+    // authored as partial overlays. They must be evaluated over their paired
+    // full-body clip; playing them as a replacement correctly animates only
+    // the exported head/arm channels.
+    if clip.animated_target_count > 12 {
+        return None;
+    }
+    let name = clip.name.to_ascii_lowercase();
+    let candidates = [
+        name.strip_suffix("down").map(str::to_owned),
+        name.strip_suffix("up").map(str::to_owned),
+        Some(name.replace("down_", "_")),
+        Some(name.replace("up_", "_")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate != &name)
+}
+
 #[allow(clippy::type_complexity)]
 fn zoo_ui_interactions(
     interactions: ZooUiInteractionQuery<'_, '_>,
@@ -1036,6 +1077,37 @@ fn source_clip_transform(
     transform
 }
 
+fn source_clip_transform_over_base(
+    base_clip: Option<&AnimationClip>,
+    selected_clip: &AnimationClip,
+    target: AnimationTargetId,
+    base_time: f32,
+    selected_time: f32,
+    rest: Transform,
+) -> Transform {
+    let mut transform = base_clip
+        .map(|clip| source_clip_transform(clip, target, base_time, rest))
+        .unwrap_or(rest);
+    if let Some(value) = selected_clip.sample_clamped(
+        animated_field!(Transform::translation),
+        target,
+        selected_time,
+    ) {
+        transform.translation = value;
+    }
+    if let Some(value) =
+        selected_clip.sample_clamped(animated_field!(Transform::rotation), target, selected_time)
+    {
+        transform.rotation = value;
+    }
+    if let Some(value) =
+        selected_clip.sample_clamped(animated_field!(Transform::scale), target, selected_time)
+    {
+        transform.scale = value;
+    }
+    transform
+}
+
 fn retarget_global_transform(
     target_rest_global: Mat4,
     source_rest_global: Mat4,
@@ -1070,6 +1142,10 @@ fn retarget_animation_zoo(
     let Some(clip) = clips.get(&clip_info.handle) else {
         return;
     };
+    let base_clip = clip_info
+        .base_clip_index
+        .and_then(|index| runtime.clips.get(index))
+        .and_then(|base| clips.get(&base.handle));
     let Some(player_entity) = runtime.player else {
         return;
     };
@@ -1078,10 +1154,24 @@ fn retarget_animation_zoo(
         .ok()
         .and_then(|player| player.animation(clip_info.node))
         .map_or(runtime.elapsed, |active| active.seek_time());
+    let base_time = base_clip.map_or(0.0, |base| {
+        if base.duration() > 0.0 {
+            time.rem_euclid(base.duration())
+        } else {
+            0.0
+        }
+    });
 
     let mut source_globals = vec![Mat4::IDENTITY; runtime.pack_targets.len()];
     for (index, target) in runtime.pack_targets.iter().enumerate() {
-        let local = source_clip_transform(clip, target.id, time, target.rest_local);
+        let local = source_clip_transform_over_base(
+            base_clip,
+            clip,
+            target.id,
+            base_time,
+            time,
+            target.rest_local,
+        );
         source_globals[index] = target
             .parent
             .map_or(Mat4::IDENTITY, |parent| source_globals[parent])
@@ -1200,6 +1290,43 @@ fn zoo_view_controls(
     }
     view.camera_yaw = view.camera_yaw.rem_euclid(std::f32::consts::TAU);
     view.actor_yaw = view.actor_yaw.rem_euclid(std::f32::consts::TAU);
+}
+
+#[allow(clippy::type_complexity)]
+fn zoo_ui_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut scrollables: Query<(
+        &ComputedNode,
+        &UiGlobalTransform,
+        &mut ScrollPosition,
+        Option<&ZooDebugPanel>,
+        Option<&ZooClipList>,
+    )>,
+) {
+    let Some(cursor) = windows.single().ok().and_then(Window::cursor_position) else {
+        wheel.clear();
+        return;
+    };
+    let events = wheel.read().collect::<Vec<_>>();
+    if events.is_empty() {
+        return;
+    }
+    for (node, transform, mut position, debug, clips) in &mut scrollables {
+        if (debug.is_none() && clips.is_none()) || !node.contains_point(*transform, cursor) {
+            continue;
+        }
+        let delta = events.iter().fold(0.0, |total, event| {
+            total
+                + event.y
+                    * match event.unit {
+                        MouseScrollUnit::Line => 28.0,
+                        MouseScrollUnit::Pixel => 1.0,
+                    }
+        });
+        let max_scroll = (node.content_size().y - node.size().y).max(0.0);
+        position.y = (position.y - delta).clamp(0.0, max_scroll);
+    }
 }
 
 fn apply_zoo_view(
@@ -1371,6 +1498,10 @@ fn update_probe(
         interpolator_types: clip
             .map(|clip| clip.catalog.interpolator_types.clone())
             .unwrap_or_default(),
+        blend_base_clip: clip
+            .and_then(|clip| clip.base_clip_index)
+            .and_then(|index| runtime.clips.get(index))
+            .map(|clip| clip.catalog.name.clone()),
         text_keys: clip
             .map(|clip| clip.catalog.text_keys.clone())
             .unwrap_or_default(),
@@ -1414,8 +1545,12 @@ fn update_zoo_ui(
         probe.skipped_clips,
     );
     let selection_text = format!(
-        "Selected: {}\nMouse orbit/rotate on viewport; click any row to play it.",
-        clip.map_or("<loading>", |clip| clip.catalog.name.as_str())
+        "Selected: {}{}\nMouse orbit/rotate on viewport; click any row to play it.",
+        clip.map_or("<loading>", |clip| clip.catalog.name.as_str()),
+        probe
+            .blend_base_clip
+            .as_deref()
+            .map_or(String::new(), |base| format!("  |  layered over {base}"))
     );
     if let Ok(mut status) = texts.p0().single_mut() {
         status.0 = status_text;
@@ -1446,7 +1581,7 @@ fn update_zoo_ui(
             .collect::<Vec<_>>()
             .join("\n");
         let debug_text = format!(
-            "source: {}\nsequence: {}\nrange: {:?}..{:?} @ {:?} Hz\nduration: {:.3}s | elapsed: {:.3}s | cycles: {}\nloop current: {} | cycle catalog: {} | ground offset: {:+.3}\nroot motion: {:?} ({})\nchannels: {} | animated targets: {} | bound: {}\nrequired: {} | missing: {} | text keys: {}\ncontrollers: {}\ninterpolators: {}\n{}{}\n\nRecent events:\n{}",
+            "source: {}\nsequence: {}\nrange: {:?}..{:?} @ {:?} Hz\nduration: {:.3}s | elapsed: {:.3}s | cycles: {}\nloop current: {} | cycle catalog: {} | ground offset: {:+.3}\nroot motion: {:?} ({})\nblend base: {}\nchannels: {} | animated targets: {} | bound: {}\nrequired: {} | missing: {} | text keys: {}\ncontrollers: {}\ninterpolators: {}\n{}{}\n\nRecent events:\n{}",
             probe.source_kf_path.as_deref().unwrap_or("<none>"),
             probe.source_sequence_name.as_deref().unwrap_or("<unnamed>"),
             probe.source_start_seconds,
@@ -1460,6 +1595,7 @@ fn update_zoo_ui(
             probe.ground_offset,
             probe.root_motion_policy,
             probe.accumulation_root.as_deref().unwrap_or("<none>"),
+            probe.blend_base_clip.as_deref().unwrap_or("<none>"),
             clip.map_or(0, |clip| clip.catalog.animated_channel_count),
             probe.animated_targets.len(),
             probe.bound_targets,
@@ -1587,6 +1723,25 @@ mod tests {
             "bip01 r finger1"
         );
         assert_eq!(animation_node_name_key("Weapon"), "weapon");
+    }
+
+    #[test]
+    fn partial_aim_clips_resolve_to_their_full_body_pair() {
+        let clip = PreparedActorAnimationClip {
+            name: "1hmaimdown".into(),
+            animated_target_count: 6,
+            ..default()
+        };
+        assert_eq!(layer_base_clip_name(&clip).as_deref(), Some("1hmaim"));
+        let clip = PreparedActorAnimationClip {
+            name: "1hmattackspinup".into(),
+            animated_target_count: 7,
+            ..default()
+        };
+        assert_eq!(
+            layer_base_clip_name(&clip).as_deref(),
+            Some("1hmattackspin")
+        );
     }
 
     #[test]

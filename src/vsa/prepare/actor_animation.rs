@@ -11,7 +11,7 @@ use bevyout_core::actor_animation::{
 pub(crate) const ACTOR_ANIMATION_CATALOG_REVISION: &str =
     "actor-animations-v3-normalized-runtime-contract";
 pub(crate) const ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION: &str =
-    "nifty-native-kf-clip-pack-v4-bspline-source-metadata";
+    "nifty-native-kf-clip-pack-v5-bspline-evaluation-source-metadata";
 pub(crate) const ACTOR_ANIMATION_BLENDER_CONVERTER_REVISION: &str =
     "niftools-external-kf-clip-pack-v6-source-metadata";
 
