@@ -813,6 +813,7 @@ struct BevyoutWorld {
     nav_derived_door_blockers: Vec<nav_doors::BlockerVolume>,
     nav_derived_door_meshes: Vec<nav_doors::BlockerMeshInput>,
     nav_derived_door_associations: Option<Vec<nav_doors::DerivedDoorAssociation>>,
+    nav_approach_observation: Option<door_link::ApproachObservation>,
 }
 
 fn find_placement<'a>(
@@ -10609,5 +10610,39 @@ async fn then_derived_door_association_openable(
         association.openable,
         expectation == "openable",
         "{association:?}"
+    );
+}
+
+#[given(regex = r"^an agent (stalled|still moving) ([\d.]+) metres from a door crossing$")]
+async fn given_approach_agent(world: &mut BevyoutWorld, progress: String, distance: f32) {
+    world.nav_approach_observation = Some(door_link::ApproachObservation {
+        distance_to_crossing: distance,
+        agent_distance_to_target: 0.0,
+        crossing_distance_to_target: 0.0,
+        stalled: progress == "stalled",
+    });
+}
+
+#[given(
+    regex = r"^the crossing is ([\d.]+) metres from the target and the agent is ([\d.]+) metres from it$"
+)]
+async fn given_approach_distances(world: &mut BevyoutWorld, crossing: f32, agent: f32) {
+    let observation = world
+        .nav_approach_observation
+        .as_mut()
+        .expect("the agent must be placed first");
+    observation.crossing_distance_to_target = crossing;
+    observation.agent_distance_to_target = agent;
+}
+
+#[then(regex = r"^the approach gate (fires|does not fire)$")]
+async fn then_approach_gate(world: &mut BevyoutWorld, outcome: String) {
+    let observation = world
+        .nav_approach_observation
+        .expect("the agent must be placed first");
+    assert_eq!(
+        door_link::approach_gate(observation),
+        outcome == "fires",
+        "{observation:?}"
     );
 }
