@@ -7450,6 +7450,134 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Issue #177: closed-blocker cost overrides compose with lock state
+    // -----------------------------------------------------------------
+
+    /// Bare-`World` fixture for `apply_door_lock_overrides`: one blocker
+    /// FormID with both a gate type index (priced on *usability*, i.e. lock)
+    /// and an interior/blocking type index (priced on *open*), so every
+    /// (locked, open) combination can be asserted on one component.
+    fn closed_blocker_override_world(usable: bool, open: bool) -> (World, Entity) {
+        let mut world = harness_world();
+        let agent = world.spawn_empty().id();
+        let mut state = world.resource_mut::<NavArchipelagoState>();
+        state.door_usable.insert(0x99, usable);
+        state.door_open.insert(0x99, open);
+        state.door_type_indices.insert(0x99, 1);
+        state.closed_door_type_indices.insert(0x99, 2);
+        (world, agent)
+    }
+
+    fn override_costs(world: &World, agent: Entity) -> Vec<(usize, f32)> {
+        let mut costs: Vec<(usize, f32)> = world
+            .get::<AgentTypeIndexCostOverrides>(agent)
+            .expect("the agent must carry overrides")
+            .iter()
+            .map(|(&index, &cost)| (index, cost))
+            .collect();
+        costs.sort_by_key(|(index, _)| *index);
+        costs
+    }
+
+    #[test]
+    fn a_closed_unlocked_door_blocks_only_its_interior_polygons() {
+        // The issue's core rule: a shut door's *interior* is impassable, but
+        // its doorway crossing stays routable so the crossing gate can fire
+        // and open it. Pricing the crossing too would make every closed
+        // interior door a wall.
+        let (mut world, agent) = closed_blocker_override_world(true, false);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)]
+        );
+    }
+
+    #[test]
+    fn an_open_unlocked_door_blocks_nothing() {
+        let (mut world, agent) = closed_blocker_override_world(true, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(override_costs(&world, agent), Vec::new());
+    }
+
+    #[test]
+    fn a_closed_locked_door_blocks_both_its_crossing_and_its_interior() {
+        let (mut world, agent) = closed_blocker_override_world(false, false);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![
+                (1, LOCKED_DOOR_TYPE_INDEX_COST),
+                (2, LOCKED_DOOR_TYPE_INDEX_COST),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_open_locked_door_blocks_nothing_either() {
+        // `repath::door_usable`'s existing rule: an open door is passable
+        // regardless of its lock record. The interior override must agree --
+        // keying it on `open` rather than `usable` is what makes these two
+        // compose instead of contradicting each other.
+        let (mut world, agent) = closed_blocker_override_world(true, true);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .door_usable
+            .insert(0x99, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(override_costs(&world, agent), Vec::new());
+    }
+
+    #[test]
+    fn a_blocker_with_no_open_state_recorded_is_treated_as_closed() {
+        // Fail safe: an unknown open state must never leave the inside of a
+        // solid routable.
+        let (mut world, agent) = closed_blocker_override_world(true, false);
+        world
+            .resource_mut::<NavArchipelagoState>()
+            .door_open
+            .remove(&0x99);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)]
+        );
+    }
+
+    #[test]
+    fn derived_gate_and_blocking_associations_take_distinct_type_indices() {
+        // Issue #177 feature 2: the two classes must never share an index,
+        // or opening a door would clear the wrong override.
+        let mesh = landmass_graph::MeshInput {
+            form_id: 0x10,
+            vertices: Vec::new(),
+            polygons: Vec::new(),
+            doors: Vec::new(),
+            derived_doors: vec![
+                landmass_graph::DerivedDoorInput {
+                    triangle_index: 1,
+                    door_reference_form_id: 0x99,
+                    blocks_when_closed: false,
+                },
+                landmass_graph::DerivedDoorInput {
+                    triangle_index: 2,
+                    door_reference_form_id: 0x99,
+                    blocks_when_closed: true,
+                },
+            ],
+        };
+        let meshes = [mesh];
+        let door_indices = landmass_graph::door_type_indices(&meshes);
+        let closed_indices = landmass_graph::closed_door_type_indices(&meshes, &door_indices);
+        assert_eq!(door_indices.get(&0x99), Some(&1));
+        assert_eq!(closed_indices.get(&0x99), Some(&2));
+        assert_eq!(
+            landmass_graph::preferred_pathing_type_index(&door_indices, &closed_indices),
+            3
+        );
+    }
+
     #[test]
     fn unlocking_the_only_route_door_restores_the_direct_path() {
         // Invariant 3: starting locked (as above, `NoPath`), then clearing
