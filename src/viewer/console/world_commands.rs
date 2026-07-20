@@ -361,10 +361,25 @@ pub(super) fn activate_reference(
             "activate supports only door, container, corpse, and pickup references",
         ));
     };
+    // Issue #177: an ordinary in-cell door has no travel destination, and
+    // before this it had no open mechanism anywhere in the runtime -- neither
+    // this command nor the nav door link, both of which were wired only to
+    // travel doors. It now toggles through the same scripted boundary the nav
+    // agent's crossing gate uses, so a human (and the manual acceptance
+    // script) can drive an interior door directly.
     let Some(destination) = &door.destination else {
-        return Err(ConsoleError::new(
-            "no_destination",
-            "door has no travel destination",
+        let opened = interaction::scripted_door_toggle(world, entity);
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "kind": "door",
+                "opened": opened,
+            }),
+            vec![format!(
+                "door {:08x} {}",
+                placement.reference_form_id,
+                if opened { "opened" } else { "closed" }
+            )],
         ));
     };
     // Wave-3 amendment: route through the same Open-clip lead as player

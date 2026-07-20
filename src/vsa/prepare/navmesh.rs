@@ -1350,6 +1350,7 @@ pub(crate) fn apply_derived_door_associations(
                 triangle_index: association.triangle_index,
                 door_reference_form_id: association.door_reference_form_id,
                 blocks_when_closed: association.blocks_when_closed,
+                openable: association.openable,
             })
             .collect();
     }

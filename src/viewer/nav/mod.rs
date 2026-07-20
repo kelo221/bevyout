@@ -108,6 +108,7 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
                     triangle_index: door.triangle_index,
                     door_reference_form_id: door.door_reference_form_id,
                     blocks_when_closed: door.blocks_when_closed,
+                    openable: door.openable,
                 })
                 .collect(),
         })

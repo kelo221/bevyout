@@ -28,7 +28,10 @@ use super::super::paths::FO3_SCALE;
 
 /// Bump whenever the graph asset shape changes, even when new fields are
 /// serde-defaulted, per the `ACTOR_CATALOG_REVISION`/`ITEM_CATALOG_REVISION`
-/// precedent. Bumped to v7 for issue #177 (M4 wave 11): every mesh carries
+/// precedent. Bumped to v8 for issue #177 acceptance: derived associations
+/// carry `openable`, which decides whether a closed blocker's interior is
+/// merely expensive or genuinely impassable.
+/// Bumped to v7 for issue #177 (M4 wave 11): every mesh carries
 /// the new `PreparedNavMesh::derived_doors` list of collision-derived
 /// blocker -> polygon associations, which the authored `NVDP` data does not
 /// provide for ordinary in-cell doors.
@@ -44,7 +47,7 @@ use super::super::paths::FO3_SCALE;
 /// Bumped to v4 for issue #156: `PreparedNavMeshMerge::authored_evidence`,
 /// `PreparedNavPolygon::authored_external`, and the merge-candidate
 /// authored/geometric split + NVEX/NVCI correlation counters.
-pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v7";
+pub(crate) const NAV_GRAPH_REVISION: &str = "nav-graph-v8";
 
 /// `NVTR` per-edge "external" flag bits (fopdoc FalloutNV `Records/NAVM.html`,
 /// "Flag Values"), restated locally per this module's no-`openmw_esm4`-import
@@ -251,8 +254,14 @@ pub(crate) struct PreparedNavDerivedDoor {
     /// blocking placement's reference FormID produced it.
     pub(crate) door_reference_form_id: u32,
     /// `true` when the polygon lies wholly inside the blocker's collision
-    /// volume, so it must be impassable while the blocker is closed.
+    /// volume, so it must not be freely traversable while the blocker is
+    /// closed.
     pub(crate) blocks_when_closed: bool,
+    /// `true` when this blocker owns a runtime open/close FSM (a real `DOOR`
+    /// record). Decides the runtime *cost* of a closed blocker's interior:
+    /// passable-but-expensive when it can be opened, impassable when it
+    /// cannot -- see `viewer::nav::agent::CLOSED_DOOR_TYPE_INDEX_COST`.
+    pub(crate) openable: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1595,7 +1604,7 @@ mod tests {
 
     #[test]
     fn revision_is_pinned() {
-        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v7");
+        assert_eq!(NAV_GRAPH_REVISION, "nav-graph-v8");
     }
 
     #[test]

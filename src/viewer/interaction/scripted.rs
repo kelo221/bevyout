@@ -149,6 +149,34 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
 /// activation. Idempotent: a door already open is left open. Returns
 /// whether this call transitioned the door from closed to open.
 pub(crate) fn scripted_door_open(world: &mut World, entity: Entity) -> bool {
+    scripted_door_set_open(world, entity, true)
+}
+
+/// Issue #177: scripted intra-cell door *toggle*, the console/BRP surface for
+/// an ordinary door with no travel destination. Before this, `activate` on
+/// such a door failed with `no_destination` -- the console path, like the nav
+/// link path, was wired only to travel doors, so an in-cell door had no open
+/// mechanism anywhere in the runtime and neither a human nor the manual
+/// acceptance script could drive one. Shares every step with
+/// [`scripted_door_open`] (state, sound, animation clip, log line); only the
+/// direction differs. Returns whether the door is open after this call.
+pub(crate) fn scripted_door_toggle(world: &mut World, entity: Entity) -> bool {
+    let open = world
+        .get_resource_or_insert_with(InteractionState::default)
+        .open
+        .contains(&entity);
+    scripted_door_set_open(world, entity, !open)
+}
+
+/// Shared implementation for [`scripted_door_open`] and
+/// [`scripted_door_toggle`]: drives `entity`'s door state to `open`,
+/// emitting the matching sound cue, animation transition and log line.
+/// A no-op when the door is already in the requested state. Returns the
+/// door's state after the call, so `scripted_door_open`'s historical
+/// "did this transition it" contract is preserved by its own wrapper (it
+/// only ever requests `true`, where "already open" and "no-op" coincide with
+/// the pre-#177 `false` return).
+fn scripted_door_set_open(world: &mut World, entity: Entity, open: bool) -> bool {
     let placement = world
         .get::<PlacementRoot>(entity)
         .expect("caller resolved a placement root")
@@ -159,30 +187,42 @@ pub(crate) fn scripted_door_open(world: &mut World, entity: Entity) -> bool {
         .get::<GlobalTransform>(entity)
         .map(|transform| transform.translation())
         .unwrap_or_default();
-    let opening = !world
+    let was_open = world
         .get_resource_or_insert_with(InteractionState::default)
         .open
         .contains(&entity);
-    if !opening {
-        return false;
+    if was_open == open {
+        return open && !was_open;
     }
-    world
-        .get_resource_or_insert_with(InteractionState::default)
-        .open
-        .insert(entity);
-    if let Some(form_id) = placement.audio.open_sound_form_id {
+    let sound = {
+        let mut state = world.get_resource_or_insert_with(InteractionState::default);
+        if open {
+            state.open.insert(entity);
+            placement.audio.open_sound_form_id
+        } else {
+            state.open.remove(&entity);
+            placement.audio.close_sound_form_id
+        }
+    };
+    if let Some(form_id) = sound {
         world.write_message(PlaySound::at(form_id, position));
     }
     world.write_message(animation::PlayPlacementAnimation {
         root: entity,
-        transition: ClipTransition::Opening,
+        transition: if open {
+            ClipTransition::Opening
+        } else {
+            ClipTransition::Closing
+        },
         lead_ms: 0.0,
     });
     info!(
-        "door {} ({:08x}) opened (scripted, nav agent)",
-        name, placement.reference_form_id
+        "door {} ({:08x}) {} (scripted, nav agent)",
+        name,
+        placement.reference_form_id,
+        if open { "opened" } else { "closed" }
     );
-    true
+    open
 }
 
 /// F118.2: scripted corpse activation enters the same transfer modal as

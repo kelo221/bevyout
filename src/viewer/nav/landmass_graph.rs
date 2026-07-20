@@ -72,10 +72,14 @@ pub(crate) struct DerivedDoorInput {
     pub(crate) triangle_index: u32,
     pub(crate) door_reference_form_id: u32,
     /// `true` when the polygon lies wholly inside the blocker's collision
-    /// volume, so it must be impassable while the blocker is closed. `false`
-    /// is the doorway *crossing* itself, which stays routable so the runtime
-    /// crossing gate can fire on it.
+    /// volume, so it must not be freely traversable while the blocker is
+    /// closed. `false` is the doorway *crossing* itself, which stays
+    /// ordinary walkable ground so the runtime crossing gate can fire on it.
     pub(crate) blocks_when_closed: bool,
+    /// Whether this blocker owns a runtime open/close FSM. Decides the
+    /// closed-state cost rather than the classification -- see
+    /// `nav/agent.rs`'s `CLOSED_DOOR_TYPE_INDEX_COST`.
+    pub(crate) openable: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -175,6 +179,24 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
         .enumerate()
         .map(|(offset, door_form_id)| (door_form_id, offset + 1))
         .collect()
+}
+
+/// Every blocker FormID whose derived associations report it as openable
+/// (`DerivedDoorInput::openable`) -- a real `DOOR` record with a runtime
+/// open/close FSM. `nav/agent.rs` prices a *closed* openable blocker's
+/// interior expensive-but-passable so the solver still routes through the
+/// doorway and the crossing gate can open it, and a non-openable one
+/// impassable.
+pub(crate) fn openable_blockers(meshes: &[MeshInput]) -> BTreeSet<u32> {
+    let mut form_ids = BTreeSet::new();
+    for mesh in meshes {
+        for door in &mesh.derived_doors {
+            if door.openable {
+                form_ids.insert(door.door_reference_form_id);
+            }
+        }
+    }
+    form_ids
 }
 
 /// Global blocker FormID -> `landmass` polygon type index for the *blocking*

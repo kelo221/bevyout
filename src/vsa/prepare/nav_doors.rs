@@ -124,6 +124,13 @@ pub(crate) struct DerivedDoorAssociation {
     /// `true` when the polygon lies wholly inside the blocker's collision
     /// volume (see the module doc comment's two classes).
     pub(crate) blocks_when_closed: bool,
+    /// Mirrors [`BlockerVolume::gated`]: whether this blocker owns a runtime
+    /// open/close FSM. Carried through to the runtime because the two cases
+    /// need different *costs*, not just different classifications -- a door
+    /// that can be opened must stay passable-but-expensive while shut so the
+    /// solver routes through it and the crossing gate can open it, whereas a
+    /// blocker with no open mechanism is genuinely impassable.
+    pub(crate) openable: bool,
 }
 
 /// Deterministic association list, ordered by `(door_reference_form_id,
@@ -173,6 +180,7 @@ pub(crate) fn derive_door_associations(
                     door_reference_form_id: blocker.reference_form_id,
                     triangle_index: polygon.index,
                     blocks_when_closed: contained,
+                    openable: blocker.gated,
                 });
             }
         }
