@@ -8,6 +8,7 @@ pub mod actor;
 pub mod actor_animation;
 pub mod content;
 pub mod form_id;
+pub mod geometry;
 pub mod item_transaction;
 pub mod items;
 pub mod manifest;

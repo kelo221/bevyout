@@ -829,22 +829,16 @@ fn distance_to_segment_xz(point: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
     ((px - cx).powi(2) + (pz - cz).powi(2)).sqrt()
 }
 
-/// Barycentric-sign point-in-triangle containment test, projected onto the
-/// horizontal (XZ) plane -- Y (height) is ignored entirely here;
-/// [`point_in_door_triangle`] applies the separate vertical-gap guard
-/// first. Winding-independent (accepts either polygon winding: the three
-/// signed areas either all agree in sign, or the point sits exactly on an
-/// edge/vertex, giving at least one zero).
+/// Point-in-triangle containment, projected onto the horizontal (XZ) plane --
+/// Y (height) is ignored entirely here; [`point_in_door_triangle`] applies the
+/// separate vertical-gap guard first. Winding-independent.
+///
+/// Issue #189 feature 4: this defers to the one shared containment primitive
+/// (`bevyout_core::geometry`) rather than carrying its own exact-zero copy,
+/// which was one of four hand-rolled point-in-polygon tests with three
+/// different tolerances. See that module for the epsilon rationale.
 fn point_in_triangle_xz(point: [f32; 3], triangle: [[f32; 3]; 3]) -> bool {
-    fn signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
-        (a[0] - c[0]) * (c[2] - b[2]) - (b[0] - c[0]) * (c[2] - a[2])
-    }
-    let d1 = signed_area_xz(point, triangle[0], triangle[1]);
-    let d2 = signed_area_xz(point, triangle[1], triangle[2]);
-    let d3 = signed_area_xz(point, triangle[2], triangle[0]);
-    let has_negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
-    let has_positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
-    !(has_negative && has_positive)
+    bevyout_core::geometry::point_in_triangle_xz(point, triangle)
 }
 
 // ---------------------------------------------------------------------

@@ -10471,6 +10471,23 @@ async fn given_derived_door_blocker(
             min_y,
             max_y,
             gated: true,
+            // Issue #189 feature 3: the raw collision solid the footprint
+            // above is the hull of. The derivation reads the footprint and
+            // the invariant check reads these triangles, by different
+            // primitives, so the check can disagree with the derivation
+            // instead of only ever echoing it.
+            collision_triangles: vec![
+                [
+                    [min_x, min_y, min_z],
+                    [max_x, min_y, min_z],
+                    [max_x, min_y, max_z],
+                ],
+                [
+                    [min_x, min_y, min_z],
+                    [max_x, min_y, max_z],
+                    [min_x, min_y, max_z],
+                ],
+            ],
         });
 }
 
@@ -10773,5 +10790,57 @@ async fn then_locomotion_never_changed(world: &mut BevyoutWorld) {
         !world.nav_locomotion_changed,
         "the locomotion state flapped: {:?}",
         world.nav_locomotion_state
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_derived_doors.feature (issue #189, M4 walking-actors wave, lane B) --
+// appended section, do not interleave. Steps for the independent
+// interior-polygon invariant path (feature 3), which reads the blocker's
+// collision triangles rather than the derivation's footprint.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^blocker 0x([0-9a-fA-F]{8}) has a mis-derived footprint from (-?[\d.]+), (-?[\d.]+) to (-?[\d.]+), (-?[\d.]+)$"
+)]
+async fn given_derived_door_blocker_wrong_footprint(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    min_x: f32,
+    min_z: f32,
+    max_x: f32,
+    max_z: f32,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("hex blocker FormID");
+    // Only the footprint moves; `collision_triangles` keeps the blocker's real
+    // solid, so the derivation and the invariant now disagree -- which is the
+    // whole point of the independent path.
+    derived_door_blocker(world, form_id).footprint = vec![
+        [min_x, min_z],
+        [max_x, min_z],
+        [max_x, max_z],
+        [min_x, max_z],
+    ];
+}
+
+#[then(
+    regex = r"^polygon (\d+) of mesh 0x([0-9a-fA-F]{8}) is reported unreported inside blocker 0x([0-9a-fA-F]{8})$"
+)]
+async fn then_polygon_is_reported_unreported(
+    world: &mut BevyoutWorld,
+    index: u32,
+    mesh_form_id: String,
+    blocker_form_id: String,
+) {
+    let mesh_form_id = u32::from_str_radix(&mesh_form_id, 16).expect("hex mesh FormID");
+    let blocker_form_id = u32::from_str_radix(&blocker_form_id, 16).expect("hex blocker FormID");
+    let unreported = nav_doors::unreported_interior_polygons(
+        &world.nav_derived_door_meshes,
+        &world.nav_derived_door_blockers,
+        derived_door_associations(world),
+    );
+    assert!(
+        unreported.contains(&(mesh_form_id, index, blocker_form_id)),
+        "{unreported:?}"
     );
 }

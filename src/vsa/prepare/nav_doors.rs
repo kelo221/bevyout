@@ -54,12 +54,6 @@ pub(crate) const BLOCKER_FLOOR_TOLERANCE: f32 = 0.5;
 /// face by the clearance pass (issue #171) -- are not overlapping.
 const OVERLAP_EPSILON: f32 = 1.0e-4;
 
-/// Slack (metres) allowed when testing whether a polygon vertex lies inside a
-/// blocker footprint, so a vertex sitting numerically *on* the footprint
-/// boundary still counts as inside. Same robustness role as
-/// [`OVERLAP_EPSILON`].
-const CONTAINMENT_EPSILON: f32 = 1.0e-4;
-
 /// One blocking placement's collision footprint in Bevy-metre world space:
 /// the XZ convex hull of every player-blocking shape triangle it contributes,
 /// plus that geometry's vertical extent.
@@ -86,6 +80,19 @@ pub(crate) struct BlockerVolume {
     /// an open that can never happen. Non-gated blockers contribute blocking
     /// associations only.
     pub(crate) gated: bool,
+    /// The blocker's player-blocking collision triangles in Bevy-metre world
+    /// space -- the raw geometry `footprint` above is the convex hull *of*
+    /// (issue #189 feature 3).
+    ///
+    /// Carried separately, and deliberately redundant, because
+    /// [`unreported_interior_polygons`] is the invariant check on
+    /// [`derive_door_associations`] and must not share the derivation's
+    /// input or its containment primitive. Before this, both called the same
+    /// `point_in_convex_polygon` over the same `footprint`, so the invariant
+    /// could not catch a bug in the thing they shared -- it would simply
+    /// agree with it. That is the exact failure shape this project shipped
+    /// four times (`docs/postmortem/VERDICT.md` §1).
+    pub(crate) collision_triangles: Vec<[[f32; 3]; 3]>,
 }
 
 /// One walkable polygon of one prepared nav mesh, in Bevy-metre world space.
@@ -169,9 +176,12 @@ pub(crate) fn derive_door_associations(
                     continue;
                 }
                 let contained = !mesh.authored_door_polygons.contains(&polygon.index)
-                    && triangle
-                        .iter()
-                        .all(|point| point_in_convex_polygon(*point, &blocker.footprint));
+                    && triangle.iter().all(|point| {
+                        bevyout_core::geometry::point_in_convex_polygon_xz(
+                            *point,
+                            &blocker.footprint,
+                        )
+                    });
                 if !blocker.gated && !contained {
                     continue;
                 }
@@ -194,10 +204,6 @@ pub(crate) fn derive_door_associations(
     });
     associations.dedup();
     associations
-}
-
-fn cross(origin: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
-    (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
 }
 
 /// Whether two convex XZ polygons genuinely overlap (separating-axis test
@@ -237,24 +243,146 @@ fn project(shape: &[[f32; 2]], axis: [f32; 2]) -> (f32, f32) {
     (min, max)
 }
 
-/// Whether `point` lies inside the counter-clockwise convex `polygon`
-/// (boundary counts as inside, per [`CONTAINMENT_EPSILON`]).
-fn point_in_convex_polygon(point: [f32; 2], polygon: &[[f32; 2]]) -> bool {
-    for index in 0..polygon.len() {
-        let start = polygon[index];
-        let end = polygon[(index + 1) % polygon.len()];
-        if cross(start, end, point) < -CONTAINMENT_EPSILON {
-            return false;
+// ---------------------------------------------------------------------
+// The invariant check -- an INDEPENDENT verification path (issue #189
+// feature 3). Nothing below this line may call the shared convex-polygon
+// primitive `bevyout_core::geometry::point_in_convex_polygon_xz`,
+// `convex_shapes_overlap`, or read `BlockerVolume::footprint` for a
+// containment decision: those are `derive_door_associations`' primitives and
+// its input, i.e. the subject under test.
+// ---------------------------------------------------------------------
+
+/// Slack (metres) the independent check allows around a blocker whose
+/// collision geometry projects to *zero* XZ area.
+///
+/// Real authored Havok door collision is routinely a single zero-thickness
+/// plane (`MetroGateLoad`), whose XZ projection is a line segment with no
+/// interior -- so a strict inside-the-projection test would find nothing and
+/// the invariant would be vacuous for exactly the blocker class that motivated
+/// it, which is the disease this issue exists to cure rather than a tolerable
+/// gap. Matches `navmesh::BLOCKER_MIN_HALF_THICKNESS`, the half-thickness the
+/// footprint builder gives the same flat geometry, so the two paths judge the
+/// same *region* while computing it by different means. Held locally rather
+/// than imported, keeping this module std-only for the cucumber `#[path]`
+/// include (the same precedent [`BLOCKER_FLOOR_TOLERANCE`] sets).
+const FLAT_SOLID_TOLERANCE: f32 = 0.05;
+
+/// Total projected XZ area (m²) below which a blocker's collision geometry
+/// counts as flat and earns [`FLAT_SOLID_TOLERANCE`]. Purely a
+/// numerical-robustness floor: 1 mm² is orders of magnitude below any real
+/// door leaf's footprint and above f32 rounding on world-space coordinates.
+const FLAT_SOLID_AREA: f32 = 1.0e-6;
+
+/// Slack (metres) the independent check allows around a *solid* blocker's
+/// projected boundary.
+///
+/// An even-odd crossing count is exact but undecided exactly *on* an edge, and
+/// a triangle soup is full of interior edges: a point on a collision
+/// triangulation's internal diagonal belongs to both neighbours and is
+/// reported by neither. The clearance pass (issue #171) clips nav polygon
+/// boundaries directly onto collider faces, so lying exactly on a collision
+/// edge is the common case here, not an oddity.
+///
+/// Numerically equal to `bevyout_core::geometry::CONTAINMENT_EPSILON`, the
+/// slack the derivation's shared convex-polygon primitive gives its boundary
+/// (issue #189 feature 4), so the two paths agree on how much
+/// f32 noise counts as "on the surface" while still deciding containment by
+/// different means. That is a shared *convention*, not a shared primitive: at
+/// 0.1 mm it cannot turn ground the derivation could not have claimed into a
+/// prepare failure.
+const SOLID_BOUNDARY_TOLERANCE: f32 = 1.0e-4;
+
+/// Twice the signed XZ area of a projected collision triangle.
+fn projected_double_area(triangle: &[[f32; 3]; 3]) -> f32 {
+    let [a, b, c] = triangle;
+    (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])
+}
+
+/// Whether `point` is inside a collision triangle's XZ projection, by an
+/// **even-odd ray-crossing** test.
+///
+/// Deliberately a different algorithm from the barycentric/half-plane family
+/// the derivation and the rest of the nav pipeline use (issue #189 feature 4's
+/// shared primitive): a crossing count makes no assumption about winding,
+/// convexity or the sign of a determinant, so a sign, winding or epsilon
+/// mistake in that family cannot reproduce itself here and silently make this
+/// invariant agree with the bug it is meant to catch.
+fn point_in_projected_triangle(point: [f32; 2], triangle: &[[f32; 3]; 3]) -> bool {
+    let mut inside = false;
+    for index in 0..3 {
+        let a = triangle[index];
+        let b = triangle[(index + 1) % 3];
+        let (az, bz) = (a[2], b[2]);
+        if (az > point[1]) != (bz > point[1]) {
+            let x = a[0] + (point[1] - az) / (bz - az) * (b[0] - a[0]);
+            if point[0] < x {
+                inside = !inside;
+            }
         }
     }
-    true
+    inside
+}
+
+/// XZ distance from `point` to a projected collision triangle's boundary.
+fn distance_to_projected_triangle(point: [f32; 2], triangle: &[[f32; 3]; 3]) -> f32 {
+    let mut best = f32::INFINITY;
+    for index in 0..3 {
+        let a = triangle[index];
+        let b = triangle[(index + 1) % 3];
+        let (ex, ez) = (b[0] - a[0], b[2] - a[2]);
+        let length_squared = ex * ex + ez * ez;
+        let t = if length_squared < 1.0e-12 {
+            0.0
+        } else {
+            (((point[0] - a[0]) * ex + (point[1] - a[2]) * ez) / length_squared).clamp(0.0, 1.0)
+        };
+        let (cx, cz) = (a[0] + ex * t, a[2] + ez * t);
+        best = best.min(((point[0] - cx).powi(2) + (point[1] - cz).powi(2)).sqrt());
+    }
+    best
+}
+
+/// Whether `point` lies inside a blocker's *actual collision solid* in XZ,
+/// sampled against the blocker's raw triangles rather than the convex hull
+/// footprint the derivation uses.
+///
+/// The union of a blocker's projected triangles is always a subset of their
+/// convex hull, so for solid geometry this predicate is strictly *no more*
+/// permissive than the derivation's: it cannot invent a violation the
+/// derivation had no chance to report. What it can do -- and the only reason
+/// it exists -- is disagree when the derivation's own containment primitive is
+/// wrong.
+fn point_inside_solid_xz(point: [f32; 2], blocker: &BlockerVolume) -> bool {
+    let flat = blocker
+        .collision_triangles
+        .iter()
+        .map(|triangle| projected_double_area(triangle).abs() / 2.0)
+        .sum::<f32>()
+        < FLAT_SOLID_AREA;
+    let tolerance = if flat {
+        FLAT_SOLID_TOLERANCE
+    } else {
+        SOLID_BOUNDARY_TOLERANCE
+    };
+    blocker.collision_triangles.iter().any(|triangle| {
+        point_in_projected_triangle(point, triangle)
+            || distance_to_projected_triangle(point, triangle) <= tolerance
+    })
 }
 
 /// Every walkable polygon that lies wholly inside a blocker's collision
 /// volume without a matching `blocks_when_closed` association -- the
-/// deterministic invariant check `navmesh.rs` reports at prepare time and the
-/// unit/cucumber suites assert is empty. Returns `(mesh_form_id,
-/// triangle_index, reference_form_id)` triples, sorted.
+/// deterministic invariant `navmesh.rs` enforces as a hard `prepare` failure
+/// (issue #189 feature 2) and the unit/cucumber suites assert is empty.
+/// Returns `(mesh_form_id, triangle_index, reference_form_id)` triples,
+/// sorted.
+///
+/// Verified independently of its subject (issue #189 feature 3): containment
+/// is decided by [`point_inside_solid_xz`] against the blocker's raw collision
+/// triangles, never by the shared `geometry::point_in_convex_polygon_xz` /
+/// `BlockerVolume::footprint` pair `derive_door_associations` runs on. A check
+/// that shares its primitive with the code it validates can only ever agree
+/// with that code -- see this module's section header above.
 pub(crate) fn unreported_interior_polygons(
     meshes: &[BlockerMeshInput],
     blockers: &[BlockerVolume],
@@ -289,9 +417,10 @@ pub(crate) fn unreported_interior_polygons(
                 // they are never classified blocking -- see
                 // `BlockerMeshInput::authored_door_polygons`.
                 let inside = !mesh.authored_door_polygons.contains(&polygon.index)
-                    && polygon.vertices.iter().all(|vertex| {
-                        point_in_convex_polygon([vertex[0], vertex[2]], &blocker.footprint)
-                    });
+                    && polygon
+                        .vertices
+                        .iter()
+                        .all(|vertex| point_inside_solid_xz([vertex[0], vertex[2]], blocker));
                 if !inside {
                     continue;
                 }
@@ -319,14 +448,35 @@ mod tests {
         ]
     }
 
+    /// A solid blocker: the footprint plus the collision geometry it is the
+    /// hull of, as a triangle fan over the same outline. The two are supplied
+    /// separately on purpose -- `derive_door_associations` reads only the
+    /// former and `unreported_interior_polygons` only the latter (issue #189
+    /// feature 3), and [`fake_solid_geometry`] below exploits exactly that to
+    /// prove the invariant is not merely echoing the derivation.
     fn blocker(footprint: Vec<[f32; 2]>, gated: bool) -> BlockerVolume {
+        let collision_triangles = fan(&footprint, 0.0);
         BlockerVolume {
             reference_form_id: 0x99,
             footprint,
             min_y: 0.0,
             max_y: 2.0,
             gated,
+            collision_triangles,
         }
+    }
+
+    /// Triangle fan over a closed XZ outline, at height `y`.
+    fn fan(outline: &[[f32; 2]], y: f32) -> Vec<[[f32; 3]; 3]> {
+        (1..outline.len().saturating_sub(1))
+            .map(|index| {
+                [
+                    [outline[0][0], y, outline[0][1]],
+                    [outline[index][0], y, outline[index][1]],
+                    [outline[index + 1][0], y, outline[index + 1][1]],
+                ]
+            })
+            .collect()
     }
 
     fn mesh(polygons: Vec<BlockerPolygonInput>) -> BlockerMeshInput {
@@ -477,5 +627,83 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// Issue #189 feature 3, and the test the whole feature is for: the
+    /// invariant must be able to *disagree* with the derivation.
+    ///
+    /// The blocker below is given a footprint that excludes the polygon while
+    /// its collision solid encloses it -- the observable signature of a bug in
+    /// the derivation's own containment primitive or footprint construction.
+    /// The derivation therefore reports nothing, and the invariant must still
+    /// fire. Restore the pre-#189 shape (a check reading
+    /// `point_in_convex_polygon` over `BlockerVolume::footprint`, the
+    /// derivation's own primitive and input) and this goes red, because such a
+    /// check can only ever agree with the code it is validating.
+    #[test]
+    fn the_invariant_reads_the_collision_solid_not_the_derivations_footprint() {
+        let meshes = [mesh(vec![triangle(
+            1,
+            [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]],
+            0.0,
+        )])];
+        let blockers = [BlockerVolume {
+            // A footprint nowhere near the polygon: whatever produced it is
+            // wrong, and the derivation has no way to know that.
+            footprint: square(10.0, 10.0, 11.0, 11.0),
+            ..blocker(square(0.0, 0.0, 1.0, 1.0), true)
+        }];
+        let associations = derive_door_associations(&meshes, &blockers);
+        assert!(associations.is_empty(), "{associations:?}");
+        assert_eq!(
+            unreported_interior_polygons(&meshes, &blockers, &associations),
+            vec![(0x10, 1, 0x99)],
+        );
+    }
+
+    /// The invariant must not be vacuous for the blocker class that motivated
+    /// it. Real authored Havok door collision is routinely a single
+    /// zero-thickness plane (`MetroGateLoad`), whose XZ projection has no
+    /// interior at all -- so a strict inside-the-projection test would report
+    /// nothing forever while reading perfectly healthy.
+    #[test]
+    fn a_zero_thickness_collision_plane_still_claims_the_ground_on_it() {
+        let meshes = [mesh(vec![triangle(
+            1,
+            [[0.5, 0.49], [0.6, 0.5], [0.5, 0.51]],
+            0.0,
+        )])];
+        let plane = [
+            [[0.0f32, 0.0, 0.5], [1.0, 0.0, 0.5], [1.0, 2.0, 0.5]],
+            [[0.0, 0.0, 0.5], [1.0, 2.0, 0.5], [0.0, 2.0, 0.5]],
+        ];
+        let blockers = [BlockerVolume {
+            collision_triangles: plane.to_vec(),
+            ..blocker(square(0.0, 0.45, 1.0, 0.55), true)
+        }];
+        let associations = derive_door_associations(&meshes, &blockers);
+        let unreported = unreported_interior_polygons(&meshes, &blockers, &associations);
+        assert!(unreported.is_empty(), "{unreported:?}");
+        // ... and it is a real verdict, not an empty one: with the derivation
+        // silenced, the same polygon is reported.
+        assert_eq!(
+            unreported_interior_polygons(&meshes, &blockers, &[]),
+            vec![(0x10, 1, 0x99)],
+        );
+    }
+
+    /// The independent path must not be *more* permissive than the
+    /// derivation's hull, or it would fail `prepare` on ground the derivation
+    /// never had a chance to claim. Ground outside a solid blocker is outside
+    /// it under both paths.
+    #[test]
+    fn ground_outside_a_solid_blocker_is_never_reported() {
+        let meshes = [mesh(vec![triangle(
+            1,
+            [[2.0, 2.0], [3.0, 2.0], [2.5, 3.0]],
+            0.0,
+        )])];
+        let blockers = [blocker(square(0.0, 0.0, 1.0, 1.0), true)];
+        assert!(unreported_interior_polygons(&meshes, &blockers, &[]).is_empty());
     }
 }

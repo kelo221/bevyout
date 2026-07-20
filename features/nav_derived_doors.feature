@@ -90,3 +90,24 @@ Feature: Collision-derived door to nav-polygon associations
     When the derived door associations are resolved
     Then the derived association order is 0x00000020/2, 0x00000020/5, 0x00000040/2, 0x00000040/5
     And resolving the derived door associations again gives the same result
+
+  Scenario: The interior-polygon invariant is verified against the collision solid, not the derivation's own footprint
+    # Issue #189 feature 3. Before this, the invariant check and
+    # `derive_door_associations` both called the same
+    # `point_in_convex_polygon` over the same footprint, so the check could
+    # not catch a bug in the primitive they shared -- it could only ever
+    # agree with it. That is the shape behind every defect in
+    # `docs/postmortem/VERDICT.md` section 1.
+    #
+    # Here the blocker's footprint is wrong (it points nowhere near the
+    # blocker's actual collision geometry), which is exactly what a bug in
+    # the derivation's containment primitive or hull construction looks like
+    # from the outside. The derivation reports nothing, and the invariant --
+    # sampling the collision solid by an independent even-odd crossing count
+    # -- must still fire.
+    Given a blocker 0x00000099 with footprint from 0, 0 to 1, 1 spanning height 0 to 2
+    And blocker 0x00000099 has a mis-derived footprint from 10, 10 to 11, 11
+    And nav mesh 0x00000010 has walkable polygon 1 with vertices 0.1, 0, 0.1 and 0.9, 0, 0.1 and 0.5, 0, 0.9
+    When the derived door associations are resolved
+    Then there are exactly 0 derived door associations
+    And polygon 1 of mesh 0x00000010 is reported unreported inside blocker 0x00000099

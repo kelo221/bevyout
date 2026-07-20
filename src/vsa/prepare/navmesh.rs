@@ -703,15 +703,12 @@ fn report_nav_probe(
             ) else {
                 return None;
             };
-            let det = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
-            if det.abs() < 1.0e-9 {
-                return None;
-            }
-            let beta = ((x - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (z - a[2])) / det;
-            let gamma = ((b[0] - a[0]) * (z - a[2]) - (x - a[0]) * (b[2] - a[2])) / det;
-            let alpha = 1.0 - beta - gamma;
-            (alpha >= -1.0e-4 && beta >= -1.0e-4 && gamma >= -1.0e-4)
-                .then(|| (index, alpha * a[1] + beta * b[1] + gamma * c[1]))
+            // Issue #189 feature 4: the one shared containment primitive,
+            // rather than the inline barycentric copy this was (with its own
+            // 1e-9/1e-4 tolerances). The weights interpolate the covering
+            // polygon's surface height at the probe point.
+            let [alpha, beta, gamma] = bevyout_core::geometry::barycentric_xz(x, z, a, b, c)?;
+            Some((index, alpha * a[1] + beta * b[1] + gamma * c[1]))
         })
     };
 
@@ -1220,6 +1217,11 @@ pub(crate) fn cell_blocker_volumes(
             min_y,
             max_y,
             gated,
+            // Issue #189 feature 3: the raw geometry the hull above was built
+            // from, kept so `nav_doors::unreported_interior_polygons` can
+            // verify the derivation against the collision solid itself rather
+            // than against the derivation's own input.
+            collision_triangles: triangles.iter().map(|triangle| triangle.vertices).collect(),
         });
     }
     volumes
@@ -1295,6 +1297,74 @@ fn blocker_footprint(points: &[[f32; 3]]) -> Vec<[f32; 2]> {
     ]
 }
 
+/// Escape hatch for [`interior_polygon_gate`] (issue #189 feature 2).
+///
+/// Setting this to `1`/`true` downgrades the walkable-ground-inside-a-closed-
+/// blocker invariant from a hard `prepare` failure back to warnings. It exists
+/// for exactly one situation: a cell whose *authored* data legitimately places
+/// walkable NAVM inside a solid the blocker rule cannot distinguish from a
+/// door -- for example a placement whose collision hull encloses a genuinely
+/// traversable alcove. That is a data finding, and the correct response is to
+/// record it (with the cell, the blocker FormID and the polygon count) and
+/// narrow the blocker rule, not to leave the hatch open. It is deliberately an
+/// environment variable and not a CLI flag: nothing in a normal `prepare`
+/// invocation should be able to set it by habit.
+///
+/// If this is ever set in a committed script or CI job, the invariant has been
+/// silently retired and this issue's whole point -- a check that reads healthy
+/// while agreeing with the bug -- has been re-created.
+const NAV_INTERIOR_ESCAPE_ENV: &str = "BEVYOUT_NAV_ALLOW_INTERIOR_POLYGONS";
+
+/// Whether [`NAV_INTERIOR_ESCAPE_ENV`] is set to an affirmative value. Read
+/// exactly once, at the single call site, so the gate itself stays pure and
+/// testable without touching process-global state.
+fn interior_polygon_escape_hatch() -> bool {
+    matches!(
+        std::env::var(NAV_INTERIOR_ESCAPE_ENV).as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Issue #189 feature 2: the walkable-ground-inside-a-closed-blocker invariant
+/// as a **hard failure**, not a number in a summary line.
+///
+/// Before this, `unreported interior polygons` was a `format!` field in the
+/// `nav doors:` summary: it could report a non-zero count and `prepare` still
+/// succeeded, which is the direct descendant of #148/#177's root cause -- the
+/// navmesh running straight through a closed slab, the agent walking in, and
+/// physics wedging it. A count nobody has to act on is the same instrument
+/// failure as `smallest largest-component share 98%` on a cell with zero
+/// navigation.
+///
+/// Every offending polygon is still listed individually (severity `error`, so
+/// it survives into the manifest's diagnostics) before the build stops.
+fn interior_polygon_gate(
+    unreported: &[(u32, u32, u32)],
+    escape_hatch: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let severity = if escape_hatch { "warning" } else { "error" };
+    for (mesh_form_id, triangle_index, reference_form_id) in unreported {
+        diagnostics.push(Diagnostic {
+            severity: severity.into(),
+            message: format!(
+                "nav doors: mesh {mesh_form_id:08x} polygon {triangle_index} is walkable inside closed blocker {reference_form_id:08x} with no blocking association"
+            ),
+        });
+    }
+    if unreported.is_empty() || escape_hatch {
+        return Ok(());
+    }
+    let (mesh_form_id, triangle_index, reference_form_id) = unreported[0];
+    anyhow::bail!(
+        "nav doors: {} walkable polygon(s) are routable inside a closed blocker with no blocking \
+         association (first: mesh {mesh_form_id:08x} polygon {triangle_index} inside blocker \
+         {reference_form_id:08x}); an agent routed there wedges against the closed solid. Set \
+         {NAV_INTERIOR_ESCAPE_ENV}=1 only if this cell's authored data is genuinely the exception",
+        unreported.len(),
+    )
+}
+
 /// Populates every mesh's `PreparedNavMesh::derived_doors` from this cell's
 /// blocking placements (issue #177), rewrites `navgraph.ron`, and returns the
 /// refreshed manifest pointer plus a deterministic summary line.
@@ -1364,14 +1434,7 @@ pub(crate) fn apply_derived_door_associations(
         .map(|association| association.door_reference_form_id)
         .collect();
 
-    for (mesh_form_id, triangle_index, reference_form_id) in &unreported {
-        diagnostics.push(Diagnostic {
-            severity: "warning".into(),
-            message: format!(
-                "nav doors: mesh {mesh_form_id:08x} polygon {triangle_index} is walkable inside closed blocker {reference_form_id:08x} with no blocking association"
-            ),
-        });
-    }
+    interior_polygon_gate(&unreported, interior_polygon_escape_hatch(), diagnostics)?;
 
     let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
     let summary = format!(
@@ -1432,5 +1495,199 @@ mod blocker_footprint_tests {
     #[test]
     fn a_single_point_has_no_footprint() {
         assert!(blocker_footprint(&[[1.0, 2.0, 3.0]]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod landmass_acceptance_tests {
+    //! Issue #189 feature 1. [`verify_landmass_acceptance`] is the guard added
+    //! *because* Vault 101 shipped with zero navigation while every prepare
+    //! metric read a healthy 98% component share -- and until this module it
+    //! appeared exactly twice in the repository: its definition and its single
+    //! call site, with no test anywhere. A guard against this project's worst
+    //! shipped failure had no proof it still fires.
+    //!
+    //! These tests are written to go red if the guard is *weakened*, not only
+    //! if it is deleted: the rejecting cases below are rejected by `landmass`
+    //! for reasons the pre-filter in `verify_landmass_acceptance` deliberately
+    //! does not screen out, so broadening that filter to "fix" a failing cell
+    //! (the tempting move, and the one that would restore the 98% lie) turns
+    //! these red rather than green.
+
+    use super::*;
+
+    fn polygon(index: u32, vertex_indices: [u32; 3]) -> PreparedNavPolygon {
+        PreparedNavPolygon {
+            index,
+            vertex_indices,
+            ..PreparedNavPolygon::default()
+        }
+    }
+
+    fn mesh(vertices: Vec<[f32; 3]>, polygons: Vec<PreparedNavPolygon>) -> PreparedNavMesh {
+        PreparedNavMesh {
+            form_id: 0x0001_0000,
+            vertices,
+            polygons,
+            ..PreparedNavMesh::default()
+        }
+    }
+
+    /// Two counter-clockwise triangles sharing one edge: the ordinary,
+    /// healthy case, which must pass unchanged.
+    #[test]
+    fn a_valid_mesh_is_accepted() {
+        let mesh = mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![polygon(0, [0, 2, 1]), polygon(1, [0, 3, 2])],
+        );
+        assert!(verify_landmass_acceptance(&mesh).is_ok());
+    }
+
+    /// A mesh wound entirely the other way is *not* a rejection: the guard
+    /// retries with both windings exactly as the runtime does, and authored
+    /// FO3 `NAVM` winding is not guaranteed to match `landmass`'s. Pinned so
+    /// the retry cannot be dropped as dead code.
+    #[test]
+    fn a_uniformly_reverse_wound_mesh_is_accepted_by_the_retry() {
+        let mesh = mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![polygon(0, [1, 2, 0]), polygon(1, [2, 3, 0])],
+        );
+        assert!(verify_landmass_acceptance(&mesh).is_ok());
+    }
+
+    /// The Vault 101 shape: one polygon wound against the rest. Neither
+    /// winding pass can satisfy `landmass`, so it rejects the *entire* mesh
+    /// and the cell ends up with no navigation at all -- while every
+    /// prepare-side connectivity metric, which measures the graph this pass
+    /// built rather than the graph the runtime accepts, still reads healthy.
+    #[test]
+    fn a_mesh_with_one_reverse_wound_polygon_is_rejected() {
+        let mesh = mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+            // Polygon 1 is wound against polygon 0, so neither the forward
+            // nor the reversed pass can satisfy `landmass`.
+            vec![polygon(0, [0, 2, 1]), polygon(1, [2, 3, 0])],
+        );
+        let error = verify_landmass_acceptance(&mesh)
+            .expect_err("a mixed-winding mesh must not be accepted");
+        assert!(
+            error.contains("concave") || error.contains("clockwise"),
+            "{error}"
+        );
+    }
+
+    /// Winding-independent rejection: three triangles sharing one edge is a
+    /// non-manifold mesh `landmass` refuses in either winding. This is the
+    /// case that survives *any* re-winding retry, so it pins the guard's
+    /// verdict rather than the retry's.
+    #[test]
+    fn a_non_manifold_mesh_is_rejected_in_either_winding() {
+        let mesh = mesh(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.5, 0.0, 1.0],
+                [0.5, 0.0, -1.0],
+                [0.5, 0.0, 2.0],
+            ],
+            vec![
+                polygon(0, [1, 0, 2]),
+                polygon(1, [0, 1, 3]),
+                polygon(2, [1, 0, 4]),
+            ],
+        );
+        let error = verify_landmass_acceptance(&mesh)
+            .expect_err("an edge shared by three polygons must not be accepted");
+        assert!(error.contains("more than two polygons"), "{error}");
+    }
+
+    /// A mesh with nothing walkable left is the runtime's own documented
+    /// empty case, not a rejection -- pinned so the early return keeps its
+    /// meaning.
+    #[test]
+    fn a_mesh_with_no_walkable_polygons_is_accepted() {
+        let mut mesh = mesh(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0]],
+            vec![polygon(0, [0, 1, 2])],
+        );
+        mesh.polygons[0].walkable = false;
+        assert!(verify_landmass_acceptance(&mesh).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod interior_polygon_gate_tests {
+    //! Issue #189 feature 2. These pin the *verdict*, not the wording: if the
+    //! gate is weakened back to a diagnostic-only report (the shape it had
+    //! when it shipped), `a_single_unreported_interior_polygon_fails_prepare`
+    //! goes red.
+
+    use super::*;
+
+    #[test]
+    fn no_unreported_interior_polygons_is_a_clean_pass() {
+        let mut diagnostics = Vec::new();
+        assert!(interior_polygon_gate(&[], false, &mut diagnostics).is_ok());
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_single_unreported_interior_polygon_fails_prepare() {
+        let mut diagnostics = Vec::new();
+        let error =
+            interior_polygon_gate(&[(0x0001_0000, 42, 0x0002_4710)], false, &mut diagnostics)
+                .expect_err("walkable ground inside a closed blocker must stop the build");
+        let error = error.to_string();
+        assert!(error.contains("00024710"), "{error}");
+        assert!(error.contains("polygon 42"), "{error}");
+        // Every offender is still enumerated, at error severity, so the
+        // manifest names them rather than only reporting a count.
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, "error");
+    }
+
+    #[test]
+    fn the_documented_escape_hatch_downgrades_the_failure_to_warnings() {
+        let mut diagnostics = Vec::new();
+        assert!(
+            interior_polygon_gate(&[(0x0001_0000, 42, 0x0002_4710)], true, &mut diagnostics)
+                .is_ok()
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, "warning");
+    }
+
+    /// The hatch is opt-in: an unset (or arbitrary) environment must leave the
+    /// invariant fatal, so a stray value cannot quietly retire it.
+    #[test]
+    fn the_escape_hatch_is_off_unless_explicitly_affirmative() {
+        // SAFETY: single-threaded within this test; the variable is read only
+        // by `interior_polygon_escape_hatch`, which no other test calls.
+        unsafe { std::env::remove_var(NAV_INTERIOR_ESCAPE_ENV) };
+        assert!(!interior_polygon_escape_hatch());
+        unsafe { std::env::set_var(NAV_INTERIOR_ESCAPE_ENV, "0") };
+        assert!(!interior_polygon_escape_hatch());
+        unsafe { std::env::set_var(NAV_INTERIOR_ESCAPE_ENV, "yes") };
+        assert!(!interior_polygon_escape_hatch());
+        unsafe { std::env::set_var(NAV_INTERIOR_ESCAPE_ENV, "1") };
+        assert!(interior_polygon_escape_hatch());
+        unsafe { std::env::remove_var(NAV_INTERIOR_ESCAPE_ENV) };
     }
 }
