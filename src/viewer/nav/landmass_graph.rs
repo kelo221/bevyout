@@ -53,6 +53,29 @@ pub(crate) struct MeshInput {
     pub(crate) vertices: Vec<[f32; 3]>,
     pub(crate) polygons: Vec<PolygonInput>,
     pub(crate) doors: Vec<DoorInput>,
+    /// Issue #177: collision-derived blocker -> polygon associations
+    /// (`PreparedNavMesh::derived_doors`), deliberately kept out of `doors`.
+    /// The authored list's per-door triangle *count* is load bearing
+    /// (`door_link_descriptors` treats exactly two as a two-sided link,
+    /// `single_sided_doors` exactly one as a travel/crossing candidate), so
+    /// folding derived associations in would silently reclassify authored
+    /// doors -- a travel door with one authored triangle plus three derived
+    /// ones would stop being a travel door.
+    pub(crate) derived_doors: Vec<DerivedDoorInput>,
+}
+
+/// One derived blocker -> polygon association (issue #177). Unlike
+/// [`DoorInput`] the FormID is always present: a derived association exists
+/// only because a blocking placement produced it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DerivedDoorInput {
+    pub(crate) triangle_index: u32,
+    pub(crate) door_reference_form_id: u32,
+    /// `true` when the polygon lies wholly inside the blocker's collision
+    /// volume, so it must be impassable while the blocker is closed. `false`
+    /// is the doorway *crossing* itself, which stays routable so the runtime
+    /// crossing gate can fire on it.
+    pub(crate) blocks_when_closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -139,11 +162,51 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
                 door_form_ids.insert(door_form_id);
             }
         }
+        // Issue #177: a derived-only blocker (an ordinary in-cell door the
+        // authored `NVDP` never associated with a triangle) needs a type
+        // index for exactly the same reason an authored one does -- it is
+        // the identity `apply_door_lock_overrides` prices.
+        for door in &mesh.derived_doors {
+            door_form_ids.insert(door.door_reference_form_id);
+        }
     }
     door_form_ids
         .into_iter()
         .enumerate()
         .map(|(offset, door_form_id)| (door_form_id, offset + 1))
+        .collect()
+}
+
+/// Global blocker FormID -> `landmass` polygon type index for the *blocking*
+/// derived association class (issue #177): the polygons that lie wholly
+/// inside a blocker's collision volume. They need their own type index,
+/// separate from [`door_type_indices`]'s, because the two classes are priced
+/// on different state: a door's ordinary (gate) polygons are impassable only
+/// while it is *locked*, while a polygon inside the solid slab is impassable
+/// whenever the door is *closed*, lock or no lock. `landmass` stores exactly
+/// one `type_index` per polygon, so one door needing both rules needs two
+/// indices.
+///
+/// Allocated above every index [`door_type_indices`] assigned, in ascending
+/// FormID order, so the two maps can never collide and both are deterministic
+/// across calls on the same graph.
+pub(crate) fn closed_door_type_indices(
+    meshes: &[MeshInput],
+    door_type_indices: &BTreeMap<u32, usize>,
+) -> BTreeMap<u32, usize> {
+    let mut form_ids: BTreeSet<u32> = BTreeSet::new();
+    for mesh in meshes {
+        for door in &mesh.derived_doors {
+            if door.blocks_when_closed {
+                form_ids.insert(door.door_reference_form_id);
+            }
+        }
+    }
+    let base = door_type_indices.values().max().copied().unwrap_or(0) + 1;
+    form_ids
+        .into_iter()
+        .enumerate()
+        .map(|(offset, form_id)| (form_id, base + offset))
         .collect()
 }
 
@@ -160,8 +223,17 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
 /// the same preferred-pathing index. `1` when there are no doors at all
 /// (the type-index space starts fresh at `1`, same as `door_type_indices`
 /// itself).
-pub(crate) fn preferred_pathing_type_index(door_type_indices: &BTreeMap<u32, usize>) -> usize {
-    door_type_indices.values().max().copied().unwrap_or(0) + 1
+pub(crate) fn preferred_pathing_type_index(
+    door_type_indices: &BTreeMap<u32, usize>,
+    closed_door_type_indices: &BTreeMap<u32, usize>,
+) -> usize {
+    door_type_indices
+        .values()
+        .chain(closed_door_type_indices.values())
+        .max()
+        .copied()
+        .unwrap_or(0)
+        + 1
 }
 
 /// Resolves one triangle's landmass polygon type index (issue #156 feature
@@ -257,6 +329,7 @@ pub(crate) fn build_navigation_mesh(
     mesh: &MeshInput,
     _merges: &[MergeInput],
     door_type_indices: &BTreeMap<u32, usize>,
+    closed_door_type_indices: &BTreeMap<u32, usize>,
 ) -> BuildResult {
     let mut diagnostics = Vec::new();
     let vertex_count = mesh.vertices.len();
@@ -275,11 +348,38 @@ pub(crate) fn build_navigation_mesh(
             door_type_index_by_triangle.insert(door.triangle_index, type_index);
         }
     }
+    // Issue #177: derived associations type the same way authored ones do,
+    // with the blocking class taking its own index (see
+    // `closed_door_type_indices`). A derived association is applied after the
+    // authored ones so a blocking classification wins over a plain gate
+    // classification on the same triangle -- the stricter rule must not be
+    // silently downgraded.
+    for door in &mesh.derived_doors {
+        let index = if door.blocks_when_closed {
+            closed_door_type_indices.get(&door.door_reference_form_id)
+        } else {
+            door_type_indices.get(&door.door_reference_form_id)
+        };
+        if let Some(&type_index) = index {
+            let slot = door_type_index_by_triangle.entry(door.triangle_index);
+            match slot {
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    if door.blocks_when_closed {
+                        occupied.insert(type_index);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(type_index);
+                }
+            }
+        }
+    }
     // Issue #156 feature 1: computed once from the same archipelago-wide
     // `door_type_indices` map every mesh in this build shares, so every
     // mesh agrees on the same preferred-pathing index (see
     // `preferred_pathing_type_index`'s doc comment).
-    let preferred_pathing_index = preferred_pathing_type_index(door_type_indices);
+    let preferred_pathing_index =
+        preferred_pathing_type_index(door_type_indices, closed_door_type_indices);
 
     let mut included_polygons: Vec<&PolygonInput> = Vec::new();
     let mut included_type_indices: Vec<usize> = Vec::new();
@@ -564,6 +664,61 @@ pub(crate) fn single_sided_doors(meshes: &[MeshInput]) -> Vec<SingleSidedDoor> {
         index = group_end;
     }
     result
+}
+
+/// Deterministic mid-route crossing-gate candidates recovered from the
+/// *derived* associations (issue #177), ordered by `(door_form_id,
+/// mesh_form_id, polygon_index)`.
+///
+/// Only the gate class (`!blocks_when_closed`) is returned: a polygon wholly
+/// inside a closed blocker's solid is priced impassable instead
+/// (`closed_door_type_indices`), and gating on it would ask an agent to stop
+/// inside a wall. Unlike `single_sided_doors` this places no cardinality
+/// restriction on a door's association count -- a derived doorway routinely
+/// overlaps several post-clip sub-polygons (issue #171 re-triangulates), and
+/// every one of them is a legitimate place for the crossing gate to fire.
+/// Authored associations are untouched here: they keep flowing through
+/// `door_link_descriptors`/`single_sided_doors` exactly as before, so a door
+/// with both authored and derived associations cannot be reclassified.
+pub(crate) fn derived_door_gates(meshes: &[MeshInput]) -> Vec<SingleSidedDoor> {
+    let mut gates = Vec::new();
+    for mesh in meshes {
+        for door in &mesh.derived_doors {
+            if door.blocks_when_closed {
+                continue;
+            }
+            let Some(polygon) = mesh
+                .polygons
+                .iter()
+                .find(|polygon| polygon.index == door.triangle_index)
+            else {
+                continue;
+            };
+            let (Some(vertices), Some(midpoint)) = (
+                polygon_vertices(mesh, polygon),
+                polygon_centroid(mesh, polygon),
+            ) else {
+                continue;
+            };
+            gates.push(SingleSidedDoor {
+                door_form_id: door.door_reference_form_id,
+                side: DoorLinkSide {
+                    mesh_form_id: mesh.form_id,
+                    polygon_index: polygon.index,
+                    midpoint,
+                },
+                vertices,
+            });
+        }
+    }
+    gates.sort_by_key(|gate| {
+        (
+            gate.door_form_id,
+            gate.side.mesh_form_id,
+            gate.side.polygon_index,
+        )
+    });
+    gates
 }
 
 // ---------------------------------------------------------------------
@@ -885,6 +1040,7 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         }
     }
 
@@ -895,7 +1051,7 @@ mod tests {
         // vertex layout (see `reversed_winding_still_validates_after_retry`
         // for the opposite winding, which does need the retry).
         let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.is_empty(),
@@ -909,7 +1065,7 @@ mod tests {
         // Same square, opposite winding: the first attempt must fail
         // internally and the retry with reversed order must succeed.
         let mesh = square_mesh([0, 2, 1], [1, 2, 3]);
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -925,7 +1081,7 @@ mod tests {
     fn water_polygons_are_excluded_as_non_walkable() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         // One walkable polygon remains -- still a valid (smaller) mesh.
         // `ValidNavigationMesh`'s fields are private to `landmass`, so this
         // only asserts what's externally observable: conversion still
@@ -938,7 +1094,7 @@ mod tests {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[0].is_water = true;
         mesh.polygons[1].is_water = true;
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(result.nav_mesh.is_none());
         assert!(
             result
@@ -954,7 +1110,7 @@ mod tests {
     fn invalid_vertex_index_polygon_is_skipped_with_an_error_diagnostic_and_never_panics() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 2, u32::MAX];
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result.diagnostics.iter().any(
@@ -969,7 +1125,7 @@ mod tests {
     fn degenerate_polygon_is_skipped_with_a_warning_diagnostic() {
         let mut mesh = square_mesh([0, 2, 1], [1, 2, 3]);
         mesh.polygons[1].vertex_indices = [1, 1, 3];
-        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let result = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(result.nav_mesh.is_some(), "{:?}", result.diagnostics);
         assert!(
             result
@@ -996,6 +1152,7 @@ mod tests {
                 triangle_index,
                 door_reference_form_id: Some(door_form_id),
             }],
+            derived_doors: Vec::new(),
         }
     }
 
@@ -1135,8 +1292,8 @@ mod tests {
         let mesh = mesh_with_door(0x10, 0, 0x99);
         let indices = door_type_indices(std::slice::from_ref(&mesh));
         assert_eq!(indices.get(&0x99), Some(&1));
-        let typed = build_navigation_mesh(&mesh, &[], &indices);
-        let untyped = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let typed = build_navigation_mesh(&mesh, &[], &indices, &BTreeMap::new());
+        let untyped = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
         assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
     }
@@ -1153,12 +1310,18 @@ mod tests {
         let door_indices = door_type_indices(&[mesh_a, mesh_b]);
         // Doors got 1 (0x50) and 2 (0x99) -- see
         // `each_distinct_door_gets_its_own_type_index_starting_at_one`.
-        assert_eq!(preferred_pathing_type_index(&door_indices), 3);
+        assert_eq!(
+            preferred_pathing_type_index(&door_indices, &BTreeMap::new()),
+            3
+        );
     }
 
     #[test]
     fn preferred_pathing_type_index_is_one_when_there_are_no_doors() {
-        assert_eq!(preferred_pathing_type_index(&BTreeMap::new()), 1);
+        assert_eq!(
+            preferred_pathing_type_index(&BTreeMap::new(), &BTreeMap::new()),
+            1
+        );
     }
 
     #[test]
@@ -1215,6 +1378,7 @@ mod tests {
                 is_preferred_pathing: true,
             }],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         }
     }
 
@@ -1225,10 +1389,10 @@ mod tests {
         // typing a preferred-pathing triangle must not remove or alter
         // adjacency, only which cost `landmass::pathfinding` looks up.
         let mesh = mesh_with_preferred_pathing_polygon(0x10);
-        let typed = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let typed = build_navigation_mesh(&mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         let mut untyped_mesh = mesh;
         untyped_mesh.polygons[0].is_preferred_pathing = false;
-        let untyped = build_navigation_mesh(&untyped_mesh, &[], &BTreeMap::new());
+        let untyped = build_navigation_mesh(&untyped_mesh, &[], &BTreeMap::new(), &BTreeMap::new());
         assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
         assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
     }

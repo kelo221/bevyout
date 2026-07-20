@@ -1128,3 +1128,188 @@ pub(crate) fn apply_nav_clearance(
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);
     Ok((graph_source, summary))
 }
+
+// ---------------------------------------------------------------------
+// Derived blocker -> polygon associations (issue #177, M4 wave 11)
+// ---------------------------------------------------------------------
+
+/// Whether `placement` is a *blocking* placement for nav-topology purposes:
+/// an initially-enabled reference with a solid, player-blocking body that the
+/// static nav-collision shell deliberately excludes because it moves
+/// (`static_collision_placement`), and that is not an actor. In practice that
+/// is doors (kinematic slabs) plus kinematic activators -- vault gear doors
+/// and the like, which are `ACTI` records but block a corridor exactly the
+/// way a `DOOR` does.
+///
+/// Returns `(is_blocker, gated)`; `gated` is `true` only for real `DOOR`
+/// records, which own a runtime open/close FSM. A blocker with no way to be
+/// opened must never become a crossing-gate candidate (an agent would pause
+/// in front of it forever), so it contributes blocking associations only --
+/// see `nav_doors::BlockerVolume::gated`.
+fn blocker_placement(placement: &PreparedPlacement) -> Option<bool> {
+    if !placement.initially_enabled || placement.physics_asset_path.is_none() {
+        return None;
+    }
+    match (&placement.semantic, placement.physics_classification) {
+        (PreparedSemantic::Door(_), _) => Some(true),
+        (PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_), _) => None,
+        (_, PreparedPhysicsClassification::Kinematic) => Some(false),
+        _ => None,
+    }
+}
+
+/// Extracts every blocking placement's collision footprint as a
+/// [`BlockerVolume`] in Bevy-metre world space, using the exact same cooked
+/// sidecars and placement transform `cell_static_collision_triangles` uses
+/// for the static shell. Deterministic: placements are visited in
+/// `(reference_form_id, base_form_id)` order and a blocker with no usable
+/// footprint (degenerate or missing collision) is skipped.
+pub(crate) fn cell_blocker_volumes(
+    placements: &[PreparedPlacement],
+    physics_assets: &HashMap<String, PreparedPhysicsAsset>,
+) -> Vec<BlockerVolume> {
+    let mut ordered: Vec<(&PreparedPlacement, bool)> = placements
+        .iter()
+        .filter_map(|placement| blocker_placement(placement).map(|gated| (placement, gated)))
+        .collect();
+    ordered.sort_by_key(|(placement, _)| (placement.reference_form_id, placement.base_form_id));
+
+    let mut volumes = Vec::new();
+    for (placement, gated) in ordered {
+        let Some(path) = placement.physics_asset_path.as_ref() else {
+            continue;
+        };
+        let Some(asset) = physics_assets.get(path) else {
+            continue;
+        };
+        let scale = placement.scale.abs().max(0.0001);
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_array(placement.rotation_xyzw).normalize(),
+            Vec3::from_array(placement.translation),
+        );
+        let mut triangles = Vec::new();
+        for body in &asset.bodies {
+            if !body_blocks_player(body) {
+                continue;
+            }
+            for shape in &body.shapes {
+                append_shape_world_triangles(&transform, shape, &mut triangles);
+            }
+        }
+        if triangles.is_empty() {
+            continue;
+        }
+        let points: Vec<[f32; 3]> = triangles
+            .iter()
+            .flat_map(|triangle| triangle.vertices)
+            .collect();
+        let footprint = convex_hull_xz(&points);
+        if footprint.len() < 3 {
+            continue;
+        }
+        let min_y = points
+            .iter()
+            .fold(f32::INFINITY, |acc, point| acc.min(point[1]));
+        let max_y = points
+            .iter()
+            .fold(f32::NEG_INFINITY, |acc, point| acc.max(point[1]));
+        volumes.push(BlockerVolume {
+            reference_form_id: placement.reference_form_id,
+            footprint,
+            min_y,
+            max_y,
+            gated,
+        });
+    }
+    volumes
+}
+
+/// Populates every mesh's `PreparedNavMesh::derived_doors` from this cell's
+/// blocking placements (issue #177), rewrites `navgraph.ron`, and returns the
+/// refreshed manifest pointer plus a deterministic summary line.
+///
+/// Runs *after* `apply_nav_clearance`, so `triangle_index` refers to the
+/// post-clip polygon set the runtime actually loads, and only walkable
+/// polygons are considered (a polygon clearance already dropped is not
+/// routable and needs no door typing).
+///
+/// The summary also reports the issue's invariant --
+/// `nav_doors::unreported_interior_polygons` -- so a regression that leaves
+/// routable ground inside a closed door is visible in `prepare` output
+/// without a viewer.
+pub(crate) fn apply_derived_door_associations(
+    cache_dir: &Path,
+    cell_form_id: u32,
+    graph: &mut PreparedNavGraph,
+    blockers: &[BlockerVolume],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(PreparedNavGraphSource, String)> {
+    let mesh_inputs: Vec<BlockerMeshInput> = graph
+        .meshes
+        .iter()
+        .map(|mesh| BlockerMeshInput {
+            form_id: mesh.form_id,
+            polygons: mesh
+                .polygons
+                .iter()
+                .filter(|polygon| polygon.walkable)
+                .filter_map(|polygon| {
+                    let mut vertices = [[0.0f32; 3]; 3];
+                    for (slot, &index) in polygon.vertex_indices.iter().enumerate() {
+                        vertices[slot] = *mesh.vertices.get(index as usize)?;
+                    }
+                    Some(BlockerPolygonInput {
+                        index: polygon.index,
+                        vertices,
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+
+    let associations = derive_door_associations(&mesh_inputs, blockers);
+    let unreported = unreported_interior_polygons(&mesh_inputs, blockers, &associations);
+
+    for mesh in &mut graph.meshes {
+        mesh.derived_doors = associations
+            .iter()
+            .filter(|association| association.mesh_form_id == mesh.form_id)
+            .map(|association| PreparedNavDerivedDoor {
+                triangle_index: association.triangle_index,
+                door_reference_form_id: association.door_reference_form_id,
+                blocks_when_closed: association.blocks_when_closed,
+            })
+            .collect();
+    }
+
+    let blocking = associations
+        .iter()
+        .filter(|association| association.blocks_when_closed)
+        .count();
+    let associated_blockers: std::collections::BTreeSet<u32> = associations
+        .iter()
+        .map(|association| association.door_reference_form_id)
+        .collect();
+
+    for (mesh_form_id, triangle_index, reference_form_id) in &unreported {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: format!(
+                "nav doors: mesh {mesh_form_id:08x} polygon {triangle_index} is walkable inside closed blocker {reference_form_id:08x} with no blocking association"
+            ),
+        });
+    }
+
+    let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
+    let summary = format!(
+        "nav doors: blockers {}, associations {} (blocking {}) across {} blocker(s), unreported interior polygons {}",
+        blockers.len(),
+        associations.len(),
+        blocking,
+        associated_blockers.len(),
+        unreported.len(),
+    );
+    let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);
+    Ok((graph_source, summary))
+}
