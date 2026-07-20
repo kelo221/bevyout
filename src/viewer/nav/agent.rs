@@ -671,6 +671,18 @@ struct NavArchipelagoState {
     /// door's lock state into the matching `AgentTypeIndexCostOverrides`
     /// entry without recomputing it from the raw mesh inputs every time.
     door_type_indices: BTreeMap<u32, usize>,
+    /// Blocker FormID -> `landmass` polygon type index for the *blocking*
+    /// derived association class (issue #177, `landmass_graph::
+    /// closed_door_type_indices`): the polygons that lie wholly inside the
+    /// blocker's collision volume. Priced [`LOCKED_DOOR_TYPE_INDEX_COST`]
+    /// whenever the blocker is *closed* -- lock or no lock -- so no route
+    /// can ever be planned through the inside of a closed door slab, which
+    /// is what let an agent walk in and wedge against it in physics.
+    closed_door_type_indices: BTreeMap<u32, usize>,
+    /// Last observed per-door *open* state, the change detector for the
+    /// closed-blocker override above (`door_usable` cannot serve: an
+    /// unlocked door is usable whether it is open or shut).
+    door_open: HashMap<u32, bool>,
     /// How many distinct merge-portal `landmass` animation-link kinds this
     /// build assigned (issue #162 feature 1, `landmass_graph::
     /// merge_link_kind`): every validated merge candidate this build
@@ -1081,6 +1093,10 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // agree on the same door's type index -- see `door_type_indices`'s doc
     // comment).
     let door_type_indices = landmass_graph::door_type_indices(&mesh_inputs);
+    // Issue #177: the blocking derived-association class takes its own
+    // indices, allocated above every `door_type_indices` one.
+    let closed_door_type_indices =
+        landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
 
     // Widen the sample distances to humanoid scale (see
     // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
@@ -1088,11 +1104,21 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let mut options = ArchipelagoOptions::from_agent_radius(AGENT_RADIUS);
     options.point_sample_distance = AGENT_POINT_SAMPLE_DISTANCE;
     let archipelago_entity = world.spawn(Archipelago3d::new(options)).id();
-    apply_preferred_pathing_base_cost(world, archipelago_entity, &door_type_indices);
+    apply_preferred_pathing_base_cost(
+        world,
+        archipelago_entity,
+        &door_type_indices,
+        &closed_door_type_indices,
+    );
 
     let mut islands = Vec::new();
     for mesh in &mesh_inputs {
-        let result = landmass_graph::build_navigation_mesh(mesh, &merge_inputs, &door_type_indices);
+        let result = landmass_graph::build_navigation_mesh(
+            mesh,
+            &merge_inputs,
+            &door_type_indices,
+            &closed_door_type_indices,
+        );
         for diagnostic in &result.diagnostics {
             warn!(
                 "nav landmass conversion mesh {:08x}: {}",
@@ -1134,6 +1160,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let mut link_kinds = HashMap::new();
     let mut blocked_door_links = Vec::new();
     let mut door_usable = HashMap::new();
+    let mut door_open = HashMap::new();
 
     // Same-cell cross-mesh merge links (issue #113 feature 2). Real FO3
     // meshes never share seam vertex positions, so landmass's native island
@@ -1303,6 +1330,37 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         }
     }
 
+    // Derived blocker crossing gates (issue #177). Ordinary in-cell doors
+    // carry no authored `NVDP` triangle association at all, so none of the
+    // loops above ever saw them; `prepare` now derives the association from
+    // the door's own collision footprint and this feeds it into the exact
+    // same `mid_route_doors` crossing-gate set an authored travel-door
+    // triangle uses -- pause -> request open -> wait -> traverse -> resume.
+    // A blocker's *interior* polygons are deliberately absent here: they are
+    // priced impassable while it is closed instead (`closed_door_type_
+    // indices`), so an agent is never asked to stop inside a solid slab.
+    for gate in landmass_graph::derived_door_gates(&mesh_inputs) {
+        door_usable
+            .entry(gate.door_form_id)
+            .or_insert_with(|| door_usable_now(world, gate.door_form_id, &door_lock_info));
+        mid_route_doors.push(MidRouteDoor {
+            door_form_id: gate.door_form_id,
+            vertices: gate.vertices.map(Vec3::from_array),
+        });
+    }
+    // Every blocker with a closed-state override needs an open-state entry,
+    // whether or not it also has a crossing gate: `door_availability_system`
+    // polls exactly the tracked set.
+    for &blocker_form_id in closed_door_type_indices.keys() {
+        door_usable
+            .entry(blocker_form_id)
+            .or_insert_with(|| door_usable_now(world, blocker_form_id, &door_lock_info));
+    }
+    for &door_form_id in door_usable.keys() {
+        let (open, _) = door_open_and_locked(world, door_form_id, &door_lock_info);
+        door_open.insert(door_form_id, open);
+    }
+
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
         cell_form_id: Some(current_cell),
         archipelago: Some(archipelago_entity),
@@ -1316,6 +1374,8 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_usable,
         door_lock_info,
         door_type_indices,
+        closed_door_type_indices,
+        door_open,
         merge_link_kind_count,
     };
     Ok(())
@@ -1339,8 +1399,10 @@ fn apply_preferred_pathing_base_cost(
     world: &mut World,
     archipelago_entity: Entity,
     door_type_indices: &BTreeMap<u32, usize>,
+    closed_door_type_indices: &BTreeMap<u32, usize>,
 ) {
-    let preferred_pathing_index = landmass_graph::preferred_pathing_type_index(door_type_indices);
+    let preferred_pathing_index =
+        landmass_graph::preferred_pathing_type_index(door_type_indices, closed_door_type_indices);
     if let Ok(mut entity) = world.get_entity_mut(archipelago_entity)
         && let Some(mut archipelago) = entity.get_mut::<Archipelago3d>()
     {
@@ -1658,6 +1720,24 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
         if let Some(&type_index) = state.door_type_indices.get(&door_form_id) {
             overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
         }
+    }
+    // Issue #177: a blocker's *interior* polygons (derived associations that
+    // lie wholly inside its collision volume) are impassable whenever it is
+    // closed, independent of its lock state -- there is no route through the
+    // inside of a shut door slab, and pricing them only on `door_usable`
+    // (lock) is exactly what let an agent plan straight through one and wedge
+    // against it. Opening the door clears the entry through the same
+    // rebuild-the-whole-component path a lock change takes.
+    for (&blocker_form_id, &type_index) in &state.closed_door_type_indices {
+        if state
+            .door_open
+            .get(&blocker_form_id)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
     }
     if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
         entity.insert(overrides);
@@ -3446,6 +3526,53 @@ fn door_availability_system(world: &mut World) {
         .resource::<NavArchipelagoState>()
         .door_lock_info
         .clone();
+
+    // Issue #177: open-state poll, tracked separately from usability. An
+    // unlocked door that merely opens or shuts never flips `door_usable`, so
+    // the loop below would miss it entirely -- but it is exactly the state
+    // the closed-blocker cost override keys on. Flips rebuild every active
+    // agent's overrides and re-insert its target, the same one-repath-per-
+    // flip shape the usability loop uses.
+    let open_flips: Vec<(u32, bool)> = tracked
+        .iter()
+        .filter_map(|&(door_form_id, _)| {
+            let (open, _) = door_open_and_locked(world, door_form_id, &lock_info);
+            let was_open = world
+                .resource::<NavArchipelagoState>()
+                .door_open
+                .get(&door_form_id)
+                .copied();
+            (was_open != Some(open)).then_some((door_form_id, open))
+        })
+        .collect();
+    if !open_flips.is_empty() {
+        for (door_form_id, open) in &open_flips {
+            world
+                .resource_mut::<NavArchipelagoState>()
+                .door_open
+                .insert(*door_form_id, *open);
+        }
+        let active_agents: Vec<Entity> = world
+            .resource::<TestNavAgentState>()
+            .active()
+            .map(|(_, entity)| entity)
+            .collect();
+        for agent_entity in &active_agents {
+            apply_door_lock_overrides(world, *agent_entity);
+            let target =
+                world
+                    .get::<AgentTarget3d>(*agent_entity)
+                    .and_then(|target| match target {
+                        AgentTarget3d::None => None,
+                        AgentTarget3d::Point(point) => Some(AgentTarget3d::Point(*point)),
+                        AgentTarget3d::Entity(entity) => Some(AgentTarget3d::Entity(*entity)),
+                    });
+            if let Some(target) = target {
+                world.entity_mut(*agent_entity).insert(target);
+            }
+        }
+    }
+
     for (door_form_id, was_usable) in tracked {
         let now_usable = door_usable_now(world, door_form_id, &lock_info);
         if now_usable == was_usable {
@@ -6722,11 +6849,13 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         };
         let valid = landmass_graph::build_navigation_mesh(
             &mesh_input,
             &[],
-            &std::collections::BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
         )
         .nav_mesh
         .expect("synthetic square validates");
@@ -7196,6 +7325,7 @@ mod tests {
                     door_reference_form_id: Some(0x99),
                 },
             ],
+            derived_doors: Vec::new(),
         }
     }
 
@@ -7224,7 +7354,8 @@ mod tests {
             Some(&1),
             "test setup: the door must resolve to type index 1"
         );
-        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let build_result =
+            landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices, &BTreeMap::new());
         let valid = build_result.nav_mesh.unwrap_or_else(|| {
             panic!(
                 "door_topology_mesh always validates: {:?}",
@@ -7453,6 +7584,7 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         }
     }
 
@@ -7463,8 +7595,10 @@ mod tests {
     fn a_preferred_corridor_is_chosen_over_an_equal_length_ordinary_one() {
         let mesh = preferred_path_mesh();
         let door_type_indices = BTreeMap::new();
-        let preferred_index = landmass_graph::preferred_pathing_type_index(&door_type_indices);
-        let build_result = landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices);
+        let preferred_index =
+            landmass_graph::preferred_pathing_type_index(&door_type_indices, &BTreeMap::new());
+        let build_result =
+            landmass_graph::build_navigation_mesh(&mesh, &[], &door_type_indices, &BTreeMap::new());
         let valid = build_result.nav_mesh.unwrap_or_else(|| {
             panic!(
                 "preferred_path_mesh always validates: {:?}",

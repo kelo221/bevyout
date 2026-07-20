@@ -1283,10 +1283,12 @@ mod tests {
                 },
             ],
             doors: Vec::new(),
+            derived_doors: Vec::new(),
         };
         let valid = landmass_graph::build_navigation_mesh(
             &mesh_input,
             &[],
+            &std::collections::BTreeMap::new(),
             &std::collections::BTreeMap::new(),
         )
         .nav_mesh

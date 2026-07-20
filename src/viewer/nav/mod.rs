@@ -97,6 +97,19 @@ pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshI
                     door_reference_form_id: door.door_reference_form_id,
                 })
                 .collect(),
+            // Issue #177: collision-derived blocker associations, carried
+            // separately from the authored `NVDP` list -- see
+            // `landmass_graph::MeshInput::derived_doors` for why they must
+            // never be merged into it.
+            derived_doors: mesh
+                .derived_doors
+                .iter()
+                .map(|door| landmass_graph::DerivedDoorInput {
+                    triangle_index: door.triangle_index,
+                    door_reference_form_id: door.door_reference_form_id,
+                    blocks_when_closed: door.blocks_when_closed,
+                })
+                .collect(),
         })
         .collect()
 }

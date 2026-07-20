@@ -930,14 +930,34 @@ fn prepare_cell(
     // pointer (`nav_graph`).
     if let Some(graph) = nav_graph_full.as_mut() {
         let collision = cell_static_collision_triangles(&placements, &physics_assets);
-        let (updated_source, clearance_summary) =
+        let (_clearance_source, clearance_summary) =
             apply_nav_clearance(&cache_dir, cell_id, graph, &collision, &mut diagnostics)?;
-        nav_graph = Some(updated_source);
         diagnostics.push(Diagnostic {
             severity: "info".into(),
             message: clearance_summary.clone(),
         });
         output.push(clearance_summary);
+
+        // Issue #177 (M4 wave 11): collision-derived blocker -> polygon
+        // associations. Runs after clearance so triangle indices refer to the
+        // post-clip polygons the runtime loads, and against the placements
+        // the static shell deliberately excludes (doors, kinematic
+        // activators) -- the missing input the authored `NVDP` door list only
+        // ever provides for load/travel doors.
+        let blockers = cell_blocker_volumes(&placements, &physics_assets);
+        let (updated_source, door_summary) = apply_derived_door_associations(
+            &cache_dir,
+            cell_id,
+            graph,
+            &blockers,
+            &mut diagnostics,
+        )?;
+        nav_graph = Some(updated_source);
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: door_summary.clone(),
+        });
+        output.push(door_summary);
     }
     let item_catalog = build_item_catalog(
         &parsed.bases,

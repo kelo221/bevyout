@@ -6280,6 +6280,7 @@ async fn when_landmass_mesh_converted(world: &mut BevyoutWorld) {
         &mesh,
         &[],
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
     ));
 }
 
