@@ -297,13 +297,16 @@ pub(super) fn activate_focused_placement(
                 );
                 return;
             }
-            let opening = !state.open.contains(&entity);
+            // Issue #186: the open-state toggle goes through the shared
+            // blocker signal (`InteractionState::toggle_open`), the same one
+            // the Activator arm below uses -- a door is one blocker
+            // *behaviour*, not the sole record type allowed to record open
+            // state (verdict §2.2).
+            let opening = state.toggle_open(entity);
             let transition = if opening {
-                state.open.insert(entity);
                 write_sound(&mut sounds, placement.audio.open_sound_form_id, position);
                 ClipTransition::Opening
             } else {
-                state.open.remove(&entity);
                 write_sound(&mut sounds, placement.audio.close_sound_form_id, position);
                 // F57.4: closing before this door's own open-lead elapses
                 // cancels the still-pending travel rather than letting a
@@ -375,16 +378,49 @@ pub(super) fn activate_focused_placement(
             }
         }
         PreparedSemantic::Activator => {
-            write_sound(
-                &mut sounds,
-                placement.audio.activate_sound_form_id,
-                position,
+            // Issue #186 / verdict §2.1: a solid activator (vault gear door,
+            // blast door) is a capsule blocker, so its runtime open/close
+            // state is route topology nav reads from `InteractionState.open`
+            // -- exactly like a door's. Its record *type* selects only the
+            // *behaviour*: it opens and closes freely, with no key and no
+            // travel destination. The open-state population itself is the
+            // shared blocker signal (`toggle_open`), not a door-specific one,
+            // so this can never again animate open in the world while nav
+            // still models it shut. Before this the arm played `Opening`
+            // unconditionally and never touched `open`, holding the gear
+            // door's polygons at `INFINITY` forever.
+            let opening = state.toggle_open(entity);
+            let (sound, transition) = if opening {
+                (
+                    placement
+                        .audio
+                        .open_sound_form_id
+                        .or(placement.audio.activate_sound_form_id),
+                    ClipTransition::Opening,
+                )
+            } else {
+                (
+                    placement
+                        .audio
+                        .close_sound_form_id
+                        .or(placement.audio.activate_sound_form_id),
+                    ClipTransition::Closing,
+                )
+            };
+            write_sound(&mut sounds, sound, position);
+            notice.show(format!(
+                "{} {name}",
+                if opening { "Opened" } else { "Closed" }
+            ));
+            info!(
+                "activator {} ({:08x}) {}",
+                name,
+                placement.reference_form_id,
+                if opening { "opened" } else { "closed" }
             );
-            notice.show(format!("Activated {name}"));
-            info!("activated {} ({:08x})", name, placement.reference_form_id);
             animation_playback.write(animation::PlayPlacementAnimation {
                 root: entity,
-                transition: ClipTransition::Opening,
+                transition,
                 lead_ms: 0.0,
             });
         }

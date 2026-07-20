@@ -194,6 +194,12 @@ mod ledger_policy;
 #[allow(dead_code, unused_imports)]
 mod movement_policy;
 
+// `viewer::nav::locomotion` (issue #188) is std-only, same flat top-level
+// include rationale as `movement_policy`/`fall_guard` above.
+#[path = "../src/viewer/nav/locomotion.rs"]
+#[allow(dead_code, unused_imports)]
+mod locomotion;
+
 #[path = "../src/converter_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod converter_policy;
@@ -828,6 +834,10 @@ struct BevyoutWorld {
     actor_state_resolved: Option<actor_state::ResolvedActorValue>,
     actor_state_store: actor_state::ActorStateStore,
     actor_state_serialized: Option<String>,
+
+    // -- nav_locomotion.feature (issue #188) --
+    nav_locomotion_state: locomotion::LocomotionState,
+    nav_locomotion_changed: bool,
 }
 
 fn find_placement<'a>(
@@ -10475,6 +10485,23 @@ async fn given_derived_door_blocker(
             min_y,
             max_y,
             gated: true,
+            // Issue #189 feature 3: the raw collision solid the footprint
+            // above is the hull of. The derivation reads the footprint and
+            // the invariant check reads these triangles, by different
+            // primitives, so the check can disagree with the derivation
+            // instead of only ever echoing it.
+            collision_triangles: vec![
+                [
+                    [min_x, min_y, min_z],
+                    [max_x, min_y, min_z],
+                    [max_x, min_y, max_z],
+                ],
+                [
+                    [min_x, min_y, min_z],
+                    [max_x, min_y, max_z],
+                    [min_x, min_y, max_z],
+                ],
+            ],
         });
 }
 
@@ -10991,4 +11018,175 @@ async fn then_canonical_actor_items_unchanged(
     }];
     assert_eq!(holder.items.len(), 1);
     assert_eq!(holder.items[0].count, expected_count);
+}
+
+// ---------------------------------------------------------------------
+// nav_locomotion.feature (issue #188): the pure achieved-motion ->
+// locomotion-clip policy that drives a nav-bound actor's animation.
+// ---------------------------------------------------------------------
+
+fn parse_locomotion_state(label: &str) -> locomotion::LocomotionState {
+    match label {
+        "idle" => locomotion::LocomotionState::Idle,
+        "walk" => locomotion::LocomotionState::Walk,
+        "run" => locomotion::LocomotionState::Run,
+        "turn_left" => locomotion::LocomotionState::TurnLeft,
+        "turn_right" => locomotion::LocomotionState::TurnRight,
+        other => panic!("unknown locomotion state {other:?}"),
+    }
+}
+
+fn step_locomotion(
+    world: &mut BevyoutWorld,
+    observation: locomotion::LocomotionObservation,
+) -> locomotion::LocomotionState {
+    let previous = world.nav_locomotion_state;
+    let next = locomotion::next_locomotion_state(previous, observation);
+    if next != previous {
+        world.nav_locomotion_changed = true;
+    }
+    world.nav_locomotion_state = next;
+    next
+}
+
+#[given(regex = r"^a bound actor currently in the (\w+) locomotion state$")]
+async fn given_locomotion_state(world: &mut BevyoutWorld, state: String) {
+    world.nav_locomotion_state = parse_locomotion_state(&state);
+    world.nav_locomotion_changed = false;
+}
+
+#[when(regex = r"^its achieved horizontal speed is ([\d.]+) metres per second$")]
+async fn when_locomotion_speed(world: &mut BevyoutWorld, speed: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: speed,
+            yaw_rate: 0.0,
+        },
+    );
+}
+
+#[when(regex = r"^it is stationary and its yaw rate is (-?[\d.]+) radians per second$")]
+async fn when_locomotion_yaw(world: &mut BevyoutWorld, yaw_rate: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: 0.0,
+            yaw_rate,
+        },
+    );
+}
+
+#[when(
+    regex = r"^its achieved horizontal speed is ([\d.]+) metres per second and its yaw rate is (-?[\d.]+) radians per second$"
+)]
+async fn when_locomotion_speed_and_yaw(world: &mut BevyoutWorld, speed: f32, yaw_rate: f32) {
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: speed,
+            yaw_rate,
+        },
+    );
+}
+
+#[when(regex = r"^navigation desires ([\d.]+) metres per second but the KCC achieves ([\d.]+)$")]
+async fn when_locomotion_wedged(world: &mut BevyoutWorld, _desired: f32, achieved: f32) {
+    // The desired speed is deliberately not an input to the policy: a
+    // wedged agent must not stride on the spot. Accepting it here and
+    // discarding it keeps that fact visible in the scenario.
+    step_locomotion(
+        world,
+        locomotion::LocomotionObservation {
+            achieved_horizontal_speed: achieved,
+            yaw_rate: 0.0,
+        },
+    );
+}
+
+#[when(
+    regex = r"^its achieved horizontal speed oscillates (\d+) times between ([\d.]+) and ([\d.]+) metres per second$"
+)]
+async fn when_locomotion_oscillates(world: &mut BevyoutWorld, cycles: u32, low: f32, high: f32) {
+    for _ in 0..cycles {
+        for speed in [low, high] {
+            step_locomotion(
+                world,
+                locomotion::LocomotionObservation {
+                    achieved_horizontal_speed: speed,
+                    yaw_rate: 0.0,
+                },
+            );
+        }
+    }
+}
+
+#[then(regex = r"^its locomotion state becomes (\w+)$")]
+async fn then_locomotion_state(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.nav_locomotion_state,
+        parse_locomotion_state(&expected),
+        "locomotion state"
+    );
+}
+
+#[then(regex = r"^its locomotion state never changed$")]
+async fn then_locomotion_never_changed(world: &mut BevyoutWorld) {
+    assert!(
+        !world.nav_locomotion_changed,
+        "the locomotion state flapped: {:?}",
+        world.nav_locomotion_state
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_derived_doors.feature (issue #189, M4 walking-actors wave, lane B) --
+// appended section, do not interleave. Steps for the independent
+// interior-polygon invariant path (feature 3), which reads the blocker's
+// collision triangles rather than the derivation's footprint.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^blocker 0x([0-9a-fA-F]{8}) has a mis-derived footprint from (-?[\d.]+), (-?[\d.]+) to (-?[\d.]+), (-?[\d.]+)$"
+)]
+async fn given_derived_door_blocker_wrong_footprint(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    min_x: f32,
+    min_z: f32,
+    max_x: f32,
+    max_z: f32,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("hex blocker FormID");
+    // Only the footprint moves; `collision_triangles` keeps the blocker's real
+    // solid, so the derivation and the invariant now disagree -- which is the
+    // whole point of the independent path.
+    derived_door_blocker(world, form_id).footprint = vec![
+        [min_x, min_z],
+        [max_x, min_z],
+        [max_x, max_z],
+        [min_x, max_z],
+    ];
+}
+
+#[then(
+    regex = r"^polygon (\d+) of mesh 0x([0-9a-fA-F]{8}) is reported unreported inside blocker 0x([0-9a-fA-F]{8})$"
+)]
+async fn then_polygon_is_reported_unreported(
+    world: &mut BevyoutWorld,
+    index: u32,
+    mesh_form_id: String,
+    blocker_form_id: String,
+) {
+    let mesh_form_id = u32::from_str_radix(&mesh_form_id, 16).expect("hex mesh FormID");
+    let blocker_form_id = u32::from_str_radix(&blocker_form_id, 16).expect("hex blocker FormID");
+    let unreported = nav_doors::unreported_interior_polygons(
+        &world.nav_derived_door_meshes,
+        &world.nav_derived_door_blockers,
+        derived_door_associations(world),
+    );
+    assert!(
+        unreported.contains(&(mesh_form_id, index, blocker_form_id)),
+        "{unreported:?}"
+    );
 }

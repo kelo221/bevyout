@@ -195,12 +195,14 @@ fn scripted_door_set_open(world: &mut World, entity: Entity, open: bool) -> bool
         return open && !was_open;
     }
     let sound = {
+        // Issue #186: the state change goes through the shared blocker signal
+        // (`InteractionState::set_open`), the same one activators use, rather
+        // than poking `open` directly.
         let mut state = world.get_resource_or_insert_with(InteractionState::default);
+        state.set_open(entity, open);
         if open {
-            state.open.insert(entity);
             placement.audio.open_sound_form_id
         } else {
-            state.open.remove(&entity);
             placement.audio.close_sound_form_id
         }
     };
@@ -223,6 +225,63 @@ fn scripted_door_set_open(world: &mut World, entity: Entity, open: bool) -> bool
         if open { "opened" } else { "closed" }
     );
     open
+}
+
+/// Issue #186: scripted (console/BRP) activator toggle -- the console
+/// `activate` surface for a solid activator blocker (a vault gear door,
+/// blast door, ...), the same human-testable gap #177 closed for ordinary
+/// in-cell doors. It shares the one blocker open-state signal
+/// (`InteractionState::toggle_open`) the player activation path and every
+/// door path route through, so nav's `door_availability_system` observes an
+/// activated gear door exactly as it observes an opened door -- lifting the
+/// closed-blocker cost override so a route past it completes. An activator's
+/// record type selects only its behaviour (opens freely, no key, no travel);
+/// this is not a second door-specific open-state path. Returns whether the
+/// activator is open after this call.
+pub(crate) fn scripted_activator_toggle(world: &mut World, entity: Entity) -> bool {
+    let placement = world
+        .get::<PlacementRoot>(entity)
+        .expect("caller resolved a placement root")
+        .placement()
+        .clone();
+    let name = placement_name(&placement);
+    let position = world
+        .get::<GlobalTransform>(entity)
+        .map(|transform| transform.translation())
+        .unwrap_or_default();
+    let opening = world
+        .get_resource_or_insert_with(InteractionState::default)
+        .toggle_open(entity);
+    let sound = if opening {
+        placement
+            .audio
+            .open_sound_form_id
+            .or(placement.audio.activate_sound_form_id)
+    } else {
+        placement
+            .audio
+            .close_sound_form_id
+            .or(placement.audio.activate_sound_form_id)
+    };
+    if let Some(form_id) = sound {
+        world.write_message(PlaySound::at(form_id, position));
+    }
+    world.write_message(animation::PlayPlacementAnimation {
+        root: entity,
+        transition: if opening {
+            ClipTransition::Opening
+        } else {
+            ClipTransition::Closing
+        },
+        lead_ms: 0.0,
+    });
+    info!(
+        "activator {} ({:08x}) {} (scripted)",
+        name,
+        placement.reference_form_id,
+        if opening { "opened" } else { "closed" }
+    );
+    opening
 }
 
 /// F118.2: scripted corpse activation enters the same transfer modal as

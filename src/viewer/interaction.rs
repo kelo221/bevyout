@@ -55,8 +55,9 @@ use presentation::{
     update_interaction_notice,
 };
 pub(crate) use scripted::{
-    ScriptedPickupError, scripted_container_toggle, scripted_corpse_toggle, scripted_door_open,
-    scripted_door_toggle, scripted_door_travel, scripted_pickup,
+    ScriptedPickupError, scripted_activator_toggle, scripted_container_toggle,
+    scripted_corpse_toggle, scripted_door_open, scripted_door_toggle, scripted_door_travel,
+    scripted_pickup,
 };
 pub(crate) use state::{
     ActiveContainer, ActiveContainerTarget, ContainerStates, InteractionNotice, InteractionState,

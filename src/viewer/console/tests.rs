@@ -769,6 +769,26 @@ fn activate_toggles_a_destination_less_door_open_and_closed() {
     assert_eq!(output.value["opened"], false);
 }
 
+/// Issue #186: `activate` drives a solid activator blocker (vault gear door)
+/// open and closed, the same human-testable parity #177 gave in-cell doors.
+/// Before this, `activate` hard-rejected any non door/container/corpse/pickup
+/// reference with `not_a_door`, so a gear door could only be opened by the
+/// player and nav could never be told it had opened.
+#[test]
+fn activate_toggles_an_activator_blocker_open_and_closed() {
+    let mut app = test_app();
+    app.add_message::<super::super::audio::PlaySound>();
+    app.add_message::<super::super::animation::PlayPlacementAnimation>();
+    register_placement(&mut app, "Activator");
+    let output = exec(&mut app, "activate TestRef");
+    assert!(output.ok, "activate failed: {:?}", output.error);
+    assert_eq!(output.value["kind"], "activator");
+    assert_eq!(output.value["opened"], true);
+    let output = exec(&mut app, "activate TestRef");
+    assert!(output.ok, "activate failed: {:?}", output.error);
+    assert_eq!(output.value["opened"], false);
+}
+
 // Wave-4 amendment: containers toggle their open state through the
 // console, so the persistence gate can be driven over the agent bridge.
 #[test]

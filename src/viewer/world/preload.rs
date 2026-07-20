@@ -401,6 +401,21 @@ fn poll_preload_parse_tasks(
 /// Drains the front of the pending-spawn queue at
 /// `PRELOAD_SPAWN_BUDGET_PER_FRAME` raw placement entries per frame. Cells
 /// evicted (or whose root was replaced) while still queued are dropped.
+///
+/// Issue #199: `poll_preload_parse_tasks` spawns a neighbor cell's hidden
+/// root with `Commands` and, in the *same* frame, pushes the
+/// `PendingCellSpawn` this system drains. Because the two systems are
+/// unordered and buffer their commands, the root can still be a *reserved,
+/// unspawned* entity when this system runs -- and spawning its placements as
+/// `ChildOf(root)` then makes Bevy 0.19's relationship `on_insert` hook
+/// hard-panic ("Entity not yet spawned") while modifying the not-yet-live
+/// parent's `Children`. That was the Vault101a (`00024512`) launch crash: it
+/// only surfaces on cells with prepared neighbours. The `alive` guard below
+/// skips a pending whose root is not yet (or no longer) a live entity and
+/// *retains* it, so the very next frame -- once poll's spawn has flushed --
+/// it drains normally and the neighbour's actors are projected. This also
+/// covers a root despawned by eviction mid-flight (cause 1 in the issue):
+/// skip-and-retry rather than panic.
 fn advance_pending_cell_spawns(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -408,6 +423,7 @@ fn advance_pending_cell_spawns(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut resident_cells: ResMut<ResidentCells>,
     mut pending_spawns: ResMut<PendingCellSpawns>,
+    alive: Query<()>,
 ) {
     let Some(pending) = pending_spawns.0.front_mut() else {
         return;
@@ -420,6 +436,14 @@ fn advance_pending_cell_spawns(
         pending_spawns.0.pop_front();
         return;
     };
+    // Issue #199: never parent a placement to a root that is not a live
+    // entity this frame (a same-frame reserved root, or one just evicted).
+    // Retain the pending -- the resident still exists, so a real drop only
+    // happens via the `resident.root == pending.root` filter above -- and
+    // retry next frame once the root has been flushed into the World.
+    if alive.get(pending.root).is_err() {
+        return;
+    }
     let manifest = Arc::clone(&resident.manifest);
     let (content, next_index) = spawn_cell_placements_chunk(
         &mut commands,
@@ -463,5 +487,253 @@ fn check_preload_ready(
                 resident.placement_count
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod issue_199_tests {
+    //! Regression coverage for issue #199: `poll_preload_parse_tasks` spawns
+    //! a neighbor cell's hidden root with `Commands` and, in the same frame,
+    //! queues its placements for `advance_pending_cell_spawns`, which parents
+    //! each placement to that root with `ChildOf`. Without a sync point
+    //! between the two systems the root is still a reserved-but-unflushed
+    //! entity when the child `ChildOf` commands apply, and Bevy 0.19's
+    //! relationship `on_insert` hook hard-panics with "Entity not yet
+    //! spawned" while modifying the parent's `Children`. This is exactly the
+    //! Vault101a (`00024512`) launch crash, reproduced synthetically.
+
+    use super::*;
+    use crate::viewer::interaction::PlacementRoot;
+    use crate::vsa::{CellInfo, PreparedPlacement, PreparedSemantic};
+    use std::panic::AssertUnwindSafe;
+
+    /// A one-placement manifest whose single placement carries an
+    /// `asset_path`, so `spawn_cell_placements_chunk` spawns exactly one
+    /// `PlacementRoot` as `ChildOf(root)` -- the child that triggers #199.
+    fn one_child_manifest() -> PreparedSceneManifest {
+        PreparedSceneManifest {
+            schema_version: 1,
+            prepare_revision: None,
+            converter_revision: None,
+            physics_schema_version: None,
+            asset_root: ".".into(),
+            source_plugin: "Test.esm".into(),
+            source_fingerprint: "test".into(),
+            item_catalog_path: None,
+            item_catalog_revision: None,
+            item_catalog_hash: None,
+            recipe_catalog_path: None,
+            recipe_catalog_revision: None,
+            recipe_catalog_hash: None,
+            actor_catalog_path: None,
+            actor_catalog_revision: None,
+            actor_catalog_hash: None,
+            actor_animation_catalog_path: None,
+            actor_animation_catalog_revision: None,
+            actor_animation_catalog_hash: None,
+            source_plugins: Vec::new(),
+            visual_issues: Vec::new(),
+            cell: CellInfo {
+                form_id: 0x0002_4511,
+                editor_id: None,
+                name: None,
+                interior: true,
+                ambient_rgba: [0.0; 4],
+                directional_rgba: [0.0; 4],
+                image_space_form_id: None,
+                image_space: None,
+                lighting_template_form_id: None,
+                lighting_template_flags: 0,
+                lighting_template: None,
+                raw_lighting: None,
+                effective_lighting: None,
+                water_form_id: None,
+                water_height: None,
+                grid: None,
+                worldspace_form_id: None,
+            },
+            placements: vec![PreparedPlacement {
+                reference_form_id: 0x0001_83b5,
+                base_form_id: 0x0001_0000,
+                asset_path: Some("test/door.glb".into()),
+                translation: [0.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: 1.0,
+                error: None,
+                physics_asset_path: None,
+                physics_source: None,
+                physics_classification: Default::default(),
+                step_support: false,
+                mutability: Default::default(),
+                mutability_root_form_id: None,
+                reference_kind: "REFR".into(),
+                base_kind: "DOOR".into(),
+                editor_id: None,
+                display_name: None,
+                count: 1,
+                semantic: PreparedSemantic::Static,
+                initially_enabled: true,
+                enable_parent: None,
+                owner_form_id: None,
+                owner_faction_rank: None,
+                inventory: Vec::new(),
+                audio: Default::default(),
+                ao_mode: "ao-none".into(),
+            }],
+            lights: Vec::new(),
+            diagnostics: Vec::new(),
+            navmeshes: Vec::new(),
+            nav_graph: None,
+            cell_audio: Default::default(),
+            audio_clips: Vec::new(),
+            footstep_sets: Vec::new(),
+            hard_landing_clips: Vec::new(),
+            bake: None,
+            static_point_shadows: None,
+            mutability_summary: Default::default(),
+            leveled_lists: Default::default(),
+        }
+    }
+
+    /// Emulates the relevant half of `poll_preload_parse_tasks`: spawns a
+    /// hidden cell root with `Commands` (a reserved entity this frame),
+    /// records it as a `Loading` resident, and queues its placements -- all
+    /// in one system so the root is unflushed when `advance` runs.
+    fn poll_stub(
+        mut commands: Commands,
+        mut resident_cells: ResMut<ResidentCells>,
+        mut pending_spawns: ResMut<PendingCellSpawns>,
+        mut done: Local<bool>,
+    ) {
+        if *done {
+            return;
+        }
+        *done = true;
+        let form_id = 0x0002_4511;
+        let root = commands
+            .spawn((Transform::default(), Visibility::Hidden))
+            .id();
+        resident_cells.0.insert(
+            form_id,
+            ResidentCell {
+                root,
+                state: ResidentState::Loading,
+                manifest: Arc::new(one_child_manifest()),
+                scene_handles: Vec::new(),
+                placement_count: 0,
+            },
+        );
+        pending_spawns.0.push_back(PendingCellSpawn {
+            form_id,
+            root,
+            next_index: 0,
+        });
+    }
+
+    fn base_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((bevy::MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        // `spawn_cell_placements_chunk` loads each asset-backed placement's
+        // GLB as a `Handle<WorldAsset>`; the type must be registered or the
+        // `AssetServer::load` panics for an unrelated reason.
+        app.init_asset::<WorldAsset>();
+        app.init_resource::<ResidentCells>();
+        app.init_resource::<PendingCellSpawns>();
+        app
+    }
+
+    fn children_of(app: &mut App, root: Entity) -> Vec<Entity> {
+        let world = app.world_mut();
+        let mut roots = world.query::<(Entity, &PlacementRoot, &ChildOf)>();
+        roots
+            .iter(world)
+            .filter(|(_, _, parent)| parent.parent() == root)
+            .map(|(entity, _, _)| entity)
+            .collect()
+    }
+
+    /// The #199 regression, deterministic: `advance` must never spawn a
+    /// placement as `ChildOf(root)` when `root` is not a live entity. A dead
+    /// (spawned-then-despawned) root stands in for the reserved same-frame
+    /// root the real crash hit -- both are absent from the World. Without the
+    /// `alive` guard this update panics inside the `ChildOf::on_insert` hook
+    /// with "Entity not yet spawned"; with it, the pending is retained for a
+    /// later frame and nothing is parented to the dead root.
+    #[test]
+    fn advance_skips_a_pending_whose_root_is_not_a_live_entity() {
+        let mut app = base_app();
+        let form_id = 0x0002_4511;
+        // A root that is definitively not a live entity.
+        let dead_root = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(dead_root).despawn();
+        app.world_mut().resource_mut::<ResidentCells>().0.insert(
+            form_id,
+            ResidentCell {
+                root: dead_root,
+                state: ResidentState::Loading,
+                manifest: Arc::new(one_child_manifest()),
+                scene_handles: Vec::new(),
+                placement_count: 0,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<PendingCellSpawns>()
+            .0
+            .push_back(PendingCellSpawn {
+                form_id,
+                root: dead_root,
+                next_index: 0,
+            });
+        app.add_systems(Update, advance_pending_cell_spawns);
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| app.update()));
+        assert!(
+            result.is_ok(),
+            "advance must not panic when its pending root is not a live entity"
+        );
+        assert!(
+            app.world()
+                .resource::<PendingCellSpawns>()
+                .contains(form_id),
+            "the pending must be retained for retry, not dropped"
+        );
+        assert!(
+            children_of(&mut app, dead_root).is_empty(),
+            "nothing may be parented to a dead root"
+        );
+    }
+
+    /// The real same-frame flow end to end: `poll_stub` spawns the cell root
+    /// with `Commands` and queues its placements the same frame `advance`
+    /// runs, exactly as `poll_preload_parse_tasks`/`advance_pending_cell_spawns`
+    /// do in the unordered `install` schedule. No panic, and by the time
+    /// poll's root spawn has flushed the neighbour's placement is parented to
+    /// it -- proving the fix lets the actor actually spawn rather than merely
+    /// avoiding the crash.
+    #[test]
+    fn a_same_frame_neighbour_root_and_placements_resolve_without_panicking() {
+        let mut app = base_app();
+        app.add_systems(Update, (poll_stub, advance_pending_cell_spawns));
+
+        // A couple of frames: frame 1 spawns+flushes the root (advance may
+        // skip it while still reserved), a later frame drains its placements.
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let root = app
+            .world()
+            .resource::<ResidentCells>()
+            .0
+            .get(&0x0002_4511)
+            .expect("resident recorded")
+            .root;
+        assert_eq!(
+            children_of(&mut app, root).len(),
+            1,
+            "the neighbour placement must end up parented to its cell root"
+        );
     }
 }

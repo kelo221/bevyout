@@ -281,26 +281,14 @@ fn triangle_normal(t: &CollisionTriangle) -> Option<[f32; 3]> {
 /// the XZ plane, or `None` when outside or the projection is degenerate (a
 /// vertical wall triangle projects to a line, so it never "contains" a point
 /// -- exactly why walls never falsely support).
+///
+/// Issue #189 feature 4: the single shared containment primitive
+/// (`bevyout_core::geometry`), reached here through a thin alias so this
+/// module's many call sites keep their local name. Previously one of four
+/// hand-rolled copies with three different tolerances; see that module for the
+/// consolidated epsilon rationale.
 fn barycentric_xz(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> Option<[f32; 3]> {
-    let v0x = b[0] - a[0];
-    let v0z = b[2] - a[2];
-    let v1x = c[0] - a[0];
-    let v1z = c[2] - a[2];
-    let det = v0x * v1z - v1x * v0z;
-    if det.abs() < 1.0e-9 {
-        return None;
-    }
-    let v2x = px - a[0];
-    let v2z = pz - a[2];
-    let beta = (v2x * v1z - v1x * v2z) / det;
-    let gamma = (v0x * v2z - v2x * v0z) / det;
-    let alpha = 1.0 - beta - gamma;
-    const EPS: f32 = 1.0e-4;
-    if alpha < -EPS || beta < -EPS || gamma < -EPS {
-        None
-    } else {
-        Some([alpha, beta, gamma])
-    }
+    bevyout_core::geometry::barycentric_xz(px, pz, a, b, c)
 }
 
 /// Squared XZ distance from `(px, pz)` to segment `a..b`.
