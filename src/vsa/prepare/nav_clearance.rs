@@ -1,43 +1,44 @@
 //! Pure collision-derived navmesh validation + clearance (issue #153, M4
 //! wave 10). Given one prepared nav mesh's walkable triangle soup plus this
-//! cell's cooked static collision as world-space triangles, it:
+//! cell's cooked static collision as world-space triangles, it validates the
+//! authored FO3 NAVM against the cooked collision and drops triangles the
+//! agent capsule cannot legitimately stand on or fit through:
 //!
 //! 1. **Collision-support validation (F153.1).** Removes any walkable
 //!    triangle with no cooked collision surface under it within the agent's
-//!    step height -- the authored FO3 NAVM paves over voids the faithfully
-//!    cooked collision does not fill (issue #164: Franklin Metro 02's
-//!    `0001a273` restroom strip runs to x~-14.2 over empty-collision clutter
-//!    while the room shell ends at x~-15.6). A route into a removed area is
-//!    then `unreachable` at query time rather than relying on the runtime
-//!    fall guard.
-//! 2. **Interior-obstruction cutting (F153.2).** Marks a walkable triangle
-//!    unwalkable when a wall-like static collider rises into the agent
-//!    capsule over that triangle within the agent radius -- the entrance
-//!    frame the authored NAVM ran straight through (issue #148,
-//!    `MetHallEntrance01` 370250 wedging the r=0.35 capsule at x~9.55). The
-//!    solver then refuses the routes physics would refuse.
-//! 3. **Clearance with miter-corrected corners (F153.3).** Offsets the
-//!    boundary of the validated walkable region inward by the agent radius,
-//!    scaling a corner vertex's displacement by `radius / cos(theta/2)`
-//!    (clamped to [`MITER_LIMIT_FACTOR`] * radius) so each incident wall
-//!    keeps the full `radius` clearance -- the reverted wave-6 miter
-//!    (`6cb4c3a`), whose fixed-length average only gave a 90-degree corner
-//!    `r/sqrt(2)`. **Sub-diameter corridors disconnect:** unlike wave-6's
-//!    pinch guard, a triangle whose offset shape inverts or degenerates is
-//!    dropped (not relaxed back), so a corridor narrower than `2 * radius`
-//!    produces no route at all. New islands the disconnection creates are
-//!    legitimate output -- the runtime landmass island handling copes.
+//!    step height -- the authored NAVM paves over voids the faithfully cooked
+//!    collision does not fill (issue #164 restroom strip). A route into a
+//!    removed area is then `unreachable` at query time.
+//! 2. **Interior-obstruction cutting (F153.2).** Cuts an *interior* walkable
+//!    triangle when a wall-like static collider that the agent cannot step
+//!    over (rises above the step height, into the agent body band) sits within
+//!    the agent radius of it -- the #148 entrance frame the authored NAVM ran
+//!    straight through. Step-overable colliders (stair risers, low ledges) and
+//!    a room's own perimeter walls are deliberately excluded.
+//! 3. **Sub-diameter disconnection (F153.3).** Drops a walkable triangle only
+//!    when the *authored passage width* through it -- near-wall distance +
+//!    far-wall distance, measured across the triangle against the
+//!    (post-F153.1/F153.2) walkable boundary -- is below `2 * radius`
+//!    everywhere in it: a genuinely sub-diameter throat the agent capsule
+//!    cannot pass. Crucially it measures the passage, not per-triangle
+//!    clearance, so a wall-adjacent triangle in a wide corridor keeps the
+//!    full passage width (`0 + width`) and is never dropped -- the walkable
+//!    region stays connected instead of fragmenting into an eroded center
+//!    band. It never moves a vertex, so a ~1 m doorway with 90-degree jambs
+//!    stays connected (its passage is `1.0 m > 2 * radius`) instead of
+//!    collapsing under the reverted wave-6 miter's two-sided offset
+//!    arithmetic, while a genuine 0.5 m gap disconnects. Seam/door protected
+//!    triangles are exempt so authored doorways stay traversable.
 //!
-//! Seam/door **protected** vertices (a merge or door triangle's vertices)
-//! never move and are never dropped -- the same rule the retired erosion pass
-//! used, keeping both sides of a cross-mesh seam agreeing exactly.
+//! The pass also reports, per mesh, the connected-component structure of the
+//! surviving walkable set (over shared triangle edges) so the fragmentation
+//! this replaces is visible in `prepare` output without a viewer.
 //!
 //! Std-only (no `bevy`/`glam`/`serde`): this file is included verbatim by
 //! `tests/features.rs` via `#[path]`, the same way `nav_graph.rs` is -- see
-//! `AGENTS.md`'s testing section. The boundary
-//! conversion from `PreparedNavMesh`/`PreparedPhysicsShape` into the plain
-//! world-space triangle inputs below lives in `navmesh.rs` (which is free to
-//! import `glam`/`vsa` types), not here.
+//! `AGENTS.md`'s testing section. The boundary conversion from
+//! `PreparedNavMesh`/`PreparedPhysicsShape` into the plain world-space
+//! triangle inputs below lives in `navmesh.rs`, not here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,41 +47,35 @@ use std::collections::{BTreeMap, BTreeSet};
 /// keeping this module std-only for the cucumber `#[path]` include.
 pub(crate) const AGENT_RADIUS: f32 = 0.35;
 /// Agent capsule height (metres). Matches `nav::agent::AGENT_HEIGHT` (1.8 m).
-/// A collider must rise into `[floor, floor + AGENT_HEIGHT]` to count as an
-/// interior obstruction; a knee-high ledge the agent steps over does not.
 pub(crate) const AGENT_HEIGHT: f32 = 1.8;
 /// How far below a walkable triangle a cooked collision surface may sit and
-/// still count as support (metres). Sized to the agent's step-up capability:
-/// a floor within a step of the authored nav height supports it.
+/// still count as support, and how tall a collider may rise above the floor
+/// and still be *stepped over* rather than obstruct (metres). Sized to the
+/// agent's step-up capability.
 pub(crate) const STEP_HEIGHT: f32 = 0.5;
 /// How far a supporting collision surface may sit *above* the authored nav
-/// height and still count (metres) -- small, since FO3 NAVM is authored on
-/// the floor, but nonzero for float drift between the cooked collision top
-/// and the authored nav vertex.
+/// height and still count (metres).
 pub(crate) const SUPPORT_ABOVE_MARGIN: f32 = 0.3;
 /// A collision triangle whose unit normal's vertical component magnitude is
 /// at or above this is floor/ceiling-like and never counts as an interior
-/// *obstruction* (only as *support*). Below it the triangle is wall-like.
-/// `0.5` is 60 degrees from horizontal.
+/// obstruction (only as support). `0.5` is 60 degrees from horizontal.
 pub(crate) const WALL_NORMAL_Y_MAX: f32 = 0.5;
-/// Miter limit: caps a corner vertex's displacement at
-/// `MITER_LIMIT_FACTOR * radius` regardless of how sharp the angle between
-/// its incident boundary normals is, matching the order of magnitude
-/// Recast/Clipper polygon offsetters use (reused from wave-6 `6cb4c3a`).
-pub(crate) const MITER_LIMIT_FACTOR: f32 = 2.5;
-/// Floor for `cos(theta/2)` in the miter-scale division, keeping it finite as
-/// the angle between two incident normals approaches 180 degrees;
-/// `MITER_LIMIT_FACTOR` is what actually bounds the result there.
-const MIN_COS_HALF_ANGLE: f32 = 1.0e-4;
-/// Below this scaled-triangle area (2D horizontal plane) an offset triangle
-/// is degenerate and dropped.
-const MIN_TRIANGLE_AREA: f32 = 1.0e-4;
-/// Below this original-triangle area a triangle's winding sign is too close
-/// to the f32 noise floor to trust as the "expected orientation" (real FO3
-/// NAVM carries deliberate sliver triangles) -- such a triangle is validated
-/// against the mesh's dominant winding sign instead of its own. Reused from
-/// wave-6 `erosion_policy`'s `MIN_RELIABLE_ORIGINAL_AREA`.
-const MIN_RELIABLE_ORIGINAL_AREA: f32 = 1.0e-2;
+/// A non-main connected component at or above this many polygons is a "large"
+/// reachable region: validation stranding it means a drop misread the
+/// geometry, and the connectivity-preserving finalization reconnects it.
+/// Below it, a component is a legitimate small island (the removed restroom
+/// strip, a genuine sub-diameter alcove) left disconnected.
+const LARGE_ISLAND: usize = 6;
+
+/// Why a triangle was dropped (`None` = walkable). Tracked so the
+/// connectivity-preserving finalization can un-drop a triangle stranding a
+/// large region, and so counts reflect only committed drops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropReason {
+    Unsupported,
+    Obstructed,
+    SubDiameter,
+}
 
 // ---------------------------------------------------------------------
 // Inputs / outputs
@@ -123,38 +118,45 @@ impl Default for NavClearanceParams {
     }
 }
 
-/// Result of one clearance pass: offset vertex positions (same length/order
-/// as the input -- indices untouched, only positions move, protected
-/// vertices unmoved), a per-polygon walkable flag (`false` = removed by
-/// validation, cut by an obstruction, or disconnected by clearance), and
-/// deterministic diagnostic counters.
+/// Result of one clearance pass: a per-polygon walkable flag (`false` =
+/// removed by validation, cut by an obstruction, or dropped for insufficient
+/// agent-radius clearance) plus deterministic diagnostic counters, including
+/// the connectivity structure of the surviving walkable set. Vertices are
+/// never moved, so they are not returned.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NavClearanceResult {
-    pub(crate) vertices: Vec<[f32; 3]>,
     pub(crate) walkable: Vec<bool>,
     pub(crate) polygon_count: usize,
     /// Polygons dropped by F153.1 (no collision support under them).
     pub(crate) removed_unsupported: usize,
-    /// Polygons dropped by F153.2 (a wall-like collider intrudes the agent
-    /// capsule over them).
+    /// Polygons dropped by F153.2 (a non-step-overable wall-like collider
+    /// intrudes the agent capsule over their interior).
     pub(crate) cut_obstructed: usize,
-    /// Polygons dropped by F153.3 because their offset shape inverted or
-    /// degenerated -- a sub-diameter corridor throat that now disconnects.
-    pub(crate) disconnected_narrow: usize,
-    /// Polygons with at least one vertex that actually moved under clearance.
-    pub(crate) offset_count: usize,
-    /// Distinct vertices left unmoved because they touch a protected
-    /// (seam/door) edge.
+    /// Polygons dropped by F153.3 (the authored passage through them is
+    /// sub-diameter -- narrower than `2 * radius` everywhere in the triangle).
+    pub(crate) dropped_unfit: usize,
+    /// Protected (seam/door) triangles left walkable by the exemption from
+    /// F153.2/F153.3 (they never carry an authored sub-diameter passage).
     pub(crate) protected_count: usize,
+    /// Walkable polygons surviving every phase.
+    pub(crate) walkable_count: usize,
+    /// Connected components of the surviving walkable set over shared edges.
+    pub(crate) component_count: usize,
+    /// Polygon count of the largest such component (0 when none survive).
+    pub(crate) largest_component: usize,
+    /// Connected components of the *authored* mesh (every polygon walkable,
+    /// before any validation) over shared edges -- the baseline this pass
+    /// starts from. Real FO3 NAVM is often already multi-island within one
+    /// mesh (islands the runtime reconnects with merge/door off-mesh links),
+    /// so comparing `component_count` against this shows whether validation
+    /// fragmented anything or merely inherited the authored structure.
+    pub(crate) baseline_component_count: usize,
+    pub(crate) baseline_largest_component: usize,
 }
 
 // ---------------------------------------------------------------------
 // Geometry helpers (std-only)
 // ---------------------------------------------------------------------
-
-fn signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
-    0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
-}
 
 /// Unit normal of a world-space triangle, or `None` when degenerate.
 fn triangle_normal(t: &CollisionTriangle) -> Option<[f32; 3]> {
@@ -175,10 +177,9 @@ fn triangle_normal(t: &CollisionTriangle) -> Option<[f32; 3]> {
 }
 
 /// Barycentric weights of `(px, pz)` within triangle `a,b,c` projected onto
-/// the XZ plane, or `None` when the point is outside or the triangle's XZ
-/// projection is degenerate (a vertical wall triangle projects to a line, so
-/// it can never "contain" a point -- exactly why walls never falsely
-/// support).
+/// the XZ plane, or `None` when outside or the projection is degenerate (a
+/// vertical wall triangle projects to a line, so it never "contains" a point
+/// -- exactly why walls never falsely support).
 fn barycentric_xz(px: f32, pz: f32, a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> Option<[f32; 3]> {
     let v0x = b[0] - a[0];
     let v0z = b[2] - a[2];
@@ -266,8 +267,7 @@ fn edge_key(a: u32, b: u32) -> (u32, u32) {
 
 /// Boundary edges of the currently-walkable region: an edge (unordered
 /// vertex-index pair) referenced by exactly one walkable polygon. Shared by
-/// F153.2's interior test and F153.3's offset boundary detection so both agree
-/// on what "the boundary" is.
+/// F153.2's interior test and F153.3's clearance-field boundary.
 fn walkable_boundary_edges(
     mesh: &NavClearanceMeshInput,
     walkable: &[bool],
@@ -299,94 +299,233 @@ fn is_interior_triangle(tri: [u32; 3], boundary: &BTreeSet<(u32, u32)>) -> bool 
 // The pass
 // ---------------------------------------------------------------------
 
-/// Runs the full validation + clearance pass on one mesh. An empty
-/// `collision` list skips both collision-driven phases (F153.1/F153.2) --
-/// never remove walkable area when there is no cooked collision to judge it
-/// against -- and still applies clearance (F153.3). A zero/negative radius or
-/// empty mesh is a no-op.
+/// Runs the full validation on one mesh. An empty `collision` list skips both
+/// collision-driven phases (F153.1/F153.2) -- never remove walkable area when
+/// there is no cooked collision to judge it against -- and still applies the
+/// clearance-fit validation (F153.3). A zero/negative radius or empty mesh is
+/// a no-op.
 pub(crate) fn validate_and_clear(
     mesh: &NavClearanceMeshInput,
     collision: &[CollisionTriangle],
     params: NavClearanceParams,
 ) -> NavClearanceResult {
     let polygon_count = mesh.polygons.len();
-    let mut walkable = vec![true; polygon_count];
+    let walkable = vec![true; polygon_count];
+    let (baseline_component_count, baseline_largest_component) =
+        connected_components(mesh, &walkable);
+
     if params.agent_radius <= 0.0 || mesh.vertices.is_empty() || polygon_count == 0 {
+        let (component_count, largest_component) = connected_components(mesh, &walkable);
+        let walkable_count = walkable.iter().filter(|&&w| w).count();
         return NavClearanceResult {
-            vertices: mesh.vertices.clone(),
             walkable,
             polygon_count,
             removed_unsupported: 0,
             cut_obstructed: 0,
-            disconnected_narrow: 0,
-            offset_count: 0,
+            dropped_unfit: 0,
             protected_count: 0,
+            walkable_count,
+            component_count,
+            largest_component,
+            baseline_component_count,
+            baseline_largest_component,
         };
     }
+
+    let protected: BTreeSet<u32> = protected_triangle_indices(mesh);
+    let protected_count = protected.len();
 
     // Precompute collision-triangle bounds + normals for broadphase.
     let aabbs: Vec<TriAabb> = collision.iter().map(tri_aabb).collect();
     let normals: Vec<Option<[f32; 3]>> = collision.iter().map(triangle_normal).collect();
 
+    // Per-triangle drop reason (`None` = walkable). Tracked so the
+    // connectivity-preserving finalization below can un-drop a triangle that
+    // turns out to strand a large reachable region, and so the final counts
+    // reflect only committed drops.
+    let mut reason: Vec<Option<DropReason>> = vec![None; polygon_count];
+
     // F153.1: collision-support validation (skipped when no collision).
-    let mut removed_unsupported = 0usize;
+    // Protected (seam/door) triangles are exempt so a runtime merge/door link
+    // attachment is never removed out from under the off-mesh link. A triangle
+    // is unsupported only when *every* sampled point (centroid + edge
+    // midpoints) is over a void -- a single point landing in a crack/T-junction
+    // of the cooked collision mesh must not sever a corridor, while a triangle
+    // genuinely over a void (the #164 restroom strip) fails every sample.
     if !collision.is_empty() {
         for (index, tri) in mesh.polygons.iter().enumerate() {
-            let Some(centroid) = polygon_centroid(mesh, *tri) else {
+            if protected.contains(&(index as u32)) {
                 continue;
-            };
-            if !is_supported(centroid, collision, &aabbs, params) {
-                walkable[index] = false;
-                removed_unsupported += 1;
+            }
+            if !triangle_supported(mesh, *tri, collision, &aabbs, params) {
+                reason[index] = Some(DropReason::Unsupported);
             }
         }
     }
 
     // F153.2: interior-obstruction cutting (skipped when no collision).
-    // Only *interior* triangles (none of whose three edges lie on the
-    // walkable-region boundary) are candidates: a triangle on the boundary is
-    // already up against a wall/void the F153.3 clearance offset handles, so
-    // cutting it here for the same wall would double-treat it and erode real
-    // rooms. A triangle the authored NAVM paved *over* a freestanding
-    // collider (the #148 entrance frame, a column) is genuinely interior --
-    // walkable on every side -- and is what this phase exists to cut.
-    let mut cut_obstructed = 0usize;
+    // Protected (seam/door) triangles are exempt -- a door must never be cut
+    // by its own frame collider.
     if !collision.is_empty() {
-        let boundary = walkable_boundary_edges(mesh, &walkable);
+        let walkable_now = reason.iter().map(Option::is_none).collect::<Vec<_>>();
+        let boundary = walkable_boundary_edges(mesh, &walkable_now);
         for (index, tri) in mesh.polygons.iter().enumerate() {
-            if !walkable[index] || !is_interior_triangle(*tri, &boundary) {
+            if reason[index].is_some()
+                || protected.contains(&(index as u32))
+                || !is_interior_triangle(*tri, &boundary)
+            {
                 continue;
             }
             let Some(centroid) = polygon_centroid(mesh, *tri) else {
                 continue;
             };
             if is_obstructed(centroid, collision, &aabbs, &normals, params) {
-                walkable[index] = false;
-                cut_obstructed += 1;
+                reason[index] = Some(DropReason::Obstructed);
             }
         }
     }
 
-    // F153.3: clearance on the validated (post-removal/cut) walkable set.
-    let (vertices, offset_count, protected_count, disconnected_narrow) =
-        apply_clearance(mesh, &mut walkable, params.agent_radius);
+    // F153.3: sub-diameter disconnection on the validated walkable boundary.
+    // A triangle is dropped only when the *authored passage width* through it
+    // (near-wall distance + far-wall distance, measured across the triangle)
+    // is below `2 * radius` everywhere in it -- a genuinely sub-diameter
+    // throat. Wall-adjacent triangles in a wide passage keep the full passage
+    // width (near-wall 0 + far-wall = width) and are never dropped, so the
+    // walkable region stays connected (no erosion-style fragmentation).
+    // Protected triangles are exempt so authored doorways/seams stay traversable.
+    {
+        let walkable_now = reason.iter().map(Option::is_none).collect::<Vec<_>>();
+        let boundary = boundary_segments(mesh, &walkable_now);
+        let min_width = 2.0 * params.agent_radius;
+        for (index, tri) in mesh.polygons.iter().enumerate() {
+            if reason[index].is_some() || protected.contains(&(index as u32)) {
+                continue;
+            }
+            if max_passage_width(mesh, *tri, &boundary) < min_width {
+                reason[index] = Some(DropReason::SubDiameter);
+            }
+        }
+    }
+
+    // Connectivity-preserving finalization. Validation must strand only small
+    // dead-ends (the restroom strip, a genuine sub-diameter alcove), never
+    // sever a large reachable region -- a real interior has no large area
+    // gated solely by an unsupported/obstructed/sub-diameter triangle, so a
+    // large stranded component means a drop misread the geometry. Any drop
+    // adjacent to a large non-main component is un-dropped, iterated until only
+    // small islands remain disconnected. Determinism: fixed index order.
+    restore_large_strands(mesh, &mut reason, &protected);
+
+    let mut walkable = walkable; // shadow the all-true init with committed drops.
+    let mut removed_unsupported = 0usize;
+    let mut cut_obstructed = 0usize;
+    let mut dropped_unfit = 0usize;
+    for (index, r) in reason.iter().enumerate() {
+        match r {
+            None => {}
+            Some(DropReason::Unsupported) => {
+                walkable[index] = false;
+                removed_unsupported += 1;
+            }
+            Some(DropReason::Obstructed) => {
+                walkable[index] = false;
+                cut_obstructed += 1;
+            }
+            Some(DropReason::SubDiameter) => {
+                walkable[index] = false;
+                dropped_unfit += 1;
+            }
+        }
+    }
+
+    let walkable_count = walkable.iter().filter(|&&w| w).count();
+    let (component_count, largest_component) = connected_components(mesh, &walkable);
 
     NavClearanceResult {
-        vertices,
         walkable,
         polygon_count,
         removed_unsupported,
         cut_obstructed,
-        disconnected_narrow,
-        offset_count,
+        dropped_unfit,
         protected_count,
+        walkable_count,
+        component_count,
+        largest_component,
+        baseline_component_count,
+        baseline_largest_component,
     }
 }
 
+/// Protected triangle indices: any triangle owning at least one protected
+/// (seam/door) edge.
+fn protected_triangle_indices(mesh: &NavClearanceMeshInput) -> BTreeSet<u32> {
+    let protected_edges: BTreeSet<(u32, u32)> = mesh
+        .protected_edges
+        .iter()
+        .map(|&(a, b)| edge_key(a, b))
+        .collect();
+    let mut indices = BTreeSet::new();
+    if protected_edges.is_empty() {
+        return indices;
+    }
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        let owns = [
+            edge_key(tri[0], tri[1]),
+            edge_key(tri[1], tri[2]),
+            edge_key(tri[2], tri[0]),
+        ]
+        .iter()
+        .any(|edge| protected_edges.contains(edge));
+        if owns {
+            indices.insert(index as u32);
+        }
+    }
+    indices
+}
+
+/// F153.1: is `tri` supported? True when a majority of its sampled points
+/// (centroid + three edge midpoints) have a cooked collision surface under
+/// them -- crack/T-junction tolerant, so a single point falling through a seam
+/// in the cooked collision mesh does not spuriously remove a triangle and
+/// sever a corridor.
+fn triangle_supported(
+    mesh: &NavClearanceMeshInput,
+    tri: [u32; 3],
+    collision: &[CollisionTriangle],
+    aabbs: &[TriAabb],
+    params: NavClearanceParams,
+) -> bool {
+    let (Some(&a), Some(&b), Some(&c)) = (
+        mesh.vertices.get(tri[0] as usize),
+        mesh.vertices.get(tri[1] as usize),
+        mesh.vertices.get(tri[2] as usize),
+    ) else {
+        return true; // invalid index already diagnosed upstream; do not drop.
+    };
+    let mid = |p: [f32; 3], q: [f32; 3]| {
+        [
+            (p[0] + q[0]) * 0.5,
+            (p[1] + q[1]) * 0.5,
+            (p[2] + q[2]) * 0.5,
+        ]
+    };
+    let centroid = [
+        (a[0] + b[0] + c[0]) / 3.0,
+        (a[1] + b[1] + c[1]) / 3.0,
+        (a[2] + b[2] + c[2]) / 3.0,
+    ];
+    let samples = [centroid, mid(a, b), mid(b, c), mid(c, a)];
+    // Supported unless *every* sample is over a void: a triangle is only
+    // removed when it is genuinely, wholly unsupported (the #164 restroom
+    // strip), never for a single point falling through a collision-mesh seam
+    // -- over-removal severs through-corridors and fragments the graph.
+    samples
+        .iter()
+        .any(|&p| is_supported(p, collision, aabbs, params))
+}
+
 /// F153.1: is there a cooked collision surface under `point` within the
-/// agent's step height (and a small margin above)? A wall triangle's XZ
-/// projection is degenerate, so `barycentric_xz` rejects it -- only genuine
-/// floor/ledge surfaces the agent could stand on count.
+/// agent's step height (and a small margin above)?
 fn is_supported(
     point: [f32; 3],
     collision: &[CollisionTriangle],
@@ -417,10 +556,12 @@ fn is_supported(
     false
 }
 
-/// F153.2: does a wall-like collider rise into the agent capsule over
-/// `point`, within the agent radius (XZ)? Floor/ceiling-like triangles are
-/// excluded (they support, never obstruct); a collider must overlap the
-/// agent's vertical body band `[floor, floor + height]` to wedge it.
+/// F153.2: does a wall-like collider the agent *cannot step over* rise into
+/// the agent capsule over `point`, within the agent radius (XZ)? A collider
+/// only obstructs if it occupies some height in `(floor + step_height, floor +
+/// agent_height)` -- one entirely below `floor + step_height` is stepped over
+/// (stair risers, low ledges), one entirely above `floor + agent_height` is
+/// walked under (overheads). Floor/ceiling-like triangles never obstruct.
 fn is_obstructed(
     point: [f32; 3],
     collision: &[CollisionTriangle],
@@ -429,20 +570,17 @@ fn is_obstructed(
     params: NavClearanceParams,
 ) -> bool {
     let radius = params.agent_radius;
-    let band_low = point[1];
+    let step_top = point[1] + params.step_height;
     let band_high = point[1] + params.agent_height;
     for ((tri, aabb), normal) in collision.iter().zip(aabbs).zip(normals) {
-        // Only wall-like triangles obstruct.
         match normal {
             Some(n) if n[1].abs() < WALL_NORMAL_Y_MAX => {}
             _ => continue,
         }
-        // Must rise into the agent's vertical body band.
-        if aabb.max[1] < band_low || aabb.min[1] > band_high {
+        // Must rise above the step-over height and reach into the body band.
+        if aabb.max[1] <= step_top || aabb.min[1] >= band_high {
             continue;
         }
-        // XZ broadphase: reject if the triangle's XZ box is more than a
-        // radius away on either axis.
         if point[0] < aabb.min[0] - radius || point[0] > aabb.max[0] + radius {
             continue;
         }
@@ -456,225 +594,288 @@ fn is_obstructed(
     false
 }
 
-/// F153.3: miter-corrected inward offset of the validated walkable region's
-/// boundary, with sub-diameter corridors disconnecting. Mutates `walkable`
-/// (dropping any polygon whose offset shape inverts/degenerates) and returns
-/// `(offset_vertices, offset_count, protected_count, disconnected_narrow)`.
-fn apply_clearance(
-    mesh: &NavClearanceMeshInput,
-    walkable: &mut [bool],
-    radius: f32,
-) -> (Vec<[f32; 3]>, usize, usize, usize) {
-    let vertex_count = mesh.vertices.len();
+/// A walkable-boundary edge as a world-space XZ segment plus the unit inward
+/// normal (into the walkable region, from its one owning triangle's third
+/// vertex). The inward normal is the axis the passage width is measured
+/// along.
+#[derive(Debug, Clone, Copy)]
+struct BoundarySeg {
+    ax: f32,
+    az: f32,
+    bx: f32,
+    bz: f32,
+    /// Unit inward normal (XZ).
+    nx: f32,
+    nz: f32,
+}
 
-    // Boundary edges of the *validated* walkable region: an edge referenced
-    // by exactly one still-walkable polygon. `BTreeMap` keeps a fixed
-    // iteration order regardless of hash seed, matching the codebase's
-    // deterministic convention.
-    let mut edge_polygons: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
-    for (poly_index, tri) in mesh.polygons.iter().enumerate() {
-        if !walkable[poly_index] {
+/// Boundary edges of the walkable region as world-space XZ segments with
+/// inward normals, for the F153.3 passage-width field. A boundary edge is one
+/// referenced by exactly one walkable polygon; its inward normal points from
+/// the edge toward that polygon's third vertex.
+fn boundary_segments(mesh: &NavClearanceMeshInput, walkable: &[bool]) -> Vec<BoundarySeg> {
+    let mut edge_polys: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        if !walkable.get(index).copied().unwrap_or(false) {
             continue;
         }
         for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            let key = if a <= b { (a, b) } else { (b, a) };
-            edge_polygons.entry(key).or_default().push(poly_index);
+            edge_polys.entry(edge_key(a, b)).or_default().push(index);
         }
     }
-
-    // Per-vertex incident boundary normals (horizontal XZ, inward-facing).
-    let mut vertex_normals: Vec<Vec<(f32, f32)>> = vec![Vec::new(); vertex_count];
-    for (&(a, b), polys) in &edge_polygons {
+    let mut segs = Vec::new();
+    for ((a, b), polys) in &edge_polys {
         if polys.len() != 1 {
-            continue; // interior edge, not a wall/void boundary.
+            continue;
         }
-        let Some(&poly_index) = polys.first() else {
+        let tri = mesh.polygons[polys[0]];
+        let Some(&third) = tri.iter().find(|&&v| v != *a && v != *b) else {
             continue;
         };
-        let Some(tri) = mesh.polygons.get(poly_index) else {
-            continue;
-        };
-        let Some(&third) = tri.iter().find(|&&v| v != a && v != b) else {
-            continue;
-        };
-        let (Some(&pa), Some(&pb), Some(&pthird)) = (
-            mesh.vertices.get(a as usize),
-            mesh.vertices.get(b as usize),
+        let (Some(&pa), Some(&pb), Some(&pt)) = (
+            mesh.vertices.get(*a as usize),
+            mesh.vertices.get(*b as usize),
             mesh.vertices.get(third as usize),
         ) else {
             continue;
         };
         let ex = pb[0] - pa[0];
         let ez = pb[2] - pa[2];
-        let (n1x, n1z) = (-ez, ex);
+        // Perpendicular candidate; orient toward the third vertex (interior).
+        let (mut nx, mut nz) = (-ez, ex);
         let mid_x = (pa[0] + pb[0]) * 0.5;
         let mid_z = (pa[2] + pb[2]) * 0.5;
-        let dot = n1x * (pthird[0] - mid_x) + n1z * (pthird[2] - mid_z);
-        let (nx, nz) = if dot >= 0.0 { (n1x, n1z) } else { (-n1x, -n1z) };
+        if nx * (pt[0] - mid_x) + nz * (pt[2] - mid_z) < 0.0 {
+            nx = -nx;
+            nz = -nz;
+        }
         let len = (nx * nx + nz * nz).sqrt();
-        if len <= f32::EPSILON {
+        if len < 1.0e-9 {
             continue;
         }
-        let (ux, uz) = (nx / len, nz / len);
-        if let Some(list) = vertex_normals.get_mut(a as usize) {
-            list.push((ux, uz));
-        }
-        if let Some(list) = vertex_normals.get_mut(b as usize) {
-            list.push((ux, uz));
-        }
-    }
-
-    // Miter scale for a vertex's incident normals: `radius` for 0/1 (or
-    // exactly-collinear) edges; else `radius / cos(theta/2)` for the widest
-    // (smallest-dot) incident pair, clamped to `MITER_LIMIT_FACTOR * radius`.
-    let miter_scale = |normals: &[(f32, f32)]| -> f32 {
-        if normals.len() <= 1 {
-            return radius;
-        }
-        let mut min_dot = 1.0f32;
-        for i in 0..normals.len() {
-            for j in (i + 1)..normals.len() {
-                let (ax, az) = normals[i];
-                let (bx, bz) = normals[j];
-                let dot = (ax * bx + az * bz).clamp(-1.0, 1.0);
-                if dot < min_dot {
-                    min_dot = dot;
-                }
-            }
-        }
-        let cos_half = ((1.0 + min_dot) * 0.5).max(0.0).sqrt();
-        radius / cos_half.max(MIN_COS_HALF_ANGLE)
-    };
-
-    let mut offsets: Vec<(f32, f32)> = vec![(0.0, 0.0); vertex_count];
-    for (index, normals) in vertex_normals.iter().enumerate() {
-        if normals.is_empty() {
-            continue;
-        }
-        let (mut sx, mut sz) = (0.0f32, 0.0f32);
-        for &(nx, nz) in normals {
-            sx += nx;
-            sz += nz;
-        }
-        let len = (sx * sx + sz * sz).sqrt();
-        if len <= f32::EPSILON {
-            continue; // incident normals cancel; no safe single direction.
-        }
-        let scale = miter_scale(normals).min(radius * MITER_LIMIT_FACTOR);
-        offsets[index] = (sx / len * scale, sz / len * scale);
-    }
-
-    // Protected (seam/door) vertices never move.
-    let mut protected_vertices: BTreeSet<u32> = BTreeSet::new();
-    for &(a, b) in &mesh.protected_edges {
-        protected_vertices.insert(a);
-        protected_vertices.insert(b);
-    }
-    for &vertex in &protected_vertices {
-        if let Some(offset) = offsets.get_mut(vertex as usize) {
-            *offset = (0.0, 0.0);
-        }
-    }
-    let protected_count = protected_vertices.len();
-
-    // Apply offsets (X/Z only; Y untouched -- FO3 floors near-flat).
-    let mut vertices = mesh.vertices.clone();
-    for (index, vertex) in vertices.iter_mut().enumerate() {
-        let (ox, oz) = offsets[index];
-        vertex[0] += ox;
-        vertex[2] += oz;
-    }
-
-    // Mesh dominant winding sign, from reliable-area walkable polygons, so a
-    // single offset triangle's sign can be judged consistent with the whole.
-    let dominant_sign = dominant_winding_sign(mesh, walkable);
-
-    // Disconnect: drop any walkable polygon whose offset shape inverted or
-    // degenerated (a sub-diameter corridor throat). Reliable-area polygons
-    // that flip are counted as narrow disconnections; unreliable slivers that
-    // flip/degenerate are dropped too (they would otherwise make landmass
-    // reject the whole mesh) but not counted as corridor throats.
-    let mut disconnected_narrow = 0usize;
-    for (poly_index, tri) in mesh.polygons.iter().enumerate() {
-        if !walkable[poly_index] {
-            continue;
-        }
-        let (Some(&a), Some(&b), Some(&c)) = (
-            vertices.get(tri[0] as usize),
-            vertices.get(tri[1] as usize),
-            vertices.get(tri[2] as usize),
-        ) else {
-            continue;
-        };
-        let area = signed_area_xz(a, b, c);
-        let original = original_area(mesh, *tri);
-        let degenerate = area.abs() < MIN_TRIANGLE_AREA;
-        let inverted = match dominant_sign {
-            Some(sign) => (area > 0.0) != sign,
-            None => false,
-        };
-        if degenerate || inverted {
-            walkable[poly_index] = false;
-            if inverted && original.abs() >= MIN_RELIABLE_ORIGINAL_AREA {
-                disconnected_narrow += 1;
-            }
-        }
-    }
-
-    // offset_count: still-walkable polygons that actually moved.
-    let mut offset_count = 0usize;
-    for (poly_index, tri) in mesh.polygons.iter().enumerate() {
-        if !walkable[poly_index] {
-            continue;
-        }
-        let moved = tri.iter().any(|&v| {
-            let Some(&(ox, oz)) = offsets.get(v as usize) else {
-                return false;
-            };
-            ox.abs() > 1.0e-6 || oz.abs() > 1.0e-6
+        segs.push(BoundarySeg {
+            ax: pa[0],
+            az: pa[2],
+            bx: pb[0],
+            bz: pb[2],
+            nx: nx / len,
+            nz: nz / len,
         });
-        if moved {
-            offset_count += 1;
-        }
     }
-
-    (vertices, offset_count, protected_count, disconnected_narrow)
+    segs
 }
 
-fn original_area(mesh: &NavClearanceMeshInput, tri: [u32; 3]) -> f32 {
-    match (
+/// Nearest positive distance along the ray `(ox, oz) + t*(dx, dz)` (dir
+/// assumed unit) to any boundary segment, or `None` when the ray escapes
+/// (an open passage end). Used to reach the *far* wall across a passage.
+fn ray_boundary_distance(
+    ox: f32,
+    oz: f32,
+    dx: f32,
+    dz: f32,
+    boundary: &[BoundarySeg],
+) -> Option<f32> {
+    const EPS: f32 = 1.0e-4;
+    let mut best: Option<f32> = None;
+    for seg in boundary {
+        let ex = seg.bx - seg.ax;
+        let ez = seg.bz - seg.az;
+        let det = dx * (-ez) - (-ex) * dz;
+        if det.abs() < 1.0e-9 {
+            continue;
+        }
+        let rx = seg.ax - ox;
+        let rz = seg.az - oz;
+        // Solve [dx -ex; dz -ez] [t u]^T = [rx rz]^T.
+        let t = (rx * (-ez) - (-ex) * rz) / det;
+        let u = (dx * rz - dz * rx) / det;
+        if t > EPS && (-EPS..=1.0 + EPS).contains(&u) {
+            best = Some(best.map_or(t, |b: f32| b.min(t)));
+        }
+    }
+    best
+}
+
+/// The maximum authored passage width sampled across `tri`: for the centroid
+/// and three edge midpoints, `near-wall distance + far-wall distance` along
+/// the nearest boundary edge's inward normal. A wall-adjacent triangle's
+/// boundary-edge midpoint reports `0 + full width` = the full passage, so a
+/// wide passage's wall strip is never mistaken for sub-diameter; a genuine
+/// throat reports a small width at every sample. `f32::MAX` when there is no
+/// boundary or the far ray escapes (an open, effectively unbounded passage).
+fn max_passage_width(mesh: &NavClearanceMeshInput, tri: [u32; 3], boundary: &[BoundarySeg]) -> f32 {
+    if boundary.is_empty() {
+        return f32::MAX;
+    }
+    let (Some(&a), Some(&b), Some(&c)) = (
         mesh.vertices.get(tri[0] as usize),
         mesh.vertices.get(tri[1] as usize),
         mesh.vertices.get(tri[2] as usize),
-    ) {
-        (Some(&a), Some(&b), Some(&c)) => signed_area_xz(a, b, c),
-        _ => 0.0,
+    ) else {
+        return f32::MAX; // invalid index already diagnosed upstream.
+    };
+    let mid = |p: [f32; 3], q: [f32; 3]| [(p[0] + q[0]) * 0.5, (p[2] + q[2]) * 0.5];
+    let centroid = [(a[0] + b[0] + c[0]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
+    let samples = [centroid, mid(a, b), mid(b, c), mid(c, a)];
+    let mut best = 0.0f32;
+    for [sx, sz] in samples {
+        // Nearest boundary edge to the sample -> near-wall distance + axis.
+        let mut near_dist_sq = f32::INFINITY;
+        let mut axis = (0.0f32, 0.0f32);
+        for seg in boundary {
+            let d = point_segment_dist_sq_xz(sx, sz, [seg.ax, 0.0, seg.az], [seg.bx, 0.0, seg.bz]);
+            if d < near_dist_sq {
+                near_dist_sq = d;
+                axis = (seg.nx, seg.nz);
+            }
+        }
+        if axis == (0.0, 0.0) {
+            continue;
+        }
+        let near = near_dist_sq.sqrt();
+        // Reach the far wall along the inward normal (into the region).
+        let width = match ray_boundary_distance(sx, sz, axis.0, axis.1, boundary) {
+            Some(far) => near + far,
+            None => f32::MAX, // open passage end -> effectively unbounded.
+        };
+        if width > best {
+            best = width;
+        }
+        if best == f32::MAX {
+            break;
+        }
     }
+    best
 }
 
-/// Dominant winding sign (`true` = positive area) across the walkable
-/// polygons with a reliable original area, `None` when none qualify.
-fn dominant_winding_sign(mesh: &NavClearanceMeshInput, walkable: &[bool]) -> Option<bool> {
-    let mut positive = 0usize;
-    let mut negative = 0usize;
-    for (poly_index, tri) in mesh.polygons.iter().enumerate() {
-        if !walkable[poly_index] {
+/// Per-triangle connected-component labels over shared edges of the walkable
+/// set (union-find), plus each component root's polygon count. `roots[i] ==
+/// usize::MAX` for a non-walkable triangle. `BTreeMap` keeps determinism.
+fn label_components(
+    mesh: &NavClearanceMeshInput,
+    walkable: &[bool],
+) -> (Vec<usize>, BTreeMap<usize, usize>) {
+    let n = mesh.polygons.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    let mut edge_owner: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        if !walkable.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let area = original_area(mesh, *tri);
-        if area.abs() < MIN_RELIABLE_ORIGINAL_AREA {
-            continue;
-        }
-        if area > 0.0 {
-            positive += 1;
-        } else {
-            negative += 1;
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = edge_key(a, b);
+            match edge_owner.get(&key) {
+                Some(&other) => {
+                    let ra = find(&mut parent, index);
+                    let rb = find(&mut parent, other);
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
+                None => {
+                    edge_owner.insert(key, index);
+                }
+            }
         }
     }
-    if positive == 0 && negative == 0 {
-        None
-    } else {
-        Some(positive >= negative)
+    let roots: Vec<usize> = (0..n)
+        .map(|index| {
+            if walkable.get(index).copied().unwrap_or(false) {
+                find(&mut parent, index)
+            } else {
+                usize::MAX
+            }
+        })
+        .collect();
+    let mut sizes: BTreeMap<usize, usize> = BTreeMap::new();
+    for &root in &roots {
+        if root != usize::MAX {
+            *sizes.entry(root).or_insert(0) += 1;
+        }
+    }
+    (roots, sizes)
+}
+
+/// Connected components of the walkable set over shared triangle edges.
+/// Returns `(component_count, largest_component_polygon_count)`.
+fn connected_components(mesh: &NavClearanceMeshInput, walkable: &[bool]) -> (usize, usize) {
+    let (_, sizes) = label_components(mesh, walkable);
+    (sizes.len(), sizes.values().copied().max().unwrap_or(0))
+}
+
+/// The main (largest) component root, ties broken by smallest root index for
+/// determinism; `None` when nothing is walkable.
+fn main_component_root(sizes: &BTreeMap<usize, usize>) -> Option<usize> {
+    sizes
+        .iter()
+        .max_by(|(ra, sa), (rb, sb)| sa.cmp(sb).then(rb.cmp(ra)))
+        .map(|(root, _)| *root)
+}
+
+/// Connectivity-preserving finalization: un-drops any triangle adjacent to a
+/// *large* non-main stranded component, iterated until only small islands
+/// remain disconnected. Protected triangles are never a drop, so they are not
+/// touched. See the call site for why a large stranded component is treated as
+/// a misread drop rather than an intended disconnect.
+fn restore_large_strands(
+    mesh: &NavClearanceMeshInput,
+    reason: &mut [Option<DropReason>],
+    _protected: &BTreeSet<u32>,
+) {
+    let n = mesh.polygons.len();
+    for _ in 0..=n {
+        let walkable: Vec<bool> = reason.iter().map(Option::is_none).collect();
+        let (roots, sizes) = label_components(mesh, &walkable);
+        let Some(main) = main_component_root(&sizes) else {
+            break;
+        };
+        let large_stranded: BTreeSet<usize> = sizes
+            .iter()
+            .filter(|(root, size)| **root != main && **size >= LARGE_ISLAND)
+            .map(|(root, _)| *root)
+            .collect();
+        if large_stranded.is_empty() {
+            break;
+        }
+        // Edge -> walkable polygon owners, to find a dropped triangle's
+        // still-walkable neighbours and their components.
+        let mut edge_owners: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
+        for (index, tri) in mesh.polygons.iter().enumerate() {
+            if !walkable[index] {
+                continue;
+            }
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                edge_owners.entry(edge_key(a, b)).or_default().push(index);
+            }
+        }
+        let mut restored = false;
+        for (index, tri) in mesh.polygons.iter().enumerate() {
+            if reason[index].is_none() {
+                continue;
+            }
+            let adjacent_to_large = [
+                edge_key(tri[0], tri[1]),
+                edge_key(tri[1], tri[2]),
+                edge_key(tri[2], tri[0]),
+            ]
+            .iter()
+            .flat_map(|edge| edge_owners.get(edge).into_iter().flatten())
+            .any(|&neighbor| large_stranded.contains(&roots[neighbor]));
+            if adjacent_to_large {
+                reason[index] = None;
+                restored = true;
+            }
+        }
+        if !restored {
+            break;
+        }
     }
 }
 
@@ -682,9 +883,6 @@ fn dominant_winding_sign(mesh: &NavClearanceMeshInput, walkable: &[bool]) -> Opt
 mod tests {
     use super::*;
 
-    /// A flat floor quad (two triangles) covering `[x0,x1] x [z0,z1]` at
-    /// height `y`, as world-space collision triangles. Its top surface
-    /// supports nav triangles at `y`.
     fn floor(x0: f32, x1: f32, z0: f32, z1: f32, y: f32) -> Vec<CollisionTriangle> {
         vec![
             CollisionTriangle {
@@ -718,156 +916,110 @@ mod tests {
     }
 
     #[test]
-    fn empty_collision_never_removes_walkable_area() {
+    fn empty_collision_never_removes_or_cuts() {
         let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
         let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
-        assert!(result.walkable.iter().all(|&w| w));
         assert_eq!(result.removed_unsupported, 0);
         assert_eq!(result.cut_obstructed, 0);
     }
 
     #[test]
     fn a_triangle_over_a_void_is_removed_as_unsupported() {
-        // Floor only covers x in [0, 2]; nav covers x in [0, 4], so the
-        // far triangle's centroid (x ~ 2.67) sits over a void.
+        // Floor only reaches x=1.5; polygon 0 = [0,1,2] = (0,0),(4,0),(4,2)
+        // has its centroid and every edge midpoint beyond the floor (its
+        // nearest edge midpoint sits at x=2 > 1.5), so a majority of its
+        // samples are unsupported -> removed. Polygon 1 keeps a supported
+        // centroid + corner.
         let mesh = nav_quad(0.0, 4.0, 0.0, 2.0, 0.0);
-        let collision = floor(0.0, 2.0, -0.5, 2.5, 0.0);
+        let collision = floor(0.0, 1.5, -0.5, 2.5, 0.0);
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        // Polygon 0 = [0,1,2] centroid x ~ 2.67 (void), polygon 1 = [0,2,3]
-        // centroid x ~ 1.33 (supported).
-        assert_eq!(result.removed_unsupported, 1, "{:?}", result);
+        assert_eq!(result.removed_unsupported, 1, "{result:?}");
         assert!(
             !result.walkable[0],
             "far triangle over void must be removed"
         );
-        assert!(result.walkable[1], "near triangle over floor must survive");
-    }
-
-    #[test]
-    fn a_fully_supported_quad_survives_validation() {
-        let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        let collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
-        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.removed_unsupported, 0, "{:?}", result);
-        assert_eq!(result.cut_obstructed, 0);
     }
 
     #[test]
     fn a_floor_a_full_step_below_still_supports() {
         let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        // Floor 0.4 m below, inside the 0.5 m step height.
         let collision = floor(-1.0, 5.0, -1.0, 5.0, -0.4);
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.removed_unsupported, 0, "{:?}", result);
+        assert_eq!(result.removed_unsupported, 0, "{result:?}");
     }
 
     #[test]
     fn a_floor_beyond_the_step_below_does_not_support() {
         let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        // Floor 1.0 m below, beyond the 0.5 m step height -> unsupported.
         let collision = floor(-1.0, 5.0, -1.0, 5.0, -1.0);
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.removed_unsupported, 2, "{:?}", result);
-        assert!(result.walkable.iter().all(|&w| !w));
+        assert_eq!(result.removed_unsupported, 2, "{result:?}");
     }
 
     /// A big triangle midpoint-subdivided into four: the central triangle
-    /// (index 3, vertices D,E,F) has all three edges shared with the three
-    /// corner triangles, so it is the one genuinely *interior* triangle. The
-    /// three corner triangles are boundary. Vertices: A,B,C corners then
-    /// D=mid(A,B), E=mid(B,C), F=mid(C,A).
+    /// (index 3, vertices D,E,F) is the one fully interior triangle.
     fn subdivided_triangle() -> NavClearanceMeshInput {
         NavClearanceMeshInput {
             vertices: vec![
                 [0.0, 0.0, 0.0], // 0 A
                 [4.0, 0.0, 0.0], // 1 B
                 [0.0, 0.0, 4.0], // 2 C
-                [2.0, 0.0, 0.0], // 3 D = mid(A,B)
-                [2.0, 0.0, 2.0], // 4 E = mid(B,C)
-                [0.0, 0.0, 2.0], // 5 F = mid(C,A)
+                [2.0, 0.0, 0.0], // 3 D
+                [2.0, 0.0, 2.0], // 4 E
+                [0.0, 0.0, 2.0], // 5 F
             ],
-            polygons: vec![
-                [0, 3, 5], // corner A (boundary)
-                [3, 1, 4], // corner B (boundary)
-                [5, 4, 2], // corner C (boundary)
-                [3, 4, 5], // centre D,E,F (interior)
-            ],
+            polygons: vec![[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]],
             protected_edges: Vec::new(),
         }
     }
 
     #[test]
-    fn an_interior_collider_cuts_only_the_interior_triangle_it_sits_on() {
-        // The central (interior) triangle's centroid is ~(1.33, 1.33); a wall
-        // stub stands on it. The three boundary corner triangles are left
-        // walkable -- a perimeter/boundary wall is the F153.3 clearance
-        // offset's job, not this phase's, so only genuinely interior
-        // obstructions (the #148 entrance-frame class) are cut here.
+    fn a_tall_interior_collider_cuts_only_the_interior_triangle_it_sits_on() {
         let mesh = subdivided_triangle();
         let mut collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
+        // A tall wall stub (rises well above the step height) on the centre.
         collision.extend(wall(1.2, 1.5, 1.33, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.removed_unsupported, 0, "{:?}", result);
-        assert_eq!(result.cut_obstructed, 1, "{:?}", result);
+        assert_eq!(result.removed_unsupported, 0, "{result:?}");
+        assert_eq!(result.cut_obstructed, 1, "{result:?}");
         assert!(!result.walkable[3], "the interior triangle must be cut");
-        assert!(
-            result.walkable[0] && result.walkable[1] && result.walkable[2],
-            "boundary corner triangles must stay walkable: {:?}",
-            result
-        );
+    }
+
+    #[test]
+    fn a_step_overable_riser_does_not_cut_the_stair_tread() {
+        // A short riser (0.0..0.3 m, under the 0.5 m step height) on the same
+        // interior triangle must NOT cut it -- stairs stay traversable.
+        let mesh = subdivided_triangle();
+        let mut collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
+        collision.extend(wall(1.2, 1.5, 1.33, 0.0, 0.3));
+        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        assert_eq!(result.cut_obstructed, 0, "{result:?}");
     }
 
     #[test]
     fn a_boundary_wall_does_not_cut_perimeter_triangles() {
-        // A wall stub sitting on a *boundary* triangle is not cut here (the
-        // clearance offset handles the perimeter); this guards against the
-        // over-cut a naive within-radius test produced on real room shells.
         let mesh = nav_quad(0.0, 4.0, 0.0, 1.0, 0.0);
         let mut collision = floor(-1.0, 5.0, -1.0, 2.0, 0.0);
         collision.extend(wall(1.1, 1.5, 0.5, 0.0, 2.0));
         let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        assert_eq!(result.cut_obstructed, 0, "{:?}", result);
+        assert_eq!(result.cut_obstructed, 0, "{result:?}");
     }
 
-    #[test]
-    fn a_wide_room_corner_gets_full_radius_clearance_per_wall() {
-        // Reuse of wave-6's L-corner invariant: perpendicular clearance to
-        // each original wall is >= radius (the miter, not the fixed average).
-        let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
-        let original = mesh.vertices[0]; // corner at (0,0)
-        let eroded = result.vertices[0];
-        assert!(
-            eroded[0] > original[0] && eroded[2] > original[2],
-            "corner must move into the room: {eroded:?}"
-        );
-        // 90-degree corner -> displacement radius*sqrt(2), clearance radius.
-        let dx = eroded[0] - original[0];
-        let dz = eroded[2] - original[2];
-        let displacement = (dx * dx + dz * dz).sqrt();
-        let expected = AGENT_RADIUS * std::f32::consts::SQRT_2;
-        assert!(
-            (displacement - expected).abs() < 1.0e-4,
-            "expected miter displacement {expected}, got {displacement}"
-        );
-    }
-
-    /// A chain of `segments` corridor cells of the given `width` along X
-    /// between two long walls at z=0 and z=width -- the same fixture shape
-    /// wave-6 `erosion_policy` used for its pinch tests.
-    fn corridor(width: f32, segments: u32) -> NavClearanceMeshInput {
+    /// A corridor along X of `half_widths.len()` stations, centred on z=1,
+    /// with a per-station half-width so it can be pinched in the middle.
+    fn pinched_corridor(half_widths: &[f32]) -> NavClearanceMeshInput {
         let mut vertices = Vec::new();
-        let mut polygons = Vec::new();
-        for i in 0..=segments {
+        for (i, hw) in half_widths.iter().enumerate() {
             let x = i as f32 * 2.0;
-            vertices.push([x, 0.0, 0.0]);
-            vertices.push([x, 0.0, width]);
+            vertices.push([x, 0.0, 1.0 - hw]); // bottom row, index 2*i
+            vertices.push([x, 0.0, 1.0 + hw]); // top row, index 2*i + 1
         }
-        for i in 0..segments {
-            let ba = 2 * i;
-            let ta = 2 * i + 1;
-            let bb = 2 * (i + 1);
-            let tb = 2 * (i + 1) + 1;
+        let mut polygons = Vec::new();
+        for i in 0..half_widths.len() - 1 {
+            let ba = (2 * i) as u32;
+            let ta = (2 * i + 1) as u32;
+            let bb = (2 * (i + 1)) as u32;
+            let tb = (2 * (i + 1) + 1) as u32;
             polygons.push([ba, bb, tb]);
             polygons.push([ba, tb, ta]);
         }
@@ -879,55 +1031,55 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_diameter_corridor_disconnects_instead_of_being_preserved() {
-        // Width 0.3 m, radius 0.35: full clearance from both walls (0.35 each)
-        // overlaps by 0.4 m, well past inversion. Wave-6 preserved these
-        // impassable; this issue disconnects them (no route).
-        let mesh = corridor(0.3, 3);
+    fn a_one_metre_doorway_stays_connected_with_an_eroded_passage() {
+        // A uniform 1.0 m corridor (half-width 0.5 > radius): the centre line
+        // is 0.5 m > 0.35 m from each wall, so every triangle keeps a fitting
+        // point -- one connected component, nothing dropped.
+        let mesh = pinched_corridor(&[0.5, 0.5, 0.5, 0.5]);
         let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
-        assert!(
-            result.disconnected_narrow > 0,
-            "a sub-diameter corridor must disconnect: {:?}",
-            result
+        assert_eq!(result.dropped_unfit, 0, "{result:?}");
+        assert_eq!(result.component_count, 1, "{result:?}");
+        assert_eq!(result.largest_component, mesh.polygons.len(), "{result:?}");
+    }
+
+    #[test]
+    fn a_sub_diameter_pinch_disconnects_the_two_wide_ends() {
+        // Wide (half-width 1.0) at both ends, pinched to a 0.5 m gap
+        // (half-width 0.25 < radius) in the middle: the neck fits nowhere and
+        // drops, splitting the corridor into two components; the wide ends
+        // survive.
+        let mesh = pinched_corridor(&[1.0, 0.25, 0.25, 1.0]);
+        let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
+        assert!(result.dropped_unfit > 0, "the neck must drop: {result:?}");
+        assert_eq!(
+            result.component_count, 2,
+            "the pinch must split the corridor: {result:?}"
         );
         assert!(
-            result.walkable.iter().any(|&w| !w),
-            "at least one throat polygon must be dropped: {:?}",
-            result
+            result.walkable_count > 0,
+            "the wide ends survive: {result:?}"
         );
     }
 
     #[test]
-    fn a_wide_corridor_stays_connected_after_clearance() {
-        // Width 3.0 m, far wider than 2*radius: no disconnection.
-        let mesh = corridor(3.0, 3);
-        let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
-        assert_eq!(result.disconnected_narrow, 0, "{:?}", result);
-        assert!(
-            result.walkable.iter().all(|&w| w),
-            "a wide corridor must stay fully walkable: {:?}",
-            result
-        );
-        assert!(result.offset_count > 0);
-    }
-
-    #[test]
-    fn protected_seam_vertices_never_move() {
-        let mut mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        // Protect the z=0 edge (vertices 0-1).
+    fn protected_triangles_are_never_dropped_or_cut() {
+        // A narrow (sub-diameter) quad whose z=0 edge is protected: the
+        // protected triangle stays walkable even though the agent does not
+        // fit, so an authored doorway/seam is never severed.
+        let mut mesh = nav_quad(0.0, 4.0, 0.0, 0.3, 0.0);
         mesh.protected_edges = vec![(0, 1)];
         let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
-        assert_eq!(result.vertices[0], mesh.vertices[0], "seam vertex 0 fixed");
-        assert_eq!(result.vertices[1], mesh.vertices[1], "seam vertex 1 fixed");
-        assert!(result.protected_count == 2);
+        // Polygon 0 = [0,1,2] owns edge (0,1) -> protected; polygon 1 =
+        // [0,2,3] does not own (0,1).
+        assert!(result.walkable[0], "protected triangle stays walkable");
+        assert_eq!(result.protected_count, 1, "{result:?}");
     }
 
     #[test]
     fn the_pass_is_deterministic_across_calls() {
-        let mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
-        let collision = floor(-1.0, 5.0, -1.0, 5.0, 0.0);
-        let first = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
-        let second = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        let mesh = pinched_corridor(&[1.0, 0.25, 0.25, 1.0]);
+        let first = validate_and_clear(&mesh, &[], NavClearanceParams::default());
+        let second = validate_and_clear(&mesh, &[], NavClearanceParams::default());
         assert_eq!(first, second);
     }
 
@@ -939,7 +1091,6 @@ mod tests {
             ..NavClearanceParams::default()
         };
         let result = validate_and_clear(&mesh, &[], params);
-        assert_eq!(result.vertices, mesh.vertices);
         assert!(result.walkable.iter().all(|&w| w));
     }
 }

@@ -447,30 +447,30 @@ fn protected_edges_for_prepared_mesh(
     edges
 }
 
-fn prepared_nav_aabb(vertices: &[[f32; 3]]) -> PreparedNavAabb {
-    let Some(first) = vertices.first() else {
-        return PreparedNavAabb::default();
-    };
-    let mut min = *first;
-    let mut max = *first;
-    for vertex in &vertices[1..] {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(vertex[axis]);
-            max[axis] = max[axis].max(vertex[axis]);
-        }
-    }
-    PreparedNavAabb { min, max }
+/// Largest-connected-component share as an integer percent of a mesh's
+/// surviving walkable polygons (100 when unfragmented; 100 when the mesh has
+/// no walkable polygons at all, so an empty mesh never drags the health
+/// minimum down).
+fn component_share_pct(largest_component: usize, walkable_count: usize) -> usize {
+    // `checked_div` yields `None` (=> 100%) when there are no walkable
+    // polygons, so an empty mesh never drags the health minimum down.
+    (largest_component * 100)
+        .checked_div(walkable_count)
+        .unwrap_or(100)
 }
 
-/// Runs the collision-derived validation + clearance pass (issue #153) over
-/// every mesh in `graph`, mutating it in place: walkable triangles with no
-/// collision support are removed (F153.1), those a wall-like collider intrudes
-/// are cut (F153.2), and the validated walkable region's boundary is offset
-/// inward by the agent radius with sub-diameter corridors disconnecting
-/// (F153.3). Rewrites `navgraph.ron`, updates the graph's clearance counters,
-/// pushes per-mesh diagnostics, and returns the refreshed manifest pointer and
-/// a deterministic summary line. Runs after physics classification so
-/// `collision` reflects the same fixed static shell the player collides with.
+/// Runs the collision-derived validation pass (issue #153) over every mesh in
+/// `graph`, mutating each polygon's `walkable` flag in place: triangles with
+/// no collision support are removed (F153.1), interior triangles a
+/// non-step-overable collider intrudes are cut (F153.2), and triangles the
+/// agent capsule fits nowhere in are dropped (F153.3) -- measured on the
+/// authored geometry, so a wide passage keeps its connected center band while
+/// a genuinely sub-diameter throat drops. Vertices are never moved. Rewrites
+/// `navgraph.ron`, updates the graph's clearance counters (including the
+/// per-mesh connectivity health signal), pushes per-mesh diagnostics, and
+/// returns the refreshed manifest pointer and a deterministic summary line.
+/// Runs after physics classification so `collision` reflects the same fixed
+/// static shell the player collides with.
 pub(crate) fn apply_nav_clearance(
     cache_dir: &Path,
     cell_form_id: u32,
@@ -483,8 +483,9 @@ pub(crate) fn apply_nav_clearance(
 
     let mut removed = 0usize;
     let mut cut = 0usize;
-    let mut disconnected = 0usize;
-    let mut offset = 0usize;
+    let mut dropped = 0usize;
+    let mut walkable_total = 0usize;
+    let mut min_component_share = 100usize;
 
     for mesh in &mut graph.meshes {
         let protected_edges = protected_edges_for_prepared_mesh(mesh, &merges);
@@ -499,76 +500,56 @@ pub(crate) fn apply_nav_clearance(
         };
         let result = validate_and_clear(&input, collision, params);
 
-        mesh.vertices = result.vertices;
         for (polygon, walkable) in mesh.polygons.iter_mut().zip(&result.walkable) {
             polygon.walkable = *walkable;
         }
-        mesh.bounds = prepared_nav_aabb(&mesh.vertices);
 
         removed += result.removed_unsupported;
         cut += result.cut_obstructed;
-        disconnected += result.disconnected_narrow;
-        offset += result.offset_count;
+        dropped += result.dropped_unfit;
+        walkable_total += result.walkable_count;
+        let share = component_share_pct(result.largest_component, result.walkable_count);
+        min_component_share = min_component_share.min(share);
 
-        if result.removed_unsupported > 0
-            || result.cut_obstructed > 0
-            || result.disconnected_narrow > 0
-        {
-            diagnostics.push(Diagnostic {
-                severity: "info".into(),
-                message: format!(
-                    "nav clearance mesh {:08x}: removed {}, cut {}, disconnected {}, offset {} of {} polygon(s)",
-                    mesh.form_id,
-                    result.removed_unsupported,
-                    result.cut_obstructed,
-                    result.disconnected_narrow,
-                    result.offset_count,
-                    result.polygon_count,
-                ),
-            });
-        }
+        let baseline_share =
+            component_share_pct(result.baseline_largest_component, result.polygon_count);
+        diagnostics.push(Diagnostic {
+            severity: "info".into(),
+            message: format!(
+                "nav clearance mesh {:08x}: removed {}, cut {}, dropped {} of {} polygon(s); walkable {}, components {} (largest {} = {}%); authored components {} (largest {} = {}%)",
+                mesh.form_id,
+                result.removed_unsupported,
+                result.cut_obstructed,
+                result.dropped_unfit,
+                result.polygon_count,
+                result.walkable_count,
+                result.component_count,
+                result.largest_component,
+                share,
+                result.baseline_component_count,
+                result.baseline_largest_component,
+                baseline_share,
+            ),
+        });
     }
-
-    graph.bounds = {
-        let mut acc: Option<PreparedNavAabb> = None;
-        for mesh in &graph.meshes {
-            if mesh.vertices.is_empty() {
-                continue;
-            }
-            acc = Some(match acc {
-                None => mesh.bounds,
-                Some(a) => PreparedNavAabb {
-                    min: [
-                        a.min[0].min(mesh.bounds.min[0]),
-                        a.min[1].min(mesh.bounds.min[1]),
-                        a.min[2].min(mesh.bounds.min[2]),
-                    ],
-                    max: [
-                        a.max[0].max(mesh.bounds.max[0]),
-                        a.max[1].max(mesh.bounds.max[1]),
-                        a.max[2].max(mesh.bounds.max[2]),
-                    ],
-                },
-            });
-        }
-        acc.unwrap_or_default()
-    };
 
     graph.counters.clearance_removed_unsupported = removed;
     graph.counters.clearance_cut_obstructed = cut;
-    graph.counters.clearance_disconnected_narrow = disconnected;
-    graph.counters.clearance_offset_polygons = offset;
+    graph.counters.clearance_dropped_unfit = dropped;
+    graph.counters.clearance_walkable_total = walkable_total;
+    graph.counters.clearance_min_component_share_pct = min_component_share;
     graph.counters.clearance_collision_triangles = collision.len();
 
     let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
     let summary = format!(
-        "nav clearance: collision triangles {}, meshes {}, removed unsupported {}, cut obstructed {}, disconnected narrow {}, offset polygons {}",
+        "nav clearance: collision triangles {}, meshes {}, removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%",
         collision.len(),
         graph.counters.meshes,
         removed,
         cut,
-        disconnected,
-        offset,
+        dropped,
+        walkable_total,
+        min_component_share,
     );
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);
     Ok((graph_source, summary))

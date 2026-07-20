@@ -9188,19 +9188,31 @@ async fn then_clearance_cut(world: &mut BevyoutWorld, expected: usize) {
     assert_eq!(result.cut_obstructed, expected, "{result:?}");
 }
 
-#[then(regex = r"^(\d+) polygons? (?:is|are) disconnected as narrow$")]
-async fn then_clearance_disconnected_exact(world: &mut BevyoutWorld, expected: usize) {
+#[then(regex = r"^(\d+) polygons? (?:is|are) dropped as unfit$")]
+async fn then_clearance_dropped_exact(world: &mut BevyoutWorld, expected: usize) {
     let result = clearance_result(world);
-    assert_eq!(result.disconnected_narrow, expected, "{result:?}");
+    assert_eq!(result.dropped_unfit, expected, "{result:?}");
 }
 
-#[then(regex = r"^at least (\d+) polygons? (?:is|are) disconnected as narrow$")]
-async fn then_clearance_disconnected_at_least(world: &mut BevyoutWorld, expected: usize) {
+#[then(regex = r"^at least (\d+) polygons? (?:is|are) dropped as unfit$")]
+async fn then_clearance_dropped_at_least(world: &mut BevyoutWorld, expected: usize) {
     let result = clearance_result(world);
     assert!(
-        result.disconnected_narrow >= expected,
-        "expected >= {expected} disconnected, got {result:?}"
+        result.dropped_unfit >= expected,
+        "expected >= {expected} dropped, got {result:?}"
     );
+}
+
+#[then(regex = r"^the walkable set forms (\d+) connected component(?:s)?$")]
+async fn then_clearance_components(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.component_count, expected, "{result:?}");
+}
+
+#[then(regex = r"^the largest connected component has (\d+) polygon(?:s)?$")]
+async fn then_clearance_largest_component(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.largest_component, expected, "{result:?}");
 }
 
 #[then(regex = r"^clearance polygon (\d+) is walkable$")]
@@ -9233,10 +9245,10 @@ async fn then_clearance_every_walkable(world: &mut BevyoutWorld) {
     assert!(result.walkable.iter().all(|&w| w), "{result:?}");
 }
 
-#[then("at least one polygon was offset by clearance")]
-async fn then_clearance_offset(world: &mut BevyoutWorld) {
+#[then(regex = r"^the walkable count is (\d+)$")]
+async fn then_clearance_walkable_count(world: &mut BevyoutWorld, expected: usize) {
     let result = clearance_result(world);
-    assert!(result.offset_count > 0, "{result:?}");
+    assert_eq!(result.walkable_count, expected, "{result:?}");
 }
 
 // ---------------------------------------------------------------------

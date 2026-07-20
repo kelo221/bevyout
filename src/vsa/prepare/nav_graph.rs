@@ -373,12 +373,19 @@ pub(crate) struct NavGraphCounters {
     pub(crate) nvci_navmesh_matches: usize,
     /// Issue #153 (M4 wave 10) collision-derived clearance counters, summed
     /// over every mesh once `apply_nav_clearance` has run. All zero on a
-    /// freshly built graph (before clearance) and on cells with no cooked
-    /// static collision.
+    /// freshly built graph (before clearance); `removed`/`cut` also zero on
+    /// cells with no cooked static collision.
     pub(crate) clearance_removed_unsupported: usize,
     pub(crate) clearance_cut_obstructed: usize,
-    pub(crate) clearance_disconnected_narrow: usize,
-    pub(crate) clearance_offset_polygons: usize,
+    /// Polygons dropped by the agent-radius clearance-fit test (the capsule
+    /// fits nowhere in them -- wall-adjacent slivers and sub-diameter throats).
+    pub(crate) clearance_dropped_unfit: usize,
+    /// Walkable polygons surviving every clearance phase, whole-graph.
+    pub(crate) clearance_walkable_total: usize,
+    /// Smallest per-mesh largest-connected-component share (percent of that
+    /// mesh's surviving walkable polygons), 100 when every mesh is one
+    /// dominant component; the fragmentation health signal.
+    pub(crate) clearance_min_component_share_pct: usize,
     pub(crate) clearance_collision_triangles: usize,
 }
 
@@ -484,11 +491,13 @@ pub(crate) fn build_nav_graph(inputs: &NavGraphInputs) -> PreparedNavGraph {
         nvci_navmesh_matches: navi_correlation_counts.nvci_navmesh_matches,
         // Populated later by `navmesh::apply_nav_clearance` (issue #153),
         // which runs after physics classification; zero on the freshly built
-        // graph.
+        // graph. `clearance_min_component_share_pct` is left 0 here and set to
+        // its real value (100 when unfragmented) by that pass.
         clearance_removed_unsupported: 0,
         clearance_cut_obstructed: 0,
-        clearance_disconnected_narrow: 0,
-        clearance_offset_polygons: 0,
+        clearance_dropped_unfit: 0,
+        clearance_walkable_total: 0,
+        clearance_min_component_share_pct: 0,
         clearance_collision_triangles: 0,
     };
 
