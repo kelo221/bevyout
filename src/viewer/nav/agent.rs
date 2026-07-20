@@ -8317,6 +8317,122 @@ mod tests {
         );
     }
 
+    /// An activator placement whose reference is `reference_form_id`, the
+    /// solid gear-door class issue #186 is about. `Default` audio carries no
+    /// sound FormIDs, so activation is silent in this harness.
+    fn activator_placement(reference_form_id: u32) -> crate::vsa::PreparedPlacement {
+        let mut placement = door_placement(reference_form_id);
+        placement.base_kind = "ACTI".into();
+        placement.semantic = crate::vsa::PreparedSemantic::Activator;
+        placement
+    }
+
+    /// Issue #186, the *signal* test (verdict §2.1): drive an activator
+    /// blocker through the **real interaction boundary** and assert nav's
+    /// override lifts -- deliberately not the #177 shape that pokes
+    /// `door_open` directly (`closed_blocker_override_world`), which is why
+    /// this class of desync shipped. A closed, not-openable gear door
+    /// (`VaultGearDoor`'s prepared shape: `openable = false`) is impassable;
+    /// activating it open through `scripted_activator_toggle` -> the shared
+    /// `InteractionState.open` signal -> `door_availability_system` clears the
+    /// override so the route is free; activating it shut restores it.
+    #[test]
+    fn activating_a_blocker_through_the_interaction_boundary_lifts_the_nav_override() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let blocker = world
+            .spawn(interaction::PlacementRoot::new(activator_placement(0x99)))
+            .id();
+        registry.register(blocker, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((TestNavAgentMarker, AgentRuntime::default()))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.door_usable.insert(0x99, true);
+            state.door_open.insert(0x99, false);
+            state.closed_door_type_indices.insert(0x99, 2);
+            // Not openable, exactly like the authored VaultGearDoor: a closed
+            // one is a hard barrier, and only a runtime open can lift it.
+        }
+
+        // Closed: the blocker's interior is impassable (route unreachable).
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)],
+            "a closed activator blocker must be impassable"
+        );
+
+        // Activate it open through the real console/BRP interaction boundary
+        // -- nothing here touches `door_open` directly.
+        let opened = interaction::scripted_activator_toggle(&mut world, blocker);
+        assert!(opened, "activation must open the blocker");
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker),
+            "the interaction boundary must populate the shared open signal"
+        );
+
+        // Nav observes the open state on its next poll and rebuilds the
+        // agent's overrides: the barrier is gone, the route completes.
+        door_availability_system(&mut world);
+        assert_eq!(
+            world.resource::<NavArchipelagoState>().door_open.get(&0x99),
+            Some(&true),
+            "door_availability_system must observe the activated-open blocker"
+        );
+        assert_eq!(
+            override_costs(&world, agent),
+            Vec::new(),
+            "an activated-open blocker must impose no cost -- the route completes"
+        );
+
+        // Activating it shut again restores the barrier: closed is unreachable.
+        let opened = interaction::scripted_activator_toggle(&mut world, blocker);
+        assert!(!opened, "second activation must close the blocker");
+        door_availability_system(&mut world);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)],
+            "a re-closed activator blocker must be impassable again"
+        );
+    }
+
+    /// The population itself, in isolation (verdict §1: the #177 cost tests
+    /// bypassed this signal, which is why the desync shipped): activating an
+    /// activator inserts it into `InteractionState.open`; this fails if the
+    /// open-state population is ever removed from the activator path.
+    #[test]
+    fn activating_an_activator_populates_the_shared_open_signal() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let blocker = world
+            .spawn(interaction::PlacementRoot::new(activator_placement(0x99)))
+            .id();
+
+        assert!(interaction::scripted_activator_toggle(&mut world, blocker));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker)
+        );
+        assert!(!interaction::scripted_activator_toggle(&mut world, blocker));
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker)
+        );
+    }
+
     #[test]
     fn derived_gate_and_blocking_associations_take_distinct_type_indices() {
         // Issue #177 feature 2: the two classes must never share an index,
