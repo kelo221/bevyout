@@ -337,6 +337,28 @@ const TRAVEL_ARRIVAL_DISTANCE: f32 = 0.75;
 /// so would mean giving up on `NoPath` for the one-route-only case, this
 /// feature's actual requirement.
 const LOCKED_DOOR_TYPE_INDEX_COST: f32 = f32::INFINITY;
+/// Per-agent `landmass` type-index cost applied to a *closed but openable*
+/// blocker's interior polygons (issue #177 acceptance correction): the ground
+/// inside a shut door slab, for a door the agent can actually open.
+///
+/// Deliberately large-but-finite, the exact opposite of
+/// [`LOCKED_DOOR_TYPE_INDEX_COST`]'s reasoning above, because the requirement
+/// is the opposite. A locked door must make its route *fail* (`NoPath`), so
+/// only an unbounded cost will do. A closed-but-unlocked door must remain
+/// **passable**: the crossing gate that opens it only fires once the agent is
+/// standing on the doorway, so a route the solver refuses to plan is a route
+/// the agent never walks, a door it never approaches, and a door it therefore
+/// never opens -- the chicken-and-egg the first cut of this issue shipped,
+/// where every in-cell door became a wall that reported `unreachable` from
+/// the spawn point. This matches FO3/GECK semantics: NPCs path through closed
+/// doors and open them; only locked doors are barriers.
+///
+/// The magnitude makes any genuinely available detour cheaper, so an agent
+/// prefers an open route and only commits to opening a door when that is
+/// really the way through, while staying far below `f32::MAX` so accumulated
+/// path costs cannot overflow to infinity and re-introduce the exclusion this
+/// constant exists to avoid.
+const CLOSED_DOOR_TYPE_INDEX_COST: f32 = 1000.0;
 /// Archipelago-wide base cost for every authored preferred-pathing polygon
 /// (issue #168): `landmass_graph::preferred_pathing_type_index`'s type index
 /// gets this via `Archipelago::set_type_index_cost` in `ensure_archipelago`,
@@ -679,6 +701,10 @@ struct NavArchipelagoState {
     /// can ever be planned through the inside of a closed door slab, which
     /// is what let an agent walk in and wedge against it in physics.
     closed_door_type_indices: BTreeMap<u32, usize>,
+    /// Blockers that own a runtime open/close FSM (`landmass_graph::
+    /// openable_blockers`). Decides whether a closed blocker's interior is
+    /// merely expensive ([`CLOSED_DOOR_TYPE_INDEX_COST`]) or impassable.
+    openable_blockers: BTreeSet<u32>,
     /// Last observed per-door *open* state, the change detector for the
     /// closed-blocker override above (`door_usable` cannot serve: an
     /// unlocked door is usable whether it is open or shut).
@@ -1097,6 +1123,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // indices, allocated above every `door_type_indices` one.
     let closed_door_type_indices =
         landmass_graph::closed_door_type_indices(&mesh_inputs, &door_type_indices);
+    let openable_blockers = landmass_graph::openable_blockers(&mesh_inputs);
 
     // Widen the sample distances to humanoid scale (see
     // `AGENT_POINT_SAMPLE_DISTANCE`'s doc comment for the real-data
@@ -1375,6 +1402,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_lock_info,
         door_type_indices,
         closed_door_type_indices,
+        openable_blockers,
         door_open,
         merge_link_kind_count,
     };
@@ -1722,11 +1750,25 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
         }
     }
     // Issue #177: a blocker's *interior* polygons (derived associations that
-    // lie wholly inside its collision volume) are impassable whenever it is
-    // closed, independent of its lock state -- there is no route through the
-    // inside of a shut door slab, and pricing them only on `door_usable`
-    // (lock) is exactly what let an agent plan straight through one and wedge
-    // against it. Opening the door clears the entry through the same
+    // lie wholly inside its collision volume) are never freely traversable
+    // while it is closed -- pricing them only on `door_usable` (lock) is what
+    // let an agent plan straight through a shut door and wedge against it.
+    //
+    // How expensive depends on whether the blocker can be opened at all,
+    // which is the correction the first cut of this issue needed:
+    //
+    // - **Openable and unlocked** -> [`CLOSED_DOOR_TYPE_INDEX_COST`], a
+    //   strong but finite penalty. The route stays plannable, the agent walks
+    //   to the doorway, and the mid-route crossing gate runs the existing
+    //   pause -> request open -> wait -> traverse -> resume lifecycle. An
+    //   unbounded cost here would stop the agent ever reaching the door it is
+    //   supposed to open.
+    // - **Locked, or not openable at all** (the ungated kinematic-activator
+    //   class, e.g. a vault gear door with no open/close FSM) ->
+    //   [`LOCKED_DOOR_TYPE_INDEX_COST`]. There is no sanctioned crossing, so
+    //   the route must fail fast rather than walk the agent into a solid.
+    //
+    // Opening the blocker clears the entry entirely, through the same
     // rebuild-the-whole-component path a lock change takes.
     for (&blocker_form_id, &type_index) in &state.closed_door_type_indices {
         if state
@@ -1737,7 +1779,18 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
         {
             continue;
         }
-        overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
+        let openable = state.openable_blockers.contains(&blocker_form_id);
+        let usable = state
+            .door_usable
+            .get(&blocker_form_id)
+            .copied()
+            .unwrap_or(true);
+        let cost = if openable && usable {
+            CLOSED_DOOR_TYPE_INDEX_COST
+        } else {
+            LOCKED_DOOR_TYPE_INDEX_COST
+        };
+        overrides.set_type_index_cost(type_index, cost);
     }
     if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
         entity.insert(overrides);
@@ -7456,9 +7509,10 @@ mod tests {
 
     /// Bare-`World` fixture for `apply_door_lock_overrides`: one blocker
     /// FormID with both a gate type index (priced on *usability*, i.e. lock)
-    /// and an interior/blocking type index (priced on *open*), so every
-    /// (locked, open) combination can be asserted on one component.
-    fn closed_blocker_override_world(usable: bool, open: bool) -> (World, Entity) {
+    /// and an interior/blocking type index (priced on *open*, and on whether
+    /// the blocker can be opened at all), so every combination can be
+    /// asserted on one component.
+    fn closed_blocker_override_world(usable: bool, open: bool, openable: bool) -> (World, Entity) {
         let mut world = harness_world();
         let agent = world.spawn_empty().id();
         let mut state = world.resource_mut::<NavArchipelagoState>();
@@ -7466,6 +7520,9 @@ mod tests {
         state.door_open.insert(0x99, open);
         state.door_type_indices.insert(0x99, 1);
         state.closed_door_type_indices.insert(0x99, 2);
+        if openable {
+            state.openable_blockers.insert(0x99);
+        }
         (world, agent)
     }
 
@@ -7481,12 +7538,29 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_unlocked_door_blocks_only_its_interior_polygons() {
-        // The issue's core rule: a shut door's *interior* is impassable, but
-        // its doorway crossing stays routable so the crossing gate can fire
-        // and open it. Pricing the crossing too would make every closed
-        // interior door a wall.
-        let (mut world, agent) = closed_blocker_override_world(true, false);
+    fn a_closed_unlocked_door_stays_passable_but_expensive() {
+        // The acceptance correction: an unbounded cost here would stop the
+        // agent ever reaching the door it is supposed to open, so a closed
+        // *openable* door's interior is merely expensive. Its doorway
+        // crossing stays ordinary walkable ground.
+        let (mut world, agent) = closed_blocker_override_world(true, false, true);
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, CLOSED_DOOR_TYPE_INDEX_COST)]
+        );
+        assert!(
+            CLOSED_DOOR_TYPE_INDEX_COST.is_finite(),
+            "a closed openable door must stay plannable"
+        );
+    }
+
+    #[test]
+    fn a_closed_blocker_that_cannot_be_opened_is_impassable() {
+        // The ungated kinematic-activator class (a vault gear door with no
+        // open/close FSM): there is no sanctioned crossing, so the route must
+        // fail fast rather than walk the agent into a solid.
+        let (mut world, agent) = closed_blocker_override_world(true, false, false);
         apply_door_lock_overrides(&mut world, agent);
         assert_eq!(
             override_costs(&world, agent),
@@ -7496,14 +7570,17 @@ mod tests {
 
     #[test]
     fn an_open_unlocked_door_blocks_nothing() {
-        let (mut world, agent) = closed_blocker_override_world(true, true);
+        let (mut world, agent) = closed_blocker_override_world(true, true, true);
         apply_door_lock_overrides(&mut world, agent);
         assert_eq!(override_costs(&world, agent), Vec::new());
     }
 
     #[test]
-    fn a_closed_locked_door_blocks_both_its_crossing_and_its_interior() {
-        let (mut world, agent) = closed_blocker_override_world(false, false);
+    fn a_closed_locked_door_stays_an_impassable_barrier() {
+        // Wave-9 behaviour, unchanged: locked is a barrier on both the
+        // crossing and the interior, so the route fails at query time rather
+        // than walking the agent to a door it cannot open.
+        let (mut world, agent) = closed_blocker_override_world(false, false, true);
         apply_door_lock_overrides(&mut world, agent);
         assert_eq!(
             override_costs(&world, agent),
@@ -7520,11 +7597,7 @@ mod tests {
         // regardless of its lock record. The interior override must agree --
         // keying it on `open` rather than `usable` is what makes these two
         // compose instead of contradicting each other.
-        let (mut world, agent) = closed_blocker_override_world(true, true);
-        world
-            .resource_mut::<NavArchipelagoState>()
-            .door_usable
-            .insert(0x99, true);
+        let (mut world, agent) = closed_blocker_override_world(true, true, true);
         apply_door_lock_overrides(&mut world, agent);
         assert_eq!(override_costs(&world, agent), Vec::new());
     }
@@ -7532,8 +7605,8 @@ mod tests {
     #[test]
     fn a_blocker_with_no_open_state_recorded_is_treated_as_closed() {
         // Fail safe: an unknown open state must never leave the inside of a
-        // solid routable.
-        let (mut world, agent) = closed_blocker_override_world(true, false);
+        // solid freely traversable.
+        let (mut world, agent) = closed_blocker_override_world(true, false, true);
         world
             .resource_mut::<NavArchipelagoState>()
             .door_open
@@ -7541,7 +7614,7 @@ mod tests {
         apply_door_lock_overrides(&mut world, agent);
         assert_eq!(
             override_costs(&world, agent),
-            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)]
+            vec![(2, CLOSED_DOOR_TYPE_INDEX_COST)]
         );
     }
 
@@ -7559,11 +7632,13 @@ mod tests {
                     triangle_index: 1,
                     door_reference_form_id: 0x99,
                     blocks_when_closed: false,
+                    openable: true,
                 },
                 landmass_graph::DerivedDoorInput {
                     triangle_index: 2,
                     door_reference_form_id: 0x99,
                     blocks_when_closed: true,
+                    openable: true,
                 },
             ],
         };
@@ -7575,6 +7650,26 @@ mod tests {
         assert_eq!(
             landmass_graph::preferred_pathing_type_index(&door_indices, &closed_indices),
             3
+        );
+    }
+
+    #[test]
+    fn a_closed_door_cost_still_lets_the_only_route_solve_against_a_live_archipelago() {
+        // Issue #177 acceptance, against a real `Archipelago3d` solve on the
+        // same one-route mesh the locked-door invariant above uses: the
+        // closed-but-openable cost must still produce a path, or the agent
+        // never reaches the door the crossing gate is supposed to open. This
+        // is the exact difference between `CLOSED_DOOR_TYPE_INDEX_COST` and
+        // `LOCKED_DOOR_TYPE_INDEX_COST`, pinned end to end rather than only
+        // as an override-table assertion.
+        let (mut app, agent) = door_topology_test_app(false, Some(CLOSED_DOOR_TYPE_INDEX_COST));
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        app.world_mut().run_schedule(bevy::app::FixedPreUpdate);
+        let state = app.world().get::<AgentState>(agent).copied();
+        assert_ne!(
+            state,
+            Some(AgentState::NoPath),
+            "a closed but openable door must stay plannable, got {state:?}"
         );
     }
 

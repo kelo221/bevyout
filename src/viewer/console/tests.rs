@@ -652,23 +652,33 @@ fn activate_requires_exactly_one_reference() {
 }
 
 #[test]
-fn activate_rejects_non_door_and_destination_less_references() {
+fn activate_rejects_a_non_door_reference() {
     let mut app = test_app();
     register_placement(&mut app, "Static");
     assert_eq!(
         error_code(&exec(&mut app, "activate 00000010")),
         "not_a_door"
     );
+}
 
+/// Issue #177: an ordinary in-cell door (no travel destination) toggles open
+/// and closed instead of failing with `no_destination`. Before this it had no
+/// open mechanism anywhere in the runtime.
+#[test]
+fn activate_toggles_a_destination_less_door_open_and_closed() {
     let mut app = test_app();
+    app.add_message::<super::super::audio::PlaySound>();
+    app.add_message::<super::super::animation::PlayPlacementAnimation>();
     register_placement(
         &mut app,
         "Door((lock_level: None, key_form_id: None, destination: None))",
     );
-    assert_eq!(
-        error_code(&exec(&mut app, "activate TestRef")),
-        "no_destination"
-    );
+    let output = exec(&mut app, "activate TestRef");
+    assert!(output.ok, "activate failed: {:?}", output.error);
+    assert_eq!(output.value["opened"], true);
+    let output = exec(&mut app, "activate TestRef");
+    assert!(output.ok, "activate failed: {:?}", output.error);
+    assert_eq!(output.value["opened"], false);
 }
 
 // Wave-4 amendment: containers toggle their open state through the

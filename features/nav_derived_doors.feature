@@ -39,6 +39,7 @@ Feature: Collision-derived door to nav-polygon associations
     When the derived door associations are resolved
     Then there are exactly 1 derived door associations
     And polygon 3 is a blocking association for blocker 0x00000099
+    And polygon 3 is reported as openable
 
   Scenario: A blocker with no open/close controls only claims the ground inside it
     # A kinematic activator that blocks a corridor is still solid, but it has
@@ -52,6 +53,9 @@ Feature: Collision-derived door to nav-polygon associations
     When the derived door associations are resolved
     Then there are exactly 1 derived door associations
     And polygon 1 is a blocking association for blocker 0x00000099
+    # The runtime prices a non-openable blocker's interior impassable rather
+    # than merely expensive: there is no crossing to wait for.
+    And polygon 1 is reported as not openable
 
   Scenario: A polygon on another storey above the door is never associated
     Given a blocker 0x00000099 with footprint from 0, 0 to 1, 1 spanning height 0 to 2

@@ -10593,3 +10593,21 @@ async fn then_derived_door_associations_are_stable(world: &mut BevyoutWorld) {
     );
     assert_eq!(derived_door_associations(world), again);
 }
+
+#[then(regex = r"^polygon (\d+) is reported as (openable|not openable)$")]
+async fn then_derived_door_association_openable(
+    world: &mut BevyoutWorld,
+    index: u32,
+    expectation: String,
+) {
+    let associations = derived_door_associations(world);
+    let association = associations
+        .iter()
+        .find(|association| association.triangle_index == index)
+        .unwrap_or_else(|| panic!("no association for polygon {index}: {associations:?}"));
+    assert_eq!(
+        association.openable,
+        expectation == "openable",
+        "{association:?}"
+    );
+}
