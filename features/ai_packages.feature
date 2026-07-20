@@ -1,13 +1,23 @@
 Feature: Prepared AI package catalog
   # `vsa::prepare::package_catalog` is pure (issue #175, M4 wave 11 lane C):
   # given plain decoded PACK inputs it stages a revisioned, FormID-sorted
-  # catalog and diagnoses unsupported package types, unsupported subrecords,
-  # and unresolved location/target FormIDs. Per-actor priority ordering
-  # (including template inheritance) is `vsa::prepare::actor_catalog`'s own
-  # seam -- see the first scenario below, which reuses that feature's step
-  # vocabulary. Byte-level PACK decoding is covered by
-  # tests/actor_support.rs (M4 wave 1 task B). Conditions are carried as
-  # opaque data only -- no evaluator exists yet (#115/#15).
+  # catalog and diagnoses unsupported package types, genuinely unsupported
+  # subrecords, and unresolved (Object-ID-typed) location/target FormIDs.
+  # Per-actor priority ordering (including template inheritance) is
+  # `vsa::prepare::actor_catalog`'s own seam -- see the first scenario below,
+  # which reuses that feature's step vocabulary. Byte-level PACK decoding is
+  # covered by tests/actor_support.rs (M4 wave 1 task B). Conditions are
+  # carried as opaque data only -- no evaluator exists yet (#115/#15).
+  #
+  # M4 wave 11 follow-up (real-data acceptance on Fallout3.esm cell
+  # 0001a273 found the original diagnostics were 100% noise): known FO3
+  # script/idle/topic subrecords are "deferred" (aggregate count, no
+  # per-package diagnostic), and a location/target FormID whose PLDT/PTDT
+  # type means it can point anywhere in the game ("Near Reference"/"In
+  # Cell"/"Specific Reference") is "out of scope" (also aggregate-only) --
+  # only an "Object ID"-typed location/target missing from the decoded
+  # load order is genuinely "unresolved". See package_catalog.rs's module
+  # doc comment for the measured before/after numbers.
 
   Scenario: Package priority order is preserved through template inheritance
     Given an NPC_ actor 0x00000010 with race 0x000000AA
@@ -31,33 +41,54 @@ Feature: Prepared AI package catalog
     Given a package 0x00000010 with type 200
     When the package catalog is built
     Then package 0x00000010 has diagnostic containing "unsupported package type 200"
-    And the package catalog counts unsupported_type 1 unsupported_subrecord 0 unresolved_location 0 unresolved_target 0
+    And the package catalog counts unsupported_type 1 unsupported_subrecord 0 deferred_subrecord 0 unresolved_location 0 unresolved_target 0 out_of_scope_location 0 out_of_scope_target 0
 
-  Scenario: An unsupported subrecord is diagnosed
+  Scenario: A genuinely unsupported subrecord is diagnosed
     Given a package 0x00000010 with type 0
     And package 0x00000010 has unsupported subrecord "XNAM"
     When the package catalog is built
     Then package 0x00000010 has diagnostic containing "unsupported subrecord(s): XNAM"
-    And the package catalog counts unsupported_type 0 unsupported_subrecord 1 unresolved_location 0 unresolved_target 0
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 1 deferred_subrecord 0 unresolved_location 0 unresolved_target 0 out_of_scope_location 0 out_of_scope_target 0
 
-  Scenario: An unresolved location FormID is diagnosed
+  Scenario: A known FO3 script/idle subrecord is deferred, not unsupported
+    Given a package 0x00000010 with type 0
+    And package 0x00000010 has unsupported subrecord "SCHR"
+    When the package catalog is built
+    Then package 0x00000010 has no diagnostics
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 deferred_subrecord 1 unresolved_location 0 unresolved_target 0 out_of_scope_location 0 out_of_scope_target 0
+
+  Scenario: An unresolved Object-ID location FormID is diagnosed
+    Given a package 0x00000010 with type 0
+    And package 0x00000010 has location type 4 target 0x0000DEAD radius 0
+    When the package catalog is built
+    Then package 0x00000010 has diagnostic containing "location references unresolved FormID 0000dead"
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 deferred_subrecord 0 unresolved_location 1 unresolved_target 0 out_of_scope_location 0 out_of_scope_target 0
+
+  Scenario: An unresolved Object-ID target FormID is diagnosed
+    Given a package 0x00000010 with type 0
+    And package 0x00000010 has target type 1 target 0x0000BEEF count 1
+    When the package catalog is built
+    Then package 0x00000010 has diagnostic containing "target references unresolved FormID 0000beef"
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 deferred_subrecord 0 unresolved_location 0 unresolved_target 1 out_of_scope_location 0 out_of_scope_target 0
+
+  Scenario: A Near Reference location FormID is out of scope, not unresolved
     Given a package 0x00000010 with type 0
     And package 0x00000010 has location type 0 target 0x0000DEAD radius 0
     When the package catalog is built
-    Then package 0x00000010 has diagnostic containing "location references unresolved FormID 0000dead"
-    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 unresolved_location 1 unresolved_target 0
+    Then package 0x00000010 has no diagnostics
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 deferred_subrecord 0 unresolved_location 0 unresolved_target 0 out_of_scope_location 1 out_of_scope_target 0
 
-  Scenario: An unresolved target FormID is diagnosed
+  Scenario: A Specific Reference target FormID is out of scope, not unresolved
     Given a package 0x00000010 with type 0
     And package 0x00000010 has target type 0 target 0x0000BEEF count 1
     When the package catalog is built
-    Then package 0x00000010 has diagnostic containing "target references unresolved FormID 0000beef"
-    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 unresolved_location 0 unresolved_target 1
+    Then package 0x00000010 has no diagnostics
+    And the package catalog counts unsupported_type 0 unsupported_subrecord 0 deferred_subrecord 0 unresolved_location 0 unresolved_target 0 out_of_scope_location 0 out_of_scope_target 1
 
-  Scenario: A resolved location and target FormID are not flagged
+  Scenario: A resolved Object-ID location and target FormID are not flagged
     Given known package FormIDs "00000020"
     And a package 0x00000010 with type 0
-    And package 0x00000010 has location type 0 target 0x00000020 radius 5
-    And package 0x00000010 has target type 0 target 0x00000020 count 1
+    And package 0x00000010 has location type 4 target 0x00000020 radius 5
+    And package 0x00000010 has target type 1 target 0x00000020 count 1
     When the package catalog is built
     Then package 0x00000010 has no diagnostics
