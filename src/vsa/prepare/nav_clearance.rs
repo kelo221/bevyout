@@ -114,6 +114,12 @@ pub(crate) enum DropReason {
     Unsupported,
     Obstructed,
     SubDiameter,
+    /// F171.5: the polygon is not a geometrically valid navigation polygon
+    /// (repeated or out-of-range vertices, too ill-conditioned to have a
+    /// reliable winding, or wound against the rest of its mesh). Never
+    /// restored by the connectivity guard -- shipping one invalidates the
+    /// whole mesh at runtime.
+    InvalidGeometry,
 }
 
 impl DropReason {
@@ -123,6 +129,7 @@ impl DropReason {
             DropReason::Unsupported => "unsupported",
             DropReason::Obstructed => "obstructed",
             DropReason::SubDiameter => "sub-diameter",
+            DropReason::InvalidGeometry => "invalid-geometry",
         }
     }
 }
@@ -192,8 +199,14 @@ pub(crate) struct NavClearanceResult {
     pub(crate) clipped_polygons: usize,
     /// Vertices the re-triangulation appended.
     pub(crate) added_vertices: usize,
-    /// Sliver sub-triangles the re-triangulation discarded (F171.5).
+    /// Sliver sub-triangles the re-triangulation removed by welding (F171.5).
     pub(crate) degenerate_discarded: usize,
+    /// Vertex welds the degenerate-collapse phase performed.
+    pub(crate) collapsed_welds: usize,
+    /// Walkable polygons the geometry gate rejected as invalid navigation
+    /// polygons. Must be zero: a single one invalidates the whole mesh at
+    /// runtime, so any non-zero count is reported as an error by the caller.
+    pub(crate) invalid_geometry: usize,
     /// Walkability-predicate evaluations, reported so the pass's cost is
     /// visible in `prepare` output.
     pub(crate) predicate_evaluations: usize,
@@ -549,6 +562,8 @@ pub(crate) fn validate_and_clear(
             clipped_polygons: 0,
             added_vertices: 0,
             degenerate_discarded: 0,
+            collapsed_welds: 0,
+            invalid_geometry: 0,
             predicate_evaluations: 0,
             walkable,
             polygon_count,
@@ -632,10 +647,19 @@ pub(crate) fn validate_and_clear(
     // small islands remain disconnected. Determinism: fixed index order.
     restore_large_strands(mesh, &mut reason, &protected);
 
+    // F171.5 geometry gate. Runs last and is never undone: the connectivity
+    // guard may not rescue a polygon that is not a valid navigation polygon,
+    // because landmass rejects an entire mesh over a single bad one -- a cell
+    // then has no navigation at all, which prepare-side connectivity metrics
+    // cannot see (they measure the graph this pass built, not the graph the
+    // runtime can accept). This gate is what closes that hole.
+    reject_invalid_geometry(mesh, &mut reason);
+
     let mut walkable = vec![true; polygon_count];
     let mut removed_unsupported = 0usize;
     let mut cut_obstructed = 0usize;
     let mut dropped_unfit = 0usize;
+    let mut invalid_geometry = 0usize;
     for (index, r) in reason.iter().enumerate() {
         match r {
             None => {}
@@ -650,6 +674,10 @@ pub(crate) fn validate_and_clear(
             Some(DropReason::SubDiameter) => {
                 walkable[index] = false;
                 dropped_unfit += 1;
+            }
+            Some(DropReason::InvalidGeometry) => {
+                walkable[index] = false;
+                invalid_geometry += 1;
             }
         }
     }
@@ -679,6 +707,8 @@ pub(crate) fn validate_and_clear(
         clipped_polygons: clipped.clipped_polygons,
         added_vertices: clipped.added_vertices,
         degenerate_discarded: clipped.degenerate_discarded,
+        collapsed_welds: clipped.collapsed_welds,
+        invalid_geometry,
         predicate_evaluations: clipped.predicate_evaluations,
         walkable,
         polygon_count,
@@ -761,6 +791,65 @@ pub(crate) fn probe_points(
         .collect()
 }
 
+/// Smallest XZ area (square metres) a walkable polygon may have and still
+/// carry a reliable winding. Below this, landmass reports it as "concave or
+/// has edges in clockwise order" and discards the mesh it belongs to.
+/// Deliberately larger than `nav_clip`'s collapse threshold so the gate can
+/// never pass something the collapse phase should have removed.
+const MIN_POLYGON_AREA: f32 = 1.0e-7;
+
+/// F171.5: marks every still-walkable polygon that is not a geometrically
+/// valid navigation polygon, so it can never reach the runtime.
+///
+/// Three ways a polygon fails: a repeated or out-of-range vertex index; too
+/// little area to have a reliable winding; or a winding opposite to the rest
+/// of its mesh. The last matters because the runtime validates a mesh under
+/// one global winding (retrying reversed as a whole), so a single inverted
+/// polygon can never be accommodated -- it invalidates every other polygon
+/// with it.
+fn reject_invalid_geometry(mesh: &NavClearanceMeshInput, reason: &mut [Option<DropReason>]) {
+    let signed_area = |tri: [u32; 3]| -> Option<f32> {
+        let (Some(&a), Some(&b), Some(&c)) = (
+            mesh.vertices.get(tri[0] as usize),
+            mesh.vertices.get(tri[1] as usize),
+            mesh.vertices.get(tri[2] as usize),
+        ) else {
+            return None;
+        };
+        Some(((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])) * 0.5)
+    };
+
+    // The mesh's own winding convention, taken as the majority over the
+    // polygons that have enough area to express one.
+    let (mut positive, mut negative) = (0usize, 0usize);
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        if reason[index].is_some() {
+            continue;
+        }
+        match signed_area(*tri) {
+            Some(area) if area >= MIN_POLYGON_AREA => positive += 1,
+            Some(area) if area <= -MIN_POLYGON_AREA => negative += 1,
+            _ => {}
+        }
+    }
+    let expect_positive = positive >= negative;
+
+    for (index, tri) in mesh.polygons.iter().enumerate() {
+        if reason[index].is_some() {
+            continue;
+        }
+        let distinct = tri[0] != tri[1] && tri[1] != tri[2] && tri[2] != tri[0];
+        let valid = distinct
+            && match signed_area(*tri) {
+                Some(area) => area.abs() >= MIN_POLYGON_AREA && (area > 0.0) == expect_positive,
+                None => false,
+            };
+        if !valid {
+            reason[index] = Some(DropReason::InvalidGeometry);
+        }
+    }
+}
+
 /// The re-triangulated mesh plus the clip's own per-polygon verdict.
 struct ClippedMesh {
     vertices: Vec<[f32; 3]>,
@@ -770,6 +859,7 @@ struct ClippedMesh {
     clipped_polygons: usize,
     added_vertices: usize,
     degenerate_discarded: usize,
+    collapsed_welds: usize,
     predicate_evaluations: usize,
 }
 
@@ -800,6 +890,7 @@ fn clip_against_collision(
             clipped_polygons: 0,
             added_vertices: 0,
             degenerate_discarded: 0,
+            collapsed_welds: 0,
             predicate_evaluations: 0,
         };
     }
@@ -920,6 +1011,7 @@ fn clip_against_collision(
         clipped_polygons,
         added_vertices,
         degenerate_discarded: output.degenerate_discarded,
+        collapsed_welds: output.collapsed_welds,
         predicate_evaluations: output.predicate_evaluations,
     }
 }
@@ -1832,6 +1924,47 @@ mod tests {
         // [0,2,3] does not own (0,1).
         assert!(result.walkable[0], "protected triangle stays walkable");
         assert_eq!(result.protected_count, 1, "{result:?}");
+    }
+
+    /// F171.5. Landmass validates a mesh as a whole and rejects all of it over
+    /// a single bad polygon, leaving the cell with no navigation at all --
+    /// which no connectivity metric can see, because they measure the graph
+    /// this pass built rather than the graph the runtime will accept. The gate
+    /// is what closes that hole, so it must fire on a polygon whose vertices
+    /// are collinear.
+    #[test]
+    fn the_geometry_gate_rejects_a_collinear_polygon() {
+        let mut mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
+        // A third triangle whose three vertices lie on one line.
+        mesh.vertices.push([2.0, 0.0, 0.0]);
+        mesh.polygons.push([0, 4, 1]);
+        let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
+        assert_eq!(result.invalid_geometry, 1, "{result:?}");
+        assert!(!result.walkable[2], "the collinear polygon must be dropped");
+        assert!(
+            result.walkable[0] && result.walkable[1],
+            "and nothing else: {result:?}"
+        );
+    }
+
+    /// The other way landmass rejects a mesh: one polygon wound against the
+    /// rest. The runtime validates under a single global winding (retrying
+    /// reversed as a whole), so an inverted polygon can never be accommodated
+    /// -- it invalidates every other polygon with it.
+    #[test]
+    fn the_geometry_gate_rejects_a_polygon_wound_against_its_mesh() {
+        let mut mesh = nav_quad(0.0, 4.0, 0.0, 4.0, 0.0);
+        mesh.vertices.push([6.0, 0.0, 0.0]);
+        mesh.vertices.push([6.0, 0.0, 4.0]);
+        // Wound the opposite way round from the quad's own two triangles.
+        mesh.polygons.push([1, 5, 2]);
+        mesh.polygons.push([5, 2, 6]);
+        let result = validate_and_clear(&mesh, &[], NavClearanceParams::default());
+        assert!(result.invalid_geometry > 0, "{result:?}");
+        assert!(
+            result.walkable[0] && result.walkable[1],
+            "the majority winding survives: {result:?}"
+        );
     }
 
     #[test]

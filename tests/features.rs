@@ -9709,3 +9709,9 @@ async fn then_package_catalog_counts(
     );
     assert_eq!(catalog.counters.out_of_scope_target, out_of_scope_target);
 }
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) rejected as invalid geometry$")]
+async fn then_clearance_invalid_geometry(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.invalid_geometry, expected, "{result:?}");
+}

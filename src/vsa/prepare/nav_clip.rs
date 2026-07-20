@@ -69,8 +69,11 @@ pub(crate) struct ClipOutput {
     pub(crate) refinement_splits: usize,
     /// Boundary crossings located by bisection during the marching clip.
     pub(crate) boundary_crossings: usize,
-    /// Sub-triangles discarded for being slivers below `min_area`.
+    /// Sub-triangles removed by welding an ill-conditioned edge (never by
+    /// discarding: see [`ClipParams::min_area`]).
     pub(crate) degenerate_discarded: usize,
+    /// Vertex welds the degenerate-collapse phase performed.
+    pub(crate) collapsed_welds: usize,
     /// Predicate evaluations, so the caller can report the pass's cost.
     pub(crate) predicate_evaluations: usize,
 }
@@ -88,15 +91,17 @@ pub(crate) struct ClipParams {
     pub(crate) max_refinement_rounds: usize,
     /// Bisection iterations used to locate a boundary crossing on an edge.
     pub(crate) bisection_steps: u32,
-    /// Sub-triangles with a smaller XZ area (square metres) are dropped as
-    /// numerically degenerate.
+    /// XZ area (square metres) below which a sub-triangle is too
+    /// ill-conditioned to be a valid navigation polygon.
     ///
-    /// This is a *degeneracy* epsilon, not a shape filter. Discarding a piece
+    /// Such a piece is *collapsed*, never discarded: its shortest edge is
+    /// welded, which removes it without leaving a hole. Discarding instead
     /// punches a hole in the conformal cover, and a hole between two walkable
-    /// pieces severs their adjacency exactly as if a wall stood there -- which
-    /// is how a geometric threshold here silently disconnects a physically
-    /// clear corridor. Anything with real area is kept however thin it is;
-    /// landmass excludes repeated-index triangles on its own.
+    /// pieces severs their adjacency exactly as if a wall stood there.
+    /// Keeping them is not an option either -- a triangle whose vertices are
+    /// nearly collinear reads to landmass as "concave or has edges in
+    /// clockwise order" and invalidates the entire mesh. Welding is the only
+    /// resolution that preserves both adjacency and validity.
     pub(crate) min_area: f32,
 }
 
@@ -106,7 +111,7 @@ impl Default for ClipParams {
             resolution: 0.35,
             max_refinement_rounds: 4,
             bisection_steps: 10,
-            min_area: 1.0e-9,
+            min_area: 1.0e-6,
         }
     }
 }
@@ -289,21 +294,11 @@ pub(crate) fn refine_and_clip(
     let mut crossings: BTreeMap<(u32, u32), u32> = BTreeMap::new();
     let mut degenerate_discarded = 0usize;
     let emit = |out: &mut Vec<ClipTriangle>,
-                verts: &Vec<[f32; 3]>,
                 tri: [u32; 3],
                 source: u32,
                 is_inside: bool,
                 discarded: &mut usize| {
         if tri[0] == tri[1] || tri[1] == tri[2] || tri[2] == tri[0] {
-            *discarded += 1;
-            return;
-        }
-        if area_xz(
-            verts[tri[0] as usize],
-            verts[tri[1] as usize],
-            verts[tri[2] as usize],
-        ) < params.min_area
-        {
             *discarded += 1;
             return;
         }
@@ -323,7 +318,6 @@ pub(crate) fn refine_and_clip(
         if signs[0] == signs[1] && signs[1] == signs[2] {
             emit(
                 &mut output,
-                &verts,
                 *tri,
                 *source,
                 signs[0],
@@ -358,7 +352,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [v[0], p, r],
                 *source,
                 true,
@@ -366,7 +359,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [p, v[1], v[2]],
                 *source,
                 false,
@@ -374,7 +366,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [p, v[2], r],
                 *source,
                 false,
@@ -407,7 +398,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [v[0], v[1], q],
                 *source,
                 true,
@@ -415,7 +405,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [v[0], q, r],
                 *source,
                 true,
@@ -423,7 +412,6 @@ pub(crate) fn refine_and_clip(
             );
             emit(
                 &mut output,
-                &verts,
                 [q, v[2], r],
                 *source,
                 false,
@@ -432,14 +420,185 @@ pub(crate) fn refine_and_clip(
         }
     }
 
+    let (welds, removed) = collapse_ill_conditioned(&verts, &mut output, locked_edges, params);
+    degenerate_discarded += removed;
+
     ClipOutput {
         vertices: verts,
         triangles: output,
         refinement_splits,
         boundary_crossings: crossings.len(),
         degenerate_discarded,
+        collapsed_welds: welds,
         predicate_evaluations: evaluations,
     }
+}
+
+/// Removes sub-triangles too ill-conditioned to be valid navigation polygons
+/// by *welding* their shortest edge, never by discarding them.
+///
+/// A triangle whose vertices are nearly collinear has no reliable winding:
+/// landmass rejects it as "concave or has edges in clockwise order" and throws
+/// away the whole mesh with it, which is how a cell ends up with no navigation
+/// at all. Discarding such a piece is not an alternative -- it punches a hole
+/// in the conformal cover and severs adjacency across it. Welding removes the
+/// piece while every other triangle that referenced the welded vertex simply
+/// follows it to the survivor, so the cover stays conformal and shared-index
+/// adjacency is preserved. The welded pieces have area below `min_area`, so
+/// the geometry moves by less than that sliver's own extent.
+///
+/// Vertices belonging to a locked (protected seam/door) edge are never moved:
+/// they always win a weld, and a weld between two locked vertices is refused.
+/// Iterates because one weld can leave a neighbour ill-conditioned.
+fn collapse_ill_conditioned(
+    vertices: &[[f32; 3]],
+    triangles: &mut Vec<ClipTriangle>,
+    locked_edges: &BTreeSet<(u32, u32)>,
+    params: ClipParams,
+) -> (usize, usize) {
+    let mut locked_vertices: BTreeSet<u32> = BTreeSet::new();
+    for &(a, b) in locked_edges {
+        locked_vertices.insert(a);
+        locked_vertices.insert(b);
+    }
+
+    let mut parent: Vec<u32> = (0..vertices.len() as u32).collect();
+    fn find(parent: &mut [u32], mut node: u32) -> u32 {
+        while parent[node as usize] != node {
+            parent[node as usize] = parent[parent[node as usize] as usize];
+            node = parent[node as usize];
+        }
+        node
+    }
+
+    let before = triangles.len();
+    let mut welds = 0usize;
+
+    // Signed XZ area under the current representatives, or `None` when the
+    // triangle references an invalid slot.
+    let signed =
+        |parent: &mut Vec<u32>, tri: [u32; 3], substitute: Option<(u32, u32)>| -> Option<f32> {
+            let mut indices = [0u32; 3];
+            for (slot, &index) in tri.iter().enumerate() {
+                if index as usize >= vertices.len() {
+                    return None;
+                }
+                let mut rep = find(parent, index);
+                if let Some((drop, keep)) = substitute
+                    && rep == drop
+                {
+                    rep = keep;
+                }
+                indices[slot] = rep;
+            }
+            let [a, b, c] = indices.map(|index| vertices[index as usize]);
+            Some(((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])) * 0.5)
+        };
+
+    // One weld per round, so the incidence used to prove a weld safe is never
+    // stale. Bounded by the number of vertices; breaks as soon as a round
+    // finds nothing left to weld.
+    for _ in 0..vertices.len().max(1) {
+        let mut candidate: Option<(u32, u32)> = None;
+        'triangles: for triangle in triangles.iter() {
+            if triangle
+                .vertex_indices
+                .iter()
+                .any(|&index| index as usize >= vertices.len())
+            {
+                continue;
+            }
+            let [a, b, c] = triangle
+                .vertex_indices
+                .map(|index| find(&mut parent, index));
+            if a == b || b == c || c == a {
+                continue;
+            }
+            let (pa, pb, pc) = (
+                vertices[a as usize],
+                vertices[b as usize],
+                vertices[c as usize],
+            );
+            if area_xz(pa, pb, pc) >= params.min_area {
+                continue;
+            }
+            // Weld the shortest edge: it perturbs the mesh the least.
+            let mut ordered = [
+                (a, b, dist_xz(pa, pb)),
+                (b, c, dist_xz(pb, pc)),
+                (c, a, dist_xz(pc, pa)),
+            ];
+            ordered.sort_by(|left, right| {
+                left.2
+                    .total_cmp(&right.2)
+                    .then(left.0.cmp(&right.0))
+                    .then(left.1.cmp(&right.1))
+            });
+            for (from, to, _) in ordered {
+                let (keep, drop) = match (
+                    locked_vertices.contains(&from),
+                    locked_vertices.contains(&to),
+                ) {
+                    (true, true) => continue, // never move a protected seam
+                    (true, false) => (from, to),
+                    (false, true) => (to, from),
+                    // Deterministic: the lower index survives.
+                    (false, false) => (from.min(to), from.max(to)),
+                };
+                // Moving a vertex can drag a neighbouring triangle inside out,
+                // and an inverted polygon is exactly what landmass rejects --
+                // so a weld that would flip any triangle still carrying real
+                // area is refused rather than left for the caller's gate.
+                let inverts = triangles.iter().any(|other| {
+                    let (Some(now), Some(after)) = (
+                        signed(&mut parent, other.vertex_indices, None),
+                        signed(&mut parent, other.vertex_indices, Some((drop, keep))),
+                    ) else {
+                        return false;
+                    };
+                    after.abs() >= params.min_area && (now > 0.0) != (after > 0.0)
+                });
+                if inverts {
+                    continue;
+                }
+                candidate = Some((drop, keep));
+                break 'triangles;
+            }
+        }
+        let Some((drop, keep)) = candidate else {
+            break;
+        };
+        parent[drop as usize] = keep;
+        welds += 1;
+    }
+
+    if welds > 0 {
+        for triangle in triangles.iter_mut() {
+            if triangle
+                .vertex_indices
+                .iter()
+                .any(|&index| index as usize >= vertices.len())
+            {
+                continue;
+            }
+            triangle.vertex_indices = triangle
+                .vertex_indices
+                .map(|index| find(&mut parent, index));
+        }
+    }
+    triangles.retain(|triangle| {
+        let [a, b, c] = triangle.vertex_indices;
+        a != b && b != c && c != a
+    });
+    // A weld can make two pieces coincide; landmass requires each edge to be
+    // shared by at most two polygons, so keep only the first of any duplicate.
+    let mut seen: BTreeSet<[u32; 3]> = BTreeSet::new();
+    triangles.retain(|triangle| {
+        let mut key = triangle.vertex_indices;
+        key.sort_unstable();
+        seen.insert(key)
+    });
+    (welds, before - triangles.len())
 }
 
 /// Splits one triangle against the midpoints its edges received this round:
@@ -735,6 +894,88 @@ mod tests {
         assert_eq!(passthrough.len(), 1);
         assert!(passthrough[0].inside);
         assert_eq!(passthrough[0].vertex_indices, [0, 2, u32::MAX]);
+    }
+
+    /// The property the blocker was: landmass rejects an *entire* mesh over
+    /// one polygon that is degenerate or wound against the rest, so every
+    /// triangle this module emits must carry real area and a consistent
+    /// winding -- including under predicates whose boundary falls exactly on,
+    /// or a hair away from, an existing vertex, which is where near-collinear
+    /// pieces come from.
+    #[test]
+    fn every_emitted_triangle_is_a_valid_navigation_polygon() {
+        let (vertices, polygons) = quad();
+        type NamedPredicate<'a> = (&'a str, &'a dyn Fn([f32; 3]) -> bool);
+        let predicates: [NamedPredicate; 6] = [
+            ("crossing on a vertex", &|p: [f32; 3]| p[0] < 0.0),
+            ("crossing on the far vertex", &|p: [f32; 3]| p[0] < 4.0),
+            ("crossing a hair off a vertex", &|p: [f32; 3]| p[0] < 1.0e-6),
+            ("crossing along the diagonal", &|p: [f32; 3]| p[0] < p[2]),
+            ("crossing a hair off the diagonal", &|p: [f32; 3]| {
+                p[0] < p[2] + 1.0e-6
+            }),
+            ("a tiny interior island", &|p: [f32; 3]| {
+                (p[0] - 2.0).abs() > 1.0e-4 || (p[2] - 2.0).abs() > 1.0e-4
+            }),
+        ];
+        for (name, predicate) in predicates {
+            let params = ClipParams::default();
+            let output = refine_and_clip(&vertices, &polygons, &BTreeSet::new(), predicate, params);
+            let mut signs = Vec::new();
+            for tri in &output.triangles {
+                let [a, b, c] = tri.vertex_indices;
+                assert!(
+                    a != b && b != c && c != a,
+                    "{name}: emitted a triangle with a repeated vertex"
+                );
+                let (pa, pb, pc) = (
+                    output.vertices[a as usize],
+                    output.vertices[b as usize],
+                    output.vertices[c as usize],
+                );
+                let signed =
+                    ((pb[0] - pa[0]) * (pc[2] - pa[2]) - (pc[0] - pa[0]) * (pb[2] - pa[2])) * 0.5;
+                assert!(
+                    signed.abs() >= params.min_area,
+                    "{name}: emitted a degenerate triangle (area {signed:e})"
+                );
+                signs.push(signed > 0.0);
+            }
+            assert!(
+                signs.iter().all(|&s| s == signs[0]),
+                "{name}: emitted triangles with inconsistent winding"
+            );
+        }
+    }
+
+    #[test]
+    fn welding_a_sliver_removes_it_without_punching_a_hole() {
+        // A predicate whose boundary sits a hair off the diagonal produces
+        // slivers along it. They must be welded away, not discarded: the
+        // covered area is conserved, so no adjacency is severed.
+        let (vertices, polygons) = quad();
+        let output = refine_and_clip(
+            &vertices,
+            &polygons,
+            &BTreeSet::new(),
+            &|p| p[0] < p[2] + 1.0e-6,
+            ClipParams::default(),
+        );
+        let total: f32 = output
+            .triangles
+            .iter()
+            .map(|tri| {
+                area_xz(
+                    output.vertices[tri.vertex_indices[0] as usize],
+                    output.vertices[tri.vertex_indices[1] as usize],
+                    output.vertices[tri.vertex_indices[2] as usize],
+                )
+            })
+            .sum();
+        assert!(
+            (total - 16.0).abs() < 0.01,
+            "welding must conserve the covered area, got {total}"
+        );
     }
 
     #[test]

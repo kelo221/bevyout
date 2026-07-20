@@ -547,6 +547,85 @@ fn component_share_pct(largest_component: usize, walkable_count: usize) -> usize
         .unwrap_or(100)
 }
 
+/// Runs `landmass`' own mesh validation over a prepared mesh exactly as the
+/// runtime will (issue #171): the same walkable/water/index filtering
+/// `viewer::nav::mesh_inputs` plus `landmass_graph::build_navigation_mesh`
+/// apply, and the same both-windings retry.
+///
+/// This exists because a single invalid polygon makes `landmass` reject an
+/// *entire* mesh, leaving a cell with no navigation at all -- and prepare-side
+/// connectivity metrics cannot see it, because they measure the graph this
+/// pass built rather than the graph the runtime is willing to accept. Vault
+/// 101 shipped at a healthy 98% component share while having zero usable
+/// navigation. Replicating landmass's convexity rule prepare-side (which
+/// `nav_clearance::reject_invalid_geometry` does, so bad polygons are dropped
+/// with a named reason) is necessary but not sufficient: only running the real
+/// validator proves the runtime will accept the result.
+///
+/// `bevy_landmass` is imported directly rather than through `viewer`, which
+/// `tests/architecture.rs` forbids and which would invert the dependency.
+fn verify_landmass_acceptance(mesh: &PreparedNavMesh) -> std::result::Result<(), String> {
+    use bevy_landmass::NavigationMesh3d;
+
+    let vertex_count = mesh.vertices.len();
+    let polygons: Vec<Vec<usize>> = mesh
+        .polygons
+        .iter()
+        .filter(|polygon| polygon.walkable && !polygon.is_water)
+        .filter(|polygon| {
+            let [a, b, c] = polygon.vertex_indices;
+            a != b
+                && b != c
+                && c != a
+                && polygon
+                    .vertex_indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertex_count)
+        })
+        .map(|polygon| {
+            polygon
+                .vertex_indices
+                .iter()
+                .map(|&index| index as usize)
+                .collect()
+        })
+        .collect();
+    if polygons.is_empty() {
+        return Ok(()); // an empty mesh is the runtime's own documented case.
+    }
+    let vertices: Vec<Vec3> = mesh
+        .vertices
+        .iter()
+        .map(|v| Vec3::new(v[0], v[1], v[2]))
+        .collect();
+
+    let type_indices = vec![0; polygons.len()];
+    let mut last = String::new();
+    for reversed in [false, true] {
+        let wound: Vec<Vec<usize>> = polygons
+            .iter()
+            .map(|polygon| {
+                let mut indices = polygon.clone();
+                if reversed {
+                    indices.reverse();
+                }
+                indices
+            })
+            .collect();
+        let candidate = NavigationMesh3d {
+            vertices: vertices.clone(),
+            polygons: wound,
+            polygon_type_indices: type_indices.clone(),
+            height_mesh: None,
+        };
+        match candidate.validate() {
+            Ok(_) => return Ok(()),
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(last)
+}
+
 /// Per-mesh cap on individually listed clearance drops (issue #171). Wave 10's
 /// whole-triangle verdicts produced a handful per cell; sub-triangle clipping
 /// produces far more, far smaller ones, and listing every one would dominate
@@ -843,6 +922,8 @@ pub(crate) fn apply_nav_clearance(
     let mut clipped_polygons = 0usize;
     let mut added_vertices = 0usize;
     let mut degenerate_discarded = 0usize;
+    let mut collapsed_welds = 0usize;
+    let mut invalid_geometry = 0usize;
     let mut predicate_evaluations = 0usize;
     let probe_points_spec = nav_probe_points();
 
@@ -930,6 +1011,23 @@ pub(crate) fn apply_nav_clearance(
 
         apply_clipped_geometry(mesh, &result);
 
+        // F171.5: prove the runtime will accept what we just wrote, before it
+        // ships. A failure here is a bug in this pass, not in the cell data.
+        if let Err(error) = verify_landmass_acceptance(mesh) {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                message: format!(
+                    "nav clearance mesh {:08x}: landmass would reject this mesh ({error})",
+                    mesh.form_id
+                ),
+            });
+            anyhow::bail!(
+                "nav clearance produced a mesh landmass rejects (mesh {:08x}: {error}); \
+                 the prepared nav graph would leave this cell with no navigation",
+                mesh.form_id
+            );
+        }
+
         removed += result.removed_unsupported;
         cut += result.cut_obstructed;
         dropped += result.dropped_unfit;
@@ -937,6 +1035,17 @@ pub(crate) fn apply_nav_clearance(
         clipped_polygons += result.clipped_polygons;
         added_vertices += result.added_vertices;
         degenerate_discarded += result.degenerate_discarded;
+        collapsed_welds += result.collapsed_welds;
+        invalid_geometry += result.invalid_geometry;
+        if result.invalid_geometry > 0 {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                message: format!(
+                    "nav clearance mesh {:08x}: {} polygon(s) rejected as invalid navigation geometry (degenerate, or wound against the mesh)",
+                    mesh.form_id, result.invalid_geometry,
+                ),
+            });
+        }
         predicate_evaluations += result.predicate_evaluations;
         let share = component_share_pct(result.largest_component, result.walkable_count);
         min_component_share = min_component_share.min(share);
@@ -971,13 +1080,15 @@ pub(crate) fn apply_nav_clearance(
         diagnostics.push(Diagnostic {
             severity: "info".into(),
             message: format!(
-                "nav clearance clip mesh {:08x}: authored polygons {} re-triangulated to {} ({} clipped), vertices +{}, slivers discarded {}, authored polygons reachable in the main component {} = {}%",
+                "nav clearance clip mesh {:08x}: authored polygons {} re-triangulated to {} ({} clipped), vertices +{}, slivers welded away {} ({} vertex weld(s)), invalid geometry rejected {}, authored polygons reachable in the main component {} = {}%",
                 mesh.form_id,
                 authored_polygon_count,
                 result.polygon_count,
                 result.clipped_polygons,
                 result.added_vertices,
                 result.degenerate_discarded,
+                result.collapsed_welds,
+                result.invalid_geometry,
                 result.authored_in_main_component,
                 authored_share,
             ),
@@ -997,13 +1108,15 @@ pub(crate) fn apply_nav_clearance(
 
     let artifact = write_nav_graph(cache_dir, cell_form_id, graph)?;
     let summary = format!(
-        "nav clearance: collision triangles {}, meshes {}, polygons {} (clipped {}, vertices +{}, slivers {}), removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%, smallest authored-reachable share {}%, predicate evaluations {}",
+        "nav clearance: collision triangles {}, meshes {}, polygons {} (clipped {}, vertices +{}, slivers welded {} via {} weld(s), invalid rejected {}), removed unsupported {}, cut obstructed {}, dropped unfit {}, walkable {}, smallest largest-component share {}%, smallest authored-reachable share {}%, predicate evaluations {}",
         collision.len(),
         graph.counters.meshes,
         graph.counters.polygons,
         clipped_polygons,
         added_vertices,
         degenerate_discarded,
+        collapsed_welds,
+        invalid_geometry,
         removed,
         cut,
         dropped,

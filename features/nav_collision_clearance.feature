@@ -189,3 +189,24 @@ Feature: Collision-derived navmesh validation and clearance
     When the clearance pass runs
     Then 0 polygons are removed as unsupported
     And clearance point 2.0, 2.0 is walkable
+
+  Scenario: A collinear polygon is rejected by the geometry gate
+    # F171.5. The runtime validates a navigation mesh as a whole and rejects
+    # all of it over a single degenerate or wrongly-wound polygon, leaving the
+    # cell with no navigation at all -- which no connectivity metric can see,
+    # because they measure the graph the clearance pass built rather than the
+    # graph the runtime will accept. The gate is what closes that hole.
+    Given a clearance mesh
+    And clearance mesh has vertex 0 at 0, 0, 0
+    And clearance mesh has vertex 1 at 4, 0, 0
+    And clearance mesh has vertex 2 at 4, 0, 4
+    And clearance mesh has vertex 3 at 0, 0, 4
+    And clearance mesh has vertex 4 at 2, 0, 0
+    And clearance mesh has polygon 0 with vertices 0,1,2
+    And clearance mesh has polygon 1 with vertices 0,2,3
+    # Three vertices on one line: no reliable winding.
+    And clearance mesh has polygon 2 with vertices 0,4,1
+    When the clearance pass runs
+    Then 1 polygon is rejected as invalid geometry
+    And clearance polygon 2 is not walkable
+    And clearance polygon 0 is walkable
