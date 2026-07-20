@@ -7794,4 +7794,267 @@ mod tests {
             );
         }
     }
+
+    // ---------------------------------------------------------------
+    // Issue #172: authored-stair step capability of the agent KCC.
+    //
+    // These pin the swept-capsule step behaviour `step_agent_kcc` gets
+    // from the shared `player::move_mover`/`try_step_up`/`try_step_down`
+    // helpers against FO3-scale stair geometry built as *triangle meshes*
+    // (the shape authored `AuthoredHavok` statics cook to), including the
+    // seam between two adjacent colliders.
+    //
+    // They exist because #172 was filed as a stair-climbing defect after
+    // agents wedged in Vault 101 Entrance (00024512) at z ~= -80.4.
+    // Replaying that cell's real collision through this same
+    // `step_agent_kcc` entry point showed the wedge is *not* a step
+    // failure: the capsule is pressed against the closed `VaultGearDoor`
+    // activator collider, whose face sits at z = -80.0 (agent radius 0.35
+    // -> capsule centre stops at -80.35, the measured value). Removing
+    // that one collider from the replay lets the agent walk straight
+    // through. See the issue for the full evidence. The coverage below
+    // stays as the regression guard that stair traversal itself is, and
+    // remains, sound.
+    // ---------------------------------------------------------------
+
+    /// Appends an axis-aligned box as triangles, wound both ways: prepared
+    /// static collision is cooked two-sided (see `player::collision`'s
+    /// `TriangleMesh` path), so fixtures must be too.
+    fn push_box_triangles(
+        vertices: &mut Vec<boxddd::Vec3>,
+        indices: &mut Vec<i32>,
+        min: [f32; 3],
+        max: [f32; 3],
+    ) {
+        let base = i32::try_from(vertices.len()).expect("fixture vertex count fits in i32");
+        for &(x, y, z) in &[
+            (min[0], min[1], min[2]),
+            (max[0], min[1], min[2]),
+            (max[0], min[1], max[2]),
+            (min[0], min[1], max[2]),
+            (min[0], max[1], min[2]),
+            (max[0], max[1], min[2]),
+            (max[0], max[1], max[2]),
+            (min[0], max[1], max[2]),
+        ] {
+            vertices.push(boxddd::Vec3::new(x, y, z));
+        }
+        const FACES: [[i32; 3]; 12] = [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [1, 5, 6],
+            [1, 6, 2],
+            [2, 6, 7],
+            [2, 7, 3],
+            [3, 7, 4],
+            [3, 4, 0],
+        ];
+        for face in FACES {
+            indices.extend_from_slice(&[base + face[0], base + face[1], base + face[2]]);
+            indices.extend_from_slice(&[base + face[0], base + face[2], base + face[1]]);
+        }
+    }
+
+    fn add_fixture_mesh(world: &mut boxddd::World, vertices: Vec<boxddd::Vec3>, indices: Vec<i32>) {
+        let body = world.create_body(BodyDef::builder().body_type(BodyType::Static).build());
+        let mesh = boxddd::MeshData::builder(vertices, indices)
+            .build()
+            .expect("fixture triangle mesh");
+        world
+            .try_create_mesh_shape(
+                body,
+                &fixture_shape_def(),
+                mesh,
+                boxddd::Vec3::new(1.0, 1.0, 1.0),
+            )
+            .expect("fixture triangle mesh shape");
+    }
+
+    const STAIR_STEPS: usize = 10;
+    const STAIR_RISE: f32 = 0.24;
+    const STAIR_RUN: f32 = 0.28;
+
+    /// A flight of `STAIR_STEPS` FO3-scale treads ascending in +Z between
+    /// two landings, split into **two separate TriangleMesh statics** after
+    /// `seam_after` treads -- the two-collider seam #172 called out.
+    fn add_stair_fixture(world: &mut boxddd::World, seam_after: usize) {
+        let half_width = 2.0;
+        let mut lower = (Vec::new(), Vec::new());
+        let mut upper = (Vec::new(), Vec::new());
+        push_box_triangles(
+            &mut lower.0,
+            &mut lower.1,
+            [-half_width, -1.0, -4.0],
+            [half_width, 0.0, 0.0],
+        );
+        for index in 0..STAIR_STEPS {
+            let z0 = index as f32 * STAIR_RUN;
+            let top = (index + 1) as f32 * STAIR_RISE;
+            let target = if index < seam_after {
+                &mut lower
+            } else {
+                &mut upper
+            };
+            push_box_triangles(
+                &mut target.0,
+                &mut target.1,
+                [-half_width, top - 1.0, z0],
+                [half_width, top, z0 + STAIR_RUN],
+            );
+        }
+        let top = STAIR_STEPS as f32 * STAIR_RISE;
+        let z0 = STAIR_STEPS as f32 * STAIR_RUN;
+        push_box_triangles(
+            &mut upper.0,
+            &mut upper.1,
+            [-half_width, top - 1.0, z0],
+            [half_width, top, z0 + 4.0],
+        );
+        add_fixture_mesh(world, lower.0, lower.1);
+        add_fixture_mesh(world, upper.0, upper.1);
+    }
+
+    /// Walks the agent capsule through `step_agent_kcc` for `ticks` fixed
+    /// steps at `AGENT_DESIRED_SPEED`, returning the position trace.
+    fn walk_agent(
+        world: &mut boxddd::World,
+        start: Vec3,
+        desired: Vec2,
+        ticks: usize,
+    ) -> Vec<Vec3> {
+        let mover = fixture_capsule();
+        let filter = fixture_filter();
+        let mut position = start;
+        let mut velocity = Vec3::ZERO;
+        let mut grounded = false;
+        let mut trace = Vec::with_capacity(ticks);
+        for _ in 0..ticks {
+            let (new_position, new_velocity, new_grounded) = step_agent_kcc(
+                world,
+                &mover,
+                filter,
+                filter,
+                position,
+                velocity,
+                grounded,
+                desired,
+                1.0 / 60.0,
+            );
+            position = new_position;
+            velocity = new_velocity;
+            grounded = new_grounded;
+            trace.push(position);
+        }
+        trace
+    }
+
+    /// F172.1 (ascending): the swept KCC climbs authored-scale risers and
+    /// carries the climb across the seam between two TriangleMesh statics.
+    #[test]
+    fn agent_kcc_climbs_authored_scale_stairs_across_a_collider_seam() {
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_stair_fixture(&mut world, STAIR_STEPS / 2);
+        let top_z = STAIR_STEPS as f32 * STAIR_RUN;
+        let top_y = STAIR_STEPS as f32 * STAIR_RISE;
+
+        let trace = walk_agent(
+            &mut world,
+            Vec3::new(0.0, AGENT_HEIGHT / 2.0 + 0.1, -2.0),
+            Vec2::new(0.0, AGENT_DESIRED_SPEED),
+            360,
+        );
+
+        let arrived = trace
+            .iter()
+            .find(|position| position.z > top_z + 0.5)
+            .unwrap_or_else(|| {
+                panic!(
+                    "agent must reach the top landing; wedged at {:?}",
+                    trace.last()
+                )
+            });
+        assert!(
+            (arrived.y - (top_y + AGENT_HEIGHT / 2.0)).abs() < 0.15,
+            "agent must stand on the top landing, got {arrived:?} (landing y {top_y})"
+        );
+    }
+
+    /// F172.1 (descending): the same flight, walked downward. Guards the
+    /// step-down probe, and with it the #164 fall guard's premise that
+    /// walking a stair down is never a fall.
+    #[test]
+    fn agent_kcc_descends_authored_scale_stairs_across_a_collider_seam() {
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_stair_fixture(&mut world, STAIR_STEPS / 2);
+        let top_z = STAIR_STEPS as f32 * STAIR_RUN;
+        let top_y = STAIR_STEPS as f32 * STAIR_RISE;
+
+        let trace = walk_agent(
+            &mut world,
+            Vec3::new(0.0, top_y + AGENT_HEIGHT / 2.0 + 0.1, top_z + 2.0),
+            Vec2::new(0.0, -AGENT_DESIRED_SPEED),
+            360,
+        );
+
+        let arrived = trace
+            .iter()
+            .find(|position| position.z < -0.5)
+            .unwrap_or_else(|| {
+                panic!(
+                    "agent must reach the bottom landing; wedged at {:?}",
+                    trace.last()
+                )
+            });
+        assert!(
+            (arrived.y - AGENT_HEIGHT / 2.0).abs() < 0.15,
+            "agent must walk the flight down rather than fall it, got {arrived:?}"
+        );
+        assert!(
+            trace
+                .iter()
+                .take_while(|position| position.z > -0.5)
+                .all(|position| position.y > AGENT_HEIGHT / 2.0 - 0.2),
+            "the descent must stay on the treads -- never drop below the bottom landing"
+        );
+    }
+
+    /// F172.1 (negative): step handling stays bounded. A ledge taller than
+    /// the shared step height is not climbable, so the agent stops in
+    /// front of it rather than being lifted onto it.
+    #[test]
+    fn agent_kcc_refuses_a_ledge_taller_than_step_height() {
+        let mut world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+        add_fixture_box(
+            &mut world,
+            boxddd::Vec3::new(0.0, -0.5, -2.0),
+            boxddd::Vec3::new(4.0, 0.5, 4.0),
+        );
+        // Ledge top at y = 0.8, well above the ~0.486 m step height.
+        add_fixture_box(
+            &mut world,
+            boxddd::Vec3::new(0.0, -0.1, 4.0),
+            boxddd::Vec3::new(4.0, 0.9, 2.0),
+        );
+
+        let trace = walk_agent(
+            &mut world,
+            Vec3::new(0.0, AGENT_HEIGHT / 2.0 + 0.1, -4.0),
+            Vec2::new(0.0, AGENT_DESIRED_SPEED),
+            360,
+        );
+
+        let last = trace.last().copied().expect("trace is non-empty");
+        assert!(
+            last.y < 0.8 + AGENT_HEIGHT / 2.0 - 0.1,
+            "a ledge above step height must not be climbed, got {last:?}"
+        );
+        assert!(
+            last.z < 2.0,
+            "the agent must come to rest in front of the ledge, got {last:?}"
+        );
+    }
 }
