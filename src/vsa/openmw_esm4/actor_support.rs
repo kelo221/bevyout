@@ -36,6 +36,12 @@ pub(crate) struct RaceFaceGenData {
     pub(crate) texture_symmetric: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RaceSkillBoost {
+    pub(crate) actor_value: i8,
+    pub(crate) boost: i8,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RaceRecord {
     pub(crate) form_id: u32,
@@ -47,6 +53,10 @@ pub(crate) struct RaceRecord {
     pub(crate) male_weight: f32,
     pub(crate) female_weight: f32,
     pub(crate) flags: u32,
+    /// Seven signed `(actor value id, boost)` pairs from `RACE.DATA`.
+    /// Zero boosts are omitted; unknown non-zero IDs are retained so the
+    /// preparation boundary can emit a stable unsupported-value diagnostic.
+    pub(crate) skill_boosts: Vec<RaceSkillBoost>,
     pub(crate) older_race_form_id: Option<u32>,
     pub(crate) younger_race_form_id: Option<u32>,
     pub(crate) male_default_hair_form_id: Option<u32>,
@@ -91,9 +101,20 @@ pub(crate) fn parse_race(
     if data.len() != 36 {
         return Err(format!("DATA must be exactly 36 bytes, got {}", data.len()));
     }
-    // Bytes 0..16 are the skill-boost region (fopdoc: 7 pairs + 2 unused
-    // bytes; OpenMW: 8 pairs -- both readings land on the same 16-byte
-    // prefix). The M4 actor catalog does not need race skill boosts.
+    // Bytes 0..16 are seven signed skill-boost pairs plus two unused bytes.
+    // OpenMW models the prefix as eight pairs, but fopdoc identifies the last
+    // pair as padding; retaining only the documented seven avoids inventing
+    // an eighth actor-value modifier.
+    let skill_boosts = data[..14]
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            let boost = pair[1] as i8;
+            (boost != 0).then_some(RaceSkillBoost {
+                actor_value: pair[0] as i8,
+                boost,
+            })
+        })
+        .collect();
     let male_height = f32_at_option(data, 16).ok_or_else(|| "truncated DATA".to_string())?;
     let female_height = f32_at_option(data, 20).ok_or_else(|| "truncated DATA".to_string())?;
     let male_weight = f32_at_option(data, 24).ok_or_else(|| "truncated DATA".to_string())?;
@@ -238,6 +259,7 @@ pub(crate) fn parse_race(
         male_weight,
         female_weight,
         flags,
+        skill_boosts,
         older_race_form_id,
         younger_race_form_id,
         male_default_hair_form_id,

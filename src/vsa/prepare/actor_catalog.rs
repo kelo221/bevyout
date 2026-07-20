@@ -23,11 +23,15 @@
 //! item shape, per this task's brief: initial inventory reuses the existing
 //! prepared item-catalog/inventory-entry contract from #95/#98.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bevyout_core::actor::ActorAssemblyBlueprint;
+use bevyout_core::actor_state::{
+    ActorDefinition, ActorFactionMembership as RuntimeFactionMembership, ActorSkill, ActorValue,
+    SpecialAttribute,
+};
 use serde::{Deserialize, Serialize};
 
 use super::super::manifest::PreparedInventoryEntry;
@@ -38,7 +42,7 @@ use super::super::paths::fingerprint;
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
 pub(crate) const ACTOR_CATALOG_REVISION: &str =
-    "openmw-actors-v5-npc-creature-kffz-model-animation";
+    "openmw-actors-v6-runtime-values-race-skill-modifiers";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -283,6 +287,7 @@ pub(crate) struct ActorCatalogInputs {
     pub(crate) actors: HashMap<u32, ActorRecordInput>,
     pub(crate) leveled: HashMap<u32, LeveledInput>,
     pub(crate) races: HashSet<u32>,
+    pub(crate) race_modifiers: HashMap<u32, RaceModifierInput>,
     pub(crate) classes: HashSet<u32>,
     pub(crate) factions: HashMap<u32, FactionInput>,
     pub(crate) packages: HashSet<u32>,
@@ -293,6 +298,12 @@ pub(crate) struct ActorCatalogInputs {
     /// actor input.
     pub(crate) known_bases: HashSet<u32>,
     pub(crate) placements: Vec<ActorPlacementInput>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RaceModifierInput {
+    pub(crate) skill_modifiers: BTreeMap<ActorValue, f32>,
+    pub(crate) diagnostics: Vec<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -350,6 +361,11 @@ pub(crate) struct ActorBlueprint {
     pub(crate) health: Option<i32>,
     pub(crate) special: Option<[u8; 7]>,
     pub(crate) npc_skill_values: Option<[u8; 14]>,
+    /// Signed FO3 `RACE.DATA` skill boosts for the resolved race. Class tag
+    /// skills and faction relationship modifiers are deliberately not folded
+    /// into this map: neither is an authored numeric actor-value bonus.
+    #[serde(default)]
+    pub(crate) race_skill_modifiers: BTreeMap<ActorValue, f32>,
     pub(crate) creature_type: Option<u8>,
     pub(crate) combat_skill: Option<u8>,
     pub(crate) magic_skill: Option<u8>,
@@ -389,6 +405,102 @@ pub(crate) struct ActorBlueprint {
     /// head-part links, and unsupported template flag bits. Sorted and
     /// deduplicated.
     pub(crate) diagnostics: Vec<String>,
+}
+
+impl ActorBlueprint {
+    /// Adapts the template-resolved prepared catalog entry into the immutable
+    /// runtime definition. Template inheritance has already selected the
+    /// authoritative stats group, so those values occupy the base layer;
+    /// later race/class/faction systems can supply additive modifier layers
+    /// without changing persisted actor mutations.
+    pub(crate) fn runtime_definition(&self) -> ActorDefinition {
+        let mut base_values = std::collections::BTreeMap::new();
+        base_values.insert(ActorValue::Fatigue, f32::from(self.fatigue));
+        base_values.insert(
+            ActorValue::SpeedMultiplier,
+            f32::from(self.speed_multiplier),
+        );
+        base_values.insert(ActorValue::Karma, self.karma);
+        base_values.insert(ActorValue::Disposition, f32::from(self.disposition_base));
+        if let Some(health) = self.health {
+            base_values.insert(ActorValue::Health, health as f32);
+        }
+        if let Some(special) = self.special {
+            for (attribute, amount) in [
+                SpecialAttribute::Strength,
+                SpecialAttribute::Perception,
+                SpecialAttribute::Endurance,
+                SpecialAttribute::Charisma,
+                SpecialAttribute::Intelligence,
+                SpecialAttribute::Agility,
+                SpecialAttribute::Luck,
+            ]
+            .into_iter()
+            .zip(special)
+            {
+                base_values.insert(ActorValue::Special(attribute), f32::from(amount));
+            }
+        }
+        if let Some(skills) = self.npc_skill_values {
+            for (skill, amount) in [
+                ActorSkill::Barter,
+                ActorSkill::BigGuns,
+                ActorSkill::EnergyWeapons,
+                ActorSkill::Explosives,
+                ActorSkill::Lockpick,
+                ActorSkill::Medicine,
+                ActorSkill::MeleeWeapons,
+                ActorSkill::Repair,
+                ActorSkill::Science,
+                ActorSkill::SmallGuns,
+                ActorSkill::Sneak,
+                ActorSkill::Speech,
+                ActorSkill::Throwing,
+                ActorSkill::Unarmed,
+            ]
+            .into_iter()
+            .zip(skills)
+            {
+                base_values.insert(ActorValue::Skill(skill), f32::from(amount));
+            }
+        }
+        for (value, amount) in [
+            (ActorValue::CreatureCombatSkill, self.combat_skill),
+            (ActorValue::CreatureMagicSkill, self.magic_skill),
+            (ActorValue::CreatureStealthSkill, self.stealth_skill),
+        ] {
+            if let Some(amount) = amount {
+                base_values.insert(value, f32::from(amount));
+            }
+        }
+        if let Some(amount) = self.creature_damage {
+            base_values.insert(ActorValue::CreatureDamage, f32::from(amount));
+        }
+        ActorDefinition {
+            base_form_id: self.resolved_base_form_id.unwrap_or(self.base_form_id),
+            reference_form_id: self.reference_form_id,
+            kind: if self.record_kind == "CREA" {
+                bevyout_core::actor::ActorKind::Creature
+            } else {
+                bevyout_core::actor::ActorKind::Humanoid
+            },
+            race_form_id: self.race_form_id,
+            class_form_id: self.class_form_id,
+            factions: self
+                .factions
+                .iter()
+                .map(|membership| RuntimeFactionMembership {
+                    faction_form_id: membership.faction_form_id,
+                    rank: membership.rank,
+                    title: membership.title.clone(),
+                })
+                .collect(),
+            package_form_ids: self.package_form_ids.clone(),
+            base_values,
+            race_modifiers: self.race_skill_modifiers.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -980,6 +1092,13 @@ fn build_blueprint(
     {
         diagnostics.push(format!("unresolved race link {race:08x}"));
     }
+    let race_skill_modifiers = traits
+        .race_form_id
+        .and_then(|race| inputs.race_modifiers.get(&race))
+        .map_or_else(BTreeMap::new, |modifiers| {
+            diagnostics.extend(modifiers.diagnostics.iter().cloned());
+            modifiers.skill_modifiers.clone()
+        });
     if let Some(class) = actor.class_form_id
         && !inputs.classes.contains(&class)
     {
@@ -1042,6 +1161,7 @@ fn build_blueprint(
         health: stats.health,
         special: stats.special,
         npc_skill_values: stats.npc_skill_values,
+        race_skill_modifiers,
         creature_type: stats.creature_type,
         combat_skill: stats.combat_skill,
         magic_skill: stats.magic_skill,
@@ -1169,7 +1289,7 @@ mod tests {
     fn revision_is_pinned() {
         assert_eq!(
             ACTOR_CATALOG_REVISION,
-            "openmw-actors-v5-npc-creature-kffz-model-animation"
+            "openmw-actors-v6-runtime-values-race-skill-modifiers"
         );
     }
 
@@ -1478,6 +1598,53 @@ mod tests {
             panic!("expected a prepared blueprint");
         };
         assert_eq!(blueprint.factions[0].title.as_deref(), Some("Paladine"));
+    }
+
+    #[test]
+    fn race_skill_boosts_reach_the_runtime_definition_as_additive_modifiers() {
+        let mut actor = ActorRecordInput {
+            form_id: 0x10,
+            kind: ActorRecordKind::Npc,
+            ..Default::default()
+        };
+        actor.traits.race_form_id = Some(0x20);
+        let mut skills = [0; 14];
+        skills[0] = 12;
+        actor.stats.npc_skill_values = Some(skills);
+        let inputs = ActorCatalogInputs {
+            actors: HashMap::from([(0x10, actor)]),
+            races: HashSet::from([0x20]),
+            race_modifiers: HashMap::from([(
+                0x20,
+                RaceModifierInput {
+                    skill_modifiers: BTreeMap::from([(ActorValue::Skill(ActorSkill::Barter), 5.0)]),
+                    ..Default::default()
+                },
+            )]),
+            placements: vec![ActorPlacementInput {
+                reference_form_id: 1,
+                base_form_id: 0x10,
+                kind: ActorRecordKind::Npc,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let catalog = build_actor_catalog(&inputs, "fp");
+        let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+            panic!("expected prepared actor")
+        };
+        let definition = blueprint.runtime_definition();
+        let state = bevyout_core::actor_state::ActorInstanceState::new(
+            1,
+            bevyout_core::actor_state::ActorLifeState::Alive,
+        );
+
+        assert_eq!(
+            definition
+                .resolve_value(&state, ActorValue::Skill(ActorSkill::Barter))
+                .effective,
+            17.0
+        );
     }
 
     #[test]

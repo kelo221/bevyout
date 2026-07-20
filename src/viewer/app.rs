@@ -57,6 +57,7 @@ pub(crate) fn run_view(
         .transpose()?
         .unwrap_or_default();
     let asset_root = PathBuf::from(&manifest.asset_root);
+    let actor_definition_catalog = actor_state::load_catalog_for_manifest(&manifest, &asset_root)?;
     let actor_animation_catalog =
         actor_animation::load_catalog_for_manifest(&manifest, &asset_root)?;
     // Issue #60 (F60.3): load and compatibility-check the save slot before
@@ -136,6 +137,11 @@ pub(crate) fn run_view(
     // Don't reintroduce it without re-measuring the full chain.
     app.insert_resource(physics_assets);
     app.insert_resource(item_catalog.clone());
+    let mut actor_definition_catalogs = actor_state::ActorDefinitionCatalogs::default();
+    if let Some(catalog) = actor_definition_catalog {
+        actor_definition_catalogs.insert(manifest.cell.form_id, catalog);
+    }
+    app.insert_resource(actor_definition_catalogs);
     let mut actor_animation_catalogs = actor_animation::ActorAnimationCatalogs::default();
     if let Some(catalog) = actor_animation_catalog {
         actor_animation_catalogs.insert(manifest.cell.form_id, catalog);

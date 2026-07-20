@@ -28,8 +28,11 @@ use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]
 use super::lighting::PreparedPointShadowRuntime;
 use super::lighting::{RealtimeShadowSettings, shadow_cache_status};
-use super::{actor, actor_animation, diagnostics, interaction, nav, nav_overlay, player};
+use super::{
+    actor, actor_animation, actor_state, diagnostics, interaction, nav, nav_overlay, player,
+};
 
+mod actor_state_commands;
 mod ai_package_commands;
 mod common;
 mod item_commands;
@@ -106,7 +109,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 8] = [
+    let providers: [&dyn ConsoleCommandProvider; 9] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -115,6 +118,7 @@ fn install(app: &mut App) {
         &item_commands::ItemCommandProvider,
         &persistence_commands::PersistenceCommandProvider,
         &ai_package_commands::AiPackageCommandProvider,
+        &actor_state_commands::ActorStateCommandProvider,
     ];
     for provider in providers {
         registry

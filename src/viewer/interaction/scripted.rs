@@ -399,7 +399,8 @@ pub(crate) fn scripted_pickup(
         let mut save_state = world.resource_mut::<super::super::world::ActiveSaveState>();
         if let Some(cell) = save_state.0.cells.get_mut(&runtime_item.cell_form_id) {
             cell.dropped_items.remove(&runtime_item.runtime_id);
-            if cell.references.is_empty() && cell.dropped_items.is_empty() {
+            if cell.references.is_empty() && cell.dropped_items.is_empty() && cell.actors.is_empty()
+            {
                 save_state.0.cells.remove(&runtime_item.cell_form_id);
             }
         }

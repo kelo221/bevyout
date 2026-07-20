@@ -16,12 +16,13 @@ use crate::item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedgerSnapshot, ItemState,
     TransactionId,
 };
+use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackageCheckpoint};
 
 mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 4;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -147,6 +148,10 @@ pub struct PersistentWorldState {
 pub struct PersistentCellState {
     pub references: BTreeMap<u32, PersistentReferenceDelta>,
     pub dropped_items: BTreeMap<u64, DroppedItemState>,
+    /// Format v4 actor mutations keyed by stable ACHR/ACRE reference FormID.
+    /// Inventory/equipment remain in the canonical item ledger and transforms/
+    /// enabled state remain in `references`.
+    pub actors: BTreeMap<u32, ActorInstanceState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,7 +243,7 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
         let canonical = save
             .canonical
             .as_ref()
-            .context("v3 save is missing canonical item state")?;
+            .context("v3+ save is missing canonical item state")?;
         write_record(
             &mut bytes,
             tag("ITMS"),
@@ -262,6 +267,15 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
                     save.header.format_version,
                 )?,
             )?;
+        }
+        if save.header.format_version >= 4 {
+            for (reference_form_id, actor) in &cell.actors {
+                write_record(
+                    &mut bytes,
+                    tag("ACTR"),
+                    &encode_actor(*cell_form_id, *reference_form_id, actor)?,
+                )?;
+            }
         }
         if save.header.format_version >= 2 {
             for dropped in cell.dropped_items.values() {
@@ -367,6 +381,25 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                         .or_default()
                         .references
                         .insert_checked(reference_form_id, delta)?;
+                }
+                record_tag if *record_tag == tag("ACTR") => {
+                    if !saw_header || save.header.format_version < 4 {
+                        bail!("ACTR is only valid in save format v4 or newer");
+                    }
+                    let (cell_form_id, reference_form_id, actor) = decode_actor(&record.payload)?;
+                    if save
+                        .world
+                        .cells
+                        .entry(cell_form_id)
+                        .or_default()
+                        .actors
+                        .insert(reference_form_id, actor)
+                        .is_some()
+                    {
+                        bail!(
+                            "save contains duplicate ACTR state for reference {reference_form_id:08x}"
+                        );
+                    }
                 }
                 record_tag if *record_tag == tag("DROP") => {
                     let (cell_form_id, dropped) = decode_dropped(&record.payload)?;
@@ -978,6 +1011,123 @@ fn decode_reference(
     ))
 }
 
+fn encode_actor(
+    cell_form_id: u32,
+    reference_form_id: u32,
+    actor: &ActorInstanceState,
+) -> Result<Vec<u8>> {
+    if actor.reference_form_id != reference_form_id {
+        bail!(
+            "ACTR reference key {reference_form_id:08x} does not match state {:08x}",
+            actor.reference_form_id
+        );
+    }
+    actor
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid ACTR state: {error}"))?;
+    let mut payload = Vec::new();
+    write_subrecord(&mut payload, tag("CELL"), &cell_form_id.to_le_bytes())?;
+    write_subrecord(&mut payload, tag("REFR"), &reference_form_id.to_le_bytes())?;
+    let life = match actor.life_state {
+        ActorLifeState::Alive => 0,
+        ActorLifeState::Dead => 1,
+    };
+    write_subrecord(&mut payload, tag("LIFE"), &[life])?;
+    if !actor.value_mutations.is_empty() {
+        write_subrecord(
+            &mut payload,
+            tag("AVMD"),
+            ron::ser::to_string(&actor.value_mutations)
+                .context("encoding ACTR actor-value mutations")?
+                .as_bytes(),
+        )?;
+    }
+    if let Some(package) = actor.package {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&package.package_form_id.to_le_bytes());
+        bytes.extend_from_slice(&package.procedure_index.to_le_bytes());
+        bytes.extend_from_slice(&package.elapsed_seconds.to_le_bytes());
+        write_subrecord(&mut payload, tag("PACK"), &bytes)?;
+    }
+    Ok(payload)
+}
+
+fn decode_actor(payload: &[u8]) -> Result<(u32, u32, ActorInstanceState)> {
+    let mut cell_form_id = None;
+    let mut reference_form_id = None;
+    let mut life_state = None;
+    let mut value_mutations = None;
+    let mut package = None;
+    for subrecord in read_subrecords(payload)? {
+        match &subrecord.tag {
+            record_tag if *record_tag == tag("CELL") => {
+                if cell_form_id.is_some() {
+                    bail!("ACTR contains duplicate CELL");
+                }
+                cell_form_id = Some(read_u32(&subrecord.payload, "ACTR.CELL")?);
+            }
+            record_tag if *record_tag == tag("REFR") => {
+                if reference_form_id.is_some() {
+                    bail!("ACTR contains duplicate REFR");
+                }
+                reference_form_id = Some(read_u32(&subrecord.payload, "ACTR.REFR")?);
+            }
+            record_tag if *record_tag == tag("LIFE") => {
+                if life_state.is_some() {
+                    bail!("ACTR contains duplicate LIFE");
+                }
+                life_state = Some(match subrecord.payload.as_slice() {
+                    [0] => ActorLifeState::Alive,
+                    [1] => ActorLifeState::Dead,
+                    _ => bail!("ACTR.LIFE must contain one byte with value 0 or 1"),
+                });
+            }
+            record_tag if *record_tag == tag("AVMD") => {
+                if value_mutations.is_some() {
+                    bail!("ACTR contains duplicate AVMD");
+                }
+                value_mutations = Some(
+                    ron::de::from_bytes(&subrecord.payload)
+                        .context("decoding ACTR actor-value mutations")?,
+                );
+            }
+            record_tag if *record_tag == tag("PACK") => {
+                if package.is_some() {
+                    bail!("ACTR contains duplicate PACK");
+                }
+                if subrecord.payload.len() != 12 {
+                    bail!("ACTR.PACK must contain twelve bytes");
+                }
+                package = Some(ActorPackageCheckpoint {
+                    package_form_id: read_u32(&subrecord.payload[0..4], "ACTR.PACK form")?,
+                    procedure_index: read_u32(&subrecord.payload[4..8], "ACTR.PACK procedure")?,
+                    elapsed_seconds: f32::from_le_bytes(
+                        subrecord.payload[8..12]
+                            .try_into()
+                            .expect("checked ACTR.PACK elapsed length"),
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    let reference_form_id = reference_form_id.context("ACTR is missing REFR")?;
+    let actor = ActorInstanceState {
+        reference_form_id,
+        life_state: life_state.context("ACTR is missing LIFE")?,
+        value_mutations: value_mutations.unwrap_or_default(),
+        package,
+    };
+    actor
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid ACTR state: {error}"))?;
+    Ok((
+        cell_form_id.context("ACTR is missing CELL")?,
+        reference_form_id,
+        actor,
+    ))
+}
+
 fn encode_dropped(cell_form_id: u32, dropped: &DroppedItemState) -> Result<Vec<u8>> {
     let mut payload = Vec::new();
     write_subrecord(&mut payload, tag("CELL"), &cell_form_id.to_le_bytes())?;
@@ -1227,7 +1377,10 @@ fn validate_save(save: &SaveGame) -> Result<()> {
         validate_inventory(&player.inventory)?;
         validate_equipped(&player.equipped)?;
     }
-    for cell in save.world.cells.values() {
+    for (cell_form_id, cell) in &save.world.cells {
+        if *cell_form_id == 0 && !cell.actors.is_empty() {
+            bail!("actor cell FormID must be non-zero");
+        }
         for delta in cell.references.values() {
             if let Some(inventory) = &delta.inventory {
                 validate_inventory(inventory)?;
@@ -1252,15 +1405,35 @@ fn validate_save(save: &SaveGame) -> Result<()> {
                 bail!("next runtime item id must exceed every dropped item id");
             }
         }
+        for (reference_form_id, actor) in &cell.actors {
+            if *reference_form_id != actor.reference_form_id {
+                bail!(
+                    "actor state key {reference_form_id:08x} does not match reference {:08x}",
+                    actor.reference_form_id
+                );
+            }
+            actor
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid actor state: {error}"))?;
+        }
     }
     if save.header.format_version >= 3 {
         let canonical = save
             .canonical
             .as_ref()
-            .context("v3 save is missing canonical item state")?;
+            .context("v3+ save is missing canonical item state")?;
         validate_canonical(canonical)?;
     } else if save.canonical.is_some() {
         bail!("canonical item state is not valid in save format v1/v2");
+    }
+    if save.header.format_version < 4
+        && save
+            .world
+            .cells
+            .values()
+            .any(|cell| !cell.actors.is_empty())
+    {
+        bail!("actor state is not valid before save format v4");
     }
     Ok(())
 }
@@ -1570,6 +1743,22 @@ mod tests {
             PersistentCellState {
                 references,
                 dropped_items,
+                actors: BTreeMap::from([(
+                    0x0004_1600,
+                    ActorInstanceState {
+                        reference_form_id: 0x0004_1600,
+                        life_state: ActorLifeState::Alive,
+                        value_mutations: BTreeMap::from([(
+                            bevyout_core::actor_state::ActorValue::Health,
+                            -12.0,
+                        )]),
+                        package: Some(ActorPackageCheckpoint {
+                            package_form_id: 0x0002_c6f1,
+                            procedure_index: 3,
+                            elapsed_seconds: 4.5,
+                        }),
+                    },
+                )]),
             },
         );
         SaveGame {
@@ -1652,10 +1841,10 @@ mod tests {
         let mut save = sample_save();
         save.header.format_version = 1;
         save.next_runtime_item_id = 1;
-        save.world
-            .cells
-            .values_mut()
-            .for_each(|cell| cell.dropped_items.clear());
+        save.world.cells.values_mut().for_each(|cell| {
+            cell.dropped_items.clear();
+            cell.actors.clear();
+        });
         for stack in save
             .player
             .as_mut()
@@ -1690,6 +1879,9 @@ mod tests {
     fn version_two_save_loads_with_empty_equipment_and_hotkeys() {
         let mut save = sample_save();
         save.header.format_version = 2;
+        for cell in save.world.cells.values_mut() {
+            cell.actors.clear();
+        }
         let player = save.player.as_mut().expect("sample player");
         player.equipped.clear();
         player.hotkeys = Default::default();
@@ -1707,7 +1899,11 @@ mod tests {
     // the shape narrowly).
     #[test]
     fn version_three_save_round_trips_equipment_and_hotkeys() {
-        let save = sample_save();
+        let mut save = sample_save();
+        save.header.format_version = 3;
+        for cell in save.world.cells.values_mut() {
+            cell.actors.clear();
+        }
         assert_eq!(save.header.format_version, 3);
         let bytes = encode_save(&save).unwrap();
         let decoded = decode_save(&bytes).unwrap();
@@ -1735,6 +1931,80 @@ mod tests {
         assert_eq!(player.hotkeys[0].unwrap().base_form_id, 0x0000_0011);
         assert_eq!(player.hotkeys[1], None);
         assert_eq!(player.hotkeys[2].unwrap().base_form_id, 0x0000_0042);
+    }
+
+    #[test]
+    fn version_four_actor_state_round_trips_and_is_deterministic() {
+        let save = sample_save();
+        assert_eq!(save.header.format_version, 4);
+        let first = encode_save(&save).unwrap();
+        let second = encode_save(&save).unwrap();
+        assert_eq!(first, second);
+        let decoded = decode_save(&first).unwrap();
+        assert_eq!(decoded, save);
+        let actor = &decoded.world.cells[&0x0001_51e3].actors[&0x0004_1600];
+        assert_eq!(actor.life_state, ActorLifeState::Alive);
+        assert_eq!(actor.package.unwrap().procedure_index, 3);
+    }
+
+    #[test]
+    fn version_three_migrates_to_an_empty_actor_state_map() {
+        let mut save = sample_save();
+        save.header.format_version = 3;
+        for cell in save.world.cells.values_mut() {
+            cell.actors.clear();
+        }
+        save.canonical = Some(migrate_legacy(&save).unwrap());
+        let decoded = decode_save(&encode_save(&save).unwrap()).unwrap();
+        assert!(
+            decoded
+                .world
+                .cells
+                .values()
+                .all(|cell| cell.actors.is_empty())
+        );
+        assert_eq!(decoded.canonical, save.canonical);
+    }
+
+    #[test]
+    fn malformed_actor_state_is_rejected() {
+        let mut save = sample_save();
+        save.world
+            .cells
+            .get_mut(&0x0001_51e3)
+            .unwrap()
+            .actors
+            .get_mut(&0x0004_1600)
+            .unwrap()
+            .value_mutations
+            .insert(bevyout_core::actor_state::ActorValue::Health, f32::NAN);
+        assert!(encode_save(&save).is_err());
+
+        let mut payload = Vec::new();
+        write_subrecord(&mut payload, tag("CELL"), &1u32.to_le_bytes()).unwrap();
+        write_subrecord(&mut payload, tag("REFR"), &2u32.to_le_bytes()).unwrap();
+        write_subrecord(&mut payload, tag("LIFE"), &[7]).unwrap();
+        assert!(decode_actor(&payload).is_err());
+    }
+
+    #[test]
+    fn duplicate_actor_state_records_are_rejected() {
+        let save = sample_save();
+        let encoded = encode_save(&save).unwrap();
+        let checksum_start = encoded.len() - 40;
+        let mut bytes = encoded[..checksum_start].to_vec();
+        let actor = &save.world.cells[&0x0001_51e3].actors[&0x0004_1600];
+        write_record(
+            &mut bytes,
+            tag("ACTR"),
+            &encode_actor(0x0001_51e3, 0x0004_1600, actor).unwrap(),
+        )
+        .unwrap();
+        let checksum: [u8; 32] = Sha256::digest(&bytes).into();
+        write_record(&mut bytes, tag("CHKS"), &checksum).unwrap();
+
+        let error = decode_save(&bytes).unwrap_err().to_string();
+        assert!(error.contains("duplicate ACTR"), "{error}");
     }
 
     // Issue #98 (F98.4): equipped items must stay strictly sorted by kind,
