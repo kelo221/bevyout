@@ -172,6 +172,10 @@ pub enum PreparedItemStats {
         /// Serde-defaulted so wave 1/2 catalogs keep deserializing.
         #[serde(default)]
         ammo_form_id: Option<u32>,
+        /// Fallout 3 `WEAP.DNAM` animation type. Gameplay animation policy
+        /// maps the authored numeric value to the matching KF prefix.
+        #[serde(default)]
+        animation_type: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,

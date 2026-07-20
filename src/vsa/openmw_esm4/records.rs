@@ -311,6 +311,7 @@ pub(crate) fn parse_item_stats(
                 // Issue #98 (F98.1): FO3's WEAP.NAM0 "Ammo" field, a plain
                 // FormID reference like YNAM/ZNAM.
                 ammo_form_id: sub_form_id(subs, "NAM0", resolver),
+                animation_type: sub(subs, "DNAM").and_then(|data| u32_at_option(data, 0)),
             }
         }
         "ARMO" => OpenMwItemStats::Apparel {

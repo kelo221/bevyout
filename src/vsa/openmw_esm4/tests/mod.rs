@@ -39,6 +39,8 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             direct_subrecord("DATA", weapon_data),
             // Issue #98 (F98.1): NAM0 is the FO3 "Ammo" FormID field.
             direct_subrecord("NAM0", 0x0001_2ab3_u32.to_le_bytes().to_vec()),
+            // Issue #106: DNAM starts with the authored animation type.
+            direct_subrecord("DNAM", 5_u32.to_le_bytes().to_vec()),
         ],
         &resolver,
     )
@@ -55,6 +57,7 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             speed: None,
             reach: None,
             ammo_form_id: Some(0x0001_2ab3),
+            animation_type: Some(5),
         }
     );
     assert!(
