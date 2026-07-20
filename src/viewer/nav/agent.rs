@@ -266,6 +266,19 @@ use super::{door_link, landmass_graph, ledger_policy, movement_policy, repath};
 #[path = "fall_guard.rs"]
 mod fall_guard;
 
+// Issue #188. `locomotion` is the pure std-only speed/turn -> clip policy
+// (same `#[path]` submodule rationale as `fall_guard` above: it is included
+// verbatim by `tests/features.rs` too). `actor_binding` is its Bevy
+// consumer plus the projected-actor <-> nav-agent binding itself; it lives
+// out here rather than in this module root because `agent.rs` is already
+// 9k+ lines doing six jobs (post-mortem verdict §2.6) and must not grow a
+// seventh inline.
+#[path = "locomotion.rs"]
+mod locomotion;
+
+#[path = "actor_binding.rs"]
+mod actor_binding;
+
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
 const AGENT_DESIRED_SPEED: f32 = 2.5;
@@ -642,6 +655,26 @@ struct AgentKcc {
     /// by the next `tna goto`/`tna travel` (`tna status`'s `stuck=` field;
     /// the stable `nav agent stuck <id>` line fires on the rising edge).
     stuck: bool,
+    /// Y offset from this agent entity's `Transform.translation` to the KCC
+    /// capsule *centre* (issue #188). Zero for `tna` capsules, whose entity
+    /// transform already is the capsule centre; `AGENT_HEIGHT / 2.0` for a
+    /// bound actor, whose placement root sits at feet level. Applied by
+    /// `apply_agent_physics_movement` on the way into and back out of the
+    /// sweep, so exactly one convention (capsule centre) reaches the KCC
+    /// regardless of what the entity's own transform means.
+    capsule_centre_offset_y: f32,
+    /// This tick's desired horizontal velocity, exactly as
+    /// `apply_agent_physics_movement` blended it before handing it to
+    /// `step_agent_kcc` (issue #188). Stashed here purely so the locomotion
+    /// consumer in `actor_binding` can *reuse* the `desired`/`achieved` pair
+    /// this system already computes instead of recomputing a second,
+    /// possibly disagreeing one.
+    last_desired_horizontal: Vec2,
+    /// The achieved half of that same pair: the length of the horizontal
+    /// motion the KCC sweep actually delivered this tick, m/s. This -- not
+    /// `last_desired_horizontal` -- is what selects an actor's locomotion
+    /// clip, so a wedged agent stands still rather than striding on the spot.
+    last_achieved_horizontal_speed: f32,
 }
 
 /// The previous and latest solved desired velocities landmass has produced
@@ -993,7 +1026,13 @@ fn nav_fall_guard_system(world: &mut World) {
     let kill_z = fall_guard::fall_kill_z(min_y);
     for (index, entity, agent_y) in fallen {
         warn!("nav agent fell out of world {index} y={agent_y} kill_z={kill_z}");
-        if let Ok(entity) = world.get_entity_mut(entity) {
+        // Issue #188 feature 5: a fallen *bound actor* releases its agent
+        // and its locomotion animation state instead of being deleted --
+        // this guard exists to end a runaway descent, not to destroy an NPC
+        // the world/actor slice owns. A `tna` capsule still despawns whole.
+        if world.get::<actor_binding::NavBoundActor>(entity).is_some() {
+            actor_binding::release_bound_actor(world, entity);
+        } else if let Ok(entity) = world.get_entity_mut(entity) {
             entity.despawn();
         }
         world.resource_mut::<TestNavAgentState>().entities[index] = None;
@@ -1062,6 +1101,13 @@ impl Plugin for NavBackendPlugin {
                     door_link_system,
                     apply_agent_physics_movement,
                     nav_fall_guard_system,
+                    // Issue #188, strictly after the KCC has moved and the
+                    // fall guard has had its say: facing reads the desired/
+                    // achieved pair this tick's movement just stashed, and
+                    // the locomotion request must not be issued for an agent
+                    // the guard is about to release.
+                    actor_binding::face_bound_actors,
+                    actor_binding::drive_bound_actor_locomotion,
                     merge_traversal_system,
                     door_traversal_system,
                     log_agent_state_changes,
@@ -1930,6 +1976,7 @@ pub(crate) fn tna_command(
     let rest = &invocation.args[1..];
     match subcommand.as_str() {
         "spawn" => spawn_agent(world, rest),
+        "bind" => bind_agent(world, rest),
         "goto" => goto_agent(world, rest),
         "travel" => travel_agent(world, rest),
         "status" => agent_status(world, rest),
@@ -1938,14 +1985,14 @@ pub(crate) fn tna_command(
         other => Err(ConsoleError::new(
             "unknown_subcommand",
             format!(
-                "unknown tna subcommand '{other}'; expected spawn, goto, travel, status, despawn, or solverate"
+                "unknown tna subcommand '{other}'; expected spawn, bind, goto, travel, status, despawn, or solverate"
             ),
         )),
     }
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn [<index>]|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
+    let usage = "usage: tna spawn [<index>]|bind [<index>] <actor-reference-formid>|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
 }
 
@@ -2037,21 +2084,12 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
     let agent_entity = world
         .spawn((
             TestNavAgentMarker,
-            AgentRuntime::default(),
-            AgentKcc::default(),
-            AgentDesiredVelocityBlend::default(),
             Transform::from_translation(position),
             Visibility::Inherited,
-            Agent3dBundle {
-                agent: default(),
-                settings: AgentSettings {
-                    radius: AGENT_RADIUS,
-                    desired_speed: AGENT_DESIRED_SPEED,
-                    max_speed: AGENT_MAX_SPEED,
-                },
-                archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
-            },
-            TargetReachedCondition::Distance(Some(AGENT_TARGET_REACHED_DISTANCE)),
+            // Offset zero: a capsule entity's own transform already is the
+            // capsule centre (issue #188 introduced the offset for bound
+            // actors only, leaving this path bit-for-bit as it was).
+            agent_components(archipelago_entity, 0.0),
         ))
         .id();
     // Zero offset (issue #114 real-data regression fix, M4 wave 5): the
@@ -2108,6 +2146,126 @@ fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResul
         json!({ "index": index, "position": [position.x, position.y, position.z] }),
         vec![format!(
             "nav agent {index} spawned at ({:.2}, {:.2}, {:.2})",
+            position.x, position.y, position.z
+        )],
+    ))
+}
+
+/// The nav-agent component set, minus the marker and the debug capsule
+/// mesh: everything an entity needs to be routed and physically moved.
+/// Shared by `spawn_test_agent` (a fresh capsule) and `bind_agent` (an
+/// already-live projected actor), so the two paths cannot drift into
+/// disagreeing about what an agent is.
+fn agent_components(
+    archipelago_entity: Entity,
+    capsule_centre_offset_y: f32,
+) -> impl Bundle + use<> {
+    (
+        AgentRuntime::default(),
+        AgentKcc {
+            capsule_centre_offset_y,
+            ..default()
+        },
+        AgentDesiredVelocityBlend::default(),
+        Agent3dBundle {
+            agent: default(),
+            settings: AgentSettings {
+                radius: AGENT_RADIUS,
+                desired_speed: AGENT_DESIRED_SPEED,
+                max_speed: AGENT_MAX_SPEED,
+            },
+            archipelago_ref: ArchipelagoRef3d::new(archipelago_entity),
+        },
+        TargetReachedCondition::Distance(Some(AGENT_TARGET_REACHED_DISTANCE)),
+    )
+}
+
+/// Strips everything `agent_components` (plus the marker and target) added,
+/// returning the entity to whatever it was before it owned an agent. Used
+/// only to release a *bound actor* -- a `tna` capsule is despawned whole
+/// instead, since the capsule exists for nothing else.
+fn remove_agent_components(entity: &mut EntityWorldMut<'_>) {
+    entity.remove::<(
+        TestNavAgentMarker,
+        AgentRuntime,
+        AgentKcc,
+        AgentDesiredVelocityBlend,
+        Agent3dBundle,
+        TargetReachedCondition,
+        AgentTarget3d,
+    )>();
+    // Any traversal in flight belongs to the agent, not the actor.
+    entity.remove::<(DoorTraversal, MergeTraversal, PendingMergeRepath)>();
+}
+
+/// `tna bind [<index>] <actor-reference-formid>` (issue #188): gives an
+/// already-projected actor a nav agent in roster slot `index`, so every
+/// existing `tna goto`/`travel`/`status`/`despawn` form drives a real NPC
+/// with a skeleton and locomotion clips instead of a debug capsule. The
+/// capsule path is deliberately not migrated onto this -- it is the harness
+/// every nav wave has relied on -- so both populations coexist in the same
+/// roster.
+fn bind_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (index, form_id) = match rest {
+        [form_id] => (0, form_id),
+        [index, form_id] => (parse_agent_index(index)?, form_id),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna bind requires [<index>] <actor-reference-formid>",
+            ));
+        }
+    };
+    let reference_form_id = parse_form_id(form_id)
+        .ok_or_else(|| ConsoleError::new("bad_type", "tna bind actor FormID must be hex"))?;
+    ensure_archipelago(world)?;
+    if world.resource::<TestNavAgentState>().entities[index].is_some() {
+        return Err(ConsoleError::new(
+            "already_spawned",
+            "a nav agent already occupies this index; use tna despawn first",
+        ));
+    }
+    let entity =
+        actor_binding::actor_entity_by_reference(world, reference_form_id).ok_or_else(|| {
+            ConsoleError::new(
+                "no_actor",
+                format!("no projected actor with reference FormID {reference_form_id:08x}"),
+            )
+        })?;
+    if world.get::<AgentKcc>(entity).is_some() {
+        return Err(ConsoleError::new(
+            "already_bound",
+            "that actor already owns a nav agent",
+        ));
+    }
+    let archipelago_entity = world
+        .resource::<NavArchipelagoState>()
+        .archipelago
+        .expect("ensure_archipelago populated the archipelago");
+    world.entity_mut(entity).insert((
+        TestNavAgentMarker,
+        actor_binding::NavBoundActor::default(),
+        agent_components(
+            archipelago_entity,
+            actor_binding::BOUND_ACTOR_CAPSULE_OFFSET_Y,
+        ),
+    ));
+    world.resource_mut::<TestNavAgentState>().entities[index] = Some(entity);
+    let position = world
+        .get::<Transform>(entity)
+        .map_or(Vec3::ZERO, |transform| transform.translation);
+    info!(
+        "nav agent {index} bound actor {reference_form_id:08x} position=({:.2},{:.2},{:.2})",
+        position.x, position.y, position.z
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "index": index,
+            "reference_form_id": reference_form_id,
+            "position": [position.x, position.y, position.z],
+        }),
+        vec![format!(
+            "nav agent {index} bound to actor {reference_form_id:08x} at ({:.2}, {:.2}, {:.2})",
             position.x, position.y, position.z
         )],
     ))
@@ -2422,13 +2580,23 @@ fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandRes
             "no test nav agent is spawned at this index; use tna spawn first",
         ));
     };
-    if let Ok(entity) = world.get_entity_mut(agent_entity) {
+    // Issue #188: a bound actor is *released*, never despawned. The capsule
+    // exists only to be an agent, so despawning it is right; a projected NPC
+    // exists independently of navigation and the world/actor slice owns its
+    // lifetime.
+    let bound = world
+        .get::<actor_binding::NavBoundActor>(agent_entity)
+        .is_some();
+    if bound {
+        actor_binding::release_bound_actor(world, agent_entity);
+    } else if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
     world.resource_mut::<TestNavAgentState>().entities[index] = None;
+    let verb = if bound { "released" } else { "despawned" };
     Ok(ConsoleCommandResult::new(
-        json!({ "index": index, "despawned": true }),
-        vec![format!("nav agent {index} despawned")],
+        json!({ "index": index, "despawned": true, "bound_actor": bound }),
+        vec![format!("nav agent {index} {verb}")],
     ))
 }
 
@@ -2676,22 +2844,33 @@ fn apply_agent_physics_movement(
     for (entity, mut transform, mut velocity, blend, mut kcc, target, agent_state) in &mut agents {
         let desired_velocity = blend.previous.lerp(blend.latest, solve_blend_fraction);
         let desired_horizontal = Vec2::new(desired_velocity.x, desired_velocity.z);
-        let (new_position, new_kcc_velocity, grounded) = step_agent_kcc(
+        // Issue #188: one capsule-centre convention reaches the KCC whatever
+        // the entity transform means -- zero for `tna` capsules, half a
+        // capsule height for a feet-level bound actor root. See
+        // `AgentKcc::capsule_centre_offset_y`.
+        let centre_offset = Vec3::new(0.0, kcc.capsule_centre_offset_y, 0.0);
+        let centre = transform.translation + centre_offset;
+        let (new_centre, new_kcc_velocity, grounded) = step_agent_kcc(
             world,
             &mover,
             collision_filter,
             support_filter,
-            transform.translation,
+            centre,
             kcc.velocity,
             kcc.grounded,
             desired_horizontal,
             dt,
         );
-        let achieved = (new_position - transform.translation) / dt;
+        let new_position = new_centre - centre_offset;
+        let achieved = (new_centre - centre) / dt;
         transform.translation = new_position;
         kcc.velocity = new_kcc_velocity;
         kcc.grounded = grounded;
         velocity.velocity = achieved;
+        // Issue #188: hand the locomotion consumer the very pair this
+        // system just computed, rather than letting it derive a second one.
+        kcc.last_desired_horizontal = desired_horizontal;
+        kcc.last_achieved_horizontal_speed = Vec2::new(achieved.x, achieved.z).length();
 
         let outcome =
             movement_policy::decide_collision_outcome(movement_policy::VelocityObservation {
@@ -2712,10 +2891,13 @@ fn apply_agent_physics_movement(
             // offending surface directly (a wall face at
             // `point +/- AGENT_RADIUS` along its normal). Rising edge only,
             // so a permanently wedged agent logs this once, not per tick.
+            // `new_centre`, not `transform.translation`: the contact probe
+            // must query the capsule where the capsule actually is (issue
+            // #188 added the feet-level bound-actor convention).
             let contacts = world_contact_report(
                 world,
                 &mover,
-                transform.translation,
+                new_centre,
                 collision_filter,
                 desired_horizontal,
             );
@@ -8132,6 +8314,122 @@ mod tests {
         assert_eq!(
             override_costs(&world, agent),
             vec![(2, CLOSED_DOOR_TYPE_INDEX_COST)]
+        );
+    }
+
+    /// An activator placement whose reference is `reference_form_id`, the
+    /// solid gear-door class issue #186 is about. `Default` audio carries no
+    /// sound FormIDs, so activation is silent in this harness.
+    fn activator_placement(reference_form_id: u32) -> crate::vsa::PreparedPlacement {
+        let mut placement = door_placement(reference_form_id);
+        placement.base_kind = "ACTI".into();
+        placement.semantic = crate::vsa::PreparedSemantic::Activator;
+        placement
+    }
+
+    /// Issue #186, the *signal* test (verdict §2.1): drive an activator
+    /// blocker through the **real interaction boundary** and assert nav's
+    /// override lifts -- deliberately not the #177 shape that pokes
+    /// `door_open` directly (`closed_blocker_override_world`), which is why
+    /// this class of desync shipped. A closed, not-openable gear door
+    /// (`VaultGearDoor`'s prepared shape: `openable = false`) is impassable;
+    /// activating it open through `scripted_activator_toggle` -> the shared
+    /// `InteractionState.open` signal -> `door_availability_system` clears the
+    /// override so the route is free; activating it shut restores it.
+    #[test]
+    fn activating_a_blocker_through_the_interaction_boundary_lifts_the_nav_override() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let mut registry = crate::console::RefRegistry::default();
+        let blocker = world
+            .spawn(interaction::PlacementRoot::new(activator_placement(0x99)))
+            .id();
+        registry.register(blocker, 0x99, None);
+        world.insert_resource(registry);
+
+        let agent = world
+            .spawn((TestNavAgentMarker, AgentRuntime::default()))
+            .id();
+        world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+        {
+            let mut state = world.resource_mut::<NavArchipelagoState>();
+            state.door_usable.insert(0x99, true);
+            state.door_open.insert(0x99, false);
+            state.closed_door_type_indices.insert(0x99, 2);
+            // Not openable, exactly like the authored VaultGearDoor: a closed
+            // one is a hard barrier, and only a runtime open can lift it.
+        }
+
+        // Closed: the blocker's interior is impassable (route unreachable).
+        apply_door_lock_overrides(&mut world, agent);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)],
+            "a closed activator blocker must be impassable"
+        );
+
+        // Activate it open through the real console/BRP interaction boundary
+        // -- nothing here touches `door_open` directly.
+        let opened = interaction::scripted_activator_toggle(&mut world, blocker);
+        assert!(opened, "activation must open the blocker");
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker),
+            "the interaction boundary must populate the shared open signal"
+        );
+
+        // Nav observes the open state on its next poll and rebuilds the
+        // agent's overrides: the barrier is gone, the route completes.
+        door_availability_system(&mut world);
+        assert_eq!(
+            world.resource::<NavArchipelagoState>().door_open.get(&0x99),
+            Some(&true),
+            "door_availability_system must observe the activated-open blocker"
+        );
+        assert_eq!(
+            override_costs(&world, agent),
+            Vec::new(),
+            "an activated-open blocker must impose no cost -- the route completes"
+        );
+
+        // Activating it shut again restores the barrier: closed is unreachable.
+        let opened = interaction::scripted_activator_toggle(&mut world, blocker);
+        assert!(!opened, "second activation must close the blocker");
+        door_availability_system(&mut world);
+        assert_eq!(
+            override_costs(&world, agent),
+            vec![(2, LOCKED_DOOR_TYPE_INDEX_COST)],
+            "a re-closed activator blocker must be impassable again"
+        );
+    }
+
+    /// The population itself, in isolation (verdict §1: the #177 cost tests
+    /// bypassed this signal, which is why the desync shipped): activating an
+    /// activator inserts it into `InteractionState.open`; this fails if the
+    /// open-state population is ever removed from the activator path.
+    #[test]
+    fn activating_an_activator_populates_the_shared_open_signal() {
+        let mut world = harness_world();
+        world.init_resource::<interaction::InteractionState>();
+        let blocker = world
+            .spawn(interaction::PlacementRoot::new(activator_placement(0x99)))
+            .id();
+
+        assert!(interaction::scripted_activator_toggle(&mut world, blocker));
+        assert!(
+            world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker)
+        );
+        assert!(!interaction::scripted_activator_toggle(&mut world, blocker));
+        assert!(
+            !world
+                .resource::<interaction::InteractionState>()
+                .open
+                .contains(&blocker)
         );
     }
 

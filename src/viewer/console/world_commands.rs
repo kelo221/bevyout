@@ -402,10 +402,33 @@ pub(super) fn activate_reference(
             vec![format!("picked up {:08x} x{count}", placement.base_form_id)],
         ));
     }
+    // Issue #186: a solid activator blocker (vault gear door, blast door) is
+    // openable route topology, so `activate` drives its open/close state
+    // through the same scripted boundary the nav crossing gate observes --
+    // the same human-testable parity #177 gave ordinary in-cell doors. This
+    // is the activator *behaviour* (opens freely, no key, no travel), not a
+    // door-record special case: the open-state signal it toggles is the
+    // shared `InteractionState.open` nav reads for every blocker (verdict
+    // §2.1/§2.2).
+    if matches!(placement.semantic, PreparedSemantic::Activator) {
+        let opened = interaction::scripted_activator_toggle(world, entity);
+        return Ok(ConsoleCommandResult::new(
+            json!({
+                "reference_form_id": placement.reference_form_id,
+                "kind": "activator",
+                "opened": opened,
+            }),
+            vec![format!(
+                "activator {:08x} {}",
+                placement.reference_form_id,
+                if opened { "opened" } else { "closed" }
+            )],
+        ));
+    }
     let PreparedSemantic::Door(door) = &placement.semantic else {
         return Err(ConsoleError::new(
             "not_a_door",
-            "activate supports only door, container, corpse, and pickup references",
+            "activate supports only door, activator, container, corpse, and pickup references",
         ));
     };
     // Issue #177: an ordinary in-cell door has no travel destination, and

@@ -54,6 +54,38 @@ pub(crate) struct InteractionState {
     pub(crate) open: HashSet<Entity>,
 }
 
+impl InteractionState {
+    /// Records solid blocker `entity`'s runtime open/close state.
+    ///
+    /// Issue #186 / post-mortem verdict §2.1–§2.2: `open` is the *single*
+    /// runtime open-state signal nav's `apply_door_lock_overrides` reads for
+    /// *every* capsule-blocking placement -- doors, activators (vault gear
+    /// doors, blast doors), and any future solid record type alike. A
+    /// blocker's record *type* selects its *behaviour* (needs a key, carries
+    /// a travel destination, opens freely, or never opens); it never decides
+    /// whether the blocker's open state is observable here. Every path that
+    /// animates a blocker open or shut routes through this one method so a
+    /// new blocker class can never animate open in the world while nav still
+    /// models it closed -- which is exactly the desync §2.1 caught for
+    /// activators, arriving because the previous fix was an allow-list keyed
+    /// on `PreparedSemantic::Door` rather than this invariant.
+    pub(crate) fn set_open(&mut self, entity: Entity, open: bool) {
+        if open {
+            self.open.insert(entity);
+        } else {
+            self.open.remove(&entity);
+        }
+    }
+
+    /// Flips `entity`'s open state through [`set_open`](Self::set_open),
+    /// returning whether it is now open.
+    pub(crate) fn toggle_open(&mut self, entity: Entity) -> bool {
+        let open = !self.open.contains(&entity);
+        self.set_open(entity, open);
+        open
+    }
+}
+
 /// Issue #59's notice seam: `world::swap`'s fallback-cancellation and
 /// failure-recovery systems reach this same HUD line (`show`, made
 /// `pub(crate)` for that) rather than inventing a second notice surface.
