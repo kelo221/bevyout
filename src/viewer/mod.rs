@@ -103,6 +103,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
         args.realtime_shadows,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        args.unfocused,
         args.save_slot,
     )
 }
@@ -199,6 +200,10 @@ pub fn render(args: RenderArgs) -> Result<()> {
         args.realtime_shadows,
         args.trace_seconds,
         args.agent_bridge.then_some(args.agent_port),
+        // `render` has no standalone `--unfocused` flag (issue #180 only
+        // added one to `view`); an agent-bridge launch still starts
+        // unfocused automatically via `run_view`'s own agent_port check.
+        false,
         None,
     )
 }

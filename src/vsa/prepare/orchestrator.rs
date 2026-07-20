@@ -640,6 +640,11 @@ fn prepare_cell(
         .collect::<Vec<_>>();
     let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
     let mut actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
+    // Issue #175 (M4 wave 11 lane C): the package catalog's `known_form_ids`
+    // link-check set needs every base record and placed reference this
+    // decode pass saw, so it is built here too -- before `references` is
+    // taken below -- exactly like `actor_references` above.
+    let package_catalog_inputs = build_package_catalog_inputs(&parsed);
     let mut references = std::mem::take(&mut parsed.references);
     let actor_models = build_actor_appearance_models(
         &parsed,
@@ -1040,6 +1045,44 @@ fn prepare_cell(
         message: recipe_summary.clone(),
     });
     output.push(recipe_summary);
+    // Issue #175 (M4 wave 11 lane C): content-set-wide like the item/recipe
+    // catalogs above (packages are plugin content, not tied to this cell's
+    // placements), so it shares their fingerprint-keyed `catalogs/`
+    // directory rather than the actor catalog's per-cell path below.
+    let package_catalog = build_package_catalog(&package_catalog_inputs, &source_fingerprint);
+    // Unlike `item_catalog_path`/`actor_catalog_path`, the manifest carries
+    // no dedicated pointer for this catalog: its path is fully deterministic
+    // from `source_fingerprint` (`catalogs/<fingerprint>/packages.ron`,
+    // exactly what `write_package_catalog` itself constructs) and it is
+    // read on demand by the `showpackages` console command rather than
+    // preloaded at `view` startup, so there is nothing to validate a
+    // manifest-carried hash/revision against.
+    let (package_catalog_path_relative, _package_catalog_hash) =
+        write_package_catalog(&cache_dir, &package_catalog)?;
+    // M4 wave 11 follow-up: real-data acceptance on cell 0001a273 found the
+    // original 4-counter line was 100% noise (3021/3021 packages tripped
+    // "unsupported subrecord"; 2356/718 "unresolved" were almost entirely
+    // out-of-scope PLDT/PTDT FormIDs, not dangling links). `deferred_*`/
+    // `out_of_scope_*` carry that volume separately from the two counters
+    // that remain genuine signal -- see `package_catalog.rs`'s module doc
+    // comment for the measured breakdown.
+    let package_catalog_summary = format!(
+        "package catalog: {} packages, {} unsupported type, {} unsupported subrecord, {} deferred subrecord, {} unresolved location, {} unresolved target, {} out-of-scope location, {} out-of-scope target -> {}",
+        package_catalog.counters.total,
+        package_catalog.counters.unsupported_type,
+        package_catalog.counters.unsupported_subrecord,
+        package_catalog.counters.deferred_subrecord,
+        package_catalog.counters.unresolved_location,
+        package_catalog.counters.unresolved_target,
+        package_catalog.counters.out_of_scope_location,
+        package_catalog.counters.out_of_scope_target,
+        package_catalog_path_relative
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: package_catalog_summary.clone(),
+    });
+    output.push(package_catalog_summary);
     // Per-cell artifact next to `scene.ron` -- the actor catalog embeds this
     // cell's ACHR/ACRE placements, so unlike the content-set-wide item/
     // recipe catalogs it must not share one fingerprint-keyed file across
@@ -1475,6 +1518,67 @@ fn build_actor_catalog_inputs(
         packages,
         known_bases,
         placements,
+    }
+}
+
+// ---------------------------------------------------------------------
+// Package catalog wiring (issue #175, M4 wave 11 lane C)
+//
+// `package_catalog.rs` is a pure std/serde-only module for the same reason
+// `actor_catalog.rs` is (see its module doc comment): boundary conversion
+// from the parser's `PackageRecord`/`PackageLocation`/`PackageSchedule`/
+// `PackageTarget` types into its plain input types lives here.
+// ---------------------------------------------------------------------
+
+/// Assembles the pure `PackageCatalogInputs` for this prepare pass: every
+/// decoded `PACK` record (content-set-wide, like `parsed.recipes`/
+/// `parsed.bases`, not scoped to one cell) plus every FormID this pass
+/// decoded (bases and placed references), used only to diagnose an
+/// unresolved `PLDT`/`PTDT` FormID -- see `PackageCatalogInputs::
+/// known_form_ids`'s doc comment for the same scoping caveat
+/// `ActorCatalogInputs::known_bases` already accepts.
+fn build_package_catalog_inputs(parsed: &ParsedPlugin) -> PackageCatalogInputs {
+    let mut known_form_ids: HashSet<u32> = parsed.bases.keys().copied().collect();
+    known_form_ids.extend(parsed.references.iter().map(|reference| reference.form_id));
+    let packages = parsed
+        .packages
+        .iter()
+        .map(|(&form_id, record)| {
+            (
+                form_id,
+                PackageInput {
+                    form_id,
+                    editor_id: record.editor_id.clone(),
+                    general_flags: record.general_flags,
+                    package_type: record.package_type,
+                    location: record.location.map(|location| PackageLocationInput {
+                        location_type: location.location_type,
+                        form_id: location.form_id,
+                        raw_value: location.raw_value,
+                        radius: location.radius,
+                    }),
+                    schedule: record.schedule.map(|schedule| PackageScheduleInput {
+                        month: schedule.month,
+                        day_of_week: schedule.day_of_week,
+                        date: schedule.date,
+                        time: schedule.time,
+                        duration: schedule.duration,
+                    }),
+                    target: record.target.map(|target| PackageTargetInput {
+                        target_type: target.target_type,
+                        form_id: target.form_id,
+                        raw_value: target.raw_value,
+                        count_or_distance: target.count_or_distance,
+                    }),
+                    conditions: record.conditions.clone(),
+                    unsupported_subrecords: record.ignored_subrecords.clone(),
+                },
+            )
+        })
+        .collect();
+    PackageCatalogInputs {
+        packages,
+        known_form_ids,
     }
 }
 

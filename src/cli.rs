@@ -297,6 +297,11 @@ pub struct ViewArgs {
     /// Loopback HTTP port used by the agent bridge.
     #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
     pub(crate) agent_port: u16,
+    /// Open the window without taking OS input focus or raising it above
+    /// other windows. Automatically implied by `--agent-bridge`, so
+    /// automated/agent launches never interrupt whatever the human is doing.
+    #[arg(long)]
+    pub(crate) unfocused: bool,
     /// Load this save slot at startup and apply it to the launch cell.
     #[arg(long, value_name = "SLOT")]
     pub(crate) save_slot: Option<String>,
