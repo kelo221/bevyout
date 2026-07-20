@@ -1250,6 +1250,7 @@ pub(crate) fn apply_derived_door_associations(
         .iter()
         .map(|mesh| BlockerMeshInput {
             form_id: mesh.form_id,
+            authored_door_polygons: mesh.doors.iter().map(|door| door.triangle_index).collect(),
             polygons: mesh
                 .polygons
                 .iter()
