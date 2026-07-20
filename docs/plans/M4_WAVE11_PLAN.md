@@ -121,11 +121,15 @@ own delimited section of `tests/features.rs`. NOT `orchestrator.rs`
 `tests/features.rs`. May *read* the player controller freely; changes
 there need orchestrator go-ahead.
 
-### Acceptance (orchestrator, real data)
+### Acceptance (orchestrator, real data) — REVISED, see amendment A1
 
-00024512: spawn (154.66, 41.10, −108.22) → goto (152.5, 36.6, −37) ends
-`reached`; the doorway route (154, 36.5, −34) also completes. No
-regression in the wave-10 manual's metro checks.
+The original criterion (both Vault routes end `reached`) is **void**: the
+investigation proved the wedge is the closed `VaultGearDoor` activator,
+not a riser, so no KCC change could make those routes complete. #172 is
+closed as premise-disproven; the real defect is #177. What this wave
+ships instead is the missing stair regression coverage, gated on the
+synthetic `boxddd` tests being green and no regression in the wave-10
+manual's metro checks.
 
 ## Issues #175 + #176 — AI package foundation (lane C, in this order)
 
@@ -174,3 +178,31 @@ implementation. `cargo fmt --check`, `cargo clippy --all-targets --
 -D warnings`, `cargo test`, representative `cargo run-dev -- prepare`.
 Manual script `docs/plans/M4_WAVE11_MANUAL.md` before the PR; PR closes
 #171, #148, #172, #175, #176.
+
+
+## Shipped amendments
+
+- **A1 — #172's premise was disproven; closed, replaced by #177.** The
+  Vault 101 "stair-top wedge" tracked since wave 8 is the **closed vault
+  door**: `VaultGearDoor` (RefID 149264, `base_kind: ACTI`,
+  `semantic: Activator`, `physics_classification: Kinematic`, collision
+  face z ≈ −80.0). Agent radius 0.35 puts a blocked capsule centre at
+  z ≈ −80.35, matching every measurement across three builds
+  (−80.4/−80.37/−80.38) and explaining why two different targets wedge
+  at the same z. An isolated collider replay reproduced it at
+  (154.360, 39.787, −80.380); removing only that collider clears the
+  path; the two stair statics are traversable in isolation and both
+  carry `step_support: true`. Verified independently by the orchestrator
+  against `scene.ron` and the code. F172.2 was also moot: the nav agent
+  already reuses the player controller's step handling with an identical
+  capsule, so no second policy existed to reconcile. The wave ships the
+  missing stair regression tests only.
+- **A2 — new issue #177 (P1):** nav route topology is gated exclusively
+  on `PreparedSemantic::Door(_)` (`nav/mod.rs:151`, `nav/agent.rs:1018`,
+  `nav/agent.rs:3786`; no `Activator` handling anywhere in nav), so
+  solid closed activators/kinematic placements are planned straight
+  through. Must generalize door topology to state-dependent blocking
+  placements, reusing #155's query-time cost overrides and #137's
+  mid-route gating. Explicitly *not* a job for #171's clearance pass:
+  that validates **static** collision, and a state-dependent blocker
+  must never be baked into the prepared navmesh as permanent geometry.
