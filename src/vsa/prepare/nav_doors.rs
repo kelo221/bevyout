@@ -102,6 +102,17 @@ pub(crate) struct BlockerMeshInput {
     /// Walkable polygons only -- the boundary conversion filters
     /// `PreparedNavPolygon::walkable` before building this.
     pub(crate) polygons: Vec<BlockerPolygonInput>,
+    /// Polygon indices this mesh's *authored* `NVDP` door list already
+    /// associates with a door. Such a polygon is never classified blocking:
+    /// it is the authored doorway crossing itself -- the exact triangle the
+    /// travel/crossing lifecycle routes *to* -- and a real door leaf's
+    /// collision hull naturally contains it, so a purely geometric
+    /// containment test would price the sanctioned crossing impassable and
+    /// make every travel door unusable while shut. Authored evidence wins
+    /// over derived geometry, the same precedence
+    /// `landmass_graph::resolve_polygon_type_index` applies between door and
+    /// preferred-pathing typing.
+    pub(crate) authored_door_polygons: std::collections::BTreeSet<u32>,
 }
 
 /// One derived blocker -> polygon association.
@@ -150,9 +161,10 @@ pub(crate) fn derive_door_associations(
                 if !convex_shapes_overlap(&triangle, &blocker.footprint) {
                     continue;
                 }
-                let contained = triangle
-                    .iter()
-                    .all(|point| point_in_convex_polygon(*point, &blocker.footprint));
+                let contained = !mesh.authored_door_polygons.contains(&polygon.index)
+                    && triangle
+                        .iter()
+                        .all(|point| point_in_convex_polygon(*point, &blocker.footprint));
                 if !blocker.gated && !contained {
                     continue;
                 }
@@ -265,9 +277,13 @@ pub(crate) fn unreported_interior_polygons(
                 if floor < blocker.min_y - BLOCKER_FLOOR_TOLERANCE || floor > blocker.max_y {
                     continue;
                 }
-                let inside = polygon.vertices.iter().all(|vertex| {
-                    point_in_convex_polygon([vertex[0], vertex[2]], &blocker.footprint)
-                });
+                // Authored doorway crossings are exempt for the same reason
+                // they are never classified blocking -- see
+                // `BlockerMeshInput::authored_door_polygons`.
+                let inside = !mesh.authored_door_polygons.contains(&polygon.index)
+                    && polygon.vertices.iter().all(|vertex| {
+                        point_in_convex_polygon([vertex[0], vertex[2]], &blocker.footprint)
+                    });
                 if !inside {
                     continue;
                 }
@@ -309,7 +325,19 @@ mod tests {
         BlockerMeshInput {
             form_id: 0x10,
             polygons,
+            authored_door_polygons: std::collections::BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn an_authored_door_polygon_is_never_classified_blocking() {
+        let mut input = mesh(vec![triangle(3, [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]], 0.0)]);
+        input.authored_door_polygons.insert(3);
+        let blockers = [blocker(square(0.0, 0.0, 1.0, 1.0), true)];
+        let associations = derive_door_associations(&[input.clone()], &blockers);
+        assert_eq!(associations.len(), 1);
+        assert!(!associations[0].blocks_when_closed);
+        assert!(unreported_interior_polygons(&[input], &blockers, &associations).is_empty());
     }
 
     fn triangle(index: u32, points: [[f32; 2]; 3], y: f32) -> BlockerPolygonInput {

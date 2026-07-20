@@ -10503,6 +10503,7 @@ async fn given_derived_door_polygon(
             .push(nav_doors::BlockerMeshInput {
                 form_id: mesh_form_id,
                 polygons: vec![polygon],
+                authored_door_polygons: std::collections::BTreeSet::new(),
             }),
     }
 }
