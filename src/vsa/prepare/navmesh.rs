@@ -1204,7 +1204,7 @@ pub(crate) fn cell_blocker_volumes(
             .iter()
             .flat_map(|triangle| triangle.vertices)
             .collect();
-        let footprint = convex_hull_xz(&points);
+        let footprint = blocker_footprint(&points);
         if footprint.len() < 3 {
             continue;
         }
@@ -1223,6 +1223,76 @@ pub(crate) fn cell_blocker_volumes(
         });
     }
     volumes
+}
+
+/// Minimum XZ half-thickness (metres) a blocker footprint is given when its
+/// collision geometry is flat. Real authored Havok door collision is
+/// routinely a single zero-thickness plane -- `MetroGateLoad` in
+/// FranklinMetro02 is exactly that -- whose XZ convex hull is a degenerate
+/// line segment with no interior, so every overlap and containment test would
+/// silently report nothing and the door would keep its pre-#177 behaviour of
+/// not existing at all as far as route topology is concerned. Purely a
+/// numerical-robustness floor, not a tuned value: it is the smallest
+/// thickness that gives a plane an interior at f32 precision with room to
+/// spare, far below anything a nav polygon or agent capsule is measured in,
+/// and it is applied identically to every blocker.
+const BLOCKER_MIN_HALF_THICKNESS: f32 = 0.05;
+
+/// The XZ footprint of a blocker's collision `points`: its convex hull,
+/// thickened to a rectangle of minimum thickness whenever that hull is flat
+/// (see [`BLOCKER_MIN_HALF_THICKNESS`]). Flatness is judged by the hull's
+/// actual width, not its vertex count: a zero-thickness authored plane
+/// survives `convex_hull_xz` as three or four *collinear* points once f32
+/// rounding perturbs them off the line, and such a hull has no interior for
+/// any overlap or containment test to find.
+fn blocker_footprint(points: &[[f32; 3]]) -> Vec<[f32; 2]> {
+    let hull = convex_hull_xz(points);
+    if hull.len() < 2 {
+        return Vec::new();
+    }
+    // Shoelace area and longest chord: width ~= 2 * area / chord for a thin
+    // sliver, which is exactly the shape being detected.
+    let mut area = 0.0f32;
+    for index in 0..hull.len() {
+        let a = hull[index];
+        let b = hull[(index + 1) % hull.len()];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    let area = (area / 2.0).abs();
+    let mut chord = ([0.0f32; 2], [0.0f32; 2]);
+    let mut chord_length = 0.0f32;
+    for (index, &a) in hull.iter().enumerate() {
+        for &b in &hull[index + 1..] {
+            let length = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            if length > chord_length {
+                chord_length = length;
+                chord = (a, b);
+            }
+        }
+    }
+    if chord_length < 1.0e-6 {
+        return Vec::new();
+    }
+    if hull.len() >= 3 && 2.0 * area / chord_length >= 2.0 * BLOCKER_MIN_HALF_THICKNESS {
+        return hull;
+    }
+    // Flat: extend the longest chord sideways by the minimum half-thickness,
+    // wound counter-clockwise like the hull.
+    let (first, last) = chord;
+    let direction = [
+        (last[0] - first[0]) / chord_length,
+        (last[1] - first[1]) / chord_length,
+    ];
+    let normal = [
+        -direction[1] * BLOCKER_MIN_HALF_THICKNESS,
+        direction[0] * BLOCKER_MIN_HALF_THICKNESS,
+    ];
+    vec![
+        [first[0] - normal[0], first[1] - normal[1]],
+        [last[0] - normal[0], last[1] - normal[1]],
+        [last[0] + normal[0], last[1] + normal[1]],
+        [first[0] + normal[0], first[1] + normal[1]],
+    ]
 }
 
 /// Populates every mesh's `PreparedNavMesh::derived_doors` from this cell's
@@ -1313,4 +1383,53 @@ pub(crate) fn apply_derived_door_associations(
     );
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, graph);
     Ok((graph_source, summary))
+}
+
+#[cfg(test)]
+mod blocker_footprint_tests {
+    use super::*;
+
+    /// Real authored Havok door collision is routinely a single
+    /// zero-thickness plane (`MetroGateLoad` in FranklinMetro02): f32
+    /// rounding leaves `convex_hull_xz` returning three or four *collinear*
+    /// points, which has no interior for any overlap or containment test to
+    /// find. It must be thickened, not discarded.
+    #[test]
+    fn a_flat_collision_plane_is_thickened_into_a_footprint() {
+        let points: Vec<[f32; 3]> = (0..8)
+            .map(|step| {
+                [
+                    9.558576 + (step % 3) as f32 * 1.0e-5,
+                    105.0 + step as f32 * 0.25,
+                    -75.0 + step as f32 * 0.5,
+                ]
+            })
+            .collect();
+        let footprint = blocker_footprint(&points);
+        assert_eq!(footprint.len(), 4, "{footprint:?}");
+        let min_x = footprint.iter().fold(f32::INFINITY, |acc, p| acc.min(p[0]));
+        let max_x = footprint
+            .iter()
+            .fold(f32::NEG_INFINITY, |acc, p| acc.max(p[0]));
+        assert!(
+            (max_x - min_x - 2.0 * BLOCKER_MIN_HALF_THICKNESS).abs() < 1.0e-3,
+            "{footprint:?}"
+        );
+    }
+
+    #[test]
+    fn a_solid_box_keeps_its_own_hull() {
+        let points = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 2.0, 1.0],
+            [0.0, 2.0, 1.0],
+        ];
+        assert_eq!(blocker_footprint(&points).len(), 4);
+    }
+
+    #[test]
+    fn a_single_point_has_no_footprint() {
+        assert!(blocker_footprint(&[[1.0, 2.0, 3.0]]).is_empty());
+    }
 }
