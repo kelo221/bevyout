@@ -553,6 +553,188 @@ fn component_share_pct(largest_component: usize, walkable_count: usize) -> usize
 /// the prepared manifest. The remainder is reported as a single count line.
 const DROP_DIAGNOSTIC_CAP: usize = 32;
 
+/// Environment variable naming world points the clearance pass should explain
+/// itself at (issue #171). Debug affordance: unset in every normal run, and it
+/// only ever adds `println!` lines -- it never changes a verdict.
+///
+/// Format: `;`-separated entries, each either a point `x,y,z` or a sampled
+/// segment `x0,y0,z0>x1,y1,z1@count`. Example:
+///
+/// ```text
+/// BEVYOUT_NAV_PROBE='9.6,106,-73.1>0,106,-73.1@40' cargo run-dev -- prepare --cell 0001a273
+/// ```
+const NAV_PROBE_ENV: &str = "BEVYOUT_NAV_PROBE";
+
+/// Parses [`NAV_PROBE_ENV`] into world points. Malformed entries are skipped
+/// silently -- this is a debug affordance, never a prepare input.
+fn nav_probe_points() -> Vec<[f32; 3]> {
+    let Ok(spec) = std::env::var(NAV_PROBE_ENV) else {
+        return Vec::new();
+    };
+    let parse = |text: &str| -> Option<[f32; 3]> {
+        let mut parts = text.split(',').map(|value| value.trim().parse::<f32>());
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(Ok(x)), Some(Ok(y)), Some(Ok(z))) => Some([x, y, z]),
+            _ => None,
+        }
+    };
+    let mut points = Vec::new();
+    for entry in spec.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+        let Some((from, rest)) = entry.split_once('>') else {
+            points.extend(parse(entry));
+            continue;
+        };
+        let (to, count) = rest.split_once('@').unwrap_or((rest, "20"));
+        let (Some(a), Some(b), Ok(count)) = (parse(from), parse(to), count.trim().parse::<usize>())
+        else {
+            continue;
+        };
+        for step in 0..=count.max(1) {
+            let t = step as f32 / count.max(1) as f32;
+            points.push([
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ]);
+        }
+    }
+    points
+}
+
+/// Reports, for every probed point, which walkability term rejected it and
+/// what the clipped mesh finally decided -- the covering polygon, its drop
+/// reason, and which connected component it ended up in, plus whether any
+/// output polygon covers the point at all (which is how a sliver-filtering
+/// hole shows up). The predicate terms are evaluated at the covering
+/// polygon's own surface height, not at the probe's `y`, since that is the
+/// height the clearance pass itself judged the point at.
+/// Deterministic `println!` lines, in the CLI logging style.
+fn report_nav_probe(
+    mesh: &PreparedNavMesh,
+    result: &NavClearanceResult,
+    collision: &[CollisionTriangle],
+    points: &[[f32; 3]],
+) {
+    let covering = |x: f32, z: f32| -> Option<(usize, f32)> {
+        result.polygons.iter().enumerate().find_map(|(index, tri)| {
+            let (Some(&a), Some(&b), Some(&c)) = (
+                result.vertices.get(tri[0] as usize),
+                result.vertices.get(tri[1] as usize),
+                result.vertices.get(tri[2] as usize),
+            ) else {
+                return None;
+            };
+            let det = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
+            if det.abs() < 1.0e-9 {
+                return None;
+            }
+            let beta = ((x - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (z - a[2])) / det;
+            let gamma = ((b[0] - a[0]) * (z - a[2]) - (x - a[0]) * (b[2] - a[2])) / det;
+            let alpha = 1.0 - beta - gamma;
+            (alpha >= -1.0e-4 && beta >= -1.0e-4 && gamma >= -1.0e-4)
+                .then(|| (index, alpha * a[1] + beta * b[1] + gamma * c[1]))
+        })
+    };
+
+    // Component labels over the surviving walkable set, so the probe can say
+    // whether two reachable-looking points are actually routable to each other.
+    let components = walkable_component_labels(result);
+    let mut component_sizes: HashMap<usize, usize> = HashMap::new();
+    for root in components.iter().flatten() {
+        *component_sizes.entry(*root).or_insert(0) += 1;
+    }
+    let largest = component_sizes.values().copied().max().unwrap_or(0);
+
+    let samples: Vec<[f32; 3]> = points
+        .iter()
+        .map(|&[x, y, z]| [x, covering(x, z).map(|(_, sy)| sy).unwrap_or(y), z])
+        .collect();
+    let probes = probe_points(collision, NavClearanceParams::default(), &samples);
+
+    for (probe, original) in probes.iter().zip(points) {
+        let [x, y, z] = probe.point;
+        let verdict = match covering(x, z) {
+            None => "uncovered".to_string(),
+            Some((index, _)) => {
+                let component = components
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .map(|root| root.to_string())
+                    .unwrap_or_else(|| "-".into());
+                match result.reasons.get(index).copied().flatten() {
+                    None => {
+                        let size = components
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .and_then(|root| component_sizes.get(&root).copied())
+                            .unwrap_or(0);
+                        format!(
+                            "walkable polygon {index} component {component} size {size}{}",
+                            if size == largest { " (MAIN)" } else { "" }
+                        )
+                    }
+                    Some(reason) => format!("polygon {index} {}", reason.label()),
+                }
+            }
+        };
+        let wall = match probe.nearest_wall {
+            Some([a, b, c]) => format!(
+                " nearest-wall ({:.2},{:.2},{:.2})/({:.2},{:.2},{:.2})/({:.2},{:.2},{:.2})",
+                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]
+            ),
+            None => String::new(),
+        };
+        println!(
+            "nav clearance probe mesh {:08x} ({x:.2}, {z:.2}) at surface y {y:.2} (probed {:.2}): supported {} (exact {}), obstructed {}, wall-distance {:.3}, {verdict}{wall}",
+            mesh.form_id,
+            original[1],
+            probe.supported,
+            probe.supported_exact,
+            probe.obstructed,
+            probe.nearest_wall_distance,
+        );
+    }
+}
+
+/// Connected-component root per output polygon (`None` when not walkable),
+/// over shared vertex-index edges -- exactly the adjacency landmass derives.
+fn walkable_component_labels(result: &NavClearanceResult) -> Vec<Option<usize>> {
+    let count = result.polygons.len();
+    let mut parent: Vec<usize> = (0..count).collect();
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    let mut owners: HashMap<(u32, u32), usize> = HashMap::new();
+    for (index, tri) in result.polygons.iter().enumerate() {
+        if !result.walkable[index] {
+            continue;
+        }
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            match owners.get(&key) {
+                Some(&other) => {
+                    let (ra, rb) = (find(&mut parent, index), find(&mut parent, other));
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
+                None => {
+                    owners.insert(key, index);
+                }
+            }
+        }
+    }
+    (0..count)
+        .map(|index| result.walkable[index].then(|| find(&mut parent, index)))
+        .collect()
+}
+
 /// Writes one clearance pass's re-triangulated geometry (issue #171) back into
 /// the prepared mesh.
 ///
@@ -662,6 +844,7 @@ pub(crate) fn apply_nav_clearance(
     let mut added_vertices = 0usize;
     let mut degenerate_discarded = 0usize;
     let mut predicate_evaluations = 0usize;
+    let probe_points_spec = nav_probe_points();
 
     for mesh in &mut graph.meshes {
         let authored_polygon_count = mesh.polygons.len();
@@ -739,6 +922,10 @@ pub(crate) fn apply_nav_clearance(
                     mesh.form_id, size, centroid[0], centroid[1], centroid[2],
                 ),
             });
+        }
+
+        if !probe_points_spec.is_empty() {
+            report_nav_probe(mesh, &result, collision, &probe_points_spec);
         }
 
         apply_clipped_geometry(mesh, &result);

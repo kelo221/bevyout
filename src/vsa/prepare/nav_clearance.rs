@@ -458,6 +458,32 @@ impl<'a> CollisionIndex<'a> {
         }
     }
 
+    /// Highest collision surface height at `(x, z)` that is at or below
+    /// `ceiling`, or `None` when nothing supports that spot within reach.
+    /// This is the *footing* an obstruction candidate stands on.
+    fn highest_support_at(&self, x: f32, z: f32, ceiling: f32) -> Option<f32> {
+        let (cell, oversized) = self.candidates(x, z, true);
+        let mut best: Option<f32> = None;
+        for &i in cell.iter().chain(oversized) {
+            let aabb = self.aabbs[i as usize];
+            if x < aabb.min[0] || x > aabb.max[0] || z < aabb.min[2] || z > aabb.max[2] {
+                continue;
+            }
+            if aabb.min[1] > ceiling {
+                continue;
+            }
+            let [a, b, c] = self.triangles[i as usize].vertices;
+            let Some(w) = barycentric_xz(x, z, a, b, c) else {
+                continue;
+            };
+            let height = w[0] * a[1] + w[1] * b[1] + w[2] * c[1];
+            if height <= ceiling {
+                best = Some(best.map_or(height, |current: f32| current.max(height)));
+            }
+        }
+        best
+    }
+
     /// Candidate triangle indices for a point query, as the point's own grid
     /// cell plus the oversized list.
     fn candidates(&self, x: f32, z: f32, support: bool) -> (&[u32], &[u32]) {
@@ -670,6 +696,69 @@ pub(crate) fn validate_and_clear(
         reasons: reason,
         nonmain_components,
     }
+}
+
+/// Why the walkability predicate accepted or rejected one world point, for the
+/// `prepare`-time probe (issue #171 acceptance): the pointwise question
+/// "why is this spot not walkable?" answered term by term, so an
+/// over-blocking term can be identified from `prepare` output alone rather
+/// than inferred from a severed route.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct NavClearanceProbe {
+    pub(crate) point: [f32; 3],
+    /// Collision support directly under the point, before the seam tolerance.
+    pub(crate) supported_exact: bool,
+    /// Collision support including [`SUPPORT_SEAM_TOLERANCE`] dilation.
+    pub(crate) supported: bool,
+    pub(crate) obstructed: bool,
+    /// XZ distance to the nearest non-step-overable wall-like collider
+    /// triangle that reaches into the agent band here (`f32::MAX` when none
+    /// does). Below the agent radius means this point is inside an expanded
+    /// obstruction footprint.
+    pub(crate) nearest_wall_distance: f32,
+    /// That triangle's world-space vertices, so the offending collider can be
+    /// identified against the prepared placement list.
+    pub(crate) nearest_wall: Option<[[f32; 3]; 3]>,
+}
+
+/// Evaluates the walkability predicate's individual terms at each of `points`.
+/// Debug-only: the clearance pass itself never calls this.
+pub(crate) fn probe_points(
+    collision: &[CollisionTriangle],
+    params: NavClearanceParams,
+    points: &[[f32; 3]],
+) -> Vec<NavClearanceProbe> {
+    let index = CollisionIndex::build(collision, params);
+    points
+        .iter()
+        .map(|&point| {
+            let mut nearest_wall_distance = f32::MAX;
+            let mut nearest_wall = None;
+            let step_top = point[1] + params.step_height;
+            let band_high = point[1] + params.agent_height;
+            let (cell, oversized) = index.candidates(point[0], point[2], false);
+            for &i in cell.iter().chain(oversized) {
+                let aabb = index.aabbs[i as usize];
+                if aabb.max[1] <= step_top || aabb.min[1] >= band_high {
+                    continue;
+                }
+                let triangle = &index.triangles[i as usize];
+                let distance = point_triangle_dist_xz(point[0], point[2], triangle);
+                if distance < nearest_wall_distance {
+                    nearest_wall_distance = distance;
+                    nearest_wall = Some(triangle.vertices);
+                }
+            }
+            NavClearanceProbe {
+                point,
+                supported_exact: is_supported_exact(point, &index, params),
+                supported: is_supported(point, &index, params),
+                obstructed: is_obstructed(point, &index, params),
+                nearest_wall_distance,
+                nearest_wall,
+            }
+        })
+        .collect()
 }
 
 /// The re-triangulated mesh plus the clip's own per-polygon verdict.
@@ -962,7 +1051,30 @@ fn is_obstructed(point: [f32; 3], index: &CollisionIndex, params: NavClearancePa
         if point[2] < aabb.min[2] - radius || point[2] > aabb.max[2] + radius {
             continue;
         }
-        if point_triangle_dist_xz(point[0], point[2], &index.triangles[i as usize]) < radius {
+        let triangle = &index.triangles[i as usize];
+        if point_triangle_dist_xz(point[0], point[2], triangle) >= radius {
+            continue;
+        }
+        // Judge the collider against the walkable surface at *its own*
+        // footprint, not at the query point. A step is only an obstruction if
+        // the agent cannot stand on whatever is there: measured from the query
+        // point instead, every riser more than a step above the tread the
+        // agent is on reads as a wall, and since real stair runs are often
+        // shorter than the agent radius, that classifies whole staircases as
+        // walls and strands everything they serve. Measured from the riser's
+        // own footing, the next tread is one step up and the staircase stays
+        // walkable, while a wall still rises far above the floor it stands on
+        // and a crate too tall to mount still obstructs (its own top is out of
+        // reach, so its footing is the floor).
+        let [a, b, c] = triangle.vertices;
+        let footing = index
+            .highest_support_at(
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+                step_top,
+            )
+            .unwrap_or(point[1]);
+        if aabb.max[1] > footing + params.step_height {
             return true;
         }
     }
@@ -1354,6 +1466,19 @@ mod tests {
         ]
     }
 
+    /// A vertical wall quad at fixed `x`, spanning `z=[z0,z1]` from `y0` up
+    /// to `y1` -- the same shape as [`wall`], turned to face along x.
+    fn wall_along_z(x: f32, z0: f32, z1: f32, y0: f32, y1: f32) -> Vec<CollisionTriangle> {
+        vec![
+            CollisionTriangle {
+                vertices: [[x, y0, z0], [x, y0, z1], [x, y1, z1]],
+            },
+            CollisionTriangle {
+                vertices: [[x, y0, z0], [x, y1, z1], [x, y1, z0]],
+            },
+        ]
+    }
+
     fn nav_quad(x0: f32, x1: f32, z0: f32, z1: f32, y: f32) -> NavClearanceMeshInput {
         NavClearanceMeshInput {
             vertices: vec![[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
@@ -1510,6 +1635,54 @@ mod tests {
         assert!(
             walkable_at(&result, 0.3, 0.3),
             "floor a clear distance from the stub must survive: {result:?}"
+        );
+    }
+
+    /// A flight of stairs steep enough that the riser *two steps up* is still
+    /// within the agent radius while already rising more than a step height
+    /// above the tread the agent stands on. Judged from the query point, that
+    /// classifies the whole flight as wall and strands everything it serves;
+    /// judged from each riser's own footing (the tread it stands on) the
+    /// flight stays walkable and both levels stay connected. Vault 101's
+    /// stairs are this shape: the footing rule took that cell's
+    /// largest-component share from 90% to 98%.
+    /// A collider is judged against the walkable surface at *its own*
+    /// footprint, not at the query point. Here a 0.3 m riser stands on a
+    /// 0.3 m ledge the agent can step onto, so it is one step above what it
+    /// rests on -- climbable -- even though its top (0.6 m) is past the step
+    /// height measured from the query point. This is the shape every
+    /// staircase has, and measuring from the query point instead classifies
+    /// flights as walls: it cost Vault 101 8 points of largest-component
+    /// share (90% -> 98%) by stranding everything its stairs serve.
+    #[test]
+    fn a_riser_standing_on_a_reachable_ledge_is_climbable_not_an_obstruction() {
+        let mesh = nav_quad(0.0, 4.0, 0.0, 2.0, 0.0);
+        let mut collision = floor(-1.0, 5.0, -1.0, 3.0, 0.0);
+        // The ledge the riser stands on, one step up and within reach.
+        collision.extend(floor(2.0, 5.0, -1.0, 3.0, 0.3));
+        // The riser itself: from the ledge top up another step.
+        collision.extend(wall_along_z(2.0, -1.0, 3.0, 0.3, 0.6));
+        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        assert_eq!(result.cut_obstructed, 0, "{result:?}");
+        assert!(
+            walkable_at(&result, 1.8, 1.0),
+            "floor right up against a climbable riser stays walkable: {result:?}"
+        );
+    }
+
+    /// The same riser with nothing to stand on at its footprint: it rises
+    /// 0.6 m straight off the floor, past the step height, so it obstructs
+    /// and its agent-radius margin is clipped away.
+    #[test]
+    fn the_same_riser_with_no_footing_obstructs() {
+        let mesh = nav_quad(0.0, 4.0, 0.0, 2.0, 0.0);
+        let mut collision = floor(-1.0, 5.0, -1.0, 3.0, 0.0);
+        collision.extend(wall_along_z(2.0, -1.0, 3.0, 0.3, 0.6));
+        let result = validate_and_clear(&mesh, &collision, NavClearanceParams::default());
+        assert!(result.cut_obstructed > 0, "{result:?}");
+        assert!(
+            !walkable_at(&result, 1.8, 1.0),
+            "floor inside the riser's agent-radius margin is clipped: {result:?}"
         );
     }
 

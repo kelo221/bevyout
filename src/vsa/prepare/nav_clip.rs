@@ -89,7 +89,14 @@ pub(crate) struct ClipParams {
     /// Bisection iterations used to locate a boundary crossing on an edge.
     pub(crate) bisection_steps: u32,
     /// Sub-triangles with a smaller XZ area (square metres) are dropped as
-    /// slivers.
+    /// numerically degenerate.
+    ///
+    /// This is a *degeneracy* epsilon, not a shape filter. Discarding a piece
+    /// punches a hole in the conformal cover, and a hole between two walkable
+    /// pieces severs their adjacency exactly as if a wall stood there -- which
+    /// is how a geometric threshold here silently disconnects a physically
+    /// clear corridor. Anything with real area is kept however thin it is;
+    /// landmass excludes repeated-index triangles on its own.
     pub(crate) min_area: f32,
 }
 
@@ -99,7 +106,7 @@ impl Default for ClipParams {
             resolution: 0.35,
             max_refinement_rounds: 4,
             bisection_steps: 10,
-            min_area: 1.0e-4,
+            min_area: 1.0e-9,
         }
     }
 }
