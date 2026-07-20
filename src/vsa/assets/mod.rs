@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod actor_animation;
 mod archives;
 mod blender;
 mod cache;
@@ -10,6 +11,7 @@ mod material_glb;
 mod material_policy;
 mod textures;
 
+pub(crate) use actor_animation::*;
 pub(crate) use archives::*;
 pub(crate) use blender::*;
 pub(crate) use cache::*;

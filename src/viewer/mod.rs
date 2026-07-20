@@ -47,6 +47,7 @@ pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
 
 mod actor;
 mod animation;
+mod animation_zoo;
 mod audio;
 mod interaction;
 mod inventory;
@@ -74,6 +75,7 @@ mod performance_policy;
 mod ragdoll_lab;
 mod scene;
 
+pub use animation_zoo::animation_zoo;
 pub(crate) use app::run_view;
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
@@ -301,6 +303,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         cell: None,
         blender: args.blender.clone(),
         converter: args.converter,
+        actor_animation_converter: crate::cli::ActorAnimationConverter::Disabled,
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
         rebuild_shadows: args.rebuild_shadows,

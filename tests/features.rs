@@ -244,6 +244,10 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod actor_appearance;
 
+    #[path = "../src/vsa/prepare/actor_animation_cache.rs"]
+    #[allow(dead_code, unused_imports)]
+    pub mod actor_animation_cache;
+
     // `vsa::prepare::nav_graph` (issue #111, M4 wave 2) reuses
     // `vsa::paths::{FO3_SCALE, fingerprint}` via relative `super::super::`
     // imports, so it is nested here too -- same pattern as `actor_catalog`
@@ -253,6 +257,7 @@ mod prepare {
     #[allow(dead_code, unused_imports)]
     pub mod nav_graph;
 }
+use prepare::actor_animation_cache;
 use prepare::actor_appearance;
 use prepare::actor_catalog;
 use prepare::batch_cache;
@@ -361,6 +366,7 @@ mod recipe_policy;
 
 use assets::AssetConversion;
 use bevyout_core::actor;
+use bevyout_core::actor_animation;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -706,7 +712,6 @@ struct BevyoutWorld {
     actor_fallback_input: actor::ActorAppearanceAvailability,
     actor_fallback_supplied_reasons: Vec<actor::ActorFallbackReason>,
     actor_fallback_decision: Option<actor::ActorFallbackDecision>,
-
     // -- nav_stuck_progress.feature (issue #157) --
     nav_stuck_progress_desired: [f32; 2],
     nav_stuck_progress_achieved: [f32; 2],
@@ -731,6 +736,20 @@ struct BevyoutWorld {
     nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
     nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
     nav_door_topology_point: Option<[f32; 3]>,
+    // -- actor_animation_catalog.feature / actor_animation_conversion.feature
+    // (issue #104, M4 wave 10): append-only shared seam. --
+    npc_kffz_payload: Vec<u8>,
+    creature_kffz_payload: Vec<u8>,
+    npc_kffz_paths: Vec<String>,
+    creature_kffz_paths: Vec<String>,
+    actor_animation_discovery_inputs: Vec<actor_animation::ActorAnimationDiscoveryInput>,
+    actor_animation_assets: Vec<actor_animation::ActorAnimationAsset>,
+    actor_animation_catalog: Option<actor_animation::PreparedActorAnimationCatalog>,
+    requested_actor_animation_converter: Option<converter_policy::ActorAnimationBackend>,
+    resolved_actor_animation_converter: Option<converter_policy::ActorAnimationBackend>,
+    actor_animation_pack_cache_state: actor_animation_cache::ActorAnimationPackCacheState,
+    actor_animation_pack_cache_decision:
+        Option<actor_animation_cache::ActorAnimationPackCacheDecision>,
 
     // -- nav_fall_guard.feature (issue #164) --
     nav_fall_guard_bounds_min_y: Option<f32>,
@@ -8188,6 +8207,315 @@ async fn then_fallback_identity_remains(
     assert_eq!(decision.base_form_id, parse_hex(&base_form_id));
     assert_eq!(decision.reference_form_id, parse_hex(&reference_form_id));
 }
+// ---------------------------------------------------------------------
+// actor_animation_catalog.feature -- appended section, do not interleave.
+// ---------------------------------------------------------------------
+
+fn decode_kffz_fixture(encoded: &str) -> Vec<u8> {
+    let encoded = encoded.replace("\\\\0", "\0").replace("\\\\", "\\");
+    encoded.into_bytes()
+}
+
+#[given(regex = r#"^an NPC KFFZ payload \"([^\"]*)\"$"#)]
+async fn given_npc_kffz_payload(world: &mut BevyoutWorld, payload: String) {
+    world.npc_kffz_payload = decode_kffz_fixture(&payload);
+}
+
+#[given(regex = r#"^a creature KFFZ payload \"([^\"]*)\"$"#)]
+async fn given_creature_kffz_payload(world: &mut BevyoutWorld, payload: String) {
+    world.creature_kffz_payload = decode_kffz_fixture(&payload);
+}
+
+#[when("the actor animation payloads are decoded")]
+async fn when_actor_animation_payloads_are_decoded(world: &mut BevyoutWorld) {
+    world.npc_kffz_paths = actor_animation::decode_kffz(&world.npc_kffz_payload).paths;
+    world.creature_kffz_paths = actor_animation::decode_kffz(&world.creature_kffz_payload).paths;
+}
+
+#[then(regex = r#"^the NPC animation paths are \"([^\"]*)\"$"#)]
+async fn then_npc_animation_paths(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.npc_kffz_paths.join(","), expected);
+}
+
+#[then(regex = r#"^the creature animation paths are \"([^\"]*)\"$"#)]
+async fn then_creature_animation_paths(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(world.creature_kffz_paths.join(","), expected);
+}
+
+#[given(
+    regex = r#"^actor animation source 0x([0-9a-fA-F]+) uses skeleton \"([^\"]*)\" and clips \"([^\"]*)\"$"#
+)]
+async fn given_actor_animation_source(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    skeleton: String,
+    clips: String,
+) {
+    let form_id = parse_hex(&form_hex);
+    let actor = actor_catalog::ActorRecordInput {
+        form_id,
+        kind: actor_catalog::ActorRecordKind::Npc,
+        model_animation: actor_catalog::ActorModelAnimation {
+            model_path: Some(skeleton),
+            animation_files: clips
+                .split(',')
+                .filter(|clip| !clip.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    world.actor_catalog_inputs.actors.insert(form_id, actor);
+    world
+        .actor_catalog_inputs
+        .placements
+        .push(actor_catalog::ActorPlacementInput {
+            reference_form_id: form_id,
+            base_form_id: form_id,
+            kind: actor_catalog::ActorRecordKind::Npc,
+            ..Default::default()
+        });
+}
+
+#[given(
+    regex = r"^actor animation source 0x([0-9a-fA-F]+) inherits model animation from 0x([0-9a-fA-F]+)$"
+)]
+async fn given_actor_animation_source_inherits(
+    world: &mut BevyoutWorld,
+    actor_hex: String,
+    template_hex: String,
+) {
+    let actor = actor_catalog_actor_mut(world, parse_hex(&actor_hex));
+    actor.base_template_form_id = Some(parse_hex(&template_hex));
+    actor.template_usage.model_animation = true;
+}
+
+#[when("actor animation sources are resolved")]
+async fn when_actor_animation_sources_are_resolved(world: &mut BevyoutWorld) {
+    world.actor_catalog_result = Some(actor_catalog::build_actor_catalog(
+        &world.actor_catalog_inputs,
+        "animation-fixture",
+    ));
+}
+
+#[then(regex = r#"^actor animation source 0x([0-9a-fA-F]+) resolves clips \"([^\"]*)\"$"#)]
+async fn then_actor_animation_source_resolves_clips(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    assert_eq!(
+        actor_catalog_blueprint(world, &reference_hex)
+            .animation_candidates
+            .join(","),
+        expected
+    );
+}
+
+#[given(
+    regex = r#"^animation actor reference 0x([0-9a-fA-F]+) base 0x([0-9a-fA-F]+) model \"([^\"]*)\" skeleton \"([^\"]*)\" explicit clips \"([^\"]*)\"$"#
+)]
+async fn given_animation_actor_reference(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    model_path: String,
+    skeleton_path: String,
+    clips: String,
+) {
+    world
+        .actor_animation_discovery_inputs
+        .push(actor_animation::ActorAnimationDiscoveryInput {
+            reference_form_id: parse_hex(&reference_hex),
+            base_form_id: parse_hex(&base_hex),
+            kind: if model_path.to_ascii_lowercase().contains("creatures/") {
+                actor_animation::PreparedActorAnimationKind::Creature
+            } else {
+                actor_animation::PreparedActorAnimationKind::Npc
+            },
+            model_path,
+            skeleton_fingerprint: format!("skeleton-{skeleton_path}"),
+            skeleton_path,
+            explicit_kf_paths: clips
+                .split(',')
+                .filter(|clip| !clip.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            default_directories: Vec::new(),
+        });
+}
+
+#[given(regex = r#"^available KF assets \"([^\"]*)\"$"#)]
+async fn given_available_kf_assets(world: &mut BevyoutWorld, encoded: String) {
+    world.actor_animation_assets = encoded
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (path, fingerprint_and_state) = entry
+                .split_once('@')
+                .expect("KF asset fixture must be path@fingerprint");
+            let (fingerprint, state) = match fingerprint_and_state.split_once('!') {
+                Some((fingerprint, "malformed")) => (
+                    fingerprint,
+                    actor_animation::ActorAnimationAssetState::Malformed(
+                        "synthetic malformed KF".to_owned(),
+                    ),
+                ),
+                Some((fingerprint, "incompatible")) => (
+                    fingerprint,
+                    actor_animation::ActorAnimationAssetState::Incompatible(
+                        "synthetic skeleton mismatch".to_owned(),
+                    ),
+                ),
+                Some((_, other)) => panic!("unknown KF asset fixture state {other}"),
+                None => (
+                    fingerprint_and_state,
+                    actor_animation::ActorAnimationAssetState::Compatible,
+                ),
+            };
+            actor_animation::ActorAnimationAsset {
+                path: path.to_owned(),
+                fingerprint: fingerprint.to_owned(),
+                state,
+            }
+        })
+        .collect();
+}
+
+#[when("the prepared actor animation catalog is built")]
+async fn when_prepared_actor_animation_catalog_is_built(world: &mut BevyoutWorld) {
+    world.actor_animation_catalog = Some(actor_animation::build_actor_animation_catalog(
+        "actor-animations-v1",
+        "fixture-content",
+        &world.actor_animation_discovery_inputs,
+        &world.actor_animation_assets,
+    ));
+}
+
+fn actor_animation_set_for_reference<'a>(
+    world: &'a BevyoutWorld,
+    reference_hex: &str,
+) -> &'a actor_animation::PreparedActorAnimationSet {
+    let reference_form_id = parse_hex(reference_hex);
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    let mapping = catalog
+        .actor_mappings
+        .iter()
+        .find(|mapping| mapping.reference_form_id == reference_form_id)
+        .expect("actor animation mapping must exist");
+    catalog
+        .animation_sets
+        .iter()
+        .find(|set| set.id == mapping.animation_set_id)
+        .expect("mapped actor animation set must exist")
+}
+
+#[then(regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has source paths \"([^\"]*)\"$"#)]
+async fn then_animation_set_source_paths(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let actual = actor_animation_set_for_reference(world, &reference_hex)
+        .clips
+        .iter()
+        .map(|clip| clip.source_kf_path.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has clip names \"([^\"]*)\"$"#)]
+async fn then_animation_set_clip_names(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let actual = actor_animation_set_for_reference(world, &reference_hex)
+        .clips
+        .iter()
+        .map(|clip| clip.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[then(regex = r"^animation set for reference 0x([0-9a-fA-F]+) contains (\d+) ready clip$")]
+async fn then_animation_set_ready_count(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: usize,
+) {
+    assert_eq!(
+        actor_animation_set_for_reference(world, &reference_hex)
+            .clips
+            .iter()
+            .filter(|clip| {
+                clip.status == actor_animation::PreparedActorAnimationClipStatus::Ready
+            })
+            .count(),
+        expected
+    );
+}
+
+#[then(
+    regex = r#"^animation set for reference 0x([0-9a-fA-F]+) has diagnostic codes \"([^\"]*)\"$"#
+)]
+async fn then_animation_set_diagnostic_codes(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    expected: String,
+) {
+    let mut actual = actor_animation_set_for_reference(world, &reference_hex)
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.clone())
+        .collect::<Vec<_>>();
+    actual.sort();
+    actual.dedup();
+    assert_eq!(actual.join(","), expected);
+}
+
+#[then(
+    regex = r"^the prepared actor animation catalog has (\d+) actor mappings and (\d+) animation set$"
+)]
+async fn then_prepared_actor_animation_catalog_counts(
+    world: &mut BevyoutWorld,
+    mappings: usize,
+    sets: usize,
+) {
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    assert_eq!(catalog.actor_mappings.len(), mappings);
+    assert_eq!(catalog.animation_sets.len(), sets);
+}
+
+#[then(regex = r"^references 0x([0-9a-fA-F]+) and 0x([0-9a-fA-F]+) use the same animation set$")]
+async fn then_references_use_same_animation_set(
+    world: &mut BevyoutWorld,
+    left_hex: String,
+    right_hex: String,
+) {
+    let catalog = world
+        .actor_animation_catalog
+        .as_ref()
+        .expect("actor animation catalog must be built first");
+    let set_id = |form_id| {
+        catalog
+            .actor_mappings
+            .iter()
+            .find(|mapping| mapping.reference_form_id == form_id)
+            .map(|mapping| mapping.animation_set_id.as_str())
+            .expect("actor animation mapping must exist")
+    };
+    assert_eq!(set_id(parse_hex(&left_hex)), set_id(parse_hex(&right_hex)));
+}
 
 // ---------------------------------------------------------------------
 // nav_portals.feature (issue #154, M4 wave 8) -- appended section, do not
@@ -8693,7 +9021,118 @@ async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32
         "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
     );
 }
+// ---------------------------------------------------------------------
+// actor_animation_conversion.feature (issue #104, M4 wave 10) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
 
+#[given("no scene converter is requested for actor animation preparation")]
+async fn given_no_scene_converter_for_actor_animation(world: &mut BevyoutWorld) {
+    world.requested_converter = None;
+}
+
+#[given("no actor animation converter is requested")]
+async fn given_no_actor_animation_converter(world: &mut BevyoutWorld) {
+    world.requested_actor_animation_converter = None;
+}
+
+#[given(regex = r#"^the \"([^\"]*)\" actor animation converter is requested$"#)]
+async fn given_actor_animation_converter(world: &mut BevyoutWorld, converter: String) {
+    world.requested_actor_animation_converter = Some(match converter.as_str() {
+        "disabled" => converter_policy::ActorAnimationBackend::Disabled,
+        "native" => converter_policy::ActorAnimationBackend::Native,
+        "blender" => converter_policy::ActorAnimationBackend::Blender,
+        other => panic!("unknown actor animation converter {other:?}"),
+    });
+}
+
+#[given("an actor animation clip pack has an output and report that both validate")]
+async fn given_valid_actor_animation_clip_pack(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.output_present = true;
+    world.actor_animation_pack_cache_state.report_present = true;
+    world.actor_animation_pack_cache_state.validation_passed = true;
+}
+
+#[given("actor animation clip-pack rebuild is not requested")]
+async fn given_actor_animation_rebuild_not_requested(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.rebuild_requested = false;
+}
+
+#[given("actor animation clip-pack rebuild is requested")]
+async fn given_actor_animation_rebuild_requested(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_state.rebuild_requested = true;
+}
+
+#[when("the actor animation converter selections are resolved")]
+async fn when_actor_animation_converter_selections_resolved(world: &mut BevyoutWorld) {
+    world.resolved_converter = Some(converter_policy::resolve_converter_backend(
+        world.requested_converter,
+    ));
+    world.resolved_actor_animation_converter =
+        Some(converter_policy::resolve_actor_animation_backend(
+            world.requested_actor_animation_converter,
+        ));
+}
+
+#[when("the actor animation clip-pack cache decision is made")]
+async fn when_actor_animation_pack_cache_decision_is_made(world: &mut BevyoutWorld) {
+    world.actor_animation_pack_cache_decision =
+        Some(actor_animation_cache::actor_animation_pack_cache_decision(
+            world.actor_animation_pack_cache_state,
+        ));
+}
+
+#[then(regex = r#"^the selected scene converter is \"([^\"]*)\"$"#)]
+async fn then_selected_scene_converter(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_converter
+            .expect("scene converter must be resolved")
+            .as_str(),
+        expected
+    );
+}
+
+#[then(regex = r#"^the selected actor animation converter is \"([^\"]*)\"$"#)]
+async fn then_selected_actor_animation_converter(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+            .as_str(),
+        expected
+    );
+}
+
+#[then("actor animation preparation requires Blender")]
+async fn then_actor_animation_preparation_requires_blender(world: &mut BevyoutWorld) {
+    assert!(converter_policy::actor_animation_backend_requires_blender(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+    ));
+}
+
+#[then("actor animation preparation does not require Blender")]
+async fn then_actor_animation_preparation_does_not_require_blender(world: &mut BevyoutWorld) {
+    assert!(!converter_policy::actor_animation_backend_requires_blender(
+        world
+            .resolved_actor_animation_converter
+            .expect("actor animation converter must be resolved")
+    ));
+}
+
+#[then(regex = r#"^the actor animation clip-pack cache decision is \"([^\"]*)\"$"#)]
+async fn then_actor_animation_pack_cache_decision(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world
+        .actor_animation_pack_cache_decision
+        .expect("actor animation cache decision must be made")
+    {
+        actor_animation_cache::ActorAnimationPackCacheDecision::Reuse => "reuse",
+        actor_animation_cache::ActorAnimationPackCacheDecision::Build => "build",
+    };
+    assert_eq!(actual, expected);
+}
 // =====================================================================
 // nav_fall_guard.feature (issue #164) -- appended step section.
 //

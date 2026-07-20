@@ -6298,6 +6298,9 @@ mod tests {
             actor_catalog_path: None,
             actor_catalog_revision: None,
             actor_catalog_hash: None,
+            actor_animation_catalog_path: None,
+            actor_animation_catalog_revision: None,
+            actor_animation_catalog_hash: None,
             source_plugins: Vec::new(),
             visual_issues: Vec::new(),
             cell: crate::vsa::CellInfo {
