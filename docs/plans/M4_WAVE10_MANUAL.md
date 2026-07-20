@@ -127,6 +127,9 @@ machine that is:
    sideways/jittering control-point jumps from the stale v4 pack. Open `Debug`
    and scroll the pane to confirm the source range, controller/interpolator
    metadata, blend base, ground offset, and recent events remain readable.
+   If the old pack is still present, the zoo exits before opening a window with
+   an explicit `native actor animation pack revision ... is stale` message;
+   repeat step 1 rather than inspecting that stale asset.
 
 ## C. See and control a real humanoid KF
 

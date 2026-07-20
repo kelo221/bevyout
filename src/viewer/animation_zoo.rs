@@ -12,6 +12,7 @@ use bevy::camera::primitives::Aabb;
 use bevy::gltf::{Gltf, GltfAssetLabel, GltfNode};
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::ui_widgets::ScrollArea;
 use bevy::window::PrimaryWindow;
 use bevyout_core::actor_animation::{
     PreparedActorAnimationCatalog, PreparedActorAnimationClip, PreparedActorAnimationClipStatus,
@@ -23,7 +24,8 @@ use serde::Serialize;
 
 use crate::cli::AnimationZooArgs;
 use crate::vsa::{
-    PreparedPlacement, PreparedSceneManifest, PreparedSemantic, find_cached_manifest, fingerprint,
+    ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION, PreparedPlacement, PreparedSceneManifest,
+    PreparedSemantic, find_cached_manifest, fingerprint,
 };
 
 use super::agent_bridge::AnimationZooAgentBridgePlugin;
@@ -35,7 +37,7 @@ use policy::{ZooControlAction, ZooPlaybackPolicy};
 
 const FLOOR_CENTER: Vec3 = Vec3::new(0.0, -0.25, 0.0);
 const ZOO_CAMERA_TARGET: Vec3 = Vec3::new(0.0, 1.0, 0.0);
-const ZOO_PANEL_WIDTH: f32 = 440.0;
+const ZOO_PANEL_WIDTH: f32 = 520.0;
 
 pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
     let cache_dir = args
@@ -87,6 +89,7 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
         &asset_root.join(&clip_pack_path),
         "actor animation clip pack",
     )?;
+    validate_clip_pack_revision(&asset_root, &clip_pack_path)?;
 
     let compatible_clips = set
         .clips
@@ -161,7 +164,6 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
                 zoo_ui_interactions,
                 keyboard_controls,
                 zoo_view_controls,
-                zoo_ui_scroll,
                 drive_playback,
                 apply_zoo_view,
                 update_probe,
@@ -247,6 +249,27 @@ fn require_file(path: &Path, label: &str) -> Result<()> {
     }
 }
 
+fn validate_clip_pack_revision(asset_root: &Path, clip_pack_path: &str) -> Result<()> {
+    let report_path = asset_root.join(clip_pack_path).with_extension("json");
+    let Ok(report) = fs::read_to_string(&report_path) else {
+        return Ok(());
+    };
+    let Ok(report) = serde_json::from_str::<serde_json::Value>(&report) else {
+        return Ok(());
+    };
+    let Some(revision) = report.get("revision").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    if revision.starts_with("nifty-native-kf-clip-pack-")
+        && revision != ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION
+    {
+        bail!(
+            "native actor animation pack revision '{revision}' is stale; rerun prepare with --actor-animation-converter native --rebuild-assets"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Resource)]
 struct AnimationZooDefinition {
     actor_form_id: u32,
@@ -298,6 +321,7 @@ struct ZooRetargetTarget {
 struct AnimationZooRuntime {
     phase: ZooPhase,
     actor_root: Option<Entity>,
+    asset_root: Option<Entity>,
     player: Option<Entity>,
     pack: Option<Handle<Gltf>>,
     pack_targets: Vec<PackTarget>,
@@ -459,18 +483,29 @@ fn spawn_zoo(
         Transform::from_xyz(4.8, 3.0, 6.2).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
         ZooCamera,
     ));
+    // Keep a stable wrapper above the imported WorldAsset. Some NIF-derived
+    // GLBs contain an internal scene root whose serialized hierarchy must not
+    // become the transform authority for the pedestal actor.
     let root = commands
+        .spawn((
+            Transform::from_scale(Vec3::splat(definition.root_scale)),
+            Visibility::default(),
+            AnimationPlayer::default(),
+            ZooActorRoot,
+        ))
+        .id();
+    let asset_root = commands
         .spawn((
             WorldAssetRoot(
                 asset_server
                     .load(GltfAssetLabel::Scene(0).from_asset(definition.appearance_path.clone())),
             ),
-            Transform::from_scale(Vec3::splat(definition.root_scale)),
-            AnimationPlayer::default(),
-            ZooActorRoot,
+            Transform::IDENTITY,
+            ChildOf(root),
         ))
         .id();
     runtime.actor_root = Some(root);
+    runtime.asset_root = Some(asset_root);
     let pack = asset_server.load::<Gltf>(definition.clip_pack_path.clone());
     runtime.pack = Some(pack);
     spawn_zoo_ui(&mut commands, &definition);
@@ -591,15 +626,16 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                 .spawn((
                     Node {
                         min_height: px(0),
-                        max_height: px(380),
+                        max_height: px(520),
                         width: percent(100),
                         padding: UiRect::all(px(6)),
                         overflow: Overflow::scroll_y(),
+                        display: Display::None,
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.01, 0.015, 0.025, 0.96)),
                     ZooDebugPanel,
-                    ScrollPosition::default(),
+                    ScrollArea,
                     Visibility::Hidden,
                 ))
                 .with_child((
@@ -607,7 +643,7 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                     ZooDebugText,
                     TextColor(Color::srgb(0.68, 0.76, 0.88)),
                     TextFont {
-                        font_size: FontSize::Px(13.0),
+                        font_size: FontSize::Px(14.0),
                         ..default()
                     },
                 ));
@@ -629,7 +665,7 @@ fn spawn_zoo_ui(commands: &mut Commands, definition: &AnimationZooDefinition) {
                     row_gap: px(2),
                     ..default()
                 })
-                .insert((ZooClipList, ScrollPosition::default()))
+                .insert((ZooClipList, ScrollArea))
                 .with_children(|list| {
                     for (index, clip) in definition.clips.iter().enumerate() {
                         list.spawn((
@@ -696,6 +732,27 @@ fn descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
         }
     }
     output
+}
+
+/// Return the lowest world-space point of an entity's local-space AABB.
+///
+/// A skinned mesh's `Aabb` remains its bind-pose bound, but using all eight
+/// corners still matters for articulated static nodes: rotating a node changes
+/// its world-space vertical extent, which the old center/scale shortcut missed.
+fn aabb_min_y(global: &GlobalTransform, aabb: &Aabb) -> f32 {
+    let center = Vec3::from(aabb.center);
+    let half_extents = Vec3::from(aabb.half_extents);
+    let mut minimum = f32::INFINITY;
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            for z in [-1.0, 1.0] {
+                let local =
+                    center + Vec3::new(x * half_extents.x, y * half_extents.y, z * half_extents.z);
+                minimum = minimum.min(global.transform_point(local).y);
+            }
+        }
+    }
+    minimum
 }
 
 fn collect_pack_target_paths(
@@ -904,9 +961,7 @@ fn resolve_animation_zoo(
         .filter_map(|entity| {
             let aabb = aabbs.get(*entity).ok()?;
             let global = global_transforms.get(*entity).ok()?;
-            let center = global.transform_point(Vec3::from(aabb.center));
-            let (scale, _, _) = global.to_scale_rotation_translation();
-            Some(center.y - aabb.half_extents.y * scale.y.abs())
+            Some(aabb_min_y(global, aabb))
         })
         .reduce(f32::min);
     runtime.ground_offset = min_y.map_or(0.0, |value| -value + 0.015);
@@ -1062,9 +1117,12 @@ fn source_clip_transform(
     target: AnimationTargetId,
     time: f32,
     rest: Transform,
+    hold_root_motion: bool,
 ) -> Transform {
     let mut transform = rest;
-    if let Some(value) = clip.sample_clamped(animated_field!(Transform::translation), target, time)
+    if !hold_root_motion
+        && let Some(value) =
+            clip.sample_clamped(animated_field!(Transform::translation), target, time)
     {
         transform.translation = value;
     }
@@ -1084,15 +1142,18 @@ fn source_clip_transform_over_base(
     base_time: f32,
     selected_time: f32,
     rest: Transform,
+    hold_root_motion: bool,
 ) -> Transform {
     let mut transform = base_clip
-        .map(|clip| source_clip_transform(clip, target, base_time, rest))
+        .map(|clip| source_clip_transform(clip, target, base_time, rest, hold_root_motion))
         .unwrap_or(rest);
-    if let Some(value) = selected_clip.sample_clamped(
-        animated_field!(Transform::translation),
-        target,
-        selected_time,
-    ) {
+    if !hold_root_motion
+        && let Some(value) = selected_clip.sample_clamped(
+            animated_field!(Transform::translation),
+            target,
+            selected_time,
+        )
+    {
         transform.translation = value;
     }
     if let Some(value) =
@@ -1161,9 +1222,17 @@ fn retarget_animation_zoo(
             0.0
         }
     });
+    let accumulation_root = clip_info
+        .catalog
+        .accumulation_root
+        .as_deref()
+        .map(animation_node_name_key);
 
     let mut source_globals = vec![Mat4::IDENTITY; runtime.pack_targets.len()];
     for (index, target) in runtime.pack_targets.iter().enumerate() {
+        let hold_root_motion = accumulation_root.as_deref().is_some_and(|root| {
+            target.name_key == root || target.name_key == format!("{root} nonaccum")
+        });
         let local = source_clip_transform_over_base(
             base_clip,
             clip,
@@ -1171,6 +1240,7 @@ fn retarget_animation_zoo(
             base_time,
             time,
             target.rest_local,
+            hold_root_motion,
         );
         source_globals[index] = target
             .parent
@@ -1293,49 +1363,31 @@ fn zoo_view_controls(
 }
 
 #[allow(clippy::type_complexity)]
-fn zoo_ui_scroll(
-    mut wheel: MessageReader<MouseWheel>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut scrollables: Query<(
-        &ComputedNode,
-        &UiGlobalTransform,
-        &mut ScrollPosition,
-        Option<&ZooDebugPanel>,
-        Option<&ZooClipList>,
-    )>,
-) {
-    let Some(cursor) = windows.single().ok().and_then(Window::cursor_position) else {
-        wheel.clear();
-        return;
-    };
-    let events = wheel.read().collect::<Vec<_>>();
-    if events.is_empty() {
-        return;
-    }
-    for (node, transform, mut position, debug, clips) in &mut scrollables {
-        if (debug.is_none() && clips.is_none()) || !node.contains_point(*transform, cursor) {
-            continue;
-        }
-        let delta = events.iter().fold(0.0, |total, event| {
-            total
-                + event.y
-                    * match event.unit {
-                        MouseScrollUnit::Line => 28.0,
-                        MouseScrollUnit::Pixel => 1.0,
-                    }
-        });
-        let max_scroll = (node.content_size().y - node.size().y).max(0.0);
-        position.y = (position.y - delta).clamp(0.0, max_scroll);
-    }
-}
-
 fn apply_zoo_view(
     runtime: Res<AnimationZooRuntime>,
     view: Res<AnimationZooViewState>,
     mut cameras: Query<&mut Transform, With<ZooCamera>>,
-    mut actors: Query<&mut Transform, (With<ZooActorRoot>, Without<ZooCamera>)>,
+    mut actors: Query<
+        &mut Transform,
+        (
+            With<ZooActorRoot>,
+            Without<ZooCamera>,
+            Without<WorldAssetRoot>,
+        ),
+    >,
+    mut assets: Query<
+        &mut Transform,
+        (
+            With<WorldAssetRoot>,
+            Without<ZooActorRoot>,
+            Without<ZooCamera>,
+        ),
+    >,
 ) {
-    let target = ZOO_CAMERA_TARGET + Vec3::Y * runtime.ground_offset;
+    // Keep the camera target in pedestal/world space. The imported asset's
+    // bind-pose offset is applied to the asset root below; following that
+    // correction with the camera would put the camera below the floor.
+    let target = ZOO_CAMERA_TARGET;
     let horizontal = view.camera_pitch.cos() * view.camera_distance;
     let camera_position = target
         + Vec3::new(
@@ -1347,8 +1399,14 @@ fn apply_zoo_view(
         *camera = Transform::from_translation(camera_position).looking_at(target, Vec3::Y);
     }
     if let Ok(mut actor) = actors.single_mut() {
-        actor.translation.y = runtime.ground_offset;
-        actor.rotation = Quat::from_rotation_y(view.actor_yaw);
+        actor.translation.y = 0.0;
+        actor.rotation = Quat::IDENTITY;
+    }
+    if let Some(asset_root) = runtime.asset_root
+        && let Ok(mut asset) = assets.get_mut(asset_root)
+    {
+        asset.translation.y = runtime.ground_offset;
+        asset.rotation = Quat::from_rotation_y(view.actor_yaw);
     }
 }
 
@@ -1522,7 +1580,7 @@ fn update_zoo_ui(
         Query<&mut Text, With<ZooSelectionText>>,
         Query<&mut Text, With<ZooDebugText>>,
     )>,
-    mut debug_panel: Single<&mut Visibility, With<ZooDebugPanel>>,
+    debug_panel: Single<(&mut Visibility, &mut Node), With<ZooDebugPanel>>,
     mut clip_rows: Query<(&ZooClipButton, &mut BackgroundColor)>,
 ) {
     let clip = runtime
@@ -1558,10 +1616,16 @@ fn update_zoo_ui(
     if let Ok(mut selection) = texts.p1().single_mut() {
         selection.0 = selection_text;
     }
-    **debug_panel = if view.debug_visible {
+    let (mut debug_visibility, mut debug_node) = debug_panel.into_inner();
+    *debug_visibility = if view.debug_visible {
         Visibility::Inherited
     } else {
         Visibility::Hidden
+    };
+    debug_node.display = if view.debug_visible {
+        Display::Flex
+    } else {
+        Display::None
     };
     if view.debug_visible {
         let diagnostics = clip
@@ -1723,6 +1787,18 @@ mod tests {
             "bip01 r finger1"
         );
         assert_eq!(animation_node_name_key("Weapon"), "weapon");
+    }
+
+    #[test]
+    fn aabb_min_y_uses_all_transformed_corners() {
+        let global = GlobalTransform::from(Transform::from_rotation(Quat::from_rotation_z(
+            std::f32::consts::FRAC_PI_2,
+        )));
+        let aabb = Aabb {
+            center: Vec3A::ZERO,
+            half_extents: Vec3A::new(2.0, 1.0, 3.0),
+        };
+        assert!((aabb_min_y(&global, &aabb) + 2.0).abs() < 1e-5);
     }
 
     #[test]

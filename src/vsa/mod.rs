@@ -64,6 +64,7 @@ pub(crate) use physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsShape,
     PreparedPhysicsSource, body_blocks_player, read_physics_asset,
 };
+pub(crate) use prepare::ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION;
 pub(crate) use prepare::ITEM_CATALOG_REVISION;
 // Issue #128's `tnm` console command decodes `navgraph.ron` (issue #111)
 // straight into these types -- see `viewer::nav_overlay`.

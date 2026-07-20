@@ -247,4 +247,8 @@ appropriate for keeping those contracts aligned.
   `ScrollPosition` and consume wheel input over the hovered pane. Low-target
   AimUp/AimDown and matching partial weapon overlays are sampled over their
   paired full-body clip; the probe and selection line identify the blend base.
-  The selected clip still holds at its end unless catalog cycling is enabled.
+  Exact bind-pose AABB corners establish one stable pedestal offset; imported
+  root motion is held at the accumulation roots for this inspection view, and
+  the zoo refuses stale native v1-v4 sidecars with a direct rebuild
+  instruction. The selected clip still holds at its end unless catalog cycling
+  is enabled.
