@@ -8269,6 +8269,40 @@ mod tests {
             })
             .unwrap_or_default();
         let mut wedge = build_wedge_world(&scene, &skip);
+        {
+            let mover = fixture_capsule();
+            let cf = player::player_collision_filter();
+            for (label, probe) in [
+                ("spawn", start + Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0)),
+                ("target", target + Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0)),
+            ] {
+                let bp = player::to_box_vec3(probe);
+                let planes = wedge
+                    .world
+                    .collide_mover(bp, &mover, cf)
+                    .unwrap_or_default();
+                let ground = wedge
+                    .world
+                    .cast_mover(bp, &mover, boxddd::Vec3::new(0.0, -1.2, 0.0), cf)
+                    .unwrap_or(1.0);
+                println!(
+                    "{label} ({:.2},{:.2},{:.2}): contacts={} ground_cast={ground:.3}",
+                    probe.x,
+                    probe.y,
+                    probe.z,
+                    planes.len()
+                );
+                for plane in planes.iter().take(4) {
+                    println!(
+                        "    n=({:.2},{:.2},{:.2}) <- {}",
+                        plane.plane.normal.x,
+                        plane.plane.normal.y,
+                        plane.plane.normal.z,
+                        wedge.owner(plane.shape_id)
+                    );
+                }
+            }
+        }
         println!("cooked {} shapes (skipped {skip:08x?})", wedge.owners.len());
 
         let mover = fixture_capsule();
@@ -8337,41 +8371,5 @@ mod tests {
             .cast_mover(box_pos, &mover, delta, collision_filter)
             .unwrap_or(1.0);
         println!("forward sweep fraction={fraction:.4} (1.0 = unobstructed)");
-
-        // Occupancy map of the local walkable band: '.' = capsule fits,
-        // otherwise the initial of the placement blocking it.
-        println!(
-            "occupancy (rows z, cols x), capsule centre at floor+{:.2}",
-            AGENT_HEIGHT / 2.0
-        );
-        let mut header = String::from("        ");
-        let mut x = start.x - 6.0;
-        while x <= start.x + 2.0 {
-            header.push_str(&format!("{:<4.0}", x));
-            x += 0.25;
-        }
-        println!("{header}");
-        let mut z = start.z - 4.0;
-        while z <= start.z + 4.0 {
-            let mut row = format!("z{z:6.2} ");
-            let mut x = start.x - 6.0;
-            while x <= start.x + 2.0 {
-                let probe = player::to_box_vec3(Vec3::new(x, position.y, z));
-                let planes = wedge
-                    .world
-                    .collide_mover(probe, &mover, collision_filter)
-                    .unwrap_or_default();
-                let blocking = planes
-                    .iter()
-                    .find(|plane| plane.plane.normal.y < WALKABLE_CONTACT_NORMAL_Y);
-                row.push(match blocking {
-                    None => '.',
-                    Some(plane) => wedge.owner(plane.shape_id).chars().next().unwrap_or('?'),
-                });
-                x += 0.25;
-            }
-            println!("{row}");
-            z += 0.25;
-        }
     }
 }
