@@ -9,6 +9,7 @@
 //! layout wins, per this task's brief.
 
 use super::*;
+use bevyout_core::actor_animation::decode_kffz;
 
 /// One `SNAM` faction membership entry (8 bytes: FormID + rank + 3 unused).
 /// OpenMW's `ESM4::ActorFaction` (`components/esm4/actor.hpp`) declares
@@ -182,6 +183,10 @@ pub(crate) struct ActorData {
     pub(crate) ai_data: Option<ActorAiData>,
     /// `PKID` (repeated).
     pub(crate) package_form_ids: Vec<u32>,
+    /// `KFFZ`: zero-terminated external animation filenames. Shared by NPC_
+    /// and CREA so model/animation template inheritance treats both kinds the
+    /// same way.
+    pub(crate) animation_files: Vec<String>,
     /// `CNAM`. `NPC_` only.
     pub(crate) class_form_id: Option<u32>,
     /// `NPC_.DATA`. `NPC_` only (`CREA`'s `DATA` is `CreatureData::stats`).
@@ -223,7 +228,7 @@ pub(crate) fn actor_supported_signatures(sig: &str) -> &'static [&'static str] {
         "NPC_" => &[
             "ACBS", "SNAM", "INAM", "VTCK", "RNAM", "EITM", "SCRI", "AIDT", "PKID", "CNAM", "DATA",
             "DNAM", "PNAM", "HNAM", "ENAM", "LNAM", "HCLR", "ZNAM", "NAM6", "NAM7", "FGGS", "FGGA",
-            "FGTS",
+            "FGTS", "KFFZ",
         ],
         "CREA" => &[
             "NIFZ", "NIFT", "KFFZ", "ACBS", "SNAM", "INAM", "PKID", "AIDT", "DATA", "RNAM", "ZNAM",
@@ -260,6 +265,7 @@ fn parse_npc(subs: &[Subrecord], resolver: &FormIdResolver) -> (ActorData, Vec<S
         parse_npc_skills,
         &mut diagnostics,
     );
+    let animation_files = parse_animation_files(subs, &mut diagnostics);
 
     let actor = ActorData {
         base_config,
@@ -271,6 +277,7 @@ fn parse_npc(subs: &[Subrecord], resolver: &FormIdResolver) -> (ActorData, Vec<S
         script_form_id: sub_form_id(subs, "SCRI", resolver),
         ai_data,
         package_form_ids: form_id_list(subs, "PKID", resolver),
+        animation_files,
         class_form_id: sub_form_id(subs, "CNAM", resolver),
         base_stats,
         skills,
@@ -300,11 +307,12 @@ fn parse_creature(subs: &[Subrecord], resolver: &FormIdResolver) -> (ActorData, 
         parse_creature_data,
         &mut diagnostics,
     );
+    let animation_files = parse_animation_files(subs, &mut diagnostics);
 
     let creature = CreatureData {
         model_list: sub(subs, "NIFZ").map(cstring_list).unwrap_or_default(),
         texture_file_hashes: sub(subs, "NIFT").map(<[u8]>::to_vec),
-        animation_files: sub(subs, "KFFZ").map(cstring_list).unwrap_or_default(),
+        animation_files: animation_files.clone(),
         stats,
         attack_reach: sub(subs, "RNAM").and_then(|data| data.first().copied()),
         turning_speed: sub(subs, "TNAM").and_then(|data| f32_at_option(data, 0)),
@@ -319,6 +327,7 @@ fn parse_creature(subs: &[Subrecord], resolver: &FormIdResolver) -> (ActorData, 
         death_item_form_id: sub_form_id(subs, "INAM", resolver),
         ai_data,
         package_form_ids: form_id_list(subs, "PKID", resolver),
+        animation_files,
         combat_style_form_id: sub_form_id(subs, "ZNAM", resolver),
         creature: Some(creature),
         ..ActorData::default()
@@ -368,6 +377,15 @@ fn form_id_list(subs: &[Subrecord], signature: &str, resolver: &FormIdResolver) 
         .map(|data| resolver.adjust(u32::from_le_bytes(data.try_into().unwrap())))
         .filter(|id| *id != 0)
         .collect()
+}
+
+fn parse_animation_files(subs: &[Subrecord], diagnostics: &mut Vec<String>) -> Vec<String> {
+    let Some(data) = sub(subs, "KFFZ") else {
+        return Vec::new();
+    };
+    let decoded = decode_kffz(data);
+    diagnostics.extend(decoded.diagnostics);
+    decoded.paths
 }
 
 /// Splits a `NIFZ`/`KFFZ`-style zero-terminated string array (OpenMW's

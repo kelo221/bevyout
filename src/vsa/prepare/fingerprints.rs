@@ -37,11 +37,14 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// two independent bumps that raced on parallel branches: issue #120 (M4
 /// wave 6) reclassifies source-dead NPC references as
 /// `PreparedSemantic::Corpse` instead of `Npc`, and M4 wave 7 (#160)
-/// corrected nested actor appearance resolution — both change what
+/// corrected nested actor appearance resolution, M4 wave 10 (#104)
+/// added the prepared actor-animation catalog, and M4 wave 12 (#106) adds
+/// authored weapon animation types to the item catalog — all change what
 /// `prepare_cell` produces from the same source content, so a resumable
 /// *batch* prepare run must not skip a cell completed under either old
 /// logic.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v3-corpse-nested-actors";
+pub(crate) const PREPARE_PIPELINE_REVISION: &str =
+    "prepare-pipeline-v5-corpse-nested-actors-actor-animations-weapon-animation-type";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

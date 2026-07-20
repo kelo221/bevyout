@@ -7,7 +7,8 @@ pub(super) struct WorldCommandProvider;
 impl ConsoleCommandProvider for WorldCommandProvider {
     fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
         for command in [
-            ConsoleCommand::new("actorinspect", "actorinspect <actor-reference>", "Report a prepared actor's identity, assembly, fallback tier/reasons, scale, canonical holder, proxy, and weapon attachment state.", actor_inspect),
+            ConsoleCommand::new("actorinspect", "actorinspect <actor-reference>", "Report a prepared actor's identity, assembly, animation, fallback tier/reasons, scale, canonical holder, proxy, and weapon attachment state.", actor_inspect),
+            ConsoleCommand::new("actoranim", "actoranim <actor-reference> <idle|walk|run|turn_left|turn_right|equip|unequip>", "Request a gameplay animation through the same actor controller used by AI and scripted behavior.", actor_animation).mutating(),
             ConsoleCommand::new("ragdoll", "ragdoll <actor-reference> [on|off|reset]", "Toggle a prepared NPC/creature's developer ragdoll body; actors stay locked in T-pose by default.", ragdoll).mutating(),
             ConsoleCommand::new("ragdollprobe", "ragdollprobe <actor-reference>", "Report live ragdoll constraint, velocity, sleep, and visual-node errors without changing the actor.", ragdoll_probe),
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
@@ -60,6 +61,7 @@ pub(super) fn actor_inspect(
     };
     let runtime = world.get::<actor::ActorRuntime>(entity).cloned();
     let runtime_state = world.get::<actor::ActorRuntimeState>(entity).cloned();
+    let animation_runtime = world.get::<actor_animation::ActorAnimationRuntime>(entity);
     let assembly = runtime
         .as_ref()
         .and_then(|runtime| runtime.assembly.as_ref())
@@ -267,6 +269,16 @@ pub(super) fn actor_inspect(
                 },
             },
             "fallback": fallback,
+            "animation": {
+                "present": animation_runtime.is_some(),
+                "set_id": animation_runtime.map(|runtime| runtime.set_id()),
+                "state": animation_runtime.map(|runtime| runtime.state_label()),
+                "clip": animation_runtime.and_then(|runtime| runtime.clip_name()),
+                "bound_targets": animation_runtime.map(|runtime| runtime.bound_target_count()),
+                "loop_mode": animation_runtime.map(|runtime| format!("{:?}", runtime.loop_mode())),
+                "root_motion_policy": animation_runtime.map(|runtime| format!("{:?}", runtime.root_motion_policy())),
+                "diagnostic": animation_runtime.and_then(|runtime| runtime.diagnostic()),
+            },
             "runtime": {
                 "present": runtime.is_some(),
                 "holder_seeded": runtime_state.as_ref().is_some_and(|state| state.holder_seeded),
@@ -277,6 +289,41 @@ pub(super) fn actor_inspect(
             },
         }),
         vec![summary],
+    ))
+}
+
+pub(super) fn actor_animation(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector, state] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "actoranim requires an actor reference and animation state",
+        ));
+    };
+    let entity = resolve_reference(world, selector)?;
+    let reference_form_id = world
+        .get::<actor::ActorRuntime>(entity)
+        .map(|runtime| runtime.reference_form_id)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference is not a projected actor"))?;
+    let state = actor_animation::policy::ActorAnimationState::parse(state).ok_or_else(|| {
+        ConsoleError::new(
+            "bad_value",
+            "animation state must be idle, walk, run, turn_left, turn_right, equip, or unequip",
+        )
+    })?;
+    actor_animation::request_actor_animation(world, entity, state)
+        .map_err(|error| ConsoleError::new("animation_unavailable", error.to_string()))?;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": reference_form_id,
+            "requested_state": state.label(),
+        }),
+        vec![format!(
+            "actoranim {reference_form_id:08x} {}",
+            state.label()
+        )],
     ))
 }
 

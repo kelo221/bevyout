@@ -37,7 +37,8 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v4-nested-leveled-resolution";
+pub(crate) const ACTOR_CATALOG_REVISION: &str =
+    "openmw-actors-v5-npc-creature-kffz-model-animation";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -160,12 +161,12 @@ pub(crate) struct ActorFactionInput {
 }
 
 /// `USE_MODEL_ANIMATION` group: the `NPC_`/`CREA` base's own `MODL` model
-/// plus `CREA`-only `NIFZ`/`KFFZ` candidate lists.
+/// plus `CREA`-only `NIFZ` candidates and the NPC_/CREA `KFFZ` list.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ActorModelAnimation {
     pub(crate) model_path: Option<String>,
     pub(crate) creature_model_list: Vec<String>,
-    pub(crate) creature_animation_files: Vec<String>,
+    pub(crate) animation_files: Vec<String>,
     pub(crate) creature_base_scale: Option<f32>,
 }
 
@@ -1019,7 +1020,7 @@ fn build_blueprint(
         display_name: base_data.name.clone(),
         model_path: model_animation.model_path.clone(),
         creature_model_list: model_animation.creature_model_list.clone(),
-        animation_candidates: model_animation.creature_animation_files.clone(),
+        animation_candidates: model_animation.animation_files.clone(),
         race_form_id: traits.race_form_id,
         female: traits.female,
         height: traits.height,
@@ -1168,7 +1169,7 @@ mod tests {
     fn revision_is_pinned() {
         assert_eq!(
             ACTOR_CATALOG_REVISION,
-            "openmw-actors-v4-nested-leveled-resolution"
+            "openmw-actors-v5-npc-creature-kffz-model-animation"
         );
     }
 

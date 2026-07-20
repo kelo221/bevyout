@@ -111,6 +111,7 @@ fn decodes_every_supported_npc_subrecord() {
         direct_subrecord("FGGS", vec![1, 2, 3, 4, 5]),
         direct_subrecord("FGGA", vec![9, 8, 7]),
         direct_subrecord("FGTS", vec![6, 5, 4, 3, 2, 1]),
+        direct_subrecord("KFFZ", b"idle.kf\0special/wave.kf\0".to_vec()),
     ];
 
     let base = parse_base("NPC_", &subs, &resolver).unwrap();
@@ -166,6 +167,7 @@ fn decodes_every_supported_npc_subrecord() {
 
     assert_eq!(actor.package_form_ids, vec![0x2000, 0x2001]);
     assert_eq!(actor.class_form_id, Some(0x800));
+    assert_eq!(actor.animation_files, ["idle.kf", "special/wave.kf"]);
 
     let stats = actor.base_stats.expect("DATA must decode");
     assert_eq!(stats.base_health, 200);
@@ -293,6 +295,7 @@ fn decodes_every_supported_crea_subrecord() {
     );
     assert_eq!(actor.death_item_form_id, Some(0x510));
     assert_eq!(actor.package_form_ids, vec![0x2100, 0x2101]);
+    assert_eq!(actor.animation_files, ["anim/idle.kf", "anim/attack.kf"]);
     assert_eq!(actor.combat_style_form_id, Some(0x910));
     assert!(actor.race_form_id.is_none());
     assert!(actor.base_stats.is_none());
@@ -510,12 +513,14 @@ fn truncated_acbs_aidt_data_produce_diagnostics_not_panics() {
         direct_subrecord("ACBS", vec![0; 23]), // one byte short of 24
         direct_subrecord("AIDT", vec![0; 19]), // one byte short of 20
         direct_subrecord("DATA", vec![0; 5]),  // short of 11
+        direct_subrecord("KFFZ", b"idle.kf".to_vec()), // missing final NUL
     ];
     let base = parse_base("NPC_", &subs, &resolver).unwrap();
     let actor = base.actor.as_ref().unwrap();
     assert!(actor.base_config.is_none());
     assert!(actor.ai_data.is_none());
     assert!(actor.base_stats.is_none());
+    assert_eq!(actor.animation_files, ["idle.kf"]);
     assert!(
         base.ignored_subrecords
             .iter()
@@ -530,6 +535,11 @@ fn truncated_acbs_aidt_data_produce_diagnostics_not_panics() {
         base.ignored_subrecords
             .iter()
             .any(|message| message.starts_with("DATA malformed"))
+    );
+    assert!(
+        base.ignored_subrecords
+            .iter()
+            .any(|message| message.starts_with("KFFZ malformed"))
     );
 
     let crea_subs = vec![direct_subrecord("DATA", vec![0; 16])]; // one byte short of 17

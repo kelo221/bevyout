@@ -10,7 +10,7 @@ use super::*;
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
 /// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v4";
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v5";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -233,6 +233,7 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             speed,
             reach,
             ammo_form_id,
+            animation_type,
         } => PreparedItemStats::Weapon {
             damage: *damage,
             max_condition: *max_condition,
@@ -240,6 +241,7 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             speed: *speed,
             reach: *reach,
             ammo_form_id: *ammo_form_id,
+            animation_type: *animation_type,
         },
         OpenMwItemStats::Apparel {
             armor_rating,
@@ -291,8 +293,8 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v4");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v4");
+        assert_eq!(catalog.revision, "openmw-items-v5");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v5");
     }
 
     #[test]
@@ -388,6 +390,7 @@ mod tests {
             speed: None,
             reach: None,
             ammo_form_id: Some(0x0000_00aa),
+            animation_type: Some(3),
         };
         let mut armor = BaseRecord::default();
         armor.kind = "ARMO".into();
@@ -408,6 +411,7 @@ mod tests {
             weapon_stats,
             PreparedItemStats::Weapon {
                 ammo_form_id: Some(0x0000_00aa),
+                animation_type: Some(3),
                 ..
             }
         ));

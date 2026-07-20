@@ -147,6 +147,9 @@ fn developer_commands_and_aliases_are_registered_and_structured() {
     let actor_inspect_help = exec(&mut app, "help actorinspect");
     assert!(actor_inspect_help.ok);
     assert_eq!(actor_inspect_help.value["mutating"], false);
+    let actor_animation_help = exec(&mut app, "help actoranim");
+    assert!(actor_animation_help.ok);
+    assert_eq!(actor_animation_help.value["mutating"], true);
     let free_camera = exec(&mut app, "toggleflycam");
     assert_eq!(free_camera.value["camera_mode"], "free");
     assert_eq!(free_camera.log, ["Free camera enabled."]);
@@ -587,6 +590,7 @@ fn actorinspect_reports_prepared_and_runtime_assembly_state() {
         "missing_attachment_node"
     );
     assert_eq!(output.value["runtime"]["holder_seeded"], true);
+    assert_eq!(output.value["animation"]["present"], false);
     assert_eq!(output.value["runtime"]["canonical"]["present"], true);
     assert_eq!(
         output.value["runtime"]["canonical"]["equipped_instance_id"],
@@ -601,6 +605,32 @@ fn actorinspect_reports_prepared_and_runtime_assembly_state() {
         "missing_weapon_attachment_node"
     );
     assert!(output.log[0].contains("tier=RaceSexSpecific"));
+}
+
+#[test]
+fn actoranim_uses_the_gameplay_request_component() {
+    let mut app = test_app();
+    register_actor_placement(&mut app);
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<actor::ActorRuntime>>()
+        .single(app.world())
+        .unwrap();
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(actor_animation::ActorAnimationIntent::default());
+
+    let output = exec(&mut app, "actoranim 00000010 run");
+    assert!(output.ok, "actoranim failed: {:?}", output.error);
+    assert_eq!(output.value["reference_form_id"], 16);
+    assert_eq!(output.value["requested_state"], "run");
+    assert_eq!(output.log, ["actoranim 00000010 run"]);
+    assert_eq!(
+        app.world()
+            .get::<actor_animation::ActorAnimationIntent>(entity)
+            .and_then(|intent| intent.requested),
+        Some(actor_animation::policy::ActorAnimationState::Run)
+    );
 }
 
 #[test]
@@ -1049,6 +1079,7 @@ fn additem_adds_a_requested_count_seeded_with_catalog_condition() {
                 speed: None,
                 reach: None,
                 ammo_form_id: None,
+                animation_type: None,
             },
             audio: Default::default(),
         }],

@@ -5,6 +5,7 @@
 //! and runtime boundaries.
 
 pub mod actor;
+pub mod actor_animation;
 pub mod content;
 pub mod form_id;
 pub mod item_transaction;

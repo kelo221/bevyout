@@ -17,5 +17,5 @@ pub use save::{
     PersistentWorldState, SaveGame, SaveGameHeader, SaveLoadOutcome, SavePlugin, SaveSlotSource,
     SaveStore, SavedBodyState, SavedTransform, decode_save, encode_save,
 };
-pub use viewer::{ragdoll_lab, render, view};
+pub use viewer::{animation_zoo, ragdoll_lab, render, view};
 pub use vsa::{bake, cells, nif_convert, prepare, report};

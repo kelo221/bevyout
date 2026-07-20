@@ -110,6 +110,8 @@ pub(crate) enum OpenMwItemStats {
         /// treats it as an opaque skipped subrecord; this port decodes it as
         /// a FormID reference the way `YNAM`/`ZNAM` already are).
         ammo_form_id: Option<u32>,
+        /// Fallout 3 `WEAP.DNAM` animation type (the first 32-bit field).
+        animation_type: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,

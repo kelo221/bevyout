@@ -187,16 +187,25 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // toolchain and exits nonzero on any staleness. Performs no
     // preparation: it returns before the cell map is written or the job
     // manifest's `pending` entries and on-disk copy are touched.
-    let selected_converter_revision = match args.converter {
+    let selected_scene_converter_revision = match args.converter {
         PrepareConverter::Blender => PREPARED_CONVERTER_REVISION,
         PrepareConverter::Native => NATIVE_PREPARED_CONVERTER_REVISION,
     };
+    let selected_actor_animation_backend = crate::converter_policy::resolve_actor_animation_backend(
+        Some(args.actor_animation_converter.backend()),
+    );
+    let selected_converter_revision = crate::converter_policy::prepare_converter_identity(
+        selected_scene_converter_revision,
+        selected_actor_animation_backend,
+        ACTOR_ANIMATION_CATALOG_REVISION,
+        actor_animation_converter_revision(selected_actor_animation_backend),
+    );
     if args.check_fingerprints {
         return report_fingerprints(
             &manifest,
             &resolved,
             &fingerprint,
-            selected_converter_revision,
+            &selected_converter_revision,
         );
     }
 
@@ -227,7 +236,7 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // component re-prepares exactly that cell instead of being skipped.
     manifest.ensure_pending(&resolved);
     let current_fingerprints =
-        CellFingerprints::current_with_converter(fingerprint.clone(), selected_converter_revision);
+        CellFingerprints::current_with_converter(fingerprint.clone(), &selected_converter_revision);
     let (to_run, skipped, stale_cells) =
         filter_resume_checked(&manifest, &resolved, args.force, &current_fingerprints);
     for (form_id, components) in &stale_cells {
@@ -594,9 +603,13 @@ fn prepare_cell(
                 NATIVE_PREPARED_CONVERTER_REVISION,
             ),
         };
-    let blender = (args.converter == PrepareConverter::Blender)
-        .then(|| find_blender(args.blender.clone()))
-        .transpose()?;
+    let actor_animation_backend = args.actor_animation_converter.backend();
+    let blender = (args.converter == PrepareConverter::Blender
+        || crate::converter_policy::actor_animation_backend_requires_blender(
+            actor_animation_backend,
+        ))
+    .then(|| find_blender(args.blender.clone()))
+    .transpose()?;
     let (navmeshes, mut nav_graph, mut nav_graph_full, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
@@ -978,6 +991,33 @@ fn prepare_cell(
         })
         .collect::<HashMap<_, _>>();
     attach_actor_assemblies(&mut actor_catalog, &finalized_actor_assemblies);
+    let mut actor_animation_catalog = discover_actor_animation_catalog(
+        &actor_catalog,
+        &source_fingerprint,
+        &data_root,
+        &session.archives,
+    )?;
+    let conversion_context = ActorAnimationConversionContext {
+        converter: actor_animation_backend,
+        converter_revision: actor_animation_converter_revision(actor_animation_backend),
+        blender: blender.as_deref(),
+        data_root: &data_root,
+        archives: &session.archives,
+        staging_dir: &staging_dir,
+        assets_dir: &assets_dir,
+        rebuild: args.rebuild_assets,
+    };
+    let actor_animation_conversion =
+        if crate::converter_policy::actor_animation_backend_requires_blender(
+            actor_animation_backend,
+        ) {
+            let _blender_guard = session.blender_lock.lock().unwrap();
+            convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?
+        } else {
+            // Disabled catalog preparation performs no external conversion and
+            // must not serialize otherwise parallel native cell preparation.
+            convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?
+        };
     let (catalog_path, catalog_hash) = write_item_catalog(&cache_dir, &item_catalog)?;
     output.push(format!(
         "item catalog: {} records, {} icons, {} world assets -> {}",
@@ -1084,6 +1124,38 @@ fn prepare_cell(
     let actor_catalog_path = Some(actor_catalog_artifact.relative_path);
     let actor_catalog_revision = Some(ACTOR_CATALOG_REVISION.into());
     let actor_catalog_hash = Some(actor_catalog_artifact.hash);
+    let actor_animation_catalog_artifact =
+        write_actor_animation_catalog(&cache_dir, cell_id, &actor_animation_catalog)?;
+    let ready_animation_clips = actor_animation_catalog
+        .animation_sets
+        .iter()
+        .flat_map(|set| set.clips.iter())
+        .filter(|clip| {
+            clip.status == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+        })
+        .count();
+    let actor_animation_catalog_summary = format!(
+        "actor animation catalog: {} actor mappings, {} sets, {} ready clips, packs built {}, reused {}, failed clips {}, cache {}",
+        actor_animation_catalog.actor_mappings.len(),
+        actor_animation_catalog.animation_sets.len(),
+        ready_animation_clips,
+        actor_animation_conversion.built_packs,
+        actor_animation_conversion.reused_packs,
+        actor_animation_conversion.failed_clips,
+        if actor_animation_catalog_artifact.reused {
+            "reused"
+        } else {
+            "written"
+        }
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: actor_animation_catalog_summary.clone(),
+    });
+    output.push(actor_animation_catalog_summary);
+    let actor_animation_catalog_path = Some(actor_animation_catalog_artifact.relative_path);
+    let actor_animation_catalog_revision = Some(ACTOR_ANIMATION_CATALOG_REVISION.into());
+    let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -1151,6 +1223,9 @@ fn prepare_cell(
         actor_catalog_path,
         actor_catalog_revision,
         actor_catalog_hash,
+        actor_animation_catalog_path,
+        actor_animation_catalog_revision,
+        actor_animation_catalog_hash,
         source_plugins,
         cell,
         placements,
@@ -1332,11 +1407,7 @@ fn actor_record_input(
             .as_ref()
             .map(|creature| creature.model_list.clone())
             .unwrap_or_default(),
-        creature_animation_files: actor
-            .creature
-            .as_ref()
-            .map(|creature| creature.animation_files.clone())
-            .unwrap_or_default(),
+        animation_files: actor.animation_files.clone(),
         creature_base_scale: actor
             .creature
             .as_ref()

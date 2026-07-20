@@ -7,6 +7,24 @@ pub(crate) enum ConverterBackend {
     Blender,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ActorAnimationBackend {
+    #[default]
+    Disabled,
+    Native,
+    Blender,
+}
+
+impl ActorAnimationBackend {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Native => "native",
+            Self::Blender => "blender",
+        }
+    }
+}
+
 impl ConverterBackend {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -22,5 +40,82 @@ pub(crate) const fn resolve_converter_backend(
     match requested {
         Some(backend) => backend,
         None => ConverterBackend::Native,
+    }
+}
+
+pub(crate) const fn resolve_actor_animation_backend(
+    requested: Option<ActorAnimationBackend>,
+) -> ActorAnimationBackend {
+    match requested {
+        Some(backend) => backend,
+        None => ActorAnimationBackend::Disabled,
+    }
+}
+
+pub(crate) const fn actor_animation_backend_requires_blender(
+    backend: ActorAnimationBackend,
+) -> bool {
+    matches!(backend, ActorAnimationBackend::Blender)
+}
+
+pub(crate) fn prepare_converter_identity(
+    scene_converter_revision: &str,
+    actor_animation_backend: ActorAnimationBackend,
+    actor_animation_catalog_revision: &str,
+    actor_animation_converter_revision: &str,
+) -> String {
+    match actor_animation_backend {
+        ActorAnimationBackend::Disabled => format!(
+            "{scene_converter_revision}+actor-animation=disabled@{actor_animation_catalog_revision}"
+        ),
+        ActorAnimationBackend::Native => format!(
+            "{scene_converter_revision}+actor-animation=native@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
+        ),
+        ActorAnimationBackend::Blender => format!(
+            "{scene_converter_revision}+actor-animation=blender@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actor_animation_backend_participates_in_prepare_identity() {
+        let disabled = prepare_converter_identity(
+            "native-scene-v1",
+            ActorAnimationBackend::Disabled,
+            "actor-catalog-v1",
+            "actor-kf-v1",
+        );
+        let blender = prepare_converter_identity(
+            "native-scene-v1",
+            ActorAnimationBackend::Blender,
+            "actor-catalog-v1",
+            "actor-kf-v1",
+        );
+        assert_ne!(disabled, blender);
+        assert!(disabled.contains("actor-animation=disabled@actor-catalog-v1"));
+        assert!(blender.contains("actor-animation=blender@actor-catalog-v1+actor-kf-v1"));
+        assert_eq!(
+            disabled,
+            prepare_converter_identity(
+                "native-scene-v1",
+                ActorAnimationBackend::Disabled,
+                "actor-catalog-v1",
+                "actor-kf-v2",
+            ),
+            "a Blender-only converter change must not invalidate disabled preparation"
+        );
+        let native = prepare_converter_identity(
+            "native-scene-v1",
+            ActorAnimationBackend::Native,
+            "actor-catalog-v1",
+            "actor-kf-native-v1",
+        );
+        assert_ne!(native, disabled);
+        assert_ne!(native, blender);
+        assert!(native.contains("actor-animation=native@actor-catalog-v1+actor-kf-native-v1"));
     }
 }

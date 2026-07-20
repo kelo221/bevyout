@@ -31,6 +31,9 @@ pub enum CommandLine {
     /// Compare one prepared actor ragdoll in an isolated physics laboratory.
     #[command(name = "ragdoll-lab")]
     RagdollLab(RagdollLabArgs),
+    /// Cycle every compatible prepared animation on one isolated actor.
+    #[command(name = "animation-zoo")]
+    AnimationZoo(AnimationZooArgs),
     /// Generate a deterministic compatibility report for a plugin's records.
     #[command(name = "report")]
     Report(ReportArgs),
@@ -93,6 +96,14 @@ pub(crate) enum PrepareConverter {
     Native,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ActorAnimationConverter {
+    #[default]
+    Disabled,
+    Native,
+    Blender,
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RagdollLabBackend {
     Avian,
@@ -124,6 +135,27 @@ impl std::fmt::Display for PrepareConverter {
             Self::Native => crate::converter_policy::ConverterBackend::Native,
         };
         formatter.write_str(backend.as_str())
+    }
+}
+
+impl std::fmt::Display for ActorAnimationConverter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backend = match self {
+            Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
+            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
+        };
+        formatter.write_str(backend.as_str())
+    }
+}
+
+impl ActorAnimationConverter {
+    pub(crate) const fn backend(self) -> crate::converter_policy::ActorAnimationBackend {
+        match self {
+            Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
+            Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
+            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
+        }
     }
 }
 
@@ -201,6 +233,10 @@ pub struct PrepareArgs {
     /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
     #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
     pub(crate) converter: PrepareConverter,
+    /// External-KF clip-pack backend. Disabled by default; select `native` to
+    /// decode KF files with Nifty or `blender` for the NIFTools comparison path.
+    #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
+    pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -294,6 +330,31 @@ pub struct RagdollLabArgs {
     /// Exit after this many seconds; useful for bounded solver captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+}
+
+#[derive(Parser, Debug)]
+pub struct AnimationZooArgs {
+    /// Prepared scene GECK EditorID or eight-digit hexadecimal FormID.
+    #[arg(value_name = "EDITOR_ID")]
+    pub(crate) selector: String,
+    /// Actor reference FormID from the prepared scene.
+    #[arg(long, value_name = "FORM_ID")]
+    pub(crate) actor: String,
+    /// Prepared scene cache directory; defaults to .bevyout/cache.
+    #[arg(long)]
+    pub(crate) cache_dir: Option<PathBuf>,
+    /// Normalized clip name to select first.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) start_clip: Option<String>,
+    /// Exit after this many seconds; useful for bounded captures.
+    #[arg(long)]
+    pub(crate) trace_seconds: Option<f32>,
+    /// Expose the zoo to a local agent through Bevy Remote Protocol.
+    #[arg(long)]
+    pub(crate) agent_bridge: bool,
+    /// Loopback HTTP port used by the agent bridge.
+    #[arg(long, default_value_t = 15_702, requires = "agent_bridge")]
+    pub(crate) agent_port: u16,
 }
 
 #[derive(Parser, Debug)]
