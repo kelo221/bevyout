@@ -1514,3 +1514,207 @@ fn tp_to_a_prepared_different_cell_writes_a_travel_request_at_the_given_position
     assert_eq!(request.door_form_id, 0);
     cleanup.expect("remove synthetic prepared-cell fixture dir");
 }
+
+// ---------------------------------------------------------------------
+// showpackages (issue #176): console-harness tests over a synthetic
+// per-cell actor catalog + content-set-wide package catalog written to a
+// temp asset root, the same fixture pattern as the `tp`-to-a-prepared-cell
+// tests above.
+// ---------------------------------------------------------------------
+
+fn write_showpackages_fixture(
+    test_name: &str,
+    reference_form_id: u32,
+    base_form_id: u32,
+    package_form_ids: Vec<u32>,
+    packages: Vec<crate::vsa::PreparedPackageEntry>,
+) -> (PreparedSceneManifest, std::path::PathBuf) {
+    let mut manifest = fixture_manifest();
+    let cell = manifest.cell.form_id;
+    let fingerprint = format!("showpackages-fp-{test_name}");
+    let temp_root = std::env::temp_dir().join(format!(
+        "bevyout-console-{test_name}-{}-{reference_form_id:08x}",
+        std::process::id()
+    ));
+    let scene_dir = temp_root.join("scenes").join(format!("{cell:08x}"));
+    std::fs::create_dir_all(&scene_dir).expect("create synthetic prepared-cell fixture dir");
+
+    let actor_catalog = crate::vsa::PreparedActorCatalog {
+        revision: crate::vsa::ACTOR_CATALOG_REVISION.into(),
+        source_fingerprint: fingerprint.clone(),
+        entries: vec![crate::vsa::ActorCatalogEntry::Prepared(Box::new(
+            crate::vsa::ActorBlueprint {
+                base_form_id,
+                reference_form_id,
+                record_kind: "NPC_".into(),
+                package_form_ids,
+                ..crate::vsa::ActorBlueprint::default()
+            },
+        ))],
+        counters: Default::default(),
+    };
+    std::fs::write(
+        scene_dir.join("actors.ron"),
+        ron::ser::to_string_pretty(&actor_catalog, ron::ser::PrettyConfig::default())
+            .expect("serialize synthetic actor catalog"),
+    )
+    .expect("write synthetic actor catalog fixture");
+    manifest.actor_catalog_path = Some(format!("scenes/{cell:08x}/actors.ron"));
+
+    let catalog_dir = temp_root.join("catalogs").join(&fingerprint);
+    std::fs::create_dir_all(&catalog_dir).expect("create synthetic package catalog dir");
+    let package_catalog = crate::vsa::PreparedPackageCatalog {
+        revision: crate::vsa::PACKAGE_CATALOG_REVISION.into(),
+        source_fingerprint: fingerprint.clone(),
+        packages,
+        counters: Default::default(),
+    };
+    std::fs::write(
+        catalog_dir.join("packages.ron"),
+        ron::ser::to_string_pretty(&package_catalog, ron::ser::PrettyConfig::default())
+            .expect("serialize synthetic package catalog"),
+    )
+    .expect("write synthetic package catalog fixture");
+
+    manifest.source_fingerprint = fingerprint;
+    manifest.asset_root = temp_root.to_string_lossy().into_owned();
+    (manifest, temp_root)
+}
+
+#[test]
+fn showpackages_reports_a_known_actors_packages_in_priority_order() {
+    let (manifest, temp_root) = write_showpackages_fixture(
+        "known-actor",
+        16,
+        1,
+        vec![0x50, 0x60],
+        vec![
+            crate::vsa::PreparedPackageEntry {
+                form_id: 0x50,
+                editor_id: Some("PKWander".into()),
+                package_type: 5,
+                conditions: vec![vec![0; 4], vec![1; 4]],
+                ..Default::default()
+            },
+            crate::vsa::PreparedPackageEntry {
+                form_id: 0x60,
+                editor_id: Some("PKSleep".into()),
+                package_type: 4,
+                ..Default::default()
+            },
+        ],
+    );
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Npc((base_template_form_id: None, assembly: None))",
+    );
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 00000010");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "showpackages failed: {:?}", output.error);
+    assert_eq!(output.value["actor_reference_form_id"], 16);
+    assert_eq!(output.value["actor_base_form_id"], 1);
+    let packages = output.value["packages"].as_array().unwrap();
+    assert_eq!(packages.len(), 2);
+    assert_eq!(packages[0]["form_id"], 0x50);
+    assert_eq!(packages[0]["editor_id"], "PKWander");
+    assert_eq!(packages[0]["package_type_label"], "Wander");
+    assert_eq!(packages[0]["condition_count"], 2);
+    assert_eq!(packages[1]["form_id"], 0x60);
+    assert_eq!(packages[1]["editor_id"], "PKSleep");
+    assert!(output.log[0].contains("2 package(s) in priority order"));
+    assert!(output.log[1].contains("#1/2 00000050"));
+    assert!(output.log[1].contains("\"PKWander\""));
+    assert!(output.log[2].contains("#2/2 00000060"));
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
+#[test]
+fn showpackages_reports_a_clear_line_for_an_actor_without_packages() {
+    let (manifest, temp_root) =
+        write_showpackages_fixture("no-packages", 16, 1, Vec::new(), Vec::new());
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Npc((base_template_form_id: None, assembly: None))",
+    );
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 00000010");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "showpackages failed: {:?}", output.error);
+    assert_eq!(output.value["packages"].as_array().unwrap().len(), 0);
+    assert!(output.log[0].contains("has no packages"));
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
+#[test]
+fn showpackages_resolves_a_raw_base_formid_not_currently_placed() {
+    let (manifest, temp_root) = write_showpackages_fixture(
+        "base-formid",
+        16,
+        0x2A,
+        vec![0x50],
+        vec![crate::vsa::PreparedPackageEntry {
+            form_id: 0x50,
+            package_type: 0,
+            ..Default::default()
+        }],
+    );
+    let mut app = test_app();
+    // No live placement is registered: `2A` is only known through the
+    // actor catalog, proving the base-FormID half of
+    // "actor-reference-or-base-formid" works without a spawned entity.
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 0000002A");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "showpackages failed: {:?}", output.error);
+    assert_eq!(output.value["actor_base_form_id"], 0x2A);
+    assert_eq!(output.value["packages"].as_array().unwrap().len(), 1);
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
+#[test]
+fn showpackages_rejects_an_unknown_formid_deterministically() {
+    let (manifest, temp_root) =
+        write_showpackages_fixture("unknown-formid", 16, 1, Vec::new(), Vec::new());
+    let mut app = test_app();
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 0000dead");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert_eq!(error_code(&output), "unknown_actor");
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
+#[test]
+fn showpackages_rejects_bad_arity_and_non_actor_references() {
+    let mut app = test_app();
+    assert_eq!(error_code(&exec(&mut app, "showpackages")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "showpackages a b")), "bad_arity");
+    register_placement(&mut app, "Static");
+    assert_eq!(
+        error_code(&exec(&mut app, "showpackages 00000010")),
+        "not_actor"
+    );
+}
+
+#[test]
+fn showpackages_requires_a_loaded_cell_manifest() {
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Npc((base_template_form_id: None, assembly: None))",
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "showpackages 00000010")),
+        "cell_unavailable"
+    );
+}
