@@ -508,8 +508,11 @@ fn bind_gameplay_actors(
         let Some(set) = cached.resolved.as_ref() else {
             continue;
         };
+        // `descendants` now excludes `root` itself (issue #188), so the
+        // "scene has not spawned its hierarchy yet" guard is emptiness
+        // rather than a length of one.
         let hierarchy = descendants(root, &children);
-        if hierarchy.len() <= 1 {
+        if hierarchy.is_empty() {
             continue;
         }
         let Ok(root_global) = globals.get(root) else {
@@ -1010,9 +1013,24 @@ fn collect_pack_target_paths(
     Some(())
 }
 
+/// Every entity strictly *below* `root`, never `root` itself.
+///
+/// The exclusion is load-bearing, not tidiness (issue #188 feature 4). The
+/// only consumer is `bind_gameplay_actors`, whose results become
+/// `retarget_gameplay_actors`' write targets. `root` is the actor's
+/// placement root -- and, for a nav-bound actor, the very `Transform` the
+/// KCC owns. If a clip-pack node name ever matched the root's own `Name`,
+/// retargeting would start writing that transform each frame and animation
+/// would silently become a second movement authority: precisely the shape
+/// the navmesh post-mortem's §2.3 records `landmass`'s border ORCA taking
+/// for the navigation feature's entire life. Skeletons live under the root
+/// by construction, so nothing legitimate is lost by refusing to look at it.
 fn descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
     let mut output = Vec::new();
-    let mut pending = vec![root];
+    let Ok(root_children) = children.get(root) else {
+        return output;
+    };
+    let mut pending: Vec<Entity> = root_children.iter().collect();
     while let Some(entity) = pending.pop() {
         output.push(entity);
         if let Ok(children) = children.get(entity) {
