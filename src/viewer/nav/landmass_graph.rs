@@ -40,8 +40,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bevy_landmass::{AgentState, NavigationMesh3d, ValidNavigationMesh3d, ValidationError};
 use glam::Vec3;
 
-use super::erosion_policy;
-
 // ---------------------------------------------------------------------
 // Conversion inputs (boundary conversion from `PreparedNavGraph` happens in
 // `nav/mod.rs`)
@@ -62,6 +60,11 @@ pub(crate) struct PolygonInput {
     pub(crate) index: u32,
     pub(crate) vertex_indices: [u32; 3],
     pub(crate) is_water: bool,
+    /// `NVTR`'s `PREFERRED_PATHING` flag (issue #156 feature 1): resolved to
+    /// a cheaper-cost landmass polygon type by `resolve_polygon_type_index`
+    /// -- see that function's doc comment for the precedence rule when a
+    /// triangle is both a door and preferred-pathing.
+    pub(crate) is_preferred_pathing: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,43 +116,6 @@ pub(crate) struct BuildResult {
     pub(crate) diagnostics: Vec<ConversionDiagnostic>,
 }
 
-/// Protected (seam/portal) edges for `mesh`'s own erosion pass (issue #136
-/// follow-up): every edge of a triangle that is either a door-link/
-/// travel-door attachment (`mesh.doors`, always per-mesh already) or a
-/// cross-mesh merge participant naming this mesh's own `form_id`
-/// (`merges`, graph-wide -- only entries touching `mesh.form_id`
-/// contribute `triangle_a`/`triangle_b` respectively). See
-/// `erosion_policy`'s module doc comment for why these edges must never
-/// move during erosion, and why the whole triangle's three edges are
-/// protected rather than trying to isolate exactly one "seam" edge (this
-/// project has no data that says which single edge of a merge/door
-/// triangle actually touches the other mesh, only that the triangle as a
-/// whole is the attachment point).
-pub(crate) fn protected_edges_for_mesh(mesh: &MeshInput, merges: &[MergeInput]) -> Vec<(u32, u32)> {
-    let mut protected_triangle_indices: BTreeSet<u32> = BTreeSet::new();
-    for door in &mesh.doors {
-        protected_triangle_indices.insert(door.triangle_index);
-    }
-    for merge in merges {
-        if merge.mesh_a_form_id == mesh.form_id {
-            protected_triangle_indices.insert(merge.triangle_a);
-        }
-        if merge.mesh_b_form_id == mesh.form_id {
-            protected_triangle_indices.insert(merge.triangle_b);
-        }
-    }
-    let mut protected_edges: Vec<(u32, u32)> = Vec::new();
-    for polygon in &mesh.polygons {
-        if protected_triangle_indices.contains(&polygon.index) {
-            let [a, b, c] = polygon.vertex_indices;
-            protected_edges.push((a, b));
-            protected_edges.push((b, c));
-            protected_edges.push((c, a));
-        }
-    }
-    protected_edges
-}
-
 /// Global door FormID -> `landmass` polygon type index (issue #155 feature
 /// 1), computed once across every mesh in one archipelago build (not
 /// per-mesh): `override_type_index_cost`/`AgentTypeIndexCostOverrides`
@@ -181,6 +147,54 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
         .collect()
 }
 
+/// The single landmass polygon type index every preferred-pathing triangle
+/// (issue #156 feature 1, `NVTR`'s `PREFERRED_PATHING` flag) that is not
+/// itself a door triangle resolves to: one past the highest door type index
+/// this archipelago-wide `door_type_indices` map assigned (issue #155
+/// feature 1), so it can never collide with a door's own type index
+/// regardless of how many distinct doors this cell's meshes reference.
+/// Deterministic: depends only on `door_type_indices`'s own contents, and
+/// that map is itself computed deterministically once per archipelago build
+/// (`door_type_indices`'s own doc comment) and passed unchanged to every
+/// mesh's `build_navigation_mesh` call, so every mesh in one build agrees on
+/// the same preferred-pathing index. `1` when there are no doors at all
+/// (the type-index space starts fresh at `1`, same as `door_type_indices`
+/// itself).
+pub(crate) fn preferred_pathing_type_index(door_type_indices: &BTreeMap<u32, usize>) -> usize {
+    door_type_indices.values().max().copied().unwrap_or(0) + 1
+}
+
+/// Resolves one triangle's landmass polygon type index (issue #156 feature
+/// 1 / issue #155 feature 1's coexistence rule): a door-typed triangle
+/// always wins over a preferred-pathing triangle when a triangle is both,
+/// falling back to ordinary walkable ground (`0`) when neither applies.
+///
+/// landmass 0.9.2 stores exactly one `type_index` per polygon
+/// (`ValidPolygon::type_index`, fed by `NavigationMesh::polygon_type_indices`
+/// -- see `build_navigation_mesh`'s doc comment) -- there is no way to stack
+/// a door's lockable type and a preferred-path's cheaper-cost type on the
+/// same triangle, so precedence has to pick one. Door wins: a locked door
+/// must always block the route through that exact triangle regardless of
+/// its preferred-pathing flag (a preferred-pathing type's whole purpose is a
+/// *cheaper*, not an *infinite*, cost -- letting it silently override the
+/// door's lockable type would reopen a "locked" doorway), and real FO3 NAVM
+/// data already treats a door triangle as special-purposed distinctly from
+/// ordinary preferred-path corridor filler.
+fn resolve_polygon_type_index(
+    polygon_index: u32,
+    is_preferred_pathing: bool,
+    door_type_index_by_triangle: &HashMap<u32, usize>,
+    preferred_pathing_type_index: usize,
+) -> usize {
+    if let Some(&type_index) = door_type_index_by_triangle.get(&polygon_index) {
+        return type_index;
+    }
+    if is_preferred_pathing {
+        return preferred_pathing_type_index;
+    }
+    0
+}
+
 /// Converts `mesh` into a validated `bevy_landmass` navigation mesh.
 ///
 /// Non-walkable exclusion: `is_water` polygons are dropped rather than
@@ -206,32 +220,31 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
 /// once per mesh (a mix of the two within one mesh would corrupt
 /// `validate()`'s doubly-connected-edge adjacency detection).
 ///
-/// Erosion (issue #136): after the water/invalid/degenerate exclusions
-/// above, walkable-boundary vertices are moved inward by the agent radius
-/// via `erosion_policy::erode` before either winding attempt -- see that
-/// module's doc comment for why moving positions (not polygon topology)
-/// keeps this safe against disconnecting the mesh, and for the
-/// corridor-pinch fallback that keeps narrow corridors from inverting.
-///
-/// `merges` (issue #136 follow-up, real-data regression on a two-mesh
-/// cell): every `MergeInput` touching `mesh.form_id` identifies one of
-/// this mesh's own triangles as a seam/portal to another mesh, not a
-/// wall -- eroding it independently on both sides of the seam opened a
-/// real gap where a generated animation link used to connect the two
-/// islands. Door-triangle vertices (`mesh.doors`, off-mesh link
-/// attachment points for door links/travel doors) get the same
-/// protection. See `erosion_policy`'s module doc comment for the
-/// "protected edges" rule this feeds.
+/// Clearance (issue #153, M4 wave 10): agent-radius clearance and
+/// collision-derived validation now run prepare-side in
+/// `vsa::prepare::nav_clearance` and are baked into `mesh.vertices` (offset
+/// positions, seam/door edges pinned) and a per-polygon `walkable` flag
+/// `viewer::nav::mesh_inputs` filters on before this function ever sees the
+/// mesh. The interim runtime erosion pass this used to call is retired, so
+/// vertices are taken as-is here. `_merges` is retained on the signature for
+/// call-site compatibility but is no longer consumed (the seam/door
+/// protected-edge computation it fed moved to `nav_clearance`).
 ///
 /// `door_type_indices` (issue #155 feature 1): every door-associated
 /// triangle (`mesh.doors`) gets the polygon type index its door FormID
 /// resolves to in this map, instead of the flat `0` every polygon used
-/// before -- everything else stays type `0`. This only changes which
+/// before. `is_preferred_pathing` (issue #156 feature 1): every non-door
+/// preferred-pathing triangle gets the single shared
+/// `preferred_pathing_type_index` -- everything else stays type `0`. A
+/// triangle that is both resolves via `resolve_polygon_type_index`'s
+/// documented precedence (door wins). This only changes which
 /// `landmass::pathfinding` cost a polygon looks up (`type_index_to_cost`,
 /// overridden per agent by `nav/agent.rs`'s `AgentTypeIndexCostOverrides`
-/// when a door is locked); it does not remove the polygon or touch its
-/// vertices/winding, so a typed door triangle stays exactly as connected to
-/// its neighbours as before -- confirmed against `landmass` 0.9.2's own
+/// when a door is locked, or -- for the preferred-pathing type, issue #156 --
+/// by a base `Archipelago::set_type_index_cost` a future wave wires up on
+/// the archipelago itself); it does not remove the polygon or touch its
+/// vertices/winding, so a typed triangle stays exactly as connected to its
+/// neighbours as before -- confirmed against `landmass` 0.9.2's own
 /// `NavigationMesh::validate()` (`nav_mesh.rs`): region/adjacency
 /// (`DisjointSet`/`connectivity`) is computed purely from shared vertex
 /// indices between polygons, and `polygon_type_indices[i]` only ever feeds
@@ -242,7 +255,7 @@ pub(crate) fn door_type_indices(meshes: &[MeshInput]) -> BTreeMap<u32, usize> {
 /// `bevy::app`/`Landmass3dPlugin` -- see the module doc comment).
 pub(crate) fn build_navigation_mesh(
     mesh: &MeshInput,
-    merges: &[MergeInput],
+    _merges: &[MergeInput],
     door_type_indices: &BTreeMap<u32, usize>,
 ) -> BuildResult {
     let mut diagnostics = Vec::new();
@@ -262,6 +275,11 @@ pub(crate) fn build_navigation_mesh(
             door_type_index_by_triangle.insert(door.triangle_index, type_index);
         }
     }
+    // Issue #156 feature 1: computed once from the same archipelago-wide
+    // `door_type_indices` map every mesh in this build shares, so every
+    // mesh agrees on the same preferred-pathing index (see
+    // `preferred_pathing_type_index`'s doc comment).
+    let preferred_pathing_index = preferred_pathing_type_index(door_type_indices);
 
     let mut included_polygons: Vec<&PolygonInput> = Vec::new();
     let mut included_type_indices: Vec<usize> = Vec::new();
@@ -288,12 +306,12 @@ pub(crate) fn build_navigation_mesh(
             )));
             continue;
         }
-        included_type_indices.push(
-            door_type_index_by_triangle
-                .get(&polygon.index)
-                .copied()
-                .unwrap_or(0),
-        );
+        included_type_indices.push(resolve_polygon_type_index(
+            polygon.index,
+            polygon.is_preferred_pathing,
+            &door_type_index_by_triangle,
+            preferred_pathing_index,
+        ));
         included_polygons.push(polygon);
     }
 
@@ -308,31 +326,13 @@ pub(crate) fn build_navigation_mesh(
         };
     }
 
-    // Issue #136: erode the walkable boundary inward by the agent radius
-    // before handing vertices to `bevy_landmass`, so its path smoothing
-    // cannot string-pull a route within less than a capsule-width of a
-    // wall/prop collider. Runs once per mesh (not per winding attempt
-    // below) -- erosion only moves vertex *positions*, so it does not
-    // interact with which polygon vertex order validates.
-    let erosion_input = erosion_policy::ErosionMeshInput {
-        vertices: mesh.vertices.clone(),
-        polygons: included_polygons
-            .iter()
-            .map(|polygon| polygon.vertex_indices)
-            .collect(),
-        protected_edges: protected_edges_for_mesh(mesh, merges),
-    };
-    let erosion_result = erosion_policy::erode(&erosion_input, erosion_policy::AGENT_RADIUS);
-    tracing::info!(
-        "nav erosion: polys {} eroded {} pinch-guard {} relax-passes {} protected {}",
-        erosion_result.polygon_count,
-        erosion_result.eroded_count,
-        erosion_result.pinch_guard_count,
-        erosion_result.relax_passes,
-        erosion_result.protected_count,
-    );
-
-    let vertices: Vec<Vec3> = erosion_result
+    // Issue #153 (M4 wave 10): agent-radius clearance (with collision-derived
+    // validation) is now applied prepare-side in `vsa::prepare::nav_clearance`
+    // and baked into `mesh.vertices` (offset positions) + a per-polygon
+    // `walkable` flag that `viewer::nav::mesh_inputs` has already filtered on.
+    // The runtime erosion pass this used to call is retired, so vertices are
+    // taken as-is.
+    let vertices: Vec<Vec3> = mesh
         .vertices
         .iter()
         .map(|v| Vec3::new(v[0], v[1], v[2]))
@@ -580,12 +580,13 @@ pub(crate) fn single_sided_doors(meshes: &[MeshInput]) -> Vec<SingleSidedDoor> {
 /// gate even when its corridor never actually crossed it -- see this
 /// module's `door_type_indices` doc comment's sibling problem for locking).
 ///
-/// `triangle` should be the door polygon's exact, un-eroded vertices:
-/// `erosion_policy` (via `protected_edges_for_mesh`) deliberately excludes
-/// door triangles from the agent-radius boundary erosion every other
-/// walkable polygon gets, so this is always the authored NAVM footprint,
-/// not a shrunk approximation -- an agent's capsule *centre* threading
-/// through a real doorway gap will cross exactly this triangle.
+/// `triangle` should be the door polygon's exact door-footprint vertices:
+/// the prepare-side clearance pass (`vsa::prepare::nav_clearance`) pins
+/// seam/door triangle vertices in place rather than offsetting them by the
+/// agent radius like every other walkable polygon, so this is always the
+/// authored NAVM footprint, not a shrunk approximation -- an agent's capsule
+/// *centre* threading through a real doorway gap will cross exactly this
+/// triangle.
 ///
 /// The vertical guard mirrors `movement_policy::nav_point_reached`'s
 /// same-XZ-different-floor rejection (a horizontal-only test alone cannot
@@ -657,6 +658,57 @@ pub(crate) struct MergeLinkDescriptor {
     pub(crate) distance: f32,
 }
 
+/// The `landmass` animation-link "kind" a validated merge-link candidate at
+/// position `validated_index` in this build's own deterministic
+/// `merge_link_descriptors` order gets (issue #162 feature 1): kind `0` is
+/// reserved for every ordinary/door animation link (`spawn_link_pair`'s
+/// existing flat default -- see `door_link_descriptors`), so merge kinds
+/// start at `1` and never collide with it. Unlike door locking's polygon
+/// *type-index* scheme (#155's `door_type_indices`), a merge portal has no
+/// polygon to type -- `bevy_landmass::AnimationLink3d::kind` is a property
+/// of the off-mesh link itself, so per-link exclusion via
+/// `landmass::PermittedAnimationLinks::Kinds` achieves exact single-link
+/// granularity for free, with no risk of two links sharing an entry
+/// polygon the way a polygon-typing scheme would have to worry about (see
+/// [`permitted_animation_link_kinds`]'s doc comment). Only meaningful
+/// within one archipelago build: kind numbers are not stable across
+/// rebuilds, and nothing needs them to be -- a quarantine
+/// (`nav::agent::AgentRuntime::quarantined_merge_link_kinds`) is cleared on
+/// every retarget/despawn (module doc comment, issue #162 feature 2) well
+/// before a cell ever rebuilds its archipelago.
+pub(crate) fn merge_link_kind(validated_index: usize) -> usize {
+    validated_index + 1
+}
+
+/// The animation-link kinds an agent with quarantine set `quarantined` may
+/// still use, given this archipelago build assigned merge portals kinds
+/// `1..=merge_link_kind_count` (see [`merge_link_kind`]). Kind `0` (every
+/// door link, `door_link_descriptors`) is always included -- a blocked
+/// merge portal must never make an unrelated door impassable, since
+/// `landmass::PermittedAnimationLinks::Kinds` is an *allow-list*, not a
+/// deny-list, so a quarantine has to enumerate everything it still permits
+/// rather than just the one thing it excludes.
+///
+/// Returns `None` when `quarantined` is empty: `bevy_landmass::
+/// PermittedAnimationLinks::All` is the correct component value for an
+/// unquarantined agent (the overwhelmingly common case), and callers
+/// should use it directly rather than materializing the equivalent full
+/// `0..=merge_link_kind_count` set on every tick.
+pub(crate) fn permitted_animation_link_kinds(
+    quarantined: &BTreeSet<usize>,
+    merge_link_kind_count: usize,
+) -> Option<BTreeSet<usize>> {
+    if quarantined.is_empty() {
+        return None;
+    }
+    Some(
+        std::iter::once(0)
+            .chain(1..=merge_link_kind_count)
+            .filter(|kind| !quarantined.contains(kind))
+            .collect(),
+    )
+}
+
 fn interval_midpoint(interval: [[f32; 3]; 2]) -> [f32; 3] {
     [
         (interval[0][0] + interval[1][0]) / 2.0,
@@ -682,8 +734,8 @@ fn point_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// up/down this portal" check instead. Duplicate of `viewer::openmw_player::
 /// DEFAULT_STEP_HEIGHT`'s value (`34.0 / 69.991_25`), not an import: this
 /// module is Bevy-engine-free (see the module doc comment) and that
-/// constant's owning module pulls in `bevy::prelude::*`. Same duplication
-/// precedent as `erosion_policy::AGENT_RADIUS`.
+/// constant's owning module pulls in `bevy::prelude::*`. Same local-copy
+/// precedent as `nav::agent::AGENT_RADIUS`.
 const MERGE_PORTAL_STEP_HEIGHT: f32 = 34.0 / 69.991_25;
 
 /// Resolves each `MergeInput` into a world-space link, using its own
@@ -823,11 +875,13 @@ mod tests {
                     index: 0,
                     vertex_indices: vertex_indices_a,
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
                 PolygonInput {
                     index: 1,
                     vertex_indices: vertex_indices_b,
                     is_water: false,
+                    is_preferred_pathing: false,
                 },
             ],
             doors: Vec::new(),
@@ -936,6 +990,7 @@ mod tests {
                 index: triangle_index,
                 vertex_indices: [0, 1, 2],
                 is_water: false,
+                is_preferred_pathing: false,
             }],
             doors: vec![DoorInput {
                 triangle_index,
@@ -1082,6 +1137,98 @@ mod tests {
         assert_eq!(indices.get(&0x99), Some(&1));
         let typed = build_navigation_mesh(&mesh, &[], &indices);
         let untyped = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
+        assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
+    }
+
+    // -------------------------------------------------------------
+    // preferred_pathing_type_index / resolve_polygon_type_index
+    // (issue #156 feature 1)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn preferred_pathing_type_index_is_one_past_the_highest_door_index() {
+        let mesh_a = mesh_with_door(0x10, 0, 0x99);
+        let mesh_b = mesh_with_door(0x20, 0, 0x50);
+        let door_indices = door_type_indices(&[mesh_a, mesh_b]);
+        // Doors got 1 (0x50) and 2 (0x99) -- see
+        // `each_distinct_door_gets_its_own_type_index_starting_at_one`.
+        assert_eq!(preferred_pathing_type_index(&door_indices), 3);
+    }
+
+    #[test]
+    fn preferred_pathing_type_index_is_one_when_there_are_no_doors() {
+        assert_eq!(preferred_pathing_type_index(&BTreeMap::new()), 1);
+    }
+
+    #[test]
+    fn an_ordinary_polygon_resolves_to_type_zero() {
+        let door_type_index_by_triangle = HashMap::new();
+        assert_eq!(
+            resolve_polygon_type_index(0, false, &door_type_index_by_triangle, 5),
+            0
+        );
+    }
+
+    #[test]
+    fn a_preferred_pathing_polygon_resolves_to_the_preferred_pathing_type() {
+        let door_type_index_by_triangle = HashMap::new();
+        assert_eq!(
+            resolve_polygon_type_index(0, true, &door_type_index_by_triangle, 5),
+            5
+        );
+    }
+
+    #[test]
+    fn a_door_polygon_resolves_to_its_own_door_type() {
+        let mut door_type_index_by_triangle = HashMap::new();
+        door_type_index_by_triangle.insert(0, 2);
+        assert_eq!(
+            resolve_polygon_type_index(0, false, &door_type_index_by_triangle, 5),
+            2
+        );
+    }
+
+    #[test]
+    fn a_triangle_that_is_both_a_door_and_preferred_pathing_keeps_its_door_type() {
+        // The exact coexistence rule issue #156 feature 1 documents: landmass
+        // 0.9.2 stores one type index per polygon, so when a triangle is
+        // both, the door's lockable type must win -- a preferred-pathing
+        // type only ever means a *cheaper* cost, never an override that
+        // could silently reopen a locked door.
+        let mut door_type_index_by_triangle = HashMap::new();
+        door_type_index_by_triangle.insert(0, 2);
+        assert_eq!(
+            resolve_polygon_type_index(0, true, &door_type_index_by_triangle, 5),
+            2
+        );
+    }
+
+    fn mesh_with_preferred_pathing_polygon(form_id: u32) -> MeshInput {
+        MeshInput {
+            form_id,
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            polygons: vec![PolygonInput {
+                index: 0,
+                vertex_indices: [0, 1, 2],
+                is_water: false,
+                is_preferred_pathing: true,
+            }],
+            doors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_preferred_pathing_mesh_still_validates_and_keeps_its_polygon_count() {
+        // CONSTRAINT pin (issue #156 feature 1), the same shape as #155's own
+        // `a_typed_door_triangle_still_validates_and_keeps_its_polygon_count`:
+        // typing a preferred-pathing triangle must not remove or alter
+        // adjacency, only which cost `landmass::pathfinding` looks up.
+        let mesh = mesh_with_preferred_pathing_polygon(0x10);
+        let typed = build_navigation_mesh(&mesh, &[], &BTreeMap::new());
+        let mut untyped_mesh = mesh;
+        untyped_mesh.polygons[0].is_preferred_pathing = false;
+        let untyped = build_navigation_mesh(&untyped_mesh, &[], &BTreeMap::new());
         assert!(typed.nav_mesh.is_some(), "{:?}", typed.diagnostics);
         assert!(untyped.nav_mesh.is_some(), "{:?}", untyped.diagnostics);
     }
@@ -1246,68 +1393,6 @@ mod tests {
         assert_eq!(descriptors.len(), 1, "{descriptors:?}");
     }
 
-    /// `MergeInput` with zeroed portal intervals -- the tests below only
-    /// exercise `protected_edges_for_mesh`, which never reads
-    /// `interval_a`/`interval_b`.
-    fn merge_input(
-        mesh_a_form_id: u32,
-        triangle_a: u32,
-        mesh_b_form_id: u32,
-        triangle_b: u32,
-    ) -> MergeInput {
-        MergeInput {
-            mesh_a_form_id,
-            triangle_a,
-            mesh_b_form_id,
-            triangle_b,
-            interval_a: [[0.0; 3]; 2],
-            interval_b: [[0.0; 3]; 2],
-        }
-    }
-
-    #[test]
-    fn a_merge_naming_this_mesh_as_side_a_protects_its_triangles_edges() {
-        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        // polygon 0 = [0, 1, 2]; triangle_b (5) is some triangle on the
-        // other mesh, irrelevant here.
-        let merges = vec![merge_input(0x10, 0, 0x20, 5)];
-        let edges = protected_edges_for_mesh(&mesh, &merges);
-        assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0)]);
-    }
-
-    #[test]
-    fn a_merge_naming_this_mesh_as_side_b_protects_its_triangles_edges() {
-        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        // polygon 1 = [1, 3, 2].
-        let merges = vec![merge_input(0x20, 5, 0x10, 1)];
-        let edges = protected_edges_for_mesh(&mesh, &merges);
-        assert_eq!(edges, vec![(1, 3), (3, 2), (2, 1)]);
-    }
-
-    #[test]
-    fn a_door_triangle_protects_its_edges_the_same_way_as_a_merge() {
-        let mut mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        mesh.doors.push(DoorInput {
-            triangle_index: 0,
-            door_reference_form_id: Some(0x99),
-        });
-        let edges = protected_edges_for_mesh(&mesh, &[]);
-        assert_eq!(edges, vec![(0, 1), (1, 2), (2, 0)]);
-    }
-
-    #[test]
-    fn a_merge_not_touching_this_mesh_protects_nothing() {
-        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        let merges = vec![merge_input(0x30, 0, 0x40, 1)];
-        assert!(protected_edges_for_mesh(&mesh, &merges).is_empty());
-    }
-
-    #[test]
-    fn no_doors_or_merges_protects_nothing() {
-        let mesh = square_mesh([0, 1, 2], [1, 3, 2]);
-        assert!(protected_edges_for_mesh(&mesh, &[]).is_empty());
-    }
-
     #[test]
     fn agent_state_maps_to_project_status() {
         assert_eq!(map_agent_state(AgentState::Idle), NavAgentStatus::Idle);
@@ -1329,5 +1414,64 @@ mod tests {
             NavAgentStatus::Unreachable
         );
         assert_eq!(map_agent_state(AgentState::Paused), NavAgentStatus::Paused);
+    }
+
+    // -------------------------------------------------------------
+    // merge_link_kind / permitted_animation_link_kinds (issue #162)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn merge_link_kinds_start_at_one_and_never_collide_with_the_reserved_door_kind() {
+        assert_eq!(merge_link_kind(0), 1);
+        assert_eq!(merge_link_kind(1), 2);
+        assert_eq!(merge_link_kind(4), 5);
+    }
+
+    #[test]
+    fn an_unquarantined_agent_gets_no_kind_restriction() {
+        assert_eq!(
+            permitted_animation_link_kinds(&BTreeSet::new(), 3),
+            None,
+            "an empty quarantine must signal `PermittedAnimationLinks::All`, not an explicit full set"
+        );
+    }
+
+    #[test]
+    fn a_quarantined_link_is_excluded_but_everything_else_including_doors_stays_permitted() {
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(2);
+        let permitted = permitted_animation_link_kinds(&quarantined, 3)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        // Door kind 0 and every other merge kind (1, 3) stay permitted;
+        // only the quarantined merge kind (2) is excluded.
+        assert_eq!(permitted, BTreeSet::from([0, 1, 3]));
+    }
+
+    #[test]
+    fn quarantining_every_merge_kind_still_leaves_doors_permitted() {
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(1);
+        quarantined.insert(2);
+        let permitted = permitted_animation_link_kinds(&quarantined, 2)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        assert_eq!(
+            permitted,
+            BTreeSet::from([0]),
+            "every merge portal is blocked, but door links (kind 0) must remain usable"
+        );
+    }
+
+    #[test]
+    fn a_quarantined_kind_past_this_builds_own_range_is_harmless() {
+        // Defensive: a stale quarantine entry from a torn-down archipelago
+        // (should never happen given issue #162 feature 2's clear-on-
+        // retarget/despawn lifecycle, but this function has no way to know
+        // that) must not panic or corrupt the allow-list for kinds that do
+        // exist in this build.
+        let mut quarantined = BTreeSet::new();
+        quarantined.insert(99);
+        let permitted = permitted_animation_link_kinds(&quarantined, 2)
+            .expect("a non-empty quarantine must produce an explicit allow-list");
+        assert_eq!(permitted, BTreeSet::from([0, 1, 2]));
     }
 }

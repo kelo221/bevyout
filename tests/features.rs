@@ -656,10 +656,6 @@ struct BevyoutWorld {
     nav_solve_blend_interval: u32,
     nav_solve_blend_fraction: Option<f32>,
 
-    // -- nav_erosion.feature (issue #136, M4 wave 6) --
-    erosion_mesh: erosion_policy::ErosionMeshInput,
-    erosion_result: Option<erosion_policy::ErosionResult>,
-
     // -- note_text.feature (issue #123) --
     // Raw concatenated subrecord bytes (built with `nav_subrecord`) for the
     // synthetic NOTE record's body: `openmw_esm4::Subrecord`'s fields are
@@ -740,7 +736,6 @@ struct BevyoutWorld {
     nav_door_topology_type_indices: Option<std::collections::BTreeMap<u32, usize>>,
     nav_door_topology_triangle: Option<[[f32; 3]; 3]>,
     nav_door_topology_point: Option<[f32; 3]>,
-
     // -- actor_animation_catalog.feature / actor_animation_conversion.feature
     // (issue #104, M4 wave 10): append-only shared seam. --
     npc_kffz_payload: Vec<u8>,
@@ -755,6 +750,31 @@ struct BevyoutWorld {
     actor_animation_pack_cache_state: actor_animation_cache::ActorAnimationPackCacheState,
     actor_animation_pack_cache_decision:
         Option<actor_animation_cache::ActorAnimationPackCacheDecision>,
+
+    // -- nav_fall_guard.feature (issue #164) --
+    nav_fall_guard_bounds_min_y: Option<f32>,
+    nav_fall_guard_agent_y: Option<f32>,
+    nav_fall_guard_kill_z: Option<f32>,
+    nav_fall_guard_verdict: Option<fall_guard::FallVerdict>,
+
+    // -- nav_travel_lock.feature (issue #165 real-data acceptance
+    // follow-up: `door_link::effective_door_open`) --
+    nav_travel_lock_destination: Option<door_link::LinkDestination>,
+    nav_travel_lock_physically_open: bool,
+    nav_travel_lock_locked: bool,
+
+    // -- nav_collision_clearance.feature (issue #153, M4 wave 10) --
+    nav_clearance_mesh: nav_clearance::NavClearanceMeshInput,
+    nav_clearance_collision: Vec<nav_clearance::CollisionTriangle>,
+    nav_clearance_result: Option<nav_clearance::NavClearanceResult>,
+
+    // -- nav_portal_quarantine.feature (issue #162, M4 wave 10: per-link
+    // merge-portal quarantine) --
+    nav_quarantine_candidate_index: Option<usize>,
+    nav_quarantine_resolved_kind: Option<usize>,
+    nav_quarantine_kind_count: usize,
+    nav_quarantine_excluded_kinds: std::collections::BTreeSet<usize>,
+    nav_quarantine_permitted: Option<Option<std::collections::BTreeSet<usize>>>,
 }
 
 fn find_placement<'a>(
@@ -6224,6 +6244,7 @@ async fn given_landmass_polygon(
         index,
         vertex_indices: [a, b, c],
         is_water: false,
+        is_preferred_pathing: false,
     });
 }
 
@@ -7259,122 +7280,6 @@ async fn then_solve_blend_fraction(world: &mut BevyoutWorld, expected: f32) {
     assert_eq!(world.nav_solve_blend_fraction, Some(expected));
 }
 
-// `viewer::nav::erosion_policy` (issue #136, M4 wave 6) is std-only, same
-// flat top-level include rationale as `door_link`/`repath`/`ledger_policy`/
-// `movement_policy` above -- declared down here rather than alongside that
-// block because this issue's `tests/features.rs` file ownership is
-// append-only (three other wave-6 executors merge into this same file), not
-// because nesting/order matters to the module resolution itself (a `mod`
-// declaration's position in the file does not affect what `super::` resolves
-// to for its siblings).
-#[path = "../src/viewer/nav/erosion_policy.rs"]
-#[allow(dead_code, unused_imports)]
-mod erosion_policy;
-
-// ---------------------------------------------------------------------
-// --- #136 nav erosion steps ---
-// nav_erosion.feature (issue #136, M4 wave 6) -- appended section, do not
-// interleave.
-// ---------------------------------------------------------------------
-
-fn erosion_signed_area_xz(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
-    0.5 * ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]))
-}
-
-#[given("an erosion mesh")]
-async fn given_erosion_mesh(world: &mut BevyoutWorld) {
-    world.erosion_mesh = erosion_policy::ErosionMeshInput::default();
-    world.erosion_result = None;
-}
-
-#[given(regex = r"^erosion mesh has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
-async fn given_erosion_vertex(world: &mut BevyoutWorld, index: usize, x: f32, y: f32, z: f32) {
-    assert_eq!(
-        world.erosion_mesh.vertices.len(),
-        index,
-        "vertices must be given in order starting at 0"
-    );
-    world.erosion_mesh.vertices.push([x, y, z]);
-}
-
-#[given(regex = r"^erosion mesh has polygon (\d+) with vertices (\d+),(\d+),(\d+)$")]
-async fn given_erosion_polygon(world: &mut BevyoutWorld, index: usize, a: u32, b: u32, c: u32) {
-    assert_eq!(
-        world.erosion_mesh.polygons.len(),
-        index,
-        "polygons must be given in order starting at 0"
-    );
-    world.erosion_mesh.polygons.push([a, b, c]);
-}
-
-#[when(regex = r"^the erosion mesh is eroded by radius ([\d.]+)$")]
-async fn when_erosion_mesh_eroded(world: &mut BevyoutWorld, radius: f32) {
-    world.erosion_result = Some(erosion_policy::erode(&world.erosion_mesh, radius));
-}
-
-#[then(regex = r"^eroded vertex (\d+) moved into the room on both the x and z axes$")]
-async fn then_eroded_vertex_moved_into_room(world: &mut BevyoutWorld, index: usize) {
-    let original = world.erosion_mesh.vertices[index];
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    let eroded = result.vertices[index];
-    assert!(
-        eroded[0] > original[0] && eroded[2] > original[2],
-        "expected vertex {index} to move into the room on both axes: {original:?} -> {eroded:?}"
-    );
-}
-
-#[then(regex = r"^the erosion pinch guard count is (\d+)$")]
-async fn then_erosion_pinch_guard_count(world: &mut BevyoutWorld, expected: usize) {
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    assert_eq!(result.pinch_guard_count, expected);
-}
-
-#[then("the erosion pinch guard count is greater than 0")]
-async fn then_erosion_pinch_guard_count_positive(world: &mut BevyoutWorld) {
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    assert!(
-        result.pinch_guard_count > 0,
-        "expected the pinch guard to engage, got {result:?}"
-    );
-}
-
-#[then("every eroded polygon keeps its original winding sign")]
-async fn then_every_eroded_polygon_keeps_winding_sign(world: &mut BevyoutWorld) {
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    for (poly_index, triangle) in world.erosion_mesh.polygons.iter().enumerate() {
-        let original = erosion_signed_area_xz(
-            world.erosion_mesh.vertices[triangle[0] as usize],
-            world.erosion_mesh.vertices[triangle[1] as usize],
-            world.erosion_mesh.vertices[triangle[2] as usize],
-        );
-        let eroded = erosion_signed_area_xz(
-            result.vertices[triangle[0] as usize],
-            result.vertices[triangle[1] as usize],
-            result.vertices[triangle[2] as usize],
-        );
-        assert!(
-            (eroded > 0.0) == (original > 0.0),
-            "polygon {poly_index} inverted: original area {original}, eroded area {eroded}"
-        );
-        assert!(
-            eroded.abs() > 1.0e-6,
-            "polygon {poly_index} degenerated: eroded area {eroded}"
-        );
-    }
-}
-
 // --- #123 note text steps ---
 //
 // `openmw_esm4::Subrecord`/`FormIdResolver` fields are module-private, so
@@ -7666,18 +7571,6 @@ async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form
         base.record_flags & 0x0008_0000,
         0,
         "NPC_ base {form_hex} unexpectedly decoded the starts-dead flag"
-    );
-}
-
-#[then("the erosion relax passes is greater than 0")]
-async fn then_erosion_relax_passes_positive(world: &mut BevyoutWorld) {
-    let result = world
-        .erosion_result
-        .as_ref()
-        .expect("mesh must be eroded first");
-    assert!(
-        result.relax_passes > 0,
-        "expected at least one corrective pass, got {result:?}"
     );
 }
 
@@ -9128,7 +9021,6 @@ async fn then_point_within_centroid_radius(world: &mut BevyoutWorld, radius: f32
         "test setup: the query point ({distance} m) must be within the old proximity radius ({radius} m) of the centroid"
     );
 }
-
 // ---------------------------------------------------------------------
 // actor_animation_conversion.feature (issue #104, M4 wave 10) -- appended
 // section, do not interleave.
@@ -9240,4 +9132,634 @@ async fn then_actor_animation_pack_cache_decision(world: &mut BevyoutWorld, expe
         actor_animation_cache::ActorAnimationPackCacheDecision::Build => "build",
     };
     assert_eq!(actual, expected);
+}
+// =====================================================================
+// nav_fall_guard.feature (issue #164) -- appended step section.
+//
+// `viewer::nav::fall_guard` is std-only (no bevy/bevy_landmass import),
+// same flat `#[path]` include rationale as `movement_policy` et al. above;
+// declared here inside this appended section to respect the shared
+// merge-seam convention (only World fields and one delimited step section
+// appended at the end of this file).
+// =====================================================================
+#[path = "../src/viewer/nav/fall_guard.rs"]
+#[allow(dead_code, unused_imports)]
+mod fall_guard;
+
+#[given(regex = r"^a cell whose minimum geometry Y is (-?[\d.]+)$")]
+async fn given_cell_minimum_geometry_y(world: &mut BevyoutWorld, min_y: f32) {
+    world.nav_fall_guard_bounds_min_y = Some(min_y);
+}
+
+#[given(regex = r"^a nav agent at Y (-?[\d.]+)$")]
+async fn given_nav_agent_at_y(world: &mut BevyoutWorld, agent_y: f32) {
+    world.nav_fall_guard_agent_y = Some(agent_y);
+}
+
+#[given("a nav agent resting exactly at the kill plane")]
+async fn given_nav_agent_at_kill_plane(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_agent_y = Some(fall_guard::fall_kill_z(min_y));
+}
+
+#[given("a nav agent just below the kill plane")]
+async fn given_nav_agent_just_below_kill_plane(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_agent_y = Some(fall_guard::fall_kill_z(min_y) - 0.01);
+}
+
+#[when("the fall kill plane is computed")]
+async fn when_fall_kill_plane_computed(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    world.nav_fall_guard_kill_z = Some(fall_guard::fall_kill_z(min_y));
+}
+
+#[when("the fall guard is evaluated")]
+async fn when_fall_guard_evaluated(world: &mut BevyoutWorld) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    let agent_y = world
+        .nav_fall_guard_agent_y
+        .expect("a nav agent Y must be given first");
+    world.nav_fall_guard_verdict = Some(fall_guard::evaluate_fall(min_y, agent_y));
+}
+
+#[then(regex = r"^the fall kill plane is (-?[\d.]+) metres below the minimum geometry Y$")]
+async fn then_fall_kill_plane_below_min(world: &mut BevyoutWorld, margin: f32) {
+    let min_y = world
+        .nav_fall_guard_bounds_min_y
+        .expect("a cell minimum geometry Y must be given first");
+    let kill_z = world
+        .nav_fall_guard_kill_z
+        .expect("the kill plane must be computed first");
+    assert!((kill_z - (min_y - margin)).abs() < 1e-4);
+}
+
+#[then("the fall guard reports the agent is in bounds")]
+async fn then_fall_guard_in_bounds(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_fall_guard_verdict,
+        Some(fall_guard::FallVerdict::InBounds)
+    );
+}
+
+#[then("the fall guard reports the agent has fallen out of the world")]
+async fn then_fall_guard_fell_out(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_fall_guard_verdict,
+        Some(fall_guard::FallVerdict::FellOutOfWorld)
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_authored_semantics.feature (issue #156, M4 wave 9) -- appended
+// section, do not interleave. No new `BevyoutWorld` fields: every scenario
+// drives the existing `nav_graph_inputs`/`nav_graph_result`/
+// `nav_backend_meshes` state via `nav_graph_mesh_input_mut`/
+// `nav_graph_result_mesh`/`nav_backend_mesh_mut`, reusing nav_graph.feature's
+// mesh/triangle steps and nav_portals.feature's cross-mesh merge steps.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^mesh 0x([0-9a-fA-F]+) triangle (\d+) has flags 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_triangle_flags(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    triangle_index: usize,
+    flags_hex: String,
+) {
+    let flags = parse_hex(&flags_hex);
+    let mesh = nav_graph_mesh_input_mut(world, &form_hex);
+    let triangle = mesh.triangles.get_mut(triangle_index).unwrap_or_else(|| {
+        panic!("mesh {form_hex} triangle {triangle_index} was not created first")
+    });
+    triangle.flags = flags;
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) is marked preferred-pathing$")]
+async fn then_nav_graph_polygon_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        mesh.polygons[polygon].is_preferred_pathing,
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) is not marked preferred-pathing$")]
+async fn then_nav_graph_polygon_not_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        !mesh.polygons[polygon].is_preferred_pathing,
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) is authored-external$")]
+async fn then_nav_graph_edge_authored_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        mesh.polygons[polygon].authored_external[edge],
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+#[then(regex = r"^mesh 0x([0-9a-fA-F]+) polygon (\d+) edge (\d+) is not authored-external$")]
+async fn then_nav_graph_edge_not_authored_external(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    polygon: usize,
+    edge: usize,
+) {
+    let mesh = nav_graph_result_mesh(world, &form_hex);
+    assert!(
+        !mesh.polygons[polygon].authored_external[edge],
+        "{:?}",
+        mesh.polygons[polygon]
+    );
+}
+
+fn nav_graph_merge(world: &BevyoutWorld, index: usize) -> &nav_graph::PreparedNavMeshMerge {
+    &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .mesh_merges[index]
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) is authored$")]
+async fn then_nav_graph_merge_authored(world: &mut BevyoutWorld, index: usize) {
+    let merge = nav_graph_merge(world, index);
+    assert!(merge.authored_evidence, "{merge:?}");
+}
+
+#[then(regex = r"^cross-mesh merge (\d+) is geometric$")]
+async fn then_nav_graph_merge_geometric(world: &mut BevyoutWorld, index: usize) {
+    let merge = nav_graph_merge(world, index);
+    assert!(!merge.authored_evidence, "{merge:?}");
+}
+
+#[then(regex = r"^the nav graph counters report merges authored (\d+) geometric (\d+)$")]
+async fn then_nav_graph_counters_merges_authored(
+    world: &mut BevyoutWorld,
+    authored: usize,
+    geometric: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.mesh_merges_authored, authored);
+    assert_eq!(counters.mesh_merges_geometric, geometric);
+}
+
+#[then(regex = r"^the nav graph counters report merge candidates authored (\d+) geometric (\d+)$")]
+async fn then_nav_graph_counters_candidates_authored(
+    world: &mut BevyoutWorld,
+    authored: usize,
+    geometric: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.merge_candidates_authored, authored);
+    assert_eq!(counters.merge_candidates_geometric, geometric);
+}
+
+#[then(regex = r"^the nav graph counters report nvex outside-cell (\d+) inside-cell (\d+)$")]
+async fn then_nav_graph_counters_nvex(world: &mut BevyoutWorld, outside: usize, inside: usize) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.nvex_targets_outside_cell, outside);
+    assert_eq!(counters.nvex_targets_inside_cell, inside);
+}
+
+#[then(
+    regex = r"^the nav graph counters report nvci subrecords (\d+) entries (\d+) door-matches (\d+) navmesh-matches (\d+)$"
+)]
+async fn then_nav_graph_counters_nvci(
+    world: &mut BevyoutWorld,
+    subrecords: usize,
+    entries: usize,
+    door_matches: usize,
+    navmesh_matches: usize,
+) {
+    let counters = &world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first")
+        .counters;
+    assert_eq!(counters.nvci_subrecords, subrecords);
+    assert_eq!(counters.nvci_entries, entries);
+    assert_eq!(counters.nvci_door_matches, door_matches);
+    assert_eq!(counters.nvci_navmesh_matches, navmesh_matches);
+}
+
+#[then(regex = r#"^the nav graph has an "info" diagnostic containing "([^"]*)"$"#)]
+async fn then_nav_graph_info_diagnostic(world: &mut BevyoutWorld, expected: String) {
+    let graph = world
+        .nav_graph_result
+        .as_ref()
+        .expect("the nav graph must be built first");
+    assert!(
+        graph
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == "info"
+                && diagnostic.message.contains(expected.as_str())),
+        "expected an info diagnostic containing {expected:?} in {:?}",
+        graph.diagnostics
+    );
+}
+
+#[given(regex = r"^a nav graph NAVI correlation with leading NAVM 0x([0-9a-fA-F]+)$")]
+async fn given_nav_graph_navi_correlation(world: &mut BevyoutWorld, navm_hex: String) {
+    world
+        .nav_graph_inputs
+        .navi_correlations
+        .push(nav_graph::NavGraphNaviCorrelationInput {
+            leading_navmesh_form_id: Some(parse_hex(&navm_hex)),
+            entries: Vec::new(),
+        });
+}
+
+#[given(
+    regex = r"^that NAVI correlation has an entry linking NAVM 0x([0-9a-fA-F]+) and NAVM 0x([0-9a-fA-F]+) via door 0x([0-9a-fA-F]+)$"
+)]
+async fn given_nav_graph_navi_correlation_entry(
+    world: &mut BevyoutWorld,
+    navm_a_hex: String,
+    navm_b_hex: String,
+    door_hex: String,
+) {
+    let correlation = world
+        .nav_graph_inputs
+        .navi_correlations
+        .last_mut()
+        .expect("a NAVI correlation must be given first");
+    correlation
+        .entries
+        .push(nav_graph::NavGraphNaviCorrelationEntryInput {
+            navmesh_form_id: Some(parse_hex(&navm_a_hex)),
+            other_navmesh_form_id: Some(parse_hex(&navm_b_hex)),
+            door_form_id: Some(parse_hex(&door_hex)),
+        });
+}
+
+#[given(regex = r"^landmass mesh 0x([0-9a-fA-F]+) polygon (\d+) is preferred-pathing$")]
+async fn given_landmass_polygon_preferred_pathing(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    index: u32,
+) {
+    let mesh = nav_backend_mesh_mut(world, &form_hex);
+    let polygon = mesh
+        .polygons
+        .iter_mut()
+        .find(|polygon| polygon.index == index)
+        .expect("polygon must be given first");
+    polygon.is_preferred_pathing = true;
+}
+
+// ---------------------------------------------------------------------
+// nav_travel_lock.feature (issue #165 real-data acceptance follow-up) --
+// appended section, do not interleave. `door_link::effective_door_open`
+// is the pure decision the travel-arrival `Paused` arm in `nav/agent.rs`
+// now consults: a `Travel` destination's hand-off must stay gated on
+// lock state even when the door is physically open (left that way by a
+// prior successful hand-off through the same door), while an ordinary
+// `IntraCell` mid-route crossing keeps passing through an already-open
+// door regardless of lock, exactly like `crossing_gate`.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^a door-link tick observation that is (open|closed), (locked|unlocked), and bound for (travel|intra-cell)$"
+)]
+async fn given_travel_lock_tick_observation(
+    world: &mut BevyoutWorld,
+    physical: String,
+    lock: String,
+    destination: String,
+) {
+    world.nav_travel_lock_physically_open = physical == "open";
+    world.nav_travel_lock_locked = lock == "locked";
+    world.nav_travel_lock_destination = Some(match destination.as_str() {
+        "travel" => door_link::LinkDestination::Travel {
+            destination_cell_form_id: 0xC0DE,
+        },
+        _ => door_link::LinkDestination::IntraCell,
+    });
+}
+
+#[then(regex = r"^the effective door-open decision is (open|closed)$")]
+async fn then_travel_lock_effective_open(world: &mut BevyoutWorld, expected: String) {
+    let destination = world
+        .nav_travel_lock_destination
+        .expect("a door-link tick observation must be given first");
+    let effective = door_link::effective_door_open(
+        destination,
+        world.nav_travel_lock_physically_open,
+        world.nav_travel_lock_locked,
+    );
+    assert_eq!(effective, expected == "open");
+}
+
+/// Represents leg B's real-data shape: a *prior* hand-off left the door
+/// physically open, so every tick observes `physically_open == true`
+/// throughout -- only `effective_door_open`'s lock-authoritative rule for
+/// `Travel` destinations keeps the agent from completing the crossing.
+#[when(regex = r"^the door-link ticks (\d+) times with the door physically open and locked$")]
+async fn when_door_link_ticks_n_open_and_locked(world: &mut BevyoutWorld, count: u32) {
+    for _ in 0..count {
+        let destination = match world.nav_backend_door_link_state {
+            door_link::DoorLinkState::Paused { destination, .. } => destination,
+            _ => door_link::LinkDestination::IntraCell,
+        };
+        let door_open = door_link::effective_door_open(destination, true, true);
+        world.nav_backend_door_link_state = door_link::transition(
+            world.nav_backend_door_link_state,
+            door_link::DoorLinkEvent::Tick { door_open },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// --- #153 collision-derived navmesh clearance steps (M4 wave 10) ---
+// nav_collision_clearance.feature -- appended section, do not interleave.
+// `vsa::prepare::nav_clearance` is std-only (no `super::` imports), so it is
+// flat top-level included here the same way `door_link`/`repath` are.
+// ---------------------------------------------------------------------
+
+#[path = "../src/vsa/prepare/nav_clearance.rs"]
+#[allow(dead_code, unused_imports)]
+mod nav_clearance;
+
+#[given("a clearance mesh")]
+async fn given_clearance_mesh(world: &mut BevyoutWorld) {
+    world.nav_clearance_mesh = nav_clearance::NavClearanceMeshInput::default();
+    world.nav_clearance_collision = Vec::new();
+    world.nav_clearance_result = None;
+}
+
+#[given(regex = r"^clearance mesh has vertex (\d+) at (-?[\d.]+), (-?[\d.]+), (-?[\d.]+)$")]
+async fn given_clearance_vertex(world: &mut BevyoutWorld, index: usize, x: f32, y: f32, z: f32) {
+    assert_eq!(
+        world.nav_clearance_mesh.vertices.len(),
+        index,
+        "vertices must be given in order starting at 0"
+    );
+    world.nav_clearance_mesh.vertices.push([x, y, z]);
+}
+
+#[given(regex = r"^clearance mesh has polygon (\d+) with vertices (\d+),(\d+),(\d+)$")]
+async fn given_clearance_polygon(world: &mut BevyoutWorld, index: usize, a: u32, b: u32, c: u32) {
+    assert_eq!(
+        world.nav_clearance_mesh.polygons.len(),
+        index,
+        "polygons must be given in order starting at 0"
+    );
+    world.nav_clearance_mesh.polygons.push([a, b, c]);
+}
+
+#[given(regex = r"^clearance mesh has protected edge (\d+),(\d+)$")]
+async fn given_clearance_protected_edge(world: &mut BevyoutWorld, a: u32, b: u32) {
+    world.nav_clearance_mesh.protected_edges.push((a, b));
+}
+
+#[given(
+    regex = r"^a collision floor from (-?[\d.]+), (-?[\d.]+) by (-?[\d.]+), (-?[\d.]+) at height (-?[\d.]+)$"
+)]
+async fn given_collision_floor(
+    world: &mut BevyoutWorld,
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32,
+    y: f32,
+) {
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y, z0], [x1, y, z0], [x1, y, z1]],
+        });
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y, z0], [x1, y, z1], [x0, y, z1]],
+        });
+}
+
+#[given(
+    regex = r"^a collision wall from (-?[\d.]+), (-?[\d.]+) at z (-?[\d.]+) from (-?[\d.]+) to (-?[\d.]+)$"
+)]
+async fn given_collision_wall(
+    world: &mut BevyoutWorld,
+    x0: f32,
+    x1: f32,
+    z: f32,
+    y0: f32,
+    y1: f32,
+) {
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y0, z], [x1, y0, z], [x1, y1, z]],
+        });
+    world
+        .nav_clearance_collision
+        .push(nav_clearance::CollisionTriangle {
+            vertices: [[x0, y0, z], [x1, y1, z], [x0, y1, z]],
+        });
+}
+
+#[when("the clearance pass runs")]
+async fn when_clearance_pass_runs(world: &mut BevyoutWorld) {
+    world.nav_clearance_result = Some(nav_clearance::validate_and_clear(
+        &world.nav_clearance_mesh,
+        &world.nav_clearance_collision,
+        nav_clearance::NavClearanceParams::default(),
+    ));
+}
+
+fn clearance_result(world: &BevyoutWorld) -> &nav_clearance::NavClearanceResult {
+    world
+        .nav_clearance_result
+        .as_ref()
+        .expect("the clearance pass must run first")
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) removed as unsupported$")]
+async fn then_clearance_removed(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.removed_unsupported, expected, "{result:?}");
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) cut as obstructed$")]
+async fn then_clearance_cut(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.cut_obstructed, expected, "{result:?}");
+}
+
+#[then(regex = r"^(\d+) polygons? (?:is|are) dropped as unfit$")]
+async fn then_clearance_dropped_exact(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.dropped_unfit, expected, "{result:?}");
+}
+
+#[then(regex = r"^at least (\d+) polygons? (?:is|are) dropped as unfit$")]
+async fn then_clearance_dropped_at_least(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert!(
+        result.dropped_unfit >= expected,
+        "expected >= {expected} dropped, got {result:?}"
+    );
+}
+
+#[then(regex = r"^the walkable set forms (\d+) connected component(?:s)?$")]
+async fn then_clearance_components(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.component_count, expected, "{result:?}");
+}
+
+#[then(regex = r"^the largest connected component has (\d+) polygon(?:s)?$")]
+async fn then_clearance_largest_component(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.largest_component, expected, "{result:?}");
+}
+
+#[then(regex = r"^clearance polygon (\d+) is walkable$")]
+async fn then_clearance_polygon_walkable(world: &mut BevyoutWorld, index: usize) {
+    let result = clearance_result(world);
+    assert!(result.walkable[index], "polygon {index}: {result:?}");
+}
+
+#[then(regex = r"^clearance polygon (\d+) is not walkable$")]
+async fn then_clearance_polygon_not_walkable(world: &mut BevyoutWorld, index: usize) {
+    let result = clearance_result(world);
+    assert!(!result.walkable[index], "polygon {index}: {result:?}");
+}
+
+#[then("at least one clearance polygon is walkable")]
+async fn then_clearance_any_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().any(|&w| w), "{result:?}");
+}
+
+#[then("at least one clearance polygon is not walkable")]
+async fn then_clearance_any_not_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().any(|&w| !w), "{result:?}");
+}
+
+#[then("every clearance polygon is walkable")]
+async fn then_clearance_every_walkable(world: &mut BevyoutWorld) {
+    let result = clearance_result(world);
+    assert!(result.walkable.iter().all(|&w| w), "{result:?}");
+}
+
+#[then(regex = r"^the walkable count is (\d+)$")]
+async fn then_clearance_walkable_count(world: &mut BevyoutWorld, expected: usize) {
+    let result = clearance_result(world);
+    assert_eq!(result.walkable_count, expected, "{result:?}");
+}
+
+// ---------------------------------------------------------------------
+// nav_portal_quarantine.feature (issue #162, M4 wave 10) -- appended
+// section, do not interleave. Drives `viewer::nav::landmass_graph`'s pure
+// `merge_link_kind`/`permitted_animation_link_kinds` directly -- the
+// Bevy-side timeout/quarantine/repath wiring lives in `nav/agent.rs`'s own
+// `#[cfg(test)]` unit tests (see this feature's own doc comment for why).
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^merge-link candidate index (\d+)$")]
+async fn given_merge_link_candidate_index(world: &mut BevyoutWorld, index: usize) {
+    world.nav_quarantine_candidate_index = Some(index);
+}
+
+#[when("the merge-link kind is resolved")]
+async fn when_merge_link_kind_resolved(world: &mut BevyoutWorld) {
+    let index = world
+        .nav_quarantine_candidate_index
+        .expect("a merge-link candidate index must be given first");
+    world.nav_quarantine_resolved_kind = Some(landmass_graph::merge_link_kind(index));
+}
+
+#[then(regex = r"^the merge-link kind is (\d+)$")]
+async fn then_merge_link_kind(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(
+        world.nav_quarantine_resolved_kind,
+        Some(expected),
+        "merge-link kind must resolve deterministically from its candidate index"
+    );
+}
+
+#[given(regex = r"^(\d+) merge-link kinds exist$")]
+async fn given_merge_link_kind_count(world: &mut BevyoutWorld, count: usize) {
+    world.nav_quarantine_kind_count = count;
+}
+
+#[given(regex = r"^merge-link kind (\d+) is quarantined$")]
+async fn given_merge_link_kind_quarantined(world: &mut BevyoutWorld, kind: usize) {
+    world.nav_quarantine_excluded_kinds.insert(kind);
+}
+
+#[when("the permitted animation link kinds are computed")]
+async fn when_permitted_animation_link_kinds_computed(world: &mut BevyoutWorld) {
+    world.nav_quarantine_permitted = Some(landmass_graph::permitted_animation_link_kinds(
+        &world.nav_quarantine_excluded_kinds,
+        world.nav_quarantine_kind_count,
+    ));
+}
+
+#[then("every animation link kind is permitted")]
+async fn then_every_animation_link_kind_permitted(world: &mut BevyoutWorld) {
+    let permitted = world
+        .nav_quarantine_permitted
+        .take()
+        .expect("the permitted animation link kinds must be computed first");
+    assert_eq!(
+        permitted, None,
+        "an empty quarantine must signal `PermittedAnimationLinks::All` (`None`), not an explicit full set"
+    );
+}
+
+#[then(regex = r"^the permitted animation link kinds are (.+)$")]
+async fn then_permitted_animation_link_kinds(world: &mut BevyoutWorld, expected: String) {
+    let permitted = world
+        .nav_quarantine_permitted
+        .take()
+        .expect("the permitted animation link kinds must be computed first")
+        .expect("a non-empty quarantine must produce an explicit allow-list, not `All`");
+    let expected: std::collections::BTreeSet<usize> = expected
+        .split(',')
+        .map(|value| value.trim().parse().expect("valid kind number"))
+        .collect();
+    assert_eq!(permitted, expected);
 }

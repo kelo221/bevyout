@@ -1,231 +1,94 @@
 # M4 wave 10 — manual acceptance script
 
-**What this wave shipped, in plain language:** Fallout 3's external actor KF
-animations can now be prepared as a reusable, animation-only GLB pack without
-changing the native scene/actor converter. The prepared catalog records each
-clip's authored sequence name, time range, loop mode, root-motion policy,
-required and animated targets, controller/interpolator classes, and text keys.
-An isolated animation zoo makes the result visible and lets a human or the
-loopback agent bridge cycle and inspect every compatible clip. Missing and
-unsupported clips stay explicit diagnostics.
+What this wave shipped, in plain language: the prepared navmesh is now
+validated against the cell's real collision — triangles with no floor
+under them are removed, corridors genuinely narrower than the agent are
+disconnected up front, and a connectivity diagnostic proves the mesh
+stays whole (99–100% on the test cells). The old interim runtime erosion
+is deleted outright. Locked doors now behave correctly in three more
+ways: preferred-path polygons carry a cheaper routing cost, a `setlock`
+issued before any agent exists is no longer lost, and an agent that
+fails a door wait no longer freezes forever. Blocked seam portals now
+quarantine just the bad link instead of abandoning the route. Two
+hard geometry/physics classes were measured, root-caused, and split to
+follow-ups #171 (sub-triangle clearance: the metro entrance frame and
+the restroom void edge) and #172 (KCC stair risers) — their standing
+wedges are documented below as *expected* outcomes, not regressions.
 
-Prerequisite: Blender 5.1.2 with the Blender NifTools addon enabled. PyNifly is
-not required for this compatibility path. The first full humanoid pack build
-is intentionally expensive (about 17 minutes, 147 MiB output, and 6.65 GiB
-peak RSS on the acceptance machine); subsequent prepares validate and reuse
-it.
+## 0. One-time setup
 
-If running from an isolated worktree, Fallout 3 configuration is not inherited
-from another checkout. Either pass `--game-root "<Fallout 3 goty>"` to every
-`prepare` command below, or point `--config` at a config file containing the
-`[fallout3] game_root` and `plugin = "Fallout3.esm"` entries. On the acceptance
-machine that is:
-
-```powershell
---config /Users/simon/projects/bevyout/.bevyout/config.toml
+```
+cargo run-dev -- prepare --cell 0001a273
+cargo run-dev -- prepare --cell 00024512
 ```
 
-## A. Default native preparation does not invoke Blender
+Expected: each prints a `nav clearance:` line, e.g.:
 
-1. Run:
+```
+nav clearance: collision triangles 58352, meshes 2, removed unsupported 12, cut obstructed 10, dropped unfit 9, walkable 1307, smallest largest-component share 99%
+nav clearance: collision triangles 5055, meshes 1, removed unsupported 0, cut obstructed 1, dropped unfit 1, walkable 291, smallest largest-component share 100%
+```
 
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native
-   ```
+The `smallest largest-component share` percentage is the wave's headline
+guarantee: validation never shreds the mesh (≥95%).
 
-2. **Expected:** preparation succeeds without resolving Blender. The actor
-   animation summary reports two discovered sets but no built/reused packs and
-   no conversion failures; discovered source clips have `NotConverted` status
-   under the informational `conversion_not_requested` diagnostic, not a failed
-   status.
+## A. #169 — early `setlock` is no longer lost
 
-## B. Build and reuse the humanoid compatibility pack
+1. Launch FranklinMetro02:
+   `cargo run-dev -- view --manifest .bevyout/cache/scenes/0001a273/scene.ron`
+2. In the console, FIRST thing after load (before any `tna` command):
+   `setlock 0007f7e3 0`.
+3. `player.setpos x 90`, `player.setpos y 96.2`, `player.setpos z -144`,
+   then `tna spawn`, then `tna travel 0007f7e3`.
+4. Expected: `nav agent 0 handed off to cell 0001a280` within ~6 s.
+   (Before this wave, step 2's unlock was silently lost and this exact
+   sequence ended `unreachable state=NoPath` — issue #169.)
 
-1. Run:
+## B. #165-adjacent fix — a failed door wait no longer freezes the agent
 
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter blender
-   ```
+5. `tna spawn`, `setlock 0007f7e3 25`, `tna travel 0007f7e3`; poll
+   `tna status` until it settles at `unreachable` (~3 s of `paused`
+   first — that is the wait window).
+6. `setlock 0007f7e3 0`, then `tna travel 0007f7e3`.
+   Expected: `handed off`. (Before this wave the agent stayed `paused`
+   forever after step 5 — the `PauseAgent` component leaked on the
+   failed terminal.)
 
-2. **Expected on the first run:**
-   `actor animation catalog: 11 actor mappings, 2 sets, 1385 ready clips, packs built 1, reused 0, failed clips 27`.
-   The 27 failures are retained as `conversion_failed` with the stable reason
-   `KF produced no animated channels on the prepared skeleton`.
-3. Run the same command again. **Expected:** the cell is skipped as valid by
-   the prepare job manifest. If another prepared revision made the cell stale,
-   the inner summary instead reports `packs built 0, reused 1`; either result
-   proves the validated warm artifact was not rebuilt.
+## C. #153 — collision validation, disconnect semantics, fall-guard interplay
 
-## B2. Build the native Nifty KF pack (no Blender)
+7. Step 0's `nav clearance` lines are the primary surface; `tnm` in the
+   viewer shows the surviving walkable triangles.
+8. Restroom void (known #171 residual, guard backstops it):
+   `player.setpos x -16.6`, `player.setpos y 103.4`,
+   `player.setpos z -57.2`, `tna spawn`, `tna goto -15 103.3 -57`.
+   Expected: the agent steps onto the void edge and exactly one
+   `nav agent fell out of world … kill_z=…` warning fires — no infinite
+   fall. (Query-time removal of this straddling triangle needs the #171
+   sub-triangle clip.)
+9. Sub-diameter invariant (synthetic): `cargo test nav_clearance` — the
+   `a_one_metre_doorway_stays_connected…` and
+   `a_sub_diameter_pinch_disconnects…` tests are the doorway-regression
+   guards.
 
-1. Run:
+## D. Known wedges, expected and tracked (not regressions)
 
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter native
-   ```
+10. #148 / #171: on 0001a273, `player.setpos x 9.6` / `y 106` /
+    `z -73.1`, `tna spawn`, `tna goto -19 103.4 -59.5`. Expected: the
+    agent walks ~0.5 m and ends `stuck=true blocked=true` near
+    (9.90, 106.05, −73.84) — the `MetHallEntrance01` frame posts, which
+    triangle-level clearance provably cannot cut (see #171).
+11. #172: on 00024512, `tna spawn`, `tna goto 152.5 36.6 -37`. Expected:
+    the agent descends the stairs and wedges near (154.4, 39.4, −80.4)
+    — the authored riser seam the KCC cannot yet climb. The route being
+    *found* (status `moving`, not `unreachable`) is this wave's
+    guarantee: no wave-6-style over-shrink regression.
 
-2. **Expected:** the command never resolves Blender and reports 1,380 ready
-   clips, one native pack built on a cold cache, and 32 failed clips. The
-   failures are explicit: 27 zero-channel actions and five legacy 20.0.0.4 KF
-   files rejected by the FO3 20.2.0.7 parser. Compact B-spline transform
-   channels are decoded natively. A warm rerun
-   validates/reuses the native pack.
+## E. #162 / #168 — no player-visible surface on the test cells
 
-3. Launch the same native pack:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --start-clip 1hpequip --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
-   ```
-
-   **Expected:** the startup log/probe reports `clips=1380`, `skipped=32`,
-   `bound_targets=67`, and `error: null`; the actor remains coherent while
-   holding the selected native clip. This proves the Nifty path is live
-   independently of the Blender comparison pack. The five legacy clips remain
-   explicitly rejected because they are not FO3 20.2.0.7 assets.
-
-## B3. Inspect and control the native zoo
-
-1. The right panel contains an exhaustive, scrollable list of every ready
-   prepared clip. Click a row to select and restart that clip. `Prev`, `Next`,
-   and `Restart` are also available there; the same actions are `Left Arrow`,
-   `Right Arrow`, and `R`.
-2. The selected clip holds its authored final pose by default. `Loop` or `L`
-   repeats only that clip. `Cycle` or `Y` explicitly enables catalog
-   auto-advance when a clip finishes; this is off by default so a selected
-   animation cannot unexpectedly chain into another one.
-3. Drag with the left mouse button over the viewport to orbit the camera
-   around the actor. Drag with the right mouse button to rotate the actor on
-   its pedestal. Scroll to zoom. `Q`/`E` rotate the actor from the keyboard;
-   `C` resets the camera and `X` resets the actor rotation.
-4. The top-left overlay is intentionally compact. Press `D` or click `Debug`
-   to open bounded source metadata, target/controller details, the computed
-   grounding offset, and the most recent 16 zoo events. Press it again to hide
-   the diagnostic panel without losing the current clip list or controls.
-
-## B4. Verify native spline playback and layered clips
-
-1. Rebuild the native pack after the spline evaluator correction (the converter
-   revision deliberately invalidates the old cache):
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare SuperDuperMart --converter native --actor-animation-converter native --rebuild-assets
-   ```
-
-2. Launch the zoo for raider `00041600` with the native pack:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
-   ```
-
-3. Scroll the `All animations` pane with the wheel and select rows `0007`
-   (`1hmaim`), `0008` (`1hmaimdown`), `0009` (`1hmaimup`), and `0011`
-   (`1hmattackforwardpower`). The `0008` and `0009` selections must report
-   `blend_base_clip: 1hmaim` and the selection line must say they are layered
-   over `1hmaim`; they should not collapse to a head-only pose.
-4. Select the power-attack row and watch its root motion. The corrected native
-   clip should remain smooth and bounded; it must not exhibit the large
-   sideways/jittering control-point jumps from the stale v4 pack. Open `Debug`
-   and scroll the pane to confirm the source range, controller/interpolator
-   metadata, blend base, ground offset, and recent events remain readable.
-   If the old pack is still present, the zoo exits before opening a window with
-   an explicit `native actor animation pack revision ... is stale` message;
-   repeat step 1 rather than inspecting that stale asset.
-
-## C. See and control a real humanoid KF
-
-1. Launch raider reference `00041600` at its pistol-equip clip:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 00041600 --start-clip 1hpequip --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
-   ```
-
-2. **Expected within about one second:** the window shows `LvlRaiderGun`,
-   `Clip 79/1385`, source `meshes/characters/_male/1hpequip.kf`, authored
-   sequence `Equip`, source range approximately `0.0..0.3667`, source loop
-   `clamp`, root-motion policy `preserve_authored` with accumulation root
-   `Bip01`, and five text keys. The actor visibly plays the equip motion.
-   The startup log/probe should report `bound_targets: 66`; this confirms the
-   Blender-space clip pack was retargeted onto the native actor hierarchy
-   rather than merely accepted by metadata.
-3. Press `Space`. **Expected:** HUD state changes to `paused` and elapsed time
-   stops. Press `Space` again to resume.
-4. Press Right Arrow, then `R`. **Expected:** the next compatible clip is
-   selected and restarts from elapsed zero.
-5. Press `L`, then Up Arrow. **Expected:** playback loop becomes `true` and
-   speed becomes `2.00x`; the current clip repeats instead of advancing.
-6. Optional structured check from another terminal:
-
-   ```powershell
-   curl -X POST http://127.0.0.1:15702/ -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"bevyout.animation_zoo_probe","params":{}}'
-   curl -X POST http://127.0.0.1:15702/ -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":2,"method":"bevyout.animation_zoo_control","params":{"action":"toggle_pause"}}'
-   ```
-
-   **Expected:** the probe reports `count: 1385`, `bound_targets: 66`,
-   `error: null`, the source
-   metadata named above, required/animated/missing target arrays,
-   controller/interpolator arrays, and the original text-key values (including
-   `Enum: Equip`, `prn: Bip01 R Hand`, and `Attach`). The control response is
-   `accepted: true`.
-
-## D. See and control a real creature KF set
-
-1. Exit the humanoid zoo, then prepare Vault 101 Atrium with the same explicit
-   compatibility backend:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml prepare 00024511 --converter native --actor-animation-converter blender
-   ```
-
-2. **Expected:** the summary reports 17 actor mappings, two sets, 1,401 ready
-   clips, one pack built and the humanoid pack reused. The added Radroach pack
-   contains 16 ready clips with no failures.
-3. Launch Radroach reference `0005443b` at a real attack clip:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo 00024511 --actor 0005443b --start-clip h2hattackleft --cache-dir .bevyout/cache --agent-bridge --agent-port 15702
-   ```
-
-4. **Expected:** the window shows `CG04Radroach`, 16 clips, zero skipped, and
-   visible movement. The startup log/probe should report `bound_targets: 48`.
-   The attack metadata reports sequence `AttackLeft`, source
-   range approximately `0.0..0.6667`, source loop `clamp`, root-motion policy
-   `preserve_authored`, accumulation root `Bip01`, transform controllers, and
-   authored text keys including `Hit` and `Sound: NPCRoachWings`.
-5. Repeat the controls from section C. **Expected:** pause/resume, next,
-   restart, loop, and 2x speed all update the HUD and playback exactly as for
-   the humanoid pack.
-
-## E. A missing creature set remains honest
-
-1. Exit the zoo and run:
-
-   ```powershell
-   cargo run-dev -- --config /Users/simon/projects/bevyout/.bevyout/config.toml animation-zoo SuperDuperMart --actor 0006d921 --cache-dir .bevyout/cache
-   ```
-
-2. **Expected:** startup fails clearly with `actor animation set has no clip
-   pack: KF asset was not found in loose files or loaded archives`. Protectron's
-   20 authored `KFFZ` filenames resolve relative to its model directory, as
-   required by the ESM4 contract, but those KF assets are absent. They are not
-   silently substituted with the humanoid files of the same basename.
-
-## F. Reproduce the representative weapon-controller row
-
-1. Convert the real laser-pistol model to temporary outputs (use any paths
-   outside the repository):
-
-   ```powershell
-   cargo run-dev -- nif-convert --asset meshes/weapons/1handpistol/laserpistol.nif --output /tmp/bevyout-laserpistol.glb --report /tmp/bevyout-laserpistol.json --allow-lossy --force
-   ```
-
-2. **Expected:** the deterministic summary reports 4 meshes, 3 animations, 3
-   channels, 10 keyframes, 6 embedded textures, 0 missing textures, and no
-   lossy issues. The GLB retains the named controller nodes/clips
-   `##LPSideLatch`, `##LPSmallEnergyCell`, and `##LPTrigger`, plus
-   `ProjectileNode`.
-3. Delete the two temporary outputs after inspection. They are derived game
-   data and must never be committed.
-
-Door Open/Close controller playback remains covered by M2 wave 3 / issue #57;
-this wave changes only the new external-KF clip-pack path and does not alter the
-door converter.
+12. #162 (portal quarantine): both test cells' surviving portals are
+    physics-validated, so no blocked link exists to demonstrate live;
+    the behavior is pinned by `features/nav_portal_quarantine.feature`
+    and the `nav agent portal quarantined <id> link=<kind>` log line
+    fires on a real timeout. #168 (preferred-path cost 0.5): active on
+    every archipelago build; visible routing differences await cells
+    with authored preferred-path flags. Both are unit/cucumber-pinned.

@@ -1,21 +1,20 @@
-# M4 wave 10 kickoff — actor KF compatibility and animation zoo (#104)
+# M4 wave 10 — kickoff prompt
 
-Requested on 2026-07-19:
+Verbatim request (after PR #170 merged and the nav progress review):
 
-- continue the stopped `Animations` branch;
-- do not switch or modify the caller's current branch;
-- use an isolated git worktree for all continuation work; and
-- determine the missing context from the repository before asking questions.
+> Go ahead, rescope 153 and start the wave with 162,168,169 is possible to
+> do parallely. 153 is the last big item, I assume. Rephrase and work on
+> it, too
 
-The remote branch contained one large prototype commit named `Init`: KFFZ
-decoding, a prepared actor-animation catalog, external-KF clip-pack conversion,
-and an isolated `animation-zoo` viewer. It had no pull request, wave plan,
-manual acceptance script, or recorded real-data evidence. The continuation
-worktree is `/Users/simon/projects/bevyout-worktrees/Animations` on the local
-tracking branch `Animations`.
+Orchestrator decisions:
 
-Repository and issue review identify the bounded prototype as the test surface
-for [#104](https://github.com/kelo221/bevyout/issues/104), not completion of
-[#106](https://github.com/kelo221/bevyout/issues/106). The latter still owns
-gameplay idle/locomotion/turn/equip transitions and representative runtime
-integration after the compatibility decision is measured.
+- #153 retitled/rescoped (comment on the issue, 2026-07-20): collision-
+  derived navmesh validation + clearance rebuild replacing the interim
+  erosion, per #148/#164's wave-9 investigation verdict. #148's route is
+  its acceptance gate and closes with it.
+- Wave 10 = #153 (big lane) parallel with #162 + #168 + #169 (small lane).
+  The three small items all touch the `agent.rs`/`landmass_graph.rs`
+  runtime seam, so they run as ONE executor sequentially in a worktree
+  while #153 works prepare-side on the wave branch — disjoint seams,
+  AGENTS.md parallel-worktree rule with `tests/features.rs` as the only
+  shared merge seam.

@@ -16,10 +16,22 @@
 //! divisor/bounds header) has no documented element count and is not
 //! required by the runtime graph (`prepare::nav_graph`), so only that fixed
 //! header is decoded; the remainder stays inside the record's retained raw
-//! `payload`. `NAVI.NVCI`'s fields are labelled "Unknown" even in fopdoc
-//! itself (every field name is literally `Unknown`) with no confirmed
-//! element layout, so it -- and any other subrecord besides `NVER`/`NVMI` --
-//! is retained as an opaque diagnosed subrecord rather than guessed at.
+//! `payload`.
+//!
+//! `NAVI.NVCI` (issue #156, F156.3) is decoded following fopdoc's literal
+//! documented byte layout (`Records/NAVI.html`'s "NVCI" table: a single
+//! leading `formid`, then a repeating `(formid, formid, formid)` group whose
+//! third field fopdoc names "Door" rather than "Unknown" -- see
+//! `decode_navi_correlation`'s doc comment). Unlike `NVMI`'s tail, this
+//! layout has **not** been cross-checked against real Fallout3.esm/
+//! FalloutNV.esm bytes in this repository (fopdoc labels every other field
+//! "Unknown" and OpenMW's `loadnavi.cpp` skips it entirely for FO3/FNV, so
+//! there is no second source to verify against, and this worktree has no
+//! `.bevyout/` cache to inspect real prepared output) -- it is correlation
+//! evidence only (issue #156 feature 3: FormID cross-references against a
+//! cell's own doors/NAVMs in a prepare diagnostic), never consumed for
+//! runtime pathing. Any other subrecord besides `NVER`/`NVMI`/`NVCI` is
+//! still retained as an opaque diagnosed subrecord rather than guessed at.
 
 use super::*;
 
@@ -438,10 +450,32 @@ pub(crate) struct NaviInfoEntry {
     pub(crate) tail: Vec<u8>,
 }
 
+/// One decoded `NVCI` correlation entry (issue #156, F156.3): the repeating
+/// `(formid, formid, formid)` group fopdoc's `Records/NAVI.html` documents
+/// for `NVCI`, whose third field it names "Door" rather than "Unknown" --
+/// see [`decode_navi_correlation`]'s doc comment for the full layout and its
+/// verification caveat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NaviCorrelationEntry {
+    pub(crate) navmesh_form_id: Option<u32>,
+    pub(crate) other_navmesh_form_id: Option<u32>,
+    pub(crate) door_form_id: Option<u32>,
+}
+
+/// One decoded `NVCI` subrecord: fopdoc's single leading (non-repeating)
+/// `formid` field, plus the repeating [`NaviCorrelationEntry`] group that
+/// follows. See [`decode_navi_correlation`]'s doc comment.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct NaviCorrelation {
+    pub(crate) leading_navmesh_form_id: Option<u32>,
+    pub(crate) entries: Vec<NaviCorrelationEntry>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NaviRecord {
     /// Record identity/version metadata, retained for diagnostics and
-    /// forward use; only `entries` feeds the prepared nav graph today.
+    /// forward use; only `entries`/`correlations` feed the prepared nav
+    /// graph today.
     #[allow(dead_code)]
     pub(crate) form_id: u32,
     #[allow(dead_code)]
@@ -449,13 +483,17 @@ pub(crate) struct NaviRecord {
     #[allow(dead_code)]
     pub(crate) version: Option<u32>,
     pub(crate) entries: Vec<NaviInfoEntry>,
+    /// Decoded `NVCI` subrecords, in file order (issue #156 feature 3;
+    /// correlation-only, never consumed for runtime pathing -- see the
+    /// module doc comment).
+    pub(crate) correlations: Vec<NaviCorrelation>,
 }
 
-/// Decodes one `NAVI` record: `NVER` and every `NVMI` entry. Every other
-/// subrecord (including `NVCI`, whose fields fopdoc itself only labels
-/// "Unknown") is retained as an opaque, diagnosed subrecord -- see the
-/// module doc comment. Returns pre-formatted (but unprefixed) diagnostic
-/// messages; the caller (`reader.rs`) adds the `NAVI <form_id>:` prefix.
+/// Decodes one `NAVI` record: `NVER`, every `NVMI` entry, and every `NVCI`
+/// correlation subrecord (issue #156 feature 3). Every other subrecord is
+/// retained as an opaque, diagnosed subrecord -- see the module doc comment.
+/// Returns pre-formatted (but unprefixed) diagnostic messages; the caller
+/// (`reader.rs`) adds the `NAVI <form_id>:` prefix.
 pub(crate) fn parse_navi(
     subs: &[Subrecord],
     form_id: u32,
@@ -475,7 +513,19 @@ pub(crate) fn parse_navi(
             diagnostics.push(format!("NVMI {index}: {message}"));
         }
     }
-    for signature in ignored_signatures(subs, &["EDID", "NVER", "NVMI"]) {
+    let mut correlations = Vec::new();
+    for (index, subrecord) in subs.iter().filter(|s| s.signature == "NVCI").enumerate() {
+        let mut correlation_diagnostics = Vec::new();
+        correlations.push(decode_navi_correlation(
+            &subrecord.data,
+            resolver,
+            &mut correlation_diagnostics,
+        ));
+        for message in correlation_diagnostics {
+            diagnostics.push(format!("NVCI {index}: {message}"));
+        }
+    }
+    for signature in ignored_signatures(subs, &["EDID", "NVER", "NVMI", "NVCI"]) {
         diagnostics.push(format!(
             "ignored unsupported NAVI.{signature} subrecord; layout not documented for Fallout 3/New Vegas"
         ));
@@ -486,9 +536,80 @@ pub(crate) fn parse_navi(
             flags,
             version,
             entries,
+            correlations,
         },
         diagnostics,
     )
+}
+
+/// Decodes one `NVCI` subrecord following fopdoc's literal documented byte
+/// layout (`Records/NAVI.html`'s "NVCI" table, reproduced here since fopdoc
+/// gives every field but one the placeholder name "Unknown"):
+///
+/// - A single leading `formid` field (fopdoc's first table row, the only one
+///   with no repeat marker): a `NAVM` FormID.
+/// - Followed by zero or more repeating 12-byte groups (fopdoc's remaining
+///   three rows, each individually marked as repeating): `(formid, formid,
+///   formid)`, the last of which fopdoc names "Door" (a `REFR` FormID) while
+///   the first two stay "Unknown" `NAVM` FormIDs.
+///
+/// This is a best-effort decode of fopdoc's documented shape, not a
+/// real-data-verified layout -- see the module doc comment for why (no
+/// OpenMW reference, no `.bevyout/` cache in this worktree to cross-check
+/// against). It never panics: a payload shorter than the 4-byte leading
+/// field, or trailing bytes that do not form a complete 12-byte entry, are
+/// diagnosed and the unparsed remainder is simply not decoded further
+/// (nothing to retain beyond the record's own raw `payload`, which this
+/// module does not carry per-subrecord).
+fn decode_navi_correlation(
+    data: &[u8],
+    resolver: &FormIdResolver,
+    diagnostics: &mut Vec<String>,
+) -> NaviCorrelation {
+    const LEADING_LEN: usize = 4;
+    const ENTRY_LEN: usize = 12;
+
+    if data.len() < LEADING_LEN {
+        diagnostics.push(format!(
+            "malformed: expected at least {LEADING_LEN} bytes, got {}",
+            data.len()
+        ));
+        return NaviCorrelation::default();
+    }
+    let leading_navmesh_form_id = u32_at(data, 0)
+        .map(|raw| resolver.adjust(raw))
+        .filter(|id| *id != 0);
+
+    let remainder = &data[LEADING_LEN..];
+    let mut entries = Vec::with_capacity(remainder.len() / ENTRY_LEN);
+    let mut offset = 0;
+    while offset + ENTRY_LEN <= remainder.len() {
+        let navmesh_form_id = u32_at(remainder, offset)
+            .map(|raw| resolver.adjust(raw))
+            .filter(|id| *id != 0);
+        let other_navmesh_form_id = u32_at(remainder, offset + 4)
+            .map(|raw| resolver.adjust(raw))
+            .filter(|id| *id != 0);
+        let door_form_id = u32_at(remainder, offset + 8)
+            .map(|raw| resolver.adjust(raw))
+            .filter(|id| *id != 0);
+        entries.push(NaviCorrelationEntry {
+            navmesh_form_id,
+            other_navmesh_form_id,
+            door_form_id,
+        });
+        offset += ENTRY_LEN;
+    }
+    if offset != remainder.len() {
+        diagnostics.push(format!(
+            "{} trailing byte(s) after the leading FormID do not form a complete {ENTRY_LEN}-byte correlation entry",
+            remainder.len() - offset
+        ));
+    }
+    NaviCorrelation {
+        leading_navmesh_form_id,
+        entries,
+    }
 }
 
 fn decode_navi_info(
