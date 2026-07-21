@@ -112,6 +112,14 @@ impl RefRegistry {
         self.by_entity.get(&entity)
     }
 
+    /// Live entity currently registered for `form_id`, if any. Read-only
+    /// lookup for per-frame systems (e.g. the cinema camera) that must
+    /// re-resolve a tracked reference each frame without exclusive world
+    /// access. Callers should still confirm the entity via their own query.
+    pub fn entity_of(&self, form_id: u32) -> Option<Entity> {
+        self.by_form_id.get(&form_id).copied()
+    }
+
     pub fn label(&self, entity: Entity) -> String {
         self.identity(entity).map_or_else(
             || format!("entity {}", entity.to_bits()),

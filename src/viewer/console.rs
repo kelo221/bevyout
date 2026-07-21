@@ -34,6 +34,7 @@ use super::{
 
 mod actor_state_commands;
 mod ai_package_commands;
+mod cinema_commands;
 mod common;
 mod item_commands;
 mod navigation_commands;
@@ -109,7 +110,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 9] = [
+    let providers: [&dyn ConsoleCommandProvider; 10] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -119,6 +120,7 @@ fn install(app: &mut App) {
         &persistence_commands::PersistenceCommandProvider,
         &ai_package_commands::AiPackageCommandProvider,
         &actor_state_commands::ActorStateCommandProvider,
+        &cinema_commands::CinemaCommandProvider,
     ];
     for provider in providers {
         registry

@@ -51,6 +51,7 @@ mod actor_state;
 mod animation;
 mod animation_zoo;
 mod audio;
+mod cinema;
 mod interaction;
 mod inventory;
 mod openmw_player;
