@@ -49,7 +49,6 @@ mod item_transaction {
 mod actor_state {
     pub use bevyout_core::actor_state::*;
 }
-
 #[allow(dead_code, unused_imports)]
 mod pause_menu {
     pub use bevyout_core::pause_menu::*;
