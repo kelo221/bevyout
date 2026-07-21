@@ -138,9 +138,9 @@ pub(super) fn sync_ui_visibility(
     diagnostic: Res<DiagnosticUiState>,
     mut entities: UiVisibilityQuery<'_, '_>,
 ) {
-    let console_open = modal.is_some_and(|modal| *modal.get() == GameplayModal::Console);
+    let modal_open = modal.is_some_and(|modal| *modal.get() != GameplayModal::None);
     for (game_marker, diagnostic_marker, mut visibility) in &mut entities {
-        let visible = !console_open
+        let visible = !modal_open
             && game_marker.is_none_or(|_| game.visible)
             && diagnostic_marker.is_none_or(|_| diagnostic.visible);
         *visibility = if visible {

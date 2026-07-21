@@ -11,7 +11,7 @@ use crate::app_state::AppStatePlugin;
 
 use super::{
     actor, actor_animation, actor_state, agent_bridge, animation, audio, bindings, console,
-    console_ui, interaction, nav, pipboy, pipboy_reader, player, world, world_items,
+    console_ui, interaction, nav, pause_menu, pipboy, pipboy_reader, player, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -76,6 +76,7 @@ impl PluginGroup for ViewerPlugins {
             .add(animation::PlacementAnimationPlugin)
             .add(console::ViewerConsolePlugin)
             .add(console_ui::ConsoleUiPlugin)
+            .add(pause_menu::PauseMenuPlugin)
             .add(world::WorldPlugin {
                 resident_cell_limit: self.resident_cell_limit,
             })
@@ -106,6 +107,7 @@ mod tests {
         assert!(app.is_plugin_added::<actor::ActorPlugin>());
         assert!(app.is_plugin_added::<actor_state::ActorStatePlugin>());
         assert!(app.is_plugin_added::<actor_animation::ActorAnimationPlugin>());
+        assert!(app.is_plugin_added::<pause_menu::PauseMenuPlugin>());
         assert!(app.is_plugin_added::<world::WorldPlugin>());
         assert!(app.is_plugin_added::<nav::NavPlugin>());
         assert!(app.world().resource::<player::PhysicsDisabled>().0);
