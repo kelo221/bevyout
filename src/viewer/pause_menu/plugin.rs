@@ -2,10 +2,10 @@
 
 use bevy::prelude::*;
 
-use crate::app_state::GameplayModal;
-
 use super::snapshot::{self, PauseSnapshot};
 use super::ui::{self, PauseMenuUiState};
+use crate::app_state::GameplayModal;
+use crate::viewer::console::{DiagnosticUi, GameUi};
 
 pub(crate) struct PauseMenuPlugin;
 
@@ -16,11 +16,22 @@ impl Plugin for PauseMenuPlugin {
             .add_systems(Startup, ui::load_pause_menu_assets)
             .add_systems(
                 OnEnter(GameplayModal::Paused),
-                (snapshot::begin_snapshot_capture, ui::open_pause_menu).chain(),
+                (
+                    snapshot::hide_gameplay_ui::<GameUi>,
+                    snapshot::hide_gameplay_ui::<DiagnosticUi>,
+                    snapshot::begin_snapshot_capture,
+                    ui::open_pause_menu,
+                )
+                    .chain(),
             )
             .add_systems(
                 OnExit(GameplayModal::Paused),
-                (ui::close_pause_menu, snapshot::restore_world_camera).chain(),
+                (
+                    ui::close_pause_menu,
+                    snapshot::restore_world_camera,
+                    snapshot::show_gameplay_ui,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
