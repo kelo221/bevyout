@@ -12,7 +12,6 @@ use bevy::ui::widget::NodeImageMode;
 
 use super::ui::{PauseMenuBackdrop, PauseMenuRoot};
 
-
 /// How many Update ticks to wait for GPU readback before showing the menu
 /// with the solid fill (so Esc is never a black hole). Real captures often
 /// need more than a handful of frames; a short stall was cancelling them.
@@ -39,6 +38,37 @@ struct PendingPauseSnapshot {
     generation: u64,
 }
 
+/// Marker that the pause menu hid this entity for the freeze-frame capture.
+/// We restore on `OnExit(Paused)` to whatever the visibility sync systems would
+/// set (`Inherited` here is fine — `sync_ui_visibility` re-applies next tick).
+#[derive(Component)]
+pub(super) struct HiddenByPauseMenu;
+
+pub(super) fn hide_gameplay_ui<Marker: Component>(
+    mut commands: Commands,
+    entities: Query<Entity, With<Marker>>,
+) {
+    for entity in &entities {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.insert((Visibility::Hidden, HiddenByPauseMenu));
+        }
+    }
+}
+
+pub(super) fn show_gameplay_ui(
+    mut commands: Commands,
+    entities: Query<Entity, With<HiddenByPauseMenu>>,
+) {
+    for entity in &entities {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands
+                .insert(Visibility::Inherited)
+                .remove::<HiddenByPauseMenu>();
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
 pub(super) fn begin_snapshot_capture(
     mut commands: Commands,
     mut snapshot: ResMut<PauseSnapshot>,
@@ -138,10 +168,10 @@ fn on_screenshot_captured(
     // a transparent frame of the overlay.
     suspend_world_camera(&mut cameras, &mut commands, &ui_cameras);
     for (entity, visibility) in &roots {
-        if matches!(*visibility, Visibility::Hidden) {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.insert(Visibility::Inherited);
-            }
+        if matches!(*visibility, Visibility::Hidden)
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.insert(Visibility::Inherited);
         }
     }
 }
@@ -244,16 +274,18 @@ pub(super) fn process_snapshot_blur(source: &Image) -> Option<Image> {
     // Full-resolution separable blur pass across native 1:1 screenshot texels.
     apply_separable_blur(&mut rgba.bytes, width, height, 16);
 
-    // Authentic Fallout 3 warm beige / golden amber CRT phosphor grade matching reference screenshot.
+    // Sepia phosphor grade: classic warm-brown sepia matrix over the blurred
+    // freeze-frame, with a small lift so dark scenes keep a base CRT glow.
     for pixel in rgba.bytes.chunks_exact_mut(4) {
         let r = f32::from(pixel[0]);
         let g = f32::from(pixel[1]);
         let b = f32::from(pixel[2]);
-        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        // Warm glowing beige/amber phosphor curve
-        pixel[0] = (lum * 0.75 + r * 0.40 + 15.0).clamp(0.0, 255.0) as u8;
-        pixel[1] = (lum * 0.75 + g * 0.35 + 15.0).clamp(0.0, 255.0) as u8;
-        pixel[2] = (lum * 0.35 + b * 0.20 + 5.0).clamp(0.0, 255.0) as u8;
+        let sepia_r = 0.393 * r + 0.769 * g + 0.189 * b;
+        let sepia_g = 0.349 * r + 0.686 * g + 0.168 * b;
+        let sepia_b = 0.272 * r + 0.534 * g + 0.131 * b;
+        pixel[0] = (sepia_r * 1.02 + 12.0).clamp(0.0, 255.0) as u8;
+        pixel[1] = (sepia_g * 0.98 + 10.0).clamp(0.0, 255.0) as u8;
+        pixel[2] = (sepia_b * 0.92 + 6.0).clamp(0.0, 255.0) as u8;
         pixel[3] = 255;
     }
 
@@ -563,7 +595,7 @@ mod tests {
         let blurred = process_snapshot_blur(&source).expect("bgra process snapshot blur");
         assert_eq!(blurred.width(), 64);
         assert_eq!(blurred.height(), 32);
-        // First pixel should be near the CRT-tinted source RGB (not swapped).
+        // First pixel should be near the sepia-graded source RGB (not swapped).
         let data = blurred.data.as_ref().expect("cpu bytes");
         assert!(data[0] > 5, "red channel present: {:?}", &data[..4]);
         assert!(data[1] > 10, "green channel present: {:?}", &data[..4]);

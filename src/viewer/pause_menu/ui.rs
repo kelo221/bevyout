@@ -16,15 +16,16 @@ const ACTIVE: Color = Color::srgb(0.55, 1.0, 0.45);
 const ACTIVE_DIM: Color = Color::srgba(0.35, 0.75, 0.32, 0.95);
 const DISABLED: Color = Color::srgba(0.28, 0.52, 0.24, 0.55);
 const SELECTED_GLOW: Color = Color::srgba(0.55, 1.0, 0.45, 0.55);
-const GRID: Color = Color::srgba(0.35, 0.7, 0.3, 0.18);
-const TICK: Color = Color::srgba(0.45, 0.85, 0.4, 0.55);
-const TINT: Color = Color::srgba(0.20, 0.20, 0.05, 0.40);
+/// Faint full-screen grid lines of the CRT overlay.
+const GRID: Color = Color::srgba(0.35, 0.7, 0.3, 0.12);
+/// Warm sepia wash over the freeze-frame.
+const TINT: Color = Color::srgba(0.18, 0.12, 0.05, 0.30);
 const VIGNETTE: Color = Color::srgba(0.0, 0.0, 0.0, 0.72);
 /// Opaque fill under the freeze-frame so the live 3D view can never bleed
 /// through letterboxing or a late/missing snapshot.
 const BACKDROP_FILL: Color = Color::srgb(0.06, 0.05, 0.02);
-const FONT_SIZE: f32 = 28.0;
-const ROW_HEIGHT: f32 = 40.0;
+const FONT_SIZE: f32 = 30.0;
+const ROW_HEIGHT: f32 = 44.0;
 
 #[derive(Resource, Clone)]
 pub(super) struct PauseMenuFont(pub(super) Handle<Font>);
@@ -226,20 +227,9 @@ fn spawn_screen(
         });
 }
 
+/// Faint full-screen 3×2 grid of the FO3 pause CRT overlay: two vertical
+/// thirds and one horizontal half, kept subtle under the vignette.
 fn spawn_grid(root: &mut ChildSpawnerCommands) {
-    root.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(3.0),
-            right: Val::Percent(3.0),
-            top: Val::Percent(4.0),
-            bottom: Val::Percent(4.0),
-            border: UiRect::all(Val::Px(1.0)),
-            ..default()
-        },
-        BorderColor::all(GRID),
-    ));
-
     for pct in [33.3_f32, 66.6_f32] {
         root.spawn((
             Node {
@@ -252,47 +242,18 @@ fn spawn_grid(root: &mut ChildSpawnerCommands) {
             },
             BackgroundColor(GRID),
         ));
-        root.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Percent(pct),
-                left: Val::Percent(3.0),
-                right: Val::Percent(3.0),
-                height: Val::Px(1.0),
-                ..default()
-            },
-            BackgroundColor(GRID),
-        ));
     }
-
-    for (top, bottom, glyph) in [
-        (Val::Percent(3.0), Val::Auto, "▲"),
-        (Val::Auto, Val::Percent(3.0), "▼"),
-    ] {
-        for left_side in [true, false] {
-            let (left, right) = if left_side {
-                (Val::Percent(3.5), Val::Auto)
-            } else {
-                (Val::Auto, Val::Percent(3.5))
-            };
-            root.spawn((
-                Text::new(glyph),
-                TextColor(TICK),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                Node {
-                    position_type: PositionType::Absolute,
-                    left,
-                    right,
-                    top,
-                    bottom,
-                    ..default()
-                },
-            ));
-        }
-    }
+    root.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Percent(50.0),
+            left: Val::Percent(3.0),
+            right: Val::Percent(3.0),
+            height: Val::Px(1.0),
+            ..default()
+        },
+        BackgroundColor(GRID),
+    ));
 }
 
 fn spawn_menu_column(
@@ -302,14 +263,16 @@ fn spawn_menu_column(
 ) {
     root.spawn(Node {
         position_type: PositionType::Absolute,
-        right: Val::Percent(6.0),
-        top: Val::Percent(0.0),
+        right: Val::Percent(2.5),
+        // FO3's stack centers slightly below mid-screen; the top inset shifts
+        // the centering region down to match.
+        top: Val::Percent(11.0),
         bottom: Val::Percent(0.0),
         width: Val::Px(220.0),
         flex_direction: FlexDirection::Column,
         justify_content: JustifyContent::Center,
         align_items: AlignItems::FlexEnd,
-        row_gap: Val::Px(6.0),
+        row_gap: Val::Px(14.0),
         ..default()
     })
     .with_children(|column| {
