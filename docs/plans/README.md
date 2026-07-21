@@ -47,3 +47,4 @@ and as comments on the issues; the PR closes the issues.
 | Architecture wave 3 — interaction capability modules | [ARCH_WAVE3_PROMPT.md](ARCH_WAVE3_PROMPT.md) | [ARCH_WAVE3_PLAN.md](ARCH_WAVE3_PLAN.md) | Planned (#145; epic #142) |
 | Architecture wave 4 — viewer console capability modules | [ARCH_WAVE4_PROMPT.md](ARCH_WAVE4_PROMPT.md) | [ARCH_WAVE4_PLAN.md](ARCH_WAVE4_PLAN.md) | Planned (#146; epic #142) |
 | Architecture wave 5 — production-backed extension traits | [ARCH_WAVE5_PROMPT.md](ARCH_WAVE5_PROMPT.md) | [ARCH_WAVE5_PLAN.md](ARCH_WAVE5_PLAN.md) | Planned (#147; epic #142) |
+| M4 HeadAnims wave — restore missing HeadAnims node + robust animation binder | [M4_HEADANIMS_PROMPT.md](M4_HEADANIMS_PROMPT.md) | [M4_HEADANIMS_PLAN.md](M4_HEADANIMS_PLAN.md) | In progress (#206, #205; walking-actors animation bug on real data); manual script pending |
