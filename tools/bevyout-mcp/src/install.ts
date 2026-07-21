@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 export const SERVER_NAME = "bevyout";
 export const SERVER_RELATIVE_PATH = "tools/bevyout-mcp/src/server.ts";
 
-export type InstallTarget = "codex" | "claude-desktop" | "claude-code";
+export type InstallTarget = "codex" | "claude-desktop" | "claude-code" | "opencode";
 
 export type InstallOptions = {
   targets: InstallTarget[];
@@ -13,6 +13,7 @@ export type InstallOptions = {
   codexPath?: string;
   claudeDesktopPath?: string;
   claudeCodePath?: string;
+  opencodePath?: string;
   dryRun?: boolean;
   now?: Date;
 };
@@ -26,7 +27,7 @@ export type InstallResult = {
 
 type JsonRecord = Record<string, unknown>;
 
-const ALL_TARGETS: InstallTarget[] = ["codex", "claude-desktop", "claude-code"];
+const ALL_TARGETS: InstallTarget[] = ["codex", "claude-desktop", "claude-code", "opencode"];
 
 export function codexConfigPath(): string {
   const root = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
@@ -47,6 +48,11 @@ export function claudeDesktopConfigPath(): string {
 
 export function claudeCodeConfigPath(repoRoot: string): string {
   return join(repoRoot, ".mcp.json");
+}
+
+export function opencodeConfigPath(): string {
+  const root = process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
+  return join(root, "opencode", "opencode.jsonc");
 }
 
 function isObject(value: unknown): value is JsonRecord {
@@ -85,6 +91,26 @@ function mergeJsonConfig(
 
   root.mcpServers = {
     ...servers,
+    [SERVER_NAME]: { ...previous, ...server },
+  };
+  return `${JSON.stringify(root, null, 2)}\n`;
+}
+
+function mergeOpencodeConfig(
+  existing: string | undefined,
+  path: string,
+  server: JsonRecord,
+): string {
+  const root = existing === undefined ? {} : parseJsonConfig(existing, path);
+  const mcp = root.mcp === undefined
+    ? {}
+    : asObject(root.mcp, `${path}.mcp`);
+  const previous = mcp[SERVER_NAME] === undefined
+    ? {}
+    : asObject(mcp[SERVER_NAME], `${path}.mcp.${SERVER_NAME}`);
+
+  root.mcp = {
+    ...mcp,
     [SERVER_NAME]: { ...previous, ...server },
   };
   return `${JSON.stringify(root, null, 2)}\n`;
@@ -250,6 +276,18 @@ export async function installTargets(options: InstallOptions): Promise<InstallRe
       continue;
     }
 
+    if (target === "opencode") {
+      const path = options.opencodePath ?? opencodeConfigPath();
+      const existing = await optionalRead(path);
+      const desired = mergeOpencodeConfig(existing, path, {
+        type: "local",
+        command: ["bun", "run", serverScript],
+        enabled: true,
+      });
+      results.push(await applyConfig(target, path, desired, options));
+      continue;
+    }
+
     throw new Error(`Unsupported install target: ${target}`);
   }
 
@@ -275,6 +313,8 @@ export function parseInstallArgs(argv: string[]): CliOptions {
       targets.push("claude-desktop");
     } else if (argument === "--claude-code") {
       targets.push("claude-code");
+    } else if (argument === "--opencode") {
+      targets.push("opencode");
     } else if (argument === "--dry-run") {
       dryRun = true;
     } else if (argument === "--help" || argument === "-h") {
@@ -292,7 +332,7 @@ export function parseInstallArgs(argv: string[]): CliOptions {
 }
 
 function printHelp(): void {
-  console.log(`bevyout MCP installer\n\nUsage:\n  bun run tools/bevyout-mcp/src/install.ts --all\n\nTargets:\n  --codex            Update CODEX_HOME/config.toml\n  --claude-desktop   Update Claude Desktop's global config\n  --claude-code      Update this repository's .mcp.json\n  --all              Update all three targets\n  --dry-run          Show changes without writing files`);
+  console.log(`bevyout MCP installer\n\nUsage:\n  bun run tools/bevyout-mcp/src/install.ts --all\n\nTargets:\n  --codex            Update CODEX_HOME/config.toml\n  --claude-desktop   Update Claude Desktop's global config\n  --claude-code      Update this repository's .mcp.json\n  --opencode         Update OpenCode's global config\n  --all              Update all four targets\n  --dry-run          Show changes without writing files`);
 }
 
 function printResults(results: InstallResult[], dryRun: boolean): void {
