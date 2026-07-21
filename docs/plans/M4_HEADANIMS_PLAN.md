@@ -3,6 +3,29 @@
 Traceability: PROMPT → feature list → tests → implementation. See
 `docs/plans/README.md`.
 
+## Outcome (Shipped amendment — supersedes the issue framing below)
+
+Acceptance disproved the "live bug" premise of both issues. On current code a
+fresh native prepare of SuperDuperMart binds every actor (`bound_targets=67`,
+no `HeadAnims` diagnostic, 6 `actor-animation ready`). Root cause of the
+original report: a **stale actor-GLB cache** built before wave 7 (#160,
+`selective-head-anims`) added `HeadAnims` handling. Actor GLB names are
+content-addressed on `NATIVE_ACTOR_CONVERTER_REVISION` + the assembly
+descriptor (`placements.rs:567-576`), and `scene.ron` is rewritten
+unconditionally every prepare (`orchestrator.rs:1248`) — so a post-wave-7
+prepare cannot reference a pre-wave-7 GLB, and the failure self-heals on any
+re-prepare. `HeadAnims` is a native skeleton node (present regardless of
+hair); `missing_facegen` was a red herring (deferred #109).
+
+- **#206** — closed as not-a-bug (stale cache). Deliverable kept: regression
+  tests locking the HeadAnims hair-attachment contract (`native.rs`), a
+  provable no-op refactor.
+- **#205** — closed as not-needed. With a correct cache `HeadAnims` always
+  binds; the binder-robustness change was speculative (YAGNI).
+
+The feature lists below are retained for the record but were **not**
+implemented as bug fixes.
+
 ## Execution model recommendation (Claude runtime)
 
 - **#206 (HeadAnims node, `native.rs` merge):** **Opus** — requires
