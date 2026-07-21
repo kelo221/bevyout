@@ -54,7 +54,6 @@ mod actor_state {
 mod pause_menu {
     pub use bevyout_core::pause_menu::*;
 }
-}
 
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
