@@ -1,10 +1,9 @@
 //! Monofonto right-stack pause UI with CRT overlays over a freeze-frame.
 
 use bevy::prelude::*;
-use bevy::text::FontSource;
 use bevy::ui::{
     BackgroundGradient, ColorStop, RadialGradient, RadialGradientShape, UiPosition,
-    widget::{NodeImageMode, TextShadow},
+    widget::NodeImageMode,
 };
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevyout_core::pause_menu::{PauseMenuAction, PauseMenuOption, PauseMenuState};
@@ -19,11 +18,11 @@ const DISABLED: Color = Color::srgba(0.28, 0.52, 0.24, 0.55);
 const SELECTED_GLOW: Color = Color::srgba(0.55, 1.0, 0.45, 0.55);
 const GRID: Color = Color::srgba(0.35, 0.7, 0.3, 0.18);
 const TICK: Color = Color::srgba(0.45, 0.85, 0.4, 0.55);
-const TINT: Color = Color::srgba(0.12, 0.16, 0.04, 0.42);
+const TINT: Color = Color::srgba(0.20, 0.20, 0.05, 0.40);
 const VIGNETTE: Color = Color::srgba(0.0, 0.0, 0.0, 0.72);
 /// Opaque fill under the freeze-frame so the live 3D view can never bleed
 /// through letterboxing or a late/missing snapshot.
-const BACKDROP_FILL: Color = Color::srgb(0.02, 0.03, 0.01);
+const BACKDROP_FILL: Color = Color::srgb(0.06, 0.05, 0.02);
 const FONT_SIZE: f32 = 28.0;
 const ROW_HEIGHT: f32 = 40.0;
 

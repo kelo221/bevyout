@@ -12,8 +12,6 @@ use bevy::ui::widget::NodeImageMode;
 
 use super::ui::{PauseMenuBackdrop, PauseMenuRoot};
 
-/// Target width of the freeze-frame. Height keeps the source aspect ratio.
-pub(super) const SNAPSHOT_WIDTH: u32 = 160;
 
 /// How many Update ticks to wait for GPU readback before showing the menu
 /// with the solid fill (so Esc is never a black hole). Real captures often
@@ -41,7 +39,22 @@ struct PendingPauseSnapshot {
     generation: u64,
 }
 
-pub(super) fn begin_snapshot_capture(mut commands: Commands, mut snapshot: ResMut<PauseSnapshot>) {
+pub(super) fn begin_snapshot_capture(
+    mut commands: Commands,
+    mut snapshot: ResMut<PauseSnapshot>,
+    mut ui_entities: Query<
+        &mut Visibility,
+        Or<(
+            With<crate::viewer::console::GameUi>,
+            With<crate::viewer::console::DiagnosticUi>,
+        )>,
+    >,
+) {
+    // Hide reticle, crosshair, and HUD UI elements immediately so they are not
+    // baked into the blurred pause background snapshot.
+    for mut visibility in &mut ui_entities {
+        *visibility = Visibility::Hidden;
+    }
     snapshot.generation = snapshot.generation.wrapping_add(1);
     let generation = snapshot.generation;
     snapshot.pending_generation = Some(generation);
@@ -100,7 +113,7 @@ fn on_screenshot_captured(
         source.texture_descriptor.format
     );
 
-    match downsample_box_blur(source, SNAPSHOT_WIDTH) {
+    match process_snapshot_blur(source) {
         Some(blurred) => {
             let handle = images.add(blurred);
             if let Some(old) = snapshot.handle.replace(handle.clone()) {
@@ -219,70 +232,140 @@ pub(super) fn restore_world_camera(
     }
 }
 
-/// Average-pool the screenshot down to `target_width`, keeping aspect ratio.
-/// Stretching this tiny texture with linear sampling yields a cheap blur.
-pub(super) fn downsample_box_blur(source: &Image, target_width: u32) -> Option<Image> {
-    let target_width = target_width.max(1);
-    let rgba = screenshot_to_rgba8(source)?;
-    let src_w = rgba.width.max(1);
-    let src_h = rgba.height.max(1);
-    let target_height = ((u64::from(src_h) * u64::from(target_width)) / u64::from(src_w))
-        .max(1)
-        .min(u64::from(u32::MAX)) as u32;
-
-    let mut out = vec![0_u8; (target_width * target_height * 4) as usize];
-    for ty in 0..target_height {
-        let y0 = (u64::from(ty) * u64::from(src_h)) / u64::from(target_height);
-        let y1 = ((u64::from(ty) + 1) * u64::from(src_h)) / u64::from(target_height);
-        let y1 = y1.max(y0 + 1);
-        for tx in 0..target_width {
-            let x0 = (u64::from(tx) * u64::from(src_w)) / u64::from(target_width);
-            let x1 = ((u64::from(tx) + 1) * u64::from(src_w)) / u64::from(target_width);
-            let x1 = x1.max(x0 + 1);
-            let mut sum = [0_u64; 4];
-            let mut count = 0_u64;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let idx = ((y * u64::from(src_w) + x) * 4) as usize;
-                    for channel in 0..4 {
-                        sum[channel] += u64::from(rgba.bytes[idx + channel]);
-                    }
-                    count += 1;
-                }
-            }
-            let count = count.max(1);
-            let dst = ((ty * target_width + tx) * 4) as usize;
-            for channel in 0..4 {
-                out[dst + channel] = (sum[channel] / count) as u8;
-            }
-        }
+/// Process the full-resolution screenshot with a separable blur pass and warm CRT phosphor grade.
+pub(super) fn process_snapshot_blur(source: &Image) -> Option<Image> {
+    let mut rgba = screenshot_to_rgba8(source)?;
+    let width = rgba.width;
+    let height = rgba.height;
+    if width == 0 || height == 0 {
+        return None;
     }
 
-    // Warm CRT phosphor lean: push greens up slightly and crush blue.
-    for pixel in out.chunks_exact_mut(4) {
+    // Full-resolution separable blur pass across native 1:1 screenshot texels.
+    apply_separable_blur(&mut rgba.bytes, width, height, 16);
+
+    // Authentic Fallout 3 warm beige / golden amber CRT phosphor grade matching reference screenshot.
+    for pixel in rgba.bytes.chunks_exact_mut(4) {
         let r = f32::from(pixel[0]);
         let g = f32::from(pixel[1]);
         let b = f32::from(pixel[2]);
-        pixel[0] = (r * 0.92 + g * 0.08).clamp(0.0, 255.0) as u8;
-        pixel[1] = (g * 1.05 + r * 0.05).clamp(0.0, 255.0) as u8;
-        pixel[2] = (b * 0.55).clamp(0.0, 255.0) as u8;
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        // Warm glowing beige/amber phosphor curve
+        pixel[0] = (lum * 0.75 + r * 0.40 + 15.0).clamp(0.0, 255.0) as u8;
+        pixel[1] = (lum * 0.75 + g * 0.35 + 15.0).clamp(0.0, 255.0) as u8;
+        pixel[2] = (lum * 0.35 + b * 0.20 + 5.0).clamp(0.0, 255.0) as u8;
         pixel[3] = 255;
     }
 
     let mut image = Image::new(
         Extent3d {
-            width: target_width,
-            height: target_height,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        out,
+        rgba.bytes,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
-    // Linear sampling is the actual "blur" once the tiny texture is stretched.
     image.sampler = ImageSampler::linear();
     Some(image)
+}
+
+fn apply_separable_blur(bytes: &mut [u8], width: u32, height: u32, radius: usize) {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 || radius == 0 {
+        return;
+    }
+
+    let mut temp = vec![0_u8; bytes.len()];
+    let r = radius as i32;
+
+    // Horizontal pass: sliding window along each row
+    for y in 0..h {
+        let row_offset = y * w * 4;
+        let mut sum = [0_u64; 4];
+        let mut count = 0_u64;
+
+        // Initialize sum for x = 0 (window 0 .. r)
+        for kx in 0..=(r as usize).min(w - 1) {
+            let px = row_offset + kx * 4;
+            for c in 0..4 {
+                sum[c] += u64::from(bytes[px + c]);
+            }
+            count += 1;
+        }
+
+        for x in 0..w {
+            let xi = x as i32;
+            let add_x = xi + r;
+            if add_x > r && add_x < w as i32 {
+                let px = row_offset + (add_x as usize) * 4;
+                for c in 0..4 {
+                    sum[c] += u64::from(bytes[px + c]);
+                }
+                count += 1;
+            }
+
+            let rem_x = xi - r - 1;
+            if rem_x >= 0 {
+                let px = row_offset + (rem_x as usize) * 4;
+                for c in 0..4 {
+                    sum[c] -= u64::from(bytes[px + c]);
+                }
+                count -= 1;
+            }
+
+            let dst = row_offset + x * 4;
+            let div = count.max(1);
+            for c in 0..4 {
+                temp[dst + c] = (sum[c] / div) as u8;
+            }
+        }
+    }
+
+    // Vertical pass: sliding window along each column
+    for x in 0..w {
+        let mut sum = [0_u64; 4];
+        let mut count = 0_u64;
+
+        // Initialize sum for y = 0 (window 0 .. r)
+        for ky in 0..=(r as usize).min(h - 1) {
+            let px = (ky * w + x) * 4;
+            for c in 0..4 {
+                sum[c] += u64::from(temp[px + c]);
+            }
+            count += 1;
+        }
+
+        for y in 0..h {
+            let yi = y as i32;
+            let add_y = yi + r;
+            if add_y > r && add_y < h as i32 {
+                let px = ((add_y as usize) * w + x) * 4;
+                for c in 0..4 {
+                    sum[c] += u64::from(temp[px + c]);
+                }
+                count += 1;
+            }
+
+            let rem_y = yi - r - 1;
+            if rem_y >= 0 {
+                let px = ((rem_y as usize) * w + x) * 4;
+                for c in 0..4 {
+                    sum[c] -= u64::from(temp[px + c]);
+                }
+                count -= 1;
+            }
+
+            let dst = (y * w + x) * 4;
+            let div = count.max(1);
+            for c in 0..4 {
+                bytes[dst + c] = (sum[c] / div) as u8;
+            }
+        }
+    }
 }
 
 struct Rgba8Image {
@@ -467,19 +550,19 @@ mod tests {
     }
 
     #[test]
-    fn downsample_preserves_aspect_and_reduces_resolution() {
+    fn full_resolution_blur_preserves_native_dimensions() {
         let source = solid_image(320, 180, TextureFormat::Rgba8UnormSrgb, [10, 20, 30, 255]);
-        let blurred = downsample_box_blur(&source, 80).expect("downsample");
-        assert_eq!(blurred.width(), 80);
-        assert_eq!(blurred.height(), 45);
+        let blurred = process_snapshot_blur(&source).expect("process snapshot blur");
+        assert_eq!(blurred.width(), 320);
+        assert_eq!(blurred.height(), 180);
     }
 
     #[test]
-    fn downsample_accepts_bgra_window_format() {
+    fn full_resolution_blur_accepts_bgra_window_format() {
         let source = solid_image(64, 32, TextureFormat::Bgra8UnormSrgb, [10, 20, 30, 255]);
-        let blurred = downsample_box_blur(&source, 16).expect("bgra downsample");
-        assert_eq!(blurred.width(), 16);
-        assert_eq!(blurred.height(), 8);
+        let blurred = process_snapshot_blur(&source).expect("bgra process snapshot blur");
+        assert_eq!(blurred.width(), 64);
+        assert_eq!(blurred.height(), 32);
         // First pixel should be near the CRT-tinted source RGB (not swapped).
         let data = blurred.data.as_ref().expect("cpu bytes");
         assert!(data[0] > 5, "red channel present: {:?}", &data[..4]);
