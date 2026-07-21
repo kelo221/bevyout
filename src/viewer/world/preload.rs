@@ -103,6 +103,7 @@ type PreloadParseResult = Result<
     (
         PreparedSceneManifest,
         Vec<PreloadedSidecar>,
+        Option<crate::vsa::PreparedActorCatalog>,
         Option<bevyout_core::actor_animation::PreparedActorAnimationCatalog>,
     ),
     String,
@@ -249,10 +250,18 @@ pub(crate) fn spawn_preload_parse_task(commands: &mut Commands, asset_root: &Pat
                 });
             }
         }
+        let actor_definition_catalog =
+            crate::viewer::actor_state::load_catalog_for_manifest(&manifest, &asset_root)
+                .map_err(|error| error.to_string())?;
         let actor_animation_catalog =
             crate::viewer::actor_animation::load_catalog_for_manifest(&manifest, &asset_root)
                 .map_err(|error| error.to_string())?;
-        Ok((manifest, sidecars, actor_animation_catalog))
+        Ok((
+            manifest,
+            sidecars,
+            actor_definition_catalog,
+            actor_animation_catalog,
+        ))
     });
     commands.spawn(PendingPreloadParse { form_id, task });
 }
@@ -267,6 +276,7 @@ fn evaluate_preload_plan(
     active_cell: Res<ActiveCell>,
     cell_map_index: Res<CellMapIndex>,
     mut resident_cells: ResMut<ResidentCells>,
+    mut actor_definition_catalogs: ResMut<crate::viewer::actor_state::ActorDefinitionCatalogs>,
     mut actor_animation_catalogs: ResMut<crate::viewer::actor_animation::ActorAnimationCatalogs>,
     resident_cell_limit: Res<ResidentCellLimit>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
@@ -297,6 +307,7 @@ fn evaluate_preload_plan(
     }
 
     for form_id in plan.evict {
+        actor_definition_catalogs.remove(form_id);
         actor_animation_catalogs.remove(form_id);
         if let Some(resident) = resident_cells.0.remove(&form_id) {
             // Issue #61 (F61.1): stage the departing cell for capture;
@@ -334,6 +345,7 @@ fn poll_preload_parse_tasks(
     mut resident_cells: ResMut<ResidentCells>,
     mut pending_spawns: ResMut<PendingCellSpawns>,
     mut physics_assets: ResMut<super::super::player::PreparedPhysicsAssets>,
+    mut actor_definition_catalogs: ResMut<crate::viewer::actor_state::ActorDefinitionCatalogs>,
     mut actor_animation_catalogs: ResMut<crate::viewer::actor_animation::ActorAnimationCatalogs>,
     mut parse_failed: MessageWriter<PreloadParseFailed>,
 ) {
@@ -344,13 +356,16 @@ fn poll_preload_parse_tasks(
         let form_id = pending_parse.form_id;
         commands.entity(entity).despawn();
         match result {
-            Ok((manifest, sidecars, actor_animation_catalog)) => {
+            Ok((manifest, sidecars, actor_definition_catalog, actor_animation_catalog)) => {
                 for sidecar in sidecars {
                     physics_assets.insert_preloaded(
                         sidecar.relative_path,
                         sidecar.byte_len,
                         sidecar.asset,
                     );
+                }
+                if let Some(catalog) = actor_definition_catalog {
+                    actor_definition_catalogs.insert(form_id, catalog);
                 }
                 if let Some(catalog) = actor_animation_catalog {
                     actor_animation_catalogs.insert(form_id, catalog);

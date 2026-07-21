@@ -7,6 +7,7 @@ use bevyout_core::actor::{
     canonicalize_mesh_parts, hair_visible, resolve_actor_fallback, resolve_actor_root_scale,
     select_starting_weapon,
 };
+use bevyout_core::actor_state::{ActorSkill, ActorValue};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
@@ -1491,6 +1492,29 @@ fn build_actor_catalog_inputs(
         }
     }
     let races = parsed.races.keys().copied().collect::<HashSet<_>>();
+    let race_modifiers = parsed
+        .races
+        .iter()
+        .map(|(&form_id, race)| {
+            let mut modifiers = RaceModifierInput::default();
+            for boost in &race.skill_boosts {
+                let Some(skill) = fo3_skill_actor_value(boost.actor_value) else {
+                    modifiers.diagnostics.push(format!(
+                        "unsupported race actor value {} with boost {}",
+                        boost.actor_value, boost.boost
+                    ));
+                    continue;
+                };
+                *modifiers
+                    .skill_modifiers
+                    .entry(ActorValue::Skill(skill))
+                    .or_default() += f32::from(boost.boost);
+            }
+            modifiers.diagnostics.sort();
+            modifiers.diagnostics.dedup();
+            (form_id, modifiers)
+        })
+        .collect();
     let classes = parsed.classes.keys().copied().collect::<HashSet<_>>();
     let packages = parsed.packages.keys().copied().collect::<HashSet<_>>();
     let factions = parsed
@@ -1533,12 +1557,33 @@ fn build_actor_catalog_inputs(
         actors,
         leveled,
         races,
+        race_modifiers,
         classes,
         factions,
         packages,
         known_bases,
         placements,
     }
+}
+
+fn fo3_skill_actor_value(actor_value: i8) -> Option<ActorSkill> {
+    Some(match actor_value {
+        32 => ActorSkill::Barter,
+        33 => ActorSkill::BigGuns,
+        34 => ActorSkill::EnergyWeapons,
+        35 => ActorSkill::Explosives,
+        36 => ActorSkill::Lockpick,
+        37 => ActorSkill::Medicine,
+        38 => ActorSkill::MeleeWeapons,
+        39 => ActorSkill::Repair,
+        40 => ActorSkill::Science,
+        41 => ActorSkill::SmallGuns,
+        42 => ActorSkill::Sneak,
+        43 => ActorSkill::Speech,
+        44 => ActorSkill::Throwing,
+        45 => ActorSkill::Unarmed,
+        _ => return None,
+    })
 }
 
 // ---------------------------------------------------------------------

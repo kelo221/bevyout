@@ -10,7 +10,9 @@ pub const BIPED_SLOT_HAIR: u32 = 1 << 1;
 /// FO3 biped slot used by hats that replace authored hair meshes.
 pub const BIPED_SLOT_HAT: u32 = 1 << 10;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub enum ActorKind {
     #[default]
     Humanoid,

@@ -22,6 +22,8 @@ fn test_app() -> App {
         .insert_resource(interaction::PlayerInventory::default())
         .insert_resource(interaction::PlayerEquipment::default());
     app.init_resource::<interaction::CanonicalItemLedger>();
+    app.init_resource::<super::super::world::ActiveSaveState>();
+    app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
     app.init_state::<GameplayModal>();
     let camera = player::CameraModeState {
         collision_build_complete: true,
@@ -605,6 +607,92 @@ fn actorinspect_reports_prepared_and_runtime_assembly_state() {
         "missing_weapon_attachment_node"
     );
     assert!(output.log[0].contains("tier=RaceSexSpecific"));
+}
+
+#[test]
+fn actorstate_mutations_join_definition_save_and_canonical_holder() {
+    use bevyout_core::actor_state::{
+        ActorDefinition, ActorFactionMembership, ActorInstanceState, ActorLifeState, ActorValue,
+    };
+
+    let mut app = test_app();
+    let item_id = register_actor_placement(&mut app);
+    let entity = app
+        .world_mut()
+        .query_filtered::<Entity, With<actor::ActorRuntime>>()
+        .single(app.world())
+        .unwrap();
+    let mut definition = ActorDefinition {
+        base_form_id: 2,
+        reference_form_id: 16,
+        factions: vec![ActorFactionMembership {
+            faction_form_id: 0x1f17b,
+            rank: 2,
+            title: Some("Raider".into()),
+        }],
+        ..Default::default()
+    };
+    definition.base_values.insert(ActorValue::Health, 100.0);
+    app.world_mut()
+        .entity_mut(entity)
+        .insert(super::super::actor_state::ActorStateRuntime {
+            cell_form_id: 0x17f37,
+            definition: std::sync::Arc::new(definition),
+            life_state: ActorLifeState::Alive,
+        });
+    app.world_mut()
+        .resource_mut::<super::super::world::ActiveSaveState>()
+        .0
+        .cells
+        .entry(0x17f37)
+        .or_default()
+        .actors
+        .insert(16, ActorInstanceState::new(16, ActorLifeState::Alive));
+
+    assert!(exec(&mut app, "setactorvalue 00000010 health -12").ok);
+    assert!(exec(&mut app, "setactorlife 00000010 dead").ok);
+    assert!(exec(&mut app, "setactorpackage 00000010 0002c6f1 3 4.5").ok);
+    let output = exec(&mut app, "actorstate 00000010");
+
+    assert!(output.ok, "actorstate failed: {:?}", output.error);
+    assert_eq!(output.value["life_state"], "dead");
+    assert_eq!(output.value["definition"]["base_form_id"], 2);
+    assert_eq!(output.value["definition"]["factions"][0]["rank"], 2);
+    assert_eq!(output.value["values"][0]["name"], "health");
+    assert_eq!(output.value["values"][0]["runtime_mutation"], -12.0);
+    assert_eq!(output.value["values"][0]["effective"], 88.0);
+    assert_eq!(output.value["package"]["form_id"], 0x2c6f1);
+    assert_eq!(output.value["canonical"]["equipped_instance_id"], item_id.0);
+    assert!(output.log[0].contains("life=dead"));
+}
+
+#[test]
+fn actorstate_rejects_non_finite_mutations_and_unknown_lifecycle() {
+    let mut app = test_app();
+    register_actor_placement(&mut app);
+    app.world_mut()
+        .resource_mut::<super::super::world::ActiveSaveState>()
+        .0
+        .cells
+        .entry(0x17f37)
+        .or_default()
+        .actors
+        .insert(
+            16,
+            bevyout_core::actor_state::ActorInstanceState::new(
+                16,
+                bevyout_core::actor_state::ActorLifeState::Alive,
+            ),
+        );
+
+    assert_eq!(
+        error_code(&exec(&mut app, "setactorvalue 00000010 health NaN")),
+        "bad_value"
+    );
+    assert_eq!(
+        error_code(&exec(&mut app, "setactorlife 00000010 sleeping")),
+        "bad_value"
+    );
 }
 
 #[test]

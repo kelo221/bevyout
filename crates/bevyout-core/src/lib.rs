@@ -6,6 +6,7 @@
 
 pub mod actor;
 pub mod actor_animation;
+pub mod actor_state;
 pub mod content;
 pub mod form_id;
 pub mod geometry;

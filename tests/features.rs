@@ -43,6 +43,13 @@ mod item_transaction {
     pub use bevyout_core::item_transaction::*;
 }
 
+// M4/#110 immutable actor definitions and mutable instance state live in the
+// same pure core boundary as canonical item transactions.
+#[allow(dead_code, unused_imports)]
+mod actor_state {
+    pub use bevyout_core::actor_state::*;
+}
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -820,6 +827,13 @@ struct BevyoutWorld {
     nav_derived_door_meshes: Vec<nav_doors::BlockerMeshInput>,
     nav_derived_door_associations: Option<Vec<nav_doors::DerivedDoorAssociation>>,
     nav_approach_observation: Option<door_link::ApproachObservation>,
+
+    // -- actor_state.feature (issue #110, M4 wave 13) --
+    actor_state_definition: actor_state::ActorDefinition,
+    actor_state_instance: actor_state::ActorInstanceState,
+    actor_state_resolved: Option<actor_state::ResolvedActorValue>,
+    actor_state_store: actor_state::ActorStateStore,
+    actor_state_serialized: Option<String>,
 
     // -- nav_locomotion.feature (issue #188) --
     nav_locomotion_state: locomotion::LocomotionState,
@@ -10672,6 +10686,338 @@ async fn then_approach_gate(world: &mut BevyoutWorld, outcome: String) {
         outcome == "fires",
         "{observation:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// actor_state.feature (#110, M4 wave 13) -- appended shared seam.
+// ---------------------------------------------------------------------
+
+fn actor_value(label: &str) -> actor_state::ActorValue {
+    actor_state::ActorValue::parse(label).unwrap_or_else(|| panic!("unknown actor value {label:?}"))
+}
+
+fn actor_state_by_reference_mut(
+    store: &mut actor_state::ActorStateStore,
+    reference_form_id: u32,
+) -> &mut actor_state::ActorInstanceState {
+    store
+        .cells
+        .values_mut()
+        .find_map(|actors| actors.get_mut(&reference_form_id))
+        .unwrap_or_else(|| panic!("actor reference {reference_form_id:08x} was not seeded"))
+}
+
+fn actor_state_by_reference(
+    store: &actor_state::ActorStateStore,
+    reference_form_id: u32,
+) -> &actor_state::ActorInstanceState {
+    store
+        .cells
+        .values()
+        .find_map(|actors| actors.get(&reference_form_id))
+        .unwrap_or_else(|| panic!("actor reference {reference_form_id:08x} was not seeded"))
+}
+
+#[given(
+    regex = r"^an actor definition with template health (-?[\d.]+) and base health (-?[\d.]+)$"
+)]
+async fn given_actor_template_and_base_health(world: &mut BevyoutWorld, template: f32, base: f32) {
+    world.actor_state_definition.base_form_id = 1;
+    world.actor_state_definition.reference_form_id = 2;
+    world
+        .actor_state_definition
+        .template_values
+        .insert(actor_state::ActorValue::Health, template);
+    world
+        .actor_state_definition
+        .base_values
+        .insert(actor_state::ActorValue::Health, base);
+    world.actor_state_instance =
+        actor_state::ActorInstanceState::new(2, actor_state::ActorLifeState::Alive);
+}
+
+#[given(regex = r"^an actor definition with template fatigue (-?[\d.]+) and no base fatigue$")]
+async fn given_actor_template_fatigue(world: &mut BevyoutWorld, template: f32) {
+    world.actor_state_definition.base_form_id = 1;
+    world.actor_state_definition.reference_form_id = 2;
+    world
+        .actor_state_definition
+        .template_values
+        .insert(actor_state::ActorValue::Fatigue, template);
+    world.actor_state_instance =
+        actor_state::ActorInstanceState::new(2, actor_state::ActorLifeState::Alive);
+}
+
+#[given(
+    regex = r"^the actor has race health modifier (-?[\d.]+), class health modifier (-?[\d.]+), and faction health modifier (-?[\d.]+)$"
+)]
+async fn given_actor_health_modifiers(
+    world: &mut BevyoutWorld,
+    race: f32,
+    class: f32,
+    faction: f32,
+) {
+    world
+        .actor_state_definition
+        .race_modifiers
+        .insert(actor_state::ActorValue::Health, race);
+    world
+        .actor_state_definition
+        .class_modifiers
+        .insert(actor_state::ActorValue::Health, class);
+    world
+        .actor_state_definition
+        .faction_modifiers
+        .insert(actor_state::ActorValue::Health, faction);
+}
+
+#[given(regex = r"^the actor instance has runtime (health|fatigue) mutation (-?[\d.]+)$")]
+async fn given_actor_value_mutation(world: &mut BevyoutWorld, value: String, mutation: f32) {
+    world
+        .actor_state_instance
+        .set_value_mutation(actor_value(&value), mutation)
+        .unwrap();
+}
+
+#[when(regex = r"^the actor (health|fatigue) is resolved$")]
+async fn when_actor_value_resolved(world: &mut BevyoutWorld, value: String) {
+    world.actor_state_resolved = Some(
+        world
+            .actor_state_definition
+            .resolve_value(&world.actor_state_instance, actor_value(&value)),
+    );
+}
+
+#[then(regex = r"^the effective actor (?:health|fatigue) is (-?[\d.]+)$")]
+async fn then_effective_actor_value(world: &mut BevyoutWorld, expected: f32) {
+    assert_eq!(
+        world
+            .actor_state_resolved
+            .expect("actor value must be resolved")
+            .effective,
+        expected
+    );
+}
+
+#[then("the persisted actor state contains no derived value snapshot")]
+async fn then_actor_state_has_no_derived_snapshot(world: &mut BevyoutWorld) {
+    let serialized = ron::ser::to_string(&world.actor_state_instance).unwrap();
+    assert!(!serialized.contains("effective"), "{serialized}");
+}
+
+#[given(
+    regex = r"^actor reference 0x([0-9a-fA-F]+) belongs to faction 0x([0-9a-fA-F]+) at rank (-?\d+)$"
+)]
+async fn given_runtime_actor_faction(
+    world: &mut BevyoutWorld,
+    reference: String,
+    faction: String,
+    rank: i8,
+) {
+    world.actor_state_definition.base_form_id = 1;
+    world.actor_state_definition.reference_form_id = parse_hex(&reference);
+    world
+        .actor_state_definition
+        .factions
+        .push(actor_state::ActorFactionMembership {
+            faction_form_id: parse_hex(&faction),
+            rank,
+            title: None,
+        });
+}
+
+#[then(regex = r"^actor reference 0x([0-9a-fA-F]+) has faction 0x([0-9a-fA-F]+) at rank (-?\d+)$")]
+async fn then_actor_faction(
+    world: &mut BevyoutWorld,
+    reference: String,
+    faction: String,
+    rank: i8,
+) {
+    assert_eq!(
+        world.actor_state_definition.reference_form_id,
+        parse_hex(&reference)
+    );
+    assert!(
+        world
+            .actor_state_definition
+            .factions
+            .iter()
+            .any(|membership| {
+                membership.faction_form_id == parse_hex(&faction) && membership.rank == rank
+            })
+    );
+}
+
+#[then("the actor definition contains no hostility decision")]
+async fn then_actor_definition_has_no_hostility(world: &mut BevyoutWorld) {
+    let serialized = ron::ser::to_string(&world.actor_state_definition).unwrap();
+    assert!(!serialized.contains("hostil"), "{serialized}");
+}
+
+#[given("an empty actor state store")]
+async fn given_empty_actor_state_store(world: &mut BevyoutWorld) {
+    world.actor_state_store = actor_state::ActorStateStore::default();
+}
+
+#[when(
+    regex = r"^actor reference 0x([0-9a-fA-F]+) in cell 0x([0-9a-fA-F]+) is seeded alive(?: again)?$"
+)]
+async fn when_actor_seeded_alive(world: &mut BevyoutWorld, reference: String, cell: String) {
+    world
+        .actor_state_store
+        .seed(
+            parse_hex(&cell),
+            parse_hex(&reference),
+            actor_state::ActorLifeState::Alive,
+        )
+        .unwrap();
+}
+
+#[when(regex = r"^actor reference 0x([0-9a-fA-F]+) receives runtime health mutation (-?[\d.]+)$")]
+async fn when_stored_actor_mutated(world: &mut BevyoutWorld, reference: String, mutation: f32) {
+    actor_state_by_reference_mut(&mut world.actor_state_store, parse_hex(&reference))
+        .set_value_mutation(actor_state::ActorValue::Health, mutation)
+        .unwrap();
+}
+
+#[then(regex = r"^actor reference 0x([0-9a-fA-F]+) has runtime health mutation (-?[\d.]+)$")]
+async fn then_stored_actor_mutation(world: &mut BevyoutWorld, reference: String, expected: f32) {
+    assert_eq!(
+        actor_state_by_reference(&world.actor_state_store, parse_hex(&reference)).value_mutations
+            [&actor_state::ActorValue::Health],
+        expected
+    );
+}
+
+#[then("exactly one actor instance is stored")]
+async fn then_one_actor_instance_stored(world: &mut BevyoutWorld) {
+    assert_eq!(world.actor_state_store.len(), 1);
+}
+
+#[given(regex = r"^actor reference 0x([0-9a-fA-F]+) in cell 0x([0-9a-fA-F]+) is dead$")]
+async fn given_dead_actor(world: &mut BevyoutWorld, reference: String, cell: String) {
+    world
+        .actor_state_store
+        .seed(
+            parse_hex(&cell),
+            parse_hex(&reference),
+            actor_state::ActorLifeState::Dead,
+        )
+        .unwrap();
+}
+
+#[given(
+    regex = r"^actor reference 0x([0-9a-fA-F]+) is running package 0x([0-9a-fA-F]+) procedure (\d+) for ([\d.]+) seconds$"
+)]
+async fn given_actor_package_checkpoint(
+    world: &mut BevyoutWorld,
+    reference: String,
+    package: String,
+    procedure_index: u32,
+    elapsed_seconds: f32,
+) {
+    actor_state_by_reference_mut(&mut world.actor_state_store, parse_hex(&reference)).package =
+        Some(actor_state::ActorPackageCheckpoint {
+            package_form_id: parse_hex(&package),
+            procedure_index,
+            elapsed_seconds,
+        });
+}
+
+#[when("the actor state store is serialized and restored")]
+async fn when_actor_state_store_round_trips(world: &mut BevyoutWorld) {
+    let serialized = ron::ser::to_string(&world.actor_state_store).unwrap();
+    world.actor_state_store = ron::de::from_str(&serialized).unwrap();
+    world.actor_state_serialized = Some(serialized);
+}
+
+#[then(regex = r"^actor reference 0x([0-9a-fA-F]+) remains dead$")]
+async fn then_actor_remains_dead(world: &mut BevyoutWorld, reference: String) {
+    assert_eq!(
+        actor_state_by_reference(&world.actor_state_store, parse_hex(&reference)).life_state,
+        actor_state::ActorLifeState::Dead
+    );
+}
+
+#[then(
+    regex = r"^actor reference 0x([0-9a-fA-F]+) retains package 0x([0-9a-fA-F]+) procedure (\d+) at ([\d.]+) seconds$"
+)]
+async fn then_actor_retains_package(
+    world: &mut BevyoutWorld,
+    reference: String,
+    package: String,
+    procedure_index: u32,
+    elapsed_seconds: f32,
+) {
+    assert_eq!(
+        actor_state_by_reference(&world.actor_state_store, parse_hex(&reference)).package,
+        Some(actor_state::ActorPackageCheckpoint {
+            package_form_id: parse_hex(&package),
+            procedure_index,
+            elapsed_seconds,
+        })
+    );
+}
+
+#[given(
+    regex = r"^canonical actor reference 0x([0-9a-fA-F]+) owns item instance (\d+) with (\d+) of base item 0x([0-9a-fA-F]+)$"
+)]
+async fn given_canonical_actor_item(
+    world: &mut BevyoutWorld,
+    reference: String,
+    instance: u64,
+    count: u32,
+    base: String,
+) {
+    let item = item_transaction::ItemInstance::new(
+        item_transaction::ItemInstanceId(instance),
+        parse_hex(&base),
+        count,
+        item_transaction::ItemState::default(),
+    )
+    .unwrap();
+    world
+        .canonical_ledger
+        .insert_holder(
+            item_transaction::HolderId::Actor {
+                reference_form_id: parse_hex(&reference),
+            },
+            item_transaction::ItemHolderState {
+                items: vec![item],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+#[when(regex = r"^canonical actor reference 0x([0-9a-fA-F]+) is projected twice$")]
+async fn when_canonical_actor_projected_twice(world: &mut BevyoutWorld, reference: String) {
+    let holder = item_transaction::HolderId::Actor {
+        reference_form_id: parse_hex(&reference),
+    };
+    for _ in 0..2 {
+        if !world.canonical_ledger.holders().contains_key(&holder) {
+            world
+                .canonical_ledger
+                .insert_holder(holder, item_transaction::ItemHolderState::default())
+                .unwrap();
+        }
+    }
+}
+
+#[then(
+    regex = r"^canonical actor reference 0x([0-9a-fA-F]+) still owns (\d+) items in one instance$"
+)]
+async fn then_canonical_actor_items_unchanged(
+    world: &mut BevyoutWorld,
+    reference: String,
+    expected_count: u32,
+) {
+    let holder = &world.canonical_ledger.holders()[&item_transaction::HolderId::Actor {
+        reference_form_id: parse_hex(&reference),
+    }];
+    assert_eq!(holder.items.len(), 1);
+    assert_eq!(holder.items[0].count, expected_count);
 }
 
 // ---------------------------------------------------------------------

@@ -38,7 +38,7 @@ use crate::vsa::PreparedInventoryEntry;
 use crate::vsa::PreparedSemantic;
 use crate::vsa::{PreparedPlacement, PreparedSceneManifest, is_bake_static};
 
-use super::super::{animation, interaction, player};
+use super::super::{actor, animation, interaction, player};
 use super::persist_policy;
 use super::preload::{ActiveCell, ResidentCells};
 
@@ -192,7 +192,7 @@ pub(crate) fn apply_save_state_at_startup(world: &mut World) {
 /// (`present == false`) rather than merely never-spawned.
 fn placement_is_spawnable(placement: &PreparedPlacement, exclude_bake_static: bool) -> bool {
     placement.initially_enabled
-        && placement.asset_path.is_some()
+        && (placement.asset_path.is_some() || actor::is_actor_semantic(&placement.semantic))
         && (!exclude_bake_static || !is_bake_static(placement))
 }
 
@@ -401,7 +401,10 @@ fn capture_runtime_items(world: &mut World, cell: u32, root: Entity) {
     let mut state = world.get_resource_or_insert_with(ActiveSaveState::default);
     let cell_state = state.0.cells.entry(cell).or_default();
     cell_state.dropped_items = dropped_items;
-    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
+    if cell_state.references.is_empty()
+        && cell_state.dropped_items.is_empty()
+        && cell_state.actors.is_empty()
+    {
         state.0.cells.remove(&cell);
     }
 }
@@ -454,7 +457,10 @@ fn merge_captured_deltas(
             cell_state.references.remove(&form_id);
         }
     }
-    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
+    if cell_state.references.is_empty()
+        && cell_state.dropped_items.is_empty()
+        && cell_state.actors.is_empty()
+    {
         state.0.cells.remove(&cell);
     }
 }
@@ -486,7 +492,10 @@ fn merge_captured_container_deltas(
             cell_state.references.remove(&form_id);
         }
     }
-    if cell_state.references.is_empty() && cell_state.dropped_items.is_empty() {
+    if cell_state.references.is_empty()
+        && cell_state.dropped_items.is_empty()
+        && cell_state.actors.is_empty()
+    {
         state.0.cells.remove(&cell);
     }
 }
@@ -1022,6 +1031,27 @@ mod tests {
                 .bodies
                 .contains_key(&0x10)
         );
+    }
+
+    #[test]
+    fn assetless_actor_proxy_is_included_in_persistence_capture() {
+        let mut world = test_world();
+        let actor = PreparedPlacement {
+            asset_path: None,
+            semantic: PreparedSemantic::Npc(crate::vsa::PreparedActor::default()),
+            ..placement(0x30, [0.0, 0.0, 0.0])
+        };
+        assert!(placement_is_spawnable(&actor, false));
+        let (root, children) = spawn_cell(&mut world, std::slice::from_ref(&actor));
+        world
+            .entity_mut(children[0])
+            .insert(Transform::from_xyz(1.0, 2.0, 3.0));
+
+        capture_cell_placements(&mut world, 0xC0DE, root, &[actor], false);
+
+        let saved = &world.resource::<ActiveSaveState>().0.cells[&0xC0DE].references[&0x30];
+        assert_eq!(saved.transform.unwrap().translation, [1.0, 2.0, 3.0]);
+        assert!(!saved.deleted);
     }
 
     // T60.4: a taken pickup (despawned entity) is captured deleted, and a

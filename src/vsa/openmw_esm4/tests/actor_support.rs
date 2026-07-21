@@ -99,10 +99,15 @@ fn ptdt(target_type: i32, target: u32, count_or_distance: i32, unknown: f32) -> 
 #[test]
 fn race_decodes_stats_links_hair_eyes_parts_and_facegen() {
     let resolver = direct_resolver();
+    let mut data = race_data(72.0, 68.0, 180.0, 140.0, 0x5);
+    data[0] = 32;
+    data[1] = 5;
+    data[2] = 45;
+    data[3] = (-2_i8) as u8;
     let subs = vec![
         direct_subrecord("EDID", b"RaceTest\0".to_vec()),
         direct_subrecord("FULL", b"Test Race\0".to_vec()),
-        direct_subrecord("DATA", race_data(72.0, 68.0, 180.0, 140.0, 0x5)),
+        direct_subrecord("DATA", data),
         direct_subrecord("ONAM", 0x100_u32.to_le_bytes().to_vec()),
         direct_subrecord("YNAM", 0x101_u32.to_le_bytes().to_vec()),
         direct_subrecord(
@@ -152,6 +157,19 @@ fn race_decodes_stats_links_hair_eyes_parts_and_facegen() {
     assert_eq!(race.male_weight, 180.0);
     assert_eq!(race.female_weight, 140.0);
     assert_eq!(race.flags, 0x5);
+    assert_eq!(
+        race.skill_boosts,
+        vec![
+            RaceSkillBoost {
+                actor_value: 32,
+                boost: 5,
+            },
+            RaceSkillBoost {
+                actor_value: 45,
+                boost: -2,
+            },
+        ]
+    );
     assert_eq!(race.older_race_form_id, Some(0x100));
     assert_eq!(race.younger_race_form_id, Some(0x101));
     assert_eq!(race.male_default_hair_form_id, Some(0x200));

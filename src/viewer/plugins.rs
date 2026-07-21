@@ -10,8 +10,8 @@ use bevy::prelude::*;
 use crate::app_state::AppStatePlugin;
 
 use super::{
-    actor, actor_animation, agent_bridge, animation, audio, bindings, console, console_ui,
-    interaction, nav, pipboy, pipboy_reader, player, world, world_items,
+    actor, actor_animation, actor_state, agent_bridge, animation, audio, bindings, console,
+    console_ui, interaction, nav, pipboy, pipboy_reader, player, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -69,6 +69,7 @@ impl PluginGroup for ViewerPlugins {
             .add(audio::ViewerAudioPlugin)
             .add(interaction::InteractionPlugin)
             .add(actor::ActorPlugin)
+            .add(actor_state::ActorStatePlugin)
             .add(actor_animation::ActorAnimationPlugin)
             .add(pipboy::PipBoyPlugin)
             .add(pipboy_reader::PipBoyReaderPlugin)
@@ -103,6 +104,7 @@ mod tests {
         assert!(app.is_plugin_added::<player::PlayerPlugin>());
         assert!(app.is_plugin_added::<interaction::InteractionPlugin>());
         assert!(app.is_plugin_added::<actor::ActorPlugin>());
+        assert!(app.is_plugin_added::<actor_state::ActorStatePlugin>());
         assert!(app.is_plugin_added::<actor_animation::ActorAnimationPlugin>());
         assert!(app.is_plugin_added::<world::WorldPlugin>());
         assert!(app.is_plugin_added::<nav::NavPlugin>());
