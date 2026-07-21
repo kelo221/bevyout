@@ -55,6 +55,64 @@ const FACING_TURN_RATE_RADIANS_PER_SECOND: f32 = std::f32::consts::PI;
 /// standing actor jitter.
 const FACING_DEADBAND_SPEED: f32 = locomotion::WALK_EXIT_SPEED;
 
+/// The fixed yaw correction between the travel-direction formula in
+/// [`bound_actor_target_yaw`] (which assumes Bevy's default local forward,
+/// -Z, the axis a bare `Capsule3d` -- the untouched `tna spawn` debug path
+/// -- actually has) and a converted Fallout 3 actor mesh's true forward
+/// axis, which is not -Z (issue #208).
+///
+/// Every bound-actor mesh comes from `convert_actor_scene`
+/// (`src/vsa/nif_convert/mod.rs`) assembled onto the shared FO3 humanoid rig
+/// (`Characters/_Male/Skeleton.NIF`, referenced by every humanoid actor
+/// catalog entry's `model_path`). Parsing that shipped skeleton NIF
+/// directly (`nif::fo3::extract_scene`) shows its root ("Scene Root", block
+/// 0) at an identity transform, but that root's only child -- "Bip01", the
+/// bone every other bone and every skinned body mesh hangs off -- carries a
+/// baked local rotation of
+/// `[[~0, -1, 0], [1, ~0, 0], [0, 0, 1]]`: a pure yaw (the invariant third
+/// row/column is the NIF up axis, Z) of +90 degrees about that axis, with
+/// no pitch or roll. `M * (0, 1, 0)` (NIF's own forward axis) comes out to
+/// `(-1, 0, 0)`, i.e. NIF -X, not NIF +Y: this is the "authored yaw offset"
+/// the alternative approach in the issue brief describes, and it is a
+/// skeleton-rig constant rather than something that needs capturing per
+/// actor at bind time, because every bound actor shares this one rig.
+///
+/// The global NIF-to-glTF coordinate conversion every converted asset gets
+/// (`nifty`'s `fo3::glb::encode_glb`, "Z-up to glTF Y-up", the quarter-turn
+/// about X wrapping the whole scene) contributes no yaw of its own: applying
+/// its rotation to NIF's forward axis (0, 1, 0) yields Bevy's (0, 0, -1)
+/// exactly. So composing the two: a bound actor's true local forward, in
+/// Bevy space, is Bevy's -X -- a fixed quarter turn from the -Z a bare
+/// primitive has.
+///
+/// Concretely: a mesh whose true local forward is -X, held at
+/// `Transform::IDENTITY`, visually faces -X, not -Z. The travel-direction
+/// formula in [`bound_actor_target_yaw`] computes the yaw that points *-Z*
+/// at the desired direction; to point the *actual* -X forward there
+/// instead, the applied yaw must be a quarter turn short of that -- hence
+/// subtracting, not adding, a quarter turn here. This reproduces the
+/// reported bug exactly when omitted: for a bound actor walking toward
+/// world +X, the naive (no-offset) formula sets yaw so that -Z points at
+/// +X, but the mesh's real -X-forward then visually points at -Z instead --
+/// which, under this module's own left/right convention (`right =
+/// cross(forward, up)`, so facing +X puts +Z on the right and -Z on the
+/// left), is exactly "90 degrees to the left of the travel direction".
+const ACTOR_MODEL_FORWARD_YAW_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
+
+/// The yaw that turns a bound actor's true mesh forward (see
+/// [`ACTOR_MODEL_FORWARD_YAW_OFFSET`]) toward `desired`, a horizontal
+/// direction in the same `(x, z)` convention
+/// `AgentKcc::last_desired_horizontal` uses. Pure glam math, extracted so it
+/// can be unit-tested without a `World`.
+fn bound_actor_target_yaw(desired: Vec2) -> f32 {
+    // Bevy's forward is -Z, and a yaw rotation about +Y maps it to
+    // (-sin(yaw), 0, -cos(yaw)); inverting that for the desired (x, z)
+    // direction gives the yaw that would point -Z (not the actor's real
+    // forward) at `desired`.
+    let neg_z_forward_yaw = (-desired.x).atan2(-desired.y);
+    neg_z_forward_yaw + ACTOR_MODEL_FORWARD_YAW_OFFSET
+}
+
 /// Marks an [`ActorRuntime`] entity that owns a nav agent. Insertion (by
 /// `super::bind_actor_agent`) is what turns an ordinary projected actor into
 /// a routed one; removal releases it back to `actor_animation`'s own
@@ -101,10 +159,7 @@ pub(super) fn face_bound_actors(
             bound.yaw_rate = 0.0;
             continue;
         }
-        // Bevy's forward is -Z, and a yaw rotation about +Y maps it to
-        // (-sin(yaw), 0, -cos(yaw)); inverting that for the desired (x, z)
-        // direction gives the target yaw.
-        let target_yaw = (-desired.x).atan2(-desired.y);
+        let target_yaw = bound_actor_target_yaw(desired);
         let current_yaw = transform.rotation.to_euler(EulerRot::YXZ).0;
         let error = shortest_yaw_delta(target_yaw - current_yaw);
         let step = error.clamp(
@@ -292,12 +347,15 @@ mod tests {
     #[test]
     fn facing_turns_toward_the_desired_direction_at_a_bounded_rate() {
         let (mut world, entity) = bound_actor_world();
-        // Desired velocity along +X: Bevy's -Z forward reaches it at a yaw
-        // of -PI/2 (a right turn from the identity facing).
+        // Desired velocity along world +Z: `bound_actor_target_yaw` (see
+        // `ACTOR_MODEL_FORWARD_YAW_OFFSET`) reaches it at a yaw of +PI/2 (a
+        // left turn from the identity facing) -- +X or -X would land the
+        // target exactly on the +/-PI wrap boundary, an ambiguous edge case
+        // this test deliberately avoids.
         world
             .get_mut::<AgentKcc>(entity)
             .unwrap()
-            .last_desired_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
+            .last_desired_horizontal = Vec2::new(0.0, AGENT_DESIRED_SPEED);
         advance(&mut world, 0.1);
         world.run_system_once(face_bound_actors).unwrap();
         let yaw = world
@@ -308,11 +366,11 @@ mod tests {
             .0;
         let step = FACING_TURN_RATE_RADIANS_PER_SECOND * 0.1;
         assert!(
-            (yaw + step).abs() < 1e-5,
-            "one bounded step toward -PI/2, got {yaw}"
+            (yaw - step).abs() < 1e-5,
+            "one bounded step toward +PI/2, got {yaw}"
         );
         let rate = world.get::<NavBoundActor>(entity).unwrap().yaw_rate;
-        assert!(rate < -locomotion::TURN_ENTER_RATE, "{rate}");
+        assert!(rate > locomotion::TURN_ENTER_RATE, "{rate}");
     }
 
     #[test]
@@ -335,13 +393,19 @@ mod tests {
 
     /// A bound actor pivoting on the spot at the route start selects a turn
     /// clip, which is what makes `turn_left`/`turn_right` reachable at all.
+    ///
+    /// Desired velocity along world +Z: at the entity's starting identity
+    /// rotation, the actor's true forward (`ACTOR_MODEL_FORWARD_YAW_OFFSET`)
+    /// already points world -X, so this needs a genuine turn (unlike world
+    /// -X, which the true forward already faces with zero rotation, and
+    /// unlike world +X, which lands exactly on the +/-PI wrap boundary).
     #[test]
     fn a_bound_actor_pivoting_in_place_requests_a_turn_clip() {
         let (mut world, entity) = bound_actor_world();
         world
             .get_mut::<AgentKcc>(entity)
             .unwrap()
-            .last_desired_horizontal = Vec2::new(-AGENT_DESIRED_SPEED, 0.0);
+            .last_desired_horizontal = Vec2::new(0.0, AGENT_DESIRED_SPEED);
         advance(&mut world, 1.0 / 64.0);
         world.run_system_once(face_bound_actors).unwrap();
         world.run_system_once(drive_bound_actor_locomotion).unwrap();
@@ -452,6 +516,42 @@ mod tests {
         assert!(world.get::<NavBoundActor>(entity).is_none());
         assert!(world.get::<AgentKcc>(entity).is_none());
         assert_eq!(requested(&world, entity), Some(ActorAnimationState::Idle));
+    }
+
+    /// The unit test issue #208 asks for: assert the actor mesh's *true*
+    /// forward axis (Bevy's -X, per [`ACTOR_MODEL_FORWARD_YAW_OFFSET`]'s
+    /// derivation from the shipped skeleton NIF) lands on the desired travel
+    /// direction after [`bound_actor_target_yaw`] -- not the -Z a bare
+    /// `Capsule3d` has, which is exactly the 90-degree-left bug this fixes.
+    /// Pure glam math: no `World`, no Bevy systems.
+    #[test]
+    fn bound_actor_target_yaw_points_the_true_mesh_forward_along_desired_travel() {
+        const TRUE_LOCAL_FORWARD: Vec3 = Vec3::new(-1.0, 0.0, 0.0);
+        let cases: [(&str, Vec2); 5] = [
+            ("-Z", Vec2::new(0.0, -1.0)),
+            ("+Z", Vec2::new(0.0, 1.0)),
+            ("+X", Vec2::new(1.0, 0.0)),
+            ("-X", Vec2::new(-1.0, 0.0)),
+            ("diagonal +X+Z", Vec2::new(1.0, 1.0).normalize()),
+        ];
+        for (label, desired) in cases {
+            let yaw = bound_actor_target_yaw(desired);
+            let actual_forward = Quat::from_rotation_y(yaw) * TRUE_LOCAL_FORWARD;
+            let expected_forward = Vec3::new(desired.x, 0.0, desired.y).normalize();
+            assert!(
+                actual_forward.abs_diff_eq(expected_forward, 1e-5),
+                "{label}: expected true forward {expected_forward:?}, got {actual_forward:?} (yaw {yaw})"
+            );
+            // The bug this fixes, stated as a negative assertion: the *naive*
+            // -Z-forward assumption must NOT land on the desired direction --
+            // it is a fixed 90 degrees off, which is what made the mesh
+            // visually face 90 degrees away from its travel direction.
+            let naive_forward = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
+            assert!(
+                !naive_forward.abs_diff_eq(expected_forward, 1e-3),
+                "{label}: naive -Z forward should NOT match desired (that was the bug)"
+            );
+        }
     }
 
     #[test]
