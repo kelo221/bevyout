@@ -43,6 +43,11 @@ mod item_transaction {
     pub use bevyout_core::item_transaction::*;
 }
 
+#[allow(dead_code, unused_imports)]
+mod pause_menu {
+    pub use bevyout_core::pause_menu::*;
+}
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -824,6 +829,10 @@ struct BevyoutWorld {
     // -- nav_locomotion.feature (issue #188) --
     nav_locomotion_state: locomotion::LocomotionState,
     nav_locomotion_changed: bool,
+
+    // -- pause_menu.feature --
+    pause_menu: pause_menu::PauseMenuState,
+    pause_menu_action: Option<Option<pause_menu::PauseMenuAction>>,
 }
 
 fn find_placement<'a>(
@@ -10843,4 +10852,82 @@ async fn then_polygon_is_reported_unreported(
         unreported.contains(&(mesh_form_id, index, blocker_form_id)),
         "{unreported:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// pause_menu.feature -- pure ESC pause menu selection state
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a fresh pause menu$")]
+async fn given_fresh_pause_menu(world: &mut BevyoutWorld) {
+    world.pause_menu = pause_menu::PauseMenuState::new();
+    world.pause_menu_action = None;
+}
+
+#[when(regex = r"^the pause menu moves up$")]
+async fn when_pause_menu_moves_up(world: &mut BevyoutWorld) {
+    world.pause_menu.move_up();
+}
+
+#[when(regex = r"^the pause menu moves down$")]
+async fn when_pause_menu_moves_down(world: &mut BevyoutWorld) {
+    world.pause_menu.move_down();
+}
+
+#[when(regex = r"^the pause menu selects (Continue|Save|Load|Settings|Help|Quit)$")]
+async fn when_pause_menu_selects(world: &mut BevyoutWorld, option: String) {
+    world.pause_menu.select(parse_pause_menu_option(&option));
+}
+
+#[then(regex = r"^the pause menu selection is (Continue|Save|Load|Settings|Help|Quit)$")]
+async fn then_pause_menu_selection(world: &mut BevyoutWorld, option: String) {
+    assert_eq!(
+        world.pause_menu.selected(),
+        parse_pause_menu_option(&option),
+        "pause menu selection"
+    );
+}
+
+#[then(regex = r"^activating the pause menu yields Continue$")]
+async fn then_pause_menu_yields_continue(world: &mut BevyoutWorld) {
+    world.pause_menu_action = Some(world.pause_menu.activate());
+    assert_eq!(
+        world.pause_menu_action,
+        Some(Some(pause_menu::PauseMenuAction::Continue))
+    );
+}
+
+#[then(regex = r"^activating the pause menu yields Quit$")]
+async fn then_pause_menu_yields_quit(world: &mut BevyoutWorld) {
+    world.pause_menu_action = Some(world.pause_menu.activate());
+    assert_eq!(
+        world.pause_menu_action,
+        Some(Some(pause_menu::PauseMenuAction::Quit))
+    );
+}
+
+#[then(regex = r"^activating the pause menu yields nothing$")]
+async fn then_pause_menu_yields_nothing(world: &mut BevyoutWorld) {
+    world.pause_menu_action = Some(world.pause_menu.activate());
+    assert_eq!(world.pause_menu_action, Some(None));
+}
+
+#[then(
+    regex = r#"^pause menu option (Continue|Save|Load|Settings|Help|Quit) is labeled "([^"]+)"$"#
+)]
+async fn then_pause_menu_option_label(world: &mut BevyoutWorld, option: String, label: String) {
+    let _ = world;
+    assert_eq!(parse_pause_menu_option(&option).label(), label);
+}
+
+fn parse_pause_menu_option(label: &str) -> pause_menu::PauseMenuOption {
+    match label {
+        "Continue" => pause_menu::PauseMenuOption::Continue,
+        "Save" => pause_menu::PauseMenuOption::Save,
+        "Load" => pause_menu::PauseMenuOption::Load,
+        "Settings" => pause_menu::PauseMenuOption::Settings,
+        "Help" => pause_menu::PauseMenuOption::Help,
+        "Quit" => pause_menu::PauseMenuOption::Quit,
+        other => panic!("unknown pause menu option {other:?}"),
+    }
 }

@@ -72,6 +72,7 @@ mod hybrid_shadow_policy;
 mod lighting;
 mod nav;
 mod nav_overlay;
+mod pause_menu;
 mod performance_policy;
 mod ragdoll_lab;
 mod scene;
