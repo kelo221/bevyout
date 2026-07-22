@@ -1701,6 +1701,7 @@ fn write_showpackages_fixture(
             },
         ))],
         counters: Default::default(),
+        faction_table: Default::default(),
     };
     std::fs::write(
         scene_dir.join("actors.ron"),

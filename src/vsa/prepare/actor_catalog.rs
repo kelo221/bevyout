@@ -32,6 +32,10 @@ use bevyout_core::actor_state::{
     ActorDefinition, ActorFactionMembership as RuntimeFactionMembership, ActorSkill, ActorValue,
     SpecialAttribute,
 };
+use bevyout_core::faction::{
+    FactionRelation as CoreFactionRelation, FactionRelationTable, GroupCombatReaction,
+    PreparedFaction,
+};
 use serde::{Deserialize, Serialize};
 
 use super::super::manifest::PreparedInventoryEntry;
@@ -41,8 +45,7 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str =
-    "openmw-actors-v6-runtime-values-race-skill-modifiers";
+pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v7-faction-relation-table";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -248,10 +251,24 @@ pub(crate) struct FactionRankInput {
     pub(crate) female_title: Option<String>,
 }
 
+/// One `XNAM` inter-faction relation, mirrored from
+/// `openmw_esm4::actor_support::FactionRelation` at the orchestrator boundary
+/// (`group_combat_reaction` stays a raw `u32` here; the core
+/// `GroupCombatReaction` enum is applied when the table is built).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FactionRelationInput {
+    pub(crate) faction_form_id: u32,
+    pub(crate) modifier: i32,
+    pub(crate) group_combat_reaction: u32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FactionInput {
     pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) name: Option<String>,
     pub(crate) ranks: Vec<FactionRankInput>,
+    pub(crate) relations: Vec<FactionRelationInput>,
 }
 
 /// One `ACHR`/`ACRE` placement's identity, transform, and enable state,
@@ -568,6 +585,13 @@ pub(crate) struct PreparedActorCatalog {
     pub(crate) source_fingerprint: String,
     pub(crate) entries: Vec<ActorCatalogEntry>,
     pub(crate) counters: ActorCatalogCounters,
+    /// Prepared `FACT` relations reachable from this cell's actors, the
+    /// authoritative input to runtime disposition/hostility resolution
+    /// (issue #116). Serde-defaulted for artifact readability; the revision
+    /// gate rejects stale files that would otherwise deserialize with an
+    /// empty table.
+    #[serde(default)]
+    pub(crate) faction_table: FactionRelationTable,
 }
 
 // ---------------------------------------------------------------------
@@ -932,7 +956,37 @@ pub(crate) fn build_actor_catalog(
         source_fingerprint: source_fingerprint.into(),
         entries,
         counters,
+        faction_table: build_faction_table(&inputs.factions),
     }
+}
+
+/// Projects the decoded `FACT` inputs into the pure runtime relation table.
+/// Relations are stored in ascending target-FormID order and deduplicated so
+/// the serialized table is deterministic. A relation pointing at an unknown
+/// faction is retained (it is still a real authored declaration); the actor
+/// catalog already diagnoses unresolved faction *membership* links.
+fn build_faction_table(factions: &HashMap<u32, FactionInput>) -> FactionRelationTable {
+    let mut table = FactionRelationTable::new();
+    for faction in factions.values() {
+        let mut relations: Vec<CoreFactionRelation> = faction
+            .relations
+            .iter()
+            .map(|relation| CoreFactionRelation {
+                faction_form_id: relation.faction_form_id,
+                modifier: relation.modifier,
+                reaction: GroupCombatReaction::from_raw(relation.group_combat_reaction),
+            })
+            .collect();
+        relations.sort_by_key(|relation| relation.faction_form_id);
+        relations.dedup_by_key(|relation| relation.faction_form_id);
+        table.insert(PreparedFaction {
+            form_id: faction.form_id,
+            editor_id: faction.editor_id.clone(),
+            name: faction.name.clone(),
+            relations,
+        });
+    }
+    table
 }
 
 fn stable_selection_seed(
@@ -1289,7 +1343,7 @@ mod tests {
     fn revision_is_pinned() {
         assert_eq!(
             ACTOR_CATALOG_REVISION,
-            "openmw-actors-v6-runtime-values-race-skill-modifiers"
+            "openmw-actors-v7-faction-relation-table"
         );
     }
 
@@ -1584,6 +1638,7 @@ mod tests {
                 male_title: Some("Paladin".into()),
                 female_title: Some("Paladine".into()),
             }],
+            ..Default::default()
         };
 
         let inputs = ActorCatalogInputs {
