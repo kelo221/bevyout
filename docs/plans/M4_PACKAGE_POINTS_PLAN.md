@@ -128,4 +128,52 @@ roster (#215); persistence of nav runtime state (#217). This wave only makes
 Patrol/Sandbox *resolve and drive* under the existing `runpackage` command.
 
 ## Shipped amendments
-_(to be filled during acceptance)_
+
+- **Cell identity correction.** The prompt's `0005cf10`/"SuperDuperMart"
+  reference is cell `00017f37`, not `0001a273` (an unrelated Metro cell found
+  during a false-start byte scan before the real cell was confirmed via
+  `scene.ron`'s `editor_id`). All real FormIDs in the manual are re-verified
+  against `00017f37`.
+- **`0005cf10` itself has no static `XLKR`.** Confirmed against real bytes:
+  this specific actor's linked reference is set by a quest script at runtime
+  (out of scope — no script VM here), not authored statically. A sibling
+  raider in the same cell, `00041600`, does carry a static chain and is used
+  for the manual/acceptance instead. `0005cf10` still correctly reports the
+  same deterministic "no linked reference" diagnostic as before — that part
+  was never wrong, just unresolvable for this one actor by design.
+- **Real gap beyond the plan's premise: patrol markers were dropped from the
+  manifest entirely, not merely unspawned.** The plan assumed every
+  asset-less placement survives into `LoadedSceneManifest.0.placements` (based
+  on a different cell's stale placement count). In fact FO3 patrol markers are
+  plain `ReferenceKind::Object` placements of the engine's `XMarkerHeading`
+  base (`markerxheading.nif`), and `prepare::placements`'s "skip non-rendering
+  editor marker" branch dropped them **before any placement was ever
+  created** for a plain Object-kind reference. `build_resolution_context`'s
+  manifest fold-in (F3) could never have found them no matter how it was
+  written. Fixed in `stage_placements`: a marker that is a linked-reference
+  link source or link target keeps its placement now (`prepare-v6` bump
+  covers this too, since it changes the manifest's *placement set*, not just
+  a field). See the F1 commit's `editor_marker_needs_placement` for the pure,
+  unit-tested decision.
+- **Follow-up filed (not fixed here, out of scope):** `PackageLocation.radius`
+  / `PackageTarget.count_or_distance` are never scaled by `FO3_SCALE` in
+  `viewer::ai::resolution` (pre-existing since #195/#198, unrelated to this
+  issue's editor-location/linked-reference resolution work). Found while
+  acceptance-testing the Sandbox roam live: a `radius: 1024` package (a sane
+  ~14.6 m radius in Bethesda's native units) is read back as 1024 *metres*,
+  so `runpackage`'s Sandbox family routes outside the interior cell and
+  reports `phase=failed` rather than a bounded wander. The roam *center*
+  (this issue's own scope) is verified correct regardless. Recommended fix:
+  multiply both fields by `FO3_SCALE` in `resolve_location`/`resolve_target`.
+- **Real-data acceptance (cinema/console, both cells re-prepared to
+  `prepare-v6-...-linked-ref`):**
+  - SuperDuperMart (`00017f37`) `00041600`: `showpackages` resolved
+    `linked-reference` to marker `00041601`'s real position
+    `(17.81,96.46,-89.05)`; nav-bound + `runpackage` walked marker 0→1,
+    landing on marker `00041602`'s real position `(19.04,96.46,-89.83)`,
+    confirmed via both `runpackage status` (`marker=1/2`) and the actor's own
+    live `getpos`.
+  - Vault 101 Atrium (`00024511`) radroach `0005443b`: `showpackages` resolved
+    `editor-location` to the actor's own authored placement position exactly;
+    `runpackage`'s Sandbox roam center matched the same point exactly (roam
+    radius itself hits the pre-existing radius-scale gap above).
