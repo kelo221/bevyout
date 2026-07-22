@@ -25,8 +25,9 @@ connect/inspect/act workflow -- this skill only covers the filmstrip step.
    `prid`/`dump` to confirm the reference exists in this session before
    pointing the camera at it.
 3. Put the subject on-mesh before driving navigation. `tna bind <actor-formid>`
-   binds a nav agent to an existing actor reference; `tna goto <index> <x> <y>
-   <z>` drives it. `tna status` reports `grounded`/`AgentNotOnNavMesh` --
+   binds a nav agent to an existing actor reference; `tna goto <x> <y> <z>`
+   drives it (an optional leading `<index>` selects a non-default agent).
+   `tna status` reports `grounded`/`AgentNotOnNavMesh` --
    an ungrounded agent will not move no matter what the camera shows. Prefer
    open floor: cluttered cells and doorways wedge agents on approach.
 4. Engage the camera directly with `console_exec`, or let `cinema_record` do
