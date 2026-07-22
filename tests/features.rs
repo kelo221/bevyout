@@ -403,6 +403,19 @@ use viewer_player::player::equipment;
 #[allow(dead_code, unused_imports)]
 mod recipe_policy;
 
+// Pure AI package runtime layer (issues #193/#194/#195). Each is std/serde-only
+// (lifecycle also uses the Bevy-free `bevyout_core::actor_state` checkpoint) so
+// all three compile verbatim here via `#[path]`.
+#[path = "../src/viewer/ai/lifecycle.rs"]
+#[allow(unused_imports)]
+mod ai_lifecycle;
+#[path = "../src/viewer/ai/resolution.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_resolution;
+#[path = "../src/viewer/ai/selection.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_selection;
+
 use assets::AssetConversion;
 use bevyout_core::actor;
 use bevyout_core::actor_animation;
@@ -855,6 +868,23 @@ struct BevyoutWorld {
     // -- pause_menu.feature --
     pause_menu: pause_menu::PauseMenuState,
     pause_menu_action: Option<Option<pause_menu::PauseMenuAction>>,
+
+    // -- ai_package_selection.feature (issue #193) --
+    ai_sel_candidates: Vec<ai_selection::PackageCandidate>,
+    ai_sel_hour: f32,
+    ai_sel_functions: std::collections::HashMap<u16, f32>,
+    ai_sel_report: Option<ai_selection::SelectionReport>,
+
+    // -- ai_package_lifecycle.feature (issue #194) --
+    ai_lifecycle: ai_lifecycle::PackageLifecycle,
+    ai_lifecycle_checkpoint: Option<bevyout_core::actor_state::ActorPackageCheckpoint>,
+
+    // -- ai_package_resolution.feature (issue #195) --
+    ai_res_context: ai_resolution::ResolutionContext,
+    ai_res_location: Option<ai_resolution::PackageLocation>,
+    ai_res_target: Option<ai_resolution::PackageTarget>,
+    ai_res_result:
+        Option<Result<ai_resolution::ResolvedPoint, ai_resolution::ResolutionDiagnostic>>,
 }
 
 fn find_placement<'a>(
@@ -11358,5 +11388,437 @@ fn parse_pause_menu_option(label: &str) -> pause_menu::PauseMenuOption {
         "Help" => pause_menu::PauseMenuOption::Help,
         "Quit" => pause_menu::PauseMenuOption::Quit,
         other => panic!("unknown pause menu option {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// ai_package_selection.feature / ai_package_lifecycle.feature /
+// ai_package_resolution.feature (issues #193/#194/#195) -- appended
+// section, do not interleave. Each drives the pure runtime module directly.
+// ---------------------------------------------------------------------
+
+/// Builds a minimal 20-byte CTDA for the selection steps: operator in the top
+/// three bits of byte 0, the comparison value at offset 4, function index at
+/// offset 8 -- the exact header `ai_selection::decode_condition` reads.
+fn build_ctda(operator: &str, comparison_value: f32, function_index: u16) -> Vec<u8> {
+    let op_bits: u8 = match operator {
+        "equal" => 0,
+        "not-equal" => 1,
+        "greater" => 2,
+        "greater-or-equal" => 3,
+        "less" => 4,
+        "less-or-equal" => 5,
+        other => panic!("unknown CTDA operator {other:?}"),
+    };
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = op_bits << 5;
+    bytes[4..8].copy_from_slice(&comparison_value.to_le_bytes());
+    bytes[8..10].copy_from_slice(&function_index.to_le_bytes());
+    bytes
+}
+
+fn ai_sel_candidate_mut(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+) -> &mut ai_selection::PackageCandidate {
+    if let Some(index) = world
+        .ai_sel_candidates
+        .iter()
+        .position(|candidate| candidate.form_id == form_id)
+    {
+        &mut world.ai_sel_candidates[index]
+    } else {
+        world
+            .ai_sel_candidates
+            .push(ai_selection::PackageCandidate {
+                form_id,
+                ..ai_selection::PackageCandidate::default()
+            });
+        world.ai_sel_candidates.last_mut().unwrap()
+    }
+}
+
+#[given(regex = r"^a selection game hour of ([\d.]+)$")]
+async fn given_selection_game_hour(world: &mut BevyoutWorld, hour: f32) {
+    world.ai_sel_hour = hour;
+}
+
+#[given(regex = r"^a package candidate 0x([0-9a-fA-F]+) of type (\d+)$")]
+async fn given_package_candidate(world: &mut BevyoutWorld, hex: String, package_type: u8) {
+    let form_id = parse_hex(&hex);
+    ai_sel_candidate_mut(world, form_id).package_type = package_type;
+}
+
+#[given(regex = r"^candidate 0x([0-9a-fA-F]+) has schedule time (-?\d+) duration (-?\d+)$")]
+async fn given_candidate_schedule(world: &mut BevyoutWorld, hex: String, time: i8, duration: i32) {
+    let form_id = parse_hex(&hex);
+    ai_sel_candidate_mut(world, form_id).schedule = Some(ai_selection::PackageSchedule {
+        time,
+        duration,
+        ..ai_selection::PackageSchedule::default()
+    });
+}
+
+#[given(regex = r"^condition function (\d+) returns ([\d.]+)$")]
+async fn given_condition_function_returns(world: &mut BevyoutWorld, index: u16, value: f32) {
+    world.ai_sel_functions.insert(index, value);
+}
+
+#[given(
+    regex = r"^candidate 0x([0-9a-fA-F]+) requires function (\d+) (equal|not-equal|greater|greater-or-equal|less|less-or-equal) ([\d.]+)$"
+)]
+async fn given_candidate_condition(
+    world: &mut BevyoutWorld,
+    hex: String,
+    function_index: u16,
+    operator: String,
+    value: f32,
+) {
+    let form_id = parse_hex(&hex);
+    let ctda = build_ctda(&operator, value, function_index);
+    ai_sel_candidate_mut(world, form_id).conditions.push(ctda);
+}
+
+/// A boundary backed by the World's `(function_index) -> value` map.
+struct MapFunctions(std::collections::HashMap<u16, f32>);
+
+impl ai_selection::ConditionFunctions for MapFunctions {
+    fn evaluate(&self, function_index: u16, _param1: u32, _param2: u32) -> Option<f32> {
+        self.0.get(&function_index).copied()
+    }
+}
+
+#[when("the actor's package is selected")]
+async fn when_actor_package_selected(world: &mut BevyoutWorld) {
+    let now = ai_selection::GameInstant {
+        hour: world.ai_sel_hour,
+        ..ai_selection::GameInstant::default()
+    };
+    let boundary = MapFunctions(world.ai_sel_functions.clone());
+    world.ai_sel_report = Some(ai_selection::select_package(
+        &world.ai_sel_candidates,
+        now,
+        &boundary,
+    ));
+}
+
+fn ai_sel_report(world: &BevyoutWorld) -> &ai_selection::SelectionReport {
+    world
+        .ai_sel_report
+        .as_ref()
+        .expect("the package must be selected first")
+}
+
+#[then(regex = r"^the selected package is 0x([0-9a-fA-F]+)$")]
+async fn then_selected_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(ai_sel_report(world).selected, Some(parse_hex(&hex)));
+}
+
+#[then("no package is selected")]
+async fn then_no_package_selected(world: &mut BevyoutWorld) {
+    assert_eq!(ai_sel_report(world).selected, None);
+}
+
+#[then(regex = r#"^package candidate 0x([0-9a-fA-F]+) was rejected as "([^"]*)"$"#)]
+async fn then_candidate_rejected_as(world: &mut BevyoutWorld, hex: String, reason: String) {
+    let form_id = parse_hex(&hex);
+    let evaluation = ai_sel_report(world)
+        .evaluations
+        .iter()
+        .find(|evaluation| evaluation.form_id == form_id)
+        .unwrap_or_else(|| panic!("no evaluation for candidate {hex}"));
+    match evaluation.outcome {
+        ai_selection::CandidateOutcome::Rejected(actual) => assert_eq!(actual.label(), reason),
+        ai_selection::CandidateOutcome::Selected => {
+            panic!("candidate {hex} was selected, expected rejection {reason:?}")
+        }
+    }
+}
+
+#[then(
+    regex = r"^the selection counts unsupported_type (\d+) out_of_schedule (\d+) conditions_false (\d+) conditions_unevaluable (\d+) schedule_gap (\d+)$"
+)]
+async fn then_selection_counts(
+    world: &mut BevyoutWorld,
+    unsupported_type: usize,
+    out_of_schedule: usize,
+    conditions_false: usize,
+    conditions_unevaluable: usize,
+    schedule_gap: usize,
+) {
+    let counters = ai_sel_report(world).counters;
+    assert_eq!(
+        counters.unsupported_type, unsupported_type,
+        "unsupported_type"
+    );
+    assert_eq!(counters.out_of_schedule, out_of_schedule, "out_of_schedule");
+    assert_eq!(
+        counters.conditions_false, conditions_false,
+        "conditions_false"
+    );
+    assert_eq!(
+        counters.conditions_unevaluable, conditions_unevaluable,
+        "conditions_unevaluable"
+    );
+    assert_eq!(counters.schedule_gap, schedule_gap, "schedule_gap");
+}
+
+// -- ai_package_lifecycle.feature --
+
+#[given("a fresh package lifecycle")]
+async fn given_fresh_lifecycle(world: &mut BevyoutWorld) {
+    world.ai_lifecycle = ai_lifecycle::PackageLifecycle::new();
+    world.ai_lifecycle_checkpoint = None;
+}
+
+#[given(regex = r"^a fresh package lifecycle with backoff ([\d.]+) and max retries (\d+)$")]
+async fn given_fresh_lifecycle_with_policy(
+    world: &mut BevyoutWorld,
+    backoff: f32,
+    max_retries: u32,
+) {
+    world.ai_lifecycle =
+        ai_lifecycle::PackageLifecycle::new().with_retry_policy(max_retries, backoff);
+    world.ai_lifecycle_checkpoint = None;
+}
+
+#[when(regex = r"^package 0x([0-9a-fA-F]+) is selected$")]
+async fn when_lifecycle_package_selected(world: &mut BevyoutWorld, hex: String) {
+    world.ai_lifecycle.on_select(Some(parse_hex(&hex)));
+}
+
+#[when("no package is selected for the lifecycle")]
+async fn when_lifecycle_no_package(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.on_select(None);
+}
+
+#[when(regex = r"^the active package advances (\d+) steps$")]
+async fn when_active_advances(world: &mut BevyoutWorld, steps: u32) {
+    for _ in 0..steps {
+        world.ai_lifecycle.advance_step();
+    }
+}
+
+#[when("the active package completes")]
+async fn when_active_completes(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.complete();
+}
+
+#[when("the active package fails")]
+async fn when_active_fails(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.fail();
+}
+
+#[when(regex = r"^the lifecycle ticks ([\d.]+) seconds$")]
+async fn when_lifecycle_ticks(world: &mut BevyoutWorld, seconds: f32) {
+    world.ai_lifecycle.tick(seconds);
+}
+
+#[when("the lifecycle checkpoint is persisted")]
+async fn when_lifecycle_checkpoint_persisted(world: &mut BevyoutWorld) {
+    // Route the checkpoint through the same serde the save format's ACTR
+    // record uses (`ActorInstanceState`), proving the persisted shape
+    // survives a save/load round-trip deterministically.
+    let checkpoint = world
+        .ai_lifecycle
+        .to_checkpoint()
+        .expect("a running lifecycle snapshots");
+    let mut state =
+        bevyout_core::actor_state::ActorInstanceState::new(1, actor_state::ActorLifeState::Alive);
+    state.package = Some(checkpoint);
+    let json = serde_json::to_string(&state).expect("serialize actor state");
+    let restored: bevyout_core::actor_state::ActorInstanceState =
+        serde_json::from_str(&json).expect("deserialize actor state");
+    world.ai_lifecycle_checkpoint = restored.package;
+}
+
+#[when("the lifecycle is rebuilt from the checkpoint")]
+async fn when_lifecycle_rebuilt(world: &mut BevyoutWorld) {
+    let checkpoint = world
+        .ai_lifecycle_checkpoint
+        .expect("a checkpoint must be persisted first");
+    world.ai_lifecycle = ai_lifecycle::PackageLifecycle::from_checkpoint(checkpoint);
+}
+
+#[then(regex = r"^the lifecycle phase is (idle|running|paused|completed|awaiting-retry|failed)$")]
+async fn then_lifecycle_phase(world: &mut BevyoutWorld, phase: String) {
+    assert_eq!(world.ai_lifecycle.phase().label(), phase);
+}
+
+#[then(regex = r"^the active package is 0x([0-9a-fA-F]+)$")]
+async fn then_active_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(world.ai_lifecycle.active_form_id(), Some(parse_hex(&hex)));
+}
+
+#[then(regex = r"^the paused package is 0x([0-9a-fA-F]+)$")]
+async fn then_paused_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(world.ai_lifecycle.paused_form_id(), Some(parse_hex(&hex)));
+}
+
+#[then(regex = r"^the active step is (\d+)$")]
+async fn then_active_step_is(world: &mut BevyoutWorld, step_index: u32) {
+    assert_eq!(world.ai_lifecycle.step(), Some(step_index));
+}
+
+#[then(regex = r"^the active elapsed is ([\d.]+)$")]
+async fn then_active_elapsed_is(world: &mut BevyoutWorld, elapsed: f32) {
+    assert_eq!(world.ai_lifecycle.elapsed_seconds(), Some(elapsed));
+}
+
+#[then(regex = r"^the retry count is (\d+)$")]
+async fn then_retry_count_is(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(world.ai_lifecycle.retry_count(), Some(count));
+}
+
+// -- ai_package_resolution.feature --
+
+#[given(regex = r"^the resolving actor is at ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn given_resolving_actor_at(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.ai_res_context.actor_position = [x, y, z];
+}
+
+#[given(
+    regex = r"^a resolvable reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_resolvable_reference(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let reference_form_id = parse_hex(&reference_hex);
+    let base_form_id = parse_hex(&base_hex);
+    world.ai_res_context.references.insert(
+        reference_form_id,
+        ai_resolution::ResolvedReference {
+            reference_form_id,
+            base_form_id,
+            cell_form_id: 0x1000,
+            position: [x, y, z],
+            entity: Some(u64::from(reference_form_id)),
+        },
+    );
+    world
+        .ai_res_context
+        .bases
+        .entry(base_form_id)
+        .or_default()
+        .push(reference_form_id);
+}
+
+#[given(regex = r"^a package location of type (\d+) referencing 0x([0-9a-fA-F]+) radius (-?\d+)$")]
+async fn given_package_location_input(
+    world: &mut BevyoutWorld,
+    location_type: u32,
+    form_hex: String,
+    radius: i32,
+) {
+    let raw = parse_hex(&form_hex);
+    world.ai_res_location = Some(ai_resolution::PackageLocation {
+        location_type,
+        form_id: (raw != 0).then_some(raw),
+        raw_value: raw,
+        radius,
+    });
+}
+
+#[given(
+    regex = r"^a package target of type (-?\d+) referencing 0x([0-9a-fA-F]+) distance (-?\d+)$"
+)]
+async fn given_package_target_input(
+    world: &mut BevyoutWorld,
+    target_type: i32,
+    form_hex: String,
+    distance: i32,
+) {
+    let raw = parse_hex(&form_hex);
+    world.ai_res_target = Some(ai_resolution::PackageTarget {
+        target_type,
+        form_id: (raw != 0).then_some(raw),
+        raw_value: raw,
+        count_or_distance: distance,
+    });
+}
+
+#[when("the package location is resolved")]
+async fn when_location_resolved(world: &mut BevyoutWorld) {
+    let location = world.ai_res_location.expect("a location must be set first");
+    world.ai_res_result = Some(ai_resolution::resolve_location(
+        &location,
+        &world.ai_res_context,
+    ));
+}
+
+#[when("the package target is resolved")]
+async fn when_target_resolved(world: &mut BevyoutWorld) {
+    let target = world.ai_res_target.expect("a target must be set first");
+    world.ai_res_result = Some(ai_resolution::resolve_target(
+        &target,
+        &world.ai_res_context,
+    ));
+}
+
+fn ai_res_point(world: &BevyoutWorld) -> &ai_resolution::ResolvedPoint {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => point,
+        Err(diagnostic) => panic!("expected a resolved point, got diagnostic: {diagnostic}"),
+    }
+}
+
+#[then(regex = r"^the location resolves to ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn then_location_resolves_to(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    assert_eq!(ai_res_point(world).position, [x, y, z]);
+}
+
+#[then(regex = r"^the target resolves to ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn then_target_resolves_to(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    assert_eq!(ai_res_point(world).position, [x, y, z]);
+}
+
+#[then(regex = r#"^the location resolves via "([^"]*)"$"#)]
+async fn then_location_resolves_via(world: &mut BevyoutWorld, label: String) {
+    assert_eq!(ai_res_point(world).source.label(), label);
+}
+
+#[then(regex = r"^the target radius is ([\d.]+)$")]
+async fn then_target_radius_is(world: &mut BevyoutWorld, radius: f32) {
+    assert_eq!(ai_res_point(world).radius, radius);
+}
+
+#[then(regex = r#"^the location is unresolved with diagnostic containing "([^"]*)"$"#)]
+async fn then_location_unresolved(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => panic!("expected an unresolved location, got {point:?}"),
+        Err(diagnostic) => assert!(
+            diagnostic.message.contains(&expected),
+            "diagnostic {:?} did not contain {expected:?}",
+            diagnostic.message
+        ),
+    }
+}
+
+#[then(regex = r#"^the target is unresolved with diagnostic containing "([^"]*)"$"#)]
+async fn then_target_unresolved(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => panic!("expected an unresolved target, got {point:?}"),
+        Err(diagnostic) => assert!(
+            diagnostic.message.contains(&expected),
+            "diagnostic {:?} did not contain {expected:?}",
+            diagnostic.message
+        ),
     }
 }
