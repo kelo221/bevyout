@@ -19,7 +19,7 @@ use crate::vsa::{
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };
 
-use super::super::ai::families::{PackageFamily, Waypoint};
+use super::super::ai::families::{self, PackageFamily, Waypoint};
 use super::super::ai::family_runtime::{
     ActorPackageController, DEFAULT_ARRIVAL_TOLERANCE, PackageInteractionOccupancy,
 };
@@ -506,13 +506,35 @@ fn start_package(
     })?;
 
     let context = build_resolution_context(world, reference_form_id);
-    // Eat/Sleep drive to the furniture (the package target); the others drive
-    // to the package location. Fall back to the other slot when the preferred
-    // one is missing or unresolvable.
-    let prefer_target = matches!(family, PackageFamily::Eat | PackageFamily::Sleep);
-    let resolved = resolve_family_point(entry, &context, prefer_target)?;
-    let waypoints = build_waypoints(family, &resolved, selected);
-    let target = resolved.position;
+    // Eat/Sleep pick the nearest free interaction point among the resolved
+    // furniture candidates; the others drive to the single resolved location
+    // (falling back to the target slot).
+    let waypoints = if matches!(family, PackageFamily::Eat | PackageFamily::Sleep) {
+        let candidates = resolve_interaction_candidates(entry, &context, selected);
+        if candidates.is_empty() {
+            return Err(ConsoleError::new(
+                "unresolved_point",
+                format!("package {selected:08x} has no resolvable interaction point"),
+            ));
+        }
+        let occupied = &world.resource::<PackageInteractionOccupancy>().0;
+        let chosen = families::select_interaction_point(
+            &candidates,
+            context.actor_position,
+            occupied,
+        )
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "furniture_busy",
+                format!("every resolved interaction point for package {selected:08x} is occupied"),
+            )
+        })?;
+        vec![candidates[chosen]]
+    } else {
+        let resolved = resolve_family_point(entry, &context, false)?;
+        vec![Waypoint::at(resolved.position)]
+    };
+    let target = waypoints[0].position;
 
     let controller = ActorPackageController::start(
         reference_form_id,
@@ -673,26 +695,53 @@ fn resolve_family_point(
     Err(ConsoleError::new("unresolved_point", diagnostic))
 }
 
-/// Builds the waypoint list a family drives. Eat/Sleep carry an interaction
-/// point (the resolved furniture entity, or the package FormID as a fallback
-/// occupancy key); the others are plain positional waypoints.
-fn build_waypoints(
-    family: PackageFamily,
-    resolved: &ResolvedPoint,
+/// Resolves an eat/sleep package's furniture candidates: the target slot (the
+/// furniture reference) and the location slot, each carried as a `Waypoint` with
+/// an interaction-point occupancy key (the resolved entity, or the package
+/// FormID as a fallback). `families::select_interaction_point` then picks the
+/// nearest free one.
+fn resolve_interaction_candidates(
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
     selected: u32,
 ) -> Vec<Waypoint> {
-    match family {
-        PackageFamily::Eat | PackageFamily::Sleep => {
-            let interaction_point = resolved.entity.map_or(selected, |entity| entity as u32);
-            vec![Waypoint {
-                position: resolved.position,
-                wait_seconds: 0.0,
-                orientation_yaw: None,
-                interaction_point: Some(interaction_point),
-            }]
-        }
-        _ => vec![Waypoint::at(resolved.position)],
+    let mut candidates = Vec::new();
+    let mut push = |point: ResolvedPoint| {
+        let interaction_point = point.entity.map_or(selected, |entity| entity as u32);
+        candidates.push(Waypoint {
+            position: point.position,
+            wait_seconds: 0.0,
+            orientation_yaw: None,
+            interaction_point: Some(interaction_point),
+        });
+    };
+    if let Some(target) = entry.target
+        && let Ok(point) = resolution::resolve_target(
+            &PackageTarget {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            },
+            context,
+        )
+    {
+        push(point);
     }
+    if let Some(location) = entry.location
+        && let Ok(point) = resolution::resolve_location(
+            &PackageLocation {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            },
+            context,
+        )
+    {
+        push(point);
+    }
+    candidates
 }
 
 /// Maps a prepared catalog entry onto the pure #193 selection input.

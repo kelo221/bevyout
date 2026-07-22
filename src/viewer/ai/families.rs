@@ -93,17 +93,6 @@ pub enum FamilyAnimation {
     Sleep,
 }
 
-impl FamilyAnimation {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Eat => "eat",
-            Self::Sleep => "sleep",
-        }
-    }
-}
-
 /// The *only* things a family may request. Navigation and animation -- never a
 /// transform write (module doc comment, verdict §2.3).
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -108,7 +108,7 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
 
         // Phase A: advance the lifecycle clock and (while running) the family,
         // all under a single mutable borrow of the controller.
-        let Some((request, signal, released, claim, family_label, ref_form_id)) = ({
+        let Some((request, signal, released, claim, orientation, family_label, ref_form_id)) = ({
             let Some(mut controller) = world.get_mut::<ActorPackageController>(entity) else {
                 continue;
             };
@@ -134,11 +134,17 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
                     None
                 };
                 let claim = controller.driver.occupied_point();
+                // The authored idle/patrol-marker facing to apply when the actor
+                // is holding a pose (a `Play` request), if any.
+                let orientation = matches!(step.request, Some(FamilyRequest::Play(_)))
+                    .then(|| controller.driver.current_orientation_yaw())
+                    .flatten();
                 Some((
                     step.request,
                     step.signal,
                     released,
                     claim,
+                    orientation,
                     controller.driver.family().label(),
                     controller.reference_form_id,
                 ))
@@ -167,6 +173,14 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
             Some(FamilyRequest::Stop) => agent::clear_agent_target(world, entity),
             Some(FamilyRequest::Play(animation)) => {
                 let _ = request_actor_animation(world, entity, animation_state(animation));
+                // Apply the authored idle-marker facing while standing still.
+                // This is a rotation write only -- translation (the KCC's sole
+                // authority) is never touched here.
+                if let Some(yaw) = orientation
+                    && let Some(mut transform) = world.get_mut::<Transform>(entity)
+                {
+                    transform.rotation = Quat::from_rotation_y(yaw);
+                }
             }
             None => {}
         }
