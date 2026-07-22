@@ -519,6 +519,11 @@ fn start_package(
         )
     })?;
 
+    // Set the nav-owned door policy for this family before dispatching: only
+    // Sandbox/Wander refuses to open doors (#198). Nav reads this marker at its
+    // door-open seam and never learns the family type itself.
+    agent::set_agent_refuses_doors(world, entity, !family.opens_doors());
+
     let context = build_resolution_context(world, reference_form_id);
     // The dynamic families (#198) resolve differently: Follow needs the live
     // leader entity to trail; Sandbox needs a roam centre + radius.
@@ -759,6 +764,10 @@ fn stop_package(
             .remove(&point);
     }
     agent::clear_agent_target(world, entity);
+    // Clear the nav-owned door policy and hand facing back to navigation: the
+    // package that set them is ending.
+    agent::set_agent_refuses_doors(world, entity, false);
+    agent::set_facing_authority(world, entity, false);
     world.entity_mut(entity).remove::<ActorPackageController>();
     Ok(ConsoleCommandResult::new(
         json!({

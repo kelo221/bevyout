@@ -129,6 +129,23 @@ pub(super) struct NavBoundActor {
     pub(super) yaw_rate: f32,
 }
 
+/// Which authority owns a bound actor's `Transform.rotation` this frame -- the
+/// explicit signal that resolves the rotation double-writer race. The
+/// nav-derived facing writer ([`face_bound_actors`]) yields whenever this is
+/// [`Self::PoseAuthored`], so an AI family holding an authored idle-marker yaw
+/// is the only system that writes rotation that frame; otherwise nav steers
+/// facing. Absent (the common bound actor before any package, and every `tna`
+/// capsule) reads as [`Self::NavDerived`]. The AI adapter sets it through
+/// `super::set_facing_authority`; nav reads only this component -- across a
+/// Stop/arrival transition (while `AgentKcc.last_desired_horizontal` is still
+/// decaying) exactly one writer sets rotation, with pose taking precedence.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum FacingAuthority {
+    #[default]
+    NavDerived,
+    PoseAuthored,
+}
+
 /// The Y offset from a bound actor's placement root (feet level, where
 /// preparation puts an actor reference) to the KCC capsule *centre*, which
 /// is what `apply_agent_physics_movement` positions. `tna` capsules keep an
@@ -147,13 +164,26 @@ pub(super) const BOUND_ACTOR_CAPSULE_OFFSET_Y: f32 = AGENT_HEIGHT / 2.0;
 /// is never touched (see the module doc comment).
 pub(super) fn face_bound_actors(
     time: Res<Time>,
-    mut actors: Query<(&mut Transform, &AgentKcc, &mut NavBoundActor)>,
+    mut actors: Query<(
+        &mut Transform,
+        &AgentKcc,
+        &mut NavBoundActor,
+        Option<&FacingAuthority>,
+    )>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (mut transform, kcc, mut bound) in &mut actors {
+    for (mut transform, kcc, mut bound, authority) in &mut actors {
+        // Rotation double-writer contract: when an AI family owns facing (it is
+        // holding an authored pose yaw), the nav-derived writer yields so that
+        // family's write is the only rotation this frame -- no race with a
+        // still-decaying desired velocity across a Stop/arrival transition.
+        if authority.copied().unwrap_or_default() == FacingAuthority::PoseAuthored {
+            bound.yaw_rate = 0.0;
+            continue;
+        }
         let desired = kcc.last_desired_horizontal;
         if desired.length() < FACING_DEADBAND_SPEED {
             bound.yaw_rate = 0.0;
@@ -270,6 +300,11 @@ pub(super) fn release_bound_actor(world: &mut World, entity: Entity) {
     entity_mut.remove::<NavBoundActor>();
     super::remove_agent_components(&mut entity_mut);
     let _ = request_actor_animation(world, entity, ActorAnimationState::Idle);
+    // Run every registered teardown hook (e.g. the AI slice tears down a
+    // running package controller and frees any interaction point it claimed),
+    // so a released actor is no longer ticked by an AI system on an agent it no
+    // longer has. Nav owns the contract; it never names the AI types.
+    super::run_bound_actor_release_hooks(world, entity);
 }
 
 #[cfg(test)]
@@ -389,6 +424,67 @@ mod tests {
             .0;
         assert!((yaw - 0.7).abs() < 1e-5, "{yaw}");
         assert_eq!(world.get::<NavBoundActor>(entity).unwrap().yaw_rate, 0.0);
+    }
+
+    /// **The rotation double-writer contract.** Across a Stop/arrival
+    /// transition the AI adapter writes an authored pose yaw and claims facing
+    /// (`FacingAuthority::PoseAuthored`) while `AgentKcc.last_desired_horizontal`
+    /// is still decaying. The nav-derived writer must yield -- so exactly one
+    /// system sets rotation this frame and the surviving rotation is the intended
+    /// pose yaw, not a half-applied turn toward the stale desired velocity.
+    ///
+    /// Verified to genuinely fail: dropping the `PoseAuthored` yield in
+    /// `face_bound_actors` makes the first assertion red (the nav writer turns
+    /// the actor off the authored pose).
+    #[test]
+    fn pose_authored_facing_wins_over_a_still_decaying_desired_velocity() {
+        const POSE_YAW: f32 = 0.9;
+        let (mut world, entity) = bound_actor_world();
+        // What the AI adapter writes this transition frame: the authored pose
+        // yaw plus the claim that it -- not nav -- owns facing now.
+        world
+            .entity_mut(entity)
+            .insert(Transform::from_rotation(Quat::from_rotation_y(POSE_YAW)))
+            .insert(FacingAuthority::PoseAuthored);
+        // A still-decaying desired velocity the nav writer, left unchecked, would
+        // turn toward (well above the facing deadband).
+        world
+            .get_mut::<AgentKcc>(entity)
+            .unwrap()
+            .last_desired_horizontal = Vec2::new(0.0, AGENT_DESIRED_SPEED);
+        advance(&mut world, 0.1);
+        world.run_system_once(face_bound_actors).unwrap();
+        let yaw = world
+            .get::<Transform>(entity)
+            .unwrap()
+            .rotation
+            .to_euler(EulerRot::YXZ)
+            .0;
+        assert!(
+            (yaw - POSE_YAW).abs() < 1e-6,
+            "nav writer overrode the authored pose yaw: got {yaw}, expected {POSE_YAW}"
+        );
+        assert_eq!(
+            world.get::<NavBoundActor>(entity).unwrap().yaw_rate,
+            0.0,
+            "the yielding writer must report no achieved turn"
+        );
+
+        // Control -- guard the guard: with facing handed back to navigation, the
+        // *same* decaying velocity DOES turn the actor, proving the yield above is
+        // the flag's doing and not a dead input.
+        world.entity_mut(entity).insert(FacingAuthority::NavDerived);
+        world.run_system_once(face_bound_actors).unwrap();
+        let turned = world
+            .get::<Transform>(entity)
+            .unwrap()
+            .rotation
+            .to_euler(EulerRot::YXZ)
+            .0;
+        assert!(
+            (turned - POSE_YAW).abs() > 1e-4,
+            "nav-derived facing should turn toward the desired velocity, got {turned}"
+        );
     }
 
     /// A bound actor pivoting on the spot at the route start selects a turn
