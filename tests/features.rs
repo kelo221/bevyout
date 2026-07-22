@@ -11744,6 +11744,7 @@ async fn given_resolvable_reference(
             cell_form_id: 0x1000,
             position: [x, y, z],
             entity: Some(u64::from(reference_form_id)),
+            linked_reference: None,
         },
     );
     world
