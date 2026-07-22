@@ -484,6 +484,71 @@ fn prepared_placement_carries_the_decoded_linked_reference_form_id() {
     assert_eq!(placement.linked_reference_form_id, None);
 }
 
+// F213.5 (real-data amendment): `is_editor_marker` (e.g. the engine's
+// `XMarkerHeading`) would otherwise drop a plain Object-kind patrol marker
+// entirely -- no placement at all -- even though it is the only surface
+// the runtime resolution context can read its position from. A marker
+// that is either a link source (its own `XLKR`) or a link target (another
+// reference's `XLKR` names it) must still get a placement; a genuinely
+// unrelated editor marker (e.g. a cell's cosmetic north marker) stays
+// dropped, same as before this issue.
+#[test]
+fn editor_marker_needs_placement_keeps_patrol_chain_markers_but_drops_unrelated_ones() {
+    let mut targets = HashSet::new();
+    targets.insert(0x20);
+
+    // This reference is itself a link source (has its own XLKR).
+    let link_source = ReferenceRecord {
+        form_id: 0x10,
+        linked_reference_form_id: Some(0x20),
+        ..object_reference(1)
+    };
+    assert!(editor_marker_needs_placement(
+        &link_source,
+        "STAT",
+        &targets
+    ));
+
+    // This reference is a link target: some other reference's XLKR names
+    // it (0x20 is in `targets`), even though it has no outgoing link of
+    // its own -- the real-data terminal-marker case.
+    let link_target = ReferenceRecord {
+        form_id: 0x20,
+        linked_reference_form_id: None,
+        ..object_reference(1)
+    };
+    assert!(editor_marker_needs_placement(
+        &link_target,
+        "STAT",
+        &targets
+    ));
+
+    // An unrelated Object-kind marker (neither a link source nor a link
+    // target) is still dropped.
+    let unrelated = ReferenceRecord {
+        form_id: 0x99,
+        linked_reference_form_id: None,
+        ..object_reference(1)
+    };
+    assert!(!editor_marker_needs_placement(&unrelated, "STAT", &targets));
+
+    // Actor and door references always keep their placement, link or not.
+    let npc = ReferenceRecord {
+        kind: ReferenceKind::Npc,
+        form_id: 0x30,
+        linked_reference_form_id: None,
+        ..object_reference(1)
+    };
+    assert!(editor_marker_needs_placement(&npc, "STAT", &targets));
+
+    let door = ReferenceRecord {
+        form_id: 0x40,
+        linked_reference_form_id: None,
+        ..object_reference(1)
+    };
+    assert!(editor_marker_needs_placement(&door, "DOOR", &targets));
+}
+
 #[test]
 fn prepared_semantic_object_without_a_base_record_is_unsupported() {
     assert!(matches!(
