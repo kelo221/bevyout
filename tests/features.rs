@@ -204,6 +204,12 @@ mod movement_policy;
 #[allow(dead_code, unused_imports)]
 mod locomotion;
 
+// `viewer::nav::openmw_doors` (issue #185) is std-only, same flat top-level
+// include rationale as `door_link`/`repath`/`movement_policy` above.
+#[path = "../src/viewer/nav/openmw_doors/mod.rs"]
+#[allow(dead_code, unused_imports)]
+mod openmw_doors;
+
 #[path = "../src/converter_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod converter_policy;
@@ -855,6 +861,11 @@ struct BevyoutWorld {
     // -- pause_menu.feature --
     pause_menu: pause_menu::PauseMenuState,
     pause_menu_action: Option<Option<pause_menu::PauseMenuAction>>,
+
+    // -- nav_door_access.feature (issue #185): key-aware locked doors and
+    // the trapped-door barrier, `viewer::nav::openmw_doors::door_openable`.
+    nav_door_access_observation: openmw_doors::DoorAccessObservation,
+    nav_door_access_result: Option<bool>,
 }
 
 fn find_placement<'a>(
@@ -11359,4 +11370,37 @@ fn parse_pause_menu_option(label: &str) -> pause_menu::PauseMenuOption {
         "Quit" => pause_menu::PauseMenuOption::Quit,
         other => panic!("unknown pause menu option {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// nav_door_access.feature (issue #185) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a door with lock level (none|\d+), key (none|\d+), and (trapped|untrapped)$")]
+async fn given_door_access_door(
+    world: &mut BevyoutWorld,
+    lock_level: String,
+    key: String,
+    trap: String,
+) {
+    world.nav_door_access_observation = openmw_doors::DoorAccessObservation {
+        lock_level: (lock_level != "none").then(|| lock_level.parse::<i8>().unwrap()),
+        key_form_id: (key != "none").then(|| key.parse::<u32>().unwrap()),
+        trapped: trap == "trapped",
+        holder_has_key: false,
+    };
+}
+
+#[given(regex = r"^the actor (holds|does not hold) the door's key$")]
+async fn given_door_access_key_possession(world: &mut BevyoutWorld, possession: String) {
+    world.nav_door_access_observation.holder_has_key = possession == "holds";
+}
+
+#[then(regex = r"^the door is (openable|not openable)$")]
+async fn then_door_access_result(world: &mut BevyoutWorld, expected: String) {
+    world.nav_door_access_result = Some(openmw_doors::door_openable(
+        world.nav_door_access_observation,
+    ));
+    assert_eq!(world.nav_door_access_result, Some(expected == "openable"));
 }

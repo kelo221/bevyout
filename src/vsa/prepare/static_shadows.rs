@@ -953,6 +953,7 @@ mod tests {
             door.semantic = PreparedSemantic::Door(PreparedDoor {
                 lock_level: None,
                 key_form_id: None,
+                trapped: false,
                 destination: None,
             });
             door.physics_classification = physics_classification;

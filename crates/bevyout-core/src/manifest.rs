@@ -675,6 +675,19 @@ impl PreparedSemantic {
 pub struct PreparedDoor {
     pub lock_level: Option<i8>,
     pub key_form_id: Option<u32>,
+    /// Issue #185: whether this door is trapped, per OpenMW's
+    /// `AiPackage::openDoors()` (`door.getCellRef().getTrap().empty()`) --
+    /// a trapped door is never opened by AI routing, key or no key. No
+    /// Fallout 3 `REFR`/`XLOC` subrecord distinguishing a trap from an
+    /// ordinary lock has been identified yet (unlike Morrowind's cell-ref
+    /// trap script field OpenMW reads), so `openmw_esm4::records::
+    /// parse_reference` always produces `false` for real data today; this
+    /// field exists so the awareness gate has somewhere real to plug in
+    /// once that source is found, and so a synthetic fixture can exercise
+    /// the "never opened" rule now. `#[serde(default)]` so a manifest
+    /// prepared before this field existed still decodes (as untrapped).
+    #[serde(default)]
+    pub trapped: bool,
     pub destination: Option<PreparedDoorDestination>,
 }
 

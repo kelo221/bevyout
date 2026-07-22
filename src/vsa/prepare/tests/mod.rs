@@ -60,6 +60,7 @@ fn non_static_semantics_never_become_stair_support() {
         PreparedSemantic::Door(PreparedDoor {
             lock_level: None,
             key_form_id: None,
+            trapped: false,
             destination: None,
         }),
         PreparedSemantic::Activator,
@@ -698,6 +699,7 @@ fn synthetic_records_classify_into_all_four_mutability_classes() {
     let door_semantic = PreparedSemantic::Door(PreparedDoor {
         lock_level: None,
         key_form_id: None,
+        trapped: false,
         destination: None,
     });
     assert_eq!(

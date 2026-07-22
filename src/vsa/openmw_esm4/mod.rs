@@ -239,6 +239,10 @@ impl EnableParentRecord {
 pub(crate) struct DoorRecord {
     pub(crate) lock_level: Option<i8>,
     pub(crate) key_form_id: Option<u32>,
+    /// Issue #185: see `PreparedDoor::trapped`'s doc comment -- always
+    /// `false` from real ESM data today (`records::parse_reference`), no
+    /// known FO3 trap subrecord to source it from yet.
+    pub(crate) trapped: bool,
     pub(crate) destination: Option<DoorDestinationRecord>,
     teleport: Option<TeleportRecord>,
 }

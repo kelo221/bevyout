@@ -234,6 +234,34 @@
 //!   through the existing `AgentState::NoPath -> NavAgentStatus::
 //!   Unreachable` mapping, the same fail-fast surface every other
 //!   unreachable-route case already uses.
+//!
+//! Key-aware locked doors (issue #185, following up on #177): every
+//! `door_open_and_locked`/`door_usable_now` call above used to decide
+//! "locked" by checking the *player's* `PlayerInventory` for the door's key
+//! -- a stand-in that predates #188's bound actors, and simply wrong for an
+//! NPC nav agent, which has no relationship to the player's inventory.
+//! OpenMW's `AiPackage::openDoors()` searches the *routing actor's own*
+//! inventory instead, so both functions now take an `Option<Entity>` naming
+//! whose key to check: `Some(agent_entity)` at every genuinely per-agent
+//! call site (`apply_door_lock_overrides`, `request_door_open`, and every
+//! `drive_door_link_for_agent` lock/open check), `None` for the two
+//! agent-independent bookkeeping paths (`ensure_archipelago`'s initial
+//! build, `door_availability_system`'s change-detection poll) that have no
+//! particular actor to ask. The actual key/lock/trap decision table itself
+//! is `openmw_doors::door_openable` (see that module's own doc comment and
+//! provenance files) -- a trapped door is an unconditional non-openable
+//! veto, a deliberate simplification of OpenMW's literal fall-through since
+//! this project has no trap-spring mechanic to make opening one safe.
+//! `apply_door_lock_overrides` re-checks a door the shared, actor-
+//! independent cache calls unusable against this agent's own key
+//! specifically (`agent_may_open_with_key`) before pricing it as an
+//! impassable barrier -- narrowly scoped to doors that actually have
+//! `door_lock_info` at all, since the same override cache is shared with
+//! #177's lock-less activator-blocker class. `goto_agent`/`request_travel`
+//! both re-run this override rebuild on every fresh target, so a key
+//! granted mid-session (`console::giveitem`) or a lock/key change
+//! (`setlock`'s new optional key argument) is picked up by the very next
+//! routing command without needing a respawn.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -278,6 +306,13 @@ mod locomotion;
 
 #[path = "actor_binding.rs"]
 mod actor_binding;
+
+// Issue #185. Pure OpenMW-derived key/lock/trap decision rule (see
+// `openmw_doors/README.md`/`NOTICE.md` for provenance); same `#[path]`
+// submodule rationale as `fall_guard`/`locomotion` above -- included
+// verbatim by `tests/features.rs`.
+#[path = "openmw_doors/mod.rs"]
+mod openmw_doors;
 
 const AGENT_RADIUS: f32 = 0.35;
 const AGENT_HEIGHT: f32 = 1.8;
@@ -815,10 +850,13 @@ struct NavArchipelagoState {
     merge_link_kind_count: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct DoorLockInfo {
     lock_level: Option<i8>,
     key_form_id: Option<u32>,
+    /// Issue #185: `PreparedDoor::trapped`, captured the same way
+    /// `lock_level`/`key_form_id` are.
+    trapped: bool,
 }
 
 /// A door crossable mid-route (issue #137): any single-sided door
@@ -1170,6 +1208,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
                     DoorLockInfo {
                         lock_level: door.lock_level,
                         key_form_id: door.key_form_id,
+                        trapped: door.trapped,
                     },
                 );
                 door_positions.insert(
@@ -1389,7 +1428,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     for descriptor in landmass_graph::door_link_descriptors(&mesh_inputs) {
         let start = Vec3::from_array(descriptor.side_a.midpoint);
         let end = Vec3::from_array(descriptor.side_b.midpoint);
-        let usable = door_usable_now(world, descriptor.door_form_id, &door_lock_info);
+        let usable = door_usable_now(world, None, descriptor.door_form_id, &door_lock_info);
         door_usable.insert(descriptor.door_form_id, usable);
         if usable {
             // Kind 0 (issue #162): every door link shares the reserved
@@ -1435,7 +1474,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         let triangle_midpoint = Vec3::from_array(door.side.midpoint);
         door_usable.insert(
             door.door_form_id,
-            door_usable_now(world, door.door_form_id, &door_lock_info),
+            door_usable_now(world, None, door.door_form_id, &door_lock_info),
         );
         mid_route_doors.push(MidRouteDoor {
             door_form_id: door.door_form_id,
@@ -1474,7 +1513,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     for gate in landmass_graph::derived_door_gates(&mesh_inputs) {
         door_usable
             .entry(gate.door_form_id)
-            .or_insert_with(|| door_usable_now(world, gate.door_form_id, &door_lock_info));
+            .or_insert_with(|| door_usable_now(world, None, gate.door_form_id, &door_lock_info));
         mid_route_doors.push(MidRouteDoor {
             door_form_id: gate.door_form_id,
             vertices: gate.vertices.map(Vec3::from_array),
@@ -1486,10 +1525,10 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     for &blocker_form_id in closed_door_type_indices.keys() {
         door_usable
             .entry(blocker_form_id)
-            .or_insert_with(|| door_usable_now(world, blocker_form_id, &door_lock_info));
+            .or_insert_with(|| door_usable_now(world, None, blocker_form_id, &door_lock_info));
     }
     for &door_form_id in door_usable.keys() {
-        let (open, _) = door_open_and_locked(world, door_form_id, &door_lock_info);
+        let (open, _) = door_open_and_locked(world, None, door_form_id, &door_lock_info);
         door_open.insert(door_form_id, open);
     }
 
@@ -1764,15 +1803,46 @@ fn sync_player_nav_character(
     velocity.velocity = kcc.velocity;
 }
 
-/// The live `(open, locked)` observation for `door_form_id`: `open` reads
-/// the runtime `InteractionState.open` set (guarded on `RefRegistry` being
-/// present -- `resolve_reference` panics without one, which minimal test
-/// worlds may not have), `locked` runs the same `interaction::door_is_locked`
-/// check the activation prompt uses (never a second lock model) against its
-/// prepared lock/key data and the player's inventory. A door with no
-/// prepared lock info is never locked.
+/// Whether `agent_entity` currently holds an item stack whose base FormID is
+/// `form_id`, in its own canonical inventory (issue #185).
+///
+/// A bound actor's canonical holder is always `HolderId::Actor {
+/// reference_form_id }` (`viewer::actor::project_prepared_actors`), so this
+/// resolves straight from the agent entity's own `ActorRuntime` -- an
+/// unbound `tna spawn` debug capsule (no `ActorRuntime` at all) has no
+/// inventory of its own and therefore never holds any key, which is the
+/// same conservative default `door_open_and_locked` fell back to pre-#185
+/// when no inventory resource was available.
+fn agent_holds_item(world: &World, agent_entity: Entity, form_id: u32) -> bool {
+    let Some(actor) = world.get::<crate::viewer::actor::ActorRuntime>(agent_entity) else {
+        return false;
+    };
+    let holder = bevyout_core::item_transaction::HolderId::Actor {
+        reference_form_id: actor.reference_form_id,
+    };
+    world
+        .get_resource::<interaction::CanonicalItemLedger>()
+        .and_then(|ledger| ledger.ledger.holders().get(&holder))
+        .is_some_and(|state| state.items.iter().any(|item| item.base_form_id == form_id))
+}
+
+/// The live `(open, locked)` observation for `door_form_id`, for the
+/// specific `agent` asking (issue #185: locked-with-a-key is a fact about
+/// the *pair* of door and actor, not the door alone -- mirroring OpenMW's
+/// `AiPackage::openDoors()`, which searches the routing actor's own
+/// inventory, never the player's). `open` reads the runtime
+/// `InteractionState.open` set (guarded on `RefRegistry` being present --
+/// `resolve_reference` panics without one, which minimal test worlds may
+/// not have); `locked` runs `openmw_doors::door_openable` against the
+/// door's prepared lock/key/trap data and whether `agent` (when given) holds
+/// the key. `agent: None` is the conservative, actor-independent baseline
+/// `ensure_archipelago`'s initial build and `door_availability_system`'s
+/// change-detection poll use -- no specific actor to check a key against,
+/// so a keyed lock is never lifted. A door with no prepared lock info is
+/// never locked.
 fn door_open_and_locked(
     world: &World,
+    agent: Option<Entity>,
     door_form_id: u32,
     door_lock_info: &HashMap<u32, DoorLockInfo>,
 ) -> (bool, bool) {
@@ -1787,31 +1857,30 @@ fn door_open_and_locked(
                     .is_some_and(|state| state.open.contains(&entity))
             });
     let locked = door_lock_info.get(&door_form_id).is_some_and(|info| {
-        let door = crate::vsa::PreparedDoor {
+        let holder_has_key = info.key_form_id.is_some_and(|key_form_id| {
+            agent.is_some_and(|agent| agent_holds_item(world, agent, key_form_id))
+        });
+        !openmw_doors::door_openable(openmw_doors::DoorAccessObservation {
             lock_level: info.lock_level,
+            trapped: info.trapped,
             key_form_id: info.key_form_id,
-            destination: None,
-        };
-        match world.get_resource::<interaction::PlayerInventory>() {
-            Some(inventory) => interaction::door_is_locked(&door, inventory),
-            // No inventory resource (minimal test worlds): key
-            // possession can't help, so locked is decided by the lock
-            // level alone.
-            None => door.lock_level.is_some_and(|level| level > 0),
-        }
+            holder_has_key,
+        })
     });
     (open, locked)
 }
 
-/// Whether `door_form_id` is currently usable for route planning: already
-/// open, or not locked (`repath::door_usable`'s rule). A door with no
-/// prepared lock info is usable.
+/// Whether `door_form_id` is currently usable for route planning, for the
+/// specific `agent` asking (see [`door_open_and_locked`]): already open, or
+/// not locked (`repath::door_usable`'s rule). A door with no prepared lock
+/// info is usable.
 fn door_usable_now(
     world: &World,
+    agent: Option<Entity>,
     door_form_id: u32,
     door_lock_info: &HashMap<u32, DoorLockInfo>,
 ) -> bool {
-    let (open, locked) = door_open_and_locked(world, door_form_id, door_lock_info);
+    let (open, locked) = door_open_and_locked(world, agent, door_form_id, door_lock_info);
     repath::door_usable(repath::DoorObservation { locked, open })
 }
 
@@ -1845,12 +1914,67 @@ fn door_usable_now(
 /// than fixed here.
 fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
     let mut overrides = AgentTypeIndexCostOverrides::default();
-    let state = world.resource::<NavArchipelagoState>();
-    for (&door_form_id, &usable) in &state.door_usable {
-        if usable {
+    // Issue #185: cloned out up front (rather than held as a live borrow of
+    // `NavArchipelagoState` for the whole function) so the per-agent
+    // re-checks below (`door_usable_now`, which needs `&World`) are free to
+    // read `world` without fighting this borrow.
+    let (
+        door_usable,
+        door_type_indices,
+        closed_door_type_indices,
+        openable_blockers,
+        door_open,
+        door_lock_info,
+    ) = {
+        let state = world.resource::<NavArchipelagoState>();
+        (
+            state.door_usable.clone(),
+            state.door_type_indices.clone(),
+            state.closed_door_type_indices.clone(),
+            state.openable_blockers.clone(),
+            state.door_open.clone(),
+            state.door_lock_info.clone(),
+        )
+    };
+    // Issue #185, the main gap: the shared cache above answers "usable by an
+    // actor with no particular key" (see `door_open_and_locked`'s `agent:
+    // None` case) -- but OpenMW's `AiPackage::openDoors()` tries the routing
+    // actor's *own* inventory before giving up, so a door the shared cache
+    // calls unusable may still be usable for THIS agent specifically. Only
+    // worth re-checking when the shared default already says no; if it is
+    // already usable for nobody-in-particular, it is usable for everyone.
+    //
+    // Deliberately consults `door_lock_info` directly (`openmw_doors::
+    // door_openable`) rather than the more general `door_usable_now`/
+    // `door_open_and_locked`: those treat "no prepared lock info at all" as
+    // "never locked" (harmlessly true for a real `PreparedSemantic::Door`
+    // with no `XLOC`, but this same `door_usable` cache is shared with the
+    // #177 derived-blocker class below, e.g. a vault gear activator, which
+    // is closed/open-gated with no lock or key concept and so *never* has a
+    // `door_lock_info` entry). Re-deriving "usable" for those from an absent
+    // entry would spuriously read as "openable" and lift an override that
+    // has nothing to do with a key. A door with no lock info therefore
+    // simply is not re-examined here at all -- the shared cache's `false`
+    // stands, exactly as it did before this issue.
+    let agent_may_open_with_key = |world: &World, door_form_id: u32| -> bool {
+        let Some(&info) = door_lock_info.get(&door_form_id) else {
+            return false;
+        };
+        let holder_has_key = info
+            .key_form_id
+            .is_some_and(|key_form_id| agent_holds_item(world, agent_entity, key_form_id));
+        openmw_doors::door_openable(openmw_doors::DoorAccessObservation {
+            lock_level: info.lock_level,
+            trapped: info.trapped,
+            key_form_id: info.key_form_id,
+            holder_has_key,
+        })
+    };
+    for (&door_form_id, &usable) in &door_usable {
+        if usable || agent_may_open_with_key(world, door_form_id) {
             continue;
         }
-        if let Some(&type_index) = state.door_type_indices.get(&door_form_id) {
+        if let Some(&type_index) = door_type_indices.get(&door_form_id) {
             overrides.set_type_index_cost(type_index, LOCKED_DOOR_TYPE_INDEX_COST);
         }
     }
@@ -1875,21 +1999,18 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
     //
     // Opening the blocker clears the entry entirely, through the same
     // rebuild-the-whole-component path a lock change takes.
-    for (&blocker_form_id, &type_index) in &state.closed_door_type_indices {
-        if state
-            .door_open
-            .get(&blocker_form_id)
-            .copied()
-            .unwrap_or(false)
-        {
+    for (&blocker_form_id, &type_index) in &closed_door_type_indices {
+        if door_open.get(&blocker_form_id).copied().unwrap_or(false) {
             continue;
         }
-        let openable = state.openable_blockers.contains(&blocker_form_id);
-        let usable = state
-            .door_usable
-            .get(&blocker_form_id)
-            .copied()
-            .unwrap_or(true);
+        let openable = openable_blockers.contains(&blocker_form_id);
+        // Issue #185: same per-agent key exception as the loop above --
+        // `usable` here means "not locked", the identical fact
+        // `agent_may_open_with_key` re-derives for this specific agent (a
+        // no-op for a lock-less activator blocker, which has no
+        // `door_lock_info` entry to re-check in the first place).
+        let usable = door_usable.get(&blocker_form_id).copied().unwrap_or(true)
+            || agent_may_open_with_key(world, blocker_form_id);
         let cost = if openable && usable {
             CLOSED_DOOR_TYPE_INDEX_COST
         } else {
@@ -1920,15 +2041,42 @@ pub(crate) fn set_door_lock_level(world: &mut World, door_form_id: u32, lock_lev
     let Some(mut state) = world.get_resource_mut::<NavArchipelagoState>() else {
         return;
     };
-    let key_form_id = state
+    let (key_form_id, trapped) = state
         .door_lock_info
         .get(&door_form_id)
-        .and_then(|info| info.key_form_id);
+        .map(|info| (info.key_form_id, info.trapped))
+        .unwrap_or_default();
     state.door_lock_info.insert(
         door_form_id,
         DoorLockInfo {
             lock_level,
             key_form_id,
+            trapped,
+        },
+    );
+}
+
+/// Issue #185: the nav-side mirror of [`set_door_lock_level`] for a door's
+/// key requirement -- `console::world_commands::setlock`'s optional key
+/// argument writes both the interaction-side `PlacementRoot` (the player's
+/// own activation check) and this `door_lock_info` entry (nav route
+/// planning/door-open requests) the same way a lock-level change already
+/// does. Preserves whatever `lock_level`/`trapped` was already recorded.
+pub(crate) fn set_door_key_form_id(world: &mut World, door_form_id: u32, key_form_id: Option<u32>) {
+    let Some(mut state) = world.get_resource_mut::<NavArchipelagoState>() else {
+        return;
+    };
+    let (lock_level, trapped) = state
+        .door_lock_info
+        .get(&door_form_id)
+        .map(|info| (info.lock_level, info.trapped))
+        .unwrap_or_default();
+    state.door_lock_info.insert(
+        door_form_id,
+        DoorLockInfo {
+            lock_level,
+            key_form_id,
+            trapped,
         },
     );
 }
@@ -2371,6 +2519,11 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
     // Issue #162 feature 2: a fresh target is a new routing intent -- any
     // merge-portal quarantine from a previous route no longer applies.
     clear_merge_link_quarantine(world, agent_entity);
+    // Issue #185: a fresh target is also a fresh chance for this agent's
+    // key-aware door-lock overrides to reflect whatever the agent is
+    // holding right now (e.g. a key granted since the last route) rather
+    // than whatever was last computed at spawn or the last door flip.
+    apply_door_lock_overrides(world, agent_entity);
     let elapsed = world.resource::<Time>().elapsed_secs();
     if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
         runtime.goto_started_at = Some(elapsed);
@@ -3380,17 +3533,19 @@ fn merge_traversal_timeout(initial_distance: f32) -> f32 {
 }
 
 /// Requests the door `door_form_id` open through the same boundary the
-/// `activate` console command uses. A door that is currently locked is
-/// deliberately *not* scripted open (issue #113 feature 3: no teleporting
-/// through closed doors, and a locked door resolves to the deterministic
-/// `Failed` outcome via the wait bound) -- `scripted_door_open` bypasses
-/// locks by design (dev tooling), so the lock gate lives here.
-fn request_door_open(world: &mut World, door_form_id: u32) {
+/// `activate` console command uses, on behalf of `agent_entity` (issue
+/// #185: usability is now a per-agent fact -- see `door_open_and_locked`).
+/// A door currently unusable *for this agent* is deliberately *not*
+/// scripted open (issue #113 feature 3: no teleporting through closed
+/// doors, and a locked door resolves to the deterministic `Failed` outcome
+/// via the wait bound) -- `scripted_door_open` bypasses locks by design
+/// (dev tooling), so the lock gate lives here.
+fn request_door_open(world: &mut World, agent_entity: Entity, door_form_id: u32) {
     let lock_info = world
         .resource::<NavArchipelagoState>()
         .door_lock_info
         .clone();
-    if !door_usable_now(world, door_form_id, &lock_info) {
+    if !door_usable_now(world, Some(agent_entity), door_form_id, &lock_info) {
         info!("nav agent door {door_form_id:08x} locked; waiting");
         return;
     }
@@ -3486,7 +3641,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     .door_lock_info
                     .clone();
                 let (door_open, door_locked) =
-                    door_open_and_locked(world, door_form_id, &lock_info);
+                    door_open_and_locked(world, Some(agent_entity), door_form_id, &lock_info);
                 let gate = door_link::crossing_gate(door_link::CrossingObservation {
                     door_open,
                     door_locked,
@@ -3502,7 +3657,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 );
                 world.entity_mut(agent_entity).insert(PauseAgent);
                 if gate != door_link::CrossingGate::Pass {
-                    request_door_open(world, door_form_id);
+                    request_door_open(world, agent_entity, door_form_id);
                 }
                 info!("nav agent door wait {door_form_id:08x}");
                 let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
@@ -3624,7 +3779,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     .door_lock_info
                     .clone();
                 let (door_open, door_locked) =
-                    door_open_and_locked(world, door.door_form_id, &lock_info);
+                    door_open_and_locked(world, Some(agent_entity), door.door_form_id, &lock_info);
                 let gate = door_link::crossing_gate(door_link::CrossingObservation {
                     door_open,
                     door_locked,
@@ -3638,7 +3793,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         },
                     );
                     world.entity_mut(agent_entity).insert(PauseAgent);
-                    request_door_open(world, door.door_form_id);
+                    request_door_open(world, agent_entity, door.door_form_id);
                     info!("nav agent door wait {:08x}", door.door_form_id);
                     let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
                     runtime.door_link = new_state;
@@ -3717,7 +3872,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         },
                     );
                     world.entity_mut(agent_entity).insert(PauseAgent);
-                    request_door_open(world, door_form_id);
+                    request_door_open(world, agent_entity, door_form_id);
                     info!("nav agent door wait {door_form_id:08x}");
                     let mut runtime = world.get_mut::<AgentRuntime>(agent_entity).unwrap();
                     runtime.door_link = new_state;
@@ -3756,7 +3911,8 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                 .resource::<NavArchipelagoState>()
                 .door_lock_info
                 .clone();
-            let (_, door_locked) = door_open_and_locked(world, door_form_id, &lock_info);
+            let (_, door_locked) =
+                door_open_and_locked(world, Some(agent_entity), door_form_id, &lock_info);
             let door_open =
                 door_link::effective_door_open(destination, physically_open, door_locked);
             let new_state =
@@ -3898,7 +4054,7 @@ fn door_availability_system(world: &mut World) {
     let open_flips: Vec<(u32, bool)> = tracked
         .iter()
         .filter_map(|&(door_form_id, _)| {
-            let (open, _) = door_open_and_locked(world, door_form_id, &lock_info);
+            let (open, _) = door_open_and_locked(world, None, door_form_id, &lock_info);
             let was_open = world
                 .resource::<NavArchipelagoState>()
                 .door_open
@@ -3936,7 +4092,7 @@ fn door_availability_system(world: &mut World) {
     }
 
     for (door_form_id, was_usable) in tracked {
-        let now_usable = door_usable_now(world, door_form_id, &lock_info);
+        let now_usable = door_usable_now(world, None, door_form_id, &lock_info);
         if now_usable == was_usable {
             continue;
         }
@@ -4052,15 +4208,18 @@ fn door_availability_system(world: &mut World) {
         }
 
         // Any agent paused waiting on this exact door can now proceed.
-        if now_usable {
-            let paused_on_this_door = active_agents.iter().copied().any(|agent_entity| {
-                matches!(
-                    world.get::<AgentRuntime>(agent_entity).map(|r| r.door_link),
-                    Some(door_link::DoorLinkState::Paused { door_form_id: paused, .. }) if paused == door_form_id
-                )
-            });
+        // Issue #185: this door may have become usable *for the shared,
+        // no-particular-actor baseline* (an ordinary unlock), or it may
+        // still show unusable there while being usable for one specific
+        // paused agent that holds its key -- so every paused agent gets its
+        // own `request_door_open` attempt rather than one shared check.
+        for agent_entity in active_agents.iter().copied() {
+            let paused_on_this_door = matches!(
+                world.get::<AgentRuntime>(agent_entity).map(|r| r.door_link),
+                Some(door_link::DoorLinkState::Paused { door_form_id: paused, .. }) if paused == door_form_id
+            );
             if paused_on_this_door {
-                request_door_open(world, door_form_id);
+                request_door_open(world, agent_entity, door_form_id);
             }
         }
 
@@ -4115,6 +4274,9 @@ pub(crate) fn request_travel(
     // -- any merge-portal quarantine from a previous route no longer
     // applies.
     clear_merge_link_quarantine(world, agent_entity);
+    // Issue #185: same rationale as `goto_agent` -- re-evaluate this
+    // agent's key-aware door-lock overrides for the fresh travel intent.
+    apply_door_lock_overrides(world, agent_entity);
     if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
         runtime.travel_intent = Some(door_form_id);
     }
@@ -5841,6 +6003,7 @@ mod tests {
             semantic: crate::vsa::PreparedSemantic::Door(crate::vsa::PreparedDoor {
                 lock_level: None,
                 key_form_id: None,
+                trapped: false,
                 destination: None,
             }),
             initially_enabled: true,
@@ -5916,6 +6079,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(50),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -5963,6 +6127,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(50),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -6036,6 +6201,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: None,
                     key_form_id: Some(0x1234),
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, true);
@@ -6528,6 +6694,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(50),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -6607,6 +6774,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(50),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -6643,6 +6811,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: None,
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
         door_availability_system(&mut world);
@@ -6729,6 +6898,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(25),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -6797,6 +6967,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(25),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -7089,6 +7260,7 @@ mod tests {
             semantic: crate::vsa::PreparedSemantic::Door(crate::vsa::PreparedDoor {
                 lock_level: authored_lock_level,
                 key_form_id: None,
+                trapped: false,
                 destination: None,
             }),
             ..door_placement(door_form_id)
@@ -8771,6 +8943,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(25),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -8867,6 +9040,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(25),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
@@ -8983,6 +9157,7 @@ mod tests {
                 DoorLockInfo {
                     lock_level: Some(25),
                     key_form_id: None,
+                    ..Default::default()
                 },
             );
             state.door_usable.insert(0x99, false);
