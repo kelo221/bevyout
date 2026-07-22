@@ -939,9 +939,33 @@ fn setlock_requires_reference_and_level() {
     let mut app = test_app();
     assert_eq!(error_code(&exec(&mut app, "setlock")), "bad_arity");
     assert_eq!(error_code(&exec(&mut app, "setlock 00000010")), "bad_arity");
+    // Issue #185: a third argument is now a valid (optional) key FormID, so
+    // `bad_arity` only fires past four total arguments.
     assert_eq!(
-        error_code(&exec(&mut app, "setlock 00000010 5 6")),
+        error_code(&exec(&mut app, "setlock 00000010 5 6 7")),
         "bad_arity"
+    );
+}
+
+#[test]
+fn setlock_third_argument_sets_or_clears_the_key_form_id() {
+    let mut app = test_app();
+    register_placement(&mut app, DOOR_WITH_DESTINATION);
+    let output = exec(&mut app, "setlock 00000010 25 6");
+    assert!(output.ok, "{output:?}");
+    assert_eq!(output.value["key_form_id"], serde_json::json!(6));
+    let output = exec(&mut app, "setlock 00000010 25 none");
+    assert!(output.ok, "{output:?}");
+    assert_eq!(output.value["key_form_id"], serde_json::json!(null));
+}
+
+#[test]
+fn setlock_rejects_a_bad_key_form_id() {
+    let mut app = test_app();
+    register_placement(&mut app, DOOR_WITH_DESTINATION);
+    assert_eq!(
+        error_code(&exec(&mut app, "setlock 00000010 25 not-hex")),
+        "bad_type"
     );
 }
 

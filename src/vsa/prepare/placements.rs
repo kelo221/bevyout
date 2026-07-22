@@ -276,6 +276,7 @@ pub(crate) fn prepared_semantic(
             PreparedSemantic::Door(PreparedDoor {
                 lock_level: door.and_then(|door| door.lock_level),
                 key_form_id: door.and_then(|door| door.key_form_id),
+                trapped: door.is_some_and(|door| door.trapped),
                 destination: door
                     .and_then(|door| door.destination.as_ref())
                     .map(|destination| {

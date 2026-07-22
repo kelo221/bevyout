@@ -14,8 +14,8 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
             ConsoleCommand::new(
                 "setlock",
-                "setlock <reference> <level>",
-                "Set (positive level) or clear (0) a door reference's lock level at runtime (GECK lock/unlock parity); updates both the player-facing activation check and nav route planning.",
+                "setlock <reference> <level> [<key-formid>|none]",
+                "Set (positive level) or clear (0) a door reference's lock level at runtime (GECK lock/unlock parity); updates both the player-facing activation check and nav route planning. An optional third argument sets (or, as \"none\", clears) the door's key FormID requirement -- issue #185: authored FO3 doors rarely carry one, so this is what makes key-aware AI door routing testable without a real keyed door.",
                 setlock,
             )
             .mutating(),
@@ -498,11 +498,15 @@ pub(super) fn setlock(
     world: &mut World,
     invocation: &ConsoleInvocation,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
-    let [selector, level_arg] = invocation.args.as_slice() else {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "setlock requires exactly a reference and a lock level",
-        ));
+    let (selector, level_arg, key_arg) = match invocation.args.as_slice() {
+        [selector, level_arg] => (selector, level_arg, None),
+        [selector, level_arg, key_arg] => (selector, level_arg, Some(key_arg)),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "setlock requires a reference and a lock level, and accepts an optional key FormID or \"none\"",
+            ));
+        }
     };
     let entity = resolve_reference(world, selector)?;
     let level: i32 = level_arg.parse().map_err(|_| {
@@ -517,6 +521,20 @@ pub(super) fn setlock(
             "setlock level must be between 0 and 127",
         ));
     }
+    // Issue #185: an optional third argument sets (or, spelled "none",
+    // clears) the door's key FormID requirement -- authored FO3 doors
+    // rarely carry one even when locked, so this is the only way to make
+    // key-aware AI door routing testable without a real keyed door.
+    let key_form_id = match key_arg {
+        None => None,
+        Some(value) if value.eq_ignore_ascii_case("none") => Some(None),
+        Some(value) => Some(Some(parse_item_form_id(value).ok_or_else(|| {
+            ConsoleError::new(
+                "bad_type",
+                "setlock key FormID must be 1-8 hex digits, e.g. f, 0x1f, or 0000000f, or \"none\"",
+            )
+        })?)),
+    };
     let placement = world
         .get::<interaction::PlacementRoot>(entity)
         .ok_or_else(|| ConsoleError::new("not_activatable", "reference has no placement root"))?
@@ -531,20 +549,33 @@ pub(super) fn setlock(
     // Level 0 clears the lock, matching `door_is_locked`'s own
     // `lock_level.is_none_or(|level| level <= 0)` rule.
     let lock_level = if level == 0 { None } else { Some(level as i8) };
-    world
+    let mut root = world
         .get_mut::<interaction::PlacementRoot>(entity)
-        .expect("placement root presence checked above")
-        .set_door_lock_level(lock_level);
+        .expect("placement root presence checked above");
+    root.set_door_lock_level(lock_level);
+    if let Some(key_form_id) = key_form_id {
+        root.set_door_key_form_id(key_form_id);
+    }
     nav::agent::set_door_lock_level(world, placement.reference_form_id, lock_level);
-    let summary = match lock_level {
+    if let Some(key_form_id) = key_form_id {
+        nav::agent::set_door_key_form_id(world, placement.reference_form_id, key_form_id);
+    }
+    let mut summary = match lock_level {
         Some(level) => format!("setlock {:08x} level {level}", placement.reference_form_id),
         None => format!("setlock {:08x} unlocked", placement.reference_form_id),
     };
+    if let Some(key_form_id) = key_form_id {
+        summary.push_str(&match key_form_id {
+            Some(key_form_id) => format!(" key {key_form_id:08x}"),
+            None => " key none".to_string(),
+        });
+    }
     info!("{summary}");
     Ok(ConsoleCommandResult::new(
         json!({
             "reference_form_id": placement.reference_form_id,
             "lock_level": lock_level,
+            "key_form_id": key_form_id.flatten(),
         }),
         vec![summary],
     ))

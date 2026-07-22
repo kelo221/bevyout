@@ -845,6 +845,9 @@ pub(crate) fn parse_reference(
         key_form_id: lock
             .map(|data| resolver.adjust(u32::from_le_bytes(data[4..8].try_into().unwrap())))
             .filter(|id| *id != 0),
+        // Issue #185: no identified FO3 trap subrecord yet -- see
+        // `DoorRecord::trapped`'s doc comment.
+        trapped: false,
         destination: None,
         teleport,
     });

@@ -13,6 +13,7 @@ impl ConsoleCommandProvider for ItemCommandProvider {
             ConsoleCommand::new("unequip", "[player.]unequip", "Unequip the canonical player item.", unequip_item).reference_callable(false).mutating(),
             ConsoleCommand::new("hotkey", "[player.]hotkey <0..7> <ItemInstanceId>", "Bind a stable canonical item id to a player hotkey slot.", bind_hotkey).reference_callable(false).mutating(),
             ConsoleCommand::new("useitem", "[player.]useitem <ItemInstanceId>", "Consume one unit through the canonical item-use seam.", use_item).reference_callable(false).mutating(),
+            ConsoleCommand::new("giveitem", "giveitem <actor-reference> <FormID> [count]", "Add count (default 1) of an item FormID to an NPC/creature's own canonical inventory (issue #185: grants a nav agent's bound actor a door key for AI door-access testing).", give_item).mutating(),
             ConsoleCommand::new("setmerchant", "setmerchant <container-reference> <caps>", "Mark a prepared static container as a merchant with fixed caps.", set_merchant).mutating(),
             ConsoleCommand::new("buy", "buy <merchant-reference> <ItemInstanceId> [count]", "Buy a fixed-price item from a prepared static merchant.", buy_item).mutating(),
             ConsoleCommand::new("sell", "sell <merchant-reference> <ItemInstanceId> [count]", "Sell a fixed-price item to a prepared static merchant.", sell_item).mutating(),
@@ -95,6 +96,87 @@ pub(super) fn add_item(
         }),
         vec![format!(
             "additem {form_id:08x} x{count}; inventory now has {total}"
+        )],
+    ))
+}
+
+/// Issue #185: the visible surface for granting a *specific* NPC/creature
+/// its own canonical inventory item -- `additem` is deliberately
+/// player-only (see `add_item`'s doc comment), so there was previously no
+/// console command able to put a door's key into an actor's own inventory
+/// rather than the player's. This is what makes the key-aware locked-door
+/// acceptance script drivable: `giveitem <actor> <door-key-formid>` then a
+/// fresh `tna goto`/`tna travel` re-evaluates that actor's nav-agent door
+/// overrides against its now-updated inventory (`nav::agent::
+/// apply_door_lock_overrides`, called from `goto_agent`/`request_travel`).
+pub(super) fn give_item(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !(2..=3).contains(&invocation.args.len()) {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "giveitem requires an actor reference, a FormID, and an optional count",
+        ));
+    }
+    let entity = resolve_reference(world, &invocation.args[0])?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement()
+        .clone();
+    if !matches!(
+        placement.semantic,
+        PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+    ) {
+        return Err(ConsoleError::new(
+            "not_actor",
+            "giveitem only accepts NPC or creature references",
+        ));
+    }
+    let form_id = parse_item_form_id(&invocation.args[1]).ok_or_else(|| {
+        ConsoleError::new(
+            "bad_type",
+            "giveitem FormID must be 1-8 hex digits, e.g. f, 0x1f, or 0000000f",
+        )
+    })?;
+    let count = parse_positive_count(invocation.args.get(2))?;
+    let holder = HolderId::Actor {
+        reference_form_id: placement.reference_form_id,
+    };
+    let mut canonical = world.resource_mut::<interaction::CanonicalItemLedger>();
+    if !canonical.ledger.holders().contains_key(&holder) {
+        canonical
+            .ledger
+            .insert_holder(
+                holder,
+                bevyout_core::item_transaction::ItemHolderState::default(),
+            )
+            .map_err(|error| ConsoleError::new("item_transaction_failed", error.to_string()))?;
+    }
+    let item_id = canonical
+        .ledger
+        .insert_new_item(
+            holder,
+            form_id,
+            count,
+            bevyout_core::item_transaction::ItemState::default(),
+        )
+        .map_err(|error| ConsoleError::new("item_transaction_failed", error.to_string()))?;
+    info!(
+        "giveitem {:08x} {form_id:08x} x{count} (item {})",
+        placement.reference_form_id, item_id.0
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": placement.reference_form_id,
+            "form_id": form_id,
+            "count": count,
+            "item_instance_id": item_id.0,
+        }),
+        vec![format!(
+            "giveitem {:08x}: added {form_id:08x} x{count} to its own inventory",
+            placement.reference_form_id
         )],
     ))
 }

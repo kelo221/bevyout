@@ -43,6 +43,24 @@ impl PlacementRoot {
             _ => false,
         }
     }
+
+    /// Issue #185 (`setlock`'s optional key argument): mutates this door's
+    /// runtime key requirement in place, the same way [`set_door_lock_level`]
+    /// mutates the lock level -- authored FO3 data rarely assigns a
+    /// `key_form_id` to a given lockable door at all (real spot-checks show
+    /// `None` even where `lock_level` is set), so the manual acceptance
+    /// script for key-aware locked doors needs a way to attach one at
+    /// runtime for testing. `None` clears the requirement. Returns `false`
+    /// (no-op) for a non-door placement.
+    pub(crate) fn set_door_key_form_id(&mut self, key_form_id: Option<u32>) -> bool {
+        match &mut self.placement.semantic {
+            PreparedSemantic::Door(door) => {
+                door.key_form_id = key_form_id;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// `open` is pub(crate) for issues #60/#61: `world::persist` captures
