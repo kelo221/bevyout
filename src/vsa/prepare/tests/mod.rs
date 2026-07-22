@@ -467,6 +467,23 @@ fn prepared_placement_preserves_identity_transform_and_inventory_for_a_dead_acto
     );
 }
 
+// F213.2: `linked_reference_form_id` threads verbatim from the decoded
+// `ReferenceRecord` into the prepared placement (the AI marker chain-walk
+// reads it from the manifest, not the raw record).
+#[test]
+fn prepared_placement_carries_the_decoded_linked_reference_form_id() {
+    let with_link = ReferenceRecord {
+        linked_reference_form_id: Some(0x0004_1601),
+        ..object_reference(1)
+    };
+    let placement = prepared_placement(&with_link, None, None, None, &HashMap::new());
+    assert_eq!(placement.linked_reference_form_id, Some(0x0004_1601));
+
+    let without_link = object_reference(1);
+    let placement = prepared_placement(&without_link, None, None, None, &HashMap::new());
+    assert_eq!(placement.linked_reference_form_id, None);
+}
+
 #[test]
 fn prepared_semantic_object_without_a_base_record_is_unsupported() {
     assert!(matches!(
@@ -862,6 +879,7 @@ fn classification_and_summary_are_deterministic_across_repeated_runs() {
                     enable_parent: None,
                     owner_form_id: None,
                     owner_faction_rank: None,
+                    linked_reference_form_id: None,
                     inventory: Vec::new(),
                     audio: Default::default(),
                     ao_mode: "ao-none".into(),

@@ -20,8 +20,13 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 19;
 /// `#[serde(default)]` alone would let a stale `scene.ron` decode cleanly
 /// with every door silently reported untrapped, exactly the AGENTS.md
 /// "Prepared asset revisions" trap this bump exists to close.
+/// Bumped again for issue #213: `PreparedPlacement` grew
+/// `linked_reference_form_id` (`XLKR`) -- a stale `scene.ron` would
+/// otherwise decode cleanly with every placement silently reporting no
+/// linked reference, breaking Patrol marker chain-walks and
+/// near-linked-reference package resolution without any parse error.
 pub(crate) const CURRENT_PREPARE_REVISION: &str =
-    "prepare-v5-corpse-actor-assembly-animation-catalog-door-trap";
+    "prepare-v6-corpse-actor-assembly-animation-catalog-door-trap-linked-ref";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v13-material-extensions";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 

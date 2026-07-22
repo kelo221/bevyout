@@ -74,6 +74,7 @@ pub(crate) fn prepared_placement(
         }),
         owner_form_id: reference.owner_form_id,
         owner_faction_rank: reference.owner_faction_rank,
+        linked_reference_form_id: reference.linked_reference_form_id,
         inventory: base
             .map(|base| {
                 base.inventory
