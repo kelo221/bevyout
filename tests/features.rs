@@ -930,6 +930,11 @@ struct BevyoutWorld {
     fs_roam_center: [f32; 3],
     fs_roam_radius: f32,
     fs_blocking_door: Option<u32>,
+
+    // -- ai_package_points.feature (issue #213): editor-location/patrol
+    // marker-chain resolution built from the manifest, not just spawned
+    // entities.
+    pp_chain_result: Vec<ai_resolution::ResolvedPoint>,
 }
 
 fn find_placement<'a>(
@@ -12566,4 +12571,57 @@ async fn then_sandbox_routes_within_radius(world: &mut BevyoutWorld) {
         "roam point {point:?} escaped the radius"
     );
     assert_eq!(point[1], center[1], "roam stays on the ground plane");
+}
+
+// =======================================================================
+// -- ai_package_points.feature (issue #213) --
+// Merge-seam addition: appended at the end of the file per
+// docs/plans/README.md's traceability convention. Reuses
+// `given_resolvable_reference`/`given_package_location_input`/
+// `when_location_resolved`/`then_location_resolves_to`/
+// `then_location_resolves_via` from the `ai_package_resolution.feature`
+// step section above.
+// =======================================================================
+
+#[given(regex = r"^the resolving actor's editor location is ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn given_actor_editor_location(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.ai_res_context.actor_editor_location = Some([x, y, z]);
+}
+
+#[given(regex = r"^reference 0x([0-9a-fA-F]+) is linked to 0x([0-9a-fA-F]+)$")]
+async fn given_reference_linked_to(world: &mut BevyoutWorld, from_hex: String, to_hex: String) {
+    let from = parse_hex(&from_hex);
+    let to = parse_hex(&to_hex);
+    let reference = world
+        .ai_res_context
+        .references
+        .get_mut(&from)
+        .unwrap_or_else(|| panic!("reference {from:08x} must be declared first"));
+    reference.linked_reference = Some(to);
+}
+
+#[when(regex = r"^the linked-reference chain is walked from 0x([0-9a-fA-F]+)$")]
+async fn when_linked_reference_chain_walked(world: &mut BevyoutWorld, start_hex: String) {
+    let start = parse_hex(&start_hex);
+    world.pp_chain_result = ai_resolution::linked_reference_chain(&world.ai_res_context, start);
+}
+
+#[then(regex = r"^the chain has (\d+) markers?$")]
+async fn then_chain_has_n_markers(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(world.pp_chain_result.len(), count);
+}
+
+#[then(regex = r"^chain marker (\d+) resolves to ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn then_chain_marker_resolves_to(
+    world: &mut BevyoutWorld,
+    index: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let point = world
+        .pp_chain_result
+        .get(index - 1)
+        .unwrap_or_else(|| panic!("chain has no marker #{index}"));
+    assert_eq!(point.position, [x, y, z]);
 }

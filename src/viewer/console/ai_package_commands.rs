@@ -534,8 +534,9 @@ fn start_package(
         return start_wander_package(world, entity, reference_form_id, selected, entry, &context);
     }
     // Eat/Sleep pick the nearest free interaction point among the resolved
-    // furniture candidates; the others drive to the single resolved location
-    // (falling back to the target slot).
+    // furniture candidates; Patrol (#213) walks the actor's linked-reference
+    // marker chain into an ordered waypoint list; the others drive to the
+    // single resolved location (falling back to the target slot).
     let waypoints = if matches!(family, PackageFamily::Eat | PackageFamily::Sleep) {
         let candidates = resolve_interaction_candidates(entry, &context, selected);
         if candidates.is_empty() {
@@ -557,6 +558,26 @@ fn start_package(
             )
         })?;
         vec![candidates[chosen]]
+    } else if family == PackageFamily::Patrol {
+        let start = context.linked_reference.ok_or_else(|| {
+            ConsoleError::new(
+                "unresolved_point",
+                "near-linked-reference location has no linked reference".to_string(),
+            )
+        })?;
+        let markers = resolution::linked_reference_chain(&context, start);
+        if markers.is_empty() {
+            return Err(ConsoleError::new(
+                "unresolved_point",
+                format!(
+                    "package {selected:08x}'s linked-reference chain from {start:08x} resolved no markers"
+                ),
+            ));
+        }
+        markers
+            .into_iter()
+            .map(|marker| Waypoint::at(marker.position))
+            .collect()
     } else {
         let resolved = resolve_family_point(entry, &context, false)?;
         vec![Waypoint::at(resolved.position)]
