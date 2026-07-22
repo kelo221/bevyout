@@ -1,6 +1,5 @@
 //! In-game grave-key console frontend.
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use bevy::input::keyboard::KeyboardInput;
@@ -10,10 +9,15 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, Ra
 use bevy::prelude::*;
 use bevy::text::{EditableText, EditableTextFilter, TextCursorStyle, TextEdit};
 use bevy::transform::TransformSystems;
+use bevy::ui::UiSystems;
+use bevy::ui_widgets::ScrollArea;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::GameplayModal;
-use crate::console::openmw_ui::{CommandHistory, CompletionState, load_history, save_history};
+use crate::console::openmw_ui::{
+    CommandHistory, CompletionState, ConsoleTranscript, is_clear_submission, load_history,
+    save_history,
+};
 use crate::console::{
     ConsoleQueue, ConsoleRegistry, ConsoleResponses, ConsoleSessionId, ConsoleSessionStore,
     ConsoleSystemSet, RefRegistry,
@@ -22,7 +26,6 @@ use crate::console::{
 use super::interaction::{PlacementRoot, find_placement_root};
 
 const UI_SESSION: &str = "ui";
-const SCROLLBACK_LIMIT: usize = 200;
 const INPUT_STRIP_HEIGHT: f32 = 42.0;
 
 #[derive(Component)]
@@ -35,13 +38,17 @@ struct ConsoleTitle;
 struct ConsoleScrollback;
 
 #[derive(Component)]
+struct ConsoleScrollbackViewport;
+
+#[derive(Component)]
 struct ConsoleInput;
 
 #[derive(Resource)]
 struct ConsoleUiState {
     history: CommandHistory,
     completion: CompletionState,
-    scrollback: VecDeque<String>,
+    transcript: ConsoleTranscript,
+    transcript_dirty: bool,
     history_path: PathBuf,
     pick_cycle: ConsolePickCycle,
 }
@@ -70,7 +77,8 @@ fn install(app: &mut App) {
     app.insert_resource(ConsoleUiState {
         history,
         completion: CompletionState::default(),
-        scrollback: VecDeque::new(),
+        transcript: ConsoleTranscript::default(),
+        transcript_dirty: false,
         history_path,
         pick_cycle: ConsolePickCycle::default(),
     })
@@ -94,8 +102,15 @@ fn install(app: &mut App) {
     )
     .add_systems(
         PostUpdate,
-        consume_console_responses
+        (consume_console_responses, render_console_scrollback)
+            .chain()
             .after(ConsoleSystemSet::Execute)
+            .before(UiSystems::Content),
+    )
+    .add_systems(
+        PostUpdate,
+        settle_console_scrollback_position
+            .after(UiSystems::Layout)
             .before(TransformSystems::Propagate),
     );
 }
@@ -134,6 +149,19 @@ fn spawn_console_ui(mut commands: Commands) {
                 },
             ));
             root.spawn((
+                ConsoleScrollbackViewport,
+                ScrollArea,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(40),
+                    bottom: px(INPUT_STRIP_HEIGHT),
+                    width: percent(80),
+                    height: percent(50),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+            ))
+            .with_child((
                 ConsoleScrollback,
                 Text::new(""),
                 TextColor(Color::WHITE),
@@ -142,12 +170,7 @@ fn spawn_console_ui(mut commands: Commands) {
                     ..default()
                 },
                 Node {
-                    position_type: PositionType::Absolute,
-                    left: px(40),
-                    bottom: px(INPUT_STRIP_HEIGHT),
-                    width: percent(80),
-                    max_height: percent(50),
-                    overflow: Overflow::clip(),
+                    width: percent(100),
                     ..default()
                 },
             ));
@@ -159,7 +182,7 @@ fn spawn_console_ui(mut commands: Commands) {
                     allow_newlines: false,
                     ..default()
                 },
-                EditableTextFilter::new(|character| !matches!(character, '`' | '~')),
+                EditableTextFilter::new(console_input_character_allowed),
                 TextCursorStyle::default(),
                 TextLayout::no_wrap(),
                 TextColor(Color::WHITE),
@@ -223,8 +246,12 @@ fn close_console_ui(
 fn sanitize_console_draft(draft: &str) -> String {
     draft
         .chars()
-        .filter(|character| !matches!(character, '`' | '~'))
+        .filter(|&character| console_input_character_allowed(character))
         .collect()
+}
+
+fn console_input_character_allowed(character: char) -> bool {
+    !matches!(character, '`' | '~' | '\n' | '\r')
 }
 
 fn selected_reference_text(
@@ -271,6 +298,10 @@ fn select_reference_with_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    scrollback_viewport: Query<
+        (&ComputedNode, &UiGlobalTransform),
+        With<ConsoleScrollbackViewport>,
+    >,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut raycast: MeshRayCast,
     parents: Query<&ChildOf>,
@@ -280,8 +311,20 @@ fn select_reference_with_mouse(
     mut ui: ResMut<ConsoleUiState>,
 ) {
     let wheel_delta = wheel.read().map(|event| event.y).sum::<f32>();
+    let cursor = windows
+        .single()
+        .ok()
+        .and_then(|window| window.cursor_position());
+    let cursor_over_scrollback = cursor.is_some_and(|cursor| {
+        scrollback_viewport
+            .single()
+            .is_ok_and(|(node, transform)| node.contains_point(*transform, cursor))
+    });
     if !buttons.just_pressed(MouseButton::Left) {
         if wheel_delta == 0.0 {
+            return;
+        }
+        if cursor_over_scrollback {
             return;
         }
         ui.pick_cycle.candidates.retain(|candidate| {
@@ -301,10 +344,10 @@ fn select_reference_with_mouse(
         sessions.select(session, ui.pick_cycle.candidates[next]);
         return;
     }
-    let Ok(window) = windows.single() else {
+    let Some(cursor) = cursor else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    let Ok(window) = windows.single() else {
         return;
     };
     if cursor.y >= window.height() - INPUT_STRIP_HEIGHT {
@@ -373,6 +416,11 @@ fn handle_console_input(
         }
         ui.completion.reset();
         input.clear();
+        if is_clear_submission(&current) {
+            ui.transcript.clear();
+            ui.transcript_dirty = true;
+            return;
+        }
         queue.0.push_back(crate::console::ConsoleRequest {
             session: ConsoleSessionId::new(UI_SESSION),
             line: current,
@@ -397,7 +445,7 @@ fn handle_console_input(
         replace_editable(&mut input, &result.text);
         if result.list_candidates {
             for candidate in result.matches {
-                push_scrollback(&mut ui.scrollback, candidate);
+                push_scrollback(&mut ui, candidate);
             }
         }
     }
@@ -445,35 +493,50 @@ fn update_console_title(
 fn consume_console_responses(
     mut responses: ResMut<ConsoleResponses>,
     mut ui: ResMut<ConsoleUiState>,
-    mut scrollback: Query<&mut Text, With<ConsoleScrollback>>,
 ) {
-    let mut changed = false;
     while let Some(response) = responses.0.pop_front() {
-        changed = true;
-        push_scrollback(&mut ui.scrollback, response.request.line);
+        push_scrollback(&mut ui, response.request.line);
         let has_log = !response.output.log.is_empty();
         for line in response.output.log {
-            push_scrollback(&mut ui.scrollback, line);
+            push_scrollback(&mut ui, line);
         }
         if let Some(error) = response.output.error {
-            push_scrollback(
-                &mut ui.scrollback,
-                format!("[{}] {}", error.code, error.message),
-            );
+            push_scrollback(&mut ui, format!("[{}] {}", error.code, error.message));
         } else if !has_log && !response.output.value.is_null() {
-            push_scrollback(
-                &mut ui.scrollback,
-                compact_console_value(&response.output.value),
-            );
+            push_scrollback(&mut ui, compact_console_value(&response.output.value));
         }
     }
-    if changed && let Ok(mut text) = scrollback.single_mut() {
-        text.0 = ui
-            .scrollback
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
+}
+
+fn render_console_scrollback(
+    mut ui: ResMut<ConsoleUiState>,
+    mut scrollback: Query<&mut Text, With<ConsoleScrollback>>,
+    mut viewport: Query<&mut ScrollPosition, With<ConsoleScrollbackViewport>>,
+) {
+    if !ui.transcript_dirty {
+        return;
+    }
+    if let Ok(mut text) = scrollback.single_mut() {
+        text.0 = ui.transcript.rendered();
+    }
+    if let Ok(mut position) = viewport.single_mut() {
+        position.y = if ui.transcript.is_empty() {
+            0.0
+        } else {
+            f32::MAX
+        };
+    }
+    ui.transcript_dirty = false;
+}
+
+fn settle_console_scrollback_position(
+    mut viewport: Query<(&ComputedNode, &mut ScrollPosition), With<ConsoleScrollbackViewport>>,
+) {
+    let Ok((computed, mut position)) = viewport.single_mut() else {
+        return;
+    };
+    if position.y == f32::MAX {
+        position.y = computed.scroll_position.y * computed.inverse_scale_factor;
     }
 }
 
@@ -481,11 +544,9 @@ fn compact_console_value(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
-fn push_scrollback(scrollback: &mut VecDeque<String>, line: String) {
-    scrollback.push_back(line);
-    while scrollback.len() > SCROLLBACK_LIMIT {
-        scrollback.pop_front();
-    }
+fn push_scrollback(ui: &mut ConsoleUiState, line: String) {
+    ui.transcript.push(line);
+    ui.transcript_dirty = true;
 }
 
 #[cfg(test)]
@@ -506,6 +567,15 @@ mod tests {
             sanitize_console_draft("legitimate draft"),
             "legitimate draft"
         );
+    }
+
+    #[test]
+    fn input_filter_accepts_commands_and_rejects_console_toggles_and_newlines() {
+        assert!("setpos z 2".chars().all(console_input_character_allowed));
+        assert!(!console_input_character_allowed('`'));
+        assert!(!console_input_character_allowed('~'));
+        assert!(!console_input_character_allowed('\n'));
+        assert!(!console_input_character_allowed('\r'));
     }
 
     #[test]
@@ -572,7 +642,24 @@ mod tests {
         let (node, editable, _) = input.single(world).unwrap();
         assert_eq!(node.left, px(40));
         assert_eq!(node.bottom, px(10));
+        assert_eq!(node.width, percent(80));
+        assert_eq!(node.overflow.x, OverflowAxis::Clip);
+        assert_eq!(editable.max_characters, Some(2048));
+        assert_eq!(editable.visible_width, Some(100.0));
         assert!(editable_value(editable).is_empty());
+
+        let mut viewport = world.query_filtered::<
+            (&Node, &ScrollPosition, &ChildOf),
+            (With<ConsoleScrollbackViewport>, With<ScrollArea>),
+        >();
+        let (node, position, parent) = viewport.single(world).unwrap();
+        assert_eq!(parent.parent(), root);
+        assert_eq!(node.left, px(40));
+        assert_eq!(node.bottom, px(INPUT_STRIP_HEIGHT));
+        assert_eq!(node.width, percent(80));
+        assert_eq!(node.height, percent(50));
+        assert_eq!(node.overflow.y, OverflowAxis::Scroll);
+        assert_eq!(position.0, Vec2::ZERO);
 
         let mut scrollback = world.query_filtered::<&Text, With<ConsoleScrollback>>();
         assert!(scrollback.single(world).unwrap().0.is_empty());

@@ -7,6 +7,45 @@ use std::path::Path;
 
 pub const HISTORY_LIMIT: usize = 200;
 pub const COMPLETION_LIST_LIMIT: usize = 50;
+pub const TRANSCRIPT_LIMIT: usize = 200;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConsoleTranscript {
+    lines: VecDeque<String>,
+}
+
+impl ConsoleTranscript {
+    pub fn push(&mut self, line: impl Into<String>) {
+        self.lines.push_back(line.into());
+        while self.lines.len() > TRANSCRIPT_LIMIT {
+            self.lines.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
+
+    pub fn lines(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().map(String::as_str)
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub fn rendered(&self) -> String {
+        self.lines().collect::<Vec<_>>().join("\n")
+    }
+}
+
+pub fn is_clear_submission(command: &str) -> bool {
+    command.trim().eq_ignore_ascii_case("clear")
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandHistory {
@@ -203,5 +242,36 @@ mod tests {
         let second = completion.complete("get", candidates);
         assert!(second.list_candidates);
         assert_eq!(second.matches.len(), 3);
+    }
+
+    #[test]
+    fn clear_submission_preserves_recorded_history() {
+        let mut history = CommandHistory::from_entries(["help".into(), "getpos z".into()]);
+        let mut transcript = ConsoleTranscript::default();
+        transcript.push("help");
+        transcript.push("commands listed");
+
+        history.record("clear");
+        if is_clear_submission(" clear ") {
+            transcript.clear();
+        }
+
+        assert!(transcript.is_empty());
+        assert_eq!(
+            history.entries().collect::<Vec<_>>(),
+            ["help", "getpos z", "clear"]
+        );
+    }
+
+    #[test]
+    fn transcript_keeps_only_the_recent_bounded_lines() {
+        let mut transcript = ConsoleTranscript::default();
+        for index in 0..=TRANSCRIPT_LIMIT {
+            transcript.push(format!("line {index}"));
+        }
+
+        assert_eq!(transcript.len(), TRANSCRIPT_LIMIT);
+        assert_eq!(transcript.lines().next(), Some("line 1"));
+        assert_eq!(transcript.lines().last(), Some("line 200"));
     }
 }
