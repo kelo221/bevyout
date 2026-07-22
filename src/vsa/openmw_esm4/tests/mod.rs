@@ -529,6 +529,96 @@ fn parses_audio_cell_and_enable_parent_metadata() {
     );
 }
 
+// Issue #213: `XLKR` (the FormID of a reference's linked reference) decodes
+// like every other `sub_form_id` field -- resolver-adjusted, `!= 0`-filtered
+// -- confirmed empirically against real Fallout3.esm `SuperDuperMart` data
+// (`00017f37`) at plan time before this decode was written.
+#[test]
+fn linked_reference_decodes_resolver_adjusted_and_filters_absent_or_zero() {
+    // Master-index 1's local object 0x001601 (from a plugin whose only
+    // master loads at global index 2) must come out resolver-adjusted into
+    // global index 2's FormID space, exactly like `XOWN`/`XESP` above --
+    // proving this decode goes through the shared `sub_form_id` helper
+    // rather than reading the raw bytes directly.
+    let resolver = FormIdResolver::new(0, vec![2]);
+    let with_link = parse_reference(
+        &[
+            Subrecord {
+                signature: "NAME".into(),
+                data: 0x400_u32.to_le_bytes().to_vec(),
+            },
+            Subrecord {
+                signature: "DATA".into(),
+                data: transform(),
+            },
+            Subrecord {
+                signature: "XLKR".into(),
+                data: 0x0000_1601_u32.to_le_bytes().to_vec(),
+            },
+        ],
+        0x700,
+        0x800,
+        0,
+        ReferenceKind::Object,
+        &resolver,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(with_link.linked_reference_form_id, Some(0x0200_1601));
+    assert!(!with_link.ignored_subrecords.contains(&"XLKR".to_string()));
+
+    // Absent/zero checks use a resolver with no master remapping (matching
+    // this file's `direct_resolver` convention elsewhere), so a raw `0`
+    // stays a resolved `0` and is unambiguously "no link", not master file
+    // 0's own header FormID.
+    let plain_resolver = direct_resolver();
+    let without_link = parse_reference(
+        &[
+            Subrecord {
+                signature: "NAME".into(),
+                data: 0x400_u32.to_le_bytes().to_vec(),
+            },
+            Subrecord {
+                signature: "DATA".into(),
+                data: transform(),
+            },
+        ],
+        0x701,
+        0x800,
+        0,
+        ReferenceKind::Object,
+        &plain_resolver,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(without_link.linked_reference_form_id, None);
+
+    let zero_link = parse_reference(
+        &[
+            Subrecord {
+                signature: "NAME".into(),
+                data: 0x400_u32.to_le_bytes().to_vec(),
+            },
+            Subrecord {
+                signature: "DATA".into(),
+                data: transform(),
+            },
+            Subrecord {
+                signature: "XLKR".into(),
+                data: 0_u32.to_le_bytes().to_vec(),
+            },
+        ],
+        0x702,
+        0x800,
+        0,
+        ReferenceKind::Object,
+        &plain_resolver,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(zero_link.linked_reference_form_id, None);
+}
+
 // T38.2 support: multi-hop enable-parent chains resolve to one stable root,
 // and cycles/unresolved parents are reported rather than silently accepted.
 #[test]

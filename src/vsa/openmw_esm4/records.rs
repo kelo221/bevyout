@@ -877,10 +877,12 @@ pub(crate) fn parse_reference(
             }),
         initially_enabled: flags & RECORD_DISABLED == 0,
         enable_root_form_id: None,
+        linked_reference_form_id: sub_form_id(subs, "XLKR", resolver),
         ignored_subrecords: ignored_signatures(
             subs,
             &[
                 "EDID", "NAME", "DATA", "XSCL", "XCNT", "XTEL", "XLOC", "XOWN", "XRNK", "XESP",
+                "XLKR",
             ],
         ),
     }))
