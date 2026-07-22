@@ -33,6 +33,20 @@ use super::super::ai::selection::{
 use super::super::nav::agent;
 use super::*;
 
+/// Follow band maximum (chase radius, metres) when the package's `PTDT`
+/// distance is unset; the inner (hold) radius is derived from it.
+const DEFAULT_FOLLOW_BAND_MAX: f32 = 4.0;
+/// Inner (hold) radius as a fraction of the outer (chase) radius -- the
+/// hysteresis dead band.
+const FOLLOW_INNER_RATIO: f32 = 0.5;
+/// A follow never holds closer than this, so a tiny authored distance still
+/// leaves the follower a sane personal-space band.
+const FOLLOW_MIN_INNER: f32 = 1.0;
+/// Sandbox roam radius (metres) when the package's `PLDT` radius is unset.
+const DEFAULT_WANDER_RADIUS: f32 = 8.0;
+/// Seconds a sandbox actor idles at each reached roam point.
+const DEFAULT_WANDER_IDLE_SECONDS: f32 = 3.0;
+
 pub(super) struct AiPackageCommandProvider;
 
 impl ConsoleCommandProvider for AiPackageCommandProvider {
@@ -46,7 +60,7 @@ impl ConsoleCommandProvider for AiPackageCommandProvider {
         registry.register(ConsoleCommand::new(
             "runpackage",
             "runpackage <actor-reference> [status|stop]",
-            "Drive the selected AI package family (#196 Travel/Patrol, #197 Idle/Eat/Sleep) on a nav-bound actor (run `tna bind` first). With no action, selects+resolves the actor's package and starts the family running: Travel/Patrol walk the route, Idle/Eat/Sleep occupy and play at the resolved point. `status` prints the running family's step/target; `stop` releases occupancy and ends it.",
+            "Drive the selected AI package family (#196 Travel/Patrol, #197 Idle/Eat/Sleep, #198 Follow/Sandbox) on a nav-bound actor (run `tna bind` first). With no action, selects+resolves the actor's package and starts the family running: Travel/Patrol walk the route, Idle/Eat/Sleep occupy and play at the resolved point, Follow trails a moving leader within a distance band, Sandbox roams within a radius. `status` prints the running family's step/target; `stop` releases occupancy and ends it.",
             run_package,
         ))
     }
@@ -498,7 +512,7 @@ fn start_package(
         ConsoleError::new(
             "unsupported_family",
             format!(
-                "selected package {selected:08x} type {}({}) is not driven by a family (Travel/Patrol/Idle/Eat/Sleep only)",
+                "selected package {selected:08x} type {}({}) is not driven by a family (Follow/Eat/Sleep/Idle/Travel/Sandbox/Patrol only)",
                 entry.package_type,
                 package_type_label(entry.package_type),
             ),
@@ -506,6 +520,14 @@ fn start_package(
     })?;
 
     let context = build_resolution_context(world, reference_form_id);
+    // The dynamic families (#198) resolve differently: Follow needs the live
+    // leader entity to trail; Sandbox needs a roam centre + radius.
+    if family == PackageFamily::Follow {
+        return start_follow_package(world, entity, reference_form_id, selected, entry, &context);
+    }
+    if family == PackageFamily::Sandbox {
+        return start_wander_package(world, entity, reference_form_id, selected, entry, &context);
+    }
     // Eat/Sleep pick the nearest free interaction point among the resolved
     // furniture candidates; the others drive to the single resolved location
     // (falling back to the target slot).
@@ -563,6 +585,103 @@ fn start_package(
     ))
 }
 
+/// Starts a Follow (#198) package: resolves the leader through the target
+/// slot, then trails its live entity within a hysteresis distance band.
+fn start_follow_package(
+    world: &mut World,
+    entity: Entity,
+    reference_form_id: u32,
+    selected: u32,
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    // Prefer the target slot -- a follow's leader is authored there (specific
+    // reference or linked/follow target).
+    let point = resolve_family_point(entry, context, true)?;
+    let leader_bits = point.entity.ok_or_else(|| {
+        ConsoleError::new(
+            "no_follow_target",
+            format!("follow package {selected:08x} resolved no live leader entity to follow"),
+        )
+    })?;
+    let leader = Entity::from_bits(leader_bits);
+    let outer = if point.radius > 0.0 {
+        point.radius
+    } else {
+        DEFAULT_FOLLOW_BAND_MAX
+    };
+    let inner = (outer * FOLLOW_INNER_RATIO)
+        .max(FOLLOW_MIN_INNER)
+        .min(outer);
+    let controller = ActorPackageController::start_follow(
+        reference_form_id,
+        selected,
+        leader,
+        inner,
+        outer,
+        DEFAULT_ARRIVAL_TOLERANCE,
+    );
+    world.entity_mut(entity).insert(controller);
+    let line = format!(
+        "runpackage {reference_form_id:08x}: started follow package {selected:08x} -> leader {leader_bits:016x} band [{inner:.1},{outer:.1}]",
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": reference_form_id,
+            "family": "follow",
+            "selected_form_id": selected,
+            "leader_entity": leader_bits,
+            "band_min": inner,
+            "band_max": outer,
+        }),
+        vec![line],
+    ))
+}
+
+/// Starts a Sandbox/Wander (#198) package: resolves the roam centre through the
+/// location slot and roams deterministically within its radius.
+fn start_wander_package(
+    world: &mut World,
+    entity: Entity,
+    reference_form_id: u32,
+    selected: u32,
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    // Prefer the location slot -- a sandbox roams around its authored anchor.
+    let point = resolve_family_point(entry, context, false)?;
+    let radius = if point.radius > 0.0 {
+        point.radius
+    } else {
+        DEFAULT_WANDER_RADIUS
+    };
+    let controller = ActorPackageController::start_wander(
+        reference_form_id,
+        selected,
+        point.position,
+        radius,
+        DEFAULT_WANDER_IDLE_SECONDS,
+        // A per-actor seed makes the roam deterministic and reproducible.
+        u64::from(reference_form_id),
+        DEFAULT_ARRIVAL_TOLERANCE,
+    );
+    world.entity_mut(entity).insert(controller);
+    let line = format!(
+        "runpackage {reference_form_id:08x}: started sandbox package {selected:08x} -> roam center ({:.2},{:.2},{:.2}) radius {radius:.1}",
+        point.position[0], point.position[1], point.position[2],
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": reference_form_id,
+            "family": "sandbox",
+            "selected_form_id": selected,
+            "roam_center": point.position,
+            "radius": radius,
+        }),
+        vec![line],
+    ))
+}
+
 /// Prints the running family's step and target for an actor.
 fn status_package(
     world: &mut World,
@@ -584,8 +703,14 @@ fn status_package(
         .driver
         .occupied_point()
         .map_or_else(|| "none".to_string(), |point| format!("{point:08x}"));
+    // A follow that gave up on a door it could not open names that door here
+    // (#198/#185), so the human sees *why* it stopped following.
+    let blocked = controller
+        .driver
+        .blocked_door()
+        .map_or_else(|| "none".to_string(), |door| format!("{door:08x}"));
     let line = format!(
-        "runpackage {reference_form_id:08x}: {} package {:08x} phase={} step={} marker={}/{} target={target_desc} occupied={occupied}",
+        "runpackage {reference_form_id:08x}: {} package {:08x} phase={} step={} marker={}/{} target={target_desc} occupied={occupied} blocked_door={blocked}",
         controller.driver.family().label(),
         controller.selected_form_id,
         controller.lifecycle.phase().label(),
@@ -604,6 +729,7 @@ fn status_package(
             "marker_count": controller.driver.marker_count(),
             "target": target,
             "occupied_point": controller.driver.occupied_point(),
+            "blocked_door": controller.driver.blocked_door(),
         }),
         vec![line],
     ))

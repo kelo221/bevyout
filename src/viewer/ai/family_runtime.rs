@@ -52,16 +52,17 @@ pub(crate) struct ActorPackageController {
     pub(crate) selected_form_id: u32,
     pub(crate) lifecycle: PackageLifecycle,
     pub(crate) driver: FamilyDriver,
+    /// The leader entity a follow (#198) samples each tick for its moving
+    /// target; `None` for every non-follow family.
+    pub(crate) follow_target: Option<Entity>,
 }
 
 impl ActorPackageController {
-    /// Starts `family` running the `selected_form_id` package over `waypoints`.
-    pub(crate) fn start(
+    fn new(
         reference_form_id: u32,
         selected_form_id: u32,
-        family: PackageFamily,
-        waypoints: Vec<Waypoint>,
-        arrival_tolerance: f32,
+        driver: FamilyDriver,
+        follow_target: Option<Entity>,
     ) -> Self {
         let mut lifecycle = PackageLifecycle::new();
         lifecycle.on_select(Some(selected_form_id));
@@ -69,8 +70,63 @@ impl ActorPackageController {
             reference_form_id,
             selected_form_id,
             lifecycle,
-            driver: FamilyDriver::new(family, waypoints, arrival_tolerance),
+            driver,
+            follow_target,
         }
+    }
+
+    /// Starts a scheduled `family` (Travel/Patrol/Idle/Eat/Sleep) running the
+    /// `selected_form_id` package over `waypoints`.
+    pub(crate) fn start(
+        reference_form_id: u32,
+        selected_form_id: u32,
+        family: PackageFamily,
+        waypoints: Vec<Waypoint>,
+        arrival_tolerance: f32,
+    ) -> Self {
+        Self::new(
+            reference_form_id,
+            selected_form_id,
+            FamilyDriver::new(family, waypoints, arrival_tolerance),
+            None,
+        )
+    }
+
+    /// Starts a Follow (#198) package: `follow_target` is the leader entity
+    /// whose live position the driver maintains its distance band from.
+    pub(crate) fn start_follow(
+        reference_form_id: u32,
+        selected_form_id: u32,
+        follow_target: Entity,
+        band_min: f32,
+        band_max: f32,
+        arrival_tolerance: f32,
+    ) -> Self {
+        Self::new(
+            reference_form_id,
+            selected_form_id,
+            FamilyDriver::follow(band_min, band_max, arrival_tolerance),
+            Some(follow_target),
+        )
+    }
+
+    /// Starts a Sandbox/Wander (#198) package roaming within `radius` of
+    /// `center`.
+    pub(crate) fn start_wander(
+        reference_form_id: u32,
+        selected_form_id: u32,
+        center: [f32; 3],
+        radius: f32,
+        idle_seconds: f32,
+        seed: u64,
+        arrival_tolerance: f32,
+    ) -> Self {
+        Self::new(
+            reference_form_id,
+            selected_form_id,
+            FamilyDriver::wander(center, radius, idle_seconds, seed, arrival_tolerance),
+            None,
+        )
     }
 }
 
@@ -100,10 +156,24 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         let actor_position = world
             .get::<Transform>(entity)
             .map_or([0.0; 3], |transform| transform.translation.to_array());
+        // A follow family reads its leader's live position (None == the leader
+        // is gone: target loss). Every other family leaves this None.
+        let follow_target = world
+            .get::<ActorPackageController>(entity)
+            .and_then(|controller| controller.follow_target);
+        let target_position = follow_target
+            .and_then(|leader| world.get::<Transform>(leader))
+            .map(|transform| transform.translation.to_array());
         let observation = FamilyObservation {
-            actor_position,
-            nav_reached: agent::agent_reached_target(world, entity),
-            route_failed: agent::agent_route_failed(world, entity),
+            target_position,
+            // #185's door-link `Failed` terminal names the door the agent's
+            // route gave up on; a follow abandons at a door it cannot open.
+            blocking_door: agent::agent_blocking_door(world, entity),
+            ..FamilyObservation::new(
+                actor_position,
+                agent::agent_reached_target(world, entity),
+                agent::agent_route_failed(world, entity),
+            )
         };
 
         // Phase A: advance the lifecycle clock and (while running) the family,
@@ -190,10 +260,20 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
             agent::clear_agent_target(world, entity);
         }
         if signal != LifecycleSignal::Continue {
-            info!(
-                "package family {ref_form_id:08x} {family_label} {}",
-                lifecycle_signal_label(signal)
-            );
+            // A follow that failed because of a door it could not open names
+            // that specific door (the `Unreachable`-naming terminal, verdict
+            // §4.5) rather than an anonymous fail.
+            if family_label == "follow"
+                && signal == LifecycleSignal::Fail
+                && let Some(door) = observation.blocking_door
+            {
+                info!("package family {ref_form_id:08x} follow unreachable door {door:08x}");
+            } else {
+                info!(
+                    "package family {ref_form_id:08x} {family_label} {}",
+                    lifecycle_signal_label(signal)
+                );
+            }
         }
     }
 }
@@ -234,6 +314,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Time::<()>::default());
         world.init_resource::<PackageInteractionOccupancy>();
+        // `route_agent_to_target` (the `FamilyRequest::Route` seam) reads the
+        // nav archipelago state; seed the empty one a minimal world needs.
+        agent::insert_test_archipelago_state(&mut world);
         let entity = world
             .spawn((
                 Transform::from_translation(position),
@@ -337,5 +420,78 @@ mod tests {
             .driver
             .release();
         assert_eq!(released, Some(0x0000_F00D));
+    }
+
+    /// Follow (#198) routes toward its *leader* through the nav seam, sampling
+    /// the leader's live transform -- and never writes the actor's translation.
+    #[test]
+    fn follow_family_routes_to_the_leader_without_moving_the_actor() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.init_resource::<PackageInteractionOccupancy>();
+        agent::insert_test_archipelago_state(&mut world);
+        // The moving leader the follower samples each tick.
+        let leader = world
+            .spawn(Transform::from_translation(Vec3::new(30.0, 0.0, 0.0)))
+            .id();
+        let controller = ActorPackageController::start_follow(
+            0x0000_00AD,
+            0x0000_4000,
+            leader,
+            2.0,
+            5.0,
+            DEFAULT_ARRIVAL_TOLERANCE,
+        );
+        let start = Vec3::ZERO;
+        let entity = world
+            .spawn((
+                Transform::from_translation(start),
+                ActorAnimationIntent::default(),
+                controller,
+            ))
+            .id();
+
+        world.run_system_once(drive_actor_packages).unwrap();
+
+        // Routed to the leader's position (nav request), actor not teleported.
+        match world.get::<AgentTarget3d>(entity) {
+            Some(AgentTarget3d::Point(point)) => {
+                assert_eq!(*point, Vec3::new(30.0, 0.0, 0.0));
+            }
+            other => panic!("expected a route to the leader, got {other:?}"),
+        }
+        assert_eq!(world.get::<Transform>(entity).unwrap().translation, start);
+    }
+
+    /// Sandbox (#198) roams to a bounded, deterministic point through the nav
+    /// seam -- again a route request, never a transform write.
+    #[test]
+    fn wander_family_routes_within_radius_without_moving_the_actor() {
+        let controller = ActorPackageController::start_wander(
+            0x0000_00AE,
+            0x0000_5000,
+            [0.0, 0.0, 0.0],
+            6.0,
+            2.0,
+            99,
+            DEFAULT_ARRIVAL_TOLERANCE,
+        );
+        let start = Vec3::ZERO;
+        let (mut world, entity) = controller_world(controller, start);
+
+        world.run_system_once(drive_actor_packages).unwrap();
+
+        match world.get::<AgentTarget3d>(entity) {
+            Some(AgentTarget3d::Point(point)) => {
+                assert!(
+                    point.xz().length() <= 6.0 + 1e-3,
+                    "roam point {point:?} escaped the radius"
+                );
+            }
+            other => panic!("expected a roam route, got {other:?}"),
+        }
+        assert_eq!(world.get::<Transform>(entity).unwrap().translation, start);
+        // A wandering actor requested no animation on its first roam tick.
+        assert_eq!(requested(&world, entity), None);
     }
 }

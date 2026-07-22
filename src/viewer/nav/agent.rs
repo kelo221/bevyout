@@ -2598,6 +2598,27 @@ pub(crate) fn agent_route_failed(world: &World, agent_entity: Entity) -> bool {
     )
 }
 
+/// The FormID of a door `agent_entity`'s route has given up on -- #185's
+/// `DoorLinkState::Failed` terminal, which names the blocking door after the
+/// deterministic open-wait bound expires. The AI follow family (#198) reads
+/// this to distinguish "blocked by a door it cannot open" (name it, abandon)
+/// from a plain no-path. `None` while the agent is not stuck at a failed door.
+pub(crate) fn agent_blocking_door(world: &World, agent_entity: Entity) -> Option<u32> {
+    match world.get::<AgentRuntime>(agent_entity)?.door_link {
+        door_link::DoorLinkState::Failed { door_form_id } => Some(door_form_id),
+        _ => None,
+    }
+}
+
+/// Test-only: seeds the empty [`NavArchipelagoState`] a minimal-`World` needs
+/// before [`route_agent_to_target`] (its `apply_door_lock_overrides` reads it).
+/// Lets the AI-family adapter tests exercise the real routing seam without
+/// standing up the whole `NavBackendPlugin`.
+#[cfg(test)]
+pub(crate) fn insert_test_archipelago_state(world: &mut World) {
+    world.init_resource::<NavArchipelagoState>();
+}
+
 fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
     let index = match rest {
         [] => 0,
@@ -3596,6 +3617,18 @@ fn merge_traversal_timeout(initial_distance: f32) -> f32 {
 /// via the wait bound) -- `scripted_door_open` bypasses locks by design
 /// (dev tooling), so the lock gate lives here.
 fn request_door_open(world: &mut World, agent_entity: Entity, door_form_id: u32) {
+    // OpenMW parity (`AiWander::execute` never calls `openDoors()`,
+    // `if getTypeId() == TypeIdWander return;`): a wander/sandbox package does
+    // not open doors. #185 deliberately left this gate for when the package
+    // family became available (#198). A sandboxing actor treats a closed door
+    // as a wall and roams elsewhere. This is the minimal hook -- gating the one
+    // door-open request site rather than threading the package type through the
+    // whole door-link state machine; the pause/wait cycle still runs and
+    // terminates at the documented `Failed` bound, it just never opens the door.
+    if agent_family_refuses_doors(world, agent_entity) {
+        info!("nav agent door {door_form_id:08x}: wander package does not open doors");
+        return;
+    }
     let lock_info = world
         .resource::<NavArchipelagoState>()
         .door_lock_info
@@ -3619,6 +3652,16 @@ fn request_door_open(world: &mut World, agent_entity: Entity, door_form_id: u32)
             warn!("nav agent door {door_form_id:08x}: reference not resolvable");
         }
     }
+}
+
+/// Whether the active AI package on `agent_entity` refuses to open doors --
+/// true only for the Sandbox/Wander family (`PackageFamily::opens_doors`).
+/// Actors with no running package (the common `tna`-driven agent) open doors as
+/// before.
+fn agent_family_refuses_doors(world: &World, agent_entity: Entity) -> bool {
+    world
+        .get::<crate::viewer::ai::family_runtime::ActorPackageController>(agent_entity)
+        .is_some_and(|controller| !controller.driver.family().opens_doors())
 }
 
 /// Drives the door-link lifecycle for every currently-spawned agent:
