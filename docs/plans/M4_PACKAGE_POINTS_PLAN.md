@@ -155,7 +155,7 @@ Patrol/Sandbox *resolve and drive* under the existing `runpackage` command.
   covers this too, since it changes the manifest's *placement set*, not just
   a field). See the F1 commit's `editor_marker_needs_placement` for the pure,
   unit-tested decision.
-- **Follow-up filed (not fixed here, out of scope):** `PackageLocation.radius`
+- **Follow-up filed as #222 (not fixed here, out of scope):** `PackageLocation.radius`
   / `PackageTarget.count_or_distance` are never scaled by `FO3_SCALE` in
   `viewer::ai::resolution` (pre-existing since #195/#198, unrelated to this
   issue's editor-location/linked-reference resolution work). Found while
