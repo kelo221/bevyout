@@ -239,17 +239,28 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         match request {
             Some(FamilyRequest::Route(point)) => {
                 agent::route_agent_to_point(world, entity, Vec3::from_array(point));
+                // Moving: facing belongs to navigation again.
+                agent::set_facing_authority(world, entity, false);
             }
-            Some(FamilyRequest::Stop) => agent::clear_agent_target(world, entity),
+            Some(FamilyRequest::Stop) => {
+                agent::clear_agent_target(world, entity);
+                agent::set_facing_authority(world, entity, false);
+            }
             Some(FamilyRequest::Play(animation)) => {
                 let _ = request_actor_animation(world, entity, animation_state(animation));
-                // Apply the authored idle-marker facing while standing still.
-                // This is a rotation write only -- translation (the KCC's sole
-                // authority) is never touched here.
-                if let Some(yaw) = orientation
-                    && let Some(mut transform) = world.get_mut::<Transform>(entity)
-                {
-                    transform.rotation = Quat::from_rotation_y(yaw);
+                if let Some(yaw) = orientation {
+                    // Holding an authored pose: claim facing so the nav-derived
+                    // writer (`face_bound_actors`) yields, then write the pose
+                    // yaw. Exactly one system writes rotation this frame -- this
+                    // is a rotation write only; translation (the KCC's sole
+                    // authority) is never touched here.
+                    agent::set_facing_authority(world, entity, true);
+                    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                        transform.rotation = Quat::from_rotation_y(yaw);
+                    }
+                } else {
+                    // No authored pose to hold: let navigation steer facing.
+                    agent::set_facing_authority(world, entity, false);
                 }
             }
             None => {}
@@ -278,6 +289,26 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
     }
 }
 
+/// Nav release hook (registered by [`AiPackagePlugin`] to satisfy nav's
+/// bound-actor release contract): tears down a released actor's running package.
+/// Nav's `release_bound_actor` (the #164 fall guard / `tna despawn`) calls this
+/// after it strips the agent, so a package can no longer tick an agent-less
+/// actor -- the controller is removed and any interaction point it claimed is
+/// freed. A no-op for a released actor that was not running a package.
+pub(crate) fn release_actor_package(world: &mut World, entity: Entity) {
+    let Some(mut controller) = world.get_mut::<ActorPackageController>(entity) else {
+        return;
+    };
+    let released = controller.driver.release();
+    world.entity_mut(entity).remove::<ActorPackageController>();
+    if let Some(point) = released {
+        world
+            .resource_mut::<PackageInteractionOccupancy>()
+            .0
+            .remove(&point);
+    }
+}
+
 const fn lifecycle_signal_label(signal: LifecycleSignal) -> &'static str {
     match signal {
         LifecycleSignal::Continue => "continue",
@@ -297,6 +328,11 @@ impl Plugin for AiPackagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PackageInteractionOccupancy>()
             .add_systems(Update, drive_actor_packages);
+        // Satisfy nav's bound-actor release contract: when nav releases this
+        // actor (the #164 fall guard / `tna despawn`), tear its package down too
+        // -- otherwise the controller keeps ticking an agent-less actor forever
+        // and its interaction point never frees.
+        agent::register_bound_actor_release_hook(app.world_mut(), release_actor_package);
     }
 }
 
@@ -420,6 +456,76 @@ mod tests {
             .driver
             .release();
         assert_eq!(released, Some(0x0000_F00D));
+    }
+
+    /// **Release-while-package-running** (the #164 fall-guard / `tna despawn`
+    /// seam). When nav releases a bound actor mid-package, the package must be
+    /// torn down through the nav-owned release contract -- otherwise
+    /// `drive_actor_packages` keeps ticking an agent-less actor forever and its
+    /// interaction point never frees. Asserts the *observable* outcome, not
+    /// internal flags: the controller is gone, the point is freed, and a
+    /// subsequent driver tick neither re-claims the point nor re-inserts a route.
+    #[test]
+    fn releasing_a_bound_actor_tears_down_its_running_package() {
+        const POINT: u32 = 0x0000_F00D;
+        // An Eat package whose actor already stands on its furniture, so the
+        // first tick claims the interaction point.
+        let controller = ActorPackageController::start(
+            0x0000_00AF,
+            0x0000_6000,
+            PackageFamily::Eat,
+            vec![Waypoint {
+                position: [0.0, 0.0, 0.0],
+                wait_seconds: 0.0,
+                orientation_yaw: None,
+                interaction_point: Some(POINT),
+            }],
+            DEFAULT_ARRIVAL_TOLERANCE,
+        );
+        let (mut world, entity) = controller_world(controller, Vec3::ZERO);
+        // Register the AI teardown hook exactly as `AiPackagePlugin::build` does.
+        agent::register_bound_actor_release_hook(&mut world, release_actor_package);
+
+        world.run_system_once(drive_actor_packages).unwrap();
+        assert!(
+            world
+                .resource::<PackageInteractionOccupancy>()
+                .0
+                .contains(&POINT),
+            "furniture claimed on arrival"
+        );
+
+        // Nav releases the actor (the fall-guard / `tna despawn` path).
+        agent::release_bound_actor(&mut world, entity);
+
+        // Observable outcome: the package controller is gone and the point freed.
+        assert!(
+            world.get::<ActorPackageController>(entity).is_none(),
+            "release must tear down the running package controller"
+        );
+        assert!(
+            !world
+                .resource::<PackageInteractionOccupancy>()
+                .0
+                .contains(&POINT),
+            "release must free the claimed interaction point"
+        );
+
+        // ...and the driver no longer ticks it. A still-live Eat controller would
+        // re-claim POINT and a routing family would re-insert an `AgentTarget3d`
+        // on the now agent-less actor every tick; neither may happen.
+        world.run_system_once(drive_actor_packages).unwrap();
+        assert!(
+            !world
+                .resource::<PackageInteractionOccupancy>()
+                .0
+                .contains(&POINT),
+            "a torn-down package must not re-claim its interaction point"
+        );
+        assert!(
+            world.get::<AgentTarget3d>(entity).is_none(),
+            "a torn-down package must not re-route the released actor"
+        );
     }
 
     /// Follow (#198) routes toward its *leader* through the nav seam, sampling

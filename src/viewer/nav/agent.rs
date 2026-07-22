@@ -1069,7 +1069,7 @@ fn nav_fall_guard_system(world: &mut World) {
         // this guard exists to end a runaway descent, not to destroy an NPC
         // the world/actor slice owns. A `tna` capsule still despawns whole.
         if world.get::<actor_binding::NavBoundActor>(entity).is_some() {
-            actor_binding::release_bound_actor(world, entity);
+            release_bound_actor(world, entity);
         } else if let Ok(entity) = world.get_entity_mut(entity) {
             entity.despawn();
         }
@@ -2350,6 +2350,112 @@ fn remove_agent_components(entity: &mut EntityWorldMut<'_>) {
     )>();
     // Any traversal in flight belongs to the agent, not the actor.
     entity.remove::<(DoorTraversal, MergeTraversal, PendingMergeRepath)>();
+    // Nav-owned per-agent AI-facing state (door policy + facing ownership)
+    // belongs to the agent too: a released actor opens doors and steers its own
+    // facing again.
+    entity.remove::<(AgentRefusesDoors, actor_binding::FacingAuthority)>();
+}
+
+// ---------------------------------------------------------------------
+// Bound-actor release contract (nav-owned; issues: package leak + layering)
+// ---------------------------------------------------------------------
+
+/// Nav-owned teardown hooks other slices register so
+/// [`actor_binding::release_bound_actor`] can dismantle their per-actor state
+/// (e.g. the AI slice's running package controller and any interaction point it
+/// claimed) when nav releases a bound actor via the #164 fall guard or `tna
+/// despawn`. Nav owns and invokes the contract; the AI slice satisfies it -- so
+/// nav never imports a concrete AI type, and a released actor can no longer be
+/// ticked by an AI system on an agent it no longer has. Empty (and free) until a
+/// slice registers a hook.
+/// A single registered bound-actor teardown callback.
+type BoundActorReleaseHook = Box<dyn Fn(&mut World, Entity) + Send + Sync>;
+
+#[derive(Resource, Default)]
+pub(crate) struct BoundActorReleaseHooks(Vec<BoundActorReleaseHook>);
+
+impl BoundActorReleaseHooks {
+    fn push(&mut self, hook: impl Fn(&mut World, Entity) + Send + Sync + 'static) {
+        self.0.push(Box::new(hook));
+    }
+}
+
+/// Registers a teardown `hook` invoked (in registration order) by
+/// [`actor_binding::release_bound_actor`] for the entity being released. The
+/// nav-owned inverse of an AI slice reaching into nav's release path: the AI
+/// plugin calls this on build (via `world_mut()`), so releasing a bound actor
+/// tears its package controller and occupancy down without nav ever naming an
+/// AI type. Takes `&mut World` (not `&mut App`) so tests can register the same
+/// hook against a bare world.
+pub(crate) fn register_bound_actor_release_hook(
+    world: &mut World,
+    hook: impl Fn(&mut World, Entity) + Send + Sync + 'static,
+) {
+    world
+        .get_resource_or_insert_with(BoundActorReleaseHooks::default)
+        .push(hook);
+}
+
+/// Runs every registered release hook against `entity`. Takes the resource out
+/// of the world while invoking so each hook receives `&mut World` without
+/// aliasing the resource; a no-op when no slice has registered a hook.
+fn run_bound_actor_release_hooks(world: &mut World, entity: Entity) {
+    let Some(hooks) = world.remove_resource::<BoundActorReleaseHooks>() else {
+        return;
+    };
+    for hook in &hooks.0 {
+        hook(world, entity);
+    }
+    world.insert_resource(hooks);
+}
+
+/// The bound-actor release entry point delegated to by the #164 fall guard and
+/// `tna despawn`: strips the nav agent set and runs every registered teardown
+/// hook. Re-exported at `pub(crate)` so the AI slice can exercise the full
+/// release contract (including its own hook) in tests.
+pub(crate) fn release_bound_actor(world: &mut World, entity: Entity) {
+    actor_binding::release_bound_actor(world, entity);
+}
+
+/// Nav-owned marker set on a bound actor whose active AI package must not open
+/// doors (Sandbox/Wander, #198 -- OpenMW's `AiWander` never calls
+/// `openDoors()`). Nav reads only this marker at the door-open seam; the AI
+/// slice sets it via [`set_agent_refuses_doors`], so nav no longer imports an
+/// AI type to learn a package's door policy. Absent == opens doors normally
+/// (every `tna`-driven agent and every door-opening family).
+#[derive(Component, Default)]
+pub(crate) struct AgentRefusesDoors;
+
+/// Sets or clears the nav-owned [`AgentRefusesDoors`] marker on `entity`. The AI
+/// package adapter calls this when it starts/stops a family, passing
+/// `!family.opens_doors()`; nav never learns the family type itself.
+pub(crate) fn set_agent_refuses_doors(world: &mut World, entity: Entity, refuses: bool) {
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    if refuses {
+        entity.insert(AgentRefusesDoors);
+    } else {
+        entity.remove::<AgentRefusesDoors>();
+    }
+}
+
+/// Sets a bound actor's facing authority (rotation double-writer contract). When
+/// `pose_authored` is true, the nav-derived facing writer
+/// ([`actor_binding::face_bound_actors`]) yields, so the AI adapter's authored
+/// idle-marker yaw is the only rotation written that frame; false hands facing
+/// back to navigation. The AI adapter sets it; nav reads only its own component
+/// -- so the two rotation writers can no longer race across a Stop/arrival
+/// transition (pose takes precedence over a still-decaying desired velocity).
+pub(crate) fn set_facing_authority(world: &mut World, entity: Entity, pose_authored: bool) {
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    entity.insert(if pose_authored {
+        actor_binding::FacingAuthority::PoseAuthored
+    } else {
+        actor_binding::FacingAuthority::NavDerived
+    });
 }
 
 /// `tna bind [<index>] <actor-reference-formid>` (issue #188): gives an
@@ -2823,7 +2929,7 @@ fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandRes
         .get::<actor_binding::NavBoundActor>(agent_entity)
         .is_some();
     if bound {
-        actor_binding::release_bound_actor(world, agent_entity);
+        release_bound_actor(world, agent_entity);
     } else if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
@@ -3661,13 +3767,13 @@ fn request_door_open(world: &mut World, agent_entity: Entity, door_form_id: u32)
 }
 
 /// Whether the active AI package on `agent_entity` refuses to open doors --
-/// true only for the Sandbox/Wander family (`PackageFamily::opens_doors`).
-/// Actors with no running package (the common `tna`-driven agent) open doors as
-/// before.
+/// true only when the AI slice has flagged this agent with [`AgentRefusesDoors`]
+/// (its Sandbox/Wander family; see `PackageFamily::opens_doors`). Reads a
+/// nav-owned marker the AI slice sets, not an AI type -- so nav does not depend
+/// on `ai`. Actors with no running package (the common `tna`-driven agent) are
+/// unflagged and open doors as before.
 fn agent_family_refuses_doors(world: &World, agent_entity: Entity) -> bool {
-    world
-        .get::<crate::viewer::ai::family_runtime::ActorPackageController>(agent_entity)
-        .is_some_and(|controller| !controller.driver.family().opens_doors())
+    world.get::<AgentRefusesDoors>(agent_entity).is_some()
 }
 
 /// Drives the door-link lifecycle for every currently-spawned agent:
@@ -4712,6 +4818,39 @@ mod tests {
         world.init_resource::<NavAgentLedger>();
         world.init_resource::<PendingPlayerSwapDoor>();
         world
+    }
+
+    /// **Wander-no-open-doors (#198), reproduced through the nav-owned flag.**
+    /// The door-open seam (`request_door_open`) refuses to open doors for an
+    /// actor whose active package must not (Sandbox/Wander) purely by reading the
+    /// nav-owned [`AgentRefusesDoors`] marker -- it no longer reaches up into an
+    /// AI type. The AI slice SETS the marker (`set_agent_refuses_doors` with
+    /// `!family.opens_doors()`); nav reads only its own component here. An
+    /// unflagged agent (every `tna`-driven agent and every door-opening family)
+    /// opens doors exactly as before.
+    #[test]
+    fn agent_family_refuses_doors_reads_the_nav_owned_flag() {
+        let mut world = World::new();
+        let agent = world.spawn_empty().id();
+
+        // Unflagged: opens doors (the common case, and every door-opening family).
+        assert!(!agent_family_refuses_doors(&world, agent));
+
+        // The AI slice flags a Wander/Sandbox actor (`!opens_doors()`).
+        set_agent_refuses_doors(&mut world, agent, true);
+        assert!(
+            world.get::<AgentRefusesDoors>(agent).is_some(),
+            "the setter installs the nav-owned marker"
+        );
+        assert!(
+            agent_family_refuses_doors(&world, agent),
+            "a flagged agent refuses to open doors"
+        );
+
+        // Package stop / release clears it: the actor opens doors again.
+        set_agent_refuses_doors(&mut world, agent, false);
+        assert!(world.get::<AgentRefusesDoors>(agent).is_none());
+        assert!(!agent_family_refuses_doors(&world, agent));
     }
 
     /// A permissive `boxddd` collision filter/shape pairing scoped to these
