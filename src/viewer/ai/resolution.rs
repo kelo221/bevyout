@@ -637,7 +637,10 @@ mod tests {
         ]);
         let points = linked_reference_chain(&context, 0xA);
         assert_eq!(
-            points.iter().map(|point| point.position).collect::<Vec<_>>(),
+            points
+                .iter()
+                .map(|point| point.position)
+                .collect::<Vec<_>>(),
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
         );
     }
@@ -650,11 +653,8 @@ mod tests {
 
         // A real first marker whose own link points at a FormID the context
         // does not know about: one waypoint, then a clean stop.
-        let dangling_context = context_with(vec![linked_marker(
-            0x10,
-            [5.0, 5.0, 5.0],
-            Some(0xDEAD),
-        )]);
+        let dangling_context =
+            context_with(vec![linked_marker(0x10, [5.0, 5.0, 5.0], Some(0xDEAD))]);
         let points = linked_reference_chain(&dangling_context, 0x10);
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].position, [5.0, 5.0, 5.0]);

@@ -1891,7 +1891,11 @@ fn synthetic_placement(
 /// `PackageLocationInput` is `pub(crate)` to `vsa::prepare`, not reachable
 /// by name from this module, so this goes through RON like
 /// `synthetic_placement` above.
-fn package_with_location(form_id: u32, package_type: u8, location_type: u32) -> crate::vsa::PreparedPackageEntry {
+fn package_with_location(
+    form_id: u32,
+    package_type: u8,
+    location_type: u32,
+) -> crate::vsa::PreparedPackageEntry {
     let ron = format!(
         "(
             form_id: {form_id},
