@@ -921,6 +921,15 @@ struct BevyoutWorld {
     pf_driver: Option<ai_families::FamilyDriver>,
     pf_markers: Vec<[f32; 3]>,
     pf_step: Option<ai_families::FamilyStep>,
+
+    // -- ai_follow_sandbox.feature (issue #198) --
+    // The follow leader's current position (the moving target), the roam
+    // centre + radius a sandbox is bounded by, and any door the route is
+    // reported blocked on -- all fed into the pure driver via observations.
+    fs_leader: Option<[f32; 3]>,
+    fs_roam_center: [f32; 3],
+    fs_roam_radius: f32,
+    fs_blocking_door: Option<u32>,
 }
 
 fn find_placement<'a>(
@@ -12248,11 +12257,7 @@ fn pf_driver(world: &mut BevyoutWorld) -> &mut ai_families::FamilyDriver {
 }
 
 fn pf_tick(world: &mut BevyoutWorld, position: [f32; 3], nav_reached: bool) {
-    let observation = ai_families::FamilyObservation {
-        actor_position: position,
-        nav_reached,
-        route_failed: false,
-    };
+    let observation = ai_families::FamilyObservation::new(position, nav_reached, false);
     let step = pf_driver(world).tick(&observation, 0.1);
     world.pf_step = Some(step);
 }
@@ -12420,4 +12425,144 @@ async fn then_releases_point(world: &mut BevyoutWorld, _point_id: String) {
     // `when_sleep_preempted` performed and asserted the release; confirm the
     // driver no longer holds the claim.
     assert_eq!(pf_driver(world).occupied_point(), None);
+}
+
+// ---------------------------------------------------------------------
+// ai_follow_sandbox.feature (issue #198 Follow + Sandbox) -- appended step
+// section. Drives the same pure `ai_families::FamilyDriver`, feeding the
+// dynamic follow leader / blocking door / roam bounds through observations.
+// Observable outcomes only (requests, signals, named door), never internal
+// bookkeeping.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a follow family with band ([0-9.]+) to ([0-9.]+) and tolerance ([0-9.]+)$")]
+async fn given_follow_family(
+    world: &mut BevyoutWorld,
+    band_min: String,
+    band_max: String,
+    tolerance: String,
+) {
+    let band_min: f32 = band_min.parse().expect("band min");
+    let band_max: f32 = band_max.parse().expect("band max");
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_driver = Some(ai_families::FamilyDriver::follow(
+        band_min, band_max, tolerance,
+    ));
+    world.fs_leader = None;
+    world.fs_blocking_door = None;
+}
+
+#[when(regex = r"^the leader is at \(([^)]*)\)$")]
+async fn when_leader_at(world: &mut BevyoutWorld, point: String) {
+    world.fs_leader = Some(pf_parse_point(&point));
+    world.fs_blocking_door = None;
+}
+
+#[when(regex = r"^the leader is lost$")]
+async fn when_leader_lost(world: &mut BevyoutWorld) {
+    world.fs_leader = None;
+}
+
+#[when(regex = r"^the route is blocked by locked door ([0-9a-fA-F]+)$")]
+async fn when_route_blocked(world: &mut BevyoutWorld, door: String) {
+    world.fs_blocking_door = Some(u32::from_str_radix(&door, 16).expect("door form id"));
+}
+
+#[when(regex = r"^the follower at \(([^)]*)\) ticks$")]
+async fn when_follower_ticks(world: &mut BevyoutWorld, actor: String) {
+    let actor = pf_parse_point(&actor);
+    // A blocking door surfaces alongside the nav route failure that produced it.
+    let route_failed = world.fs_blocking_door.is_some();
+    let observation = ai_families::FamilyObservation {
+        target_position: world.fs_leader,
+        blocking_door: world.fs_blocking_door,
+        ..ai_families::FamilyObservation::new(actor, false, route_failed)
+    };
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[then(regex = r"^the follow family keeps closing without stopping$")]
+async fn then_follow_keeps_closing(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_ne!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Continue);
+    assert_eq!(pf_driver(world).step_label(), "routing");
+}
+
+#[then(regex = r"^the follow family stops routing$")]
+async fn then_follow_stops(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Stop)
+    );
+    assert_eq!(pf_driver(world).step_label(), "idling");
+}
+
+#[then(regex = r"^the follow family names blocking door ([0-9a-fA-F]+) and abandons$")]
+async fn then_follow_names_door(world: &mut BevyoutWorld, door: String) {
+    let door = u32::from_str_radix(&door, 16).expect("door form id");
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Fail);
+    assert_eq!(pf_driver(world).blocked_door(), Some(door));
+    assert_eq!(pf_driver(world).step_label(), "blocked");
+}
+
+#[then(regex = r"^the follow family stops routing and keeps the package running$")]
+async fn then_follow_target_loss(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Continue);
+}
+
+#[given(regex = r"^a sandbox family roaming within ([0-9.]+) of \(([^)]*)\) seeded ([0-9]+)$")]
+async fn given_sandbox_family(
+    world: &mut BevyoutWorld,
+    radius: String,
+    center: String,
+    seed: String,
+) {
+    let radius: f32 = radius.parse().expect("radius");
+    let center = pf_parse_point(&center);
+    let seed: u64 = seed.parse().expect("seed");
+    world.fs_roam_center = center;
+    world.fs_roam_radius = radius;
+    world.pf_driver = Some(ai_families::FamilyDriver::wander(
+        center, radius, 2.0, seed, 0.5,
+    ));
+}
+
+#[when(regex = r"^the sandbox actor ticks at \(([^)]*)\)$")]
+async fn when_sandbox_ticks(world: &mut BevyoutWorld, actor: String) {
+    let actor = pf_parse_point(&actor);
+    let observation = ai_families::FamilyObservation::new(actor, false, false);
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[when(regex = r"^the sandbox actor arrives at its roam point$")]
+async fn when_sandbox_arrives(world: &mut BevyoutWorld) {
+    let point = pf_driver(world)
+        .current_target()
+        .expect("a roam point has been drawn");
+    let observation = ai_families::FamilyObservation::new(point, true, false);
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[then(regex = r"^the sandbox family routes within the roam radius$")]
+async fn then_sandbox_routes_within_radius(world: &mut BevyoutWorld) {
+    let center = world.fs_roam_center;
+    let radius = world.fs_roam_radius;
+    let Some(ai_families::FamilyRequest::Route(point)) = pf_step(world).request else {
+        panic!("expected a roam route request");
+    };
+    let dx = point[0] - center[0];
+    let dz = point[2] - center[2];
+    assert!(
+        (dx * dx + dz * dz).sqrt() <= radius + 1e-3,
+        "roam point {point:?} escaped the radius"
+    );
+    assert_eq!(point[1], center[1], "roam stays on the ground plane");
 }
