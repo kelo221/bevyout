@@ -243,11 +243,7 @@ fn convert_native_actor(
     for (path, key, scene) in decoded.iter().filter(|(_, key, _)| {
         head_parts.contains(key) && head_anchor.is_none_or(|anchor| key != anchor)
     }) {
-        let attachment = if head_anim_parts.contains(key) {
-            "HeadAnims"
-        } else {
-            "Bip01 Head"
-        };
+        let attachment = head_part_attachment(head_anim_parts.contains(key));
         if let Err(error) = nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
             warnings.push(format!(
                 "actor head visual {} could not bind to the shared skeleton: {}",
@@ -315,6 +311,22 @@ fn actor_helper_geometry(path: &str) -> bool {
     ["blowaway", "gore", "gib", "meatcap", "meat_cap"]
         .iter()
         .any(|marker| key.contains(marker))
+}
+
+/// Skeleton node a head accessory parents under during actor assembly (#160,
+/// #206). FO3 hair (a `head_anim_part`) is authored directly in the animated
+/// `HeadAnims` frame, so it must ride the `HeadAnims` skeleton node — that is
+/// the node the idle KF's `HeadAnims` target binds against at runtime. Every
+/// other head part (eyes, mouth, teeth, tongue) rides the static `Bip01 Head`
+/// bone. Attaching hair to `Bip01 Head` instead would leave the assembled
+/// actor without a `HeadAnims`-anchored accessory and the animation binding
+/// reporting a missing required target.
+fn head_part_attachment(is_head_anim_part: bool) -> &'static str {
+    if is_head_anim_part {
+        "HeadAnims"
+    } else {
+        "Bip01 Head"
+    }
 }
 
 fn native_error_stage(message: &str) -> &'static str {
@@ -416,6 +428,134 @@ mod tests {
             root_transform_policy:
                 super::super::super::assets::RootTransformPolicy::PreserveReviewRequired,
         }
+    }
+
+    use nif::fo3::{Scene, SceneMesh, SceneNode, Transform, merge_actor_scene_attached};
+
+    fn identity_transform() -> Transform {
+        Transform {
+            translation: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+        }
+    }
+
+    fn bone(name: &str, children: Vec<usize>) -> SceneNode {
+        SceneNode {
+            source_block: 0,
+            name: name.to_owned(),
+            transform: identity_transform(),
+            children,
+            mesh: None,
+            skin: None,
+        }
+    }
+
+    fn mesh_node(name: &str) -> SceneNode {
+        SceneNode {
+            source_block: 0,
+            name: name.to_owned(),
+            transform: identity_transform(),
+            children: Vec::new(),
+            mesh: Some(SceneMesh {
+                name: name.to_owned(),
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                normals: Vec::new(),
+                tangents: Vec::new(),
+                colors: Vec::new(),
+                tex_coords: Vec::new(),
+                joints: Vec::new(),
+                weights: Vec::new(),
+                indices: vec![0, 1, 2],
+                material: None,
+            }),
+            skin: None,
+        }
+    }
+
+    fn empty_scene() -> Scene {
+        Scene {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            materials: Vec::new(),
+            skins: Vec::new(),
+            issues: Vec::new(),
+            statistics: Default::default(),
+            animations: Vec::new(),
+            animation_sound_cues: Vec::new(),
+        }
+    }
+
+    /// A minimal FO3-shaped skeleton carrying the two head attachment frames
+    /// the assembler targets: the static `Bip01 Head` bone and the animated
+    /// `HeadAnims` node.
+    fn skeleton_with_head_frames() -> Scene {
+        let mut scene = empty_scene();
+        // Bip01(0) -> Bip01 Head(1) -> HeadAnims(2)
+        scene.nodes.push(bone("Bip01", vec![1]));
+        scene.nodes.push(bone("Bip01 Head", vec![2]));
+        scene.nodes.push(bone("HeadAnims", Vec::new()));
+        scene.roots.push(0);
+        scene
+    }
+
+    /// A standalone hair part: an independent root node (head-local space)
+    /// carrying the visible hair mesh, exactly the shape FO3 hair NIFs decode
+    /// to before assembly.
+    fn hair_part() -> Scene {
+        let mut scene = empty_scene();
+        scene.nodes.push(bone("HairRaiderRoot", vec![1]));
+        scene.nodes.push(mesh_node("hairraider"));
+        scene.roots.push(0);
+        scene
+    }
+
+    fn descends_from(scene: &Scene, ancestor: usize, target: usize) -> bool {
+        if ancestor == target {
+            return true;
+        }
+        scene.nodes[ancestor]
+            .children
+            .iter()
+            .any(|&child| descends_from(scene, child, target))
+    }
+
+    // #206: a visible hair head_anim_part selects the `HeadAnims` attachment
+    // frame; every other head part rides `Bip01 Head`.
+    #[test]
+    fn head_anim_parts_attach_to_headanims_others_to_bip01_head() {
+        assert_eq!(head_part_attachment(true), "HeadAnims");
+        assert_eq!(head_part_attachment(false), "Bip01 Head");
+    }
+
+    // #206: merging a hair part with the `HeadAnims` attachment the assembler
+    // selects yields a `HeadAnims` node in the output with the hair mesh
+    // parented beneath it — the node the idle KF's required `HeadAnims` target
+    // binds against at runtime.
+    #[test]
+    fn hair_merged_with_headanims_is_parented_under_a_headanims_node() {
+        let mut actor = skeleton_with_head_frames();
+        let hair = hair_part();
+        merge_actor_scene_attached(&mut actor, &hair, head_part_attachment(true)).unwrap();
+
+        let head_anims = actor
+            .nodes
+            .iter()
+            .position(|node| node.name == "HeadAnims" && node.mesh.is_none())
+            .expect("assembled actor must retain a HeadAnims node");
+        let hair_mesh = actor
+            .nodes
+            .iter()
+            .position(|node| {
+                node.mesh
+                    .as_ref()
+                    .is_some_and(|mesh| mesh.name == "hairraider")
+            })
+            .expect("hair mesh must survive the merge");
+        assert!(
+            descends_from(&actor, head_anims, hair_mesh),
+            "hair mesh must be parented beneath the HeadAnims node"
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ async function makePaths() {
     codex: join(root, "codex", "config.toml"),
     desktop: join(root, "claude", "claude_desktop_config.json"),
     code: join(root, ".mcp.json"),
+    opencode: join(root, "opencode", "opencode.jsonc"),
   };
 }
 
@@ -37,11 +38,12 @@ describe("bevyout agent installer", () => {
   test("creates all target configurations with the expected server shapes", async () => {
     const paths = await makePaths();
     const results = await installTargets({
-      targets: ["codex", "claude-desktop", "claude-code"],
+      targets: ["codex", "claude-desktop", "claude-code", "opencode"],
       repoRoot: paths.root,
       codexPath: paths.codex,
       claudeDesktopPath: paths.desktop,
       claudeCodePath: paths.code,
+      opencodePath: paths.opencode,
       now: new Date("2026-07-13T19:00:00.000Z"),
     });
 
@@ -67,6 +69,15 @@ describe("bevyout agent installer", () => {
     expect(code.mcpServers[SERVER_NAME]).toEqual({
       command: "bun",
       args: ["run", SERVER_RELATIVE_PATH],
+    });
+
+    const opencode = JSON.parse(await readFile(paths.opencode, "utf8")) as {
+      mcp: Record<string, Record<string, unknown>>;
+    };
+    expect(opencode.mcp[SERVER_NAME]).toEqual({
+      type: "local",
+      command: ["bun", "run", join(paths.root, SERVER_RELATIVE_PATH)],
+      enabled: true,
     });
   });
 
@@ -95,18 +106,28 @@ describe("bevyout agent installer", () => {
         },
       }),
     );
+    await writeFixture(
+      paths.opencode,
+      JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        mcp: {
+          other: { type: "local", command: ["other"] },
+        },
+      }),
+    );
 
     const results = await installTargets({
-      targets: ["codex", "claude-desktop"],
+      targets: ["codex", "claude-desktop", "opencode"],
       repoRoot: paths.root,
       codexPath: paths.codex,
       claudeDesktopPath: paths.desktop,
+      opencodePath: paths.opencode,
       now: new Date("2026-07-13T19:01:00.000Z"),
     });
 
     expect(results.every((result) => result.backupPath !== undefined)).toBe(true);
     for (const result of results) {
-      expect(await readFile(result.backupPath!, "utf8")).toContain("old");
+      expect(await readFile(result.backupPath!, "utf8")).toContain("other");
     }
 
     const codex = Bun.TOML.parse(await readFile(paths.codex, "utf8")) as {
@@ -122,6 +143,18 @@ describe("bevyout agent installer", () => {
     expect(desktop.preferences.keep).toBe(true);
     expect(desktop.mcpServers.other.command).toBe("other");
     expect(desktop.mcpServers[SERVER_NAME].env).toEqual({ KEEP: "yes" });
+
+    const opencode = JSON.parse(await readFile(paths.opencode, "utf8")) as {
+      $schema: string;
+      mcp: Record<string, Record<string, unknown>>;
+    };
+    expect(opencode.$schema).toBe("https://opencode.ai/config.json");
+    expect(opencode.mcp.other).toEqual({ type: "local", command: ["other"] });
+    expect(opencode.mcp[SERVER_NAME]).toEqual({
+      type: "local",
+      command: ["bun", "run", join(paths.root, SERVER_RELATIVE_PATH)],
+      enabled: true,
+    });
   });
 
   test("is idempotent and does not create a second backup", async () => {
@@ -172,11 +205,12 @@ describe("bevyout agent installer", () => {
   test("dry-run reports changes without creating files", async () => {
     const paths = await makePaths();
     const results = await installTargets({
-      targets: ["codex", "claude-desktop", "claude-code"],
+      targets: ["codex", "claude-desktop", "claude-code", "opencode"],
       repoRoot: paths.root,
       codexPath: paths.codex,
       claudeDesktopPath: paths.desktop,
       claudeCodePath: paths.code,
+      opencodePath: paths.opencode,
       dryRun: true,
     });
 
@@ -184,17 +218,23 @@ describe("bevyout agent installer", () => {
     await expect(readFile(paths.codex)).rejects.toThrow();
     await expect(readFile(paths.desktop)).rejects.toThrow();
     await expect(readFile(paths.code)).rejects.toThrow();
+    await expect(readFile(paths.opencode)).rejects.toThrow();
   });
 
   test("parses target flags and defaults to all targets", () => {
     expect(parseInstallArgs([])).toEqual({
-      targets: ["codex", "claude-desktop", "claude-code"],
+      targets: ["codex", "claude-desktop", "claude-code", "opencode"],
       dryRun: false,
       help: false,
     });
     expect(parseInstallArgs(["--claude-code", "--dry-run"])).toEqual({
       targets: ["claude-code"],
       dryRun: true,
+      help: false,
+    });
+    expect(parseInstallArgs(["--opencode"])).toEqual({
+      targets: ["opencode"],
+      dryRun: false,
       help: false,
     });
   });

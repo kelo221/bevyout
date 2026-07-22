@@ -20,3 +20,4 @@ tools/bevyout-mcp/node_modules/**
 __pycache__/
 /NifConverter
 /_.bevyout
+/tools/ktx-software
