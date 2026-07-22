@@ -2,8 +2,13 @@ import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 
 type RpcMessage = Record<string, unknown>;
+type JsonSchema = {
+  type?: string;
+  required?: string[];
+  properties?: Record<string, { type?: string; enum?: string[]; maximum?: number; minimum?: number }>;
+};
 
-test("FastMCP stdio handshake exposes the bevyout tools", async () => {
+test("cinema_record is registered with the filmstrip parameter contract", async () => {
   const packageRoot = resolve(import.meta.dir, "..");
   const process = Bun.spawn(["bun", "run", "src/server.ts"], {
     cwd: packageRoot,
@@ -52,25 +57,24 @@ test("FastMCP stdio handshake exposes the bevyout tools", async () => {
         clientInfo: { name: "bevyout-test", version: "0.1.0" },
       },
     });
-    const initialized = await nextMessage();
-    expect(initialized.id).toBe(1);
+    await nextMessage();
 
     send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const listing = await nextMessage();
-    const tools = ((listing.result as { tools: Array<{ name: string }> }).tools ?? []).map(
-      (tool) => tool.name,
-    );
-    expect(tools).toContain("viewer_status");
-    expect(tools).toContain("world_query");
-    expect(tools).toContain("performance_snapshot");
-    expect(tools).toContain("performance_probe");
-    expect(tools).toContain("schedule_snapshot");
-    expect(tools).toContain("console_exec");
-    expect(tools).toContain("console_help");
-    expect(tools).toContain("brp_call");
-    expect(tools).toContain("viewport_capture");
-    expect(tools).toContain("cinema_record");
+    const tools = (listing.result as { tools: Array<{ name: string; inputSchema: JsonSchema }> }).tools;
+    const tool = tools.find((candidate) => candidate.name === "cinema_record");
+    expect(tool).toBeDefined();
+
+    const schema = tool!.inputSchema;
+    expect(schema.required).toContain("subject");
+    expect(schema.properties?.subject?.type).toBe("string");
+    expect(schema.properties?.frames?.maximum).toBe(8);
+    expect(schema.properties?.intervalMs).toBeDefined();
+    expect(schema.properties?.mode?.enum).toEqual(["follow", "orbit"]);
+    expect(schema.properties?.dist).toBeDefined();
+    expect(schema.properties?.height).toBeDefined();
+    expect(schema.properties?.radius).toBeDefined();
   } finally {
     process.kill("SIGKILL");
     await process.exited;

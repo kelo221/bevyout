@@ -510,25 +510,122 @@ server.addTool({
   },
 });
 
+/**
+ * Requests one viewport screenshot over the bridge, waits for the temporary
+ * PNG, and returns its bytes. macOS returns a 0-byte file when the game
+ * window is occluded or backgrounded; callers must check `empty` rather than
+ * treat every capture as a valid image.
+ */
+async function captureViewport(client: BrpClient): Promise<{ buffer: Buffer; empty: boolean }> {
+  const token = crypto.randomUUID();
+  const request = (await client.call("bevyout.capture_viewport", { token })) as { path?: string };
+  if (!request.path) throw new Error("Bevy did not return a screenshot path");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && !(await Bun.file(request.path).exists())) await wait(100);
+  if (!(await Bun.file(request.path).exists())) throw new Error("Timed out waiting for viewport PNG");
+  const buffer = Buffer.from(await Bun.file(request.path).arrayBuffer());
+  await rm(request.path, { force: true });
+  return { buffer, empty: buffer.length === 0 };
+}
+
 server.addTool({
   name: "viewport_capture",
   description: "Capture the visible primary Bevy window and return it as MCP image content.",
   execute: async () => {
     const client = viewer?.client ?? clientFor();
-    const token = crypto.randomUUID();
-    const request = (await client.call("bevyout.capture_viewport", { token })) as { path?: string };
-    if (!request.path) throw new Error("Bevy did not return a screenshot path");
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline && !(await Bun.file(request.path).exists())) await wait(100);
-    if (!(await Bun.file(request.path).exists())) throw new Error("Timed out waiting for viewport PNG");
-    const buffer = Buffer.from(await Bun.file(request.path).arrayBuffer());
-    await rm(request.path, { force: true });
+    const { buffer, empty } = await captureViewport(client);
+    if (empty) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Viewport captured an empty (0-byte) frame; the game window is likely not foreground/visible (common on macOS when occluded).",
+          },
+        ],
+      };
+    }
     return {
       content: [
         { type: "text", text: "Viewport captured; the game window must remain visible to the renderer." },
         await imageContent({ buffer }),
       ],
     };
+  },
+});
+
+/** Builds the `cam` console line that engages the cinema camera on a subject. */
+function cinemaEngageLine(
+  mode: "follow" | "orbit",
+  subject: string,
+  dist?: number,
+  height?: number,
+  radius?: number,
+): string {
+  if (mode === "orbit") {
+    return `cam orbit ${subject} ${radius ?? 3}`;
+  }
+  if (dist === undefined && height === undefined) return `cam follow ${subject}`;
+  return `cam follow ${subject} ${dist ?? 4} ${height ?? 2}`;
+}
+
+server.addTool({
+  name: "cinema_record",
+  description:
+    "Engage the cinema debug camera (issue #209) on a subject FormID and capture a short filmstrip of viewport frames in one call, so an agent can assess motion instead of reasoning from a single still.",
+  parameters: z.object({
+    subject: z.string().min(1).describe("FormID selector to track, e.g. 0005cf10 or 0x0005cf10"),
+    frames: z.number().int().min(1).max(8).optional().describe("Number of frames to capture (default 4, max 8)"),
+    intervalMs: z.number().int().min(50).max(10_000).optional().describe("Spacing between frames in ms (default 500)"),
+    mode: z.enum(["follow", "orbit"]).optional().describe("Cinema camera mode (default follow)"),
+    dist: z.number().optional().describe("Follow distance (follow mode only)"),
+    height: z.number().optional().describe("Follow height (follow mode only)"),
+    radius: z.number().optional().describe("Orbit radius (orbit mode only)"),
+  }),
+  execute: async ({ subject, frames, intervalMs, mode, dist, height, radius }) => {
+    const effectiveFrames = frames ?? 4;
+    const effectiveIntervalMs = intervalMs ?? 500;
+    const effectiveMode = mode ?? "follow";
+    const client = viewer?.client ?? clientFor();
+
+    const engageLine = cinemaEngageLine(effectiveMode, subject, dist, height, radius);
+    const engageResult = await client.call("bevyout.console.exec", {
+      line: engageLine,
+      session: consoleSessionId,
+    });
+
+    const content: Array<{ type: "text"; text: string } | Awaited<ReturnType<typeof imageContent>>> = [
+      { type: "text", text: `Engaged '${engageLine}' -> ${JSON.stringify(engageResult)}` },
+    ];
+
+    for (let index = 0; index < effectiveFrames; index += 1) {
+      const { buffer, empty } = await captureViewport(client);
+
+      let camStatus: Json = null;
+      let tnaStatus: Json = null;
+      try {
+        camStatus = await client.call("bevyout.console.exec", { line: "cam status", session: consoleSessionId });
+      } catch {
+        // Best-effort: status is a bonus alongside the frame, not required.
+      }
+      try {
+        tnaStatus = await client.call("bevyout.console.exec", { line: "tna status", session: consoleSessionId });
+      } catch {
+        // tna may have no bound agent; that is not a reason to fail the capture.
+      }
+
+      const emptyNote = empty ? " [EMPTY/black frame: game window not foreground/visible]" : "";
+      content.push({
+        type: "text",
+        text: `frame ${index + 1}/${effectiveFrames} t+${index * effectiveIntervalMs}ms${emptyNote} cam_status=${JSON.stringify(
+          camStatus,
+        )} tna_status=${JSON.stringify(tnaStatus)}`,
+      });
+      if (!empty) content.push(await imageContent({ buffer }));
+
+      if (index < effectiveFrames - 1) await wait(effectiveIntervalMs);
+    }
+
+    return { content };
   },
 });
 
