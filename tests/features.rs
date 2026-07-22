@@ -406,6 +406,9 @@ mod recipe_policy;
 use assets::AssetConversion;
 use bevyout_core::actor;
 use bevyout_core::actor_animation;
+use bevyout_core::disposition;
+use bevyout_core::faction;
+use bevyout_core::perception;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -855,6 +858,18 @@ struct BevyoutWorld {
     // -- pause_menu.feature --
     pause_menu: pause_menu::PauseMenuState,
     pause_menu_action: Option<Option<pause_menu::PauseMenuAction>>,
+
+    // -- faction_hostility.feature (issue #116) --
+    hostility_table: faction::FactionRelationTable,
+    hostility_observer: disposition::DispositionActor,
+    hostility_target: disposition::DispositionTarget,
+    hostility_result: Option<disposition::DispositionResult>,
+
+    // -- perception_awareness.feature (issue #116) --
+    perception_config: Option<perception::PerceptionConfig>,
+    perception_state: perception::AwarenessState,
+    perception_candidates: Vec<perception::PerceptionInputs>,
+    perception_last_event: Option<perception::AwarenessEvent>,
 }
 
 fn find_placement<'a>(
@@ -4946,6 +4961,7 @@ async fn given_faction_known(
                 male_title: Some(male_title),
                 female_title: Some(female_title),
             }],
+            ..Default::default()
         },
     );
 }
@@ -11359,4 +11375,333 @@ fn parse_pause_menu_option(label: &str) -> pause_menu::PauseMenuOption {
         "Quit" => pause_menu::PauseMenuOption::Quit,
         other => panic!("unknown pause menu option {other:?}"),
     }
+}
+
+// ============================================================================
+// issue #116: faction disposition/hostility and target perception/awareness.
+// Pure-policy steps driving `bevyout_core::{faction, disposition, perception}`.
+// ============================================================================
+
+fn parse_faction_id(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16).expect("faction id must be hex")
+}
+
+fn parse_aggression(label: &str) -> disposition::Aggression {
+    match label {
+        "unaggressive" => disposition::Aggression::Unaggressive,
+        "aggressive" => disposition::Aggression::Aggressive,
+        "very_aggressive" => disposition::Aggression::VeryAggressive,
+        "frenzied" => disposition::Aggression::Frenzied,
+        other => panic!("unknown aggression {other:?}"),
+    }
+}
+
+fn register_known_faction(table: &mut faction::FactionRelationTable, id: u32) {
+    table
+        .factions
+        .entry(id)
+        .or_insert_with(|| faction::PreparedFaction {
+            form_id: id,
+            ..Default::default()
+        });
+}
+
+fn upsert_relation(
+    table: &mut faction::FactionRelationTable,
+    from: u32,
+    to: u32,
+    modifier: i32,
+    reaction: faction::GroupCombatReaction,
+) {
+    register_known_faction(table, to);
+    let entry = table
+        .factions
+        .entry(from)
+        .or_insert_with(|| faction::PreparedFaction {
+            form_id: from,
+            ..Default::default()
+        });
+    entry
+        .relations
+        .retain(|relation| relation.faction_form_id != to);
+    entry.relations.push(faction::FactionRelation {
+        faction_form_id: to,
+        modifier,
+        reaction,
+    });
+}
+
+fn observer_member(world: &mut BevyoutWorld, id: u32) {
+    world
+        .hostility_observer
+        .factions
+        .push(disposition::FactionMembership {
+            faction_form_id: id,
+            rank: 0,
+        });
+}
+
+#[given(regex = r#"^faction "(\w+)" and "(\w+)" are enemies$"#)]
+async fn given_factions_enemies(world: &mut BevyoutWorld, a: String, b: String) {
+    let (a, b) = (parse_faction_id(&a), parse_faction_id(&b));
+    upsert_relation(
+        &mut world.hostility_table,
+        a,
+        b,
+        -80,
+        faction::GroupCombatReaction::Enemy,
+    );
+    upsert_relation(
+        &mut world.hostility_table,
+        b,
+        a,
+        -80,
+        faction::GroupCombatReaction::Enemy,
+    );
+}
+
+#[given(regex = r#"^faction "(\w+)" and "(\w+)" are allies$"#)]
+async fn given_factions_allies(world: &mut BevyoutWorld, a: String, b: String) {
+    let (a, b) = (parse_faction_id(&a), parse_faction_id(&b));
+    upsert_relation(
+        &mut world.hostility_table,
+        a,
+        b,
+        50,
+        faction::GroupCombatReaction::Ally,
+    );
+    upsert_relation(
+        &mut world.hostility_table,
+        b,
+        a,
+        50,
+        faction::GroupCombatReaction::Ally,
+    );
+}
+
+#[given(
+    regex = r#"^faction "(\w+)" applies a disposition modifier (-?\d+) toward faction "(\w+)"$"#
+)]
+async fn given_faction_modifier(
+    world: &mut BevyoutWorld,
+    from: String,
+    modifier: String,
+    to: String,
+) {
+    let (from, to) = (parse_faction_id(&from), parse_faction_id(&to));
+    let modifier: i32 = modifier.parse().expect("modifier must be an integer");
+    upsert_relation(
+        &mut world.hostility_table,
+        from,
+        to,
+        modifier,
+        faction::GroupCombatReaction::Neutral,
+    );
+    register_known_faction(&mut world.hostility_table, from);
+}
+
+#[given(
+    regex = r#"^a hostility observer in faction "(\w+)" with base disposition (-?\d+) and aggression "(\w+)"$"#
+)]
+async fn given_observer_in_faction(
+    world: &mut BevyoutWorld,
+    faction_id: String,
+    base: String,
+    aggression: String,
+) {
+    let id = parse_faction_id(&faction_id);
+    register_known_faction(&mut world.hostility_table, id);
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+    observer_member(world, id);
+}
+
+#[given(
+    regex = r#"^a hostility observer in unknown faction "(\w+)" with base disposition (-?\d+) and aggression "(\w+)"$"#
+)]
+async fn given_observer_in_unknown_faction(
+    world: &mut BevyoutWorld,
+    faction_id: String,
+    base: String,
+    aggression: String,
+) {
+    // Deliberately does not register the faction in the table -> unresolved.
+    let id = parse_faction_id(&faction_id);
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+    observer_member(world, id);
+}
+
+#[given(regex = r#"^a hostility observer with base disposition (-?\d+) and aggression "(\w+)"$"#)]
+async fn given_observer_no_faction(world: &mut BevyoutWorld, base: String, aggression: String) {
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+}
+
+#[given(regex = r#"^the target is in faction "(\w+)"$"#)]
+async fn given_target_in_faction(world: &mut BevyoutWorld, faction_id: String) {
+    let id = parse_faction_id(&faction_id);
+    register_known_faction(&mut world.hostility_table, id);
+    world
+        .hostility_target
+        .factions
+        .push(disposition::FactionMembership {
+            faction_form_id: id,
+            rank: 0,
+        });
+}
+
+#[given(regex = r"^the target is the player$")]
+async fn given_target_is_player(world: &mut BevyoutWorld) {
+    world.hostility_target = disposition::DispositionTarget::default();
+}
+
+#[given(regex = r"^the target is the observer itself$")]
+async fn given_target_is_self(world: &mut BevyoutWorld) {
+    world.hostility_target.is_self = true;
+}
+
+#[when(regex = r"^hostility is resolved$")]
+async fn when_hostility_resolved(world: &mut BevyoutWorld) {
+    let thresholds = disposition::DispositionThresholds::default();
+    world.hostility_result = Some(disposition::resolve_disposition(
+        &world.hostility_observer,
+        &world.hostility_target,
+        &world.hostility_table,
+        &thresholds,
+    ));
+}
+
+#[then(regex = r#"^the hostility verdict is "(\w+)"$"#)]
+async fn then_hostility_verdict(world: &mut BevyoutWorld, expected: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.hostility.label(), expected);
+}
+
+#[then(regex = r#"^the deciding rule is "(\w+)"$"#)]
+async fn then_deciding_rule(world: &mut BevyoutWorld, expected: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.decided_by.label(), expected);
+}
+
+#[then(regex = r"^the resolved disposition is (-?\d+)$")]
+async fn then_resolved_disposition(world: &mut BevyoutWorld, expected: String) {
+    let expected: i32 = expected.parse().expect("disposition integer");
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.disposition, expected);
+}
+
+#[then(regex = r#"^a hostility diagnostic mentions "([^"]+)"$"#)]
+async fn then_hostility_diagnostic(world: &mut BevyoutWorld, needle: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert!(
+        result.diagnostics.iter().any(|d| d.contains(&needle)),
+        "no diagnostic mentioning {needle:?} in {:?}",
+        result.diagnostics
+    );
+}
+
+fn fast_perception_config() -> perception::PerceptionConfig {
+    perception::PerceptionConfig {
+        sight_range: 40.0,
+        view_cone_half_angle: std::f32::consts::FRAC_PI_2,
+        acquire_confidence: 0.5,
+        lose_confidence: 0.1,
+        gain_per_second: 1.0,
+        decay_per_second: 1.0,
+        forget_seconds: 2.0,
+    }
+}
+
+#[given(regex = r"^a perception observer$")]
+async fn given_perception_observer(world: &mut BevyoutWorld) {
+    world.perception_config = Some(fast_perception_config());
+    world.perception_state = perception::AwarenessState::default();
+    world.perception_candidates.clear();
+}
+
+#[given(regex = r"^a perception observer that has acquired the player$")]
+async fn given_perception_observer_acquired(world: &mut BevyoutWorld) {
+    world.perception_config = Some(fast_perception_config());
+    world.perception_state = perception::AwarenessState {
+        confidence: 1.0,
+        acquired: Some(perception::TargetId::player()),
+        ..Default::default()
+    };
+    world.perception_candidates.clear();
+}
+
+fn player_candidate(distance: f32, angle: f32, los: bool) -> perception::PerceptionInputs {
+    perception::PerceptionInputs {
+        target: perception::TargetId::player(),
+        position: [0.0, 0.0, -distance],
+        distance,
+        angle_to_target: angle,
+        has_line_of_sight: los,
+        detectable: true,
+    }
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres ahead in clear view$")]
+async fn given_player_ahead_clear(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, 0.0, true)];
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres ahead but occluded$")]
+async fn given_player_ahead_occluded(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, 0.0, false)];
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres behind in clear view$")]
+async fn given_player_behind_clear(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, std::f32::consts::PI, true)];
+}
+
+#[given(regex = r"^the target has disappeared$")]
+async fn given_target_disappeared(world: &mut BevyoutWorld) {
+    world.perception_candidates.clear();
+}
+
+#[when(regex = r"^perception advances for ([0-9.]+) seconds$")]
+async fn when_perception_advances(world: &mut BevyoutWorld, seconds: String) {
+    let seconds: f32 = seconds.parse().expect("seconds");
+    let config = world.perception_config.expect("configure observer first");
+    world.perception_last_event = Some(world.perception_state.update(
+        &world.perception_candidates,
+        &config,
+        seconds,
+    ));
+}
+
+#[when(regex = r"^the awareness state is serialized and reloaded$")]
+async fn when_awareness_round_trip(world: &mut BevyoutWorld) {
+    let text = ron::ser::to_string(&world.perception_state).expect("serialize awareness");
+    world.perception_state = ron::de::from_str(&text).expect("deserialize awareness");
+}
+
+#[then(regex = r"^the observer has acquired the player$")]
+async fn then_observer_acquired_player(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.perception_state.target(),
+        Some(perception::TargetId::player())
+    );
+}
+
+#[then(regex = r"^the observer has not acquired a target$")]
+async fn then_observer_not_acquired(world: &mut BevyoutWorld) {
+    assert!(!world.perception_state.is_aware());
+}
+
+#[then(regex = r"^the observer has lost its target$")]
+async fn then_observer_lost_target(world: &mut BevyoutWorld) {
+    assert!(!world.perception_state.is_aware());
+    assert_eq!(
+        world.perception_last_event,
+        Some(perception::AwarenessEvent::Lost(
+            perception::TargetId::player()
+        ))
+    );
 }

@@ -75,6 +75,7 @@ mod lighting;
 mod nav;
 mod nav_overlay;
 mod pause_menu;
+mod perception;
 mod performance_policy;
 mod ragdoll_lab;
 mod scene;

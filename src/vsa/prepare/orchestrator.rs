@@ -1530,7 +1530,25 @@ fn build_actor_catalog_inputs(
                     female_title: rank.female_title.clone(),
                 })
                 .collect();
-            (form_id, FactionInput { form_id, ranks })
+            let relations = faction
+                .relations
+                .iter()
+                .map(|relation| FactionRelationInput {
+                    faction_form_id: relation.faction_form_id,
+                    modifier: relation.modifier,
+                    group_combat_reaction: relation.group_combat_reaction,
+                })
+                .collect();
+            (
+                form_id,
+                FactionInput {
+                    form_id,
+                    editor_id: faction.editor_id.clone(),
+                    name: faction.name.clone(),
+                    ranks,
+                    relations,
+                },
+            )
         })
         .collect();
     let placements = actor_references
