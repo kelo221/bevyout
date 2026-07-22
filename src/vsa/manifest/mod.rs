@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 18;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 19;
 /// Gates *manifest schema/meaning* compatibility for a cached `scene.ron`
 /// (checked by `compatibility::ensure_prepared_manifest_compatible` against
 /// `manifest.prepare_revision`, independent of
@@ -16,8 +16,12 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 18;
 /// classification, exactly the trap AGENTS.md's "Prepared asset revisions"
 /// section names), M4 wave 7's actor assembly (#107/#108), and the actor
 /// animation catalog link added for the KF compatibility spike (#104).
+/// Bumped again for issue #185: `PreparedDoor` grew a `trapped` field --
+/// `#[serde(default)]` alone would let a stale `scene.ron` decode cleanly
+/// with every door silently reported untrapped, exactly the AGENTS.md
+/// "Prepared asset revisions" trap this bump exists to close.
 pub(crate) const CURRENT_PREPARE_REVISION: &str =
-    "prepare-v4-corpse-actor-assembly-animation-catalog";
+    "prepare-v5-corpse-actor-assembly-animation-catalog-door-trap";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v13-material-extensions";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v6";
 

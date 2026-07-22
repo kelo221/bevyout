@@ -394,6 +394,7 @@ fn schema_three_semantics_round_trip_through_ron() {
         semantic: PreparedSemantic::Door(PreparedDoor {
             lock_level: Some(75),
             key_form_id: Some(3),
+            trapped: false,
             destination: Some(PreparedDoorDestination {
                 door_reference_form_id: 4,
                 cell_form_id: 5,

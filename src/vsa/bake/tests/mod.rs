@@ -178,6 +178,7 @@ fn non_static_semantics_are_excluded_from_the_bake() {
         PreparedSemantic::Door(super::super::manifest::PreparedDoor {
             lock_level: None,
             key_form_id: None,
+            trapped: false,
             destination: None,
         }),
         PreparedSemantic::Activator,

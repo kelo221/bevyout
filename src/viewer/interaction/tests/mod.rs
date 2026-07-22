@@ -60,6 +60,7 @@ fn locked_door_requires_its_key() {
     let door = PreparedDoor {
         lock_level: Some(50),
         key_form_id: Some(0x42),
+        trapped: false,
         destination: None,
     };
     let mut inventory = PlayerInventory::default();
@@ -73,6 +74,7 @@ fn lock_without_a_key_remains_locked() {
     let door = PreparedDoor {
         lock_level: Some(1),
         key_form_id: None,
+        trapped: false,
         destination: None,
     };
     assert!(door_is_locked(&door, &PlayerInventory::default()));
@@ -83,6 +85,7 @@ fn zero_lock_level_is_unlocked() {
     let door = PreparedDoor {
         lock_level: Some(0),
         key_form_id: Some(0x42),
+        trapped: false,
         destination: None,
     };
     assert!(!door_is_locked(&door, &PlayerInventory::default()));
@@ -192,6 +195,7 @@ mod door_travel_animation {
             semantic: PreparedSemantic::Door(PreparedDoor {
                 lock_level: None,
                 key_form_id: None,
+                trapped: false,
                 destination,
             }),
             initially_enabled: true,

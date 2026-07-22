@@ -204,6 +204,12 @@ mod movement_policy;
 #[allow(dead_code, unused_imports)]
 mod locomotion;
 
+// `viewer::nav::openmw_doors` (issue #185) is std-only, same flat top-level
+// include rationale as `door_link`/`repath`/`movement_policy` above.
+#[path = "../src/viewer/nav/openmw_doors/mod.rs"]
+#[allow(dead_code, unused_imports)]
+mod openmw_doors;
+
 #[path = "../src/converter_policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod converter_policy;
@@ -403,9 +409,30 @@ use viewer_player::player::equipment;
 #[allow(dead_code, unused_imports)]
 mod recipe_policy;
 
+// Pure AI package runtime layer (issues #193/#194/#195). Each is std/serde-only
+// (lifecycle also uses the Bevy-free `bevyout_core::actor_state` checkpoint) so
+// all three compile verbatim here via `#[path]`.
+#[path = "../src/viewer/ai/lifecycle.rs"]
+#[allow(unused_imports)]
+mod ai_lifecycle;
+#[path = "../src/viewer/ai/resolution.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_resolution;
+#[path = "../src/viewer/ai/selection.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_selection;
+// Pure package-family dispatch (issues #196/#197): std-only, no Bevy, so it
+// compiles verbatim here via `#[path]` like the other AI package modules.
+#[path = "../src/viewer/ai/families.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_families;
+
 use assets::AssetConversion;
 use bevyout_core::actor;
 use bevyout_core::actor_animation;
+use bevyout_core::disposition;
+use bevyout_core::faction;
+use bevyout_core::perception;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -855,6 +882,54 @@ struct BevyoutWorld {
     // -- pause_menu.feature --
     pause_menu: pause_menu::PauseMenuState,
     pause_menu_action: Option<Option<pause_menu::PauseMenuAction>>,
+
+    // -- ai_package_selection.feature (issue #193) --
+    ai_sel_candidates: Vec<ai_selection::PackageCandidate>,
+    ai_sel_hour: f32,
+    ai_sel_functions: std::collections::HashMap<u16, f32>,
+    ai_sel_report: Option<ai_selection::SelectionReport>,
+
+    // -- ai_package_lifecycle.feature (issue #194) --
+    ai_lifecycle: ai_lifecycle::PackageLifecycle,
+    ai_lifecycle_checkpoint: Option<bevyout_core::actor_state::ActorPackageCheckpoint>,
+
+    // -- ai_package_resolution.feature (issue #195) --
+    ai_res_context: ai_resolution::ResolutionContext,
+    ai_res_location: Option<ai_resolution::PackageLocation>,
+    ai_res_target: Option<ai_resolution::PackageTarget>,
+    ai_res_result:
+        Option<Result<ai_resolution::ResolvedPoint, ai_resolution::ResolutionDiagnostic>>,
+
+    // -- faction_hostility.feature (issue #116) --
+    hostility_table: faction::FactionRelationTable,
+    hostility_observer: disposition::DispositionActor,
+    hostility_target: disposition::DispositionTarget,
+    hostility_result: Option<disposition::DispositionResult>,
+
+    // -- perception_awareness.feature (issue #116) --
+    perception_config: Option<perception::PerceptionConfig>,
+    perception_state: perception::AwarenessState,
+    perception_candidates: Vec<perception::PerceptionInputs>,
+    perception_last_event: Option<perception::AwarenessEvent>,
+
+    // -- nav_door_access.feature (issue #185): key-aware locked doors and
+    // the trapped-door barrier, `viewer::nav::openmw_doors::door_openable`.
+    nav_door_access_observation: openmw_doors::DoorAccessObservation,
+    nav_door_access_result: Option<bool>,
+
+    // -- package_families.feature (issues #196/#197) --
+    pf_driver: Option<ai_families::FamilyDriver>,
+    pf_markers: Vec<[f32; 3]>,
+    pf_step: Option<ai_families::FamilyStep>,
+
+    // -- ai_follow_sandbox.feature (issue #198) --
+    // The follow leader's current position (the moving target), the roam
+    // centre + radius a sandbox is bounded by, and any door the route is
+    // reported blocked on -- all fed into the pure driver via observations.
+    fs_leader: Option<[f32; 3]>,
+    fs_roam_center: [f32; 3],
+    fs_roam_radius: f32,
+    fs_blocking_door: Option<u32>,
 }
 
 fn find_placement<'a>(
@@ -4946,6 +5021,7 @@ async fn given_faction_known(
                 male_title: Some(male_title),
                 female_title: Some(female_title),
             }],
+            ..Default::default()
         },
     );
 }
@@ -11359,4 +11435,1134 @@ fn parse_pause_menu_option(label: &str) -> pause_menu::PauseMenuOption {
         "Quit" => pause_menu::PauseMenuOption::Quit,
         other => panic!("unknown pause menu option {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// ai_package_selection.feature / ai_package_lifecycle.feature /
+// ai_package_resolution.feature (issues #193/#194/#195) -- appended
+// section, do not interleave. Each drives the pure runtime module directly.
+// ---------------------------------------------------------------------
+
+/// Builds a minimal 20-byte CTDA for the selection steps: operator in the top
+/// three bits of byte 0, the comparison value at offset 4, function index at
+/// offset 8 -- the exact header `ai_selection::decode_condition` reads.
+fn build_ctda(operator: &str, comparison_value: f32, function_index: u16) -> Vec<u8> {
+    let op_bits: u8 = match operator {
+        "equal" => 0,
+        "not-equal" => 1,
+        "greater" => 2,
+        "greater-or-equal" => 3,
+        "less" => 4,
+        "less-or-equal" => 5,
+        other => panic!("unknown CTDA operator {other:?}"),
+    };
+    let mut bytes = vec![0u8; 20];
+    bytes[0] = op_bits << 5;
+    bytes[4..8].copy_from_slice(&comparison_value.to_le_bytes());
+    bytes[8..10].copy_from_slice(&function_index.to_le_bytes());
+    bytes
+}
+
+fn ai_sel_candidate_mut(
+    world: &mut BevyoutWorld,
+    form_id: u32,
+) -> &mut ai_selection::PackageCandidate {
+    if let Some(index) = world
+        .ai_sel_candidates
+        .iter()
+        .position(|candidate| candidate.form_id == form_id)
+    {
+        &mut world.ai_sel_candidates[index]
+    } else {
+        world
+            .ai_sel_candidates
+            .push(ai_selection::PackageCandidate {
+                form_id,
+                ..ai_selection::PackageCandidate::default()
+            });
+        world.ai_sel_candidates.last_mut().unwrap()
+    }
+}
+
+#[given(regex = r"^a selection game hour of ([\d.]+)$")]
+async fn given_selection_game_hour(world: &mut BevyoutWorld, hour: f32) {
+    world.ai_sel_hour = hour;
+}
+
+#[given(regex = r"^a package candidate 0x([0-9a-fA-F]+) of type (\d+)$")]
+async fn given_package_candidate(world: &mut BevyoutWorld, hex: String, package_type: u8) {
+    let form_id = parse_hex(&hex);
+    ai_sel_candidate_mut(world, form_id).package_type = package_type;
+}
+
+#[given(regex = r"^candidate 0x([0-9a-fA-F]+) has schedule time (-?\d+) duration (-?\d+)$")]
+async fn given_candidate_schedule(world: &mut BevyoutWorld, hex: String, time: i8, duration: i32) {
+    let form_id = parse_hex(&hex);
+    ai_sel_candidate_mut(world, form_id).schedule = Some(ai_selection::PackageSchedule {
+        time,
+        duration,
+        ..ai_selection::PackageSchedule::default()
+    });
+}
+
+#[given(regex = r"^condition function (\d+) returns ([\d.]+)$")]
+async fn given_condition_function_returns(world: &mut BevyoutWorld, index: u16, value: f32) {
+    world.ai_sel_functions.insert(index, value);
+}
+
+#[given(
+    regex = r"^candidate 0x([0-9a-fA-F]+) requires function (\d+) (equal|not-equal|greater|greater-or-equal|less|less-or-equal) ([\d.]+)$"
+)]
+async fn given_candidate_condition(
+    world: &mut BevyoutWorld,
+    hex: String,
+    function_index: u16,
+    operator: String,
+    value: f32,
+) {
+    let form_id = parse_hex(&hex);
+    let ctda = build_ctda(&operator, value, function_index);
+    ai_sel_candidate_mut(world, form_id).conditions.push(ctda);
+}
+
+/// A boundary backed by the World's `(function_index) -> value` map.
+struct MapFunctions(std::collections::HashMap<u16, f32>);
+
+impl ai_selection::ConditionFunctions for MapFunctions {
+    fn evaluate(&self, function_index: u16, _param1: u32, _param2: u32) -> Option<f32> {
+        self.0.get(&function_index).copied()
+    }
+}
+
+#[when("the actor's package is selected")]
+async fn when_actor_package_selected(world: &mut BevyoutWorld) {
+    let now = ai_selection::GameInstant {
+        hour: world.ai_sel_hour,
+        ..ai_selection::GameInstant::default()
+    };
+    let boundary = MapFunctions(world.ai_sel_functions.clone());
+    world.ai_sel_report = Some(ai_selection::select_package(
+        &world.ai_sel_candidates,
+        now,
+        &boundary,
+    ));
+}
+
+fn ai_sel_report(world: &BevyoutWorld) -> &ai_selection::SelectionReport {
+    world
+        .ai_sel_report
+        .as_ref()
+        .expect("the package must be selected first")
+}
+
+#[then(regex = r"^the selected package is 0x([0-9a-fA-F]+)$")]
+async fn then_selected_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(ai_sel_report(world).selected, Some(parse_hex(&hex)));
+}
+
+#[then("no package is selected")]
+async fn then_no_package_selected(world: &mut BevyoutWorld) {
+    assert_eq!(ai_sel_report(world).selected, None);
+}
+
+#[then(regex = r#"^package candidate 0x([0-9a-fA-F]+) was rejected as "([^"]*)"$"#)]
+async fn then_candidate_rejected_as(world: &mut BevyoutWorld, hex: String, reason: String) {
+    let form_id = parse_hex(&hex);
+    let evaluation = ai_sel_report(world)
+        .evaluations
+        .iter()
+        .find(|evaluation| evaluation.form_id == form_id)
+        .unwrap_or_else(|| panic!("no evaluation for candidate {hex}"));
+    match evaluation.outcome {
+        ai_selection::CandidateOutcome::Rejected(actual) => assert_eq!(actual.label(), reason),
+        ai_selection::CandidateOutcome::Selected => {
+            panic!("candidate {hex} was selected, expected rejection {reason:?}")
+        }
+    }
+}
+
+#[then(
+    regex = r"^the selection counts unsupported_type (\d+) out_of_schedule (\d+) conditions_false (\d+) conditions_unevaluable (\d+) schedule_gap (\d+)$"
+)]
+async fn then_selection_counts(
+    world: &mut BevyoutWorld,
+    unsupported_type: usize,
+    out_of_schedule: usize,
+    conditions_false: usize,
+    conditions_unevaluable: usize,
+    schedule_gap: usize,
+) {
+    let counters = ai_sel_report(world).counters;
+    assert_eq!(
+        counters.unsupported_type, unsupported_type,
+        "unsupported_type"
+    );
+    assert_eq!(counters.out_of_schedule, out_of_schedule, "out_of_schedule");
+    assert_eq!(
+        counters.conditions_false, conditions_false,
+        "conditions_false"
+    );
+    assert_eq!(
+        counters.conditions_unevaluable, conditions_unevaluable,
+        "conditions_unevaluable"
+    );
+    assert_eq!(counters.schedule_gap, schedule_gap, "schedule_gap");
+}
+
+// -- ai_package_lifecycle.feature --
+
+#[given("a fresh package lifecycle")]
+async fn given_fresh_lifecycle(world: &mut BevyoutWorld) {
+    world.ai_lifecycle = ai_lifecycle::PackageLifecycle::new();
+    world.ai_lifecycle_checkpoint = None;
+}
+
+#[given(regex = r"^a fresh package lifecycle with backoff ([\d.]+) and max retries (\d+)$")]
+async fn given_fresh_lifecycle_with_policy(
+    world: &mut BevyoutWorld,
+    backoff: f32,
+    max_retries: u32,
+) {
+    world.ai_lifecycle =
+        ai_lifecycle::PackageLifecycle::new().with_retry_policy(max_retries, backoff);
+    world.ai_lifecycle_checkpoint = None;
+}
+
+#[when(regex = r"^package 0x([0-9a-fA-F]+) is selected$")]
+async fn when_lifecycle_package_selected(world: &mut BevyoutWorld, hex: String) {
+    world.ai_lifecycle.on_select(Some(parse_hex(&hex)));
+}
+
+#[when("no package is selected for the lifecycle")]
+async fn when_lifecycle_no_package(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.on_select(None);
+}
+
+#[when(regex = r"^the active package advances (\d+) steps$")]
+async fn when_active_advances(world: &mut BevyoutWorld, steps: u32) {
+    for _ in 0..steps {
+        world.ai_lifecycle.advance_step();
+    }
+}
+
+#[when("the active package completes")]
+async fn when_active_completes(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.complete();
+}
+
+#[when("the active package fails")]
+async fn when_active_fails(world: &mut BevyoutWorld) {
+    world.ai_lifecycle.fail();
+}
+
+#[when(regex = r"^the lifecycle ticks ([\d.]+) seconds$")]
+async fn when_lifecycle_ticks(world: &mut BevyoutWorld, seconds: f32) {
+    world.ai_lifecycle.tick(seconds);
+}
+
+#[when("the lifecycle checkpoint is persisted")]
+async fn when_lifecycle_checkpoint_persisted(world: &mut BevyoutWorld) {
+    // Route the checkpoint through the same serde the save format's ACTR
+    // record uses (`ActorInstanceState`), proving the persisted shape
+    // survives a save/load round-trip deterministically.
+    let checkpoint = world
+        .ai_lifecycle
+        .to_checkpoint()
+        .expect("a running lifecycle snapshots");
+    let mut state =
+        bevyout_core::actor_state::ActorInstanceState::new(1, actor_state::ActorLifeState::Alive);
+    state.package = Some(checkpoint);
+    let json = serde_json::to_string(&state).expect("serialize actor state");
+    let restored: bevyout_core::actor_state::ActorInstanceState =
+        serde_json::from_str(&json).expect("deserialize actor state");
+    world.ai_lifecycle_checkpoint = restored.package;
+}
+
+#[when("the lifecycle is rebuilt from the checkpoint")]
+async fn when_lifecycle_rebuilt(world: &mut BevyoutWorld) {
+    let checkpoint = world
+        .ai_lifecycle_checkpoint
+        .expect("a checkpoint must be persisted first");
+    world.ai_lifecycle = ai_lifecycle::PackageLifecycle::from_checkpoint(checkpoint);
+}
+
+#[then(regex = r"^the lifecycle phase is (idle|running|paused|completed|awaiting-retry|failed)$")]
+async fn then_lifecycle_phase(world: &mut BevyoutWorld, phase: String) {
+    assert_eq!(world.ai_lifecycle.phase().label(), phase);
+}
+
+#[then(regex = r"^the active package is 0x([0-9a-fA-F]+)$")]
+async fn then_active_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(world.ai_lifecycle.active_form_id(), Some(parse_hex(&hex)));
+}
+
+#[then(regex = r"^the paused package is 0x([0-9a-fA-F]+)$")]
+async fn then_paused_package_is(world: &mut BevyoutWorld, hex: String) {
+    assert_eq!(world.ai_lifecycle.paused_form_id(), Some(parse_hex(&hex)));
+}
+
+#[then(regex = r"^the active step is (\d+)$")]
+async fn then_active_step_is(world: &mut BevyoutWorld, step_index: u32) {
+    assert_eq!(world.ai_lifecycle.step(), Some(step_index));
+}
+
+#[then(regex = r"^the active elapsed is ([\d.]+)$")]
+async fn then_active_elapsed_is(world: &mut BevyoutWorld, elapsed: f32) {
+    assert_eq!(world.ai_lifecycle.elapsed_seconds(), Some(elapsed));
+}
+
+#[then(regex = r"^the retry count is (\d+)$")]
+async fn then_retry_count_is(world: &mut BevyoutWorld, count: u32) {
+    assert_eq!(world.ai_lifecycle.retry_count(), Some(count));
+}
+
+// -- ai_package_resolution.feature --
+
+#[given(regex = r"^the resolving actor is at ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn given_resolving_actor_at(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    world.ai_res_context.actor_position = [x, y, z];
+}
+
+#[given(
+    regex = r"^a resolvable reference 0x([0-9a-fA-F]+) of base 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_resolvable_reference(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    base_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let reference_form_id = parse_hex(&reference_hex);
+    let base_form_id = parse_hex(&base_hex);
+    world.ai_res_context.references.insert(
+        reference_form_id,
+        ai_resolution::ResolvedReference {
+            reference_form_id,
+            base_form_id,
+            cell_form_id: 0x1000,
+            position: [x, y, z],
+            entity: Some(u64::from(reference_form_id)),
+        },
+    );
+    world
+        .ai_res_context
+        .bases
+        .entry(base_form_id)
+        .or_default()
+        .push(reference_form_id);
+}
+
+#[given(regex = r"^a package location of type (\d+) referencing 0x([0-9a-fA-F]+) radius (-?\d+)$")]
+async fn given_package_location_input(
+    world: &mut BevyoutWorld,
+    location_type: u32,
+    form_hex: String,
+    radius: i32,
+) {
+    let raw = parse_hex(&form_hex);
+    world.ai_res_location = Some(ai_resolution::PackageLocation {
+        location_type,
+        form_id: (raw != 0).then_some(raw),
+        raw_value: raw,
+        radius,
+    });
+}
+
+#[given(
+    regex = r"^a package target of type (-?\d+) referencing 0x([0-9a-fA-F]+) distance (-?\d+)$"
+)]
+async fn given_package_target_input(
+    world: &mut BevyoutWorld,
+    target_type: i32,
+    form_hex: String,
+    distance: i32,
+) {
+    let raw = parse_hex(&form_hex);
+    world.ai_res_target = Some(ai_resolution::PackageTarget {
+        target_type,
+        form_id: (raw != 0).then_some(raw),
+        raw_value: raw,
+        count_or_distance: distance,
+    });
+}
+
+#[when("the package location is resolved")]
+async fn when_location_resolved(world: &mut BevyoutWorld) {
+    let location = world.ai_res_location.expect("a location must be set first");
+    world.ai_res_result = Some(ai_resolution::resolve_location(
+        &location,
+        &world.ai_res_context,
+    ));
+}
+
+#[when("the package target is resolved")]
+async fn when_target_resolved(world: &mut BevyoutWorld) {
+    let target = world.ai_res_target.expect("a target must be set first");
+    world.ai_res_result = Some(ai_resolution::resolve_target(
+        &target,
+        &world.ai_res_context,
+    ));
+}
+
+fn ai_res_point(world: &BevyoutWorld) -> &ai_resolution::ResolvedPoint {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => point,
+        Err(diagnostic) => panic!("expected a resolved point, got diagnostic: {diagnostic}"),
+    }
+}
+
+#[then(regex = r"^the location resolves to ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn then_location_resolves_to(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    assert_eq!(ai_res_point(world).position, [x, y, z]);
+}
+
+#[then(regex = r"^the target resolves to ([\d.-]+) ([\d.-]+) ([\d.-]+)$")]
+async fn then_target_resolves_to(world: &mut BevyoutWorld, x: f32, y: f32, z: f32) {
+    assert_eq!(ai_res_point(world).position, [x, y, z]);
+}
+
+#[then(regex = r#"^the location resolves via "([^"]*)"$"#)]
+async fn then_location_resolves_via(world: &mut BevyoutWorld, label: String) {
+    assert_eq!(ai_res_point(world).source.label(), label);
+}
+
+#[then(regex = r"^the target radius is ([\d.]+)$")]
+async fn then_target_radius_is(world: &mut BevyoutWorld, radius: f32) {
+    assert_eq!(ai_res_point(world).radius, radius);
+}
+
+#[then(regex = r#"^the location is unresolved with diagnostic containing "([^"]*)"$"#)]
+async fn then_location_unresolved(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => panic!("expected an unresolved location, got {point:?}"),
+        Err(diagnostic) => assert!(
+            diagnostic.message.contains(&expected),
+            "diagnostic {:?} did not contain {expected:?}",
+            diagnostic.message
+        ),
+    }
+}
+
+#[then(regex = r#"^the target is unresolved with diagnostic containing "([^"]*)"$"#)]
+async fn then_target_unresolved(world: &mut BevyoutWorld, expected: String) {
+    match world
+        .ai_res_result
+        .as_ref()
+        .expect("resolution must run first")
+    {
+        Ok(point) => panic!("expected an unresolved target, got {point:?}"),
+        Err(diagnostic) => assert!(
+            diagnostic.message.contains(&expected),
+            "diagnostic {:?} did not contain {expected:?}",
+            diagnostic.message
+        ),
+    }
+}
+
+// ============================================================================
+// issue #116: faction disposition/hostility and target perception/awareness.
+// Pure-policy steps driving `bevyout_core::{faction, disposition, perception}`.
+// ============================================================================
+
+fn parse_faction_id(hex: &str) -> u32 {
+    u32::from_str_radix(hex, 16).expect("faction id must be hex")
+}
+
+fn parse_aggression(label: &str) -> disposition::Aggression {
+    match label {
+        "unaggressive" => disposition::Aggression::Unaggressive,
+        "aggressive" => disposition::Aggression::Aggressive,
+        "very_aggressive" => disposition::Aggression::VeryAggressive,
+        "frenzied" => disposition::Aggression::Frenzied,
+        other => panic!("unknown aggression {other:?}"),
+    }
+}
+
+fn register_known_faction(table: &mut faction::FactionRelationTable, id: u32) {
+    table
+        .factions
+        .entry(id)
+        .or_insert_with(|| faction::PreparedFaction {
+            form_id: id,
+            ..Default::default()
+        });
+}
+
+fn upsert_relation(
+    table: &mut faction::FactionRelationTable,
+    from: u32,
+    to: u32,
+    modifier: i32,
+    reaction: faction::GroupCombatReaction,
+) {
+    register_known_faction(table, to);
+    let entry = table
+        .factions
+        .entry(from)
+        .or_insert_with(|| faction::PreparedFaction {
+            form_id: from,
+            ..Default::default()
+        });
+    entry
+        .relations
+        .retain(|relation| relation.faction_form_id != to);
+    entry.relations.push(faction::FactionRelation {
+        faction_form_id: to,
+        modifier,
+        reaction,
+    });
+}
+
+fn observer_member(world: &mut BevyoutWorld, id: u32) {
+    world
+        .hostility_observer
+        .factions
+        .push(disposition::FactionMembership {
+            faction_form_id: id,
+            rank: 0,
+        });
+}
+
+#[given(regex = r#"^faction "(\w+)" and "(\w+)" are enemies$"#)]
+async fn given_factions_enemies(world: &mut BevyoutWorld, a: String, b: String) {
+    let (a, b) = (parse_faction_id(&a), parse_faction_id(&b));
+    upsert_relation(
+        &mut world.hostility_table,
+        a,
+        b,
+        -80,
+        faction::GroupCombatReaction::Enemy,
+    );
+    upsert_relation(
+        &mut world.hostility_table,
+        b,
+        a,
+        -80,
+        faction::GroupCombatReaction::Enemy,
+    );
+}
+
+#[given(regex = r#"^faction "(\w+)" and "(\w+)" are allies$"#)]
+async fn given_factions_allies(world: &mut BevyoutWorld, a: String, b: String) {
+    let (a, b) = (parse_faction_id(&a), parse_faction_id(&b));
+    upsert_relation(
+        &mut world.hostility_table,
+        a,
+        b,
+        50,
+        faction::GroupCombatReaction::Ally,
+    );
+    upsert_relation(
+        &mut world.hostility_table,
+        b,
+        a,
+        50,
+        faction::GroupCombatReaction::Ally,
+    );
+}
+
+#[given(
+    regex = r#"^faction "(\w+)" applies a disposition modifier (-?\d+) toward faction "(\w+)"$"#
+)]
+async fn given_faction_modifier(
+    world: &mut BevyoutWorld,
+    from: String,
+    modifier: String,
+    to: String,
+) {
+    let (from, to) = (parse_faction_id(&from), parse_faction_id(&to));
+    let modifier: i32 = modifier.parse().expect("modifier must be an integer");
+    upsert_relation(
+        &mut world.hostility_table,
+        from,
+        to,
+        modifier,
+        faction::GroupCombatReaction::Neutral,
+    );
+    register_known_faction(&mut world.hostility_table, from);
+}
+
+#[given(
+    regex = r#"^a hostility observer in faction "(\w+)" with base disposition (-?\d+) and aggression "(\w+)"$"#
+)]
+async fn given_observer_in_faction(
+    world: &mut BevyoutWorld,
+    faction_id: String,
+    base: String,
+    aggression: String,
+) {
+    let id = parse_faction_id(&faction_id);
+    register_known_faction(&mut world.hostility_table, id);
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+    observer_member(world, id);
+}
+
+#[given(
+    regex = r#"^a hostility observer in unknown faction "(\w+)" with base disposition (-?\d+) and aggression "(\w+)"$"#
+)]
+async fn given_observer_in_unknown_faction(
+    world: &mut BevyoutWorld,
+    faction_id: String,
+    base: String,
+    aggression: String,
+) {
+    // Deliberately does not register the faction in the table -> unresolved.
+    let id = parse_faction_id(&faction_id);
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+    observer_member(world, id);
+}
+
+#[given(regex = r#"^a hostility observer with base disposition (-?\d+) and aggression "(\w+)"$"#)]
+async fn given_observer_no_faction(world: &mut BevyoutWorld, base: String, aggression: String) {
+    world.hostility_observer.base_disposition = base.parse().expect("base disposition");
+    world.hostility_observer.aggression = parse_aggression(&aggression);
+}
+
+#[given(regex = r#"^the target is in faction "(\w+)"$"#)]
+async fn given_target_in_faction(world: &mut BevyoutWorld, faction_id: String) {
+    let id = parse_faction_id(&faction_id);
+    register_known_faction(&mut world.hostility_table, id);
+    world
+        .hostility_target
+        .factions
+        .push(disposition::FactionMembership {
+            faction_form_id: id,
+            rank: 0,
+        });
+}
+
+#[given(regex = r"^the target is the player$")]
+async fn given_target_is_player(world: &mut BevyoutWorld) {
+    world.hostility_target = disposition::DispositionTarget::default();
+}
+
+#[given(regex = r"^the target is the observer itself$")]
+async fn given_target_is_self(world: &mut BevyoutWorld) {
+    world.hostility_target.is_self = true;
+}
+
+#[when(regex = r"^hostility is resolved$")]
+async fn when_hostility_resolved(world: &mut BevyoutWorld) {
+    let thresholds = disposition::DispositionThresholds::default();
+    world.hostility_result = Some(disposition::resolve_disposition(
+        &world.hostility_observer,
+        &world.hostility_target,
+        &world.hostility_table,
+        &thresholds,
+    ));
+}
+
+#[then(regex = r#"^the hostility verdict is "(\w+)"$"#)]
+async fn then_hostility_verdict(world: &mut BevyoutWorld, expected: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.hostility.label(), expected);
+}
+
+#[then(regex = r#"^the deciding rule is "(\w+)"$"#)]
+async fn then_deciding_rule(world: &mut BevyoutWorld, expected: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.decided_by.label(), expected);
+}
+
+#[then(regex = r"^the resolved disposition is (-?\d+)$")]
+async fn then_resolved_disposition(world: &mut BevyoutWorld, expected: String) {
+    let expected: i32 = expected.parse().expect("disposition integer");
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert_eq!(result.disposition, expected);
+}
+
+#[then(regex = r#"^a hostility diagnostic mentions "([^"]+)"$"#)]
+async fn then_hostility_diagnostic(world: &mut BevyoutWorld, needle: String) {
+    let result = world.hostility_result.as_ref().expect("resolve first");
+    assert!(
+        result.diagnostics.iter().any(|d| d.contains(&needle)),
+        "no diagnostic mentioning {needle:?} in {:?}",
+        result.diagnostics
+    );
+}
+
+fn fast_perception_config() -> perception::PerceptionConfig {
+    perception::PerceptionConfig {
+        sight_range: 40.0,
+        view_cone_half_angle: std::f32::consts::FRAC_PI_2,
+        acquire_confidence: 0.5,
+        lose_confidence: 0.1,
+        gain_per_second: 1.0,
+        decay_per_second: 1.0,
+        forget_seconds: 2.0,
+    }
+}
+
+#[given(regex = r"^a perception observer$")]
+async fn given_perception_observer(world: &mut BevyoutWorld) {
+    world.perception_config = Some(fast_perception_config());
+    world.perception_state = perception::AwarenessState::default();
+    world.perception_candidates.clear();
+}
+
+#[given(regex = r"^a perception observer that has acquired the player$")]
+async fn given_perception_observer_acquired(world: &mut BevyoutWorld) {
+    world.perception_config = Some(fast_perception_config());
+    world.perception_state = perception::AwarenessState {
+        confidence: 1.0,
+        acquired: Some(perception::TargetId::player()),
+        ..Default::default()
+    };
+    world.perception_candidates.clear();
+}
+
+fn player_candidate(distance: f32, angle: f32, los: bool) -> perception::PerceptionInputs {
+    perception::PerceptionInputs {
+        target: perception::TargetId::player(),
+        position: [0.0, 0.0, -distance],
+        distance,
+        angle_to_target: angle,
+        has_line_of_sight: los,
+        detectable: true,
+    }
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres ahead in clear view$")]
+async fn given_player_ahead_clear(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, 0.0, true)];
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres ahead but occluded$")]
+async fn given_player_ahead_occluded(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, 0.0, false)];
+}
+
+#[given(regex = r"^a player target ([0-9.]+) metres behind in clear view$")]
+async fn given_player_behind_clear(world: &mut BevyoutWorld, distance: String) {
+    let distance: f32 = distance.parse().expect("distance");
+    world.perception_candidates = vec![player_candidate(distance, std::f32::consts::PI, true)];
+}
+
+#[given(regex = r"^the target has disappeared$")]
+async fn given_target_disappeared(world: &mut BevyoutWorld) {
+    world.perception_candidates.clear();
+}
+
+#[when(regex = r"^perception advances for ([0-9.]+) seconds$")]
+async fn when_perception_advances(world: &mut BevyoutWorld, seconds: String) {
+    let seconds: f32 = seconds.parse().expect("seconds");
+    let config = world.perception_config.expect("configure observer first");
+    world.perception_last_event = Some(world.perception_state.update(
+        &world.perception_candidates,
+        &config,
+        seconds,
+    ));
+}
+
+#[when(regex = r"^the awareness state is serialized and reloaded$")]
+async fn when_awareness_round_trip(world: &mut BevyoutWorld) {
+    let text = ron::ser::to_string(&world.perception_state).expect("serialize awareness");
+    world.perception_state = ron::de::from_str(&text).expect("deserialize awareness");
+}
+
+#[then(regex = r"^the observer has acquired the player$")]
+async fn then_observer_acquired_player(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.perception_state.target(),
+        Some(perception::TargetId::player())
+    );
+}
+
+#[then(regex = r"^the observer has not acquired a target$")]
+async fn then_observer_not_acquired(world: &mut BevyoutWorld) {
+    assert!(!world.perception_state.is_aware());
+}
+
+#[then(regex = r"^the observer has lost its target$")]
+async fn then_observer_lost_target(world: &mut BevyoutWorld) {
+    assert!(!world.perception_state.is_aware());
+    assert_eq!(
+        world.perception_last_event,
+        Some(perception::AwarenessEvent::Lost(
+            perception::TargetId::player()
+        ))
+    );
+}
+
+// ---------------------------------------------------------------------
+// nav_door_access.feature (issue #185) -- appended section, do not
+// interleave.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a door with lock level (none|\d+), key (none|\d+), and (trapped|untrapped)$")]
+async fn given_door_access_door(
+    world: &mut BevyoutWorld,
+    lock_level: String,
+    key: String,
+    trap: String,
+) {
+    world.nav_door_access_observation = openmw_doors::DoorAccessObservation {
+        lock_level: (lock_level != "none").then(|| lock_level.parse::<i8>().unwrap()),
+        key_form_id: (key != "none").then(|| key.parse::<u32>().unwrap()),
+        trapped: trap == "trapped",
+        holder_has_key: false,
+    };
+}
+
+#[given(regex = r"^the actor (holds|does not hold) the door's key$")]
+async fn given_door_access_key_possession(world: &mut BevyoutWorld, possession: String) {
+    world.nav_door_access_observation.holder_has_key = possession == "holds";
+}
+
+#[then(regex = r"^the door is (openable|not openable)$")]
+async fn then_door_access_result(world: &mut BevyoutWorld, expected: String) {
+    world.nav_door_access_result = Some(openmw_doors::door_openable(
+        world.nav_door_access_observation,
+    ));
+    assert_eq!(world.nav_door_access_result, Some(expected == "openable"));
+}
+
+// ---------------------------------------------------------------------
+// package_families.feature (issues #196 Travel/Patrol, #197 Idle/Eat/Sleep)
+// -- appended step section. Drives the pure `ai_families::FamilyDriver`
+// dispatch directly; observable outcomes (requests + lifecycle signals),
+// never internal bookkeeping.
+// ---------------------------------------------------------------------
+
+/// Parses a `(x, y, z)` / `(x,y,z)` triple from a scenario token.
+fn pf_parse_point(text: &str) -> [f32; 3] {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c == '(' || c == ')' { ' ' } else { c })
+        .collect();
+    let coords: Vec<f32> = cleaned
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().expect("coordinate"))
+        .collect();
+    assert_eq!(coords.len(), 3, "expected three coordinates in {text:?}");
+    [coords[0], coords[1], coords[2]]
+}
+
+fn pf_driver(world: &mut BevyoutWorld) -> &mut ai_families::FamilyDriver {
+    world.pf_driver.as_mut().expect("configure a family first")
+}
+
+fn pf_tick(world: &mut BevyoutWorld, position: [f32; 3], nav_reached: bool) {
+    let observation = ai_families::FamilyObservation::new(position, nav_reached, false);
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+fn pf_step(world: &BevyoutWorld) -> ai_families::FamilyStep {
+    world.pf_step.expect("a family tick has run")
+}
+
+#[given(regex = r"^a travel family targeting \(([^)]*)\) with tolerance ([0-9.]+)$")]
+async fn given_travel_family(world: &mut BevyoutWorld, point: String, tolerance: String) {
+    let position = pf_parse_point(&point);
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Travel,
+        vec![ai_families::Waypoint::at(position)],
+        tolerance,
+    ));
+}
+
+#[given(regex = r"^an idle family at \(([^)]*)\) with tolerance ([0-9.]+)$")]
+async fn given_idle_family(world: &mut BevyoutWorld, point: String, tolerance: String) {
+    let position = pf_parse_point(&point);
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Idle,
+        vec![ai_families::Waypoint::at(position)],
+        tolerance,
+    ));
+}
+
+#[given(regex = r"^a patrol family over markers \(([^)]*)\) then \(([^)]*)\) then \(([^)]*)\)$")]
+async fn given_patrol_family(world: &mut BevyoutWorld, a: String, b: String, c: String) {
+    let markers = [pf_parse_point(&a), pf_parse_point(&b), pf_parse_point(&c)];
+    world.pf_markers = markers.to_vec();
+    let waypoints = markers
+        .iter()
+        .map(|position| ai_families::Waypoint::at(*position))
+        .collect();
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Patrol,
+        waypoints,
+        0.5,
+    ));
+}
+
+#[given(regex = r"^an? (eat|sleep) family at interaction point ([0-9]+) located at \(([^)]*)\)$")]
+async fn given_occupy_family(
+    world: &mut BevyoutWorld,
+    kind: String,
+    point_id: String,
+    position: String,
+) {
+    let position = pf_parse_point(&position);
+    let interaction_point: u32 = point_id.parse().expect("interaction point id");
+    let family = match kind.as_str() {
+        "eat" => ai_families::PackageFamily::Eat,
+        "sleep" => ai_families::PackageFamily::Sleep,
+        other => panic!("unexpected occupy family {other:?}"),
+    };
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        family,
+        vec![ai_families::Waypoint {
+            position,
+            wait_seconds: 0.0,
+            orientation_yaw: None,
+            interaction_point: Some(interaction_point),
+        }],
+        0.5,
+    ));
+}
+
+#[when(regex = r"^the actor is at \(([^)]*)\) still en route$")]
+async fn when_actor_en_route(world: &mut BevyoutWorld, point: String) {
+    let position = pf_parse_point(&point);
+    pf_tick(world, position, false);
+}
+
+#[when(regex = r"^the actor arrives at \(([^)]*)\)$")]
+async fn when_actor_arrives(world: &mut BevyoutWorld, point: String) {
+    let position = pf_parse_point(&point);
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the actor arrives at patrol marker ([0-9]+)$")]
+async fn when_actor_arrives_marker(world: &mut BevyoutWorld, index: String) {
+    let index: usize = index.parse().expect("marker index");
+    let position = world.pf_markers[index];
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the actor arrives at the interaction point$")]
+async fn when_actor_arrives_interaction(world: &mut BevyoutWorld) {
+    let position = world.pf_markers[0];
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the sleep package is preempted$")]
+async fn when_sleep_preempted(world: &mut BevyoutWorld) {
+    // Preemption releases the family's occupancy claim (what the lifecycle's
+    // pause + the `runpackage stop` path both call).
+    let released = pf_driver(world).release();
+    assert!(
+        released.is_some(),
+        "preempt should release an occupied point"
+    );
+}
+
+#[then(regex = r"^the family requests a route to \(([^)]*)\)$")]
+async fn then_requests_route(world: &mut BevyoutWorld, point: String) {
+    let expected = pf_parse_point(&point);
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Route(expected))
+    );
+}
+
+#[then(regex = r"^the family stops routing and completes the package$")]
+async fn then_stops_and_completes(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Complete);
+}
+
+#[then(regex = r"^the family advances to patrol marker ([0-9]+)$")]
+async fn then_advances_to_marker(world: &mut BevyoutWorld, index: String) {
+    let index: usize = index.parse().expect("marker index");
+    assert_eq!(
+        pf_step(world).signal,
+        ai_families::LifecycleSignal::AdvanceStep
+    );
+    assert_eq!(pf_driver(world).marker_index(), index);
+}
+
+#[then(regex = r"^the family requests the idle animation$")]
+async fn then_requests_idle(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Play(
+            ai_families::FamilyAnimation::Idle
+        ))
+    );
+}
+
+#[then(regex = r"^the family occupies interaction point ([0-9]+)$")]
+async fn then_occupies_point(world: &mut BevyoutWorld, point_id: String) {
+    let point_id: u32 = point_id.parse().expect("interaction point id");
+    assert_eq!(pf_driver(world).occupied_point(), Some(point_id));
+}
+
+#[then(regex = r"^the family requests the eat animation$")]
+async fn then_requests_eat(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Play(
+            ai_families::FamilyAnimation::Eat
+        ))
+    );
+}
+
+#[then(regex = r"^the family releases interaction point ([0-9]+)$")]
+async fn then_releases_point(world: &mut BevyoutWorld, _point_id: String) {
+    // `when_sleep_preempted` performed and asserted the release; confirm the
+    // driver no longer holds the claim.
+    assert_eq!(pf_driver(world).occupied_point(), None);
+}
+
+// ---------------------------------------------------------------------
+// ai_follow_sandbox.feature (issue #198 Follow + Sandbox) -- appended step
+// section. Drives the same pure `ai_families::FamilyDriver`, feeding the
+// dynamic follow leader / blocking door / roam bounds through observations.
+// Observable outcomes only (requests, signals, named door), never internal
+// bookkeeping.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a follow family with band ([0-9.]+) to ([0-9.]+) and tolerance ([0-9.]+)$")]
+async fn given_follow_family(
+    world: &mut BevyoutWorld,
+    band_min: String,
+    band_max: String,
+    tolerance: String,
+) {
+    let band_min: f32 = band_min.parse().expect("band min");
+    let band_max: f32 = band_max.parse().expect("band max");
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_driver = Some(ai_families::FamilyDriver::follow(
+        band_min, band_max, tolerance,
+    ));
+    world.fs_leader = None;
+    world.fs_blocking_door = None;
+}
+
+#[when(regex = r"^the leader is at \(([^)]*)\)$")]
+async fn when_leader_at(world: &mut BevyoutWorld, point: String) {
+    world.fs_leader = Some(pf_parse_point(&point));
+    world.fs_blocking_door = None;
+}
+
+#[when(regex = r"^the leader is lost$")]
+async fn when_leader_lost(world: &mut BevyoutWorld) {
+    world.fs_leader = None;
+}
+
+#[when(regex = r"^the route is blocked by locked door ([0-9a-fA-F]+)$")]
+async fn when_route_blocked(world: &mut BevyoutWorld, door: String) {
+    world.fs_blocking_door = Some(u32::from_str_radix(&door, 16).expect("door form id"));
+}
+
+#[when(regex = r"^the follower at \(([^)]*)\) ticks$")]
+async fn when_follower_ticks(world: &mut BevyoutWorld, actor: String) {
+    let actor = pf_parse_point(&actor);
+    // A blocking door surfaces alongside the nav route failure that produced it.
+    let route_failed = world.fs_blocking_door.is_some();
+    let observation = ai_families::FamilyObservation {
+        target_position: world.fs_leader,
+        blocking_door: world.fs_blocking_door,
+        ..ai_families::FamilyObservation::new(actor, false, route_failed)
+    };
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[then(regex = r"^the follow family keeps closing without stopping$")]
+async fn then_follow_keeps_closing(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_ne!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Continue);
+    assert_eq!(pf_driver(world).step_label(), "routing");
+}
+
+#[then(regex = r"^the follow family stops routing$")]
+async fn then_follow_stops(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Stop)
+    );
+    assert_eq!(pf_driver(world).step_label(), "idling");
+}
+
+#[then(regex = r"^the follow family names blocking door ([0-9a-fA-F]+) and abandons$")]
+async fn then_follow_names_door(world: &mut BevyoutWorld, door: String) {
+    let door = u32::from_str_radix(&door, 16).expect("door form id");
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Fail);
+    assert_eq!(pf_driver(world).blocked_door(), Some(door));
+    assert_eq!(pf_driver(world).step_label(), "blocked");
+}
+
+#[then(regex = r"^the follow family stops routing and keeps the package running$")]
+async fn then_follow_target_loss(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Continue);
+}
+
+#[given(regex = r"^a sandbox family roaming within ([0-9.]+) of \(([^)]*)\) seeded ([0-9]+)$")]
+async fn given_sandbox_family(
+    world: &mut BevyoutWorld,
+    radius: String,
+    center: String,
+    seed: String,
+) {
+    let radius: f32 = radius.parse().expect("radius");
+    let center = pf_parse_point(&center);
+    let seed: u64 = seed.parse().expect("seed");
+    world.fs_roam_center = center;
+    world.fs_roam_radius = radius;
+    world.pf_driver = Some(ai_families::FamilyDriver::wander(
+        center, radius, 2.0, seed, 0.5,
+    ));
+}
+
+#[when(regex = r"^the sandbox actor ticks at \(([^)]*)\)$")]
+async fn when_sandbox_ticks(world: &mut BevyoutWorld, actor: String) {
+    let actor = pf_parse_point(&actor);
+    let observation = ai_families::FamilyObservation::new(actor, false, false);
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[when(regex = r"^the sandbox actor arrives at its roam point$")]
+async fn when_sandbox_arrives(world: &mut BevyoutWorld) {
+    let point = pf_driver(world)
+        .current_target()
+        .expect("a roam point has been drawn");
+    let observation = ai_families::FamilyObservation::new(point, true, false);
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+#[then(regex = r"^the sandbox family routes within the roam radius$")]
+async fn then_sandbox_routes_within_radius(world: &mut BevyoutWorld) {
+    let center = world.fs_roam_center;
+    let radius = world.fs_roam_radius;
+    let Some(ai_families::FamilyRequest::Route(point)) = pf_step(world).request else {
+        panic!("expected a roam route request");
+    };
+    let dx = point[0] - center[0];
+    let dz = point[2] - center[2];
+    assert!(
+        (dx * dx + dz * dz).sqrt() <= radius + 1e-3,
+        "roam point {point:?} escaped the radius"
+    );
+    assert_eq!(point[1], center[1], "roam stays on the ground plane");
 }
