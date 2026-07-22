@@ -1918,15 +1918,18 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
     // `NavArchipelagoState` for the whole function) so the per-agent
     // re-checks below (`door_usable_now`, which needs `&World`) are free to
     // read `world` without fighting this borrow.
-    let (
+    // No archipelago means no prepared door graph (e.g. a minimal-`App` route
+    // test, or a cell with no navmesh yet): there is nothing to override, so
+    // leave the agent's costs untouched rather than panicking on a missing
+    // resource.
+    let Some((
         door_usable,
         door_type_indices,
         closed_door_type_indices,
         openable_blockers,
         door_open,
         door_lock_info,
-    ) = {
-        let state = world.resource::<NavArchipelagoState>();
+    )) = world.get_resource::<NavArchipelagoState>().map(|state| {
         (
             state.door_usable.clone(),
             state.door_type_indices.clone(),
@@ -1935,6 +1938,9 @@ fn apply_door_lock_overrides(world: &mut World, agent_entity: Entity) {
             state.door_open.clone(),
             state.door_lock_info.clone(),
         )
+    })
+    else {
+        return;
     };
     // Issue #185, the main gap: the shared cache above answers "usable by an
     // actor with no particular key" (see `door_open_and_locked`'s `agent:
