@@ -16,6 +16,10 @@
 //! navigation, and animation are explicitly out of scope for this wave -- no
 //! always-on system ticks actors here yet.
 
+pub(crate) mod families;
+pub(crate) mod family_runtime;
 pub(crate) mod lifecycle;
 pub(crate) mod resolution;
 pub(crate) mod selection;
+
+pub(crate) use family_runtime::AiPackagePlugin;

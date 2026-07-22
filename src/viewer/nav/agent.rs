@@ -2515,6 +2515,25 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
             "no test nav agent is spawned at this index; use tna spawn first",
         ));
     };
+    route_agent_to_target(world, agent_entity, target);
+    Ok(ConsoleCommandResult::new(
+        json!({ "index": index, "target": description }),
+        vec![format!("nav agent {index} target set to {description}")],
+    ))
+}
+
+/// Sets `target` on `agent_entity` and resets the per-route bookkeeping: the
+/// merge-portal quarantine (issue #162), the path-latency timer, and the pure
+/// stuck-tracking window. The single routing seam every caller that hands an
+/// agent a new destination goes through -- `goto_agent` (the `tna goto`
+/// console command) and the AI package families (`ai::family_runtime`,
+/// #196/#197) both call this so neither can drift into a different notion of
+/// "a fresh route intent".
+pub(crate) fn route_agent_to_target(
+    world: &mut World,
+    agent_entity: Entity,
+    target: AgentTarget3d,
+) {
     world.entity_mut(agent_entity).insert(target);
     // Issue #162 feature 2: a fresh target is a new routing intent -- any
     // merge-portal quarantine from a previous route no longer applies.
@@ -2537,10 +2556,46 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
         kcc.recovery_active = false;
         kcc.stuck = false;
     }
-    Ok(ConsoleCommandResult::new(
-        json!({ "index": index, "target": description }),
-        vec![format!("nav agent {index} target set to {description}")],
-    ))
+}
+
+/// Routes `agent_entity` to a fixed world point (the AI package families'
+/// `FamilyRequest::Route`). Thin wrapper over [`route_agent_to_target`].
+pub(crate) fn route_agent_to_point(world: &mut World, agent_entity: Entity, point: Vec3) {
+    route_agent_to_target(world, agent_entity, AgentTarget3d::Point(point));
+}
+
+/// Clears any nav route on `agent_entity` (the families' `FamilyRequest::Stop`
+/// on travel arrival / package completion), so landmass stops steering it and
+/// the locomotion policy idles the now-stationary actor.
+pub(crate) fn clear_agent_target(world: &mut World, agent_entity: Entity) {
+    if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
+        entity.insert(AgentTarget3d::None);
+    }
+}
+
+/// Whether `entity` currently owns a nav agent (`tna bind`/`tna spawn`
+/// inserted the `AgentKcc`). The AI package families route only nav-bound
+/// actors; the `runpackage` console command checks this before starting one.
+pub(crate) fn is_nav_bound(world: &World, entity: Entity) -> bool {
+    world.get::<AgentKcc>(entity).is_some()
+}
+
+/// Whether `agent_entity` has reached its current route target -- landmass's
+/// own authoritative arrival latch, the families' `nav_reached` input.
+pub(crate) fn agent_reached_target(world: &World, agent_entity: Entity) -> bool {
+    matches!(
+        world.get::<AgentState>(agent_entity),
+        Some(AgentState::ReachedTarget)
+    )
+}
+
+/// Whether `agent_entity`'s current route cannot be pathed (no path, or the
+/// agent/target is off the nav mesh) -- the families' `route_failed` input.
+pub(crate) fn agent_route_failed(world: &World, agent_entity: Entity) -> bool {
+    matches!(
+        world.get::<AgentState>(agent_entity),
+        Some(AgentState::NoPath | AgentState::AgentNotOnNavMesh | AgentState::TargetNotOnNavMesh)
+    )
 }
 
 fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {

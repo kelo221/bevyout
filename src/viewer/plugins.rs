@@ -10,9 +10,9 @@ use bevy::prelude::*;
 use crate::app_state::AppStatePlugin;
 
 use super::{
-    actor, actor_animation, actor_state, agent_bridge, animation, audio, bindings, cinema, console,
-    console_ui, interaction, nav, pause_menu, perception, pipboy, pipboy_reader, player, world,
-    world_items,
+    actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
+    console, console_ui, interaction, nav, pause_menu, perception, pipboy, pipboy_reader, player,
+    world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -85,6 +85,7 @@ impl PluginGroup for ViewerPlugins {
             })
             .add(world_items::WorldItemsPlugin)
             .add(nav::NavPlugin)
+            .add(ai::AiPackagePlugin)
     }
 }
 

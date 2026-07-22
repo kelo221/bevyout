@@ -19,13 +19,18 @@ use crate::vsa::{
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };
 
+use super::super::ai::families::{self, PackageFamily, Waypoint};
+use super::super::ai::family_runtime::{
+    ActorPackageController, DEFAULT_ARRIVAL_TOLERANCE, PackageInteractionOccupancy,
+};
 use super::super::ai::lifecycle::{LifecyclePhase, PackageLifecycle};
 use super::super::ai::resolution::{
-    self, PackageLocation, PackageTarget, ResolutionContext, ResolvedReference,
+    self, PackageLocation, PackageTarget, ResolutionContext, ResolvedPoint, ResolvedReference,
 };
 use super::super::ai::selection::{
     self, CandidateOutcome, GameInstant, NoConditionFunctions, PackageCandidate, PackageSchedule,
 };
+use super::super::nav::agent;
 use super::*;
 
 pub(super) struct AiPackageCommandProvider;
@@ -37,6 +42,12 @@ impl ConsoleCommandProvider for AiPackageCommandProvider {
             "showpackages <actor-reference-or-base-formid> [game-hour]",
             "Print a prepared actor's AI packages in authored priority order, then the runtime layer: the selected package and why higher-priority ones were rejected (#193), the lifecycle phase (#194), and the resolved world position/entity for the selected package's location and target (#195). Optional game-hour (0-24) drives schedule selection; defaults to noon.",
             show_packages,
+        ))?;
+        registry.register(ConsoleCommand::new(
+            "runpackage",
+            "runpackage <actor-reference> [status|stop]",
+            "Drive the selected AI package family (#196 Travel/Patrol, #197 Idle/Eat/Sleep) on a nav-bound actor (run `tna bind` first). With no action, selects+resolves the actor's package and starts the family running: Travel/Patrol walk the route, Idle/Eat/Sleep occupy and play at the resolved point. `status` prints the running family's step/target; `stop` releases occupancy and ends it.",
+            run_package,
         ))
     }
 }
@@ -386,6 +397,351 @@ pub(super) fn show_packages(
         }),
         lines,
     ))
+}
+
+/// `runpackage <actor-reference> [status|stop]` (#196/#197): the visible
+/// surface for the package families. Starting selects+resolves the actor's
+/// package (like `showpackages`) and attaches the runtime driver
+/// (`ai::family_runtime`) the per-frame system then advances.
+pub(super) fn run_package(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (selector, action) = match invocation.args.as_slice() {
+        [selector] => (selector, "start"),
+        [selector, action] => (selector, action.as_str()),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "runpackage requires an actor reference and an optional status|stop action",
+            ));
+        }
+    };
+    let entity = resolve_reference(world, selector)?;
+    let placement = world
+        .get::<interaction::PlacementRoot>(entity)
+        .ok_or_else(|| ConsoleError::new("not_actor", "reference has no placement root"))?
+        .placement();
+    if !matches!(
+        placement.semantic,
+        PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+    ) {
+        return Err(ConsoleError::new(
+            "not_actor",
+            "runpackage only accepts NPC or creature references",
+        ));
+    }
+    let reference_form_id = placement.reference_form_id;
+    match action {
+        "start" => start_package(world, entity, reference_form_id),
+        "status" => status_package(world, entity, reference_form_id),
+        "stop" => stop_package(world, entity, reference_form_id),
+        other => Err(ConsoleError::new(
+            "bad_type",
+            format!("unknown runpackage action '{other}'; expected status or stop"),
+        )),
+    }
+}
+
+/// Selects+resolves the actor's active package and attaches a running family
+/// driver. The actor must already own a nav agent (`tna bind`).
+fn start_package(
+    world: &mut World,
+    entity: Entity,
+    reference_form_id: u32,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !agent::is_nav_bound(world, entity) {
+        return Err(ConsoleError::new(
+            "not_bound",
+            format!(
+                "actor {reference_form_id:08x} is not nav-bound; run `tna bind <index> {reference_form_id:08x}` first"
+            ),
+        ));
+    }
+    let actor_catalog = load_actor_catalog(world)?;
+    let blueprint = find_actor_blueprint(
+        &actor_catalog,
+        &ActorLookupKey::Reference(reference_form_id),
+    )?;
+    if blueprint.package_form_ids.is_empty() {
+        return Err(ConsoleError::new(
+            "no_packages",
+            format!("actor {reference_form_id:08x} has no packages"),
+        ));
+    }
+    let package_form_ids = blueprint.package_form_ids.clone();
+    let package_catalog = load_package_catalog(world)?;
+    let candidate_entries: Vec<PreparedPackageEntry> = package_form_ids
+        .iter()
+        .filter_map(|form_id| {
+            package_catalog
+                .packages
+                .iter()
+                .find(|entry| entry.form_id == *form_id)
+                .cloned()
+        })
+        .collect();
+    let candidates: Vec<PackageCandidate> = candidate_entries.iter().map(to_candidate).collect();
+    let report =
+        selection::select_package(&candidates, GameInstant::default(), &NoConditionFunctions);
+    let selected = report.selected.ok_or_else(|| {
+        ConsoleError::new(
+            "no_selection",
+            format!("actor {reference_form_id:08x} has no package selected at noon (schedule/condition gap)"),
+        )
+    })?;
+    let entry = candidate_entries
+        .iter()
+        .find(|entry| entry.form_id == selected)
+        .expect("selected package is one of the candidates");
+    let family = PackageFamily::from_package_type(entry.package_type).ok_or_else(|| {
+        ConsoleError::new(
+            "unsupported_family",
+            format!(
+                "selected package {selected:08x} type {}({}) is not driven by a family (Travel/Patrol/Idle/Eat/Sleep only)",
+                entry.package_type,
+                package_type_label(entry.package_type),
+            ),
+        )
+    })?;
+
+    let context = build_resolution_context(world, reference_form_id);
+    // Eat/Sleep pick the nearest free interaction point among the resolved
+    // furniture candidates; the others drive to the single resolved location
+    // (falling back to the target slot).
+    let waypoints = if matches!(family, PackageFamily::Eat | PackageFamily::Sleep) {
+        let candidates = resolve_interaction_candidates(entry, &context, selected);
+        if candidates.is_empty() {
+            return Err(ConsoleError::new(
+                "unresolved_point",
+                format!("package {selected:08x} has no resolvable interaction point"),
+            ));
+        }
+        let occupied = &world.resource::<PackageInteractionOccupancy>().0;
+        let chosen = families::select_interaction_point(
+            &candidates,
+            context.actor_position,
+            occupied,
+        )
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "furniture_busy",
+                format!("every resolved interaction point for package {selected:08x} is occupied"),
+            )
+        })?;
+        vec![candidates[chosen]]
+    } else {
+        let resolved = resolve_family_point(entry, &context, false)?;
+        vec![Waypoint::at(resolved.position)]
+    };
+    let target = waypoints[0].position;
+
+    let controller = ActorPackageController::start(
+        reference_form_id,
+        selected,
+        family,
+        waypoints,
+        DEFAULT_ARRIVAL_TOLERANCE,
+    );
+    world.entity_mut(entity).insert(controller);
+
+    let line = format!(
+        "runpackage {reference_form_id:08x}: started {} package {selected:08x} -> target ({:.2},{:.2},{:.2})",
+        family.label(),
+        target[0],
+        target[1],
+        target[2],
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": reference_form_id,
+            "family": family.label(),
+            "selected_form_id": selected,
+            "target": target,
+        }),
+        vec![line],
+    ))
+}
+
+/// Prints the running family's step and target for an actor.
+fn status_package(
+    world: &mut World,
+    entity: Entity,
+    reference_form_id: u32,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let controller = world.get::<ActorPackageController>(entity).ok_or_else(|| {
+        ConsoleError::new(
+            "no_running_package",
+            format!("actor {reference_form_id:08x} has no running package; start one with `runpackage {reference_form_id:08x}`"),
+        )
+    })?;
+    let target = controller.driver.current_target();
+    let target_desc = target.map_or_else(
+        || "none".to_string(),
+        |point| format!("({:.2},{:.2},{:.2})", point[0], point[1], point[2]),
+    );
+    let occupied = controller
+        .driver
+        .occupied_point()
+        .map_or_else(|| "none".to_string(), |point| format!("{point:08x}"));
+    let line = format!(
+        "runpackage {reference_form_id:08x}: {} package {:08x} phase={} step={} marker={}/{} target={target_desc} occupied={occupied}",
+        controller.driver.family().label(),
+        controller.selected_form_id,
+        controller.lifecycle.phase().label(),
+        controller.driver.step_label(),
+        controller.driver.marker_index(),
+        controller.driver.marker_count(),
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": reference_form_id,
+            "family": controller.driver.family().label(),
+            "selected_form_id": controller.selected_form_id,
+            "phase": controller.lifecycle.phase().label(),
+            "step": controller.driver.step_label(),
+            "marker_index": controller.driver.marker_index(),
+            "marker_count": controller.driver.marker_count(),
+            "target": target,
+            "occupied_point": controller.driver.occupied_point(),
+        }),
+        vec![line],
+    ))
+}
+
+/// Stops a running package: releases occupancy, clears the nav route, and
+/// removes the controller.
+fn stop_package(
+    world: &mut World,
+    entity: Entity,
+    reference_form_id: u32,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let mut controller = world
+        .get_mut::<ActorPackageController>(entity)
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "no_running_package",
+                format!("actor {reference_form_id:08x} has no running package"),
+            )
+        })?;
+    let family = controller.driver.family().label();
+    let released = controller.driver.release();
+    if let Some(point) = released {
+        world
+            .resource_mut::<PackageInteractionOccupancy>()
+            .0
+            .remove(&point);
+    }
+    agent::clear_agent_target(world, entity);
+    world.entity_mut(entity).remove::<ActorPackageController>();
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "actor_reference_form_id": reference_form_id,
+            "family": family,
+            "released_point": released,
+        }),
+        vec![format!(
+            "runpackage {reference_form_id:08x}: stopped {family} package (released={})",
+            released.map_or_else(|| "none".to_string(), |point| format!("{point:08x}")),
+        )],
+    ))
+}
+
+/// Resolves a package's location/target into a world point for a family,
+/// preferring one slot but falling back to the other.
+fn resolve_family_point(
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
+    prefer_target: bool,
+) -> Result<ResolvedPoint, ConsoleError> {
+    let location = entry.location.map(|location| {
+        resolution::resolve_location(
+            &PackageLocation {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            },
+            context,
+        )
+    });
+    let target = entry.target.map(|target| {
+        resolution::resolve_target(
+            &PackageTarget {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            },
+            context,
+        )
+    });
+    let (first, second) = if prefer_target {
+        (target, location)
+    } else {
+        (location, target)
+    };
+    if let Some(Ok(point)) = &first {
+        return Ok(*point);
+    }
+    if let Some(Ok(point)) = &second {
+        return Ok(*point);
+    }
+    // Neither resolved: surface the preferred slot's diagnostic.
+    let diagnostic = first.or(second).and_then(Result::err).map_or_else(
+        || "package has no resolvable location or target".to_string(),
+        |diagnostic| diagnostic.message,
+    );
+    Err(ConsoleError::new("unresolved_point", diagnostic))
+}
+
+/// Resolves an eat/sleep package's furniture candidates: the target slot (the
+/// furniture reference) and the location slot, each carried as a `Waypoint` with
+/// an interaction-point occupancy key (the resolved entity, or the package
+/// FormID as a fallback). `families::select_interaction_point` then picks the
+/// nearest free one.
+fn resolve_interaction_candidates(
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
+    selected: u32,
+) -> Vec<Waypoint> {
+    let mut candidates = Vec::new();
+    let mut push = |point: ResolvedPoint| {
+        let interaction_point = point.entity.map_or(selected, |entity| entity as u32);
+        candidates.push(Waypoint {
+            position: point.position,
+            wait_seconds: 0.0,
+            orientation_yaw: None,
+            interaction_point: Some(interaction_point),
+        });
+    };
+    if let Some(target) = entry.target
+        && let Ok(point) = resolution::resolve_target(
+            &PackageTarget {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            },
+            context,
+        )
+    {
+        push(point);
+    }
+    if let Some(location) = entry.location
+        && let Ok(point) = resolution::resolve_location(
+            &PackageLocation {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            },
+            context,
+        )
+    {
+        push(point);
+    }
+    candidates
 }
 
 /// Maps a prepared catalog entry onto the pure #193 selection input.

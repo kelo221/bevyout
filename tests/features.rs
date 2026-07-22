@@ -421,6 +421,11 @@ mod ai_resolution;
 #[path = "../src/viewer/ai/selection.rs"]
 #[allow(dead_code, unused_imports)]
 mod ai_selection;
+// Pure package-family dispatch (issues #196/#197): std-only, no Bevy, so it
+// compiles verbatim here via `#[path]` like the other AI package modules.
+#[path = "../src/viewer/ai/families.rs"]
+#[allow(dead_code, unused_imports)]
+mod ai_families;
 
 use assets::AssetConversion;
 use bevyout_core::actor;
@@ -911,6 +916,11 @@ struct BevyoutWorld {
     // the trapped-door barrier, `viewer::nav::openmw_doors::door_openable`.
     nav_door_access_observation: openmw_doors::DoorAccessObservation,
     nav_door_access_result: Option<bool>,
+
+    // -- package_families.feature (issues #196/#197) --
+    pf_driver: Option<ai_families::FamilyDriver>,
+    pf_markers: Vec<[f32; 3]>,
+    pf_step: Option<ai_families::FamilyStep>,
 }
 
 fn find_placement<'a>(
@@ -12210,4 +12220,204 @@ async fn then_door_access_result(world: &mut BevyoutWorld, expected: String) {
         world.nav_door_access_observation,
     ));
     assert_eq!(world.nav_door_access_result, Some(expected == "openable"));
+}
+
+// ---------------------------------------------------------------------
+// package_families.feature (issues #196 Travel/Patrol, #197 Idle/Eat/Sleep)
+// -- appended step section. Drives the pure `ai_families::FamilyDriver`
+// dispatch directly; observable outcomes (requests + lifecycle signals),
+// never internal bookkeeping.
+// ---------------------------------------------------------------------
+
+/// Parses a `(x, y, z)` / `(x,y,z)` triple from a scenario token.
+fn pf_parse_point(text: &str) -> [f32; 3] {
+    let cleaned: String = text
+        .chars()
+        .map(|c| if c == '(' || c == ')' { ' ' } else { c })
+        .collect();
+    let coords: Vec<f32> = cleaned
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().expect("coordinate"))
+        .collect();
+    assert_eq!(coords.len(), 3, "expected three coordinates in {text:?}");
+    [coords[0], coords[1], coords[2]]
+}
+
+fn pf_driver(world: &mut BevyoutWorld) -> &mut ai_families::FamilyDriver {
+    world.pf_driver.as_mut().expect("configure a family first")
+}
+
+fn pf_tick(world: &mut BevyoutWorld, position: [f32; 3], nav_reached: bool) {
+    let observation = ai_families::FamilyObservation {
+        actor_position: position,
+        nav_reached,
+        route_failed: false,
+    };
+    let step = pf_driver(world).tick(&observation, 0.1);
+    world.pf_step = Some(step);
+}
+
+fn pf_step(world: &BevyoutWorld) -> ai_families::FamilyStep {
+    world.pf_step.expect("a family tick has run")
+}
+
+#[given(regex = r"^a travel family targeting \(([^)]*)\) with tolerance ([0-9.]+)$")]
+async fn given_travel_family(world: &mut BevyoutWorld, point: String, tolerance: String) {
+    let position = pf_parse_point(&point);
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Travel,
+        vec![ai_families::Waypoint::at(position)],
+        tolerance,
+    ));
+}
+
+#[given(regex = r"^an idle family at \(([^)]*)\) with tolerance ([0-9.]+)$")]
+async fn given_idle_family(world: &mut BevyoutWorld, point: String, tolerance: String) {
+    let position = pf_parse_point(&point);
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Idle,
+        vec![ai_families::Waypoint::at(position)],
+        tolerance,
+    ));
+}
+
+#[given(regex = r"^a patrol family over markers \(([^)]*)\) then \(([^)]*)\) then \(([^)]*)\)$")]
+async fn given_patrol_family(world: &mut BevyoutWorld, a: String, b: String, c: String) {
+    let markers = [pf_parse_point(&a), pf_parse_point(&b), pf_parse_point(&c)];
+    world.pf_markers = markers.to_vec();
+    let waypoints = markers
+        .iter()
+        .map(|position| ai_families::Waypoint::at(*position))
+        .collect();
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Patrol,
+        waypoints,
+        0.5,
+    ));
+}
+
+#[given(regex = r"^an? (eat|sleep) family at interaction point ([0-9]+) located at \(([^)]*)\)$")]
+async fn given_occupy_family(
+    world: &mut BevyoutWorld,
+    kind: String,
+    point_id: String,
+    position: String,
+) {
+    let position = pf_parse_point(&position);
+    let interaction_point: u32 = point_id.parse().expect("interaction point id");
+    let family = match kind.as_str() {
+        "eat" => ai_families::PackageFamily::Eat,
+        "sleep" => ai_families::PackageFamily::Sleep,
+        other => panic!("unexpected occupy family {other:?}"),
+    };
+    world.pf_markers = vec![position];
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        family,
+        vec![ai_families::Waypoint {
+            position,
+            wait_seconds: 0.0,
+            orientation_yaw: None,
+            interaction_point: Some(interaction_point),
+        }],
+        0.5,
+    ));
+}
+
+#[when(regex = r"^the actor is at \(([^)]*)\) still en route$")]
+async fn when_actor_en_route(world: &mut BevyoutWorld, point: String) {
+    let position = pf_parse_point(&point);
+    pf_tick(world, position, false);
+}
+
+#[when(regex = r"^the actor arrives at \(([^)]*)\)$")]
+async fn when_actor_arrives(world: &mut BevyoutWorld, point: String) {
+    let position = pf_parse_point(&point);
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the actor arrives at patrol marker ([0-9]+)$")]
+async fn when_actor_arrives_marker(world: &mut BevyoutWorld, index: String) {
+    let index: usize = index.parse().expect("marker index");
+    let position = world.pf_markers[index];
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the actor arrives at the interaction point$")]
+async fn when_actor_arrives_interaction(world: &mut BevyoutWorld) {
+    let position = world.pf_markers[0];
+    pf_tick(world, position, true);
+}
+
+#[when(regex = r"^the sleep package is preempted$")]
+async fn when_sleep_preempted(world: &mut BevyoutWorld) {
+    // Preemption releases the family's occupancy claim (what the lifecycle's
+    // pause + the `runpackage stop` path both call).
+    let released = pf_driver(world).release();
+    assert!(
+        released.is_some(),
+        "preempt should release an occupied point"
+    );
+}
+
+#[then(regex = r"^the family requests a route to \(([^)]*)\)$")]
+async fn then_requests_route(world: &mut BevyoutWorld, point: String) {
+    let expected = pf_parse_point(&point);
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Route(expected))
+    );
+}
+
+#[then(regex = r"^the family stops routing and completes the package$")]
+async fn then_stops_and_completes(world: &mut BevyoutWorld) {
+    let step = pf_step(world);
+    assert_eq!(step.request, Some(ai_families::FamilyRequest::Stop));
+    assert_eq!(step.signal, ai_families::LifecycleSignal::Complete);
+}
+
+#[then(regex = r"^the family advances to patrol marker ([0-9]+)$")]
+async fn then_advances_to_marker(world: &mut BevyoutWorld, index: String) {
+    let index: usize = index.parse().expect("marker index");
+    assert_eq!(
+        pf_step(world).signal,
+        ai_families::LifecycleSignal::AdvanceStep
+    );
+    assert_eq!(pf_driver(world).marker_index(), index);
+}
+
+#[then(regex = r"^the family requests the idle animation$")]
+async fn then_requests_idle(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Play(
+            ai_families::FamilyAnimation::Idle
+        ))
+    );
+}
+
+#[then(regex = r"^the family occupies interaction point ([0-9]+)$")]
+async fn then_occupies_point(world: &mut BevyoutWorld, point_id: String) {
+    let point_id: u32 = point_id.parse().expect("interaction point id");
+    assert_eq!(pf_driver(world).occupied_point(), Some(point_id));
+}
+
+#[then(regex = r"^the family requests the eat animation$")]
+async fn then_requests_eat(world: &mut BevyoutWorld) {
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Play(
+            ai_families::FamilyAnimation::Eat
+        ))
+    );
+}
+
+#[then(regex = r"^the family releases interaction point ([0-9]+)$")]
+async fn then_releases_point(world: &mut BevyoutWorld, _point_id: String) {
+    // `when_sleep_preempted` performed and asserted the release; confirm the
+    // driver no longer holds the claim.
+    assert_eq!(pf_driver(world).occupied_point(), None);
 }
