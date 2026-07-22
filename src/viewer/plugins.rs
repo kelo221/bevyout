@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use crate::app_state::AppStatePlugin;
 
 use super::{
-    actor, actor_animation, actor_state, agent_bridge, animation, audio, bindings, console,
+    actor, actor_animation, actor_state, agent_bridge, animation, audio, bindings, cinema, console,
     console_ui, interaction, nav, pause_menu, pipboy, pipboy_reader, player, world, world_items,
 };
 
@@ -77,6 +77,7 @@ impl PluginGroup for ViewerPlugins {
             .add(console::ViewerConsolePlugin)
             .add(console_ui::ConsoleUiPlugin)
             .add(pause_menu::PauseMenuPlugin)
+            .add(cinema::CinemaPlugin)
             .add(world::WorldPlugin {
                 resident_cell_limit: self.resident_cell_limit,
             })
