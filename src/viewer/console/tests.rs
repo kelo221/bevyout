@@ -1847,7 +1847,10 @@ fn showpackages_rejects_an_unknown_formid_deterministically() {
 fn showpackages_rejects_bad_arity_and_non_actor_references() {
     let mut app = test_app();
     assert_eq!(error_code(&exec(&mut app, "showpackages")), "bad_arity");
-    assert_eq!(error_code(&exec(&mut app, "showpackages a b")), "bad_arity");
+    assert_eq!(error_code(&exec(&mut app, "showpackages a b c")), "bad_arity");
+    // The optional second argument is a game-hour; a non-numeric one is a
+    // type error, not arity.
+    assert_eq!(error_code(&exec(&mut app, "showpackages a notanhour")), "bad_type");
     register_placement(&mut app, "Static");
     assert_eq!(
         error_code(&exec(&mut app, "showpackages 00000010")),

@@ -11,6 +11,7 @@
 //! changes on every cell swap, so keeping it as a static `Resource` would
 //! need its own reload-on-swap wiring this issue does not need to build.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::vsa::{
@@ -18,6 +19,13 @@ use crate::vsa::{
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };
 
+use super::super::ai::lifecycle::{LifecyclePhase, PackageLifecycle};
+use super::super::ai::resolution::{
+    self, PackageLocation, PackageTarget, ResolutionContext, ResolvedReference,
+};
+use super::super::ai::selection::{
+    self, CandidateOutcome, GameInstant, NoConditionFunctions, PackageCandidate, PackageSchedule,
+};
 use super::*;
 
 pub(super) struct AiPackageCommandProvider;
@@ -26,8 +34,8 @@ impl ConsoleCommandProvider for AiPackageCommandProvider {
     fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
         registry.register(ConsoleCommand::new(
             "showpackages",
-            "showpackages <actor-reference-or-base-formid>",
-            "Print a prepared actor's resolved AI packages in authored priority order: FormID, EditorID, type, schedule, location, target, and condition count.",
+            "showpackages <actor-reference-or-base-formid> [game-hour]",
+            "Print a prepared actor's AI packages in authored priority order, then the runtime layer: the selected package and why higher-priority ones were rejected (#193), the lifecycle phase (#194), and the resolved world position/entity for the selected package's location and target (#195). Optional game-hour (0-24) drives schedule selection; defaults to noon.",
             show_packages,
         ))
     }
@@ -239,11 +247,24 @@ pub(super) fn show_packages(
     world: &mut World,
     invocation: &ConsoleInvocation,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
-    let [selector] = invocation.args.as_slice() else {
-        return Err(ConsoleError::new(
-            "bad_arity",
-            "showpackages requires exactly one actor reference or base FormID",
-        ));
+    let (selector, hour_override) = match invocation.args.as_slice() {
+        [selector] => (selector, None),
+        [selector, hour] => {
+            let hour = hour
+                .parse::<f32>()
+                .ok()
+                .filter(|h| (0.0..=24.0).contains(h));
+            let hour = hour.ok_or_else(|| {
+                ConsoleError::new("bad_type", "game-hour must be a number in 0..=24")
+            })?;
+            (selector, Some(hour))
+        }
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "showpackages requires an actor reference or base FormID and an optional game-hour",
+            ));
+        }
     };
     let key = resolve_actor_lookup_key(world, selector)?;
     let actor_catalog = load_actor_catalog(world)?;
@@ -264,15 +285,21 @@ pub(super) fn show_packages(
         ));
     }
 
+    let reference_form_id = blueprint.reference_form_id;
+    let base_form_id = blueprint.base_form_id;
+    let package_form_ids = blueprint.package_form_ids.clone();
+
     let package_catalog = load_package_catalog(world)?;
-    let total = blueprint.package_form_ids.len();
+    let total = package_form_ids.len();
     let mut entries = Vec::with_capacity(total);
     let mut lines = Vec::with_capacity(total + 1);
     lines.push(format!(
-        "showpackages {:08x}: actor {:08x} has {total} package(s) in priority order",
-        blueprint.reference_form_id, blueprint.base_form_id
+        "showpackages {reference_form_id:08x}: actor {base_form_id:08x} has {total} package(s) in priority order"
     ));
-    for (index, form_id) in blueprint.package_form_ids.iter().copied().enumerate() {
+    // The found catalog entries, in authored priority order -- the candidate
+    // list #193 selection runs over.
+    let mut candidate_entries: Vec<&PreparedPackageEntry> = Vec::new();
+    for (index, form_id) in package_form_ids.iter().copied().enumerate() {
         let found = package_catalog
             .packages
             .iter()
@@ -281,11 +308,11 @@ pub(super) fn show_packages(
             Some(entry) => {
                 lines.push(format_package_line(index, total, entry));
                 entries.push(package_json(index, entry));
+                candidate_entries.push(entry);
             }
             None => {
                 lines.push(format!(
-                    "showpackages {:08x}: #{}/{total} {form_id:08x} not found in package catalog (see actor catalog diagnostics)",
-                    blueprint.reference_form_id,
+                    "showpackages {reference_form_id:08x}: #{}/{total} {form_id:08x} not found in package catalog (see actor catalog diagnostics)",
                     index + 1
                 ));
                 entries.push(json!({
@@ -296,14 +323,345 @@ pub(super) fn show_packages(
             }
         }
     }
+
+    // #193: selection over the found candidates at the requested game hour.
+    let now = GameInstant {
+        hour: hour_override.unwrap_or(GameInstant::default().hour),
+        ..GameInstant::default()
+    };
+    let candidates: Vec<PackageCandidate> = candidate_entries
+        .iter()
+        .map(|entry| to_candidate(entry))
+        .collect();
+    let report = selection::select_package(&candidates, now, &NoConditionFunctions);
+    let (selection_json, selection_lines) = report_selection(reference_form_id, now, &report);
+    lines.extend(selection_lines);
+
+    // #194: lifecycle phase. A persisted checkpoint resumes deterministically;
+    // otherwise the phase is derived from this selection pass.
+    let checkpoint = persisted_checkpoint(world, reference_form_id);
+    let from_checkpoint = checkpoint.is_some();
+    let lifecycle = match checkpoint {
+        Some(checkpoint) => PackageLifecycle::from_checkpoint(checkpoint),
+        None => {
+            let mut lifecycle = PackageLifecycle::new();
+            lifecycle.on_select(report.selected);
+            lifecycle
+        }
+    };
+    let (lifecycle_json, lifecycle_line) =
+        report_lifecycle(reference_form_id, &lifecycle, from_checkpoint);
+    lines.push(lifecycle_line);
+
+    // #195: resolve the selected package's location and target into world space.
+    let resolution_json = match report.selected.and_then(|selected| {
+        candidate_entries
+            .iter()
+            .find(|entry| entry.form_id == selected)
+            .copied()
+    }) {
+        Some(entry) => {
+            let context = build_resolution_context(world, reference_form_id);
+            let (resolution_json, resolution_lines) =
+                report_resolution(reference_form_id, entry, &context);
+            lines.extend(resolution_lines);
+            resolution_json
+        }
+        None => {
+            lines.push(format!(
+                "showpackages {reference_form_id:08x}: resolution skipped (no selected package)"
+            ));
+            Value::Null
+        }
+    };
+
     Ok(ConsoleCommandResult::new(
         json!({
-            "actor_reference_form_id": blueprint.reference_form_id,
-            "actor_base_form_id": blueprint.base_form_id,
+            "actor_reference_form_id": reference_form_id,
+            "actor_base_form_id": base_form_id,
             "packages": entries,
+            "selection": selection_json,
+            "lifecycle": lifecycle_json,
+            "resolution": resolution_json,
         }),
         lines,
     ))
+}
+
+/// Maps a prepared catalog entry onto the pure #193 selection input.
+fn to_candidate(entry: &PreparedPackageEntry) -> PackageCandidate {
+    PackageCandidate {
+        form_id: entry.form_id,
+        package_type: entry.package_type,
+        schedule: entry.schedule.map(|schedule| PackageSchedule {
+            month: schedule.month,
+            day_of_week: schedule.day_of_week,
+            date: schedule.date,
+            time: schedule.time,
+            duration: schedule.duration,
+        }),
+        conditions: entry.conditions.clone(),
+    }
+}
+
+/// Renders the #193 selection report: the selected package and every
+/// higher-priority package's concrete rejection reason.
+fn report_selection(
+    reference_form_id: u32,
+    now: GameInstant,
+    report: &selection::SelectionReport,
+) -> (Value, Vec<String>) {
+    let mut lines = Vec::with_capacity(report.evaluations.len() + 2);
+    match report.selected {
+        Some(selected) => lines.push(format!(
+            "showpackages {reference_form_id:08x}: selected package {selected:08x} @ hour {:.1}",
+            now.hour
+        )),
+        None => lines.push(format!(
+            "showpackages {reference_form_id:08x}: no package selected @ hour {:.1} (schedule/condition gap)",
+            now.hour
+        )),
+    }
+    let mut evaluations_json = Vec::with_capacity(report.evaluations.len());
+    for (index, evaluation) in report.evaluations.iter().enumerate() {
+        let (status, reason) = match evaluation.outcome {
+            CandidateOutcome::Selected => ("selected", None),
+            CandidateOutcome::Rejected(reason) => ("rejected", Some(reason.label())),
+        };
+        lines.push(format!(
+            "showpackages {reference_form_id:08x}:   #{} {:08x} {status}{}",
+            index + 1,
+            evaluation.form_id,
+            reason.map_or_else(String::new, |reason| format!(": {reason}"))
+        ));
+        evaluations_json.push(json!({
+            "index": index,
+            "form_id": evaluation.form_id,
+            "status": status,
+            "reason": reason,
+        }));
+    }
+    let counters = &report.counters;
+    (
+        json!({
+            "selected_form_id": report.selected,
+            "game_hour": now.hour,
+            "evaluations": evaluations_json,
+            "counters": {
+                "total": counters.total,
+                "unsupported_type": counters.unsupported_type,
+                "out_of_schedule": counters.out_of_schedule,
+                "conditions_false": counters.conditions_false,
+                "conditions_unevaluable": counters.conditions_unevaluable,
+                "schedule_gap": counters.schedule_gap,
+            },
+        }),
+        lines,
+    )
+}
+
+/// Renders the #194 lifecycle phase for the selected/persisted package.
+fn report_lifecycle(
+    reference_form_id: u32,
+    lifecycle: &PackageLifecycle,
+    from_checkpoint: bool,
+) -> (Value, String) {
+    let source = if from_checkpoint {
+        "checkpoint"
+    } else {
+        "selection"
+    };
+    let phase = lifecycle.phase();
+    let active = lifecycle.active_form_id();
+    let line = format!(
+        "showpackages {reference_form_id:08x}: lifecycle phase={} active={} step={} elapsed={:.1} ({source})",
+        phase.label(),
+        active.map_or_else(|| "none".to_string(), |form_id| format!("{form_id:08x}")),
+        lifecycle
+            .step()
+            .map_or_else(|| "-".to_string(), |step| step.to_string()),
+        lifecycle.elapsed_seconds().unwrap_or(0.0),
+    );
+    (
+        json!({
+            "phase": phase.label(),
+            "active_form_id": active,
+            "step": lifecycle.step(),
+            "elapsed_seconds": lifecycle.elapsed_seconds(),
+            "paused_form_id": lifecycle.paused_form_id(),
+            "source": source,
+            "resumable": matches!(
+                phase,
+                LifecyclePhase::Running | LifecyclePhase::Paused | LifecyclePhase::AwaitingRetry
+            ),
+        }),
+        line,
+    )
+}
+
+/// Renders the #195 resolved world position/entity for the selected package's
+/// location and target, or the deterministic diagnostic for an unresolvable one.
+fn report_resolution(
+    reference_form_id: u32,
+    entry: &PreparedPackageEntry,
+    context: &ResolutionContext,
+) -> (Value, Vec<String>) {
+    let mut lines = Vec::with_capacity(2);
+    let location_json = match entry.location {
+        Some(location) => {
+            let location = PackageLocation {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            };
+            let result = resolution::resolve_location(&location, context);
+            lines.push(resolution_line(
+                reference_form_id,
+                entry.form_id,
+                "location",
+                &result,
+            ));
+            resolution_json(&result)
+        }
+        None => {
+            lines.push(format!(
+                "showpackages {reference_form_id:08x}: {:08x} location none",
+                entry.form_id
+            ));
+            Value::Null
+        }
+    };
+    let target_json = match entry.target {
+        Some(target) => {
+            let target = PackageTarget {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            };
+            let result = resolution::resolve_target(&target, context);
+            lines.push(resolution_line(
+                reference_form_id,
+                entry.form_id,
+                "target",
+                &result,
+            ));
+            resolution_json(&result)
+        }
+        None => {
+            lines.push(format!(
+                "showpackages {reference_form_id:08x}: {:08x} target none",
+                entry.form_id
+            ));
+            Value::Null
+        }
+    };
+    (
+        json!({
+            "selected_form_id": entry.form_id,
+            "location": location_json,
+            "target": target_json,
+        }),
+        lines,
+    )
+}
+
+fn resolution_line(
+    reference_form_id: u32,
+    package_form_id: u32,
+    slot: &str,
+    result: &Result<resolution::ResolvedPoint, resolution::ResolutionDiagnostic>,
+) -> String {
+    match result {
+        Ok(point) => format!(
+            "showpackages {reference_form_id:08x}: {package_form_id:08x} {slot} resolved via {} to ({:.2},{:.2},{:.2}) entity={} radius={:.1}",
+            point.source.label(),
+            point.position[0],
+            point.position[1],
+            point.position[2],
+            point
+                .entity
+                .map_or_else(|| "none".to_string(), |entity| format!("{entity}")),
+            point.radius,
+        ),
+        Err(diagnostic) => format!(
+            "showpackages {reference_form_id:08x}: {package_form_id:08x} {slot} unresolved: {diagnostic}"
+        ),
+    }
+}
+
+fn resolution_json(
+    result: &Result<resolution::ResolvedPoint, resolution::ResolutionDiagnostic>,
+) -> Value {
+    match result {
+        Ok(point) => json!({
+            "resolved": true,
+            "source": point.source.label(),
+            "position": point.position,
+            "entity": point.entity,
+            "radius": point.radius,
+        }),
+        Err(diagnostic) => json!({
+            "resolved": false,
+            "diagnostic": diagnostic.message,
+        }),
+    }
+}
+
+/// Reads the actor's persisted package checkpoint (`ActiveSaveState`), the
+/// same one `setactorpackage` writes and save format v4 round-trips.
+fn persisted_checkpoint(
+    world: &World,
+    reference_form_id: u32,
+) -> Option<bevyout_core::actor_state::ActorPackageCheckpoint> {
+    world
+        .get_resource::<super::super::world::ActiveSaveState>()
+        .and_then(|save| {
+            save.0.cells.values().find_map(|cell| {
+                cell.actors
+                    .get(&reference_form_id)
+                    .and_then(|state| state.package)
+            })
+        })
+}
+
+/// Snapshots the live placements into the #195 resolution context: every
+/// visible reference's position and entity, indexed by base for nearest-of-base
+/// resolution, plus the querying actor's own position.
+fn build_resolution_context(world: &mut World, actor_reference_form_id: u32) -> ResolutionContext {
+    let current_cell_form_id = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .map_or(0, |manifest| manifest.0.cell.form_id);
+    let mut references = HashMap::new();
+    let mut bases: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut actor_position = [0.0f32; 3];
+    let mut query = world.query::<(Entity, &interaction::PlacementRoot)>();
+    for (entity, root) in query.iter(world) {
+        let placement = root.placement();
+        let resolved = ResolvedReference {
+            reference_form_id: placement.reference_form_id,
+            base_form_id: placement.base_form_id,
+            cell_form_id: current_cell_form_id,
+            position: placement.translation,
+            entity: Some(entity.to_bits()),
+        };
+        if placement.reference_form_id == actor_reference_form_id {
+            actor_position = placement.translation;
+        }
+        bases
+            .entry(placement.base_form_id)
+            .or_default()
+            .push(placement.reference_form_id);
+        references.insert(placement.reference_form_id, resolved);
+    }
+    ResolutionContext {
+        current_cell_form_id,
+        actor_position,
+        references,
+        bases,
+        ..ResolutionContext::default()
+    }
 }
 
 fn package_json(index: usize, entry: &PreparedPackageEntry) -> Value {
