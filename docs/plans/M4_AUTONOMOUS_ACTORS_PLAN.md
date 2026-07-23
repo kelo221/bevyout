@@ -142,4 +142,58 @@ gameplay clock beyond wiring what exists; persistence of the roster/driver state
 big file). The package radius/`FO3_SCALE` scaling (#222) is a separate follow-up.
 
 ## Shipped amendments
-_(to be filled during acceptance)_
+
+- **F4 reuse shape differs from the literal plan text, on purpose.**
+  `build_resolution_context` and `resolve_family_point` moved exactly as
+  specified (into `ai::family_runtime`/`ai::resolution` respectively —
+  `resolve_family_point`'s signature changed from taking a whole
+  `PreparedPackageEntry` to plain `PackageLocation`/`PackageTarget` mirrors,
+  since `ai::resolution` must stay decoupled from `vsa` types to keep
+  compiling verbatim into `tests/features.rs`). But rather than *also*
+  duplicating `start_package`'s ~150-line select→resolve→dispatch body a
+  second time inside the new `ai::autonomous` module ("the same logic … as
+  start_package"), the executor made `start_package` itself `pub(crate)`,
+  added an explicit `instant: GameInstant` parameter (the console call site
+  passes `GameInstant::default()`, unchanged), and had the autonomous driver
+  call that exact function. This is strictly stronger than "the same logic
+  in two places" — it is *one* function, zero duplication, zero drift risk
+  — at the cost of `viewer::console::ai_package_commands` needing
+  `pub(crate)` visibility so `viewer::ai::autonomous` can reach it (no
+  architecture test enforces a console→ai-only direction; `tests/
+  architecture.rs` only asserts bevyout-core/Bevy and vsa/viewer
+  boundaries).
+- **Live clock:** confirmed no gameplay clock resource exists anywhere in
+  this codebase (grepped `GameInstant`/game-hour/`Time<Virtual>` — only the
+  plain `GameInstant` *input* type turned up, never a ticking source). The
+  autonomous driver uses `GameInstant::default()` (noon), matching the
+  console's own default, with a `// ponytail:` comment at the call site
+  naming the follow-up rather than building a clock system in this wave.
+- **`Added<ActorStateRuntime>` needed two systems, not one.** An ad-hoc
+  `World::query_filtered` built fresh inside an exclusive system (the shape
+  every other exclusive system in `nav/agent.rs` uses) does not track
+  `Added<>` correctly across frames — only a `Query` system parameter Bevy
+  caches does. `ai::autonomous` splits into an ordinary system with a real
+  `Query<..., Added<..>>` that queues candidates into a resource, and a
+  separate exclusive system that drains the queue and does the `&mut World`
+  mutation (bind + start).
+- **Real-data acceptance (SuperDuperMart, 00017f37), no console commands
+  before observing:** all five raiders (`00041600`, `00041604`, `00041606`,
+  `0004160c`, `00041611`) auto-bound and started their Patrol package within
+  the first frame after cell load (`autonomous package driver: bound +
+  started actor <formid>` for each); a sixth actor (`0005cf10`) logged a
+  `warn` skip for a genuine per-actor data gap (no authored `XLKR`), which is
+  correct behavior, not a bug. `actor-animation play state=run/walk/
+  turn_left/turn_right clip=...` all logged (native clips play). `nav actor
+  locomotion` transitions for the same agent landed seconds apart, never a
+  sub-100 ms burst — the #224 flap is gone. `getpos` sampled twice on
+  `00041600` a few seconds apart moved (`(18.55,96.45,-89.52)` →
+  `(18.23,96.45,-89.32)`) with zero console movement commands issued. Full
+  steps and evidence: `docs/plans/M4_AUTONOMOUS_ACTORS_MANUAL.md`.
+- **New follow-up found, not fixed here (out of scope):** a brief (~300 ms)
+  `turn_left`/`turn_right` oscillation was observed on one raider mid-route.
+  This is the yaw-rate turn classifier, which #224/`smooth_achieved_speed`
+  never touched (that fix is achieved-*speed* only, by design). It
+  self-resolved within a third of a second and did not recur elsewhere in a
+  ~50-second run. Recommend filing as its own issue if it proves visually
+  noticeable in play (candidate fix: the same EMA treatment applied to yaw
+  rate).
