@@ -95,6 +95,35 @@ pub(crate) const TURN_ENTER_RATE: f32 = std::f32::consts::FRAC_PI_4;
 /// [`WALK_EXIT_SPEED`].
 pub(crate) const TURN_EXIT_RATE: f32 = std::f32::consts::FRAC_PI_2 / 6.0;
 
+/// Time constant (seconds) for [`smooth_achieved_speed`]'s exponential moving
+/// average. About 7-8 fixed ticks at [`FIXED_TICK_HZ`] -- long enough to
+/// absorb the achieved-speed ripple `apply_agent_physics_movement` produces
+/// tick to tick (issue #224: observed live swinging the raw sample between
+/// near-zero and full route speed, which crosses every hysteresis band in
+/// this module every tick, not just the raw threshold the bands already
+/// guard), short enough that a genuine stop still reads as idle within a
+/// few frames rather than gliding to a stop over a visible fraction of a
+/// second.
+const SPEED_SMOOTHING_TIME_CONSTANT_SECONDS: f32 = 0.12;
+
+/// Exponentially smooths `raw` (this tick's achieved horizontal speed sample)
+/// toward `previous` (the smoothed value the caller carried over from last
+/// tick), frame-rate independent via `dt`.
+///
+/// This runs *before* [`next_locomotion_state`], not instead of it: the
+/// hysteresis bands there guard against a speed sitting near one raw
+/// threshold; this guards against the caller's raw sample itself swinging
+/// across the *entire* band pair tick to tick, which no threshold placement
+/// can absorb. `dt <= 0.0` (a paused or zero-length tick) returns `previous`
+/// unchanged rather than dividing by zero.
+pub(crate) fn smooth_achieved_speed(previous: f32, raw: f32, dt: f32) -> f32 {
+    if dt <= 0.0 {
+        return previous;
+    }
+    let alpha = (dt / (SPEED_SMOOTHING_TIME_CONSTANT_SECONDS + dt)).clamp(0.0, 1.0);
+    previous + (raw - previous) * alpha
+}
+
 const _: () = {
     // The exit edges are documented as restatements of `actor_animation`'s
     // per-frame epsilons at the fixed tick. Pin that claim rather than
@@ -379,6 +408,68 @@ mod tests {
         assert_eq!(
             next_locomotion_state(LocomotionState::Walk, moving(0.0)),
             LocomotionState::Idle
+        );
+    }
+
+    /// The regression test for #224's live bug: an achieved speed sample
+    /// alternating every tick between full route speed and near-zero (what
+    /// `apply_agent_physics_movement` was observed producing) swings clean
+    /// across every hysteresis band above, not just the raw threshold they
+    /// guard -- so feeding it straight to [`next_locomotion_state`] flaps
+    /// idle/run every tick (the control assertion below). Routing it through
+    /// [`smooth_achieved_speed`] first settles the classifier once the EMA
+    /// has warmed up.
+    #[test]
+    fn smoothing_stops_an_alternating_achieved_speed_from_flapping_the_classifier() {
+        const TICK_SECONDS: f32 = 1.0 / FIXED_TICK_HZ;
+        const WARMUP_TICKS: usize = 32;
+        const TOTAL_TICKS: usize = 128;
+
+        // Control: the same raw alternation fed directly into the classifier,
+        // with no smoothing, does flap almost every tick -- this is what
+        // distinguishes this test from `a_speed_oscillating_across_the_raw_
+        // run_threshold_does_not_flap` above, whose raw input stays within
+        // one band pair. This one swings the full route speed, clean across
+        // every band.
+        let mut raw_state = LocomotionState::Idle;
+        let mut raw_changes = 0;
+        for tick in 0..TOTAL_TICKS {
+            let raw = if tick % 2 == 0 {
+                ROUTE_SPEED_METRES_PER_SECOND
+            } else {
+                0.0
+            };
+            let next = next_locomotion_state(raw_state, moving(raw));
+            if next != raw_state {
+                raw_changes += 1;
+            }
+            raw_state = next;
+        }
+        assert!(
+            raw_changes > TOTAL_TICKS / 2,
+            "expected the unsmoothed classifier to flap nearly every tick, got {raw_changes} changes"
+        );
+
+        // The fix: the same alternation, smoothed first.
+        let mut smoothed = 0.0f32;
+        let mut state = LocomotionState::Idle;
+        let mut changes_after_warmup = 0;
+        for tick in 0..TOTAL_TICKS {
+            let raw = if tick % 2 == 0 {
+                ROUTE_SPEED_METRES_PER_SECOND
+            } else {
+                0.0
+            };
+            smoothed = smooth_achieved_speed(smoothed, raw, TICK_SECONDS);
+            let next = next_locomotion_state(state, moving(smoothed));
+            if tick >= WARMUP_TICKS && next != state {
+                changes_after_warmup += 1;
+            }
+            state = next;
+        }
+        assert!(
+            changes_after_warmup <= 1,
+            "classifier still flapped {changes_after_warmup} times per tick after the EMA warmed up"
         );
     }
 

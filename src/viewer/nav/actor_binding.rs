@@ -127,6 +127,13 @@ pub(super) struct NavBoundActor {
     /// tick -- the *achieved* turn, matching the achieved-not-desired rule
     /// the speed input follows.
     pub(super) yaw_rate: f32,
+    /// [`locomotion::smooth_achieved_speed`]'s running EMA of
+    /// `AgentKcc::last_achieved_horizontal_speed` (issue #224): the raw
+    /// per-tick sample swings across every hysteresis band in `locomotion.rs`
+    /// tick to tick, which produced a live idle/run flap of ~25 Hz; this is
+    /// smoothed *before* [`drive_bound_actor_locomotion`] classifies it, on
+    /// top of -- not instead of -- those bands.
+    pub(super) smoothed_speed: f32,
 }
 
 /// Which authority owns a bound actor's `Transform.rotation` this frame -- the
@@ -226,15 +233,24 @@ fn shortest_yaw_delta(delta: f32) -> f32 {
 /// `movement_policy::decide_collision_outcome`, and the yaw rate is what
 /// [`face_bound_actors`] actually applied.
 pub(super) fn drive_bound_actor_locomotion(world: &mut World) {
+    let dt = world.resource::<Time>().delta_secs();
     let mut query = world.query_filtered::<(Entity, &AgentKcc, &mut NavBoundActor), ()>();
     let requests: Vec<(Entity, LocomotionState, LocomotionState)> = query
         .iter_mut(world)
         .map(|(entity, kcc, mut bound)| {
             let previous = bound.locomotion;
+            // Smooth the raw per-tick achieved speed before it ever reaches
+            // the classifier -- see `NavBoundActor::smoothed_speed` and
+            // `locomotion::smooth_achieved_speed` (issue #224).
+            bound.smoothed_speed = locomotion::smooth_achieved_speed(
+                bound.smoothed_speed,
+                kcc.last_achieved_horizontal_speed,
+                dt,
+            );
             let next = locomotion::next_locomotion_state(
                 previous,
                 LocomotionObservation {
-                    achieved_horizontal_speed: kcc.last_achieved_horizontal_speed,
+                    achieved_horizontal_speed: bound.smoothed_speed,
                     yaw_rate: bound.yaw_rate,
                 },
             );
@@ -339,6 +355,17 @@ mod tests {
             .and_then(|intent| intent.requested)
     }
 
+    /// Runs `drive_bound_actor_locomotion` over several fixed ticks so the
+    /// #224 achieved-speed EMA (`NavBoundActor::smoothed_speed`) has time to
+    /// converge toward a sustained raw sample, mirroring an actor holding a
+    /// steady speed for a stretch of real ticks rather than a single instant.
+    fn settle_locomotion(world: &mut World) {
+        for _ in 0..40 {
+            advance(world, 1.0 / 64.0);
+            world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        }
+    }
+
     #[test]
     fn a_moving_bound_actor_requests_a_locomotion_state() {
         let (mut world, entity) = bound_actor_world();
@@ -346,14 +373,14 @@ mod tests {
             .get_mut::<AgentKcc>(entity)
             .unwrap()
             .last_achieved_horizontal_speed = AGENT_DESIRED_SPEED;
-        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        settle_locomotion(&mut world);
         assert_eq!(requested(&world, entity), Some(ActorAnimationState::Run));
 
         world
             .get_mut::<AgentKcc>(entity)
             .unwrap()
             .last_achieved_horizontal_speed = 0.8;
-        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        settle_locomotion(&mut world);
         assert_eq!(requested(&world, entity), Some(ActorAnimationState::Walk));
     }
 
