@@ -491,6 +491,12 @@ pub struct PreparedPlacement {
     pub owner_form_id: Option<u32>,
     #[serde(default)]
     pub owner_faction_rank: Option<i32>,
+    /// This reference's `XLKR` linked reference (issue #213): the FormID a
+    /// `near-linked-reference` (`PLDT` location type 6) AI package location
+    /// resolves through, and the seed for the patrol marker chain-walk.
+    /// `#[serde(default)]` -- see `CURRENT_PREPARE_REVISION`'s bump.
+    #[serde(default)]
+    pub linked_reference_form_id: Option<u32>,
     #[serde(default)]
     pub inventory: Vec<PreparedInventoryEntry>,
     #[serde(default)]

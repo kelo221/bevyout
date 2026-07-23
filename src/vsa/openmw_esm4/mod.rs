@@ -213,6 +213,15 @@ pub(crate) struct ReferenceRecord {
     /// `enable_parent` is `Some`. `None` when there is no chain, or the
     /// chain could not be resolved (unresolved/cyclic XESP).
     pub(crate) enable_root_form_id: Option<u32>,
+    /// `XLKR`: the FormID of this reference's linked reference (issue #213),
+    /// resolver-adjusted and `!= 0`-filtered like every other `sub_form_id`
+    /// read. Authored on both actor placements (the first patrol marker) and
+    /// on the markers themselves (the next marker in the chain) -- confirmed
+    /// empirically against real Fallout3.esm `SuperDuperMart` data at plan
+    /// time (`00017f37`'s `LvlRaiderMelee` ACHR `00041609` links to marker
+    /// `0004160a`, which links to `0004160b`, which links to `00041617`,
+    /// which has no further link).
+    pub(crate) linked_reference_form_id: Option<u32>,
     pub(crate) ignored_subrecords: Vec<String>,
 }
 

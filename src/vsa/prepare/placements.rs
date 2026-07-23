@@ -74,6 +74,7 @@ pub(crate) fn prepared_placement(
         }),
         owner_form_id: reference.owner_form_id,
         owner_faction_rank: reference.owner_faction_rank,
+        linked_reference_form_id: reference.linked_reference_form_id,
         inventory: base
             .map(|base| {
                 base.inventory
@@ -397,6 +398,30 @@ pub(crate) struct PlacementStage {
     pub(crate) leveled_lists: BTreeMap<u32, PreparedLeveledList>,
 }
 
+/// Whether a non-rendering editor-marker reference (an `is_editor_marker`
+/// model, e.g. the engine's `XMarkerHeading`/`markerxheading.nif`) still
+/// needs a placement projected, despite having no geometry worth
+/// converting. Actor and door references always did (their downstream
+/// logic needs a placement regardless of a model); issue #213 adds a
+/// reference that participates in a patrol's linked-reference chain --
+/// either as a link source (its own `XLKR`) or a link target (some other
+/// reference's `XLKR` names it) -- since a chain marker with no placement
+/// at all is a position the runtime resolution context can never read.
+/// Confirmed against real Fallout3.esm SuperDuperMart data at plan time:
+/// without this, an intermediate/terminal patrol marker (which carries no
+/// outgoing `XLKR` of its own) would be dropped from the manifest
+/// entirely.
+pub(crate) fn editor_marker_needs_placement(
+    reference: &ReferenceRecord,
+    base_kind: &str,
+    linked_reference_targets: &std::collections::HashSet<u32>,
+) -> bool {
+    reference.kind != ReferenceKind::Object
+        || base_kind == "DOOR"
+        || reference.linked_reference_form_id.is_some()
+        || linked_reference_targets.contains(&reference.form_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_placements(
     references: Vec<ReferenceRecord>,
@@ -412,6 +437,20 @@ pub(crate) fn stage_placements(
     actor_converter_revision: &str,
 ) -> Result<PlacementStage> {
     let model_static_usage = model_static_usage(&references, bases);
+    // Issue #213: every reference some other reference's `XLKR` names as its
+    // linked target. Confirmed against real Fallout3.esm SuperDuperMart data
+    // at plan time: FO3 patrol markers are plain `ReferenceKind::Object`
+    // placements of the engine's `XMarkerHeading` base (model
+    // `markerxheading.nif`, `paths::is_editor_marker`'s non-rendering skip
+    // list) -- without this set, the "skip this non-rendering editor
+    // marker" branch below would drop a patrol chain's intermediate/
+    // terminal markers entirely (they carry no outgoing `XLKR` of their
+    // own), leaving them permanently unresolvable no matter what the
+    // runtime resolution context folds in.
+    let linked_reference_targets: std::collections::HashSet<u32> = references
+        .iter()
+        .filter_map(|reference| reference.linked_reference_form_id)
+        .collect();
     let mut jobs: Vec<BlenderAssetJob> = Vec::new();
     let mut visual_assets = Vec::new();
     let mut placements = Vec::new();
@@ -509,7 +548,7 @@ pub(crate) fn stage_placements(
                 severity: "info".into(),
                 message: format!("skipping non-rendering editor marker {normalized_model}"),
             });
-            if reference.kind != ReferenceKind::Object || base.kind == "DOOR" {
+            if editor_marker_needs_placement(&reference, &base.kind, &linked_reference_targets) {
                 placements.push(prepared_placement(
                     &reference,
                     Some(base),

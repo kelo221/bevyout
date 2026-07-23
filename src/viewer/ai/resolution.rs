@@ -18,7 +18,7 @@
 //! via `#[path]`. The Bevy console adapter builds the [`ResolutionContext`]
 //! snapshot from live placements/transforms.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Plain mirror of `PackageLocationInput` (`PLDT`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,6 +47,10 @@ pub struct ResolvedReference {
     pub position: [f32; 3],
     /// The Bevy entity bits behind this reference, when it is spawned.
     pub entity: Option<u64>,
+    /// This reference's own `XLKR` linked reference (issue #213), if any --
+    /// carried through so the patrol marker chain-walk can hop from one
+    /// resolved marker to the next without a second lookup pass.
+    pub linked_reference: Option<u32>,
 }
 
 /// The runtime snapshot resolution reads. All fields are plain data the Bevy
@@ -348,6 +352,44 @@ pub fn resolve_target(target: &PackageTarget, context: &ResolutionContext) -> Re
     }
 }
 
+/// Defensive cap on a patrol marker chain-walk (issue #213): authored FO3
+/// patrol routes are single digits long, so a malformed or authored cycle
+/// hitting this cap is unambiguously a data problem, not a real route --
+/// the walk still terminates cleanly rather than allocating unbounded
+/// waypoints.
+const MAX_LINKED_REFERENCE_CHAIN: usize = 256;
+
+/// Walks a Patrol package's `XLKR` linked-reference chain from `start` (the
+/// acting actor's own `linked_reference`, i.e. the first marker), resolving
+/// each hop to a world point in authored order (issue #213). Each marker's
+/// own `linked_reference` (carried on [`ResolvedReference`]) names the next
+/// hop; the walk stops -- cleanly, returning everything resolved so far,
+/// never panicking and never looping -- on a reference the context does not
+/// know about, a marker with no further link, a revisited FormID (a cycle),
+/// or the defensive length cap.
+#[must_use]
+pub fn linked_reference_chain(context: &ResolutionContext, start: u32) -> Vec<ResolvedPoint> {
+    let mut points = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current = Some(start);
+    while let Some(form_id) = current {
+        if points.len() >= MAX_LINKED_REFERENCE_CHAIN || !visited.insert(form_id) {
+            break;
+        }
+        let Some(reference) = context.references.get(&form_id) else {
+            break;
+        };
+        points.push(ResolvedPoint {
+            position: reference.position,
+            entity: reference.entity,
+            radius: 0.0,
+            source: ResolutionSource::LinkedReference(form_id),
+        });
+        current = reference.linked_reference;
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +401,7 @@ mod tests {
             cell_form_id: 0x1000,
             position,
             entity: Some(u64::from(reference_form_id)),
+            linked_reference: None,
         }
     }
 
@@ -559,5 +602,61 @@ mod tests {
         };
         let error = resolve_target(&target, &context).unwrap_err();
         assert!(error.message.contains("unsupported target type 77"));
+    }
+
+    /// Like `reference`, but carries an `XLKR` link to the next marker in a
+    /// patrol chain (issue #213).
+    fn linked_marker(
+        reference_form_id: u32,
+        position: [f32; 3],
+        linked_reference: Option<u32>,
+    ) -> ResolvedReference {
+        ResolvedReference {
+            linked_reference,
+            ..reference(reference_form_id, 0x34, position)
+        }
+    }
+
+    #[test]
+    fn linked_reference_chain_walks_a_single_marker() {
+        let context = context_with(vec![linked_marker(0x10, [1.0, 2.0, 3.0], None)]);
+        let points = linked_reference_chain(&context, 0x10);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].position, [1.0, 2.0, 3.0]);
+        assert_eq!(points[0].source, ResolutionSource::LinkedReference(0x10));
+    }
+
+    #[test]
+    fn linked_reference_chain_walks_a_three_marker_cycle_and_terminates() {
+        // A -> B -> C -> A: the chain must yield exactly the three markers,
+        // in order, then stop instead of looping forever.
+        let context = context_with(vec![
+            linked_marker(0xA, [0.0, 0.0, 0.0], Some(0xB)),
+            linked_marker(0xB, [1.0, 0.0, 0.0], Some(0xC)),
+            linked_marker(0xC, [2.0, 0.0, 0.0], Some(0xA)),
+        ]);
+        let points = linked_reference_chain(&context, 0xA);
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.position)
+                .collect::<Vec<_>>(),
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+        );
+    }
+
+    #[test]
+    fn linked_reference_chain_terminates_cleanly_on_a_broken_or_missing_link() {
+        // The start reference itself is not present in the runtime at all.
+        let empty_context = context_with(vec![]);
+        assert_eq!(linked_reference_chain(&empty_context, 0x99), Vec::new());
+
+        // A real first marker whose own link points at a FormID the context
+        // does not know about: one waypoint, then a clean stop.
+        let dangling_context =
+            context_with(vec![linked_marker(0x10, [5.0, 5.0, 5.0], Some(0xDEAD))]);
+        let points = linked_reference_chain(&dangling_context, 0x10);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].position, [5.0, 5.0, 5.0]);
     }
 }

@@ -1854,6 +1854,140 @@ fn showpackages_resolves_a_raw_base_formid_not_currently_placed() {
     cleanup.expect("remove synthetic showpackages fixture dir");
 }
 
+/// A minimal `PreparedPlacement`, matching `register_placement`'s RON
+/// shape but with a caller-chosen FormID/base/translation/asset/linked
+/// reference -- used to build both a spawned actor and an unspawned
+/// asset-less marker for the #213 context-builder tests below.
+fn synthetic_placement(
+    reference_form_id: u32,
+    base_form_id: u32,
+    translation: [f32; 3],
+    asset_path: Option<&str>,
+    linked_reference_form_id: Option<u32>,
+) -> crate::vsa::PreparedPlacement {
+    let ron = format!(
+        "(
+            reference_form_id: {reference_form_id},
+            base_form_id: {base_form_id},
+            asset_path: {asset_path_ron},
+            translation: ({}, {}, {}),
+            rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            error: None,
+            semantic: Static,
+            linked_reference_form_id: {linked_ron},
+        )",
+        translation[0],
+        translation[1],
+        translation[2],
+        asset_path_ron = asset_path.map_or_else(|| "None".to_string(), |p| format!("Some({p:?})")),
+        linked_ron =
+            linked_reference_form_id.map_or_else(|| "None".to_string(), |id| format!("Some({id})")),
+    );
+    ron::de::from_str(&ron).expect("synthetic placement RON should parse")
+}
+
+/// A minimal `PreparedPackageEntry` carrying just a `PLDT` location --
+/// `PackageLocationInput` is `pub(crate)` to `vsa::prepare`, not reachable
+/// by name from this module, so this goes through RON like
+/// `synthetic_placement` above.
+fn package_with_location(
+    form_id: u32,
+    package_type: u8,
+    location_type: u32,
+) -> crate::vsa::PreparedPackageEntry {
+    let ron = format!(
+        "(
+            form_id: {form_id},
+            package_type: {package_type},
+            location: Some((
+                location_type: {location_type},
+                form_id: None,
+                raw_value: 0,
+                radius: 512,
+            )),
+        )"
+    );
+    ron::de::from_str(&ron).expect("synthetic package entry RON should parse")
+}
+
+// Issue #213: `build_resolution_context` folds the manifest's full
+// placement list in (not just spawned entities), so an asset-less patrol
+// marker -- skipped at spawn, never a `PlacementRoot` entity -- is still a
+// resolvable reference, and the querying actor's *authored* editor location
+// and linked reference come from its manifest placement rather than its
+// live (possibly since-moved) `Transform`.
+#[test]
+fn showpackages_resolves_near_editor_location_from_the_actors_authored_placement() {
+    let (mut manifest, temp_root) = write_showpackages_fixture(
+        "editor-location",
+        0x10,
+        1,
+        vec![0x50],
+        vec![package_with_location(0x50, 12, 3)], // Sandbox, NearEditorLocation
+    );
+    // The actor's *authored* point (2, 3, 4) differs from where it will
+    // actually spawn (0, 0, 0) below -- proving editor location comes from
+    // the manifest placement, not the live Transform.
+    manifest.placements = vec![synthetic_placement(
+        0x10,
+        1,
+        [2.0, 3.0, 4.0],
+        Some("meshes/npc.glb"),
+        None,
+    )];
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Npc((base_template_form_id: None, assembly: None))",
+    );
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 00000010");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "showpackages failed: {:?}", output.error);
+    let location = &output.value["resolution"]["location"];
+    assert_eq!(location["resolved"], true);
+    assert_eq!(location["source"], "editor-location");
+    assert_eq!(location["position"], serde_json::json!([2.0, 3.0, 4.0]));
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
+#[test]
+fn showpackages_resolves_near_linked_reference_from_an_unspawned_manifest_marker() {
+    let (mut manifest, temp_root) = write_showpackages_fixture(
+        "linked-reference",
+        0x10,
+        1,
+        vec![0x50],
+        vec![package_with_location(0x50, 13, 6)], // Patrol, NearLinkedReference
+    );
+    manifest.placements = vec![
+        synthetic_placement(0x10, 1, [0.0, 0.0, 0.0], Some("meshes/npc.glb"), Some(0x99)),
+        // The marker is asset-less (no GLB) and deliberately never spawned
+        // below -- `scene::spawn_cell_content` would skip it too -- so it
+        // is only reachable through the manifest fold-in.
+        synthetic_placement(0x99, 0x34, [9.0, 8.0, 7.0], None, None),
+    ];
+    let mut app = test_app();
+    register_placement(
+        &mut app,
+        "Npc((base_template_form_id: None, assembly: None))",
+    );
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    let output = exec(&mut app, "showpackages 00000010");
+    let cleanup = std::fs::remove_dir_all(&temp_root);
+    assert!(output.ok, "showpackages failed: {:?}", output.error);
+    let location = &output.value["resolution"]["location"];
+    assert_eq!(location["resolved"], true);
+    assert_eq!(location["source"], "linked-reference");
+    assert_eq!(location["position"], serde_json::json!([9.0, 8.0, 7.0]));
+    cleanup.expect("remove synthetic showpackages fixture dir");
+}
+
 #[test]
 fn showpackages_rejects_an_unknown_formid_deterministically() {
     let (manifest, temp_root) =

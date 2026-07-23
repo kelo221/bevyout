@@ -335,6 +335,7 @@ mod tests {
             enable_parent: None,
             owner_form_id: None,
             owner_faction_rank: None,
+            linked_reference_form_id: None,
             inventory: Vec::new(),
             audio: PreparedPlacementAudio::default(),
             ao_mode: "ao-none".into(),

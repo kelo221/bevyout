@@ -534,8 +534,9 @@ fn start_package(
         return start_wander_package(world, entity, reference_form_id, selected, entry, &context);
     }
     // Eat/Sleep pick the nearest free interaction point among the resolved
-    // furniture candidates; the others drive to the single resolved location
-    // (falling back to the target slot).
+    // furniture candidates; Patrol (#213) walks the actor's linked-reference
+    // marker chain into an ordered waypoint list; the others drive to the
+    // single resolved location (falling back to the target slot).
     let waypoints = if matches!(family, PackageFamily::Eat | PackageFamily::Sleep) {
         let candidates = resolve_interaction_candidates(entry, &context, selected);
         if candidates.is_empty() {
@@ -557,6 +558,26 @@ fn start_package(
             )
         })?;
         vec![candidates[chosen]]
+    } else if family == PackageFamily::Patrol {
+        let start = context.linked_reference.ok_or_else(|| {
+            ConsoleError::new(
+                "unresolved_point",
+                "near-linked-reference location has no linked reference".to_string(),
+            )
+        })?;
+        let markers = resolution::linked_reference_chain(&context, start);
+        if markers.is_empty() {
+            return Err(ConsoleError::new(
+                "unresolved_point",
+                format!(
+                    "package {selected:08x}'s linked-reference chain from {start:08x} resolved no markers"
+                ),
+            ));
+        }
+        markers
+            .into_iter()
+            .map(|marker| Waypoint::at(marker.position))
+            .collect()
     } else {
         let resolved = resolve_family_point(entry, &context, false)?;
         vec![Waypoint::at(resolved.position)]
@@ -1117,9 +1138,24 @@ fn persisted_checkpoint(
         })
 }
 
-/// Snapshots the live placements into the #195 resolution context: every
-/// visible reference's position and entity, indexed by base for nearest-of-base
-/// resolution, plus the querying actor's own position.
+/// Snapshots the runtime into the #195/#213 resolution context: every
+/// visible reference's position and entity, indexed by base for
+/// nearest-of-base resolution, plus the querying actor's own position,
+/// authored editor location, and linked reference.
+///
+/// Two sources are folded together, manifest first so a live entity's own
+/// pass always wins ties:
+/// - `LoadedSceneManifest.0.placements` -- *every* placement prepare wrote,
+///   including asset-less patrol markers (`XMarker`/`IdleMarker`). Those
+///   markers are skipped at spawn (`scene::spawn_cell_content`, no GLB) and
+///   so are never a `PlacementRoot` entity; the manifest is the only place
+///   they are visible at all. Editor location and linked reference are also
+///   read from here -- the actor's own *authored* point, not wherever it
+///   has since walked to.
+/// - Live `PlacementRoot`+`Transform` entities -- every reference actually
+///   spawned, using its current (possibly moved) position. These override
+///   the manifest-only entry for the same reference FormID, so a walking
+///   actor's own live position wins over its stale authored one.
 fn build_resolution_context(world: &mut World, actor_reference_form_id: u32) -> ResolutionContext {
     let current_cell_form_id = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
@@ -1127,28 +1163,63 @@ fn build_resolution_context(world: &mut World, actor_reference_form_id: u32) -> 
     let mut references = HashMap::new();
     let mut bases: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut actor_position = [0.0f32; 3];
-    let mut query = world.query::<(Entity, &interaction::PlacementRoot)>();
-    for (entity, root) in query.iter(world) {
-        let placement = root.placement();
-        let resolved = ResolvedReference {
-            reference_form_id: placement.reference_form_id,
-            base_form_id: placement.base_form_id,
-            cell_form_id: current_cell_form_id,
-            position: placement.translation,
-            entity: Some(entity.to_bits()),
-        };
-        if placement.reference_form_id == actor_reference_form_id {
-            actor_position = placement.translation;
+    let mut actor_editor_location = None;
+    let mut linked_reference = None;
+
+    if let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() {
+        for placement in &manifest.0.placements {
+            let resolved = ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position: placement.translation,
+                entity: None,
+                linked_reference: placement.linked_reference_form_id,
+            };
+            if placement.reference_form_id == actor_reference_form_id {
+                actor_position = placement.translation;
+                actor_editor_location = Some(placement.translation);
+                linked_reference = placement.linked_reference_form_id;
+            }
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+            references.insert(placement.reference_form_id, resolved);
         }
-        bases
-            .entry(placement.base_form_id)
-            .or_default()
-            .push(placement.reference_form_id);
-        references.insert(placement.reference_form_id, resolved);
     }
+
+    let mut query = world.query::<(Entity, &interaction::PlacementRoot, &Transform)>();
+    for (entity, root, transform) in query.iter(world) {
+        let placement = root.placement();
+        let position = transform.translation.to_array();
+        if !references.contains_key(&placement.reference_form_id) {
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+        }
+        references.insert(
+            placement.reference_form_id,
+            ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position,
+                entity: Some(entity.to_bits()),
+                linked_reference: placement.linked_reference_form_id,
+            },
+        );
+        if placement.reference_form_id == actor_reference_form_id {
+            actor_position = position;
+        }
+    }
+
     ResolutionContext {
         current_cell_form_id,
         actor_position,
+        actor_editor_location,
+        linked_reference,
         references,
         bases,
         ..ResolutionContext::default()
