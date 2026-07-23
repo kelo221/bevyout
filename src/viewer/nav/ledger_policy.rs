@@ -86,6 +86,18 @@ impl Ledger {
             .find(|entry| entry.agent_id == agent_id)
     }
 
+    /// Whether any entry is ledgered for `cell_form_id` -- the cheap
+    /// fast-path bailout `restore_ledgered_agents_system` uses before
+    /// building the (comparatively expensive) known-door set and calling
+    /// `claim_for_activation`. Scans every entry rather than a fixed
+    /// `agent_id` range (issue #215 removed the roster's upper bound, so
+    /// there is no longer a small range to enumerate).
+    pub(crate) fn has_entry_for_cell(&self, cell_form_id: u32) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.cell_form_id == cell_form_id)
+    }
+
     /// Claims every ledger entry whose `cell_form_id` matches
     /// `active_cell_form_id`, removing each claimed entry from the ledger
     /// (an entry is claimed at most once). Claimed entries are then split
@@ -162,6 +174,7 @@ pub(crate) fn decide_swap_eligibility(
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 #[path = "tests/ledger_policy.rs"]
 mod tests;
