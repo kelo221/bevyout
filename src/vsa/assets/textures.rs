@@ -1,7 +1,6 @@
 //! Texture staging and conversion.
 
 use super::*;
-use std::ffi::OsString;
 
 /// Converts a DirectX tangent-space normal texel to glTF/Bevy's convention.
 /// Fallout stores specular strength in alpha, so only the Y (green) channel
@@ -22,25 +21,8 @@ pub(crate) fn is_blender_normal_texture_path(path: impl AsRef<Path>) -> bool {
     name.contains("_n.") || name.contains("normal")
 }
 
-pub(crate) fn staged_texture_conversion_required(dds: &Path, png_exists: bool) -> bool {
-    !png_exists || is_blender_normal_texture_path(dds)
-}
-
-pub(crate) fn imagemagick_texture_arguments(
-    dds: &Path,
-    output: &Path,
-    flip_normal_y: bool,
-) -> Vec<OsString> {
-    let mut arguments = vec![dds.as_os_str().to_owned()];
-    if flip_normal_y {
-        arguments.extend(
-            ["-channel", "G", "-negate", "+channel"]
-                .into_iter()
-                .map(OsString::from),
-        );
-    }
-    arguments.extend([OsString::from("-strip"), output.as_os_str().to_owned()]);
-    arguments
+pub(crate) fn staged_texture_conversion_required(dds: &Path, ktx2_exists: bool) -> bool {
+    !ktx2_exists || is_blender_normal_texture_path(dds)
 }
 
 pub(crate) fn stage_textures(
@@ -76,77 +58,45 @@ pub(crate) fn convert_staged_textures(
     staging_dir: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    let converter = {
-        let installed = PathBuf::from(r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe");
-        if installed.exists() {
-            Some(installed)
-        } else {
-            ["magick.exe", "magick"]
-                .into_iter()
-                .find(|name| {
-                    Command::new(name)
-                        .arg("-version")
-                        .output()
-                        .is_ok_and(|output| output.status.success())
-                })
-                .map(PathBuf::from)
-        }
-    };
-    let Some(converter) = converter else {
-        diagnostics.push(Diagnostic {
-            severity: "warning".into(),
-            message: "ImageMagick was not found; DDS textures will remain unconverted".into(),
-        });
+    if !staging_dir.is_dir() {
         return Ok(());
-    };
+    }
     let mut dds_files = Vec::new();
     collect_files_with_extension(staging_dir, "dds", &mut dds_files)?;
     for dds in dds_files {
-        let png = dds.with_extension("png");
+        let ktx2 = dds.with_extension("ktx2");
         let flip_normal_y = is_blender_normal_texture_path(&dds);
-        if !staged_texture_conversion_required(&dds, png.exists()) {
+        if !staged_texture_conversion_required(&dds, ktx2.exists()) {
             fs::remove_file(&dds)?;
             continue;
         }
-        let converted = if flip_normal_y {
-            png.with_extension(format!("normal-y-{}.tmp.png", std::process::id()))
-        } else {
-            png.clone()
-        };
-        let result = Command::new(&converter)
-            .args(imagemagick_texture_arguments(
-                &dds,
-                &converted,
-                flip_normal_y,
-            ))
-            .output();
-        match result {
-            Ok(output) if output.status.success() => {
-                if flip_normal_y {
-                    atomic_replace(&converted, &png)?;
-                }
-                fs::remove_file(&dds)?;
-            }
-            Ok(output) => {
-                let _ = fs::remove_file(&converted);
-                diagnostics.push(Diagnostic {
-                    severity: "warning".into(),
-                    message: format!(
-                        "could not convert {} to PNG: {}",
-                        dds.display(),
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                });
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&converted);
-                diagnostics.push(Diagnostic {
-                    severity: "warning".into(),
-                    message: format!("could not run ImageMagick for {}: {error}", dds.display()),
-                });
+        let source = fs::read(&dds)?;
+        let mut image = image::load_from_memory(&source)
+            .with_context(|| format!("decoding staged DDS texture {}", dds.display()))?
+            .to_rgba8();
+        if flip_normal_y {
+            for pixel in image.pixels_mut() {
+                flip_directx_normal_y_texel(&mut pixel.0);
             }
         }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .with_context(|| format!("preparing staged KTX2 texture {}", dds.display()))?;
+        let encoded = encode_texture_to_ktx2(
+            &png.into_inner(),
+            if flip_normal_y {
+                TextureColorSpace::Linear
+            } else {
+                TextureColorSpace::Srgb
+            },
+        )?;
+        let converted = ktx2.with_extension(format!("{}.tmp.ktx2", std::process::id()));
+        fs::write(&converted, encoded)?;
+        atomic_replace(&converted, &ktx2)?;
+        fs::remove_file(&dds)?;
     }
+    let _ = diagnostics;
     Ok(())
 }
 

@@ -32,15 +32,16 @@ realtime point shadows belong to the viewer and are disabled unless opted in.
 
 | Operation | Default implementation | External tool behavior |
 | --- | --- | --- |
-| NIF-to-GLB during `prepare` | Native Rust (`--converter native`) | Blender is not resolved |
-| Compatibility NIF-to-GLB | `--converter blender` | Requires Blender/NIFTools; actor comparison has platform limitations |
+| NIF-to-GLB during `prepare` | Native Rust (`--converter native`) | Unified KTX-Software is required on a texture cache miss; Blender is not resolved |
+| Compatibility NIF-to-GLB | `--converter blender` | Requires Blender/NIFTools and unified KTX-Software; actor comparison has platform limitations |
 | Prepared point-shadow miss | Rust generation and KTX packaging | Resolves unified KTX-Software only on a cache miss or `--rebuild-shadows` |
 | Irradiance bake | Deterministic Rust CPU ray tracer | Requires unified `ktx`; never invokes Blender |
 | Preview bake | Blender Eevee | Requires Blender; does not create a usable irradiance bake |
 | Viewer | Bevy | Does not generate prepared or baked artifacts |
 
-ImageMagick remains an optional DDS-to-PNG dependency in the Blender
-compatibility branch; native prepare does not call `convert_staged_textures`.
+Prepared material textures, item icons, and Pip-Boy sprites are stored as
+UASTC+Zstd KTX2. ImageMagick is not a prepare fallback; unified KTX-Software
+is required whenever these texture artifacts need to be generated.
 The native converter is the CLI default through `PrepareConverter::default`
 and `resolve_converter_backend(None)`. Both native and Blender prepared
 converter revisions remain accepted by the viewer, so "supported" does not

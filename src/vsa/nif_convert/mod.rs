@@ -236,6 +236,8 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         &output.bytes,
         &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
     )?;
+    output.bytes = super::assets::transcode_glb_images_to_ktx2(&output.bytes)
+        .context("transcoding embedded GLB textures to KTX2")?;
     lines.push(format!(
         "nif-convert: textures embedded={} missing={}",
         textures.len().saturating_sub(output.missing_textures.len()),
@@ -415,6 +417,8 @@ pub(crate) fn convert_actor_scene(
         &output.bytes,
         &MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?,
     )?;
+    output.bytes = super::assets::transcode_glb_images_to_ktx2(&output.bytes)
+        .context("transcoding native actor GLB textures to KTX2")?;
 
     let physics_scene = nif::fo3::extract_physics(request.skeleton_document)
         .context("extracting actor skeleton Havok collision")?;

@@ -94,7 +94,11 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
             bail!("image bufferView extends beyond GLB")
         }
         let data = &bytes[data_start..end];
+        let mime_type = image.get("mimeType").and_then(serde_json::Value::as_str);
         if data.starts_with(b"\x89PNG\r\n\x1a\n") && data.len() >= 24 {
+            if mime_type.is_some_and(|mime| mime != "image/png") {
+                bail!("embedded PNG image has mismatched MIME type")
+            }
             let width = u32::from_be_bytes(data[16..20].try_into().unwrap());
             let height = u32::from_be_bytes(data[20..24].try_into().unwrap());
             if width <= 1 || height <= 1 {
@@ -104,6 +108,13 @@ pub(crate) fn validate_glb_images(path: &Path) -> Result<()> {
                     .unwrap_or("unnamed");
                 bail!("image {name} is a 1x1 placeholder")
             }
+        } else if data.starts_with(KTX2_IDENTIFIER) {
+            if mime_type != Some("image/ktx2") {
+                bail!("embedded KTX2 image has mismatched MIME type")
+            }
+            validate_ktx2_payload(data)?;
+        } else if matches!(mime_type, Some("image/png" | "image/ktx2")) {
+            bail!("embedded image payload does not match its declared MIME type")
         }
     }
     Ok(())

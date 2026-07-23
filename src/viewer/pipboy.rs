@@ -761,7 +761,7 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
                 ImageNode {
                     image: sources
                         .assets
-                        .load("staging/interface/shared/background/pipboy.png"),
+                        .load("staging/interface/shared/background/pipboy.ktx2"),
                     color: Color::srgba(0.18, 1.0, 0.48, 0.35),
                     ..default()
                 },

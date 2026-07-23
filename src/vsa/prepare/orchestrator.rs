@@ -723,9 +723,9 @@ fn prepare_cell(
             &staging_dir,
             &mut diagnostics,
         )?;
-        convert_staged_textures(&staging_dir, &mut diagnostics)?;
         match args.converter {
             PrepareConverter::Blender => {
+                convert_staged_textures(&staging_dir, &mut diagnostics)?;
                 if !jobs.is_empty() {
                     run_blender_batch(
                         blender.as_deref().expect("Blender backend resolved above"),
@@ -737,6 +737,11 @@ fn prepare_cell(
                 }
             }
             PrepareConverter::Native => {
+                convert_staged_textures(
+                    &staging_dir.join("item-icons").join(&source_fingerprint),
+                    &mut diagnostics,
+                )?;
+                convert_staged_textures(&staging_dir.join("interface"), &mut diagnostics)?;
                 if !jobs.is_empty() {
                     let batch = run_native_batch(
                         &jobs,

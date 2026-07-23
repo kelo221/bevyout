@@ -25,27 +25,8 @@ fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
 }
 
 #[test]
-fn blender_normal_conversion_is_green_only_and_rebuilds_stale_pngs() {
+fn staged_normal_conversion_rebuilds_existing_ktx2() {
     let dds = Path::new(r"textures\architecture\Wall_N.DDS");
-    let output = Path::new(r"textures\architecture\Wall.normal-y.tmp.png");
-    let arguments = imagemagick_texture_arguments(dds, output, true);
-    let arguments = arguments
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        arguments,
-        vec![
-            dds.to_string_lossy(),
-            "-channel".into(),
-            "G".into(),
-            "-negate".into(),
-            "+channel".into(),
-            "-strip".into(),
-            output.to_string_lossy(),
-        ]
-    );
     assert!(staged_texture_conversion_required(dds, true));
     assert!(!staged_texture_conversion_required(
         Path::new("textures/architecture/wall.dds"),
