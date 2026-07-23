@@ -390,6 +390,39 @@ pub fn linked_reference_chain(context: &ResolutionContext, start: u32) -> Vec<Re
     points
 }
 
+/// Resolves a package's location/target into a world point for a family,
+/// preferring one slot but falling back to the other (issue #218: moved out
+/// of the console layer, mechanically, so both `runpackage` and the
+/// autonomous package driver share one implementation instead of two that
+/// could drift). `location`/`target` are the package's `PLDT`/`PTDT` mirrors
+/// (`None` when the package has no such slot); `prefer_target` puts the
+/// target slot first -- a follow's leader is authored there.
+pub fn resolve_family_point(
+    location: Option<PackageLocation>,
+    target: Option<PackageTarget>,
+    context: &ResolutionContext,
+    prefer_target: bool,
+) -> Resolution {
+    let location = location.map(|location| resolve_location(&location, context));
+    let target = target.map(|target| resolve_target(&target, context));
+    let (first, second) = if prefer_target {
+        (target, location)
+    } else {
+        (location, target)
+    };
+    if let Some(Ok(point)) = &first {
+        return Ok(*point);
+    }
+    if let Some(Ok(point)) = &second {
+        return Ok(*point);
+    }
+    // Neither resolved: surface the preferred slot's diagnostic.
+    Err(first.or(second).and_then(Result::err).unwrap_or_else(|| {
+        ResolutionDiagnostic::new("package has no resolvable location or target")
+    }))
+}
+
+#[cfg(test)]
 #[cfg(test)]
 #[path = "tests/resolution.rs"]
 mod tests;

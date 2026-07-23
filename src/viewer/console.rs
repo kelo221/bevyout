@@ -35,7 +35,10 @@ use super::{
 };
 
 mod actor_state_commands;
-mod ai_package_commands;
+// pub(crate): issue #218's autonomous package driver (`viewer::ai::autonomous`)
+// calls `start_package` directly -- one select-resolve-start implementation
+// shared with the console `runpackage` command, not two.
+pub(crate) mod ai_package_commands;
 mod cinema_commands;
 mod common;
 mod item_commands;
