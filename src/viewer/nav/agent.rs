@@ -2776,6 +2776,24 @@ pub(crate) fn insert_test_archipelago_state(world: &mut World) {
     world.init_resource::<NavArchipelagoState>();
 }
 
+/// Test-only cross-module support (issue #218's autonomous package driver
+/// tests): marks a `NavArchipelagoState` already current for `cell_form_id`
+/// with `archipelago` as its entity, so [`ensure_archipelago`]'s
+/// already-current check short-circuits without a real nav-graph file --
+/// exactly [`bind_agent_entity`]'s own test harness, exposed for other
+/// modules' tests since neither `NavArchipelagoState` nor its fields are
+/// nameable outside this module.
+#[cfg(test)]
+pub(crate) fn mark_test_archipelago_current(
+    world: &mut World,
+    cell_form_id: u32,
+    archipelago: Entity,
+) {
+    let mut state = world.get_resource_or_insert_with(NavArchipelagoState::default);
+    state.cell_form_id = Some(cell_form_id);
+    state.archipelago = Some(archipelago);
+}
+
 fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
     let index = match rest {
         [] => 0,

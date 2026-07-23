@@ -390,6 +390,38 @@ pub fn linked_reference_chain(context: &ResolutionContext, start: u32) -> Vec<Re
     points
 }
 
+/// Resolves a package's location/target into a world point for a family,
+/// preferring one slot but falling back to the other (issue #218: moved out
+/// of the console layer, mechanically, so both `runpackage` and the
+/// autonomous package driver share one implementation instead of two that
+/// could drift). `location`/`target` are the package's `PLDT`/`PTDT` mirrors
+/// (`None` when the package has no such slot); `prefer_target` puts the
+/// target slot first -- a follow's leader is authored there.
+pub fn resolve_family_point(
+    location: Option<PackageLocation>,
+    target: Option<PackageTarget>,
+    context: &ResolutionContext,
+    prefer_target: bool,
+) -> Resolution {
+    let location = location.map(|location| resolve_location(&location, context));
+    let target = target.map(|target| resolve_target(&target, context));
+    let (first, second) = if prefer_target {
+        (target, location)
+    } else {
+        (location, target)
+    };
+    if let Some(Ok(point)) = &first {
+        return Ok(*point);
+    }
+    if let Some(Ok(point)) = &second {
+        return Ok(*point);
+    }
+    // Neither resolved: surface the preferred slot's diagnostic.
+    Err(first.or(second).and_then(Result::err).unwrap_or_else(|| {
+        ResolutionDiagnostic::new("package has no resolvable location or target")
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,5 +690,51 @@ mod tests {
         let points = linked_reference_chain(&dangling_context, 0x10);
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].position, [5.0, 5.0, 5.0]);
+    }
+
+    /// Issue #218's extraction: this is the console's old private
+    /// `resolve_family_point` behaviour, pinned here so the moved copy both
+    /// `runpackage` and the autonomous driver share cannot silently drift.
+    #[test]
+    fn resolve_family_point_prefers_the_first_slot_and_falls_back_to_the_second() {
+        let context = context_with(vec![reference(0x70, 0xFF, [7.0, 0.0, 0.0])]);
+        let loc = location(0, Some(0x70), 0);
+        let tgt = PackageTarget {
+            target_type: 2, // object-type: deterministically unresolvable
+            ..PackageTarget::default()
+        };
+
+        // location preferred (prefer_target = false): resolves directly.
+        let resolved =
+            resolve_family_point(Some(loc), Some(tgt), &context, false).expect("location resolves");
+        assert_eq!(resolved.position, [7.0, 0.0, 0.0]);
+
+        // target preferred but unresolvable: falls back to the location slot.
+        let resolved = resolve_family_point(Some(loc), Some(tgt), &context, true)
+            .expect("falls back to location");
+        assert_eq!(resolved.position, [7.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn resolve_family_point_reports_the_preferred_slots_diagnostic_when_neither_resolves() {
+        let context = context_with(vec![]);
+        let loc = location(3, None, 0); // NearEditorLocation with none authored
+        let tgt = PackageTarget {
+            target_type: 2,
+            ..PackageTarget::default()
+        };
+        let error = resolve_family_point(Some(loc), Some(tgt), &context, false).unwrap_err();
+        assert!(
+            error.message.contains("editor location") || error.message.contains("authored"),
+            "expected the preferred (location) slot's diagnostic, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn resolve_family_point_with_neither_slot_present_is_a_diagnostic() {
+        let context = context_with(vec![]);
+        let error = resolve_family_point(None, None, &context, false).unwrap_err();
+        assert!(error.message.contains("no resolvable location or target"));
     }
 }

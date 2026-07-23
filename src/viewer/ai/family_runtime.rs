@@ -19,7 +19,7 @@
 //! there. `family_driver_writes_no_transform_translation` below is the
 //! minimal-`App` test that fails if that ever changes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -28,8 +28,10 @@ use super::families::{
     PackageFamily, Waypoint,
 };
 use super::lifecycle::{LifecyclePhase, PackageLifecycle};
+use super::resolution::{ResolutionContext, ResolvedReference};
 use crate::viewer::actor_animation::policy::ActorAnimationState;
 use crate::viewer::actor_animation::request_actor_animation;
+use crate::viewer::interaction;
 use crate::viewer::nav::agent;
 
 /// Default arrival tolerance (metres) a family treats a waypoint as reached
@@ -333,6 +335,96 @@ impl Plugin for AiPackagePlugin {
         // -- otherwise the controller keeps ticking an agent-less actor forever
         // and its interaction point never frees.
         agent::register_bound_actor_release_hook(app.world_mut(), release_actor_package);
+        // Issue #218: the always-on autonomous package driver. Registered
+        // here (not a separate plugin) because it is the other half of this
+        // plugin's job -- making a package actually run -- just triggered by
+        // a fresh actor life-state instead of a `runpackage` console command.
+        super::autonomous::register(app);
+    }
+}
+
+/// Builds the pure [`ResolutionContext`] snapshot `ai::resolution` resolves
+/// against, from the active cell's placements and every live
+/// `interaction::PlacementRoot` entity (issue #218: moved out of the console
+/// layer, mechanically -- it only reads `World` state -- so `runpackage` and
+/// the autonomous package driver share one implementation).
+///
+/// Two passes because placements know the *authored* layout (every
+/// reference, even ones with no live entity yet) while the live entity query
+/// is what supplies an entity handle for a follow leader/interaction point;
+/// the second pass's `position`/`entity` overwrite the first's for any
+/// reference that is actually spawned, which is the live position that
+/// matters once the actor has moved.
+pub(crate) fn build_resolution_context(
+    world: &mut World,
+    actor_reference_form_id: u32,
+) -> ResolutionContext {
+    let current_cell_form_id = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .map_or(0, |manifest| manifest.0.cell.form_id);
+    let mut references = HashMap::new();
+    let mut bases: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut actor_position = [0.0f32; 3];
+    let mut actor_editor_location = None;
+    let mut linked_reference = None;
+
+    if let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() {
+        for placement in &manifest.0.placements {
+            let resolved = ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position: placement.translation,
+                entity: None,
+                linked_reference: placement.linked_reference_form_id,
+            };
+            if placement.reference_form_id == actor_reference_form_id {
+                actor_position = placement.translation;
+                actor_editor_location = Some(placement.translation);
+                linked_reference = placement.linked_reference_form_id;
+            }
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+            references.insert(placement.reference_form_id, resolved);
+        }
+    }
+
+    let mut query = world.query::<(Entity, &interaction::PlacementRoot, &Transform)>();
+    for (entity, root, transform) in query.iter(world) {
+        let placement = root.placement();
+        let position = transform.translation.to_array();
+        if !references.contains_key(&placement.reference_form_id) {
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+        }
+        references.insert(
+            placement.reference_form_id,
+            ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position,
+                entity: Some(entity.to_bits()),
+                linked_reference: placement.linked_reference_form_id,
+            },
+        );
+        if placement.reference_form_id == actor_reference_form_id {
+            actor_position = position;
+        }
+    }
+
+    ResolutionContext {
+        current_cell_form_id,
+        actor_position,
+        actor_editor_location,
+        linked_reference,
+        references,
+        bases,
+        ..ResolutionContext::default()
     }
 }
 
@@ -599,5 +691,89 @@ mod tests {
         assert_eq!(world.get::<Transform>(entity).unwrap().translation, start);
         // A wandering actor requested no animation on its first roam tick.
         assert_eq!(requested(&world, entity), None);
+    }
+
+    /// The golden manifest fixture `console::tests::fixture_manifest` also
+    /// parses (`ron::de::from_str`, not a hand-listed struct literal --
+    /// `PreparedSceneManifest` has no `Default` and dozens of fields).
+    fn fixture_manifest() -> crate::vsa::PreparedSceneManifest {
+        ron::de::from_str(include_str!("../../../features/fixtures/scene.ron"))
+            .expect("synthetic scene fixture should parse")
+    }
+
+    fn minimal_placement(
+        reference_form_id: u32,
+        translation: [f32; 3],
+        linked_reference_form_id: Option<u32>,
+    ) -> crate::vsa::PreparedPlacement {
+        crate::vsa::PreparedPlacement {
+            reference_form_id,
+            base_form_id: 0x1,
+            asset_path: None,
+            translation,
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: Default::default(),
+            step_support: false,
+            mutability: Default::default(),
+            mutability_root_form_id: None,
+            reference_kind: "REFR".into(),
+            base_kind: "ACHR".into(),
+            editor_id: None,
+            display_name: None,
+            count: 1,
+            semantic: Default::default(),
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            linked_reference_form_id,
+            inventory: Vec::new(),
+            audio: Default::default(),
+            ao_mode: "ao-none".into(),
+        }
+    }
+
+    /// Issue #218's extraction: `build_resolution_context` moved out of the
+    /// console layer verbatim -- pinned here so it still builds a context a
+    /// Patrol package's `NearLinkedReference` (`location_type == 6`) location
+    /// resolves through, exactly as it did as a console-private function.
+    #[test]
+    fn build_resolution_context_resolves_a_type_6_patrol_marker() {
+        const ACTOR_REF: u32 = 0x9010;
+        const MARKER_REF: u32 = 0x9020;
+        let mut manifest = fixture_manifest();
+        manifest.placements = vec![
+            minimal_placement(ACTOR_REF, [1.0, 2.0, 3.0], Some(MARKER_REF)),
+            minimal_placement(MARKER_REF, [5.0, 0.0, 5.0], None),
+        ];
+        let mut world = World::new();
+        world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+        let context = build_resolution_context(&mut world, ACTOR_REF);
+        assert_eq!(
+            context.linked_reference,
+            Some(MARKER_REF),
+            "the actor's own linked reference must carry through"
+        );
+
+        let resolved = crate::viewer::ai::resolution::resolve_location(
+            &crate::viewer::ai::resolution::PackageLocation {
+                location_type: 6, // Near Linked Reference
+                form_id: None,
+                raw_value: 0,
+                radius: 0,
+            },
+            &context,
+        )
+        .expect("a type-6 near-linked-reference location resolves through the moved context");
+        assert_eq!(resolved.position, [5.0, 0.0, 5.0]);
+        assert_eq!(
+            resolved.source,
+            crate::viewer::ai::resolution::ResolutionSource::LinkedReference(MARKER_REF)
+        );
     }
 }
