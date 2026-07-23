@@ -11,7 +11,7 @@ fn status_sprite(
 ) {
     parent.spawn((
         ImageNode {
-            image: assets.load(format!("staging/interface/stats/{name}.png")),
+            image: assets.load(format!("staging/interface/stats/{name}.ktx2")),
             color: GREEN,
             ..default()
         },

@@ -10,7 +10,7 @@ use super::*;
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
 /// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v5";
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v6-ktx2-icons";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -103,7 +103,7 @@ pub(crate) fn stage_item_icons(
             fs::write(&destination, bytes)?;
         }
         let final_extension = if extension == "dds" {
-            "png"
+            "ktx2"
         } else {
             &extension
         };
@@ -293,8 +293,8 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v5");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v5");
+        assert_eq!(catalog.revision, "openmw-items-v6-ktx2-icons");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v6-ktx2-icons");
     }
 
     #[test]

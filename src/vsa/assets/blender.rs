@@ -69,6 +69,19 @@ pub(crate) fn run_blender_batch(
                 job.output.display()
             )
         })?;
+        let glb = fs::read(&job.output)
+            .with_context(|| format!("reading converted GLB {}", job.output.display()))?;
+        let glb = transcode_glb_images_to_ktx2(&glb).with_context(|| {
+            format!(
+                "transcoding converted GLB textures to KTX2: {}",
+                job.output.display()
+            )
+        })?;
+        let temporary = job
+            .output
+            .with_extension(format!("ktx2-{}.tmp.glb", std::process::id()));
+        fs::write(&temporary, glb)?;
+        atomic_replace(&temporary, &job.output)?;
         validate_glb_images(&job.output).with_context(|| {
             format!(
                 "converted GLB failed texture validation: {}",

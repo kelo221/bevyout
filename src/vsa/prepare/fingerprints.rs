@@ -44,7 +44,7 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// *batch* prepare run must not skip a cell completed under either old
 /// logic.
 pub(crate) const PREPARE_PIPELINE_REVISION: &str =
-    "prepare-pipeline-v5-corpse-nested-actors-actor-animations-weapon-animation-type";
+    "prepare-pipeline-v6-corpse-nested-actors-actor-animations-weapon-animation-type-ktx2-textures";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

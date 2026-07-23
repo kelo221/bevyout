@@ -11,11 +11,17 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::vsa::assets::texture_ktx::find_texture_ktx_tool;
 
 const GLB_MAGIC: u32 = 0x4654_6c67;
 const GLB_JSON_CHUNK: u32 = 0x4e4f_534a;
 const GLB_BIN_CHUNK: u32 = 0x004e_4942;
+const KTX2_IDENTIFIER: &[u8; 12] = b"\xABKTX 20\xBB\r\n\x1A\n";
+static NEXT_KTX_DECODE_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AlphaMode {
@@ -978,11 +984,7 @@ impl OutputResources {
         let image = if let Some(image) = self.decoded_images.get(&hash) {
             Arc::clone(image)
         } else {
-            let decoded = Arc::new(
-                image::load_from_memory(bytes)
-                    .context("could not decode bake material texture")?
-                    .to_rgba8(),
-            );
+            let decoded = Arc::new(decode_bake_material_texture(bytes)?);
             self.decoded_images.insert(hash, Arc::clone(&decoded));
             decoded
         };
@@ -993,6 +995,46 @@ impl OutputResources {
             wrap_t: wrap_mode(sampler.wrap_t()),
         })
     }
+}
+
+fn decode_bake_material_texture(bytes: &[u8]) -> Result<RgbaImage> {
+    if !bytes.starts_with(KTX2_IDENTIFIER) {
+        return Ok(image::load_from_memory(bytes)
+            .context("could not decode bake material texture")?
+            .to_rgba8());
+    }
+
+    // KTX-Software is already a required prepare dependency and its reference
+    // transcoder avoids Bevy 0.19's CPU-RGBA UASTC block-layout bug.
+    let tool = find_texture_ktx_tool()?;
+    let sequence = NEXT_KTX_DECODE_TEMP.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-bake-ktx-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root)?;
+    let input = root.join("input.ktx2");
+    let output_path = root.join("output.png");
+    let result = (|| {
+        fs::write(&input, bytes).context("writing temporary bake KTX2 texture")?;
+        let output = Command::new(tool)
+            .args(["extract", "--transcode", "rgba8", "--level", "0"])
+            .arg(&input)
+            .arg(&output_path)
+            .output()
+            .context("failed to start KTX-Software for bake texture decoding")?;
+        if !output.status.success() {
+            bail!(
+                "KTX-Software could not decode bake material texture: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(image::open(&output_path)
+            .context("KTX-Software returned an invalid bake material image")?
+            .to_rgba8())
+    })();
+    let _ = fs::remove_dir_all(root);
+    result
 }
 
 fn remap_material_textures(
