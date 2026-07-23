@@ -86,6 +86,18 @@ impl Ledger {
             .find(|entry| entry.agent_id == agent_id)
     }
 
+    /// Whether any entry is ledgered for `cell_form_id` -- the cheap
+    /// fast-path bailout `restore_ledgered_agents_system` uses before
+    /// building the (comparatively expensive) known-door set and calling
+    /// `claim_for_activation`. Scans every entry rather than a fixed
+    /// `agent_id` range (issue #215 removed the roster's upper bound, so
+    /// there is no longer a small range to enumerate).
+    pub(crate) fn has_entry_for_cell(&self, cell_form_id: u32) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.cell_form_id == cell_form_id)
+    }
+
     /// Claims every ledger entry whose `cell_form_id` matches
     /// `active_cell_form_id`, removing each claimed entry from the ledger
     /// (an entry is claimed at most once). Claimed entries are then split
@@ -193,6 +205,21 @@ mod tests {
         ledger.record(frozen(1, 0x200, [1.0, 2.0, 3.0]));
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger.entry_for(1), Some(frozen(1, 0x200, [1.0, 2.0, 3.0])));
+    }
+
+    /// The fast-path bailout `restore_ledgered_agents_system` uses (issue
+    /// #215: scans every entry now that there is no small fixed `agent_id`
+    /// range to enumerate instead).
+    #[test]
+    fn has_entry_for_cell_finds_a_match_regardless_of_agent_id_and_is_false_for_a_different_cell() {
+        let mut ledger = Ledger::default();
+        assert!(!ledger.has_entry_for_cell(0x100));
+
+        // A high agent_id -- one that would have sat outside the old fixed
+        // roster's range -- must still be found.
+        ledger.record(door_marker(41, 0x100, 0xD00));
+        assert!(ledger.has_entry_for_cell(0x100));
+        assert!(!ledger.has_entry_for_cell(0x200));
     }
 
     #[test]
