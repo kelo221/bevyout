@@ -5,16 +5,18 @@
 //! of the screen, and the STATS/ITEMS/DATA button bank on the bezel.
 
 use bevy::prelude::*;
-use bevy::ui::{
-    BackgroundGradient, ColorStop, RadialGradient, RadialGradientShape, UiPosition,
-    widget::TextShadow,
-};
+use bevy::ui::{BackgroundGradient, ColorStop, RadialGradient, RadialGradientShape, UiPosition};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::app_state::GameplayModal;
 
 use super::audio::PlaySound;
 use super::bindings::HotkeyBindings;
+use super::fallout_ui::{
+    BEZEL, BEZEL_EDGE, BEZEL_RECESS, LAMP, LAMP_DIM, PHOSPHOR as GREEN, PHOSPHOR_DIM as GREEN_DIM,
+    PHOSPHOR_FAINT as GREEN_FAINT, SCREEN, SCREEN_GLOW, glow, spawn_corner_brackets,
+    spawn_selection_marker,
+};
 use super::interaction::{
     EquipToggleRequested, InteractionNotice, PlayerEquipment, PlayerInventory, item_rules, item_use,
 };
@@ -25,10 +27,14 @@ use super::{
     cell_label,
 };
 
+mod presentation;
 mod stats;
 #[cfg(test)]
-use stats::quick_aid_line;
-use stats::spawn_stats_body;
+use stats::{MoveDirection, StatusBodyPart, StatusFigurePart, StatusPartLayout, quick_aid_line};
+use stats::{
+    StatusFigureEditor, StatusFigureLayout, StatusMoveRepeat, handle_status_figure_editor,
+    spawn_stats_body,
+};
 
 /// F98.3: hotkey digits 1-8, in display order, paired with their `HotkeyBindings` slot number.
 const HOTKEY_DIGITS: [(KeyCode, u8); 8] = [
@@ -47,24 +53,6 @@ fn is_equip_eligible(category: PreparedItemCategory) -> bool {
         category,
         PreparedItemCategory::Weapons | PreparedItemCategory::Apparel | PreparedItemCategory::Ammo
     )
-}
-
-const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
-const GREEN_DIM: Color = Color::srgba(0.08, 0.45, 0.22, 0.85);
-/// Secondary labels and inactive controls: readable, but clearly not the
-/// bright primary phosphor.
-const GREEN_FAINT: Color = Color::srgba(0.1, 0.55, 0.26, 0.9);
-const SCREEN: Color = Color::srgba(0.005, 0.025, 0.012, 0.97);
-/// The CRT's radial phosphor bloom behind everything else.
-const SCREEN_GLOW: Color = Color::srgba(0.1, 0.55, 0.26, 0.14);
-/// Soft offset duplicate behind text, faking phosphor bleed.
-const TEXT_GLOW: Color = Color::srgba(0.18, 1.0, 0.48, 0.5);
-
-fn glow() -> TextShadow {
-    TextShadow {
-        offset: Vec2::new(1.0, 1.0),
-        color: TEXT_GLOW,
-    }
 }
 
 #[derive(Message, Clone, Copy, Debug)]
@@ -171,6 +159,21 @@ struct QuantityPicker {
 #[derive(Component)]
 struct PipBoyRoot;
 
+#[derive(Component)]
+struct PipBoyDevice;
+
+#[derive(Component)]
+struct PipBoyScreen;
+
+#[derive(Component)]
+struct PipBoyHeader;
+
+#[derive(Component)]
+struct PipBoyFooter;
+
+#[derive(Component)]
+struct PipBoyButtonBank;
+
 #[derive(Component, Clone, Copy)]
 struct ItemRow(StackKey);
 
@@ -230,6 +233,9 @@ struct ScreenSources<'w> {
     manifest: Option<Res<'w, crate::viewer::LoadedSceneManifest>>,
     time: Res<'w, Time>,
     status: Res<'w, PlayerStatus>,
+    figure_layout: Res<'w, StatusFigureLayout>,
+    figure_editor: Res<'w, StatusFigureEditor>,
+    presentation: Res<'w, presentation::PipBoyPresentation>,
 }
 
 pub(crate) struct PipBoyPlugin;
@@ -243,6 +249,10 @@ impl Plugin for PipBoyPlugin {
 fn install(app: &mut App) {
     app.init_resource::<PipBoyState>()
         .init_resource::<PlayerStatus>()
+        .init_resource::<StatusFigureLayout>()
+        .init_resource::<StatusFigureEditor>()
+        .init_resource::<StatusMoveRepeat>()
+        .init_resource::<Clipboard>()
         // `handle_item_action_button`'s dependencies, normally registered by
         // `interaction`/`audio`/`pipboy_reader`'s installs -- `init_resource`
         // and `add_message` are both no-ops when already registered, so this
@@ -252,8 +262,15 @@ fn install(app: &mut App) {
         .add_message::<OpenReaderRequested>()
         .add_message::<DropInventoryStackRequested>()
         .add_message::<ItemRowActivated>()
-        .add_systems(OnEnter(GameplayModal::PipBoy), enter_pipboy)
-        .add_systems(OnExit(GameplayModal::PipBoy), exit_pipboy)
+        .add_plugins(presentation::PipBoyPresentationPlugin)
+        .add_systems(
+            OnEnter(GameplayModal::PipBoy),
+            (presentation::begin_open, enter_pipboy).chain(),
+        )
+        .add_systems(
+            OnExit(GameplayModal::PipBoy),
+            (exit_pipboy, presentation::finish_close).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -267,6 +284,7 @@ fn install(app: &mut App) {
                 handle_quantity_buttons,
                 handle_item_action_button,
                 handle_equip_and_hotkeys,
+                handle_status_figure_editor,
                 refresh_after_inventory_change,
             )
                 .in_set(super::plugins::ViewerSet::Ui)
@@ -743,74 +761,138 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
                 .and_then(|item| item_rules::carried_weight(item.quest_item, item.weight))
         })
         .max(0.0);
-    commands
-        .spawn((
-            PipBoyRoot,
+    let physical_screen = sources.presentation.ui_camera().is_some();
+    let mut root = commands.spawn((
+        PipBoyRoot,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(if physical_screen {
+            SCREEN
+        } else {
+            Color::srgba(0.0, 0.008, 0.003, 0.44)
+        }),
+        GlobalZIndex(500),
+    ));
+    if let Some(camera) = sources.presentation.ui_camera() {
+        root.insert(UiTargetCamera(camera));
+    }
+    root.with_children(|root| {
+        if physical_screen {
+            root.spawn((
+                PipBoyScreen,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(Val::Px(42.0), Val::Px(24.0)),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor(SCREEN),
+            ))
+            .with_children(|screen| {
+                spawn_screen_contents(screen, sources, state, weight);
+                spawn_view_buttons(screen, state);
+            });
+            return;
+        }
+        root.spawn((
+            PipBoyDevice,
             Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
+                width: Val::Percent(76.0),
+                height: Val::Percent(94.0),
+                max_width: Val::Px(1120.0),
+                max_height: Val::Px(1000.0),
+                min_width: Val::Px(720.0),
+                min_height: Val::Px(650.0),
                 flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::axes(Val::Px(34.0), Val::Px(28.0)),
+                border: UiRect::all(Val::Px(7.0)),
+                border_radius: BorderRadius::all(Val::Px(52.0)),
                 ..default()
             },
-            BackgroundColor(SCREEN),
-            GlobalZIndex(500),
+            BackgroundColor(BEZEL),
+            BorderColor::all(BEZEL_EDGE),
         ))
-        .with_children(|root| {
-            root.spawn((
-                ImageNode {
-                    image: sources
-                        .assets
-                        .load("staging/interface/shared/background/pipboy.ktx2"),
-                    color: Color::srgba(0.18, 1.0, 0.48, 0.35),
-                    ..default()
-                },
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-            ));
-            // CRT phosphor bloom behind everything, brightest toward the
-            // upper middle like the reference screen.
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundGradient::from(RadialGradient::new(
-                    UiPosition::anchor(Vec2::new(0.0, -0.35)),
-                    RadialGradientShape::FarthestCorner,
-                    vec![
-                        ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
-                        ColorStop::new(Color::NONE, Val::Percent(100.0)),
-                    ],
-                )),
-            ));
-            root.spawn(Node {
-                flex_grow: 1.0,
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::axes(Val::Px(40.0), Val::Px(16.0)),
-                ..default()
-            })
-            .with_children(|screen| {
-                spawn_header(screen, state, &sources.status);
-                match state.view {
-                    PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
-                    PipBoyView::Items => spawn_items_body(screen, sources, state),
-                    PipBoyView::Data => spawn_data_body(screen, sources, state),
-                }
-                spawn_footer(screen, state, weight);
-            });
-            spawn_view_buttons(root, state);
-            spawn_corner_brackets(root);
+        .with_children(|device| {
+            device
+                .spawn((
+                    PipBoyScreen,
+                    Node {
+                        width: Val::Percent(100.0),
+                        max_width: Val::Px(1040.0),
+                        flex_grow: 1.0,
+                        aspect_ratio: Some(4.0 / 3.0),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::axes(Val::Px(48.0), Val::Px(24.0)),
+                        border: UiRect::all(Val::Px(9.0)),
+                        border_radius: BorderRadius::all(Val::Px(42.0)),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(SCREEN),
+                    BorderColor::all(BEZEL_RECESS),
+                ))
+                .with_children(|screen| {
+                    spawn_screen_contents(screen, sources, state, weight);
+                });
+            spawn_view_buttons(device, state);
         });
+    });
+}
+
+fn spawn_screen_contents(
+    screen: &mut ChildSpawnerCommands,
+    sources: &ScreenSources,
+    state: &PipBoyState,
+    weight: f32,
+) {
+    screen.spawn((
+        ImageNode {
+            image: sources
+                .assets
+                .load("staging/interface/shared/background/pipboy.ktx2"),
+            color: Color::srgba(0.18, 1.0, 0.48, 0.25),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+    ));
+    screen.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundGradient::from(RadialGradient::new(
+            UiPosition::anchor(Vec2::new(0.0, -0.35)),
+            RadialGradientShape::FarthestCorner,
+            vec![
+                ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
+                ColorStop::new(Color::NONE, Val::Percent(100.0)),
+            ],
+        )),
+    ));
+    spawn_header(screen, state, &sources.status);
+    match state.view {
+        PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
+        PipBoyView::Items => spawn_items_body(screen, sources, state),
+        PipBoyView::Data => spawn_data_body(screen, sources, state),
+    }
+    spawn_footer(screen, state, weight);
+    spawn_corner_brackets(screen, 14.0, 34.0, 2.0);
 }
 
 /// The stat bar along the top of the screen: the active view's name on the
@@ -818,13 +900,14 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
 fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: &PlayerStatus) {
     screen
         .spawn((
+            PipBoyHeader,
             Node {
-                height: Val::Px(64.0),
+                height: Val::Px(52.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
-                border: UiRect::bottom(Val::Px(2.0)),
-                padding: UiRect::bottom(Val::Px(6.0)),
+                border: UiRect::bottom(Val::Px(1.0)),
+                padding: UiRect::bottom(Val::Px(5.0)),
                 ..default()
             },
             BorderColor::all(GREEN_DIM),
@@ -834,14 +917,14 @@ fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: 
                 Text::new(view_label(state.view)),
                 TextColor(GREEN),
                 TextFont {
-                    font_size: FontSize::Px(40.0),
+                    font_size: FontSize::Px(30.0),
                     ..default()
                 },
                 glow(),
             ));
             header
                 .spawn(Node {
-                    column_gap: Val::Px(24.0),
+                    column_gap: Val::Px(8.0),
                     align_items: AlignItems::Center,
                     ..default()
                 })
@@ -850,13 +933,14 @@ fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: 
                         segments
                             .spawn((
                                 Node {
-                                    padding: UiRect::axes(Val::Px(14.0), Val::Px(3.0)),
+                                    min_width: Val::Px(112.0),
+                                    padding: UiRect::axes(Val::Px(10.0), Val::Px(2.0)),
                                     border: UiRect {
-                                        top: Val::Px(2.0),
-                                        bottom: Val::Px(2.0),
+                                        top: Val::Px(1.0),
+                                        bottom: Val::Px(1.0),
                                         ..default()
                                     },
-                                    column_gap: Val::Px(12.0),
+                                    column_gap: Val::Px(8.0),
                                     align_items: AlignItems::Baseline,
                                     ..default()
                                 },
@@ -867,7 +951,7 @@ fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: 
                                     Text::new(label),
                                     TextColor(GREEN_FAINT),
                                     TextFont {
-                                        font_size: FontSize::Px(18.0),
+                                        font_size: FontSize::Px(14.0),
                                         ..default()
                                     },
                                 ));
@@ -875,7 +959,7 @@ fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: 
                                     Text::new(value),
                                     TextColor(GREEN),
                                     TextFont {
-                                        font_size: FontSize::Px(30.0),
+                                        font_size: FontSize::Px(22.0),
                                         ..default()
                                     },
                                     glow(),
@@ -892,12 +976,13 @@ fn spawn_header(screen: &mut ChildSpawnerCommands, state: &PipBoyState, status: 
 fn spawn_footer(screen: &mut ChildSpawnerCommands, state: &PipBoyState, weight: f32) {
     screen
         .spawn((
+            PipBoyFooter,
             Node {
-                height: Val::Px(56.0),
+                height: Val::Px(48.0),
                 width: Val::Percent(100.0),
                 align_items: AlignItems::Center,
-                border: UiRect::top(Val::Px(2.0)),
-                padding: UiRect::top(Val::Px(6.0)),
+                border: UiRect::top(Val::Px(1.0)),
+                padding: UiRect::top(Val::Px(5.0)),
                 ..default()
             },
             BorderColor::all(GREEN_DIM),
@@ -914,7 +999,7 @@ fn spawn_footer(screen: &mut ChildSpawnerCommands, state: &PipBoyState, weight: 
                             Text::new(format!("WG {weight:.1}")),
                             TextColor(GREEN_FAINT),
                             TextFont {
-                                font_size: FontSize::Px(22.0),
+                                font_size: FontSize::Px(16.0),
                                 ..default()
                             },
                         ));
@@ -933,7 +1018,7 @@ fn spawn_footer(screen: &mut ChildSpawnerCommands, state: &PipBoyState, weight: 
                         tabs.spawn((
                             Node {
                                 padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
-                                border: UiRect::all(Val::Px(2.0)),
+                                border: UiRect::all(Val::Px(1.0)),
                                 ..default()
                             },
                             BorderColor::all(GREEN),
@@ -943,7 +1028,7 @@ fn spawn_footer(screen: &mut ChildSpawnerCommands, state: &PipBoyState, weight: 
                             Text::new("Status"),
                             TextColor(GREEN),
                             TextFont {
-                                font_size: FontSize::Px(24.0),
+                                font_size: FontSize::Px(18.0),
                                 ..default()
                             },
                             glow(),
@@ -1004,111 +1089,59 @@ fn footer_tabs(
 /// The physical button bank on the bezel below the screen: three large
 /// STATS/ITEMS/DATA buttons, the active one lit like the reference lamp.
 fn spawn_view_buttons(root: &mut ChildSpawnerCommands, state: &PipBoyState) {
-    root.spawn(Node {
-        height: Val::Px(88.0),
-        width: Val::Percent(100.0),
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        column_gap: Val::Px(56.0),
-        ..default()
-    })
+    root.spawn((
+        PipBoyButtonBank,
+        Node {
+            height: Val::Px(112.0),
+            width: Val::Percent(66.0),
+            min_width: Val::Px(430.0),
+            margin: UiRect::top(Val::Px(10.0)),
+            padding: UiRect::axes(Val::Px(34.0), Val::Px(8.0)),
+            justify_content: JustifyContent::SpaceAround,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(5.0)),
+            border_radius: BorderRadius::all(Val::Px(18.0)),
+            ..default()
+        },
+        BackgroundColor(BEZEL_RECESS),
+        BorderColor::all(BEZEL_EDGE),
+    ))
     .with_children(|bank| {
         for view in [PipBoyView::Stats, PipBoyView::Items, PipBoyView::Data] {
             let active = state.view == view;
-            bank.spawn((
-                Button,
-                ViewTab(view),
-                Node {
-                    width: Val::Px(190.0),
-                    height: Val::Px(54.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    border: UiRect::all(Val::Px(3.0)),
-                    border_radius: BorderRadius::all(Val::Px(12.0)),
-                    ..default()
-                },
-                BorderColor::all(if active { GREEN } else { GREEN_FAINT }),
-                BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
-            ))
-            .with_child((
-                Text::new(view_label(view)),
-                TextColor(if active { GREEN } else { GREEN_FAINT }),
-                TextFont {
-                    font_size: FontSize::Px(26.0),
-                    ..default()
-                },
-                glow(),
-            ));
+            bank.spawn(Node {
+                width: Val::Px(100.0),
+                height: Val::Px(88.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(5.0),
+                ..default()
+            })
+            .with_children(|control| {
+                control.spawn((
+                    Text::new(view_label(view)),
+                    TextColor(GREEN_FAINT),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                ));
+                control.spawn((
+                    Button,
+                    ViewTab(view),
+                    Node {
+                        width: Val::Px(58.0),
+                        height: Val::Px(58.0),
+                        border: UiRect::all(Val::Px(6.0)),
+                        border_radius: BorderRadius::all(Val::Percent(50.0)),
+                        ..default()
+                    },
+                    BorderColor::all(BEZEL_EDGE),
+                    BackgroundColor(if active { LAMP } else { LAMP_DIM }),
+                ));
+            });
         }
     });
-}
-
-/// The L-shaped bracket marks at the screen's four corners.
-fn spawn_corner_brackets(root: &mut ChildSpawnerCommands) {
-    const OFFSET: f32 = 10.0;
-    const SIZE: f32 = 42.0;
-    const WIDTH: f32 = 3.0;
-    for (left, right, top, bottom, border) in [
-        (
-            Some(OFFSET),
-            None,
-            Some(OFFSET),
-            None,
-            UiRect {
-                left: Val::Px(WIDTH),
-                top: Val::Px(WIDTH),
-                ..default()
-            },
-        ),
-        (
-            None,
-            Some(OFFSET),
-            Some(OFFSET),
-            None,
-            UiRect {
-                right: Val::Px(WIDTH),
-                top: Val::Px(WIDTH),
-                ..default()
-            },
-        ),
-        (
-            Some(OFFSET),
-            None,
-            None,
-            Some(OFFSET),
-            UiRect {
-                left: Val::Px(WIDTH),
-                bottom: Val::Px(WIDTH),
-                ..default()
-            },
-        ),
-        (
-            None,
-            Some(OFFSET),
-            None,
-            Some(OFFSET),
-            UiRect {
-                right: Val::Px(WIDTH),
-                bottom: Val::Px(WIDTH),
-                ..default()
-            },
-        ),
-    ] {
-        root.spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: left.map(Val::Px).unwrap_or_default(),
-                right: right.map(Val::Px).unwrap_or_default(),
-                top: top.map(Val::Px).unwrap_or_default(),
-                bottom: bottom.map(Val::Px).unwrap_or_default(),
-                width: Val::Px(SIZE),
-                height: Val::Px(SIZE),
-                border,
-                ..default()
-            },
-            BorderColor::all(GREEN),
-        ));
-    }
 }
 
 fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, state: &PipBoyState) {
@@ -1132,10 +1165,10 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
     })
     .with_children(|body| {
         body.spawn(Node {
-            width: Val::Percent(52.0),
+            width: Val::Percent(55.0),
             flex_direction: FlexDirection::Column,
             overflow: Overflow::scroll_y(),
-            padding: UiRect::all(Val::Px(12.0)),
+            padding: UiRect::axes(Val::Px(8.0), Val::Px(14.0)),
             ..default()
         })
         .with_children(|list| {
@@ -1149,35 +1182,36 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                     Button,
                     ItemRow(key),
                     Node {
-                        min_height: Val::Px(42.0),
+                        min_height: Val::Px(34.0),
                         width: Val::Percent(100.0),
-                        padding: UiRect::horizontal(Val::Px(10.0)),
+                        padding: UiRect::horizontal(Val::Px(5.0)),
                         align_items: AlignItems::Center,
-                        border: UiRect::all(Val::Px(if selected { 2.0 } else { 0.0 })),
                         ..default()
                     },
-                    BackgroundColor(if selected { GREEN_DIM } else { Color::NONE }),
-                    BorderColor::all(GREEN),
+                    BackgroundColor(Color::NONE),
                 ))
-                .with_child((
-                    Text::new(format!(
-                        "{}{}{}",
-                        equipped_marker(sources.equipment.is_equipped(key)),
-                        item_name(item),
-                        count_suffix(stack.count)
-                    )),
-                    TextColor(GREEN),
-                    TextFont {
-                        font_size: FontSize::Px(24.0),
-                        ..default()
-                    },
-                    glow(),
-                ));
+                .with_children(|row| {
+                    spawn_selection_marker(row, selected);
+                    row.spawn((
+                        Text::new(format!(
+                            "{}{}{}",
+                            equipped_marker(sources.equipment.is_equipped(key)),
+                            item_name(item),
+                            count_suffix(stack.count)
+                        )),
+                        TextColor(if selected { GREEN } else { GREEN_FAINT }),
+                        TextFont {
+                            font_size: FontSize::Px(19.0),
+                            ..default()
+                        },
+                        glow(),
+                    ));
+                });
             }
         });
         body.spawn(Node {
-            width: Val::Percent(48.0),
-            padding: UiRect::all(Val::Px(24.0)),
+            width: Val::Percent(45.0),
+            padding: UiRect::axes(Val::Px(18.0), Val::Px(14.0)),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
             ..default()
@@ -1188,9 +1222,9 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                     details
                         .spawn((
                             Node {
-                                padding: UiRect::all(Val::Px(14.0)),
-                                border: UiRect::all(Val::Px(2.0)),
-                                margin: UiRect::bottom(Val::Px(24.0)),
+                                padding: UiRect::all(Val::Px(8.0)),
+                                border: UiRect::all(Val::Px(1.0)),
+                                margin: UiRect::bottom(Val::Px(14.0)),
                                 ..default()
                             },
                             BorderColor::all(GREEN_DIM),
@@ -1202,8 +1236,8 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                                 ..default()
                             },
                             Node {
-                                width: Val::Px(228.0),
-                                height: Val::Px(228.0),
+                                width: Val::Px(176.0),
+                                height: Val::Px(176.0),
                                 ..default()
                             },
                         ));
@@ -1213,11 +1247,11 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                         Text::new("[ NO ITEM ART ]"),
                         TextColor(GREEN_DIM),
                         TextFont {
-                            font_size: FontSize::Px(26.0),
+                            font_size: FontSize::Px(20.0),
                             ..default()
                         },
                         Node {
-                            height: Val::Px(256.0),
+                            height: Val::Px(192.0),
                             align_content: AlignContent::Center,
                             ..default()
                         },
@@ -1227,14 +1261,14 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                     Text::new(detail_text(stack, item)),
                     TextColor(GREEN),
                     TextFont {
-                        font_size: FontSize::Px(22.0),
+                        font_size: FontSize::Px(17.0),
                         ..default()
                     },
                     glow(),
                     Node {
                         width: Val::Percent(100.0),
-                        border: UiRect::top(Val::Px(2.0)),
-                        padding: UiRect::top(Val::Px(18.0)),
+                        border: UiRect::top(Val::Px(1.0)),
+                        padding: UiRect::top(Val::Px(12.0)),
                         ..default()
                     },
                     BorderColor::all(GREEN_DIM),
@@ -1246,9 +1280,8 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                             action,
                             Node {
                                 margin: UiRect::top(Val::Px(16.0)),
-                                padding: UiRect::axes(Val::Px(18.0), Val::Px(6.0)),
-                                border: UiRect::all(Val::Px(2.0)),
-                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                padding: UiRect::axes(Val::Px(14.0), Val::Px(4.0)),
+                                border: UiRect::all(Val::Px(1.0)),
                                 ..default()
                             },
                             BorderColor::all(GREEN),
@@ -1258,7 +1291,7 @@ fn spawn_items_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, st
                             Text::new(label),
                             TextColor(GREEN),
                             TextFont {
-                                font_size: FontSize::Px(20.0),
+                                font_size: FontSize::Px(16.0),
                                 ..default()
                             },
                             glow(),
@@ -1292,9 +1325,9 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                         Button,
                         NoteRow(item.base_form_id),
                         Node {
-                            min_height: Val::Px(42.0),
+                            min_height: Val::Px(34.0),
                             width: Val::Percent(100.0),
-                            padding: UiRect::horizontal(Val::Px(10.0)),
+                            padding: UiRect::horizontal(Val::Px(8.0)),
                             align_items: AlignItems::Center,
                             ..default()
                         },
@@ -1304,7 +1337,7 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                         Text::new(format!("{}{}", item_name(item), count_suffix(stack.count))),
                         TextColor(GREEN),
                         TextFont {
-                            font_size: FontSize::Px(24.0),
+                            font_size: FontSize::Px(19.0),
                             ..default()
                         },
                         glow(),
@@ -1331,7 +1364,7 @@ fn spawn_data_body(root: &mut ChildSpawnerCommands, sources: &ScreenSources, sta
                         Text::new(line),
                         TextColor(GREEN),
                         TextFont {
-                            font_size: FontSize::Px(24.0),
+                            font_size: FontSize::Px(19.0),
                             ..default()
                         },
                         glow(),
@@ -1355,8 +1388,8 @@ fn footer_tab(
             Button,
             marker,
             Node {
-                padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
-                border: UiRect::all(Val::Px(if active { 2.0 } else { 0.0 })),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(3.0)),
+                border: UiRect::all(Val::Px(if active { 1.0 } else { 0.0 })),
                 ..default()
             },
             BackgroundColor(if active { GREEN_DIM } else { Color::NONE }),
@@ -1366,7 +1399,7 @@ fn footer_tab(
             Text::new(label.to_owned()),
             TextColor(if active { GREEN } else { GREEN_FAINT }),
             TextFont {
-                font_size: FontSize::Px(24.0),
+                font_size: FontSize::Px(18.0),
                 ..default()
             },
             glow(),
@@ -1579,7 +1612,10 @@ fn equipped_marker(equipped: bool) -> &'static str {
     if equipped { "[E] " } else { "" }
 }
 
-fn detail_text(stack: super::inventory::InventoryStack, item: &PreparedItemDefinition) -> String {
+pub(super) fn detail_text(
+    stack: super::inventory::InventoryStack,
+    item: &PreparedItemDefinition,
+) -> String {
     let mut lines = vec![item_name(item)];
     if let Some(value) = item.value {
         lines.push(format!("VAL  {value}"));
@@ -1669,6 +1705,7 @@ mod tests {
     use super::*;
     use bevy::asset::AssetPlugin;
     use bevy::state::app::StatesPlugin;
+    use std::time::Duration;
 
     fn test_app() -> App {
         let mut app = App::new();
@@ -1723,6 +1760,270 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn pipboy_uses_a_centered_crt_device_hierarchy() {
+        let mut app = test_app();
+        app.world_mut()
+            .spawn((CursorOptions::default(), PrimaryWindow));
+        app.world_mut()
+            .resource_mut::<NextState<GameplayModal>>()
+            .set(GameplayModal::PipBoy);
+        app.update();
+
+        for (label, count) in [
+            (
+                "device shell",
+                app.world_mut()
+                    .query_filtered::<Entity, With<PipBoyDevice>>()
+                    .iter(app.world())
+                    .count(),
+            ),
+            (
+                "CRT screen",
+                app.world_mut()
+                    .query_filtered::<Entity, With<PipBoyScreen>>()
+                    .iter(app.world())
+                    .count(),
+            ),
+            (
+                "screen header",
+                app.world_mut()
+                    .query_filtered::<Entity, With<PipBoyHeader>>()
+                    .iter(app.world())
+                    .count(),
+            ),
+            (
+                "screen footer",
+                app.world_mut()
+                    .query_filtered::<Entity, With<PipBoyFooter>>()
+                    .iter(app.world())
+                    .count(),
+            ),
+            (
+                "physical button bank",
+                app.world_mut()
+                    .query_filtered::<Entity, With<PipBoyButtonBank>>()
+                    .iter(app.world())
+                    .count(),
+            ),
+        ] {
+            assert_eq!(count, 1, "expected one {label}");
+        }
+
+        let screen = app
+            .world_mut()
+            .query_filtered::<&Node, With<PipBoyScreen>>()
+            .single(app.world())
+            .expect("the CRT screen should have layout");
+        assert_eq!(screen.aspect_ratio, Some(4.0 / 3.0));
+        assert_eq!(screen.max_width, Val::Px(1040.0));
+    }
+
+    #[test]
+    fn status_figure_part_selection_wraps_in_both_directions() {
+        let mut editor = StatusFigureEditor::default();
+        assert_eq!(editor.selected, StatusBodyPart::Head);
+
+        editor.select_previous();
+        assert_eq!(editor.selected, StatusBodyPart::RightLeg);
+
+        editor.select_next();
+        assert_eq!(editor.selected, StatusBodyPart::Head);
+        editor.select_next();
+        assert_eq!(editor.selected, StatusBodyPart::Face);
+    }
+
+    #[test]
+    fn status_figure_movement_changes_only_the_selected_part() {
+        let mut layout = StatusFigureLayout::default();
+        let original_head = layout.part(StatusBodyPart::Head);
+        let original_arm = layout.part(StatusBodyPart::LeftArm);
+
+        layout.move_part(StatusBodyPart::LeftArm, -10, 1);
+
+        assert_eq!(layout.part(StatusBodyPart::Head), original_head);
+        assert_eq!(
+            layout.part(StatusBodyPart::LeftArm),
+            StatusPartLayout {
+                left: original_arm.left - 10,
+                top: original_arm.top + 1,
+                ..original_arm
+            }
+        );
+    }
+
+    #[test]
+    fn status_figure_repeat_waits_then_ticks_at_a_fixed_interval() {
+        let mut repeat = StatusMoveRepeat::default();
+        assert_eq!(
+            repeat.steps(MoveDirection::Right, true, true, Duration::ZERO),
+            1
+        );
+        assert_eq!(
+            repeat.steps(
+                MoveDirection::Right,
+                true,
+                false,
+                Duration::from_millis(299)
+            ),
+            0
+        );
+        assert_eq!(
+            repeat.steps(MoveDirection::Right, true, false, Duration::from_millis(51)),
+            2,
+            "the 300 ms initial repeat and 50 ms interval should both fire"
+        );
+        assert_eq!(
+            repeat.steps(
+                MoveDirection::Right,
+                false,
+                false,
+                Duration::from_millis(500)
+            ),
+            0
+        );
+        assert_eq!(repeat.direction, None);
+    }
+
+    #[test]
+    fn status_figure_clipboard_block_is_complete_and_stable() {
+        let mut layout = StatusFigureLayout::default();
+        layout.move_part(StatusBodyPart::Face, 3, -2);
+
+        let copied = layout.clipboard_text();
+        let layouts = [
+            (173, 45, 123, 133),
+            (188, 61, 70, 93),
+            (148, 113, 148, 186),
+            (250, 133, 145, 75),
+            (51, 125, 139, 78),
+            (214, 204, 104, 162),
+            (116, 210, 122, 162),
+        ];
+        for (left, top, width, height) in layouts {
+            assert_eq!(
+                copied
+                    .matches(&format!(
+                        "StatusPartLayout::new({left}, {top}, {width}, {height})"
+                    ))
+                    .count(),
+                1,
+                "the layout should appear exactly once in the copied block"
+            );
+        }
+        assert!(
+            copied.starts_with("const STATUS_PART_LAYOUTS: [StatusPartLayout; 7] = ["),
+            "the result should be ready to paste back into the defaults: {copied}"
+        );
+    }
+
+    #[test]
+    fn status_figure_debug_toggle_is_stats_only_and_preserves_layout() {
+        let mut app = test_app();
+        open_pipboy(&mut app);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F1);
+        app.update();
+        assert!(app.world().resource::<StatusFigureEditor>().enabled);
+
+        app.world_mut()
+            .resource_mut::<StatusFigureLayout>()
+            .move_part(StatusBodyPart::Head, 4, 5);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut().resource_mut::<PipBoyState>().view = PipBoyView::Items;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F1);
+        app.update();
+
+        assert!(
+            app.world().resource::<StatusFigureEditor>().enabled,
+            "F1 must not toggle the editor from Items"
+        );
+        assert_eq!(
+            app.world()
+                .resource::<StatusFigureLayout>()
+                .part(StatusBodyPart::Head)
+                .left,
+            StatusFigureLayout::default()
+                .part(StatusBodyPart::Head)
+                .left
+                + 4
+        );
+    }
+
+    #[test]
+    fn status_figure_arrow_input_moves_one_or_ten_pixels() {
+        let mut app = test_app();
+        open_pipboy(&mut app);
+        let original = app
+            .world()
+            .resource::<StatusFigureLayout>()
+            .part(StatusBodyPart::Head);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::F1);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ArrowRight);
+        app.update();
+        let after_single = app
+            .world()
+            .resource::<StatusFigureLayout>()
+            .part(StatusBodyPart::Head);
+        assert_eq!(after_single.left, original.left + 1);
+        assert_eq!(after_single.top, original.top);
+
+        {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(KeyCode::ArrowRight);
+            keys.clear();
+            keys.press(KeyCode::ShiftLeft);
+            keys.press(KeyCode::ArrowDown);
+        }
+        app.update();
+        let after_large = app
+            .world()
+            .resource::<StatusFigureLayout>()
+            .part(StatusBodyPart::Head);
+        assert_eq!(after_large.left, original.left + 1);
+        assert_eq!(after_large.top, original.top + 10);
+    }
+
+    #[test]
+    fn rebuilt_stats_figure_uses_the_runtime_layout() {
+        let mut app = test_app();
+        app.world_mut()
+            .resource_mut::<StatusFigureLayout>()
+            .move_part(StatusBodyPart::RightLeg, 17, -9);
+        open_pipboy(&mut app);
+
+        let expected = app
+            .world()
+            .resource::<StatusFigureLayout>()
+            .part(StatusBodyPart::RightLeg);
+        let node = app
+            .world_mut()
+            .query::<(&StatusFigurePart, &Node)>()
+            .iter(app.world())
+            .find(|(part, _)| part.0 == StatusBodyPart::RightLeg)
+            .map(|(_, node)| node)
+            .expect("the adjusted right leg should be spawned");
+        assert_eq!(node.left, Val::Px(expected.left as f32));
+        assert_eq!(node.top, Val::Px(expected.top as f32));
+        assert_eq!(node.width, Val::Px(expected.width as f32));
+        assert_eq!(node.height, Val::Px(expected.height as f32));
     }
 
     // -- issue #99 (F99.1/F99.2): consumable use from the Items view --
