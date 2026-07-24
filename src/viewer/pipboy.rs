@@ -27,6 +27,7 @@ use super::{
     cell_label,
 };
 
+mod presentation;
 mod stats;
 #[cfg(test)]
 use stats::{MoveDirection, StatusBodyPart, StatusFigurePart, StatusPartLayout, quick_aid_line};
@@ -234,6 +235,7 @@ struct ScreenSources<'w> {
     status: Res<'w, PlayerStatus>,
     figure_layout: Res<'w, StatusFigureLayout>,
     figure_editor: Res<'w, StatusFigureEditor>,
+    presentation: Res<'w, presentation::PipBoyPresentation>,
 }
 
 pub(crate) struct PipBoyPlugin;
@@ -260,8 +262,15 @@ fn install(app: &mut App) {
         .add_message::<OpenReaderRequested>()
         .add_message::<DropInventoryStackRequested>()
         .add_message::<ItemRowActivated>()
-        .add_systems(OnEnter(GameplayModal::PipBoy), enter_pipboy)
-        .add_systems(OnExit(GameplayModal::PipBoy), exit_pipboy)
+        .add_plugins(presentation::PipBoyPresentationPlugin)
+        .add_systems(
+            OnEnter(GameplayModal::PipBoy),
+            (presentation::begin_open, enter_pipboy).chain(),
+        )
+        .add_systems(
+            OnExit(GameplayModal::PipBoy),
+            (exit_pipboy, presentation::finish_close).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -752,103 +761,176 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
                 .and_then(|item| item_rules::carried_weight(item.quest_item, item.weight))
         })
         .max(0.0);
-    commands
-        .spawn((
-            PipBoyRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.008, 0.003, 0.44)),
-            GlobalZIndex(500),
-        ))
-        .with_children(|root| {
+    let physical_screen = sources.presentation.ui_camera().is_some();
+    let mut root = commands.spawn((
+        PipBoyRoot,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(if physical_screen {
+            SCREEN
+        } else {
+            Color::srgba(0.0, 0.008, 0.003, 0.44)
+        }),
+        GlobalZIndex(500),
+    ));
+    if let Some(camera) = sources.presentation.ui_camera() {
+        root.insert(UiTargetCamera(camera));
+    }
+    root.with_children(|root| {
+        if physical_screen {
             root.spawn((
-                PipBoyDevice,
+                PipBoyScreen,
                 Node {
-                    width: Val::Percent(76.0),
-                    height: Val::Percent(94.0),
-                    max_width: Val::Px(1120.0),
-                    max_height: Val::Px(1000.0),
-                    min_width: Val::Px(720.0),
-                    min_height: Val::Px(650.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
                     flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    padding: UiRect::axes(Val::Px(34.0), Val::Px(28.0)),
-                    border: UiRect::all(Val::Px(7.0)),
-                    border_radius: BorderRadius::all(Val::Px(52.0)),
+                    padding: UiRect::axes(Val::Px(42.0), Val::Px(24.0)),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
-                BackgroundColor(BEZEL),
-                BorderColor::all(BEZEL_EDGE),
+                BackgroundColor(SCREEN),
             ))
-            .with_children(|device| {
-                device
-                    .spawn((
-                        PipBoyScreen,
-                        Node {
-                            width: Val::Percent(100.0),
-                            max_width: Val::Px(1040.0),
-                            flex_grow: 1.0,
-                            aspect_ratio: Some(4.0 / 3.0),
-                            flex_direction: FlexDirection::Column,
-                            padding: UiRect::axes(Val::Px(48.0), Val::Px(24.0)),
-                            border: UiRect::all(Val::Px(9.0)),
-                            border_radius: BorderRadius::all(Val::Px(42.0)),
-                            overflow: Overflow::clip(),
+            .with_children(|screen| {
+                spawn_screen_contents(screen, sources, state, weight);
+                spawn_view_buttons(screen, state);
+            });
+            return;
+        }
+        root.spawn((
+            PipBoyDevice,
+            Node {
+                width: Val::Percent(76.0),
+                height: Val::Percent(94.0),
+                max_width: Val::Px(1120.0),
+                max_height: Val::Px(1000.0),
+                min_width: Val::Px(720.0),
+                min_height: Val::Px(650.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                padding: UiRect::axes(Val::Px(34.0), Val::Px(28.0)),
+                border: UiRect::all(Val::Px(7.0)),
+                border_radius: BorderRadius::all(Val::Px(52.0)),
+                ..default()
+            },
+            BackgroundColor(BEZEL),
+            BorderColor::all(BEZEL_EDGE),
+        ))
+        .with_children(|device| {
+            device
+                .spawn((
+                    PipBoyScreen,
+                    Node {
+                        width: Val::Percent(100.0),
+                        max_width: Val::Px(1040.0),
+                        flex_grow: 1.0,
+                        aspect_ratio: Some(4.0 / 3.0),
+                        flex_direction: FlexDirection::Column,
+                        padding: UiRect::axes(Val::Px(48.0), Val::Px(24.0)),
+                        border: UiRect::all(Val::Px(9.0)),
+                        border_radius: BorderRadius::all(Val::Px(42.0)),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(SCREEN),
+                    BorderColor::all(BEZEL_RECESS),
+                ))
+                .with_children(|screen| {
+                    screen.spawn((
+                        ImageNode {
+                            image: sources
+                                .assets
+                                .load("staging/interface/shared/background/pipboy.ktx2"),
+                            color: Color::srgba(0.18, 1.0, 0.48, 0.25),
                             ..default()
                         },
-                        BackgroundColor(SCREEN),
-                        BorderColor::all(BEZEL_RECESS),
-                    ))
-                    .with_children(|screen| {
-                        screen.spawn((
-                            ImageNode {
-                                image: sources
-                                    .assets
-                                    .load("staging/interface/shared/background/pipboy.ktx2"),
-                                color: Color::srgba(0.18, 1.0, 0.48, 0.25),
-                                ..default()
-                            },
-                            Node {
-                                position_type: PositionType::Absolute,
-                                width: Val::Percent(100.0),
-                                height: Val::Percent(100.0),
-                                ..default()
-                            },
-                        ));
-                        screen.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                width: Val::Percent(100.0),
-                                height: Val::Percent(100.0),
-                                ..default()
-                            },
-                            BackgroundGradient::from(RadialGradient::new(
-                                UiPosition::anchor(Vec2::new(0.0, -0.35)),
-                                RadialGradientShape::FarthestCorner,
-                                vec![
-                                    ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
-                                    ColorStop::new(Color::NONE, Val::Percent(100.0)),
-                                ],
-                            )),
-                        ));
-                        spawn_header(screen, state, &sources.status);
-                        match state.view {
-                            PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
-                            PipBoyView::Items => spawn_items_body(screen, sources, state),
-                            PipBoyView::Data => spawn_data_body(screen, sources, state),
-                        }
-                        spawn_footer(screen, state, weight);
-                        spawn_corner_brackets(screen, 14.0, 34.0, 2.0);
-                    });
-                spawn_view_buttons(device, state);
-            });
+                        Node {
+                            position_type: PositionType::Absolute,
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                    ));
+                    screen.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundGradient::from(RadialGradient::new(
+                            UiPosition::anchor(Vec2::new(0.0, -0.35)),
+                            RadialGradientShape::FarthestCorner,
+                            vec![
+                                ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
+                                ColorStop::new(Color::NONE, Val::Percent(100.0)),
+                            ],
+                        )),
+                    ));
+                    spawn_header(screen, state, &sources.status);
+                    match state.view {
+                        PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
+                        PipBoyView::Items => spawn_items_body(screen, sources, state),
+                        PipBoyView::Data => spawn_data_body(screen, sources, state),
+                    }
+                    spawn_footer(screen, state, weight);
+                    spawn_corner_brackets(screen, 14.0, 34.0, 2.0);
+                });
+            spawn_view_buttons(device, state);
         });
+    });
+}
+
+fn spawn_screen_contents(
+    screen: &mut ChildSpawnerCommands,
+    sources: &ScreenSources,
+    state: &PipBoyState,
+    weight: f32,
+) {
+    screen.spawn((
+        ImageNode {
+            image: sources
+                .assets
+                .load("staging/interface/shared/background/pipboy.ktx2"),
+            color: Color::srgba(0.18, 1.0, 0.48, 0.25),
+            ..default()
+        },
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+    ));
+    screen.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundGradient::from(RadialGradient::new(
+            UiPosition::anchor(Vec2::new(0.0, -0.35)),
+            RadialGradientShape::FarthestCorner,
+            vec![
+                ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
+                ColorStop::new(Color::NONE, Val::Percent(100.0)),
+            ],
+        )),
+    ));
+    spawn_header(screen, state, &sources.status);
+    match state.view {
+        PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
+        PipBoyView::Items => spawn_items_body(screen, sources, state),
+        PipBoyView::Data => spawn_data_body(screen, sources, state),
+    }
+    spawn_footer(screen, state, weight);
+    spawn_corner_brackets(screen, 14.0, 34.0, 2.0);
 }
 
 /// The stat bar along the top of the screen: the active view's name on the
