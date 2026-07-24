@@ -65,7 +65,13 @@ fn parse_fallout_material_extra(value: &str) -> Option<FalloutMaterialExtra> {
 /// materials without an explicit authorization marker are left untouched.
 #[allow(clippy::type_complexity)]
 pub(crate) fn configure_fallout_emission(
-    extras: Query<(&MeshMaterial3d<StandardMaterial>, &GltfMaterialExtras)>,
+    extras: Query<
+        (&MeshMaterial3d<StandardMaterial>, &GltfMaterialExtras),
+        Or<(
+            Changed<MeshMaterial3d<StandardMaterial>>,
+            Changed<GltfMaterialExtras>,
+        )>,
+    >,
     mut authorized: ResMut<AuthorizedEmissionMaterials>,
 ) {
     for (material_handle, extras) in &extras {
@@ -98,9 +104,16 @@ pub(crate) fn configure_fallout_translucency(
 ) {
     for (entity, material_handle, extras) in &extras {
         let Some(metadata) = parse_fallout_material_extra(&extras.value) else {
+            // This entity has stable glTF extras, but they do not carry the
+            // Fallout material contract. Mark it terminally inspected so
+            // ordinary materials do not incur a JSON parse every frame.
+            commands.entity(entity).insert(FalloutMaterialConfigured);
             continue;
         };
         let Some(local_thickness) = metadata.local_thickness else {
+            // Fallout metadata without local-thickness data has no
+            // translucency work to perform.
+            commands.entity(entity).insert(FalloutMaterialConfigured);
             continue;
         };
         if !metadata.translucency_enabled || !local_thickness.enabled {
@@ -922,13 +935,17 @@ pub(crate) fn apply_fog_strength(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn apply_volumetric_fog(
     mut commands: Commands,
     fog_strength: Res<FogStrength>,
     fog_multiplier: Res<VolumetricFogMultiplier>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
     mut cameras: Query<(Entity, Option<&mut VolumetricFog>), With<Camera3d>>,
-    mut volumes: Query<(Entity, Option<&mut FogVolume>), With<CellVolumetricFog>>,
+    mut volumes: Query<
+        (Entity, Option<&mut FogVolume>, Option<&VolumetricLight>),
+        With<CellVolumetricFog>,
+    >,
 ) {
     if !fog_strength.is_changed() && !fog_multiplier.is_changed() && !manifest.is_changed() {
         return;
@@ -947,8 +964,11 @@ pub(crate) fn apply_volumetric_fog(
         }
 
         let mut volume_exists = false;
-        for (volume_entity, volume) in &mut volumes {
+        for (volume_entity, volume, volumetric_light) in &mut volumes {
             volume_exists = true;
+            if volumetric_light.is_none() {
+                commands.entity(volume_entity).insert(VolumetricLight);
+            }
             if let Some(mut volume) = volume {
                 *volume = volume_fog.clone();
             } else {
@@ -971,8 +991,10 @@ pub(crate) fn apply_volumetric_fog(
         }
     } else {
         commands.entity(camera_entity).remove::<VolumetricFog>();
-        for (volume_entity, _) in &mut volumes {
-            commands.entity(volume_entity).remove::<FogVolume>();
+        for (volume_entity, _, _) in &mut volumes {
+            commands
+                .entity(volume_entity)
+                .remove::<(FogVolume, VolumetricLight)>();
         }
     }
 }
@@ -1360,6 +1382,60 @@ mod tests {
         });
         let parsed = parse_fallout_material_extra(&blender.to_string()).expect("Blender extras");
         assert_eq!(parsed.translucency_strength, 0.2);
+    }
+
+    #[test]
+    fn translucency_marks_non_fallout_extras_as_configured() {
+        let mut app = test_app();
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let entity = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                MeshMaterial3d(material.clone()),
+                GltfMaterialExtras {
+                    value: r#"{"extras_only":true}"#.into(),
+                },
+            ))
+            .id();
+        let no_thickness_entity = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                MeshMaterial3d(material),
+                GltfMaterialExtras {
+                    value: r#"{"bevyout_fallout_material":{"translucency_enabled":true}}"#.into(),
+                },
+            ))
+            .id();
+        app.add_systems(Update, configure_fallout_translucency);
+
+        app.update();
+        assert!(
+            app.world()
+                .entity(entity)
+                .contains::<FalloutMaterialConfigured>()
+        );
+        assert!(
+            app.world()
+                .entity(no_thickness_entity)
+                .contains::<FalloutMaterialConfigured>()
+        );
+
+        app.update();
+        assert!(
+            app.world()
+                .entity(entity)
+                .contains::<FalloutMaterialConfigured>()
+        );
+        assert!(
+            app.world()
+                .entity(no_thickness_entity)
+                .contains::<FalloutMaterialConfigured>()
+        );
     }
 
     fn test_app() -> App {
