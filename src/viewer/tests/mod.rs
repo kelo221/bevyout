@@ -1,5 +1,5 @@
 use super::*;
-use bevy::light::NotShadowCaster;
+use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog};
 use bevy::pbr::BakedPointShadowReceiver;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
 
@@ -359,6 +359,104 @@ fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn volumetric_fog_uses_cell_range_and_live_fog_strength() {
+    let lighting = PreparedCellLighting {
+        fog_rgba: [0.1, 0.2, 0.3, 0.0],
+        directional_rgba: [0.4, 0.5, 0.6, 0.0],
+        fog_near: 10.0,
+        fog_far: 100.0,
+        fog_clip_distance: 80.0,
+        ..default()
+    };
+    let weak = volumetric_fog_density(&lighting, 0.01, 1.0).expect("valid volumetric fog");
+    let strong = volumetric_fog_density(&lighting, 0.2, 1.0).expect("valid volumetric fog");
+    let multiplied =
+        volumetric_fog_density(&lighting, 0.01, 10.0).expect("valid multiplied volumetric fog");
+    assert!(weak > 0.0);
+    assert!(strong > weak);
+    assert!(multiplied > weak);
+
+    let shorter_cell = PreparedCellLighting {
+        fog_far: 50.0,
+        ..lighting.clone()
+    };
+    let shorter = volumetric_fog_density(&shorter_cell, 0.01, 1.0).expect("valid volumetric fog");
+    assert!(shorter > weak);
+
+    let (camera_fog, volume_fog) =
+        volumetric_fog_profile(&lighting, 0.01, 1.0).expect("valid volumetric profile");
+    assert_eq!(camera_fog.step_count, 64);
+    assert_eq!(volume_fog.absorption, 0.3);
+    assert_eq!(volume_fog.scattering, 0.3);
+    assert!((volume_fog.density_factor - weak).abs() < f32::EPSILON);
+}
+
+#[test]
+fn volumetric_fog_system_attaches_a_camera_following_volume() {
+    let mut app = App::new();
+    app.insert_resource(FogStrength(DEFAULT_FOG_STRENGTH));
+    app.insert_resource(VolumetricFogMultiplier(1.0));
+    let mut manifest = compatible_render_manifest();
+    manifest.cell.effective_lighting = Some(PreparedCellLighting {
+        fog_rgba: [0.1, 0.2, 0.3, 0.0],
+        directional_rgba: [0.4, 0.5, 0.6, 0.0],
+        fog_near: 10.0,
+        fog_far: 100.0,
+        fog_clip_distance: 80.0,
+        ..default()
+    });
+    app.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+    app.world_mut().spawn(Camera3d::default());
+    app.add_systems(Update, apply_volumetric_fog);
+
+    app.update();
+
+    let camera = app
+        .world_mut()
+        .query_filtered::<Entity, With<Camera3d>>()
+        .single(app.world())
+        .expect("test camera");
+    assert!(app.world().entity(camera).contains::<VolumetricFog>());
+    let volume_count = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(volume_count, 1);
+    let fog_volume_count = app
+        .world_mut()
+        .query_filtered::<Entity, With<FogVolume>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(fog_volume_count, 1);
+
+    let volume = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .single(app.world())
+        .expect("test fog volume");
+    let initial_density = app
+        .world()
+        .get::<FogVolume>(volume)
+        .expect("fog volume component")
+        .density_factor;
+    app.world_mut().resource_mut::<VolumetricFogMultiplier>().0 = 100.0;
+    app.update();
+    let volume_count_after_update = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(volume_count_after_update, 1);
+    let multiplied_density = app
+        .world()
+        .get::<FogVolume>(volume)
+        .expect("updated fog volume component")
+        .density_factor;
+    assert!(multiplied_density > initial_density);
 }
 
 #[test]

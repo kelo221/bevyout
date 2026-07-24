@@ -181,6 +181,14 @@ pub(crate) struct AmbientScale(pub(crate) f32);
 #[derive(Resource)]
 pub(crate) struct FogStrength(pub(crate) f32);
 
+/// Live multiplier for the cell-driven volumetric fog density. This is kept
+/// separate from `FogStrength` so the existing distance-fog tuning remains
+/// unchanged while volumetric visibility can be raised for inspection.
+pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 1.0;
+
+#[derive(Resource)]
+pub(crate) struct VolumetricFogMultiplier(pub(crate) f32);
+
 #[derive(Resource)]
 pub(crate) struct AoStrength(pub(crate) f32);
 

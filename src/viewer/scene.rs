@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use super::controls::{
-    AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides, LightingScale,
+    AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides,
+    LightingScale, VolumetricFogMultiplier,
 };
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
@@ -11,7 +12,7 @@ use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfMaterialExtras;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
-use bevy::light::NotShadowCaster;
+use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog, VolumetricLight};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
@@ -25,6 +26,9 @@ pub(crate) struct PreparedPointShadowReceiverRoot;
 
 #[derive(Component)]
 pub(crate) struct FalloutMaterialConfigured;
+
+#[derive(Component)]
+pub(crate) struct CellVolumetricFog;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -171,6 +175,11 @@ const DEFAULT_BLOOM_THRESHOLD: f32 = 0.05;
 const DEFAULT_BLOOM_SOFTNESS: f32 = 0.2;
 const IMAGE_SPACE_NEUTRAL_BRIGHT_CLAMP: f32 = 0.225;
 const IMAGE_SPACE_BLOOM_RADIUS_RANGE: f32 = 8.0;
+const VOLUMETRIC_FOG_VOLUME_SIZE: f32 = 4096.0;
+const VOLUMETRIC_FOG_STEP_COUNT: u32 = 64;
+const VOLUMETRIC_FOG_ABSORPTION: f32 = 0.3;
+const VOLUMETRIC_FOG_SCATTERING: f32 = 0.3;
+const VOLUMETRIC_FOG_MAX_DENSITY: f32 = 0.1;
 
 pub(crate) fn image_space_bloom_values(
     image_space: Option<&ImageSpaceInfo>,
@@ -346,6 +355,10 @@ pub(crate) fn spawn_prepared_scene(
                 shadow_maps_enabled: false,
                 ..default()
             },
+            // Bevy's volumetric pass is activated by a volumetric light. This
+            // directional light has no runtime shadow map, so it contributes
+            // the cell's ambient fog without enabling another shadow pass.
+            VolumetricLight,
             CellDirectionalLight { base_illuminance },
             Transform::from_rotation(Quat::from_array(cell_lighting.directional_rotation_xyzw())),
         ));
@@ -779,6 +792,31 @@ pub(crate) fn effective_lighting(cell: &CellInfo) -> PreparedCellLighting {
 }
 
 pub(crate) fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Option<DistanceFog> {
+    let (start, end) = fog_world_range(lighting)?;
+    if !strength.is_finite() || strength < 0.0 {
+        return None;
+    }
+    let strength = strength.clamp(0.0, 1.0);
+    let directional_fade = lighting.directional_fade.clamp(0.0, 1.0);
+    Some(DistanceFog {
+        color: Color::srgba(
+            lighting.fog_rgba[0],
+            lighting.fog_rgba[1],
+            lighting.fog_rgba[2],
+            strength,
+        ),
+        directional_light_color: Color::srgba(
+            lighting.directional_rgba[0] * directional_fade,
+            lighting.directional_rgba[1] * directional_fade,
+            lighting.directional_rgba[2] * directional_fade,
+            strength,
+        ),
+        directional_light_exponent: lighting.fog_power.max(1.0),
+        falloff: FogFalloff::Linear { start, end },
+    })
+}
+
+fn fog_world_range(lighting: &PreparedCellLighting) -> Option<(f32, f32)> {
     let values = [
         lighting.fog_near,
         lighting.fog_far,
@@ -805,27 +843,66 @@ pub(crate) fn distance_fog(lighting: &PreparedCellLighting, strength: f32) -> Op
     if !start.is_finite() || !end.is_finite() || end <= start {
         return None;
     }
-    if !strength.is_finite() || strength < 0.0 {
+    Some((start, end))
+}
+
+/// Converts the existing Fallout fog level into a uniform volumetric density.
+/// `FogStrength` is the live viewer multiplier and the cell supplies the fog
+/// range/color. Density is chosen so the volume reaches approximately the same
+/// opacity at the cell's fog end distance as the current distance-fog alpha.
+pub(crate) fn volumetric_fog_density(
+    lighting: &PreparedCellLighting,
+    strength: f32,
+    multiplier: f32,
+) -> Option<f32> {
+    let (_, end) = fog_world_range(lighting)?;
+    if !strength.is_finite() || strength < 0.0 || !multiplier.is_finite() || multiplier < 0.0 {
         return None;
     }
-    let strength = strength.clamp(0.0, 1.0);
-    let directional_fade = lighting.directional_fade.clamp(0.0, 1.0);
-    Some(DistanceFog {
-        color: Color::srgba(
-            lighting.fog_rgba[0],
-            lighting.fog_rgba[1],
-            lighting.fog_rgba[2],
-            strength,
-        ),
-        directional_light_color: Color::srgba(
-            lighting.directional_rgba[0] * directional_fade,
-            lighting.directional_rgba[1] * directional_fade,
-            lighting.directional_rgba[2] * directional_fade,
-            strength,
-        ),
-        directional_light_exponent: lighting.fog_power.max(1.0),
-        falloff: FogFalloff::Linear { start, end },
-    })
+    let opacity = (strength * multiplier).clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return Some(0.0);
+    }
+    let density = if opacity >= 1.0 {
+        // A fully opaque target has infinite optical depth mathematically;
+        // use the bounded runtime density instead of rejecting the profile.
+        VOLUMETRIC_FOG_MAX_DENSITY
+    } else {
+        let optical_depth = -(1.0 - opacity).ln();
+        optical_depth / (end * (VOLUMETRIC_FOG_ABSORPTION + VOLUMETRIC_FOG_SCATTERING))
+    };
+    density
+        .is_finite()
+        .then_some(density.clamp(0.0, VOLUMETRIC_FOG_MAX_DENSITY))
+}
+
+pub(crate) fn volumetric_fog_profile(
+    lighting: &PreparedCellLighting,
+    strength: f32,
+    multiplier: f32,
+) -> Option<(VolumetricFog, FogVolume)> {
+    let density = volumetric_fog_density(lighting, strength, multiplier)?;
+    let fog_color = Color::srgb(
+        lighting.fog_rgba[0],
+        lighting.fog_rgba[1],
+        lighting.fog_rgba[2],
+    );
+    let strength = (strength * multiplier).clamp(0.0, 1.0);
+    Some((
+        VolumetricFog {
+            ambient_color: fog_color,
+            ambient_intensity: strength,
+            jitter: 0.0,
+            step_count: VOLUMETRIC_FOG_STEP_COUNT,
+        },
+        FogVolume {
+            fog_color,
+            density_factor: density,
+            absorption: VOLUMETRIC_FOG_ABSORPTION,
+            scattering: VOLUMETRIC_FOG_SCATTERING,
+            ..default()
+        },
+    ))
 }
 
 pub(crate) fn apply_fog_strength(
@@ -842,6 +919,61 @@ pub(crate) fn apply_fog_strength(
     };
     for mut camera_fog in &mut cameras {
         *camera_fog = fog.clone();
+    }
+}
+
+pub(crate) fn apply_volumetric_fog(
+    mut commands: Commands,
+    fog_strength: Res<FogStrength>,
+    fog_multiplier: Res<VolumetricFogMultiplier>,
+    manifest: Res<crate::viewer::LoadedSceneManifest>,
+    mut cameras: Query<(Entity, Option<&mut VolumetricFog>), With<Camera3d>>,
+    mut volumes: Query<(Entity, Option<&mut FogVolume>), With<CellVolumetricFog>>,
+) {
+    if !fog_strength.is_changed() && !fog_multiplier.is_changed() && !manifest.is_changed() {
+        return;
+    }
+    let lighting = effective_lighting(&manifest.cell);
+    let profile = volumetric_fog_profile(&lighting, fog_strength.0, fog_multiplier.0);
+    let Some((camera_entity, camera_fog)) = cameras.iter_mut().next() else {
+        return;
+    };
+
+    if let Some((volumetric_fog, volume_fog)) = profile {
+        if let Some(mut camera_fog) = camera_fog {
+            *camera_fog = volumetric_fog;
+        } else {
+            commands.entity(camera_entity).insert(volumetric_fog);
+        }
+
+        let mut volume_exists = false;
+        for (volume_entity, volume) in &mut volumes {
+            volume_exists = true;
+            if let Some(mut volume) = volume {
+                *volume = volume_fog.clone();
+            } else {
+                commands.entity(volume_entity).insert(volume_fog.clone());
+            }
+        }
+        if !volume_exists {
+            commands.spawn((
+                CellVolumetricFog,
+                // Bevy 0.19 gates its volumetric post-process on the
+                // presence of a `VolumetricLight`. Keep the gate with the
+                // camera-following volume so ambient-only cells still fog;
+                // actual directional lights are marked separately when they
+                // exist.
+                VolumetricLight,
+                volume_fog,
+                Transform::from_scale(Vec3::splat(VOLUMETRIC_FOG_VOLUME_SIZE)),
+                ChildOf(camera_entity),
+            ));
+        }
+    } else {
+        commands.entity(camera_entity).remove::<VolumetricFog>();
+        for (volume_entity, _) in &mut volumes {
+            commands.entity(volume_entity).remove::<FogVolume>();
+        }
     }
 }
 

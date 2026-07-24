@@ -22,7 +22,7 @@ use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 use super::controls::{
     AmbientScale, AoStrength, EmissionScale, FogStrength, HorizontalFov, IrradianceIntensity,
     LightingScale, LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES,
-    UnlitMode, horizontal_to_vertical_fov,
+    UnlitMode, VolumetricFogMultiplier, horizontal_to_vertical_fov,
 };
 use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]

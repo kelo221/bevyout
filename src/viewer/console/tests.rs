@@ -13,6 +13,7 @@ fn test_app() -> App {
         .insert_resource(IrradianceIntensity(1.0))
         .insert_resource(AmbientScale(1.0))
         .insert_resource(FogStrength(1.0))
+        .insert_resource(VolumetricFogMultiplier(1.0))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(0.0))
         .insert_resource(ImageSpaceBloomOverrides::default())
@@ -186,6 +187,7 @@ fn render_settings_validate_boundaries_before_mutation() {
         ("bloom_intensity", 0.0, 1.0),
         ("bloom_softness", 0.0, 1.0),
         ("fog", 0.0, 1.0),
+        ("volumetric_fog", 0.0, 100.0),
         ("ao", 0.0, 1.0),
         ("emission", 0.0, 1.0),
     ] {
@@ -239,7 +241,7 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        11
+        12
     );
 }
 

@@ -295,6 +295,7 @@ pub(crate) fn run_view(
         .insert_resource(IrradianceIntensity(1.0))
         .insert_resource(AmbientScale(0.05))
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
+        .insert_resource(VolumetricFogMultiplier(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
         .insert_resource(ImageSpaceBloomOverrides::default())
@@ -350,6 +351,10 @@ pub(crate) fn run_view(
                 .chain(),
         )
         .add_systems(Update, apply_lighting_scale)
+        .add_systems(
+            Update,
+            apply_volumetric_fog.run_if(in_state(AppState::InGame)),
+        )
         .add_systems(
             Update,
             (apply_realtime_shadow_light, mark_prepared_shadow_meshes)

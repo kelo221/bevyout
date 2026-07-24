@@ -63,7 +63,7 @@ impl ConsoleCommandProvider for RenderCommandProvider {
     }
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 11] = [
+pub(super) const RENDER_SETTINGS: [&str; 12] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -71,6 +71,7 @@ pub(super) const RENDER_SETTINGS: [&str; 11] = [
     "bloom_threshold",
     "bloom_softness",
     "fog",
+    "volumetric_fog",
     "ao",
     "emission",
     "shadow_samples",
@@ -238,6 +239,10 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     values.insert("bloom_threshold".into(), json!(bloom_threshold));
     values.insert("bloom_softness".into(), json!(bloom_softness));
     values.insert("fog".into(), json!(world.resource::<FogStrength>().0));
+    values.insert(
+        "volumetric_fog".into(),
+        json!(world.resource::<VolumetricFogMultiplier>().0),
+    );
     values.insert("ao".into(), json!(world.resource::<AoStrength>().0));
     values.insert(
         "emission".into(),
@@ -327,6 +332,7 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "bloom_threshold" => "Bloom threshold",
         "bloom_softness" => "Bloom softness",
         "fog" => "Fog",
+        "volumetric_fog" => "Volumetric fog",
         "ao" => "Ambient occlusion",
         "emission" => "Material emission",
         "shadow_samples" => "Point-shadow samples per pixel",
@@ -401,6 +407,7 @@ pub(super) fn set_render(
         "bloom_intensity" | "bloom_softness" | "fog" | "ao" | "emission" => {
             (0.0..=1.0).contains(&value)
         }
+        "volumetric_fog" => (0.0..=100.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
         "realtime_shadows" => value == 0.0 || value == 1.0,
@@ -418,6 +425,7 @@ pub(super) fn set_render(
         "irradiance" => world.resource_mut::<IrradianceIntensity>().0 = value,
         "ambient" => world.resource_mut::<AmbientScale>().0 = value,
         "fog" => world.resource_mut::<FogStrength>().0 = value,
+        "volumetric_fog" => world.resource_mut::<VolumetricFogMultiplier>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
         "emission" => world.resource_mut::<EmissionScale>().0 = value,
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
