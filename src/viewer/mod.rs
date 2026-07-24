@@ -60,6 +60,7 @@ mod pipboy;
 mod pipboy_reader;
 mod player;
 mod plugins;
+mod weapon;
 mod world;
 mod world_items;
 

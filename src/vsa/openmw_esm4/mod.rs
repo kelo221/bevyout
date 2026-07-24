@@ -112,6 +112,8 @@ pub(crate) enum OpenMwItemStats {
         ammo_form_id: Option<u32>,
         /// Fallout 3 `WEAP.DNAM` animation type (the first 32-bit field).
         animation_type: Option<u32>,
+        /// Fallout 3 `WEAP.WNAM` first-person model-object FormID.
+        first_person_model_object_form_id: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,
@@ -184,6 +186,10 @@ pub(crate) struct BaseAudioRecord {
     pub(crate) close_sound_form_id: Option<u32>,
     pub(crate) pickup_sound_form_id: Option<u32>,
     pub(crate) drop_sound_form_id: Option<u32>,
+    /// Fallout 3 `WEAP.SNAM` spatial attack sound.
+    pub(crate) weapon_fire_3d_sound_form_id: Option<u32>,
+    /// Fallout 3 `WEAP.XNAM` player-local attack sound.
+    pub(crate) weapon_fire_2d_sound_form_id: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

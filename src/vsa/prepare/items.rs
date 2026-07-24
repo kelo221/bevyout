@@ -1,6 +1,7 @@
 //! Prepared item catalogue and icon staging (M3 wave 1, issue #70).
 
 use super::*;
+use crate::vsa::openmw_esm4::BaseAudioRecord;
 
 /// Bump whenever the catalog shape *or* the decoded meaning of an existing
 /// field changes, even when the shape itself is unchanged: a stale cached
@@ -10,7 +11,7 @@ use super::*;
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
 /// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v6-ktx2-icons";
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v7-player-weapons";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -25,15 +26,29 @@ pub(crate) fn catalog_item_references(
         .map(|reference| reference.form_id)
         .collect::<HashSet<_>>();
     let mut next_id = u32::MAX;
-    let mut ids = bases.keys().copied().collect::<Vec<_>>();
+    let mut ids = bases
+        .iter()
+        .filter_map(|(base_form_id, base)| {
+            (is_pickup_kind(&base.kind) && base.model.is_some()).then_some(*base_form_id)
+        })
+        .collect::<HashSet<_>>();
+    for base in bases.values() {
+        if let OpenMwItemStats::Weapon {
+            first_person_model_object_form_id: Some(form_id),
+            ..
+        } = &base.item_stats
+            && bases
+                .get(form_id)
+                .is_some_and(|target| target.model.is_some())
+        {
+            ids.insert(*form_id);
+        }
+    }
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
     ids.sort_unstable();
     let mut references = Vec::new();
     let mut synthetic_ids = HashSet::new();
     for base_form_id in ids {
-        let base = &bases[&base_form_id];
-        if !is_pickup_kind(&base.kind) || base.model.is_none() {
-            continue;
-        }
         while used.contains(&next_id) {
             next_id = next_id.saturating_sub(1);
         }
@@ -173,7 +188,7 @@ pub(crate) fn build_item_catalog(
                 value: base.value,
                 weight: base.weight,
                 quest_item: bevyout_core::items::is_quest_item(base.record_flags),
-                stats: prepared_stats(&base.item_stats),
+                stats: prepared_stats(&base.item_stats, &base.audio, &placements),
                 audio: PreparedPlacementAudio {
                     loop_sound_form_id: base.audio.loop_sound_form_id,
                     activate_sound_form_id: base.audio.activation_sound_form_id,
@@ -224,7 +239,11 @@ fn category(kind: &str) -> Option<PreparedItemCategory> {
     }
 }
 
-fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
+fn prepared_stats(
+    stats: &OpenMwItemStats,
+    audio: &BaseAudioRecord,
+    placements: &HashMap<u32, &PreparedPlacement>,
+) -> PreparedItemStats {
     match stats {
         OpenMwItemStats::Weapon {
             damage,
@@ -234,6 +253,7 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             reach,
             ammo_form_id,
             animation_type,
+            first_person_model_object_form_id,
         } => PreparedItemStats::Weapon {
             damage: *damage,
             max_condition: *max_condition,
@@ -242,6 +262,12 @@ fn prepared_stats(stats: &OpenMwItemStats) -> PreparedItemStats {
             reach: *reach,
             ammo_form_id: *ammo_form_id,
             animation_type: *animation_type,
+            first_person_model_object_form_id: *first_person_model_object_form_id,
+            first_person_asset_path: first_person_model_object_form_id
+                .and_then(|form_id| placements.get(&form_id))
+                .and_then(|placement| placement.asset_path.clone()),
+            fire_sound_3d_form_id: audio.weapon_fire_3d_sound_form_id,
+            fire_sound_2d_form_id: audio.weapon_fire_2d_sound_form_id,
         },
         OpenMwItemStats::Apparel {
             armor_rating,
@@ -293,8 +319,8 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v6-ktx2-icons");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v6-ktx2-icons");
+        assert_eq!(catalog.revision, "openmw-items-v7-player-weapons");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v7-player-weapons");
     }
 
     #[test]
@@ -392,7 +418,10 @@ mod tests {
             reach: None,
             ammo_form_id: Some(0x0000_00aa),
             animation_type: Some(3),
+            first_person_model_object_form_id: Some(0x77),
         };
+        weapon.audio.weapon_fire_3d_sound_form_id = Some(0x88);
+        weapon.audio.weapon_fire_2d_sound_form_id = Some(0x99);
         let mut armor = BaseRecord::default();
         armor.kind = "ARMO".into();
         armor.item_stats = OpenMwItemStats::Apparel {
@@ -400,8 +429,46 @@ mod tests {
             max_condition: None,
             biped_slot_mask: Some(0x0000_0005),
         };
-        let bases = HashMap::from([(1, weapon), (2, armor)]);
-        let catalog = build_item_catalog(&bases, &HashMap::new(), &[], &HashMap::new(), "abc");
+        let mut first_person = BaseRecord::default();
+        first_person.kind = "STAT".into();
+        first_person.model = Some("weapons/10mm-first-person.nif".into());
+        let bases = HashMap::from([(1, weapon), (2, armor), (0x77, first_person)]);
+        let first_person_placement = PreparedPlacement {
+            reference_form_id: u32::MAX,
+            base_form_id: 0x77,
+            asset_path: Some("assets/10mm-first-person.glb".into()),
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            error: None,
+            physics_asset_path: None,
+            physics_source: None,
+            physics_classification: PreparedPhysicsClassification::Static,
+            step_support: false,
+            mutability: PreparedRuntimeMutability::ScriptAddressable,
+            mutability_root_form_id: None,
+            reference_kind: "Object".into(),
+            base_kind: "STAT".into(),
+            editor_id: None,
+            display_name: None,
+            count: 1,
+            semantic: PreparedSemantic::Static,
+            initially_enabled: true,
+            enable_parent: None,
+            owner_form_id: None,
+            owner_faction_rank: None,
+            linked_reference_form_id: None,
+            inventory: Vec::new(),
+            audio: PreparedPlacementAudio::default(),
+            ao_mode: "ao-none".into(),
+        };
+        let catalog = build_item_catalog(
+            &bases,
+            &HashMap::new(),
+            &[first_person_placement],
+            &HashMap::new(),
+            "abc",
+        );
         let weapon_stats = &catalog
             .items
             .iter()
@@ -413,8 +480,12 @@ mod tests {
             PreparedItemStats::Weapon {
                 ammo_form_id: Some(0x0000_00aa),
                 animation_type: Some(3),
+                first_person_model_object_form_id: Some(0x77),
+                first_person_asset_path: Some(path),
+                fire_sound_3d_form_id: Some(0x88),
+                fire_sound_2d_form_id: Some(0x99),
                 ..
-            }
+            } if path == "assets/10mm-first-person.glb"
         ));
         let armor_stats = &catalog
             .items

@@ -1,0 +1,126 @@
+//! Player-weapon inspection and MCP action controls (M5 wave 1).
+
+use bevyout_core::weapon::{ReloadDecision, WeaponAction};
+
+use super::*;
+use crate::viewer::weapon::{FireWeaponRequested, PlayerWeaponRuntime, ReloadWeaponRequested};
+
+pub(super) struct WeaponCommandProvider;
+
+impl ConsoleCommandProvider for WeaponCommandProvider {
+    fn register_commands(&self, registry: &mut ConsoleRegistry) -> Result<(), ConsoleError> {
+        for command in [
+            ConsoleCommand::new(
+                "weaponstate",
+                "weaponstate",
+                "Report equipped player weapon, action, viewmodel, accepted-shot count, and last hitscan result.",
+                weapon_state,
+            ),
+            ConsoleCommand::new(
+                "weaponfire",
+                "weaponfire",
+                "Request one center-screen player-weapon shot through the normal action, audio, light, and hitscan path.",
+                weapon_fire,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "weaponreload",
+                "weaponreload",
+                "Request the normal player-weapon reload action; firing remains blocked until it completes.",
+                weapon_reload,
+            )
+            .mutating(),
+        ] {
+            registry.register(command)?;
+        }
+        Ok(())
+    }
+}
+
+fn weapon_state(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let runtime = world.get_resource::<PlayerWeaponRuntime>().ok_or_else(|| {
+        ConsoleError::new("weapon_unavailable", "weapon runtime is not installed")
+    })?;
+    let equipped_form_id = runtime.equipped.as_ref().map(|weapon| weapon.base_form_id);
+    let action = action_label(runtime.action());
+    let summary = format!(
+        "weaponstate equipped={} action={action} shots={} viewmodel={} last={}",
+        equipped_form_id.map_or_else(|| "none".into(), |form_id| format!("{form_id:08x}")),
+        runtime.shots_fired(),
+        runtime
+            .equipped
+            .as_ref()
+            .and_then(|weapon| weapon.viewmodel_asset_path.as_deref())
+            .unwrap_or("none"),
+        runtime.last_fire.status.label()
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "equipped_form_id": equipped_form_id,
+            "label": runtime.equipped.as_ref().map(|weapon| weapon.label.as_str()),
+            "action": action,
+            "shots_fired": runtime.shots_fired(),
+            "viewmodel_asset_path": runtime.equipped.as_ref().and_then(|weapon| weapon.viewmodel_asset_path.as_deref()),
+            "fire_sound_3d_form_id": runtime.equipped.as_ref().and_then(|weapon| weapon.fire_sound_3d_form_id),
+            "fire_sound_2d_form_id": runtime.equipped.as_ref().and_then(|weapon| weapon.fire_sound_2d_form_id),
+            "muzzle_flash_active": runtime.muzzle_flash_remaining > 0.0,
+            "last_reload": runtime.last_reload.map(reload_label),
+            "last_fire": {
+                "status": runtime.last_fire.status.label(),
+                "shot_index": runtime.last_fire.shot_index,
+                "target_reference_form_id": runtime.last_fire.target_reference_form_id,
+                "hit_distance": runtime.last_fire.hit_distance,
+                "applied_damage": runtime.last_fire.applied_damage,
+                "remaining_health": runtime.last_fire.remaining_health,
+                "audio_form_id": runtime.last_fire_sound_form_id,
+                "muzzle_flash_seconds": runtime.last_muzzle_flash_seconds,
+            },
+            "ammo_accounting": false,
+        }),
+        vec![summary],
+    ))
+}
+
+fn weapon_fire(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    world.write_message(FireWeaponRequested);
+    Ok(ConsoleCommandResult::new(
+        json!({"queued": true}),
+        vec!["weaponfire queued".into()],
+    ))
+}
+
+fn weapon_reload(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    world.write_message(ReloadWeaponRequested);
+    Ok(ConsoleCommandResult::new(
+        json!({"queued": true}),
+        vec!["weaponreload queued".into()],
+    ))
+}
+
+const fn action_label(action: WeaponAction) -> &'static str {
+    match action {
+        WeaponAction::Idle => "idle",
+        WeaponAction::Firing => "firing",
+        WeaponAction::Reloading => "reloading",
+    }
+}
+
+const fn reload_label(decision: ReloadDecision) -> &'static str {
+    match decision {
+        ReloadDecision::Started => "started",
+        ReloadDecision::BlockedFiring => "blocked_firing",
+        ReloadDecision::AlreadyReloading => "already_reloading",
+    }
+}

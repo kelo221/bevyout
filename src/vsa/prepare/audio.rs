@@ -63,6 +63,19 @@ pub(crate) fn stage_audio(
             .flatten(),
         );
     }
+    // M5/#235: the item catalog can equip a weapon that is not placed in the
+    // startup cell. Stage its authored attack sounds alongside other prepared
+    // clips so firing never depends on an incidental world placement.
+    for base in parsed.bases.values().filter(|base| base.kind == "WEAP") {
+        form_ids.extend(
+            [
+                base.audio.weapon_fire_3d_sound_form_id,
+                base.audio.weapon_fire_2d_sound_form_id,
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
 
     let clips = stage_audio_clips(
         data_root,
