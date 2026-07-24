@@ -70,6 +70,7 @@ mod console;
 mod console_ui;
 mod controls;
 mod diagnostics;
+mod fallout_ui;
 #[cfg(test)]
 mod hybrid_shadow_policy;
 mod lighting;

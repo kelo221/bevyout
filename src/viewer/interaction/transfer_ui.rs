@@ -22,16 +22,16 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::app_state::{GameplayModal, RequestStateTransition};
 use crate::vsa::{PreparedItemCatalog, PreparedItemDefinition};
 
+use super::super::fallout_ui::{
+    PHOSPHOR as GREEN, PHOSPHOR_DIM as GREEN_DIM, PHOSPHOR_FAINT as GREEN_FAINT,
+    SCREEN_TRANSLUCENT, glow, spawn_corner_brackets, spawn_selection_marker,
+};
 use super::super::inventory::{DropAction, InventoryStack, StackKey, drop_action};
 use super::animation::{self, ClipTransition};
 use super::{
     ActiveContainerTarget, CanonicalItemLedger, ContainerStates, InteractionState, PlaySound,
     PlayerEquipment, PlayerInventory, container_policy, item_rules,
 };
-
-const GREEN: Color = Color::srgb(0.18, 1.0, 0.48);
-const GREEN_DIM: Color = Color::srgba(0.08, 0.45, 0.22, 0.85);
-const SCREEN: Color = Color::srgba(0.005, 0.025, 0.012, 0.97);
 
 /// Which side of the transfer a [`TransferQuantityPicker`] is acting on --
 /// mirrors `pipboy::QuantityPicker`'s role, but this modal has two possible
@@ -46,6 +46,14 @@ enum TransferDirection {
 struct TransferUiState {
     selected_container: Option<u32>,
     selected_player: Option<StackKey>,
+    active_pane: TransferPaneSide,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TransferPaneSide {
+    Player,
+    #[default]
+    Container,
 }
 
 /// Quantity-picker overlay state, opened when a right-click's `drop_action`
@@ -64,6 +72,15 @@ struct TransferQuantityPicker {
 
 #[derive(Component)]
 struct TransferRoot;
+
+#[derive(Component)]
+struct TransferPanel;
+
+#[derive(Component)]
+struct TransferPane;
+
+#[derive(Component)]
+struct TransferFooter;
 
 #[derive(Component, Clone, Copy)]
 struct ContainerRow(u32);
@@ -85,6 +102,12 @@ enum QuantityButton {
     Cancel,
 }
 
+#[derive(Component, Clone, Copy)]
+enum TransferActionButton {
+    TakeAll,
+    Exit,
+}
+
 pub(super) fn install(app: &mut App) {
     app.init_resource::<TransferUiState>()
         .add_systems(OnEnter(GameplayModal::Container), open_transfer_modal)
@@ -95,6 +118,7 @@ pub(super) fn install(app: &mut App) {
                 handle_container_rows,
                 handle_player_rows,
                 handle_quantity_buttons,
+                handle_action_buttons,
                 refresh_after_change,
                 close_on_escape,
             )
@@ -102,6 +126,7 @@ pub(super) fn install(app: &mut App) {
         );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_transfer_modal(
     mut commands: Commands,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
@@ -110,6 +135,7 @@ fn open_transfer_modal(
     container_states: Res<ContainerStates>,
     inventory: Res<PlayerInventory>,
     catalog: Res<PreparedItemCatalog>,
+    assets: Res<AssetServer>,
 ) {
     if let Ok(mut cursor) = cursor.single_mut() {
         cursor.visible = true;
@@ -131,6 +157,7 @@ fn open_transfer_modal(
         &container_states,
         &inventory,
         &catalog,
+        &assets,
         &ui_state,
     );
 }
@@ -200,6 +227,78 @@ fn close_on_escape(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_action_buttons(
+    buttons: Query<(&Interaction, &TransferActionButton), Changed<Interaction>>,
+    active: Res<ActiveContainerTarget>,
+    mut container_states: ResMut<ContainerStates>,
+    mut inventory: ResMut<PlayerInventory>,
+    mut canonical: ResMut<CanonicalItemLedger>,
+    mut requests: MessageWriter<RequestStateTransition>,
+) {
+    for (interaction, action) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            TransferActionButton::Exit => {
+                requests.write(RequestStateTransition::Modal(GameplayModal::None));
+            }
+            TransferActionButton::TakeAll => {
+                let Some(active_container) = active.0.as_ref() else {
+                    continue;
+                };
+                let Some(container) = container_states.get_mut(active_container.reference_form_id)
+                else {
+                    continue;
+                };
+                for (form_id, result) in take_all(
+                    container,
+                    &mut inventory,
+                    active_container.owner_form_id,
+                    active_container.reference_form_id,
+                    &mut canonical,
+                ) {
+                    log_transfer(
+                        result,
+                        form_id,
+                        active_container.reference_form_id,
+                        "-> player",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn take_all(
+    container: &mut container_policy::ContainerState,
+    inventory: &mut PlayerInventory,
+    owner_form_id: Option<u32>,
+    reference_form_id: u32,
+    canonical: &mut CanonicalItemLedger,
+) -> Vec<(u32, Result<i32, container_policy::TransferError>)> {
+    container
+        .stacks
+        .clone()
+        .into_iter()
+        .map(|(form_id, count)| {
+            (
+                form_id,
+                take(
+                    container,
+                    inventory,
+                    form_id,
+                    count,
+                    owner_form_id,
+                    reference_form_id,
+                    canonical,
+                ),
+            )
+        })
+        .collect()
+}
+
 /// Sorted `(form_id, count)` view of a container's current stacks -- the
 /// pure policy doesn't keep `stacks` sorted after mutation (`apply_delta`
 /// updates in place / appends), so the UI sorts on render instead of
@@ -236,6 +335,11 @@ fn normalize_selection(
         .any(|stack| ui_state.selected_player == Some(stack.key()))
     {
         ui_state.selected_player = player_stacks.first().map(|stack| stack.key());
+    }
+    if container_stacks.is_empty() && !player_stacks.is_empty() {
+        ui_state.active_pane = TransferPaneSide::Player;
+    } else if player_stacks.is_empty() && !container_stacks.is_empty() {
+        ui_state.active_pane = TransferPaneSide::Container;
     }
 }
 
@@ -283,6 +387,7 @@ fn handle_container_rows(
     mut inventory: ResMut<PlayerInventory>,
     mut canonical: ResMut<CanonicalItemLedger>,
     catalog: Res<PreparedItemCatalog>,
+    assets: Res<AssetServer>,
     mut ui_state: ResMut<TransferUiState>,
     roots: Query<Entity, With<TransferRoot>>,
     picker: Option<Res<TransferQuantityPicker>>,
@@ -291,17 +396,23 @@ fn handle_container_rows(
         return;
     };
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed && ui_state.selected_container != Some(row.0) {
+        if *interaction == Interaction::Pressed {
+            let changed = ui_state.selected_container != Some(row.0)
+                || ui_state.active_pane != TransferPaneSide::Container;
             ui_state.selected_container = Some(row.0);
-            rebuild(
-                &mut commands,
-                &roots,
-                active_container,
-                &container_states,
-                &inventory,
-                &catalog,
-                &ui_state,
-            );
+            ui_state.active_pane = TransferPaneSide::Container;
+            if changed {
+                rebuild(
+                    &mut commands,
+                    &roots,
+                    active_container,
+                    &container_states,
+                    &inventory,
+                    &catalog,
+                    &assets,
+                    &ui_state,
+                );
+            }
             return;
         }
     }
@@ -315,6 +426,7 @@ fn handle_container_rows(
         return;
     };
     ui_state.selected_container = Some(form_id);
+    ui_state.active_pane = TransferPaneSide::Container;
     let Some(container) = container_states.get_mut(active_container.reference_form_id) else {
         return;
     };
@@ -362,6 +474,7 @@ fn handle_player_rows(
     mut canonical: ResMut<CanonicalItemLedger>,
     equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
+    assets: Res<AssetServer>,
     mut ui_state: ResMut<TransferUiState>,
     roots: Query<Entity, With<TransferRoot>>,
     picker: Option<Res<TransferQuantityPicker>>,
@@ -370,17 +483,23 @@ fn handle_player_rows(
         return;
     };
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed && ui_state.selected_player != Some(row.0) {
+        if *interaction == Interaction::Pressed {
+            let changed = ui_state.selected_player != Some(row.0)
+                || ui_state.active_pane != TransferPaneSide::Player;
             ui_state.selected_player = Some(row.0);
-            rebuild(
-                &mut commands,
-                &roots,
-                active_container,
-                &container_states,
-                &inventory,
-                &catalog,
-                &ui_state,
-            );
+            ui_state.active_pane = TransferPaneSide::Player;
+            if changed {
+                rebuild(
+                    &mut commands,
+                    &roots,
+                    active_container,
+                    &container_states,
+                    &inventory,
+                    &catalog,
+                    &assets,
+                    &ui_state,
+                );
+            }
             return;
         }
     }
@@ -394,6 +513,7 @@ fn handle_player_rows(
         return;
     };
     ui_state.selected_player = Some(key);
+    ui_state.active_pane = TransferPaneSide::Player;
     // Issue #98 (F98.2): equipped items cannot be stored into a container.
     if equipment.is_equipped(key) {
         warn!(
@@ -547,6 +667,7 @@ fn refresh_after_change(
     container_states: Res<ContainerStates>,
     inventory: Res<PlayerInventory>,
     catalog: Res<PreparedItemCatalog>,
+    assets: Res<AssetServer>,
     mut ui_state: ResMut<TransferUiState>,
     roots: Query<Entity, With<TransferRoot>>,
     picker: Option<Res<TransferQuantityPicker>>,
@@ -570,6 +691,7 @@ fn refresh_after_change(
         &container_states,
         &inventory,
         &catalog,
+        &assets,
         &ui_state,
     );
 }
@@ -738,6 +860,7 @@ fn store(
     Ok(moved)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild(
     commands: &mut Commands,
     roots: &Query<Entity, With<TransferRoot>>,
@@ -745,6 +868,7 @@ fn rebuild(
     container_states: &ContainerStates,
     inventory: &PlayerInventory,
     catalog: &PreparedItemCatalog,
+    assets: &AssetServer,
     ui_state: &TransferUiState,
 ) {
     for root in roots {
@@ -756,8 +880,41 @@ fn rebuild(
         container_states,
         inventory,
         catalog,
+        assets,
         ui_state,
     );
+}
+
+fn selected_detail<'a>(
+    active_container: &super::ActiveContainer,
+    container_states: &ContainerStates,
+    inventory: &PlayerInventory,
+    catalog: &'a PreparedItemCatalog,
+    ui_state: &TransferUiState,
+) -> Option<(InventoryStack, &'a PreparedItemDefinition)> {
+    let stack = match ui_state.active_pane {
+        TransferPaneSide::Player => inventory
+            .stack_states()
+            .into_iter()
+            .find(|stack| ui_state.selected_player == Some(stack.key()))?,
+        TransferPaneSide::Container => {
+            let form_id = ui_state.selected_container?;
+            let count = container_states
+                .get(active_container.reference_form_id)
+                .map(|container| container_policy::stack_count(&container.stacks, form_id))
+                .unwrap_or_default();
+            InventoryStack {
+                base_form_id: form_id,
+                count,
+                condition: None,
+            }
+        }
+    };
+    catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == stack.base_form_id)
+        .map(|item| (stack, item))
 }
 
 fn spawn_screen(
@@ -766,11 +923,26 @@ fn spawn_screen(
     container_states: &ContainerStates,
     inventory: &PlayerInventory,
     catalog: &PreparedItemCatalog,
+    assets: &AssetServer,
     ui_state: &TransferUiState,
 ) {
     let container_stacks =
         sorted_container_stacks(container_states, active_container.reference_form_id);
     let player_stacks = inventory.stack_states();
+    let carried_weight = inventory.total_weight(|form_id| {
+        catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == form_id)
+            .and_then(|item| item_rules::carried_weight(item.quest_item, item.weight))
+    });
+    let detail = selected_detail(
+        active_container,
+        container_states,
+        inventory,
+        catalog,
+        ui_state,
+    );
 
     commands
         .spawn((
@@ -779,79 +951,155 @@ fn spawn_screen(
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                padding: UiRect::all(Val::Px(48.0)),
-                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(SCREEN),
+            BackgroundColor(Color::srgba(0.0, 0.008, 0.003, 0.28)),
             GlobalZIndex(500),
         ))
         .with_children(|root| {
             root.spawn((
-                Text::new(active_container.name.clone()),
-                TextColor(GREEN),
-                TextFont {
-                    font_size: FontSize::Px(32.0),
-                    ..default()
-                },
+                TransferPanel,
                 Node {
-                    height: Val::Px(56.0),
-                    border: UiRect::bottom(Val::Px(2.0)),
+                    width: Val::Percent(58.0),
+                    height: Val::Percent(68.0),
+                    max_width: Val::Px(1080.0),
+                    max_height: Val::Px(720.0),
+                    min_width: Val::Px(760.0),
+                    min_height: Val::Px(480.0),
+                    padding: UiRect::all(Val::Px(28.0)),
+                    flex_direction: FlexDirection::Column,
+                    border: UiRect::all(Val::Px(1.0)),
                     ..default()
                 },
+                BackgroundColor(SCREEN_TRANSLUCENT),
                 BorderColor::all(GREEN_DIM),
-            ));
-            root.spawn(Node {
-                flex_grow: 1.0,
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                ..default()
-            })
-            .with_children(|body| {
-                let holder_title = match active_container.kind {
-                    super::LootHolderKind::Container => "Container",
-                    super::LootHolderKind::Corpse => "Corpse",
-                };
-                spawn_pane(
-                    body,
-                    holder_title,
-                    container_stacks.iter().map(|&(form_id, count)| {
-                        (
-                            ContainerRow(form_id),
-                            resolve_name(form_id, catalog, &active_container.item_names),
-                            count,
-                            ui_state.selected_container == Some(form_id),
-                        )
-                    }),
-                );
-                spawn_pane(
-                    body,
-                    "You",
-                    player_stacks.iter().map(|stack| {
-                        (
-                            PlayerRow(stack.key()),
-                            resolve_name(stack.base_form_id, catalog, &active_container.item_names),
-                            stack.count,
-                            ui_state.selected_player == Some(stack.key()),
-                        )
-                    }),
-                );
+            ))
+            .with_children(|panel| {
+                panel
+                    .spawn(Node {
+                        flex_grow: 1.0,
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(42.0),
+                        ..default()
+                    })
+                    .with_children(|body| {
+                        spawn_pane(
+                            body,
+                            "<  ITEMS  >",
+                            Some(format!("WG  {carried_weight:.1}")),
+                            player_stacks.iter().map(|stack| {
+                                (
+                                    PlayerRow(stack.key()),
+                                    resolve_name(
+                                        stack.base_form_id,
+                                        catalog,
+                                        &active_container.item_names,
+                                    ),
+                                    stack.count,
+                                    ui_state.active_pane == TransferPaneSide::Player
+                                        && ui_state.selected_player == Some(stack.key()),
+                                )
+                            }),
+                        );
+                        spawn_pane(
+                            body,
+                            &format!("<  {}  >", active_container.name),
+                            None,
+                            container_stacks.iter().map(|&(form_id, count)| {
+                                (
+                                    ContainerRow(form_id),
+                                    resolve_name(form_id, catalog, &active_container.item_names),
+                                    count,
+                                    ui_state.active_pane == TransferPaneSide::Container
+                                        && ui_state.selected_container == Some(form_id),
+                                )
+                            }),
+                        );
+                    });
+                panel
+                    .spawn((
+                        TransferFooter,
+                        Node {
+                            height: Val::Px(184.0),
+                            width: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            border: UiRect::bottom(Val::Px(1.0)),
+                            padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+                            ..default()
+                        },
+                        BorderColor::all(GREEN_DIM),
+                    ))
+                    .with_children(|footer| {
+                        footer
+                            .spawn(Node {
+                                width: Val::Percent(72.0),
+                                height: Val::Percent(100.0),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                column_gap: Val::Px(28.0),
+                                ..default()
+                            })
+                            .with_children(|details| {
+                                if let Some((stack, item)) = detail {
+                                    if let Some(path) = item.icon_asset_path.as_deref() {
+                                        details.spawn((
+                                            ImageNode {
+                                                image: assets.load(path.to_owned()),
+                                                color: GREEN,
+                                                ..default()
+                                            },
+                                            Node {
+                                                width: Val::Px(168.0),
+                                                height: Val::Px(168.0),
+                                                flex_shrink: 0.0,
+                                                ..default()
+                                            },
+                                        ));
+                                    }
+                                    let text = super::super::pipboy::detail_text(stack, item)
+                                        .lines()
+                                        .skip(1)
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    details.spawn((
+                                        Text::new(text),
+                                        TextColor(GREEN),
+                                        TextFont {
+                                            font_size: FontSize::Px(17.0),
+                                            ..default()
+                                        },
+                                        glow(),
+                                    ));
+                                }
+                            });
+                        footer
+                            .spawn(Node {
+                                width: Val::Percent(28.0),
+                                height: Val::Percent(100.0),
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::FlexEnd,
+                                justify_content: JustifyContent::FlexEnd,
+                                row_gap: Val::Px(8.0),
+                                ..default()
+                            })
+                            .with_children(|actions| {
+                                transfer_action_button(
+                                    actions,
+                                    "TAKE ALL  A",
+                                    TransferActionButton::TakeAll,
+                                );
+                                transfer_action_button(
+                                    actions,
+                                    "EXIT  ESC",
+                                    TransferActionButton::Exit,
+                                );
+                            });
+                    });
+                spawn_corner_brackets(panel, 0.0, 28.0, 2.0);
             });
-            root.spawn((
-                Text::new(
-                    "Click to select, right-click to move one (or choose a quantity for \
-                     larger stacks), Esc close",
-                ),
-                TextColor(Color::srgb(0.8, 0.8, 0.8)),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                Node {
-                    height: Val::Px(32.0),
-                    ..default()
-                },
-            ));
         });
 }
 
@@ -862,54 +1110,157 @@ fn spawn_screen(
 fn spawn_pane<Row: Component + Copy>(
     body: &mut ChildSpawnerCommands,
     title: &str,
+    auxiliary: Option<String>,
     rows: impl Iterator<Item = (Row, String, i32, bool)>,
 ) {
-    body.spawn(Node {
-        width: Val::Percent(50.0),
-        flex_direction: FlexDirection::Column,
-        overflow: Overflow::scroll_y(),
-        padding: UiRect::all(Val::Px(12.0)),
-        ..default()
-    })
+    body.spawn((
+        TransferPane,
+        Node {
+            width: Val::Percent(50.0),
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::clip_y(),
+            border: UiRect {
+                top: Val::Px(1.0),
+                left: Val::Px(1.0),
+                right: Val::Px(1.0),
+                bottom: Val::Px(1.0),
+            },
+            ..default()
+        },
+        BorderColor::all(GREEN_DIM),
+    ))
     .with_children(|list| {
+        list.spawn(Node {
+            min_height: Val::Px(52.0),
+            width: Val::Percent(100.0),
+            padding: UiRect::horizontal(Val::Px(18.0)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::SpaceBetween,
+            ..default()
+        })
+        .with_children(|header| {
+            header.spawn((
+                Text::new(title.to_owned()),
+                TextColor(GREEN),
+                TextFont {
+                    font_size: FontSize::Px(21.0),
+                    ..default()
+                },
+                glow(),
+            ));
+            if let Some(auxiliary) = auxiliary {
+                header.spawn((
+                    Text::new(auxiliary),
+                    TextColor(GREEN_FAINT),
+                    TextFont {
+                        font_size: FontSize::Px(17.0),
+                        ..default()
+                    },
+                ));
+            }
+        });
         list.spawn((
-            Text::new(title.to_owned()),
-            TextColor(GREEN_DIM),
+            Text::new("^"),
+            TextColor(GREEN),
             TextFont {
                 font_size: FontSize::Px(18.0),
                 ..default()
             },
+            Node {
+                height: Val::Px(22.0),
+                padding: UiRect::left(Val::Px(6.0)),
+                ..default()
+            },
         ));
         let mut any = false;
-        for (row, name, count, selected) in rows {
-            any = true;
-            list.spawn((
-                Button,
-                row,
-                Node {
-                    min_height: Val::Px(38.0),
-                    width: Val::Percent(100.0),
-                    padding: UiRect::horizontal(Val::Px(10.0)),
-                    align_items: AlignItems::Center,
-                    border: UiRect::all(Val::Px(if selected { 2.0 } else { 0.0 })),
-                    ..default()
-                },
-                BackgroundColor(if selected { GREEN_DIM } else { Color::NONE }),
-                BorderColor::all(GREEN),
-            ))
-            .with_child((
-                Text::new(format!("{name}{}", count_suffix(count))),
-                TextColor(GREEN),
-                TextFont {
-                    font_size: FontSize::Px(22.0),
-                    ..default()
-                },
-            ));
-        }
-        if !any {
-            list.spawn((Text::new("(empty)"), TextColor(GREEN_DIM)));
-        }
+        list.spawn(Node {
+            flex_grow: 1.0,
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Column,
+            overflow: Overflow::scroll_y(),
+            padding: UiRect::horizontal(Val::Px(16.0)),
+            ..default()
+        })
+        .with_children(|rows_parent| {
+            for (row, name, count, selected) in rows {
+                any = true;
+                rows_parent
+                    .spawn((
+                        Button,
+                        row,
+                        Node {
+                            min_height: Val::Px(34.0),
+                            width: Val::Percent(100.0),
+                            padding: UiRect::horizontal(Val::Px(4.0)),
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BackgroundColor(Color::NONE),
+                    ))
+                    .with_children(|row| {
+                        spawn_selection_marker(row, selected);
+                        row.spawn((
+                            Text::new(format!("{name}{}", count_suffix(count))),
+                            TextColor(if selected { GREEN } else { GREEN_FAINT }),
+                            TextFont {
+                                font_size: FontSize::Px(19.0),
+                                ..default()
+                            },
+                            glow(),
+                        ));
+                    });
+            }
+            if !any {
+                rows_parent.spawn((
+                    Text::new("(empty)"),
+                    TextColor(GREEN_DIM),
+                    TextFont {
+                        font_size: FontSize::Px(18.0),
+                        ..default()
+                    },
+                ));
+            }
+        });
+        list.spawn((
+            Text::new("v"),
+            TextColor(GREEN),
+            TextFont {
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            Node {
+                height: Val::Px(22.0),
+                padding: UiRect::left(Val::Px(6.0)),
+                ..default()
+            },
+        ));
     });
+}
+
+fn transfer_action_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    action: TransferActionButton,
+) {
+    parent
+        .spawn((
+            Button,
+            action,
+            Node {
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .with_child((
+            Text::new(label.to_owned()),
+            TextColor(GREEN),
+            TextFont {
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            glow(),
+        ));
 }
 
 fn spawn_quantity_picker(commands: &mut Commands, quantity: i32, max: i32) {
@@ -929,7 +1280,7 @@ fn spawn_quantity_picker(commands: &mut Commands, quantity: i32, max: i32) {
                 border: UiRect::all(Val::Px(2.0)),
                 ..default()
             },
-            BackgroundColor(SCREEN),
+            BackgroundColor(SCREEN_TRANSLUCENT),
             BorderColor::all(GREEN),
             GlobalZIndex(520),
         ))
@@ -989,4 +1340,98 @@ fn quantity_button(parent: &mut ChildSpawnerCommands, label: &str, action: Quant
             BackgroundColor(GREEN_DIM),
         ))
         .with_child((Text::new(label), TextColor(GREEN)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_item(base_form_id: u32, name: &str) -> PreparedItemDefinition {
+        PreparedItemDefinition {
+            base_form_id,
+            record_kind: "MISC".into(),
+            category: crate::vsa::PreparedItemCategory::Misc,
+            editor_id: None,
+            display_name: Some(name.into()),
+            source_model_path: None,
+            icon_asset_path: Some(format!("icons/{base_form_id:08x}.ktx2")),
+            world_asset_path: None,
+            physics_asset_path: None,
+            drop_collider: Default::default(),
+            value: Some(5),
+            weight: Some(1.0),
+            quest_item: false,
+            stats: crate::vsa::PreparedItemStats::Misc,
+            audio: Default::default(),
+        }
+    }
+
+    #[test]
+    fn active_transfer_pane_selects_the_matching_icon_and_details_stack() {
+        let active = super::super::ActiveContainer {
+            kind: super::super::LootHolderKind::Container,
+            entity: Entity::PLACEHOLDER,
+            reference_form_id: 0x100,
+            name: "Test Container".into(),
+            item_names: Default::default(),
+            owner_form_id: None,
+        };
+        let states = ContainerStates(std::collections::HashMap::from([(
+            0x100,
+            container_policy::ContainerState {
+                stacks: vec![(0x10, 2)],
+                resolved: true,
+            },
+        )]));
+        let inventory = PlayerInventory::from_stack_states([InventoryStack {
+            base_form_id: 0x20,
+            count: 3,
+            condition: Some(50),
+        }]);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![
+                test_item(0x10, "Container Item"),
+                test_item(0x20, "Player Item"),
+            ],
+        };
+        let mut ui = TransferUiState {
+            selected_container: Some(0x10),
+            selected_player: Some(StackKey {
+                base_form_id: 0x20,
+                condition: Some(50),
+            }),
+            active_pane: TransferPaneSide::Container,
+        };
+
+        let (stack, item) = selected_detail(&active, &states, &inventory, &catalog, &ui).unwrap();
+        assert_eq!((stack.base_form_id, stack.count), (0x10, 2));
+        assert_eq!(item.icon_asset_path.as_deref(), Some("icons/00000010.ktx2"));
+
+        ui.active_pane = TransferPaneSide::Player;
+        let (stack, item) = selected_detail(&active, &states, &inventory, &catalog, &ui).unwrap();
+        assert_eq!(
+            (stack.base_form_id, stack.count, stack.condition),
+            (0x20, 3, Some(50))
+        );
+        assert_eq!(item.icon_asset_path.as_deref(), Some("icons/00000020.ktx2"));
+    }
+
+    #[test]
+    fn take_all_moves_every_container_stack_through_the_canonical_path() {
+        let mut container = container_policy::ContainerState {
+            stacks: vec![(0x10, 2), (0x20, 3)],
+            resolved: true,
+        };
+        let mut inventory = PlayerInventory::default();
+        let mut canonical = CanonicalItemLedger::default();
+
+        let moved = take_all(&mut container, &mut inventory, None, 0x100, &mut canonical);
+
+        assert!(moved.iter().all(|(_, result)| result.is_ok()));
+        assert!(container.stacks.is_empty());
+        assert_eq!(inventory.count(0x10), 2);
+        assert_eq!(inventory.count(0x20), 3);
+    }
 }
