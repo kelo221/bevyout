@@ -184,14 +184,25 @@ pub(crate) struct FogStrength(pub(crate) f32);
 #[derive(Resource)]
 pub(crate) struct AoStrength(pub(crate) f32);
 
-/// Runtime multiplier for every StandardMaterial emissive color. This keeps
-/// authored Fallout lights visible without returning to the original
-/// whiteout-prone source intensity; it remains live-tunable with
+/// Runtime multiplier for shader-authorized StandardMaterial emissive colors.
+/// This keeps authored Fallout lights visible without returning to the
+/// original whiteout-prone source intensity; it remains live-tunable with
 /// `setrender emission`.
 pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
+
+/// Explicit runtime overrides for bloom values that would otherwise be
+/// derived from the active Fallout ImageSpace. The override remains active
+/// across cell swaps until the viewer is restarted, preserving the existing
+/// live-tuning behavior of `setrender bloom_*`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Resource)]
+pub(crate) struct ImageSpaceBloomOverrides {
+    pub(crate) intensity: Option<f32>,
+    pub(crate) threshold: Option<f32>,
+    pub(crate) softness: Option<f32>,
+}
 
 /// Material handles whose GLB metadata explicitly authorizes Fallout
 /// emission. The live emission console control must not turn arbitrary

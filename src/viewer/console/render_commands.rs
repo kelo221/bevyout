@@ -1,6 +1,7 @@
 //! Rendering, timing, and capture console commands.
 
 use super::*;
+use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
 
 pub(super) struct RenderCommandProvider;
 
@@ -10,7 +11,7 @@ impl ConsoleCommandProvider for RenderCommandProvider {
             ConsoleCommand::new(
                 "getrender",
                 "getrender [setting]",
-                "Get one render setting or all render settings.",
+                "Get one render setting, the active ImageSpace, or all render settings.",
                 get_render,
             ),
             ConsoleCommand::new(
@@ -75,6 +76,8 @@ pub(super) const RENDER_SETTINGS: [&str; 11] = [
     "shadow_samples",
     "realtime_shadows",
 ];
+
+const IMAGE_SPACE_DIAGNOSTIC: &str = "imagespace";
 
 pub(super) const TONEMAPPER_NAMES: [&str; 9] = [
     "none",
@@ -251,6 +254,59 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     Ok(values)
 }
 
+fn image_space_values(world: &World) -> Value {
+    let manifest = world.resource::<LoadedSceneManifest>();
+    let Some(image_space) = manifest.cell.image_space.as_ref() else {
+        return json!({
+            "form_id": null,
+            "editor_id": null,
+            "interior": manifest.cell.interior,
+            "flags": 0,
+            "resolved": false,
+        });
+    };
+    let (bloom_intensity, bloom_threshold, bloom_softness) =
+        image_space_bloom_values(Some(image_space), manifest.cell.interior);
+    let overrides = world
+        .get_resource::<ImageSpaceBloomOverrides>()
+        .copied()
+        .unwrap_or_default();
+    json!({
+        "form_id": image_space.form_id,
+        "editor_id": image_space.editor_id,
+        "interior": manifest.cell.interior,
+        "resolved": true,
+        "flags": image_space.flags,
+        "brightness": image_space.brightness,
+        "saturation": image_space.cinematic_saturation,
+        "contrast": image_space.cinematic_contrast,
+        "contrast_avg_lum": image_space.cinematic_contrast_avg_lum,
+        "tint_rgb": image_space.cinematic_brightness_tint_rgb,
+        "tint_value": image_space.cinematic_brightness_tint_value,
+        "hdr_target_lum": image_space.hdr_target_lum,
+        "eye_adapt_speed": image_space.eye_adapt_speed,
+        "hdr_emissive_multiplier": image_space.hdr_emissive_multiplier,
+        "hdr_bright_scale": image_space.hdr_bright_scale,
+        "hdr_bright_clamp": image_space.hdr_bright_clamp,
+        "bloom_blur_radius": image_space.bloom_blur_radius,
+        "bloom_alpha_mult": if manifest.cell.interior {
+            image_space.bloom_alpha_mult_interior
+        } else {
+            image_space.bloom_alpha_mult_exterior
+        },
+        "bloom_defaults": {
+            "intensity": bloom_intensity,
+            "threshold": bloom_threshold,
+            "softness": bloom_softness,
+        },
+        "bloom_overrides": {
+            "intensity": overrides.intensity,
+            "threshold": overrides.threshold,
+            "softness": overrides.softness,
+        },
+    })
+}
+
 pub(super) fn validate_render_setting(setting: &str) -> Result<(), ConsoleError> {
     if RENDER_SETTINGS.contains(&setting) {
         Ok(())
@@ -292,6 +348,12 @@ pub(super) fn get_render(
     let values = render_values(world)?;
     if let Some(setting) = invocation.args.first() {
         let setting = setting.to_ascii_lowercase();
+        if setting == IMAGE_SPACE_DIAGNOSTIC {
+            return Ok(ConsoleCommandResult::new(
+                image_space_values(world),
+                vec!["Active ImageSpace reported.".into()],
+            ));
+        }
         validate_render_setting(&setting)?;
         let value = values[&setting].clone();
         let message = format!("{}: {value}.", render_setting_label(&setting));
@@ -380,13 +442,31 @@ pub(super) fn set_render(
                 }
                 camera
             };
-            let mut bloom = world
-                .get_mut::<Bloom>(camera)
-                .ok_or_else(|| ConsoleError::new("camera_unavailable", "bloom is unavailable"))?;
-            match setting.as_str() {
-                "bloom_intensity" => bloom.intensity = value,
-                "bloom_threshold" => bloom.prefilter.threshold = value,
-                "bloom_softness" => bloom.prefilter.threshold_softness = value,
+            let override_kind = {
+                let mut bloom = world.get_mut::<Bloom>(camera).ok_or_else(|| {
+                    ConsoleError::new("camera_unavailable", "bloom is unavailable")
+                })?;
+                match setting.as_str() {
+                    "bloom_intensity" => {
+                        bloom.intensity = value;
+                        0
+                    }
+                    "bloom_threshold" => {
+                        bloom.prefilter.threshold = value;
+                        1
+                    }
+                    "bloom_softness" => {
+                        bloom.prefilter.threshold_softness = value;
+                        2
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let mut overrides = world.resource_mut::<ImageSpaceBloomOverrides>();
+            match override_kind {
+                0 => overrides.intensity = Some(value),
+                1 => overrides.threshold = Some(value),
+                2 => overrides.softness = Some(value),
                 _ => unreachable!(),
             }
         }

@@ -146,6 +146,98 @@ fn image_space_settings_map_to_grading_and_target_exposure() {
 }
 
 #[test]
+fn image_space_flags_zero_leave_cinematic_grading_neutral() {
+    let image_space = ImageSpaceInfo {
+        flags: 0,
+        brightness: 4.0,
+        cinematic_saturation: 0.1,
+        cinematic_contrast: 1.5,
+        cinematic_brightness_tint_rgb: [0.1, 0.8, 0.2],
+        cinematic_brightness_tint_value: 1.0,
+        ..default()
+    };
+    let mut curves = Assets::<AutoExposureCompensationCurve>::default();
+    let (grading, _) = camera_post_processing(Some(&image_space), &mut curves);
+
+    assert_eq!(grading.global.exposure, 0.0);
+    assert_eq!(grading.global.post_saturation, 1.0);
+    assert_eq!(grading.shadows.contrast, 1.0);
+    assert_eq!(grading.midtones.contrast, 1.0);
+    assert_eq!(grading.highlights.contrast, 1.0);
+    assert_eq!(grading.global.temperature, 0.0);
+    assert_eq!(grading.global.tint, 0.0);
+}
+
+#[test]
+fn image_space_bloom_keeps_old_viewer_values_as_the_neutral_profile() {
+    assert_eq!(
+        image_space_bloom_values(Some(&ImageSpaceInfo::default()), true),
+        (0.2, 0.05, 0.2)
+    );
+
+    let image_space = ImageSpaceInfo {
+        hdr_bright_scale: 1.5,
+        hdr_bright_clamp: 0.35,
+        bloom_blur_radius: 0.8,
+        bloom_alpha_mult_interior: 0.2,
+        bloom_alpha_mult_exterior: 0.5,
+        ..default()
+    };
+
+    let interior = image_space_bloom_values(Some(&image_space), true);
+    assert!((interior.0 - 0.06).abs() < 0.00001);
+    assert!((interior.1 - (0.05 * 0.35 / 0.225)).abs() < 0.00001);
+    assert!((interior.2 - 0.22).abs() < 0.00001);
+
+    let exterior = image_space_bloom_values(Some(&image_space), false);
+    assert!((exterior.0 - 0.15).abs() < 0.00001);
+    assert!((exterior.1 - (0.05 * 0.35 / 0.225)).abs() < 0.00001);
+    assert!((exterior.2 - 0.22).abs() < 0.00001);
+}
+
+#[test]
+fn image_space_refresh_updates_cells_without_overwriting_bloom_overrides() {
+    let mut world = World::new();
+    world.insert_resource(Assets::<AutoExposureCompensationCurve>::default());
+    world.insert_resource(ImageSpaceBloomOverrides {
+        intensity: Some(0.9),
+        threshold: Some(0.7),
+        softness: None,
+    });
+    world.spawn((Camera3d::default(), Bloom::default()));
+
+    let mut cell = compatible_render_manifest().cell;
+    cell.interior = true;
+    cell.image_space = Some(ImageSpaceInfo {
+        hdr_bright_scale: 1.5,
+        hdr_bright_clamp: 0.35,
+        bloom_blur_radius: 0.8,
+        bloom_alpha_mult_interior: 0.2,
+        bloom_alpha_mult_exterior: 0.5,
+        ..default()
+    });
+    refresh_camera_post_processing(&mut world, &cell);
+
+    let camera = world
+        .query_filtered::<Entity, With<Camera3d>>()
+        .single(&world)
+        .expect("test camera");
+    let bloom = world.get::<Bloom>(camera).expect("camera bloom");
+    assert_eq!(bloom.intensity, 0.9);
+    assert_eq!(bloom.prefilter.threshold, 0.7);
+    assert!((bloom.prefilter.threshold_softness - 0.22).abs() < 0.00001);
+
+    cell.interior = false;
+    cell.image_space.as_mut().unwrap().bloom_blur_radius = 8.0;
+    refresh_camera_post_processing(&mut world, &cell);
+
+    let bloom = world.get::<Bloom>(camera).expect("camera bloom");
+    assert_eq!(bloom.intensity, 0.9);
+    assert_eq!(bloom.prefilter.threshold, 0.7);
+    assert!((bloom.prefilter.threshold_softness - 0.4).abs() < 0.00001);
+}
+
+#[test]
 fn missing_image_space_keeps_fixed_camera_post_processing() {
     let mut curves = Assets::<AutoExposureCompensationCurve>::default();
     let (grading, auto_exposure) = camera_post_processing(None, &mut curves);

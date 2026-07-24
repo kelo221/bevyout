@@ -297,6 +297,7 @@ pub(crate) fn run_view(
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
+        .insert_resource(ImageSpaceBloomOverrides::default())
         .insert_resource(AuthorizedEmissionMaterials::default())
         .insert_resource(AoMeshBases::default())
         .insert_resource(RenderReportPath(report_path))

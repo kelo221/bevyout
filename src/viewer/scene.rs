@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use super::controls::{AmbientScale, AuthorizedEmissionMaterials, FogStrength, LightingScale};
+use super::controls::{
+    AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides, LightingScale,
+};
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use crate::vsa::PreparedPlacement;
@@ -164,16 +166,88 @@ pub(crate) fn mark_prepared_shadow_meshes(
     }
 }
 
-pub(super) fn fallout_bloom() -> Bloom {
+const DEFAULT_BLOOM_INTENSITY: f32 = 0.2;
+const DEFAULT_BLOOM_THRESHOLD: f32 = 0.05;
+const DEFAULT_BLOOM_SOFTNESS: f32 = 0.2;
+const IMAGE_SPACE_NEUTRAL_BRIGHT_CLAMP: f32 = 0.225;
+const IMAGE_SPACE_BLOOM_RADIUS_RANGE: f32 = 8.0;
+
+pub(crate) fn image_space_bloom_values(
+    image_space: Option<&ImageSpaceInfo>,
+    interior: bool,
+) -> (f32, f32, f32) {
+    let Some(image_space) = image_space else {
+        return (
+            DEFAULT_BLOOM_INTENSITY,
+            DEFAULT_BLOOM_THRESHOLD,
+            DEFAULT_BLOOM_SOFTNESS,
+        );
+    };
+
+    let authored_alpha = if interior {
+        image_space.bloom_alpha_mult_interior
+    } else {
+        image_space.bloom_alpha_mult_exterior
+    };
+    let alpha = if authored_alpha.is_finite() {
+        authored_alpha
+    } else {
+        1.0
+    }
+    .clamp(0.0, 1.0);
+    let bright_scale = if image_space.hdr_bright_scale.is_finite() {
+        image_space.hdr_bright_scale
+    } else {
+        1.0
+    }
+    .max(0.0);
+    let bright_clamp = if image_space.hdr_bright_clamp.is_finite() {
+        image_space.hdr_bright_clamp
+    } else {
+        DEFAULT_BLOOM_THRESHOLD
+    }
+    .max(DEFAULT_BLOOM_THRESHOLD);
+    let blur_radius = if image_space.bloom_blur_radius.is_finite() {
+        image_space.bloom_blur_radius
+    } else {
+        0.0
+    }
+    .max(0.0);
+
+    // Keep the established viewer bloom as the neutral profile. ImageSpace
+    // values modulate that profile instead of replacing it with raw Fallout
+    // HDR magnitudes; this keeps the cell pipeline from undoing the tuned
+    // `.2/.05/.2` defaults while still honoring authored bloom controls.
+    let intensity = DEFAULT_BLOOM_INTENSITY * (alpha * bright_scale).clamp(0.0, 1.0);
+    let threshold = DEFAULT_BLOOM_THRESHOLD
+        * (bright_clamp / IMAGE_SPACE_NEUTRAL_BRIGHT_CLAMP).clamp(0.25, 4.0);
+    let softness = (DEFAULT_BLOOM_SOFTNESS
+        * (1.0 + (blur_radius / IMAGE_SPACE_BLOOM_RADIUS_RANGE).clamp(0.0, 1.0)))
+    .clamp(0.0, 1.0);
+
+    (intensity, threshold, softness)
+}
+
+pub(crate) fn fallout_bloom_for(
+    image_space: Option<&ImageSpaceInfo>,
+    interior: bool,
+    overrides: &ImageSpaceBloomOverrides,
+) -> Bloom {
+    let (intensity, threshold, softness) = image_space_bloom_values(image_space, interior);
     Bloom {
-        intensity: 0.2,
+        intensity: overrides.intensity.unwrap_or(intensity),
         prefilter: BloomPrefilter {
-            threshold: 0.05,
-            threshold_softness: 0.2,
+            threshold: overrides.threshold.unwrap_or(threshold),
+            threshold_softness: overrides.softness.unwrap_or(softness),
         },
         composite_mode: BloomCompositeMode::Additive,
         ..Bloom::OLD_SCHOOL
     }
+}
+
+#[cfg(test)]
+pub(super) fn fallout_bloom() -> Bloom {
+    fallout_bloom_for(None, true, &ImageSpaceBloomOverrides::default())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -184,6 +258,7 @@ pub(crate) fn spawn_prepared_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut compensation_curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
+    image_space_bloom_overrides: Res<ImageSpaceBloomOverrides>,
     lighting: Res<LightingScale>,
     ambient_scale: Res<AmbientScale>,
     fog_strength: Res<FogStrength>,
@@ -206,7 +281,11 @@ pub(crate) fn spawn_prepared_scene(
         ShadowFilteringMethod::Hardware2x2,
         DepthPrepass,
         OcclusionCulling,
-        fallout_bloom(),
+        fallout_bloom_for(
+            manifest.cell.image_space.as_ref(),
+            manifest.cell.interior,
+            &image_space_bloom_overrides,
+        ),
         Tonemapping::AcesFitted,
         Exposure { ev100: 12.0 },
         color_grading,
@@ -773,9 +852,9 @@ pub(crate) fn apply_fog_strength(
 /// `GlobalAmbientLight` resource rather than spawning new ones.
 /// `apply_fog_strength` only reacts to `FogStrength` changing, so a cell
 /// swap needs its own explicit refresh to pick up the new cell's lighting.
-/// Camera post-processing (color grading/auto-exposure/bloom, which follow
-/// the cell's `ImageSpace`) are deliberately left as-is; see this issue's
-/// final report.
+/// Camera post-processing follows the active cell's ImageSpace. Explicit
+/// bloom console overrides are layered on top so live tuning survives a cell
+/// swap.
 pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
     let cell = world
         .resource::<crate::viewer::LoadedSceneManifest>()
@@ -826,6 +905,39 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
             scaled_directional_illuminance(base_illuminance, lighting_scale, disabled);
         cell_light.base_illuminance = base_illuminance;
         transform.rotation = Quat::from_array(cell_lighting.directional_rotation_xyzw());
+    }
+
+    refresh_camera_post_processing(world, &cell);
+}
+
+pub(crate) fn refresh_camera_post_processing(world: &mut World, cell: &CellInfo) {
+    if !world.contains_resource::<Assets<AutoExposureCompensationCurve>>() {
+        return;
+    }
+
+    let (color_grading, auto_exposure) = {
+        let mut compensation_curves = world.resource_mut::<Assets<AutoExposureCompensationCurve>>();
+        camera_post_processing(cell.image_space.as_ref(), &mut compensation_curves)
+    };
+    let overrides = world
+        .get_resource::<ImageSpaceBloomOverrides>()
+        .copied()
+        .unwrap_or_default();
+    let bloom = fallout_bloom_for(cell.image_space.as_ref(), cell.interior, &overrides);
+    let camera = {
+        let mut cameras = world.query_filtered::<Entity, With<Camera3d>>();
+        cameras.iter(world).next()
+    };
+    let Some(camera) = camera else {
+        return;
+    };
+
+    let mut camera = world.entity_mut(camera);
+    camera.insert((color_grading, bloom));
+    if let Some(auto_exposure) = auto_exposure {
+        camera.insert(auto_exposure);
+    } else {
+        camera.remove::<AutoExposure>();
     }
 }
 
