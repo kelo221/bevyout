@@ -62,7 +62,7 @@ impl ConsoleCommandProvider for RenderCommandProvider {
     }
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 10] = [
+pub(super) const RENDER_SETTINGS: [&str; 11] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -71,6 +71,7 @@ pub(super) const RENDER_SETTINGS: [&str; 10] = [
     "bloom_softness",
     "fog",
     "ao",
+    "emission",
     "shadow_samples",
     "realtime_shadows",
 ];
@@ -236,6 +237,10 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     values.insert("fog".into(), json!(world.resource::<FogStrength>().0));
     values.insert("ao".into(), json!(world.resource::<AoStrength>().0));
     values.insert(
+        "emission".into(),
+        json!(world.resource::<EmissionScale>().0),
+    );
+    values.insert(
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
     );
@@ -267,6 +272,7 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "bloom_softness" => "Bloom softness",
         "fog" => "Fog",
         "ao" => "Ambient occlusion",
+        "emission" => "Material emission",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
         _ => "Render setting",
@@ -330,7 +336,9 @@ pub(super) fn set_render(
         "lighting" => (0.0001..=262_144.0).contains(&value),
         "irradiance" => (0.0..=4096.0).contains(&value),
         "ambient" => (0.0001..=4096.0).contains(&value),
-        "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
+        "bloom_intensity" | "bloom_softness" | "fog" | "ao" | "emission" => {
+            (0.0..=1.0).contains(&value)
+        }
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
         "realtime_shadows" => value == 0.0 || value == 1.0,
@@ -349,6 +357,7 @@ pub(super) fn set_render(
         "ambient" => world.resource_mut::<AmbientScale>().0 = value,
         "fog" => world.resource_mut::<FogStrength>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
+        "emission" => world.resource_mut::<EmissionScale>().0 = value,
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;

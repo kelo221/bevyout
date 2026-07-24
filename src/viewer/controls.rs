@@ -184,6 +184,44 @@ pub(crate) struct FogStrength(pub(crate) f32);
 #[derive(Resource)]
 pub(crate) struct AoStrength(pub(crate) f32);
 
+/// Runtime multiplier for every StandardMaterial emissive color. This keeps
+/// authored Fallout lights visible without returning to the original
+/// whiteout-prone source intensity; it remains live-tunable with
+/// `setrender emission`.
+pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
+
+#[derive(Resource)]
+pub(crate) struct EmissionScale(pub(crate) f32);
+
+/// Material handles whose GLB metadata explicitly authorizes Fallout
+/// emission. The live emission console control must not turn arbitrary
+/// StandardMaterials (including legacy or synthetic props) into emitters.
+#[derive(Resource, Default)]
+pub(crate) struct AuthorizedEmissionMaterials {
+    pub(crate) ids: HashSet<AssetId<StandardMaterial>>,
+    pub(crate) revision: u64,
+}
+
+impl AuthorizedEmissionMaterials {
+    pub(crate) fn set(&mut self, id: AssetId<StandardMaterial>, authorized: bool) {
+        let changed = if authorized {
+            self.ids.insert(id)
+        } else {
+            self.ids.remove(&id)
+        };
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct EmissionMaterialState {
+    baselines: HashMap<AssetId<StandardMaterial>, LinearRgba>,
+    last_asset_count: usize,
+    last_authorized_revision: u64,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct AoMeshBases {
     values: HashMap<AssetId<Mesh>, VertexAttributeValues>,
@@ -450,22 +488,138 @@ pub(crate) fn apply_unlit_mode(
     }
 }
 
+pub(crate) fn apply_emission_scale(
+    scale: Res<EmissionScale>,
+    authorized: Res<AuthorizedEmissionMaterials>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut state: Local<EmissionMaterialState>,
+) {
+    if !scale.is_changed()
+        && state.last_asset_count == materials.len()
+        && state.last_authorized_revision == authorized.revision
+    {
+        return;
+    }
+    state.last_asset_count = materials.len();
+    state.last_authorized_revision = authorized.revision;
+
+    let scale = scale.0.clamp(0.0, 1.0);
+    for (id, material) in materials.iter_mut() {
+        if !authorized.ids.contains(&id) {
+            continue;
+        }
+        let baseline = *state.baselines.entry(id).or_insert(material.emissive);
+        let [red, green, blue, alpha] = baseline.to_f32_array();
+        material.emissive = LinearRgba::new(red * scale, green * scale, blue * scale, alpha);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::app::{PreUpdate, Update};
+    use bevy::asset::Assets;
+    use bevy::color::LinearRgba;
     use bevy::ecs::entity::Entity;
     use bevy::ecs::message::Messages;
     use bevy::input::ButtonState;
     use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
     use bevy::input::mouse::MouseButtonInput;
     use bevy::input::{ButtonInput, InputPlugin, InputSystems};
-    use bevy::prelude::{App, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window};
+    use bevy::pbr::StandardMaterial;
+    use bevy::prelude::{
+        App, ColorToComponents, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window, default,
+    };
     use bevy::window::{PrimaryWindow, WindowFocused};
 
     use super::{
+        AuthorizedEmissionMaterials, EmissionScale, apply_emission_scale,
         horizontal_to_vertical_fov, mouse_look_is_safe, release_stuck_keys_on_focus_change,
         request_focus_on_click_while_unfocused, should_request_focus,
     };
+
+    #[test]
+    fn emission_scale_reuses_baseline_without_scaling_exposure_alpha() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<AuthorizedEmissionMaterials>()
+            .insert_resource(EmissionScale(0.0))
+            .add_systems(Update, apply_emission_scale);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: LinearRgba::new(2.0, 1.0, 0.5, 0.75),
+                ..default()
+            });
+        app.world_mut()
+            .resource_mut::<AuthorizedEmissionMaterials>()
+            .set(material.id(), true);
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [0.0, 0.0, 0.0, 0.75]
+        );
+
+        app.world_mut().resource_mut::<EmissionScale>().0 = 0.25;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [0.5, 0.25, 0.125, 0.75]
+        );
+
+        app.world_mut().resource_mut::<EmissionScale>().0 = 0.1;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [0.2, 0.1, 0.05, 0.75]
+        );
+    }
+
+    #[test]
+    fn emission_scale_ignores_materials_without_shader_authorization() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<AuthorizedEmissionMaterials>()
+            .insert_resource(EmissionScale(1.0))
+            .add_systems(Update, apply_emission_scale);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: LinearRgba::new(2.0, 1.0, 0.5, 0.75),
+                ..default()
+            });
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [2.0, 1.0, 0.5, 0.75]
+        );
+    }
 
     fn app_with_system() -> App {
         let mut app = App::new();

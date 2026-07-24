@@ -158,8 +158,8 @@ fn missing_image_space_keeps_fixed_camera_post_processing() {
 fn fallout_bloom_uses_explicit_old_school_baseline() {
     let bloom = super::scene::fallout_bloom();
 
-    assert_eq!(bloom.intensity, 0.05);
-    assert_eq!(bloom.prefilter.threshold, 0.6);
+    assert_eq!(bloom.intensity, 0.2);
+    assert_eq!(bloom.prefilter.threshold, 0.05);
     assert_eq!(bloom.prefilter.threshold_softness, 0.2);
     assert_eq!(bloom.composite_mode, BloomCompositeMode::Additive);
     assert!(bloom.prefilter.threshold > 0.0);

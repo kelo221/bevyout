@@ -296,6 +296,8 @@ pub(crate) fn run_view(
         .insert_resource(AmbientScale(0.05))
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
         .insert_resource(AoStrength(1.0))
+        .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
+        .insert_resource(AuthorizedEmissionMaterials::default())
         .insert_resource(AoMeshBases::default())
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
@@ -362,7 +364,12 @@ pub(crate) fn run_view(
                 update_fps_text,
                 apply_unlit_mode,
                 configure_glow_cards,
+                configure_fallout_translucency,
             ),
+        )
+        .add_systems(
+            Update,
+            (configure_fallout_emission, apply_emission_scale).chain(),
         )
         .add_systems(Update, record_render_sample)
         .add_systems(

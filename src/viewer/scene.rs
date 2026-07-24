@@ -2,21 +2,131 @@
 
 use std::sync::Arc;
 
-use super::controls::{AmbientScale, FogStrength, LightingScale};
+use super::controls::{AmbientScale, AuthorizedEmissionMaterials, FogStrength, LightingScale};
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
 use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
+use bevy::gltf::GltfMaterialExtras;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::light::NotShadowCaster;
+use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
+use serde::Deserialize;
 
 #[derive(Component)]
 pub(crate) struct BakedStaticSceneRoot;
 
 #[derive(Component)]
 pub(crate) struct PreparedPointShadowReceiverRoot;
+
+#[derive(Component)]
+pub(crate) struct FalloutMaterialConfigured;
+
+#[derive(Debug, Deserialize)]
+struct FalloutMaterialExtra {
+    #[serde(default)]
+    emission_authorized: Option<bool>,
+    #[serde(default)]
+    translucency_enabled: bool,
+    #[serde(default)]
+    translucency_strength: f32,
+    #[serde(default)]
+    local_thickness: Option<LocalThicknessExtra>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalThicknessExtra {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    strength: f32,
+}
+
+fn parse_fallout_material_extra(value: &str) -> Option<FalloutMaterialExtra> {
+    let root: serde_json::Value = serde_json::from_str(value).ok()?;
+    let nested = root.get("bevyout_fallout_material").cloned()?;
+    match nested {
+        serde_json::Value::Object(_) => serde_json::from_value(nested).ok(),
+        serde_json::Value::String(serialized) => serde_json::from_str(&serialized).ok(),
+        _ => None,
+    }
+}
+
+/// Registers the shader-authorized material handles used by the live
+/// `setrender emission` control. GLB extras are the cross-backend contract;
+/// materials without an explicit authorization marker are left untouched.
+#[allow(clippy::type_complexity)]
+pub(crate) fn configure_fallout_emission(
+    extras: Query<(&MeshMaterial3d<StandardMaterial>, &GltfMaterialExtras)>,
+    mut authorized: ResMut<AuthorizedEmissionMaterials>,
+) {
+    for (material_handle, extras) in &extras {
+        let Some(metadata) = parse_fallout_material_extra(&extras.value) else {
+            continue;
+        };
+        let Some(emission_authorized) = metadata.emission_authorized else {
+            continue;
+        };
+        authorized.set(material_handle.0.id(), emission_authorized);
+    }
+}
+
+/// Connects the bake's local-thickness map to Bevy's cheap diffuse-transmission
+/// lobe. Bevy loads `KHR_materials_volume` into `thickness_texture`, while the
+/// Fallout extras carry the authored transmission strength and identify the
+/// material as eligible for this bridge.
+#[allow(clippy::type_complexity)]
+pub(crate) fn configure_fallout_translucency(
+    mut commands: Commands,
+    extras: Query<
+        (
+            Entity,
+            &MeshMaterial3d<StandardMaterial>,
+            &GltfMaterialExtras,
+        ),
+        (With<Mesh3d>, Without<FalloutMaterialConfigured>),
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, material_handle, extras) in &extras {
+        let Some(metadata) = parse_fallout_material_extra(&extras.value) else {
+            continue;
+        };
+        let Some(local_thickness) = metadata.local_thickness else {
+            continue;
+        };
+        if !metadata.translucency_enabled || !local_thickness.enabled {
+            commands.entity(entity).insert(FalloutMaterialConfigured);
+            continue;
+        }
+        let strength = if local_thickness.strength.is_finite() && local_thickness.strength > 0.0 {
+            local_thickness.strength
+        } else {
+            metadata.translucency_strength
+        }
+        .clamp(0.0, 1.0);
+        let Some(mut material) = materials.get_mut(&material_handle.0) else {
+            continue;
+        };
+        let Some(thickness_texture) = material.thickness_texture.clone() else {
+            warn!(
+                "Fallout translucency metadata has no loaded thickness texture on entity {:?}",
+                entity
+            );
+            commands.entity(entity).insert(FalloutMaterialConfigured);
+            continue;
+        };
+        material.diffuse_transmission = strength;
+        material.diffuse_transmission_texture = Some(thickness_texture);
+        commands.entity(entity).insert(FalloutMaterialConfigured);
+        info!(
+            "configured Fallout local translucency entity {:?} strength={:.3}",
+            entity, strength
+        );
+    }
+}
 
 /// Marks meshes under the prepared scene and startup placement root as
 /// receivers of the prepared cubemap. The combined static scene is removed
@@ -56,9 +166,9 @@ pub(crate) fn mark_prepared_shadow_meshes(
 
 pub(super) fn fallout_bloom() -> Bloom {
     Bloom {
-        intensity: 0.05,
+        intensity: 0.2,
         prefilter: BloomPrefilter {
-            threshold: 0.6,
+            threshold: 0.05,
             threshold_softness: 0.2,
         },
         composite_mode: BloomCompositeMode::Additive,
@@ -981,6 +1091,31 @@ mod tests {
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }
+    }
+
+    #[test]
+    fn fallout_material_extra_accepts_native_object_and_blender_json_string() {
+        let native = serde_json::json!({
+            "bevyout_fallout_material": {
+                "translucency_enabled": true,
+                "translucency_strength": 0.35,
+                "local_thickness": {"enabled": true, "strength": 0.4}
+            }
+        });
+        let parsed = parse_fallout_material_extra(&native.to_string()).expect("native extras");
+        assert!(parsed.translucency_enabled);
+        assert_eq!(parsed.local_thickness.unwrap().strength, 0.4);
+
+        let nested = serde_json::json!({
+            "translucency_enabled": true,
+            "translucency_strength": 0.2,
+            "local_thickness": {"enabled": true, "strength": 0.2}
+        });
+        let blender = serde_json::json!({
+            "bevyout_fallout_material": nested.to_string()
+        });
+        let parsed = parse_fallout_material_extra(&blender.to_string()).expect("Blender extras");
+        assert_eq!(parsed.translucency_strength, 0.2);
     }
 
     fn test_app() -> App {
