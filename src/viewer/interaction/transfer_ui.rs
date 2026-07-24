@@ -73,15 +73,6 @@ struct TransferQuantityPicker {
 #[derive(Component)]
 struct TransferRoot;
 
-#[derive(Component)]
-struct TransferPanel;
-
-#[derive(Component)]
-struct TransferPane;
-
-#[derive(Component)]
-struct TransferFooter;
-
 #[derive(Component, Clone, Copy)]
 struct ContainerRow(u32);
 
@@ -960,7 +951,6 @@ fn spawn_screen(
         ))
         .with_children(|root| {
             root.spawn((
-                TransferPanel,
                 Node {
                     width: Val::Percent(58.0),
                     height: Val::Percent(68.0),
@@ -1021,7 +1011,6 @@ fn spawn_screen(
                     });
                 panel
                     .spawn((
-                        TransferFooter,
                         Node {
                             height: Val::Px(184.0),
                             width: Val::Percent(100.0),
@@ -1114,7 +1103,6 @@ fn spawn_pane<Row: Component + Copy>(
     rows: impl Iterator<Item = (Row, String, i32, bool)>,
 ) {
     body.spawn((
-        TransferPane,
         Node {
             width: Val::Percent(50.0),
             flex_direction: FlexDirection::Column,

@@ -841,45 +841,7 @@ fn spawn_screen(commands: &mut Commands, sources: &ScreenSources, state: &PipBoy
                     BorderColor::all(BEZEL_RECESS),
                 ))
                 .with_children(|screen| {
-                    screen.spawn((
-                        ImageNode {
-                            image: sources
-                                .assets
-                                .load("staging/interface/shared/background/pipboy.ktx2"),
-                            color: Color::srgba(0.18, 1.0, 0.48, 0.25),
-                            ..default()
-                        },
-                        Node {
-                            position_type: PositionType::Absolute,
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            ..default()
-                        },
-                    ));
-                    screen.spawn((
-                        Node {
-                            position_type: PositionType::Absolute,
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            ..default()
-                        },
-                        BackgroundGradient::from(RadialGradient::new(
-                            UiPosition::anchor(Vec2::new(0.0, -0.35)),
-                            RadialGradientShape::FarthestCorner,
-                            vec![
-                                ColorStop::new(SCREEN_GLOW, Val::Percent(0.0)),
-                                ColorStop::new(Color::NONE, Val::Percent(100.0)),
-                            ],
-                        )),
-                    ));
-                    spawn_header(screen, state, &sources.status);
-                    match state.view {
-                        PipBoyView::Stats => spawn_stats_body(screen, sources, &sources.status),
-                        PipBoyView::Items => spawn_items_body(screen, sources, state),
-                        PipBoyView::Data => spawn_data_body(screen, sources, state),
-                    }
-                    spawn_footer(screen, state, weight);
-                    spawn_corner_brackets(screen, 14.0, 34.0, 2.0);
+                    spawn_screen_contents(screen, sources, state, weight);
                 });
             spawn_view_buttons(device, state);
         });
@@ -1931,29 +1893,29 @@ mod tests {
         layout.move_part(StatusBodyPart::Face, 3, -2);
 
         let copied = layout.clipboard_text();
-        let names = [
-            "head",
-            "face_00",
-            "torso",
-            "left_arm",
-            "right_arm",
-            "left_leg",
-            "right_leg",
+        let layouts = [
+            (173, 45, 123, 133),
+            (188, 61, 70, 93),
+            (148, 113, 148, 186),
+            (250, 133, 145, 75),
+            (51, 125, 139, 78),
+            (214, 204, 104, 162),
+            (116, 210, 122, 162),
         ];
-        for name in names {
+        for (left, top, width, height) in layouts {
             assert_eq!(
-                copied.matches(&format!("\"{name}\"")).count(),
+                copied
+                    .matches(&format!(
+                        "StatusPartLayout::new({left}, {top}, {width}, {height})"
+                    ))
+                    .count(),
                 1,
-                "{name} should appear exactly once in the copied layout"
+                "the layout should appear exactly once in the copied block"
             );
         }
         assert!(
-            copied.contains("(\"face_00\", 188, 61, 70, 93)"),
-            "the copied block should include adjusted integer values: {copied}"
-        );
-        assert!(
-            copied.starts_with("const STATUS_PART_LAYOUTS:"),
-            "the result should be ready to paste back into the defaults"
+            copied.starts_with("const STATUS_PART_LAYOUTS: [StatusPartLayout; 7] = ["),
+            "the result should be ready to paste back into the defaults: {copied}"
         );
     }
 

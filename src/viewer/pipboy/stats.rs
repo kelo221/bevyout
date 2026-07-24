@@ -122,17 +122,12 @@ impl StatusFigureLayout {
     }
 
     pub(super) fn clipboard_text(&self) -> String {
-        let mut output =
-            String::from("const STATUS_PART_LAYOUTS: [(&str, i32, i32, i32, i32); 7] = [\n");
+        let mut output = String::from("const STATUS_PART_LAYOUTS: [StatusPartLayout; 7] = [\n");
         for part in STATUS_BODY_PARTS {
             let layout = self.part(part);
             output.push_str(&format!(
-                "    (\"{}\", {}, {}, {}, {}),\n",
-                part.asset_name(),
-                layout.left,
-                layout.top,
-                layout.width,
-                layout.height
+                "    StatusPartLayout::new({}, {}, {}, {}),\n",
+                layout.left, layout.top, layout.width, layout.height
             ));
         }
         output.push_str("];");
