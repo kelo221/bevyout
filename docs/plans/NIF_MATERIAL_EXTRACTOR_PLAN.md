@@ -86,3 +86,31 @@ introducing a second runtime emission pipeline.
   probe targets without whiteout.
 - Run `cargo fmt --check`, `cargo check-dev`, `cargo test-dev`,
   `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+
+## Shipped amendments
+
+- Emission is gated by Fallout shader semantics in both the native Nifty GLB
+  writer and the Blender fallback. Environment-map shader type `1` exports no
+  emissive factor, strength extension, or glow texture unless the glow flags
+  authorize it or the source carries the explicit high-strength constant
+  emission used by Nuka-Cola Quantum; a `_g` filename alone is not
+  authoritative. Textured effect screens and physical bulb overrides remain
+  authoritative, while untextured no-lighting props do not become emitters.
+- RadAway is a negative acceptance case: diffuse, normal, and alpha behavior
+  remain present while emission is zero. Terminal screens, Nuka Cola, and glow
+  lamps remain positive cases when their shader metadata enables glow.
+- Environment reflections remain a separate feature; this gate removes false
+  emission and does not implement reflection cubemap sampling.
+- Untextured light cards are removed as halo geometry;
+  when an explicit sibling fixture exists, its glow texture is promoted as the
+  physical-bulb emission source. Environment-map fixtures with the regular
+  Fallout environment-mapping flag and authored emission, including
+  `OffRmLight01/02` and `MetLight01b`, retain that source; shader type `1`
+  alone still does not authorize emission. The native Nifty revision is
+  `17f5769`. The viewer default material-emission scale is `0.15` and remains adjustable with
+  `setrender emission`; that command only scales material handles explicitly
+  authorized by the exported Fallout metadata.
+- Fallout effect/unlit materials are exported as black-base, emission-controlled
+  materials rather than `KHR_materials_unlit`, whose Bevy forward path bypasses
+  the emissive channel. This keeps `setrender emission 0|1` effective for
+  RCLightBox01 and terminal screens.

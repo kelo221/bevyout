@@ -5,6 +5,7 @@ use serde_json::Value;
 const SUPPORTED_REQUIRED_EXTENSIONS: &[&str] = &[
     "KHR_materials_emissive_strength",
     "KHR_materials_specular",
+    "KHR_materials_volume",
     "KHR_materials_unlit",
 ];
 
@@ -44,6 +45,7 @@ mod tests {
                 "KHR_materials_unlit",
                 "KHR_materials_specular",
                 "KHR_materials_emissive_strength",
+                "KHR_materials_volume",
             ])
             .is_empty()
         );

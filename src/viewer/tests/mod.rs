@@ -1,5 +1,5 @@
 use super::*;
-use bevy::light::NotShadowCaster;
+use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog};
 use bevy::pbr::BakedPointShadowReceiver;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
 
@@ -146,6 +146,98 @@ fn image_space_settings_map_to_grading_and_target_exposure() {
 }
 
 #[test]
+fn image_space_flags_zero_leave_cinematic_grading_neutral() {
+    let image_space = ImageSpaceInfo {
+        flags: 0,
+        brightness: 4.0,
+        cinematic_saturation: 0.1,
+        cinematic_contrast: 1.5,
+        cinematic_brightness_tint_rgb: [0.1, 0.8, 0.2],
+        cinematic_brightness_tint_value: 1.0,
+        ..default()
+    };
+    let mut curves = Assets::<AutoExposureCompensationCurve>::default();
+    let (grading, _) = camera_post_processing(Some(&image_space), &mut curves);
+
+    assert_eq!(grading.global.exposure, 0.0);
+    assert_eq!(grading.global.post_saturation, 1.0);
+    assert_eq!(grading.shadows.contrast, 1.0);
+    assert_eq!(grading.midtones.contrast, 1.0);
+    assert_eq!(grading.highlights.contrast, 1.0);
+    assert_eq!(grading.global.temperature, 0.0);
+    assert_eq!(grading.global.tint, 0.0);
+}
+
+#[test]
+fn image_space_bloom_keeps_old_viewer_values_as_the_neutral_profile() {
+    assert_eq!(
+        image_space_bloom_values(Some(&ImageSpaceInfo::default()), true),
+        (0.2, 0.05, 0.2)
+    );
+
+    let image_space = ImageSpaceInfo {
+        hdr_bright_scale: 1.5,
+        hdr_bright_clamp: 0.35,
+        bloom_blur_radius: 0.8,
+        bloom_alpha_mult_interior: 0.2,
+        bloom_alpha_mult_exterior: 0.5,
+        ..default()
+    };
+
+    let interior = image_space_bloom_values(Some(&image_space), true);
+    assert!((interior.0 - 0.06).abs() < 0.00001);
+    assert!((interior.1 - (0.05 * 0.35 / 0.225)).abs() < 0.00001);
+    assert!((interior.2 - 0.22).abs() < 0.00001);
+
+    let exterior = image_space_bloom_values(Some(&image_space), false);
+    assert!((exterior.0 - 0.15).abs() < 0.00001);
+    assert!((exterior.1 - (0.05 * 0.35 / 0.225)).abs() < 0.00001);
+    assert!((exterior.2 - 0.22).abs() < 0.00001);
+}
+
+#[test]
+fn image_space_refresh_updates_cells_without_overwriting_bloom_overrides() {
+    let mut world = World::new();
+    world.insert_resource(Assets::<AutoExposureCompensationCurve>::default());
+    world.insert_resource(ImageSpaceBloomOverrides {
+        intensity: Some(0.9),
+        threshold: Some(0.7),
+        softness: None,
+    });
+    world.spawn((Camera3d::default(), Bloom::default()));
+
+    let mut cell = compatible_render_manifest().cell;
+    cell.interior = true;
+    cell.image_space = Some(ImageSpaceInfo {
+        hdr_bright_scale: 1.5,
+        hdr_bright_clamp: 0.35,
+        bloom_blur_radius: 0.8,
+        bloom_alpha_mult_interior: 0.2,
+        bloom_alpha_mult_exterior: 0.5,
+        ..default()
+    });
+    refresh_camera_post_processing(&mut world, &cell);
+
+    let camera = world
+        .query_filtered::<Entity, With<Camera3d>>()
+        .single(&world)
+        .expect("test camera");
+    let bloom = world.get::<Bloom>(camera).expect("camera bloom");
+    assert_eq!(bloom.intensity, 0.9);
+    assert_eq!(bloom.prefilter.threshold, 0.7);
+    assert!((bloom.prefilter.threshold_softness - 0.22).abs() < 0.00001);
+
+    cell.interior = false;
+    cell.image_space.as_mut().unwrap().bloom_blur_radius = 8.0;
+    refresh_camera_post_processing(&mut world, &cell);
+
+    let bloom = world.get::<Bloom>(camera).expect("camera bloom");
+    assert_eq!(bloom.intensity, 0.9);
+    assert_eq!(bloom.prefilter.threshold, 0.7);
+    assert!((bloom.prefilter.threshold_softness - 0.4).abs() < 0.00001);
+}
+
+#[test]
 fn missing_image_space_keeps_fixed_camera_post_processing() {
     let mut curves = Assets::<AutoExposureCompensationCurve>::default();
     let (grading, auto_exposure) = camera_post_processing(None, &mut curves);
@@ -158,8 +250,8 @@ fn missing_image_space_keeps_fixed_camera_post_processing() {
 fn fallout_bloom_uses_explicit_old_school_baseline() {
     let bloom = super::scene::fallout_bloom();
 
-    assert_eq!(bloom.intensity, 0.05);
-    assert_eq!(bloom.prefilter.threshold, 0.6);
+    assert_eq!(bloom.intensity, 0.2);
+    assert_eq!(bloom.prefilter.threshold, 0.05);
     assert_eq!(bloom.prefilter.threshold_softness, 0.2);
     assert_eq!(bloom.composite_mode, BloomCompositeMode::Additive);
     assert!(bloom.prefilter.threshold > 0.0);
@@ -267,6 +359,104 @@ fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn volumetric_fog_uses_cell_range_and_live_fog_strength() {
+    let lighting = PreparedCellLighting {
+        fog_rgba: [0.1, 0.2, 0.3, 0.0],
+        directional_rgba: [0.4, 0.5, 0.6, 0.0],
+        fog_near: 10.0,
+        fog_far: 100.0,
+        fog_clip_distance: 80.0,
+        ..default()
+    };
+    let weak = volumetric_fog_density(&lighting, 0.01, 1.0).expect("valid volumetric fog");
+    let strong = volumetric_fog_density(&lighting, 0.2, 1.0).expect("valid volumetric fog");
+    let multiplied =
+        volumetric_fog_density(&lighting, 0.01, 10.0).expect("valid multiplied volumetric fog");
+    assert!(weak > 0.0);
+    assert!(strong > weak);
+    assert!(multiplied > weak);
+
+    let shorter_cell = PreparedCellLighting {
+        fog_far: 50.0,
+        ..lighting.clone()
+    };
+    let shorter = volumetric_fog_density(&shorter_cell, 0.01, 1.0).expect("valid volumetric fog");
+    assert!(shorter > weak);
+
+    let (camera_fog, volume_fog) =
+        volumetric_fog_profile(&lighting, 0.01, 1.0).expect("valid volumetric profile");
+    assert_eq!(camera_fog.step_count, 64);
+    assert_eq!(volume_fog.absorption, 0.3);
+    assert_eq!(volume_fog.scattering, 0.3);
+    assert!((volume_fog.density_factor - weak).abs() < f32::EPSILON);
+}
+
+#[test]
+fn volumetric_fog_system_attaches_a_camera_following_volume() {
+    let mut app = App::new();
+    app.insert_resource(FogStrength(DEFAULT_FOG_STRENGTH));
+    app.insert_resource(VolumetricFogMultiplier(1.0));
+    let mut manifest = compatible_render_manifest();
+    manifest.cell.effective_lighting = Some(PreparedCellLighting {
+        fog_rgba: [0.1, 0.2, 0.3, 0.0],
+        directional_rgba: [0.4, 0.5, 0.6, 0.0],
+        fog_near: 10.0,
+        fog_far: 100.0,
+        fog_clip_distance: 80.0,
+        ..default()
+    });
+    app.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+    app.world_mut().spawn(Camera3d::default());
+    app.add_systems(Update, apply_volumetric_fog);
+
+    app.update();
+
+    let camera = app
+        .world_mut()
+        .query_filtered::<Entity, With<Camera3d>>()
+        .single(app.world())
+        .expect("test camera");
+    assert!(app.world().entity(camera).contains::<VolumetricFog>());
+    let volume_count = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(volume_count, 1);
+    let fog_volume_count = app
+        .world_mut()
+        .query_filtered::<Entity, With<FogVolume>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(fog_volume_count, 1);
+
+    let volume = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .single(app.world())
+        .expect("test fog volume");
+    let initial_density = app
+        .world()
+        .get::<FogVolume>(volume)
+        .expect("fog volume component")
+        .density_factor;
+    app.world_mut().resource_mut::<VolumetricFogMultiplier>().0 = 100.0;
+    app.update();
+    let volume_count_after_update = app
+        .world_mut()
+        .query_filtered::<Entity, With<CellVolumetricFog>>()
+        .iter(app.world())
+        .count();
+    assert_eq!(volume_count_after_update, 1);
+    let multiplied_density = app
+        .world()
+        .get::<FogVolume>(volume)
+        .expect("updated fog volume component")
+        .density_factor;
+    assert!(multiplied_density > initial_density);
 }
 
 #[test]

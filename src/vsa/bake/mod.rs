@@ -405,6 +405,12 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         batching.seam_vertices_adjusted,
         batching.seam_max_correction_meters * 1000.0,
     );
+    println!(
+        "local thickness: generated {} {}x{} UV maps",
+        batching.translucency_maps,
+        batching.translucency_resolution,
+        batching.translucency_resolution,
+    );
     replace_output(&temporary_scene, output_scene)?;
     replace_output(&temporary_ktx, &ktx2_path)?;
     let scene_path = relative_asset_path(asset_root, output_scene)?;

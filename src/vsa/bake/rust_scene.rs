@@ -10,6 +10,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -92,6 +93,7 @@ pub(crate) struct TransportMaterial {
     pub(crate) alpha_mode: AlphaMode,
     pub(crate) alpha_cutoff: f32,
     pub(crate) double_sided: bool,
+    pub(crate) translucency_strength: f32,
 }
 
 impl Default for TransportMaterial {
@@ -105,6 +107,7 @@ impl Default for TransportMaterial {
             alpha_mode: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
+            translucency_strength: 0.0,
         }
     }
 }
@@ -153,6 +156,8 @@ pub(crate) struct BatchingStats {
     pub(crate) seam_edges_matched: usize,
     pub(crate) seam_vertices_adjusted: usize,
     pub(crate) seam_max_correction_meters: f32,
+    pub(crate) translucency_maps: usize,
+    pub(crate) translucency_resolution: u32,
 }
 
 pub(crate) struct RustBakeScene {
@@ -199,6 +204,412 @@ struct OutputResources {
     material_by_json: HashMap<String, usize>,
     decoded_images: HashMap<String, Arc<RgbaImage>>,
     transport_materials: Vec<TransportMaterial>,
+}
+
+const FALLOUT_MATERIAL_EXTRA: &str = "bevyout_fallout_material";
+const LOCAL_THICKNESS_RESOLUTION: u32 = 256;
+const LOCAL_THICKNESS_MAX_RAY_METERS: f32 = 4.0;
+const MAX_TRANSLUCENCY_METALLIC_FACTOR: f32 = 0.05;
+
+fn fallout_material_extra(value: &Value) -> Option<Value> {
+    let extra = value
+        .get("extras")
+        .and_then(Value::as_object)
+        .and_then(|extras| extras.get(FALLOUT_MATERIAL_EXTRA))?;
+    match extra {
+        Value::Object(_) => Some(extra.clone()),
+        Value::String(serialized) => serde_json::from_str(serialized).ok(),
+        _ => None,
+    }
+}
+
+fn fallout_translucency_strength(value: &Value) -> f32 {
+    let Some(extra) = fallout_material_extra(value) else {
+        return 0.0;
+    };
+    let enabled = extra
+        .get("translucency_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        return 0.0;
+    }
+    extra
+        .get("translucency_strength")
+        .and_then(Value::as_f64)
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(0.2)
+        .clamp(0.0, 1.0)
+}
+
+fn append_local_thickness_metadata(
+    value: &mut Value,
+    texture_index: usize,
+    resolution: u32,
+    strength: f32,
+    thickness_factor: f32,
+) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .context("bake material is not a JSON object")?;
+    let extensions = object
+        .entry("extensions")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("bake material extensions are not a JSON object")?;
+    extensions.insert(
+        "KHR_materials_volume".into(),
+        json!({
+            "thicknessFactor": thickness_factor,
+            "thicknessTexture": {"index": texture_index, "texCoord": 0}
+        }),
+    );
+    let extras = object
+        .entry("extras")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("bake material extras are not a JSON object")?;
+    let mut fallout = extras
+        .get(FALLOUT_MATERIAL_EXTRA)
+        .and_then(|value| match value {
+            Value::Object(_) => Some(value.clone()),
+            Value::String(serialized) => serde_json::from_str(serialized).ok(),
+            _ => None,
+        })
+        .unwrap_or_else(|| json!({"schema": 1}));
+    let fallout_object = fallout
+        .as_object_mut()
+        .context("Fallout material extras are not a JSON object")?;
+    fallout_object.insert(
+        "local_thickness".into(),
+        json!({
+            "enabled": true,
+            "resolution": [resolution, resolution],
+            "thickness_channel": "g",
+            "transmission_channel": "a",
+            "strength": strength,
+            "thickness_factor": thickness_factor
+        }),
+    );
+    extras.insert(FALLOUT_MATERIAL_EXTRA.into(), fallout);
+    Ok(())
+}
+
+impl OutputResources {
+    fn add_generated_texture(&mut self, image: &RgbaImage, name: &str) -> Result<usize> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image.clone())
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .context("encoding local thickness texture")?;
+        let hash = format!("generated:{:x}", Sha256::digest(&bytes));
+        if let Some(image_index) = self.image_by_hash.get(&hash).copied() {
+            return self
+                .textures
+                .iter()
+                .enumerate()
+                .find_map(|(texture_index, texture)| {
+                    (texture.get("source").and_then(Value::as_u64) == Some(image_index as u64))
+                        .then_some(texture_index)
+                })
+                .context("generated thickness image has no texture wrapper");
+        }
+        align_binary(&mut self.binary, 4);
+        let offset = self.binary.len();
+        self.binary.extend_from_slice(&bytes);
+        let view = self.buffer_views.len();
+        self.buffer_views.push(json!({
+            "buffer": 0,
+            "byteOffset": offset,
+            "byteLength": bytes.len()
+        }));
+        let image_index = self.images.len();
+        self.images.push(json!({
+            "bufferView": view,
+            "mimeType": "image/png",
+            "name": name
+        }));
+        self.image_by_hash.insert(hash, image_index);
+        let texture_index = self.textures.len();
+        self.textures.push(json!({
+            "source": image_index,
+            "name": name
+        }));
+        Ok(texture_index)
+    }
+
+    fn append_material(&mut self, value: Value, transport: TransportMaterial) -> usize {
+        let index = self.materials.len();
+        self.materials.push(value);
+        self.transport_materials.push(transport);
+        index
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TexelSample {
+    position: Vec3,
+    normal: Vec3,
+    triangle: usize,
+}
+
+fn prepare_local_translucency(
+    fragments: &mut [ComposedPrimitive],
+    resources: &mut OutputResources,
+) -> Result<usize> {
+    let mut generated = 0;
+    for fragment in fragments {
+        let Some(source_material) = resources.materials.get(fragment.material).cloned() else {
+            continue;
+        };
+        let Some(source_transport) = resources
+            .transport_materials
+            .get(fragment.material)
+            .cloned()
+        else {
+            continue;
+        };
+        // Metallic PBR surfaces do not receive this diffuse-transmission lobe.
+        // The Fallout shader flags identify translucency candidates, but they
+        // must not override an explicitly metallic glTF material.
+        if source_transport.metallic_factor > MAX_TRANSLUCENCY_METALLIC_FACTOR {
+            continue;
+        }
+        let strength = fallout_translucency_strength(&source_material);
+        if strength <= 0.0
+            || fragment.positions.len() != fragment.uvs.len()
+            || fragment.positions.is_empty()
+            || fragment
+                .uvs
+                .iter()
+                .all(|uv| uv.length_squared() <= f32::EPSILON)
+        {
+            continue;
+        }
+        let Some(image) = local_thickness_map(fragment) else {
+            continue;
+        };
+        let extent = primitive_bounds(fragment).extent().max_element();
+        let thickness_factor = (extent * 0.1).clamp(0.001, 0.5);
+        let texture_index = resources
+            .add_generated_texture(&image, &format!("bevyout_local_thickness_{generated:04}"))?;
+        let mut material = source_material;
+        append_local_thickness_metadata(
+            &mut material,
+            texture_index,
+            LOCAL_THICKNESS_RESOLUTION,
+            strength,
+            thickness_factor,
+        )?;
+        let mut transport = source_transport;
+        transport.translucency_strength = strength;
+        fragment.material = resources.append_material(material, transport);
+        generated += 1;
+    }
+    Ok(generated)
+}
+
+fn local_thickness_map(fragment: &ComposedPrimitive) -> Option<RgbaImage> {
+    let resolution = usize::try_from(LOCAL_THICKNESS_RESOLUTION).ok()?;
+    let mut samples = vec![None; resolution * resolution];
+    let mut occupied = 0;
+    for (triangle, indices) in fragment.indices.chunks_exact(3).enumerate() {
+        let [a, b, c] = [
+            indices[0] as usize,
+            indices[1] as usize,
+            indices[2] as usize,
+        ];
+        let (Some(&pa), Some(&pb), Some(&pc), Some(&uva), Some(&uvb), Some(&uvc)) = (
+            fragment.positions.get(a),
+            fragment.positions.get(b),
+            fragment.positions.get(c),
+            fragment.uvs.get(a),
+            fragment.uvs.get(b),
+            fragment.uvs.get(c),
+        ) else {
+            continue;
+        };
+        let minimum = uva.min(uvb).min(uvc).max(Vec2::ZERO);
+        let maximum = uva.max(uvb).max(uvc).min(Vec2::ONE);
+        if minimum.x > maximum.x || minimum.y > maximum.y {
+            continue;
+        }
+        let x0 = (minimum.x * resolution as f32).floor() as usize;
+        let y0 = (minimum.y * resolution as f32).floor() as usize;
+        let x1 = (maximum.x * resolution as f32)
+            .ceil()
+            .min(resolution as f32 - 1.0) as usize;
+        let y1 = (maximum.y * resolution as f32)
+            .ceil()
+            .min(resolution as f32 - 1.0) as usize;
+        let geometric_normal = (pb - pa).cross(pc - pa).normalize_or_zero();
+        for y in y0..=y1.min(resolution - 1) {
+            for x in x0..=x1.min(resolution - 1) {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / resolution as f32,
+                    (y as f32 + 0.5) / resolution as f32,
+                );
+                let Some((wa, wb, wc)) = barycentric(uv, uva, uvb, uvc) else {
+                    continue;
+                };
+                let index = y * resolution + x;
+                if samples[index].is_some() {
+                    continue;
+                }
+                let normal = (fragment.normals.get(a).copied().unwrap_or(geometric_normal) * wa
+                    + fragment.normals.get(b).copied().unwrap_or(geometric_normal) * wb
+                    + fragment.normals.get(c).copied().unwrap_or(geometric_normal) * wc)
+                    .normalize_or_zero();
+                samples[index] = Some(TexelSample {
+                    position: pa * wa + pb * wb + pc * wc,
+                    normal: if normal.length_squared() > f32::EPSILON {
+                        normal
+                    } else {
+                        geometric_normal
+                    },
+                    triangle,
+                });
+                occupied += 1;
+            }
+        }
+    }
+    if occupied == 0 {
+        return None;
+    }
+
+    let mut image = RgbaImage::new(LOCAL_THICKNESS_RESOLUTION, LOCAL_THICKNESS_RESOLUTION);
+    let max_distance = primitive_bounds(fragment)
+        .extent()
+        .length()
+        .clamp(0.001, LOCAL_THICKNESS_MAX_RAY_METERS);
+    for y in 0..resolution {
+        for x in 0..resolution {
+            let Some(sample) = samples[y * resolution + x] else {
+                continue;
+            };
+            let origin = sample.position + sample.normal * 0.0001;
+            let direction = -sample.normal;
+            let mut closest = None;
+            for (triangle, indices) in fragment.indices.chunks_exact(3).enumerate() {
+                if triangle == sample.triangle {
+                    continue;
+                }
+                let [a, b, c] = [
+                    indices[0] as usize,
+                    indices[1] as usize,
+                    indices[2] as usize,
+                ];
+                let (Some(&pa), Some(&pb), Some(&pc)) = (
+                    fragment.positions.get(a),
+                    fragment.positions.get(b),
+                    fragment.positions.get(c),
+                ) else {
+                    continue;
+                };
+                if let Some(distance) = ray_triangle_distance(origin, direction, pa, pb, pc)
+                    && distance <= max_distance
+                    && closest.is_none_or(|current| distance < current)
+                {
+                    closest = Some(distance);
+                }
+            }
+            // A shader-flagged single-sided sheet (foliage, cloth, paper) has
+            // no opposite shell to hit. Treat that as the thin limit instead
+            // of turning it opaque merely because the source mesh is open.
+            let normalized_thickness = closest
+                .map(|distance| distance / max_distance)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let transmission = 1.0 - normalized_thickness;
+            image.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgba([
+                    (transmission * 255.0).round() as u8,
+                    (normalized_thickness * 255.0).round() as u8,
+                    (transmission * 255.0).round() as u8,
+                    (transmission * 255.0).round() as u8,
+                ]),
+            );
+        }
+    }
+    bleed_local_thickness(&mut image);
+    Some(image)
+}
+
+fn barycentric(point: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)> {
+    let v0 = b - a;
+    let v1 = c - a;
+    let v2 = point - a;
+    let denominator = v0.perp_dot(v1);
+    if denominator.abs() <= 1.0e-8 {
+        return None;
+    }
+    let wb = v2.perp_dot(v1) / denominator;
+    let wc = v0.perp_dot(v2) / denominator;
+    let wa = 1.0 - wb - wc;
+    (wa >= -1.0e-5 && wb >= -1.0e-5 && wc >= -1.0e-5).then_some((wa, wb, wc))
+}
+
+fn ray_triangle_distance(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    let edge_a = b - a;
+    let edge_b = c - a;
+    let perpendicular = direction.cross(edge_b);
+    let determinant = edge_a.dot(perpendicular);
+    if determinant.abs() <= 1.0e-8 {
+        return None;
+    }
+    let inverse = 1.0 / determinant;
+    let to_origin = origin - a;
+    let barycentric_u = inverse * to_origin.dot(perpendicular);
+    if !(0.0..=1.0).contains(&barycentric_u) {
+        return None;
+    }
+    let cross = to_origin.cross(edge_a);
+    let barycentric_v = inverse * direction.dot(cross);
+    if barycentric_v < 0.0 || barycentric_u + barycentric_v > 1.0 {
+        return None;
+    }
+    let distance = inverse * edge_b.dot(cross);
+    (distance > 1.0e-4).then_some(distance)
+}
+
+fn bleed_local_thickness(image: &mut RgbaImage) {
+    for _ in 0..2 {
+        let previous = image.clone();
+        for y in 0..image.height() {
+            for x in 0..image.width() {
+                if previous.get_pixel(x, y)[3] != 0 {
+                    continue;
+                }
+                let mut replacement = None;
+                for dy in -1_i32..=1 {
+                    for dx in -1_i32..=1 {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx < 0
+                            || ny < 0
+                            || nx >= image.width() as i32
+                            || ny >= image.height() as i32
+                        {
+                            continue;
+                        }
+                        let pixel = previous.get_pixel(nx as u32, ny as u32);
+                        if pixel[3] != 0 {
+                            replacement = Some(*pixel);
+                            break;
+                        }
+                    }
+                    if replacement.is_some() {
+                        break;
+                    }
+                }
+                if let Some(pixel) = replacement {
+                    image.put_pixel(x, y, pixel);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn compose_scene(
@@ -280,6 +691,7 @@ pub(crate) fn compose_scene(
         );
     }
     let seam_stitch = stitch_static_seams(&mut fragments);
+    let translucency_maps = prepare_local_translucency(&mut fragments, &mut resources)?;
     let visual_objects_before = fragments.len();
     let render_primitives_before = fragments.len();
     let materials_before = source_material_count;
@@ -291,6 +703,12 @@ pub(crate) fn compose_scene(
     batching.seam_edges_matched = seam_stitch.edges_matched;
     batching.seam_vertices_adjusted = seam_stitch.vertices_adjusted;
     batching.seam_max_correction_meters = seam_stitch.max_correction_meters;
+    batching.translucency_maps = translucency_maps;
+    batching.translucency_resolution = if translucency_maps > 0 {
+        LOCAL_THICKNESS_RESOLUTION
+    } else {
+        0
+    };
     let bounds = scene_bounds(&primitives)?;
     Ok(RustBakeScene {
         primitives,
@@ -862,6 +1280,7 @@ impl OutputResources {
             alpha_mode,
             alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
             double_sided: material.double_sided(),
+            translucency_strength: fallout_translucency_strength(&value),
         };
         self.insert_material(value, transport)
     }
@@ -1825,6 +2244,20 @@ fn wrap_mode(mode: gltf::texture::WrappingMode) -> WrapMode {
 mod tests {
     use super::*;
 
+    fn open_sheet_fragment(material: usize) -> ComposedPrimitive {
+        ComposedPrimitive {
+            name: "paper_sheet".into(),
+            reference_form_ids: vec![1],
+            material,
+            positions: vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y],
+            normals: vec![Vec3::Z; 4],
+            uvs: vec![Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
+            colors: vec![Vec4::ONE; 4],
+            transport_colors: vec![Vec4::ONE; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }
+    }
+
     #[test]
     fn alpha_sampling_wraps_with_gltf_upper_left_origin() {
         let image = RgbaImage::from_raw(1, 2, vec![255, 0, 0, 255, 0, 255, 0, 128]).unwrap();
@@ -1835,6 +2268,78 @@ mod tests {
         };
         assert_eq!(texture.sample(Vec2::ZERO), Vec4::new(1.0, 0.0, 0.0, 1.0));
         assert!((texture.sample(Vec2::new(0.0, 1.0)).w - 128.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn local_thickness_map_marks_a_thin_closed_surface_as_transmissive() {
+        let fragment = ComposedPrimitive {
+            name: "thin_panel".into(),
+            reference_form_ids: vec![1],
+            material: 0,
+            positions: vec![
+                Vec3::new(0.0, 0.1, 0.0),
+                Vec3::new(1.0, 0.1, 0.0),
+                Vec3::new(1.0, 0.1, 1.0),
+                Vec3::new(0.0, 0.1, 1.0),
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ],
+            normals: vec![Vec3::Y; 4]
+                .into_iter()
+                .chain(vec![Vec3::NEG_Y; 4])
+                .collect(),
+            uvs: vec![
+                Vec2::ZERO,
+                Vec2::X,
+                Vec2::ONE,
+                Vec2::Y,
+                Vec2::ZERO,
+                Vec2::X,
+                Vec2::ONE,
+                Vec2::Y,
+            ],
+            colors: vec![Vec4::ONE; 8],
+            transport_colors: vec![Vec4::ONE; 8],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6],
+        };
+        let image = local_thickness_map(&fragment).expect("closed surface has a thickness map");
+        let maximum_transmission = image.pixels().map(|pixel| pixel[3]).max().unwrap_or(0);
+        assert!(maximum_transmission > 200);
+        assert!(image.pixels().any(|pixel| pixel[1] > 0));
+    }
+
+    #[test]
+    fn local_thickness_map_treats_an_open_sheet_as_paper_thin() {
+        let fragment = open_sheet_fragment(0);
+        let image = local_thickness_map(&fragment).expect("open sheet has a thickness map");
+        assert!(image.pixels().all(|pixel| pixel[3] > 240));
+        assert!(image.pixels().all(|pixel| pixel[1] == 0));
+    }
+
+    #[test]
+    fn metallic_materials_do_not_generate_local_thickness_maps() {
+        let mut resources = OutputResources::default();
+        resources.materials.push(json!({
+            "extras": {
+                "bevyout_fallout_material": {
+                    "translucency_enabled": true,
+                    "translucency_strength": 0.2
+                }
+            }
+        }));
+        resources.transport_materials.push(TransportMaterial {
+            metallic_factor: 1.0,
+            ..TransportMaterial::default()
+        });
+        let mut fragments = vec![open_sheet_fragment(0)];
+
+        assert_eq!(
+            prepare_local_translucency(&mut fragments, &mut resources).unwrap(),
+            0
+        );
+        assert_eq!(resources.materials.len(), 1);
     }
 
     #[test]

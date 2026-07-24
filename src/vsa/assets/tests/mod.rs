@@ -222,6 +222,33 @@ fn blender_script_reads_authored_emission_before_existing_overrides() {
         );
     }
     assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_emissive_strength"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("FALLOUT_EMISSIVE_SCALE = 0.25"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("* FALLOUT_EMISSIVE_SCALE"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("glow_candidate = next("));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("glow = glow_candidate if semantics['features']['glow_map'] else None")
+    );
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("glow_map = bool(flags2 & (1 << 6)) or shader_type == 2")
+    );
+    assert!(!BLENDER_CONVERSION_SCRIPT.contains("or glow_node is not None"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("bool(semantics['emission_authorized']) or"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("explicit_emission_source = authored_emission_color(material)")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("explicit_environment_emission = ("));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("semantics['shader_flags_1'] & (1 << 7)"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("emission_multiplier >= 10.0"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("not semantics['no_lighting_shader']"));
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("effect_shader = shader_type_name == 'bseffectshaderproperty'")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("'emission_authorized': glow_map or effect_shader"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("if not emission_authorized:"));
     assert!(
         BLENDER_CONVERSION_SCRIPT
             .contains("candidates = [keys[shader_type], 'bevyout_emissive_strength']")

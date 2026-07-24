@@ -202,7 +202,10 @@ fn is_static_shadow_caster(placement: &PreparedPlacement) -> bool {
         && placement.physics_classification != PreparedPhysicsClassification::Dynamic
         && !matches!(
             placement.semantic,
-            PreparedSemantic::Door(_) | PreparedSemantic::Pickup(_)
+            PreparedSemantic::Door(_)
+                | PreparedSemantic::Pickup(_)
+                | PreparedSemantic::Npc(_)
+                | PreparedSemantic::Creature(_)
         )
         && !is_pickup_record_kind(&placement.base_kind)
         && placement.base_form_id != RCLIGHTBOX01_BASE_FORM_ID
@@ -855,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn caster_filter_excludes_dynamic_physics_objects() {
+    fn caster_filter_excludes_dynamic_physics_and_actor_objects() {
         let semantics = [
             PreparedSemantic::Static,
             PreparedSemantic::Pickup(PreparedPickup {
@@ -895,14 +898,20 @@ mod tests {
         }
 
         let casters = sorted_shadow_casters(&placements);
-        // Three pickup semantics and the seven non-pickup dynamic bodies are
-        // excluded; the dynamic pickup is counted only once.
-        assert_eq!(casters.len(), 14);
+        // Static and kinematic placements remain eligible except pickups and
+        // actors; all dynamic placements are excluded as well.
+        assert_eq!(casters.len(), 10);
         assert!(
             casters
                 .iter()
                 .all(|placement| !matches!(placement.semantic, PreparedSemantic::Pickup(_)))
         );
+        assert!(casters.iter().all(|placement| {
+            !matches!(
+                placement.semantic,
+                PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+            )
+        }));
         assert!(
             casters
                 .iter()

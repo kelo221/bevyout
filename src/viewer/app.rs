@@ -295,7 +295,11 @@ pub(crate) fn run_view(
         .insert_resource(IrradianceIntensity(1.0))
         .insert_resource(AmbientScale(0.05))
         .insert_resource(FogStrength(DEFAULT_FOG_STRENGTH))
+        .insert_resource(VolumetricFogMultiplier(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER))
         .insert_resource(AoStrength(1.0))
+        .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
+        .insert_resource(ImageSpaceBloomOverrides::default())
+        .insert_resource(AuthorizedEmissionMaterials::default())
         .insert_resource(AoMeshBases::default())
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
@@ -349,6 +353,10 @@ pub(crate) fn run_view(
         .add_systems(Update, apply_lighting_scale)
         .add_systems(
             Update,
+            apply_volumetric_fog.run_if(in_state(AppState::InGame)),
+        )
+        .add_systems(
+            Update,
             (apply_realtime_shadow_light, mark_prepared_shadow_meshes)
                 .run_if(in_state(AppState::InGame)),
         )
@@ -362,7 +370,12 @@ pub(crate) fn run_view(
                 update_fps_text,
                 apply_unlit_mode,
                 configure_glow_cards,
+                configure_fallout_translucency,
             ),
+        )
+        .add_systems(
+            Update,
+            (configure_fallout_emission, apply_emission_scale).chain(),
         )
         .add_systems(Update, record_render_sample)
         .add_systems(

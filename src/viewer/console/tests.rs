@@ -1,5 +1,6 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
+use crate::viewer::ImageSpaceBloomOverrides;
 use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
@@ -12,7 +13,10 @@ fn test_app() -> App {
         .insert_resource(IrradianceIntensity(1.0))
         .insert_resource(AmbientScale(1.0))
         .insert_resource(FogStrength(1.0))
+        .insert_resource(VolumetricFogMultiplier(1.0))
         .insert_resource(AoStrength(1.0))
+        .insert_resource(EmissionScale(0.0))
+        .insert_resource(ImageSpaceBloomOverrides::default())
         .insert_resource(UnlitMode(false))
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
@@ -183,7 +187,9 @@ fn render_settings_validate_boundaries_before_mutation() {
         ("bloom_intensity", 0.0, 1.0),
         ("bloom_softness", 0.0, 1.0),
         ("fog", 0.0, 1.0),
+        ("volumetric_fog", 0.0, 100.0),
         ("ao", 0.0, 1.0),
+        ("emission", 0.0, 1.0),
     ] {
         assert!(exec(&mut app, &format!("setrender {setting} {low}")).ok);
         assert!(exec(&mut app, &format!("setrender {setting} {high}")).ok);
@@ -202,6 +208,10 @@ fn render_settings_validate_boundaries_before_mutation() {
         0
     );
     assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
+    assert_eq!(
+        app.world().resource::<ImageSpaceBloomOverrides>().threshold,
+        Some(5000.0)
+    );
     let before = app.world().resource::<LightingScale>().0;
     assert_eq!(
         exec(&mut app, "setrender lighting 0").error.unwrap().code,
@@ -231,7 +241,39 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        10
+        12
+    );
+}
+
+#[test]
+fn getrender_imagespace_reports_the_active_record_and_bloom_override() {
+    let mut app = test_app();
+    let mut manifest = fixture_manifest();
+    manifest.cell.interior = true;
+    manifest.cell.image_space = Some(Default::default());
+    let image_space = manifest.cell.image_space.as_mut().unwrap();
+    image_space.form_id = 0x1234;
+    image_space.editor_id = Some("TestImageSpace".into());
+    image_space.flags = 0;
+    image_space.hdr_target_lum = 1.25;
+    app.world_mut()
+        .insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+
+    assert!(exec(&mut app, "setrender bloom_threshold 0.7").ok);
+    let output = exec(&mut app, "getrender imagespace");
+    assert!(output.ok, "getrender imagespace failed: {:?}", output.error);
+    assert_eq!(output.value["form_id"], 0x1234);
+    assert_eq!(output.value["editor_id"], "TestImageSpace");
+    assert_eq!(output.value["flags"], 0);
+    assert_eq!(output.value["resolved"], true);
+    assert_eq!(output.value["hdr_target_lum"], 1.25);
+    assert!(
+        (output.value["bloom_overrides"]["threshold"]
+            .as_f64()
+            .expect("numeric bloom override")
+            - 0.7)
+            .abs()
+            < 0.00001
     );
 }
 

@@ -2,6 +2,8 @@ import bmesh, bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
 
 RIGID_BODY_TYPES = {'bhkRigidBody', 'bhkRigidBodyT'}
+FALLOUT_EMISSIVE_SCALE = 0.25
+FALLOUT_EMISSIVE_MAX = 1.0
 
 def perceptual_roughness_from_glossiness(glossiness):
     try:
@@ -757,6 +759,90 @@ def source_emission_multiplier(material):
         if matches and all(value == matches[0] for value in matches):
             return matches[0], True
     return 1.0, False
+
+def fallout_material_semantics(material, glow_node=None):
+    """Return the flag-shaped material contract exported with each GLB.
+
+    NIFTools owns the shader graph, so this metadata mirrors the semantics that
+    survived import rather than attempting to recreate Bethesda's shader in
+    Blender.  The JSON string is intentional: Blender ID properties export
+    reliably as scalar extras across the supported Blender versions.
+    """
+    shader = getattr(material, 'niftools_shader', None)
+
+    def integer_value(*names):
+        for owner in (shader, material):
+            for name in names:
+                value = getattr(owner, name, None) if owner is not None else None
+                if value is None and owner is material:
+                    value = material.get(name)
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0
+
+    shader_type_value = integer_value('Shader_Type', 'shader_type')
+    shader_type_name = str(getattr(shader, 'bs_shadertype', '')).casefold()
+    effect_shader = shader_type_name == 'bseffectshaderproperty'
+    no_lighting_shader = 'nolighting' in shader_type_name.replace('_', '')
+    shader_type = {
+        'environment_map': 1,
+        'environment map': 1,
+        'glow_shader': 2,
+        'glow shader': 2,
+        'skin_tint': 5,
+        'skin tint': 5,
+        'hair_tint': 6,
+        'hair tint': 6,
+    }.get(shader_type_name, shader_type_value)
+    flags1 = integer_value('Shader_Flags_1', 'shaderflags1', 'shader_flags_1')
+    flags2 = integer_value('Shader_Flags_2', 'shaderflags2', 'shader_flags_2')
+    # A filename suffix is only a texture naming convention.  Fallout's
+    # shader flags/type decide whether slot 2 is actually sampled as glow.
+    # In particular, environment-map materials can carry an adjacent `_g`
+    # texture and a nonzero authored color without being emissive.
+    glow_map = bool(flags2 & (1 << 6)) or shader_type == 2
+    specular = bool(flags1 & (1 << 0)) or bool(flags1 & (1 << 12))
+    parallax = bool(flags1 & (1 << 11)) or bool(flags2 & (1 << 24))
+    environment_mapping = bool(flags1 & (1 << 7)) or shader_type == 1
+    soft_lighting = bool(flags2 & (1 << 25))
+    back_lighting = bool(flags2 & (1 << 27))
+    translucent_candidate = (
+        soft_lighting or back_lighting or
+        shader_type in (5, 6) or
+        'skin_tint' in shader_type_name or 'hair_tint' in shader_type_name
+    )
+    strength = 0.35 if back_lighting else 0.2 if soft_lighting else 0.15 if shader_type in (5, 6) else 0.0
+    semantics = {
+        'schema': 1,
+        'shader_type': shader_type,
+        'shader_flags_1': flags1,
+        'shader_flags_2': flags2,
+        'features': {
+            'glow_map': glow_map,
+            'specular': specular,
+            'parallax': parallax,
+            'environment_mapping': environment_mapping,
+            'double_sided': not bool(getattr(material, 'use_backface_culling', True)),
+            'vertex_colors': False,
+            'vertex_alpha': False,
+            'soft_lighting': soft_lighting,
+            'back_lighting': back_lighting,
+        },
+        'effect_shader': effect_shader,
+        'no_lighting_shader': no_lighting_shader,
+        'emission_authorized': glow_map or effect_shader,
+        'translucency_enabled': translucent_candidate,
+        'translucency_strength': strength,
+        'emissive_multiplier': float(material.get('bevyout_emissive_strength', 1.0) or 1.0),
+        'emissive_max': FALLOUT_EMISSIVE_MAX,
+        'emissive_scale': FALLOUT_EMISSIVE_SCALE,
+    }
+    material['bevyout_fallout_material'] = json.dumps(
+        semantics, sort_keys=True, separators=(',', ':')
+    )
+    return semantics
 
 def collision_body_key(obj):
     source_path = obj.get('bevyout_nif_source_path')
@@ -2319,7 +2405,42 @@ for job in jobs:
             label = node.label.lower()
             return ('_g.' in name or '_em.' in name or 'glow' in name or
                     'emiss' in name or 'glow' in label or 'emiss' in label)
-        glow = next((node for node in images if is_glow_image(node)), None)
+        glow_candidate = next((node for node in images if is_glow_image(node)), None)
+        semantics = fallout_material_semantics(material)
+        if not images:
+            # An untextured BSEffectShaderProperty is the native form of a
+            # physical light card (RCLightBox01 is one example). NIFTools can
+            # import it with zero NiMaterialProperty emission and no image
+            # nodes, so use its authored diffuse color as the bulb emission.
+            if semantics['effect_shader']:
+                principled = next(
+                    (node for node in tree.nodes
+                     if node.bl_idname == 'ShaderNodeBsdfPrincipled'),
+                    None,
+                )
+                if principled:
+                    base_color = principled.inputs.get('Base Color')
+                    if base_color:
+                        for link in list(base_color.links):
+                            tree.links.remove(link)
+                        base_color.default_value = (0.0, 0.0, 0.0, material.diffuse_color[3])
+                    new_emission = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
+                    authored = authored_emission_color(material)
+                    diffuse_color = tuple(float(channel) for channel in material.diffuse_color[:3])
+                    emission_color = authored or diffuse_color
+                    if new_emission and any(channel != 0.0 for channel in emission_color):
+                        for link in list(new_emission.links):
+                            tree.links.remove(link)
+                        new_emission.default_value = (*emission_color, 1.0)
+                        strength = principled.inputs.get('Emission Strength')
+                        if strength:
+                            multiplier, has_multiplier = source_emission_multiplier(material)
+                            strength.default_value = min(
+                                FALLOUT_EMISSIVE_MAX,
+                                max(0.0, (multiplier if has_multiplier else 1.0) * FALLOUT_EMISSIVE_SCALE),
+                            )
+            continue
+        glow = glow_candidate if semantics['features']['glow_map'] else None
         diffuse = next((node for node in images if node is not glow and 'normal' not in node.label.lower() and '_n.' not in image_name(node) and not is_glow_image(node)), images[0])
         normal = next((node for node in images if node is not diffuse and ('normal' in node.label.lower() or '_n.' in node.image.name.lower())), None)
         diffuse_reference = canonical_texture_reference(
@@ -2355,8 +2476,41 @@ for job in jobs:
             # PyNifly already authored its Principled/alpha/normal graph. Keep
             # it intact; only normalize texture color spaces above.
             continue
-        authored_emission = authored_emission_color(material)
+        bulb_override = material.get('bevyout_emissive_bulb', False)
+        explicit_emission_source = authored_emission_color(material)
         emission_multiplier, has_emission_multiplier = source_emission_multiplier(material)
+        explicit_environment_emission = (
+            semantics['shader_type'] == 1 and
+            explicit_emission_source is not None and
+            glow_candidate is None and
+            (
+                bool(semantics['shader_flags_1'] & (1 << 7)) or
+                (has_emission_multiplier and emission_multiplier >= 10.0)
+            )
+        )
+        effect_shader_fallback = bool(semantics['effect_shader']) and explicit_emission_source is None
+        emission_authorized = (
+            bool(semantics['emission_authorized']) or
+            bool(bulb_override) or
+            (
+                explicit_emission_source is not None and
+                semantics['shader_type'] != 1 and
+                not semantics['no_lighting_shader']
+            ) or
+            explicit_environment_emission or
+            effect_shader_fallback
+        )
+        semantics['emission_authorized'] = emission_authorized
+        material['bevyout_fallout_material'] = json.dumps(
+            semantics, sort_keys=True, separators=(',', ':')
+        )
+        authored_emission = explicit_emission_source if emission_authorized else None
+        if not emission_authorized:
+            # Do not carry NIFTools' imported Principled emission through the
+            # rebuild for non-glow materials.  This is the path that prevents
+            # environment-map props such as RadAway from becoming uniformly
+            # orange/yellow when their authored multiplier is nonzero.
+            has_emission_multiplier = False
         old_principled = next((node for node in tree.nodes if node.bl_idname == 'ShaderNodeBsdfPrincipled'), None)
         emission_link = None
         emission_color = None
@@ -2371,9 +2525,18 @@ for job in jobs:
             strength_input = old_principled.inputs.get('Emission Strength')
             if strength_input:
                 emission_strength = strength_input.default_value
+        if not emission_authorized:
+            emission_link = None
+            emission_color = None
+            emission_strength = None
+        if semantics['effect_shader'] and not emission_link:
+            emission_link = diffuse.outputs['Color']
         principled = tree.nodes.new('ShaderNodeBsdfPrincipled')
         principled.inputs['Roughness'].default_value = material_roughness
-        tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
+        if semantics['effect_shader']:
+            principled.inputs['Base Color'].default_value = (0.0, 0.0, 0.0, 1.0)
+        else:
+            tree.links.new(diffuse.outputs['Color'], principled.inputs['Base Color'])
         new_emission = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
         if new_emission:
             # Blender 5.2 defaults the rebuilt Principled emission socket to
@@ -2396,6 +2559,8 @@ for job in jobs:
              emission_strength == 1.0)
         )
         new_emission_strength = principled.inputs.get('Emission Strength')
+        if new_emission_strength and not emission_authorized:
+            new_emission_strength.default_value = 0.0
         if new_emission_strength and source_strength_applies:
             # NIFTools can leave the imported Principled strength at its
             # zero-valued default even though niftools.emissive_color and the
@@ -2412,7 +2577,12 @@ for job in jobs:
             new_emission_strength.default_value = emission_strength
         if new_emission_strength and emission_strength is None and has_emission_multiplier:
             new_emission_strength.default_value = emission_multiplier
-        bulb_override = material.get('bevyout_emissive_bulb', False)
+        if semantics['effect_shader'] and new_emission_strength and (
+                emission_strength is None or
+                not math.isfinite(emission_strength) or
+                emission_strength <= 0.0 or
+                emission_strength == 1.0):
+            new_emission_strength.default_value = emission_multiplier if has_emission_multiplier else 1.0
         if bulb_override and new_emission:
             for link in list(new_emission.links):
                 tree.links.remove(link)
@@ -2432,6 +2602,16 @@ for job in jobs:
                     new_emission_strength.default_value = emission_multiplier
                 elif emission_strength is None and not bulb_override:
                     new_emission_strength.default_value = 1.0
+        if new_emission_strength and not new_emission_strength.is_linked:
+            # The imported Fallout values are calibrated for the original
+            # renderer; Bevy's additive bloom needs a quarter-strength export.
+            new_emission_strength.default_value = max(
+                0.0,
+                min(
+                    FALLOUT_EMISSIVE_MAX,
+                    float(new_emission_strength.default_value) * FALLOUT_EMISSIVE_SCALE,
+                ),
+            )
         if alpha_blend or alpha_test:
             alpha_output = diffuse.outputs.get('Alpha')
             alpha_input = principled.inputs.get('Alpha')

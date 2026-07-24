@@ -1,6 +1,7 @@
 //! Rendering, timing, and capture console commands.
 
 use super::*;
+use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
 
 pub(super) struct RenderCommandProvider;
 
@@ -10,7 +11,7 @@ impl ConsoleCommandProvider for RenderCommandProvider {
             ConsoleCommand::new(
                 "getrender",
                 "getrender [setting]",
-                "Get one render setting or all render settings.",
+                "Get one render setting, the active ImageSpace, or all render settings.",
                 get_render,
             ),
             ConsoleCommand::new(
@@ -62,7 +63,7 @@ impl ConsoleCommandProvider for RenderCommandProvider {
     }
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 10] = [
+pub(super) const RENDER_SETTINGS: [&str; 12] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -70,10 +71,14 @@ pub(super) const RENDER_SETTINGS: [&str; 10] = [
     "bloom_threshold",
     "bloom_softness",
     "fog",
+    "volumetric_fog",
     "ao",
+    "emission",
     "shadow_samples",
     "realtime_shadows",
 ];
+
+const IMAGE_SPACE_DIAGNOSTIC: &str = "imagespace";
 
 pub(super) const TONEMAPPER_NAMES: [&str; 9] = [
     "none",
@@ -234,7 +239,15 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     values.insert("bloom_threshold".into(), json!(bloom_threshold));
     values.insert("bloom_softness".into(), json!(bloom_softness));
     values.insert("fog".into(), json!(world.resource::<FogStrength>().0));
+    values.insert(
+        "volumetric_fog".into(),
+        json!(world.resource::<VolumetricFogMultiplier>().0),
+    );
     values.insert("ao".into(), json!(world.resource::<AoStrength>().0));
+    values.insert(
+        "emission".into(),
+        json!(world.resource::<EmissionScale>().0),
+    );
     values.insert(
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
@@ -244,6 +257,59 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         json!(world.resource::<RealtimeShadowSettings>().enabled as u8),
     );
     Ok(values)
+}
+
+fn image_space_values(world: &World) -> Value {
+    let manifest = world.resource::<LoadedSceneManifest>();
+    let Some(image_space) = manifest.cell.image_space.as_ref() else {
+        return json!({
+            "form_id": null,
+            "editor_id": null,
+            "interior": manifest.cell.interior,
+            "flags": 0,
+            "resolved": false,
+        });
+    };
+    let (bloom_intensity, bloom_threshold, bloom_softness) =
+        image_space_bloom_values(Some(image_space), manifest.cell.interior);
+    let overrides = world
+        .get_resource::<ImageSpaceBloomOverrides>()
+        .copied()
+        .unwrap_or_default();
+    json!({
+        "form_id": image_space.form_id,
+        "editor_id": image_space.editor_id,
+        "interior": manifest.cell.interior,
+        "resolved": true,
+        "flags": image_space.flags,
+        "brightness": image_space.brightness,
+        "saturation": image_space.cinematic_saturation,
+        "contrast": image_space.cinematic_contrast,
+        "contrast_avg_lum": image_space.cinematic_contrast_avg_lum,
+        "tint_rgb": image_space.cinematic_brightness_tint_rgb,
+        "tint_value": image_space.cinematic_brightness_tint_value,
+        "hdr_target_lum": image_space.hdr_target_lum,
+        "eye_adapt_speed": image_space.eye_adapt_speed,
+        "hdr_emissive_multiplier": image_space.hdr_emissive_multiplier,
+        "hdr_bright_scale": image_space.hdr_bright_scale,
+        "hdr_bright_clamp": image_space.hdr_bright_clamp,
+        "bloom_blur_radius": image_space.bloom_blur_radius,
+        "bloom_alpha_mult": if manifest.cell.interior {
+            image_space.bloom_alpha_mult_interior
+        } else {
+            image_space.bloom_alpha_mult_exterior
+        },
+        "bloom_defaults": {
+            "intensity": bloom_intensity,
+            "threshold": bloom_threshold,
+            "softness": bloom_softness,
+        },
+        "bloom_overrides": {
+            "intensity": overrides.intensity,
+            "threshold": overrides.threshold,
+            "softness": overrides.softness,
+        },
+    })
 }
 
 pub(super) fn validate_render_setting(setting: &str) -> Result<(), ConsoleError> {
@@ -266,7 +332,9 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "bloom_threshold" => "Bloom threshold",
         "bloom_softness" => "Bloom softness",
         "fog" => "Fog",
+        "volumetric_fog" => "Volumetric fog",
         "ao" => "Ambient occlusion",
+        "emission" => "Material emission",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
         _ => "Render setting",
@@ -286,6 +354,12 @@ pub(super) fn get_render(
     let values = render_values(world)?;
     if let Some(setting) = invocation.args.first() {
         let setting = setting.to_ascii_lowercase();
+        if setting == IMAGE_SPACE_DIAGNOSTIC {
+            return Ok(ConsoleCommandResult::new(
+                image_space_values(world),
+                vec!["Active ImageSpace reported.".into()],
+            ));
+        }
         validate_render_setting(&setting)?;
         let value = values[&setting].clone();
         let message = format!("{}: {value}.", render_setting_label(&setting));
@@ -330,7 +404,10 @@ pub(super) fn set_render(
         "lighting" => (0.0001..=262_144.0).contains(&value),
         "irradiance" => (0.0..=4096.0).contains(&value),
         "ambient" => (0.0001..=4096.0).contains(&value),
-        "bloom_intensity" | "bloom_softness" | "fog" | "ao" => (0.0..=1.0).contains(&value),
+        "bloom_intensity" | "bloom_softness" | "fog" | "ao" | "emission" => {
+            (0.0..=1.0).contains(&value)
+        }
+        "volumetric_fog" => (0.0..=100.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
         "realtime_shadows" => value == 0.0 || value == 1.0,
@@ -348,7 +425,9 @@ pub(super) fn set_render(
         "irradiance" => world.resource_mut::<IrradianceIntensity>().0 = value,
         "ambient" => world.resource_mut::<AmbientScale>().0 = value,
         "fog" => world.resource_mut::<FogStrength>().0 = value,
+        "volumetric_fog" => world.resource_mut::<VolumetricFogMultiplier>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
+        "emission" => world.resource_mut::<EmissionScale>().0 = value,
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
@@ -371,13 +450,31 @@ pub(super) fn set_render(
                 }
                 camera
             };
-            let mut bloom = world
-                .get_mut::<Bloom>(camera)
-                .ok_or_else(|| ConsoleError::new("camera_unavailable", "bloom is unavailable"))?;
-            match setting.as_str() {
-                "bloom_intensity" => bloom.intensity = value,
-                "bloom_threshold" => bloom.prefilter.threshold = value,
-                "bloom_softness" => bloom.prefilter.threshold_softness = value,
+            let override_kind = {
+                let mut bloom = world.get_mut::<Bloom>(camera).ok_or_else(|| {
+                    ConsoleError::new("camera_unavailable", "bloom is unavailable")
+                })?;
+                match setting.as_str() {
+                    "bloom_intensity" => {
+                        bloom.intensity = value;
+                        0
+                    }
+                    "bloom_threshold" => {
+                        bloom.prefilter.threshold = value;
+                        1
+                    }
+                    "bloom_softness" => {
+                        bloom.prefilter.threshold_softness = value;
+                        2
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let mut overrides = world.resource_mut::<ImageSpaceBloomOverrides>();
+            match override_kind {
+                0 => overrides.intensity = Some(value),
+                1 => overrides.threshold = Some(value),
+                2 => overrides.softness = Some(value),
                 _ => unreachable!(),
             }
         }

@@ -59,7 +59,7 @@ struct ReportIssue {
     message: String,
 }
 
-pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v6-normal-y-v1-pbr-material-v2-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -870,6 +870,12 @@ mod tests {
             normal_texture: Some(source_path.clone()),
             specular_texture: Some(source_path.clone()),
             glow_texture: None,
+            height_texture: None,
+            environment_texture: None,
+            environment_mask: None,
+            shader_type: 0,
+            shader_flags_1: 0,
+            shader_flags_2: 0,
         }];
 
         prepare_native_normal_textures(&mut materials, &mut textures).unwrap();
