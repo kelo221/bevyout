@@ -114,6 +114,7 @@ pub(crate) struct PlayerWeaponRuntime {
     pub(crate) last_muzzle_flash_seconds: Option<f32>,
     pub(crate) last_reload: Option<ReloadDecision>,
     pub(crate) viewmodel_entity: Option<Entity>,
+    pub(crate) spawned_viewmodel_asset_path: Option<String>,
     pub(crate) muzzle_light_entity: Option<Entity>,
     pub(crate) muzzle_flash_remaining: f32,
 }

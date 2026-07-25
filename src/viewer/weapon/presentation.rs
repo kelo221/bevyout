@@ -45,8 +45,19 @@ pub(super) fn sync_viewmodel(
         despawn_presentation(&mut commands, &mut runtime);
         return;
     }
-    if runtime.viewmodel_entity.is_some() {
+    if should_retain_viewmodel(
+        desired_asset.as_deref(),
+        runtime.spawned_viewmodel_asset_path.as_deref(),
+        runtime.viewmodel_entity.is_some(),
+        runtime.muzzle_light_entity.is_some(),
+    ) {
         return;
+    }
+    if runtime.viewmodel_entity.is_some()
+        || runtime.muzzle_light_entity.is_some()
+        || runtime.spawned_viewmodel_asset_path.is_some()
+    {
+        despawn_presentation(&mut commands, &mut runtime);
     }
     let camera = active_camera.expect("checked above");
     let asset_path = desired_asset.expect("checked above");
@@ -76,6 +87,7 @@ pub(super) fn sync_viewmodel(
         ))
         .id();
     runtime.viewmodel_entity = Some(viewmodel);
+    runtime.spawned_viewmodel_asset_path = Some(asset_path.clone());
     runtime.muzzle_light_entity = Some(light);
     info!(
         "weapon viewmodel {:08x} asset={asset_path}",
@@ -128,6 +140,16 @@ fn despawn_presentation(commands: &mut Commands, runtime: &mut PlayerWeaponRunti
     {
         commands.entity(entity).despawn();
     }
+    runtime.spawned_viewmodel_asset_path = None;
+}
+
+fn should_retain_viewmodel(
+    desired_asset: Option<&str>,
+    spawned_asset: Option<&str>,
+    has_viewmodel: bool,
+    has_muzzle_light: bool,
+) -> bool {
+    desired_asset.is_some() && desired_asset == spawned_asset && has_viewmodel && has_muzzle_light
 }
 
 fn idle_transform() -> Transform {
@@ -160,6 +182,36 @@ fn action_transform(action: WeaponAction, progress: f32) -> Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matching_viewmodel_asset_is_retained() {
+        assert!(should_retain_viewmodel(
+            Some("assets/pistol.glb"),
+            Some("assets/pistol.glb"),
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn changed_viewmodel_asset_requests_respawn() {
+        assert!(!should_retain_viewmodel(
+            Some("assets/laser.glb"),
+            Some("assets/pistol.glb"),
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn missing_desired_asset_does_not_retain_presentation() {
+        assert!(!should_retain_viewmodel(
+            None,
+            Some("assets/pistol.glb"),
+            true,
+            true,
+        ));
+    }
 
     #[test]
     fn recoil_and_reload_are_distinct_camera_local_poses() {
