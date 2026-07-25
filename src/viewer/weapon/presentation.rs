@@ -11,7 +11,7 @@ use crate::viewer::WorldAssetRoot;
 use crate::viewer::player::{CameraMode, CameraModeState};
 
 const IDLE_TRANSLATION: Vec3 = Vec3::new(0.28, -0.23, -0.58);
-const IDLE_ROTATION: Vec3 = Vec3::new(0.0, PI, 0.0);
+const IDLE_ROTATION: Vec3 = Vec3::new(-0.5 * PI, -0.5 * PI, 0.0);
 const MUZZLE_TRANSLATION: Vec3 = Vec3::new(0.20, -0.15, -0.82);
 
 #[derive(Component)]
@@ -19,6 +19,18 @@ pub(super) struct WeaponViewmodelRoot;
 
 #[derive(Component)]
 pub(super) struct WeaponMuzzleLight;
+
+type ViewmodelTransformQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Transform,
+        &'static mut GlobalTransform,
+        Option<&'static ChildOf>,
+        Option<&'static WeaponMuzzleLight>,
+    ),
+    Without<Camera3d>,
+>;
 
 pub(super) fn sync_viewmodel(
     mut commands: Commands,
@@ -130,6 +142,51 @@ pub(super) fn animate_viewmodel(
     }
 }
 
+/// Reapply the interpolated camera pose to the viewmodel hierarchy.
+///
+/// The player camera writes its render-only interpolated pose after Bevy's
+/// normal transform propagation. Since the viewmodel is a camera child, its
+/// scene hierarchy would otherwise keep the pre-interpolation globals for one
+/// frame, which is visible as stutter while moving. Propagating this small
+/// first-person hierarchy here keeps it in lockstep with the rendered camera
+/// without changing authoritative gameplay transforms.
+pub(super) fn interpolate_viewmodel_globals(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    children: Query<&Children>,
+    mut transforms: ViewmodelTransformQuery<'_, '_>,
+    roots: Query<(Entity, &ChildOf), With<WeaponViewmodelRoot>>,
+) {
+    for (root, parent) in &roots {
+        let Ok(camera_global) = cameras.get(parent.0) else {
+            continue;
+        };
+        let mut pending = vec![(root, *camera_global)];
+        while let Some((entity, parent_global)) = pending.pop() {
+            let world = {
+                let Ok((local, mut global, _, _)) = transforms.get_mut(entity) else {
+                    continue;
+                };
+                let world = compose_global_transform(parent_global, *local);
+                *global = world;
+                world
+            };
+            if let Ok(child_entities) = children.get(entity) {
+                pending.extend(child_entities.iter().map(|child| (child, world)));
+            }
+        }
+    }
+
+    for (local, mut global, parent, muzzle_light) in &mut transforms {
+        let (Some(parent), Some(_)) = (parent, muzzle_light) else {
+            continue;
+        };
+        let Ok(camera_global) = cameras.get(parent.0) else {
+            continue;
+        };
+        *global = compose_global_transform(*camera_global, *local);
+    }
+}
+
 fn despawn_presentation(commands: &mut Commands, runtime: &mut PlayerWeaponRuntime) {
     for entity in [
         runtime.viewmodel_entity.take(),
@@ -150,6 +207,10 @@ fn should_retain_viewmodel(
     has_muzzle_light: bool,
 ) -> bool {
     desired_asset.is_some() && desired_asset == spawned_asset && has_viewmodel && has_muzzle_light
+}
+
+fn compose_global_transform(parent: GlobalTransform, local: Transform) -> GlobalTransform {
+    parent.mul_transform(local)
 }
 
 fn idle_transform() -> Transform {
@@ -221,5 +282,23 @@ mod tests {
         assert_ne!(recoil.translation, idle.translation);
         assert_ne!(reload.translation, recoil.translation);
         assert!(reload.translation.y < idle.translation.y);
+    }
+
+    #[test]
+    fn idle_transform_uses_left_handed_weapon_orientation() {
+        let expected = Quat::from_euler(EulerRot::XYZ, -0.5 * PI, -0.5 * PI, 0.0);
+        assert!(idle_transform().rotation.abs_diff_eq(expected, 1e-6));
+    }
+
+    #[test]
+    fn viewmodel_global_transform_follows_interpolated_camera() {
+        let camera = GlobalTransform::from(Transform::from_translation(Vec3::new(2.0, 3.0, 4.0)));
+        let local = Transform::from_translation(Vec3::new(0.25, -0.2, -0.6));
+        let global = compose_global_transform(camera, local);
+        assert!(
+            global
+                .translation()
+                .abs_diff_eq(Vec3::new(2.25, 2.8, 3.4), 1e-6)
+        );
     }
 }

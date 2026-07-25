@@ -180,6 +180,12 @@ impl Plugin for WeaponPlugin {
                     .in_set(super::plugins::ViewerSet::WorldSync)
                     .run_if(in_state(AppState::InGame)),
             );
+        app.add_systems(
+            PostUpdate,
+            presentation::interpolate_viewmodel_globals
+                .after(super::player::interpolate_fps_camera)
+                .run_if(in_state(AppState::InGame)),
+        );
     }
 }
 
