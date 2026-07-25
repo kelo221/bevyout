@@ -12,8 +12,10 @@ use crate::viewer::player::{CameraMode, CameraModeState};
 
 const IDLE_TRANSLATION: Vec3 = Vec3::new(0.28, -0.23, -0.58);
 // Native NIF conversion already bakes the asset's -90° X basis correction;
-// apply only the remaining -90° Y first-person orientation here.
-const IDLE_ROTATION: Vec3 = Vec3::new(0.0, -0.5 * PI, 0.0);
+// apply the remaining +90° Y first-person orientation here. In Bevy's camera
+// convention, the sign is opposite the source asset's left-handed Z-forward
+// rotation, so this sends the barrel away from the player.
+const IDLE_ROTATION: Vec3 = Vec3::new(0.0, 0.5 * PI, 0.0);
 const MUZZLE_TRANSLATION: Vec3 = Vec3::new(0.20, -0.15, -0.82);
 
 #[derive(Component)]
@@ -288,7 +290,7 @@ mod tests {
 
     #[test]
     fn idle_transform_uses_left_handed_weapon_orientation() {
-        let expected = Quat::from_euler(EulerRot::XYZ, 0.0, -0.5 * PI, 0.0);
+        let expected = Quat::from_euler(EulerRot::XYZ, 0.0, 0.5 * PI, 0.0);
         assert!(idle_transform().rotation.abs_diff_eq(expected, 1e-6));
     }
 
