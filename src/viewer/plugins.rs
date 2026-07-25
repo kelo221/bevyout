@@ -12,7 +12,7 @@ use crate::app_state::AppStatePlugin;
 use super::{
     actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
     console, console_ui, interaction, nav, pause_menu, perception, pipboy, pipboy_reader, player,
-    world, world_items,
+    weapon, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -71,6 +71,7 @@ impl PluginGroup for ViewerPlugins {
             .add(interaction::InteractionPlugin)
             .add(actor::ActorPlugin)
             .add(actor_state::ActorStatePlugin)
+            .add(weapon::WeaponPlugin)
             .add(perception::PerceptionPlugin)
             .add(actor_animation::ActorAnimationPlugin)
             .add(pipboy::PipBoyPlugin)
@@ -110,6 +111,7 @@ mod tests {
         assert!(app.is_plugin_added::<interaction::InteractionPlugin>());
         assert!(app.is_plugin_added::<actor::ActorPlugin>());
         assert!(app.is_plugin_added::<actor_state::ActorStatePlugin>());
+        assert!(app.is_plugin_added::<weapon::WeaponPlugin>());
         assert!(app.is_plugin_added::<actor_animation::ActorAnimationPlugin>());
         assert!(app.is_plugin_added::<pause_menu::PauseMenuPlugin>());
         assert!(app.is_plugin_added::<world::WorldPlugin>());

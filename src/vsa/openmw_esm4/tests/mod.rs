@@ -41,6 +41,10 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             direct_subrecord("NAM0", 0x0001_2ab3_u32.to_le_bytes().to_vec()),
             // Issue #106: DNAM starts with the authored animation type.
             direct_subrecord("DNAM", 5_u32.to_le_bytes().to_vec()),
+            // M5/#235: first-person model object and attack sounds.
+            direct_subrecord("WNAM", 0x0000_1001_u32.to_le_bytes().to_vec()),
+            direct_subrecord("SNAM", 0x0000_1002_u32.to_le_bytes().to_vec()),
+            direct_subrecord("XNAM", 0x0000_1003_u32.to_le_bytes().to_vec()),
         ],
         &resolver,
     )
@@ -58,8 +62,11 @@ fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
             reach: None,
             ammo_form_id: Some(0x0001_2ab3),
             animation_type: Some(5),
+            first_person_model_object_form_id: Some(0x0000_1001),
         }
     );
+    assert_eq!(weapon.audio.weapon_fire_3d_sound_form_id, Some(0x0000_1002));
+    assert_eq!(weapon.audio.weapon_fire_2d_sound_form_id, Some(0x0000_1003));
     assert!(
         !weapon.ignored_subrecords.contains(&"NAM0".to_string()),
         "NAM0 is now decoded, not merely ignored"

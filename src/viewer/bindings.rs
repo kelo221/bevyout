@@ -48,11 +48,8 @@ enum UnsupportedAction {
     AlwaysRunToggle,
     AutomaticForwardRun,
     ThirdPersonView,
-    AttackShoot,
     AimOrBlock,
     Vats,
-    Reload,
-    Holster,
 }
 
 impl UnsupportedAction {
@@ -62,11 +59,8 @@ impl UnsupportedAction {
             Self::AlwaysRunToggle => "always-run toggle".into(),
             Self::AutomaticForwardRun => "automatic forward run".into(),
             Self::ThirdPersonView => "third-person view".into(),
-            Self::AttackShoot => "attack/shoot".into(),
             Self::AimOrBlock => "aim down sights/block".into(),
             Self::Vats => "V.A.T.S. targeting".into(),
-            Self::Reload => "reload".into(),
-            Self::Holster => "holster weapon".into(),
         }
     }
 }
@@ -78,7 +72,6 @@ fn keyboard_action(key: KeyCode) -> Option<UnsupportedAction> {
         KeyCode::KeyX => Some(UnsupportedAction::AutomaticForwardRun),
         KeyCode::KeyF => Some(UnsupportedAction::ThirdPersonView),
         KeyCode::KeyV => Some(UnsupportedAction::Vats),
-        KeyCode::KeyR => Some(UnsupportedAction::Reload),
         _ => None,
     }
 }
@@ -166,20 +159,12 @@ fn collect_unsupported_actions(
         KeyCode::KeyX,
         KeyCode::KeyF,
         KeyCode::KeyV,
-        KeyCode::KeyR,
     ] {
         if keys.just_pressed(key)
             && let Some(action) = keyboard_action(key)
         {
             actions.push(action);
         }
-    }
-    if keys.just_released(KeyCode::KeyR) {
-        actions.push(UnsupportedAction::Holster);
-    }
-
-    if captured && buttons.just_pressed(MouseButton::Left) {
-        actions.push(UnsupportedAction::AttackShoot);
     }
     if captured && buttons.just_pressed(MouseButton::Right) {
         actions.push(UnsupportedAction::AimOrBlock);
@@ -230,6 +215,8 @@ mod tests {
         );
         // Issue #98: hotkeys 1-8 are real actions now, not placeholders.
         assert_eq!(keyboard_action(KeyCode::Digit8), None);
+        // M5/#237: R is now owned by the weapon reload adapter.
+        assert_eq!(keyboard_action(KeyCode::KeyR), None);
     }
 
     #[test]
@@ -238,7 +225,10 @@ mod tests {
             UnsupportedAction::ThirdPersonView.label(),
             "third-person view"
         );
-        assert_eq!(UnsupportedAction::Holster.label(), "holster weapon");
+        assert_eq!(
+            UnsupportedAction::AimOrBlock.label(),
+            "aim down sights/block"
+        );
     }
 
     #[test]

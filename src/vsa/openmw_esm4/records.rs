@@ -80,7 +80,7 @@ pub(crate) fn parse_base(
     let mut supported_signatures = vec![
         "EDID", "FULL", "MODL", "MOD2", "MOD3", "MOD4", "DATA", "ENIT", "TPLT", "CNTO", "SNAM",
         "ANAM", "BNAM", "QNAM", "VNAM", "YNAM", "ZNAM", "LVLD", "LVLF", "LVLO", "ICON", "MICO",
-        "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM",
+        "ICO2", "MIC2", "DESC", "EFID", "EFIT", "SCIT", "DNAM", "WNAM", "XNAM",
         // Issue #98 (F98.1): now decoded by `parse_item_stats`'s
         // WEAP/ARMO arms rather than falling through to diagnostics.
         "BMDT", "NAM0",
@@ -312,6 +312,7 @@ pub(crate) fn parse_item_stats(
                 // FormID reference like YNAM/ZNAM.
                 ammo_form_id: sub_form_id(subs, "NAM0", resolver),
                 animation_type: sub(subs, "DNAM").and_then(|data| u32_at_option(data, 0)),
+                first_person_model_object_form_id: sub_form_id(subs, "WNAM", resolver),
             }
         }
         "ARMO" => OpenMwItemStats::Apparel {
@@ -414,6 +415,10 @@ pub(crate) fn parse_base_audio(
     resolver: &FormIdResolver,
 ) -> BaseAudioRecord {
     let mut audio = BaseAudioRecord::default();
+    if is_pickup_base(sig) {
+        audio.pickup_sound_form_id = sub_form_id(subs, "YNAM", resolver);
+        audio.drop_sound_form_id = sub_form_id(subs, "ZNAM", resolver);
+    }
     match sig {
         "DOOR" => {
             audio.open_sound_form_id = sub_form_id(subs, "SNAM", resolver);
@@ -434,9 +439,9 @@ pub(crate) fn parse_base_audio(
         "TERM" => {
             audio.activation_sound_form_id = sub_form_id(subs, "SNAM", resolver);
         }
-        _ if is_pickup_base(sig) => {
-            audio.pickup_sound_form_id = sub_form_id(subs, "YNAM", resolver);
-            audio.drop_sound_form_id = sub_form_id(subs, "ZNAM", resolver);
+        "WEAP" => {
+            audio.weapon_fire_3d_sound_form_id = sub_form_id(subs, "SNAM", resolver);
+            audio.weapon_fire_2d_sound_form_id = sub_form_id(subs, "XNAM", resolver);
         }
         _ => {}
     }

@@ -176,6 +176,18 @@ pub enum PreparedItemStats {
         /// maps the authored numeric value to the matching KF prefix.
         #[serde(default)]
         animation_type: Option<u32>,
+        /// Authored `WEAP.WNAM` first-person model-object FormID.
+        #[serde(default)]
+        first_person_model_object_form_id: Option<u32>,
+        /// Converted GLB for the WNAM object, when preparation resolved it.
+        #[serde(default)]
+        first_person_asset_path: Option<String>,
+        /// Authored `WEAP.SNAM` spatial fire sound.
+        #[serde(default)]
+        fire_sound_3d_form_id: Option<u32>,
+        /// Authored `WEAP.XNAM` player-local fire sound.
+        #[serde(default)]
+        fire_sound_2d_form_id: Option<u32>,
     },
     Apparel {
         armor_rating: Option<f32>,

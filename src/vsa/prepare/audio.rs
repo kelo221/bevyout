@@ -63,6 +63,20 @@ pub(crate) fn stage_audio(
             .flatten(),
         );
     }
+    // M5/#235: the item catalog can equip a weapon that is not placed in the
+    // startup cell. Stage its authored attack sounds alongside other prepared
+    // clips so firing never depends on an incidental world placement.
+    for base in parsed.bases.values().filter(|base| base.kind == "WEAP") {
+        form_ids.extend(
+            [
+                base.audio.weapon_fire_3d_sound_form_id,
+                base.audio.weapon_fire_2d_sound_form_id,
+                weapon_reload_sound_form_id(parsed, base),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
 
     let clips = stage_audio_clips(
         data_root,
@@ -73,6 +87,38 @@ pub(crate) fn stage_audio(
         form_ids,
     )?;
     Ok((cell_audio, clips))
+}
+
+/// Resolve the authored Fallout weapon reload cue from the weapon's fire
+/// sound family. WEAP records carry fire sounds but no reload FormID; the
+/// stock SOUN editor IDs provide the stable family relationship (for example
+/// WPNPistol10mmFire2D -> WPNPistol10mmReloadOut).
+fn weapon_reload_sound_form_id(
+    parsed: &ParsedPlugin,
+    base: &crate::vsa::openmw_esm4::BaseRecord,
+) -> Option<u32> {
+    let fire_form_id = base
+        .audio
+        .weapon_fire_2d_sound_form_id
+        .or(base.audio.weapon_fire_3d_sound_form_id)?;
+    let fire_editor_id = resolve_audio_descriptor(parsed, fire_form_id)?.editor_id?;
+    let stem = fire_editor_id
+        .strip_suffix("Fire2D")
+        .or_else(|| fire_editor_id.strip_suffix("Fire3D"))?;
+    [
+        "Reload",
+        "ReloadOut",
+        "ReloadInOut",
+        "ReloadIn",
+        "ReloadChamber",
+    ]
+    .iter()
+    .find_map(|suffix| {
+        let candidate = format!("{stem}{suffix}");
+        sound_form_ids_by_editor_id(parsed, &candidate)
+            .into_iter()
+            .next()
+    })
 }
 
 pub(crate) fn stage_audio_clips(

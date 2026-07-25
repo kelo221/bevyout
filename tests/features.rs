@@ -433,6 +433,7 @@ use bevyout_core::actor_animation;
 use bevyout_core::disposition;
 use bevyout_core::faction;
 use bevyout_core::perception;
+use bevyout_core::weapon;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
     HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
@@ -935,6 +936,14 @@ struct BevyoutWorld {
     // marker-chain resolution built from the manifest, not just spawned
     // entities.
     pp_chain_result: Vec<ai_resolution::ResolvedPoint>,
+
+    // -- player_weapon.feature (M5 wave 1, issues #235-#238) --
+    weapon_state: Option<weapon::WeaponState>,
+    weapon_last_fire: Option<weapon::FireDecision>,
+    weapon_ammo_consumed: u32,
+    weapon_actor_definition: actor_state::ActorDefinition,
+    weapon_actor_instance: actor_state::ActorInstanceState,
+    weapon_damage_outcome: Option<weapon::DamageOutcome>,
 }
 
 fn find_placement<'a>(
@@ -12624,4 +12633,156 @@ async fn then_chain_marker_resolves_to(
         .get(index - 1)
         .unwrap_or_else(|| panic!("chain has no marker #{index}"));
     assert_eq!(point.position, [x, y, z]);
+}
+
+// =======================================================================
+// -- player_weapon.feature (M5 wave 1, issues #235-#238) --
+// Pure action/damage policy used by the Bevy weapon adapter.
+// =======================================================================
+
+#[given(regex = r"^an idle weapon with damage ([\d.]+) and range ([\d.]+) metres$")]
+async fn given_idle_weapon(world: &mut BevyoutWorld, damage: f32, range: f32) {
+    world.weapon_state = Some(weapon::WeaponState::new(weapon::WeaponDefinition::new(
+        damage, range,
+    )));
+    world.weapon_last_fire = None;
+}
+
+#[given("weapon ammunition accounting is disabled")]
+async fn given_ammunition_accounting_disabled(world: &mut BevyoutWorld) {
+    world.weapon_ammo_consumed = 0;
+}
+
+#[when("the weapon fire action is requested")]
+async fn when_weapon_fire_requested(world: &mut BevyoutWorld) {
+    world.weapon_last_fire = Some(
+        world
+            .weapon_state
+            .as_mut()
+            .expect("weapon must be configured")
+            .request_fire(),
+    );
+}
+
+#[when("the weapon reload action is requested")]
+async fn when_weapon_reload_requested(world: &mut BevyoutWorld) {
+    world
+        .weapon_state
+        .as_mut()
+        .expect("weapon must be configured")
+        .request_reload();
+}
+
+#[when(regex = r"^the weapon advances by ([\d.]+) seconds$")]
+async fn when_weapon_advances(world: &mut BevyoutWorld, seconds: f32) {
+    world
+        .weapon_state
+        .as_mut()
+        .expect("weapon must be configured")
+        .advance(seconds);
+}
+
+#[then("the weapon action is firing")]
+async fn then_weapon_action_firing(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .weapon_state
+            .as_ref()
+            .expect("weapon must be configured")
+            .action(),
+        weapon::WeaponAction::Firing
+    );
+}
+
+#[then("the weapon action is reloading")]
+async fn then_weapon_action_reloading(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .weapon_state
+            .as_ref()
+            .expect("weapon must be configured")
+            .action(),
+        weapon::WeaponAction::Reloading
+    );
+}
+
+#[then(regex = r"^(\d+) shots? (?:has|have) been accepted$")]
+async fn then_shots_accepted(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(
+        world
+            .weapon_state
+            .as_ref()
+            .expect("weapon must be configured")
+            .shots_fired(),
+        expected
+    );
+}
+
+#[then("the fire request is blocked by reload")]
+async fn then_fire_blocked_by_reload(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.weapon_last_fire,
+        Some(weapon::FireDecision::BlockedReloading)
+    );
+}
+
+#[then("no ammunition has been consumed")]
+async fn then_no_ammunition_consumed(world: &mut BevyoutWorld) {
+    assert_eq!(world.weapon_ammo_consumed, 0);
+}
+
+#[given(regex = r"^an alive actor with base health ([\d.]+)$")]
+async fn given_alive_actor_with_health(world: &mut BevyoutWorld, health: f32) {
+    let mut definition = actor_state::ActorDefinition {
+        base_form_id: 0x10,
+        reference_form_id: 0x20,
+        ..Default::default()
+    };
+    definition
+        .base_values
+        .insert(actor_state::ActorValue::Health, health);
+    world.weapon_actor_definition = definition;
+    world.weapon_actor_instance =
+        actor_state::ActorInstanceState::new(0x20, actor_state::ActorLifeState::Alive);
+    world.weapon_damage_outcome = None;
+}
+
+#[when(regex = r"^the actor receives ([\d.]+) weapon damage$")]
+async fn when_actor_receives_weapon_damage(world: &mut BevyoutWorld, damage: f32) {
+    world.weapon_damage_outcome = Some(
+        weapon::apply_actor_damage(
+            &world.weapon_actor_definition,
+            &mut world.weapon_actor_instance,
+            damage,
+        )
+        .expect("synthetic weapon damage must be valid"),
+    );
+}
+
+#[then(regex = r"^the weapon-damaged actor health is ([\d.]+)$")]
+async fn then_effective_actor_health(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .weapon_actor_definition
+        .resolve_value(
+            &world.weapon_actor_instance,
+            actor_state::ActorValue::Health,
+        )
+        .effective;
+    assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+}
+
+#[then("the actor remains alive")]
+async fn then_actor_remains_alive(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.weapon_actor_instance.life_state,
+        actor_state::ActorLifeState::Alive
+    );
+}
+
+#[then("the actor is dead")]
+async fn then_actor_is_dead(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.weapon_actor_instance.life_state,
+        actor_state::ActorLifeState::Dead
+    );
 }

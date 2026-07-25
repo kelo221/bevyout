@@ -17,3 +17,4 @@ pub mod items;
 pub mod manifest;
 pub mod pause_menu;
 pub mod perception;
+pub mod weapon;

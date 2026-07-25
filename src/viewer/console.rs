@@ -43,6 +43,7 @@ mod persistence_commands;
 mod player_commands;
 mod render_commands;
 mod ui_commands;
+mod weapon_commands;
 mod world_commands;
 
 use common::{no_args, parse_item_form_id, toggle_result};
@@ -111,7 +112,7 @@ fn install(app: &mut App) {
         hooks.register_angle_adapter(player::console_get_angles, player::console_set_angles);
     }
     let mut registry = app.world_mut().resource_mut::<ConsoleRegistry>();
-    let providers: [&dyn ConsoleCommandProvider; 11] = [
+    let providers: [&dyn ConsoleCommandProvider; 12] = [
         &player_commands::PlayerCommandProvider,
         &navigation_commands::NavigationCommandProvider,
         &world_commands::WorldCommandProvider,
@@ -123,6 +124,7 @@ fn install(app: &mut App) {
         &actor_state_commands::ActorStateCommandProvider,
         &cinema_commands::CinemaCommandProvider,
         &perception_commands::PerceptionCommandProvider,
+        &weapon_commands::WeaponCommandProvider,
     ];
     for provider in providers {
         registry

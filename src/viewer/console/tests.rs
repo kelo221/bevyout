@@ -71,6 +71,36 @@ fn exec(app: &mut App, line: &str) -> crate::console::ConsoleOutput {
 }
 
 #[test]
+fn weapon_commands_expose_state_and_queue_normal_action_requests() {
+    let mut app = test_app();
+    app.init_resource::<super::super::weapon::PlayerWeaponRuntime>()
+        .add_message::<super::super::weapon::FireWeaponRequested>()
+        .add_message::<super::super::weapon::ReloadWeaponRequested>();
+
+    let state = exec(&mut app, "weaponstate");
+    assert!(state.ok);
+    assert_eq!(state.value["action"], "idle");
+    assert_eq!(state.value["ammo_accounting"], false);
+
+    assert!(exec(&mut app, "weaponfire").ok);
+    assert!(exec(&mut app, "weaponreload").ok);
+    assert_eq!(
+        app.world()
+            .resource::<Messages<super::super::weapon::FireWeaponRequested>>()
+            .iter_current_update_messages()
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.world()
+            .resource::<Messages<super::super::weapon::ReloadWeaponRequested>>()
+            .iter_current_update_messages()
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn toggles_and_time_multiplier_change_focused_state() {
     let mut app = test_app();
     let game_ui = app.world_mut().spawn((GameUi, Visibility::Inherited)).id();
@@ -1254,6 +1284,10 @@ fn additem_adds_a_requested_count_seeded_with_catalog_condition() {
                 reach: None,
                 ammo_form_id: None,
                 animation_type: None,
+                first_person_model_object_form_id: None,
+                first_person_asset_path: None,
+                fire_sound_3d_form_id: None,
+                fire_sound_2d_form_id: None,
             },
             audio: Default::default(),
         }],
