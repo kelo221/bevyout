@@ -304,7 +304,11 @@ pub(crate) fn build_prepared_colliders(
     // before creating gravity-enabled bodies. Swap construction gets this
     // boundary naturally from its static-only frame.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = world.try_rebuild_static_tree();
+        if let Err(error) = world.try_rebuild_static_tree() {
+            warn!(
+                "BoxDDD static tree rebuild returned error: {error:?}; dropping invalid static tree nodes and continuing"
+            );
+        }
     })) {
         warn!(
             "BoxDDD static tree rebuild encountered panic ({panic:?}); dropping invalid static tree nodes and continuing"
