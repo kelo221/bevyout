@@ -501,7 +501,7 @@ fn build_colliders_for_placement(
         };
         stats.bodies += 1;
         for shape in &body.shapes {
-            info!(
+            debug!(
                 "building shape {} for reference {:08x} asset {}",
                 shape.kind(),
                 placement.reference_form_id,
