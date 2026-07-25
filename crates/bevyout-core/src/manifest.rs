@@ -434,13 +434,20 @@ pub struct ImageSpaceInfo {
     pub get_hit_blur_damping_constant: f32,
     pub get_hit_damping_constant: f32,
     pub night_eye_tint_rgb: [f32; 3],
+    /// Night-eye brightness, stored immediately after the night-eye tint.
     pub brightness: f32,
     pub cinematic_saturation: f32,
     pub cinematic_contrast_avg_lum: f32,
     pub cinematic_contrast: f32,
+    #[serde(default = "default_cinematic_brightness")]
+    pub cinematic_brightness: f32,
     pub cinematic_brightness_tint_rgb: [f32; 3],
     pub cinematic_brightness_tint_value: f32,
     pub flags: u8,
+}
+
+fn default_cinematic_brightness() -> f32 {
+    1.0
 }
 
 impl Default for ImageSpaceInfo {
@@ -474,6 +481,7 @@ impl Default for ImageSpaceInfo {
             cinematic_saturation: 1.0,
             cinematic_contrast_avg_lum: 0.5,
             cinematic_contrast: 1.0,
+            cinematic_brightness: default_cinematic_brightness(),
             cinematic_brightness_tint_rgb: [1.0, 1.0, 1.0],
             cinematic_brightness_tint_value: 0.0,
             flags: 0,

@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 20;
+pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 21;
 /// Gates *manifest schema/meaning* compatibility for a cached `scene.ron`
 /// (checked by `compatibility::ensure_prepared_manifest_compatible` against
 /// `manifest.prepare_revision`, independent of
@@ -26,7 +26,7 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 20;
 /// linked reference, breaking Patrol marker chain-walks and
 /// near-linked-reference package resolution without any parse error.
 pub(crate) const CURRENT_PREPARE_REVISION: &str =
-    "prepare-v7-corpse-actor-assembly-animation-catalog-door-trap-linked-ref-reflection-probes";
+    "prepare-v8-corpse-actor-assembly-animation-catalog-door-trap-linked-ref-reflection-probes-image-space-layouts";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v8-light-cards-v1";
 pub(crate) const REFLECTION_PROBE_REVISION: &str =

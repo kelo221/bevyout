@@ -1170,16 +1170,32 @@ pub(crate) fn camera_post_processing(
     let flags = image_space.flags;
     let mut color_grading = ColorGrading::default();
     if flags & 0x08 != 0 {
-        color_grading.global.exposure = image_space.brightness.max(0.0001).log2();
+        color_grading.global.exposure = image_space.cinematic_brightness.max(0.0001).log2();
     }
     if flags & 0x01 != 0 {
         color_grading.global.post_saturation = image_space.cinematic_saturation.max(0.0);
     }
     if flags & 0x02 != 0 {
-        let contrast = image_space.cinematic_contrast.max(0.0);
-        color_grading.shadows.contrast = contrast;
-        color_grading.midtones.contrast = contrast;
-        color_grading.highlights.contrast = contrast;
+        let contrast = image_space.cinematic_contrast.max(0.01);
+        let contrast_pivot = if image_space.cinematic_contrast_avg_lum.is_finite() {
+            image_space.cinematic_contrast_avg_lum.clamp(0.001, 1.0)
+        } else {
+            0.18
+        };
+        // Bevy's linear contrast stage is hard-coded around 0.5 and runs
+        // before auto-exposure. Fallout's authored average luminance is a
+        // much lower pivot (commonly around 0.14), so feeding its multiplier
+        // to Bevy directly clips almost the whole HDR interior below zero.
+        // A power curve preserves positive HDR values and the authored pivot:
+        //     output = pivot * (input / pivot)^contrast
+        let gamma = contrast.recip();
+        let gain = contrast_pivot.powf((1.0 - contrast) / contrast);
+        color_grading.shadows.gamma = gamma;
+        color_grading.midtones.gamma = gamma;
+        color_grading.highlights.gamma = gamma;
+        color_grading.shadows.gain = gain;
+        color_grading.midtones.gain = gain;
+        color_grading.highlights.gain = gain;
     }
     if flags & 0x04 != 0
         && let Some((temperature, tint)) = image_space_tint_to_white_balance(
@@ -1228,10 +1244,19 @@ pub(crate) fn image_space_tint_to_white_balance(
     }
     let target_x = x / sum;
     let target_y = y / sum;
-    let strength = strength.max(0.0);
+    // Fallout authors this value as the opacity of a cinematic color
+    // overlay. Bevy exposes chromatic white-balance offsets instead, whose
+    // perceptual response is much weaker for the same normalized value.
+    // Calibrate the normalized overlay strength to the closest matching
+    // white-balance response while keeping malformed values bounded.
+    let strength = if strength.is_finite() {
+        strength.clamp(0.0, 1.0) * 4.0
+    } else {
+        0.0
+    };
     Some((
-        (0.3127 - target_x) * strength,
-        (target_y - 0.3290) * strength,
+        (target_x - 0.3127) * strength,
+        (0.3290 - target_y) * strength,
     ))
 }
 

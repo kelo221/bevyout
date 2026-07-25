@@ -904,7 +904,11 @@ pub(crate) fn ignored_signatures(subs: &[Subrecord], supported: &[&str]) -> Vec<
     signatures
 }
 
-pub(crate) fn parse_image_space(subs: &[Subrecord], form_id: u32) -> Option<ImageSpaceInfo> {
+pub(crate) fn parse_image_space(
+    subs: &[Subrecord],
+    form_id: u32,
+    form_version: u16,
+) -> Option<ImageSpaceInfo> {
     let data = sub(subs, "DNAM")?;
     let mut image_space = ImageSpaceInfo {
         form_id,
@@ -925,25 +929,63 @@ pub(crate) fn parse_image_space(subs: &[Subrecord], form_id: u32) -> Option<Imag
     image_space.hdr_sunlight_dimmer = f32_or(data, 44, image_space.hdr_sunlight_dimmer);
     image_space.hdr_grass_dimmer = f32_or(data, 48, image_space.hdr_grass_dimmer);
     image_space.hdr_tree_dimmer = f32_or(data, 52, image_space.hdr_tree_dimmer);
-    image_space.hdr_skin_dimmer = f32_or(data, 56, image_space.hdr_skin_dimmer);
-    image_space.bloom_blur_radius = f32_or(data, 60, image_space.bloom_blur_radius);
-    image_space.bloom_alpha_mult_interior = f32_or(data, 64, image_space.bloom_alpha_mult_interior);
-    image_space.bloom_alpha_mult_exterior = f32_or(data, 68, image_space.bloom_alpha_mult_exterior);
-    image_space.get_hit_blur_radius = f32_or(data, 72, image_space.get_hit_blur_radius);
+
+    // Fallout 3 IMGS DNAM records before form version 10 omit the Skin
+    // Dimmer float. All following fields therefore begin four bytes earlier.
+    // xEdit's `wbFromVersion(10, Skin Dimmer)` documents this split.
+    let mut offset = 56;
+    if form_version >= 10 {
+        image_space.hdr_skin_dimmer = f32_or(data, offset, image_space.hdr_skin_dimmer);
+        offset += 4;
+    }
+    image_space.bloom_blur_radius = f32_or(data, offset, image_space.bloom_blur_radius);
+    offset += 4;
+    image_space.bloom_alpha_mult_interior =
+        f32_or(data, offset, image_space.bloom_alpha_mult_interior);
+    offset += 4;
+    image_space.bloom_alpha_mult_exterior =
+        f32_or(data, offset, image_space.bloom_alpha_mult_exterior);
+    offset += 4;
+    image_space.get_hit_blur_radius = f32_or(data, offset, image_space.get_hit_blur_radius);
+    offset += 4;
     image_space.get_hit_blur_damping_constant =
-        f32_or(data, 76, image_space.get_hit_blur_damping_constant);
-    image_space.get_hit_damping_constant = f32_or(data, 80, image_space.get_hit_damping_constant);
-    image_space.night_eye_tint_rgb = rgb_or(data, 84, image_space.night_eye_tint_rgb);
-    image_space.brightness = f32_or(data, 96, image_space.brightness);
-    image_space.cinematic_saturation = f32_or(data, 100, image_space.cinematic_saturation);
+        f32_or(data, offset, image_space.get_hit_blur_damping_constant);
+    offset += 4;
+    image_space.get_hit_damping_constant =
+        f32_or(data, offset, image_space.get_hit_damping_constant);
+    offset += 4;
+    image_space.night_eye_tint_rgb = rgb_or(data, offset, image_space.night_eye_tint_rgb);
+    offset += 12;
+    image_space.brightness = f32_or(data, offset, image_space.brightness);
+    offset += 4;
+    image_space.cinematic_saturation =
+        f32_or(data, offset, image_space.cinematic_saturation);
+    offset += 4;
     image_space.cinematic_contrast_avg_lum =
-        f32_or(data, 104, image_space.cinematic_contrast_avg_lum);
-    image_space.cinematic_contrast = f32_or(data, 108, image_space.cinematic_contrast);
+        f32_or(data, offset, image_space.cinematic_contrast_avg_lum);
+    offset += 4;
+    image_space.cinematic_contrast = f32_or(data, offset, image_space.cinematic_contrast);
+    offset += 4;
+    image_space.cinematic_brightness =
+        f32_or(data, offset, image_space.cinematic_brightness);
+    offset += 4;
     image_space.cinematic_brightness_tint_rgb =
-        rgb_or(data, 112, image_space.cinematic_brightness_tint_rgb);
+        rgb_or(data, offset, image_space.cinematic_brightness_tint_rgb);
+    offset += 12;
     image_space.cinematic_brightness_tint_value =
-        f32_or(data, 124, image_space.cinematic_brightness_tint_value);
-    image_space.flags = data.get(144).copied().unwrap_or_default();
+        f32_or(data, offset, image_space.cinematic_brightness_tint_value);
+
+    // The grading mask moved as Bethesda extended DNAM. Legacy 132-byte
+    // records store it at 128; form versions 10-13 use 144; versions 14+
+    // append another four bytes and store it at 148.
+    let flags_offset = if form_version >= 14 {
+        148
+    } else if form_version >= 10 {
+        144
+    } else {
+        128
+    };
+    image_space.flags = data.get(flags_offset).copied().unwrap_or_default();
     Some(image_space)
 }
 

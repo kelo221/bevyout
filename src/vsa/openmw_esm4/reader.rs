@@ -74,6 +74,7 @@ pub(crate) fn walk_container(
         let flags = read_u32(bytes, offset + 8)?;
         let raw_form_id = read_u32(bytes, offset + 12)?;
         let form_id = resolver.adjust(raw_form_id);
+        let form_version = (read_u32(bytes, offset + 20)? & u32::from(u16::MAX)) as u16;
         let record_end = offset + 24 + data_size;
         if record_end > end {
             bail!("record exceeds containing group")
@@ -118,7 +119,9 @@ pub(crate) fn walk_container(
             "IMGS" => {
                 if flags & RECORD_DELETED != 0 {
                     state.image_spaces.remove(&form_id);
-                } else if let Some(image_space) = parse_image_space(&subs, form_id) {
+                } else if let Some(image_space) =
+                    parse_image_space(&subs, form_id, form_version)
+                {
                     state.image_spaces.insert(form_id, image_space);
                 }
             }
