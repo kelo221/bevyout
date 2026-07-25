@@ -4,6 +4,7 @@
 //! module only adapts equipment, input, prepared assets, audio, and Bevy
 //! presentation to that policy.
 
+mod animation;
 mod hitscan;
 mod presentation;
 
@@ -111,6 +112,7 @@ pub(crate) struct PlayerWeaponRuntime {
     pub(crate) state: Option<WeaponState>,
     pub(crate) last_fire: FireReport,
     pub(crate) last_fire_sound_form_id: Option<u32>,
+    pub(crate) last_reload_sound_form_id: Option<u32>,
     pub(crate) last_muzzle_flash_seconds: Option<f32>,
     pub(crate) last_reload: Option<ReloadDecision>,
     pub(crate) viewmodel_entity: Option<Entity>,
@@ -148,6 +150,7 @@ pub(crate) struct WeaponPlugin;
 impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerWeaponRuntime>()
+            .init_resource::<animation::PendingWeaponAnimationDiscovery>()
             .add_message::<FireWeaponRequested>()
             .add_message::<ReloadWeaponRequested>()
             .add_message::<AcceptedWeaponShot>()
@@ -174,7 +177,10 @@ impl Plugin for WeaponPlugin {
                 Update,
                 (
                     presentation::sync_viewmodel,
+                    animation::discover_animation_players,
+                    animation::resolve_pending_animation_discovery,
                     presentation::animate_viewmodel,
+                    animation::drive_viewmodel_animations,
                 )
                     .chain()
                     .in_set(super::plugins::ViewerSet::WorldSync)
@@ -229,6 +235,7 @@ fn sync_equipped_weapon(
         .map(|weapon| WeaponState::new(weapon.definition()));
     runtime.last_fire = FireReport::default();
     runtime.last_fire_sound_form_id = None;
+    runtime.last_reload_sound_form_id = None;
     runtime.last_muzzle_flash_seconds = None;
     runtime.last_reload = None;
     runtime.muzzle_flash_remaining = 0.0;
@@ -240,10 +247,28 @@ fn process_action_requests(
     mut accepted_shots: MessageWriter<AcceptedWeaponShot>,
     mut sounds: MessageWriter<super::audio::PlaySound>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
+    manifest: Option<Res<crate::viewer::LoadedSceneManifest>>,
     mut runtime: ResMut<PlayerWeaponRuntime>,
 ) {
     for _ in reload_requests.read() {
-        runtime.last_reload = runtime.state.as_mut().map(WeaponState::request_reload);
+        let decision = runtime.state.as_mut().map(WeaponState::request_reload);
+        let reload_sound_form_id = (decision == Some(ReloadDecision::Started))
+            .then(|| runtime.equipped.as_ref())
+            .flatten()
+            .and_then(|weapon| {
+                manifest
+                    .as_deref()
+                    .and_then(|manifest| reload_sound_form_id(manifest, weapon))
+            });
+        runtime.last_reload = decision;
+        runtime.last_reload_sound_form_id = reload_sound_form_id;
+        if let Some(form_id) = reload_sound_form_id {
+            sounds.write(super::audio::PlaySound {
+                form_id,
+                position: None,
+                gain_db: 0.0,
+            });
+        }
     }
     for _ in fire_requests.read() {
         let Some(decision) = runtime.state.as_mut().map(WeaponState::request_fire) else {
@@ -312,6 +337,41 @@ fn process_action_requests(
     }
 }
 
+fn reload_sound_form_id(
+    manifest: &crate::viewer::LoadedSceneManifest,
+    weapon: &EquippedWeapon,
+) -> Option<u32> {
+    let fire_form_id = weapon
+        .fire_sound_2d_form_id
+        .or(weapon.fire_sound_3d_form_id)?;
+    let fire_editor_id = manifest
+        .audio_clips
+        .iter()
+        .find(|clip| clip.form_id == fire_form_id)
+        .and_then(|clip| clip.editor_id.as_deref())?;
+    let stem = fire_editor_id
+        .strip_suffix("Fire2D")
+        .or_else(|| fire_editor_id.strip_suffix("Fire3D"))?;
+    [
+        "Reload",
+        "ReloadOut",
+        "ReloadInOut",
+        "ReloadIn",
+        "ReloadChamber",
+    ]
+    .iter()
+    .find_map(|suffix| {
+        let candidate = format!("{stem}{suffix}");
+        manifest.audio_clips.iter().find_map(|clip| {
+            clip.editor_id.as_deref().and_then(|editor_id| {
+                editor_id
+                    .eq_ignore_ascii_case(&candidate)
+                    .then_some(clip.form_id)
+            })
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +415,22 @@ mod tests {
         );
         assert_eq!(weapon.damage, 9.0);
         assert_eq!(weapon.fire_sound_2d_form_id, Some(0x201));
+    }
+
+    #[test]
+    fn reload_sound_candidates_follow_fire_sound_family() {
+        let fire_editor_id = "WPNPistol10mmFire2D";
+        let stem = fire_editor_id.strip_suffix("Fire2D").unwrap();
+        let candidates = [
+            "Reload",
+            "ReloadOut",
+            "ReloadInOut",
+            "ReloadIn",
+            "ReloadChamber",
+        ]
+        .iter()
+        .map(|suffix| format!("{stem}{suffix}"))
+        .collect::<Vec<_>>();
+        assert_eq!(candidates[1], "WPNPistol10mmReloadOut");
     }
 }

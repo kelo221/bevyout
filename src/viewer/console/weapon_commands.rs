@@ -67,6 +67,7 @@ fn weapon_state(
             "viewmodel_asset_path": runtime.equipped.as_ref().and_then(|weapon| weapon.viewmodel_asset_path.as_deref()),
             "fire_sound_3d_form_id": runtime.equipped.as_ref().and_then(|weapon| weapon.fire_sound_3d_form_id),
             "fire_sound_2d_form_id": runtime.equipped.as_ref().and_then(|weapon| weapon.fire_sound_2d_form_id),
+            "reload_sound_form_id": runtime.last_reload_sound_form_id,
             "muzzle_flash_active": runtime.muzzle_flash_remaining > 0.0,
             "last_reload": runtime.last_reload.map(reload_label),
             "last_fire": {

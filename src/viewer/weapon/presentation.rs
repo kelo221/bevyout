@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use bevy::gltf::GltfAssetLabel;
+use bevy::gltf::{Gltf, GltfAssetLabel};
 use bevy::prelude::*;
 
 use bevyout_core::weapon::WeaponAction;
@@ -12,14 +12,21 @@ use crate::viewer::player::{CameraMode, CameraModeState};
 
 const IDLE_TRANSLATION: Vec3 = Vec3::new(0.28, -0.23, -0.58);
 // Native NIF conversion already bakes the asset's -90° X basis correction;
-// apply the remaining +90° Y first-person orientation here. In Bevy's camera
-// convention, the sign is opposite the source asset's left-handed Z-forward
-// rotation, so this sends the barrel away from the player.
-const IDLE_ROTATION: Vec3 = Vec3::new(0.0, 0.5 * PI, 0.0);
+// Apply the remaining +90° Y first-person orientation here. The -90° Z roll
+// is composed after that yaw so it rotates around the now-forward barrel axis
+// and keeps the left-handed weapon basis upright in the camera view.
+const IDLE_ROTATION: Vec3 = Vec3::new(0.0, 0.5 * PI, -0.5 * PI);
 const MUZZLE_TRANSLATION: Vec3 = Vec3::new(0.20, -0.15, -0.82);
+const MUZZLE_LIGHT_INTENSITY: f32 = 9_000.0;
 
 #[derive(Component)]
 pub(super) struct WeaponViewmodelRoot;
+
+/// The root GLTF handle is kept alongside the spawned scene handle so the
+/// weapon animation adapter can discover named clips after the scene's
+/// `AnimationPlayer` entities have been instantiated.
+#[derive(Component)]
+pub(super) struct WeaponViewmodelSource(pub(super) Handle<Gltf>);
 
 #[derive(Component)]
 pub(super) struct WeaponMuzzleLight;
@@ -77,9 +84,11 @@ pub(super) fn sync_viewmodel(
     }
     let camera = active_camera.expect("checked above");
     let asset_path = desired_asset.expect("checked above");
+    let gltf = asset_server.load::<Gltf>(asset_path.clone());
     let viewmodel = commands
         .spawn((
             WeaponViewmodelRoot,
+            WeaponViewmodelSource(gltf),
             WorldAssetRoot(
                 asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path.clone())),
             ),
@@ -92,7 +101,7 @@ pub(super) fn sync_viewmodel(
             WeaponMuzzleLight,
             PointLight {
                 color: Color::srgb(1.0, 0.62, 0.25),
-                intensity: 45_000.0,
+                intensity: MUZZLE_LIGHT_INTENSITY,
                 range: 4.0,
                 shadow_maps_enabled: false,
                 ..default()
@@ -218,12 +227,10 @@ fn compose_global_transform(parent: GlobalTransform, local: Transform) -> Global
 }
 
 fn idle_transform() -> Transform {
-    Transform::from_translation(IDLE_TRANSLATION).with_rotation(Quat::from_euler(
-        EulerRot::XYZ,
-        IDLE_ROTATION.x,
-        IDLE_ROTATION.y,
-        IDLE_ROTATION.z,
-    ))
+    let rotation = Quat::from_rotation_z(IDLE_ROTATION.z)
+        * Quat::from_rotation_y(IDLE_ROTATION.y)
+        * Quat::from_rotation_x(IDLE_ROTATION.x);
+    Transform::from_translation(IDLE_TRANSLATION).with_rotation(rotation)
 }
 
 fn action_transform(action: WeaponAction, progress: f32) -> Transform {
@@ -236,9 +243,13 @@ fn action_transform(action: WeaponAction, progress: f32) -> Transform {
             transform.rotate_local_x(-0.16 * arc);
         }
         WeaponAction::Reloading => {
-            transform.translation += Vec3::new(0.05 * arc, -0.28 * arc, 0.08 * arc);
-            transform.rotate_local_z(0.95 * arc);
-            transform.rotate_local_x(-0.25 * arc);
+            // Keep the reload readable without moving the large first-person
+            // mesh outside the camera. These are intentionally camera-local
+            // offsets; the authored weapon basis already supplies its yaw and
+            // roll, so a large local rotation would swing it off-screen.
+            transform.translation += Vec3::new(0.03 * arc, -0.08 * arc, 0.02 * arc);
+            transform.rotate_local_z(0.12 * arc);
+            transform.rotate_local_x(-0.08 * arc);
         }
     }
     transform
@@ -290,7 +301,7 @@ mod tests {
 
     #[test]
     fn idle_transform_uses_left_handed_weapon_orientation() {
-        let expected = Quat::from_euler(EulerRot::XYZ, 0.0, 0.5 * PI, 0.0);
+        let expected = Quat::from_rotation_z(-0.5 * PI) * Quat::from_rotation_y(0.5 * PI);
         assert!(idle_transform().rotation.abs_diff_eq(expected, 1e-6));
     }
 
