@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
+use bevy::light::EnvironmentMapLight;
+use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
 pub(super) struct RenderCommandProvider;
 
@@ -43,6 +45,14 @@ impl ConsoleCommandProvider for RenderCommandProvider {
             )
             .mutating(),
             ConsoleCommand::new(
+                "trp",
+                "trp",
+                "Toggle prepared reflection-probe origins and influence corners.",
+                toggle_reflection_probe_debug,
+            )
+            .mutating()
+            .aliases(&["togglereflectionprobes"]),
+            ConsoleCommand::new(
                 "sgtm",
                 "sgtm <0.01..100>",
                 "Set Time<Virtual> relative speed without changing pause state.",
@@ -63,7 +73,121 @@ impl ConsoleCommandProvider for RenderCommandProvider {
     }
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 12] = [
+#[derive(Component)]
+struct ReflectionProbeDebugRoot;
+
+fn toggle_reflection_probe_debug(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !invocation.args.is_empty() {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "trp does not accept arguments",
+        ));
+    }
+    let existing = {
+        let mut query =
+            world.query_filtered::<(Entity, &Visibility), With<ReflectionProbeDebugRoot>>();
+        query
+            .iter(world)
+            .next()
+            .map(|(entity, visibility)| (entity, *visibility))
+    };
+    if let Some((entity, visibility)) = existing {
+        let enabled = visibility != Visibility::Visible;
+        world.entity_mut(entity).insert(if enabled {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
+        return Ok(ConsoleCommandResult::new(
+            json!({ "enabled": enabled }),
+            vec![format!(
+                "Reflection probe visualization {}.",
+                if enabled { "enabled" } else { "disabled" }
+            )],
+        ));
+    }
+
+    let probes = world
+        .resource::<LoadedSceneManifest>()
+        .reflection_probes
+        .as_ref()
+        .map(|set| set.probes.clone())
+        .unwrap_or_default();
+    if probes.is_empty() {
+        return Err(ConsoleError::new(
+            "reflection_probes_unavailable",
+            "the active cell has no prepared reflection probes",
+        ));
+    }
+    let sphere_mesh = {
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        meshes.add(Sphere::new(0.12).mesh().ico(3).map_err(|error| {
+            ConsoleError::new(
+                "reflection_probe_debug_mesh",
+                format!("could not build debug sphere: {error}"),
+            )
+        })?)
+    };
+    let (corner_material, sphere_material) = {
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        (
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(0.15, 0.8, 1.0),
+                emissive: LinearRgba::new(0.15, 0.8, 1.0, 1.0),
+                unlit: true,
+                ..default()
+            }),
+            materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                metallic: 1.0,
+                perceptual_roughness: 0.05,
+                ..default()
+            }),
+        )
+    };
+    let root = world
+        .spawn((
+            ReflectionProbeDebugRoot,
+            Transform::default(),
+            Visibility::Visible,
+        ))
+        .id();
+    for probe in &probes {
+        let center = Vec3::from_array(probe.capture_translation);
+        let half_extents = Vec3::from_array(probe.influence_half_extents);
+        for x in [-1.0, 1.0] {
+            for y in [-1.0, 1.0] {
+                for z in [-1.0, 1.0] {
+                    world.spawn((
+                        Mesh3d(sphere_mesh.clone()),
+                        MeshMaterial3d(corner_material.clone()),
+                        Transform::from_translation(center + half_extents * Vec3::new(x, y, z))
+                            .with_scale(Vec3::splat(0.5)),
+                        ChildOf(root),
+                    ));
+                }
+            }
+        }
+        world.spawn((
+            Mesh3d(sphere_mesh.clone()),
+            MeshMaterial3d(sphere_material.clone()),
+            Transform::from_translation(center),
+            ChildOf(root),
+        ));
+    }
+    Ok(ConsoleCommandResult::new(
+        json!({ "enabled": true, "count": probes.len() }),
+        vec![format!(
+            "Reflection probe visualization enabled ({} probes).",
+            probes.len()
+        )],
+    ))
+}
+
+pub(super) const RENDER_SETTINGS: [&str; 13] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -76,6 +200,7 @@ pub(super) const RENDER_SETTINGS: [&str; 12] = [
     "emission",
     "shadow_samples",
     "realtime_shadows",
+    "reflection_probes",
 ];
 
 const IMAGE_SPACE_DIAGNOSTIC: &str = "imagespace";
@@ -256,6 +381,17 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         "realtime_shadows".into(),
         json!(world.resource::<RealtimeShadowSettings>().enabled as u8),
     );
+    let reflection_probes_enabled = {
+        let mut query = world.query_filtered::<
+            &EnvironmentMapLight,
+            With<crate::viewer::scene::PreparedReflectionProbe>,
+        >();
+        query.iter(world).any(|probe| probe.intensity > 0.0)
+    };
+    values.insert(
+        "reflection_probes".into(),
+        json!(reflection_probes_enabled as u8),
+    );
     Ok(values)
 }
 
@@ -337,6 +473,7 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "emission" => "Material emission",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
+        "reflection_probes" => "Prepared reflection probes",
         _ => "Render setting",
     }
 }
@@ -410,7 +547,7 @@ pub(super) fn set_render(
         "volumetric_fog" => (0.0..=100.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
-        "realtime_shadows" => value == 0.0 || value == 1.0,
+        "realtime_shadows" | "reflection_probes" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
     if !valid {
@@ -431,6 +568,19 @@ pub(super) fn set_render(
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
+        }
+        "reflection_probes" => {
+            let mut query = world.query_filtered::<
+                &mut EnvironmentMapLight,
+                With<crate::viewer::scene::PreparedReflectionProbe>,
+            >();
+            for mut probe in query.iter_mut(world) {
+                probe.intensity = if value == 1.0 {
+                    crate::viewer::scene::PREPARED_REFLECTION_PROBE_INTENSITY
+                } else {
+                    0.0
+                };
+            }
         }
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
             let camera = {

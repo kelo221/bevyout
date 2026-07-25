@@ -296,6 +296,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
                 range: 8.0,
             }],
         }),
+        reflection_probes: None,
         mutability_summary: PreparedMutabilitySummary {
             immutable: 1,
             enable_group: 1,
@@ -523,6 +524,7 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         hard_landing_clips: Vec::new(),
         bake: None,
         static_point_shadows: None,
+        reflection_probes: None,
         mutability_summary: PreparedMutabilitySummary::default(),
         leveled_lists,
         item_catalog_path: None,

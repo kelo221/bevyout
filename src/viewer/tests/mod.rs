@@ -362,6 +362,11 @@ fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
 }
 
 #[test]
+fn volumetric_fog_default_preserves_authored_values_at_five_percent() {
+    assert_eq!(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER, 0.05);
+}
+
+#[test]
 fn volumetric_fog_uses_cell_range_and_live_fog_strength() {
     let lighting = PreparedCellLighting {
         fog_rgba: [0.1, 0.2, 0.3, 0.0],

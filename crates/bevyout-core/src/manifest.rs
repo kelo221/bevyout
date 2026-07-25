@@ -86,6 +86,11 @@ pub struct PreparedSceneManifest {
     pub bake: Option<PreparedBake>,
     #[serde(default)]
     pub static_point_shadows: Option<PreparedStaticPointShadows>,
+    /// Automatically placed, prepared reflection probes for this interior.
+    /// The diffuse irradiance volume remains authoritative for diffuse GI;
+    /// these probes primarily provide local specular image-based lighting.
+    #[serde(default)]
+    pub reflection_probes: Option<PreparedReflectionProbeSet>,
     /// QA counts of `PreparedRuntimeMutability` classifications across
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
@@ -248,6 +253,26 @@ pub struct PreparedStaticPointShadowLight {
     pub layer: u32,
     pub translation: [f32; 3],
     pub range: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedReflectionProbeSet {
+    pub revision: String,
+    pub source_fingerprint: String,
+    pub face_resolution: u32,
+    pub probes: Vec<PreparedReflectionProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedReflectionProbe {
+    pub capture_translation: [f32; 3],
+    /// World-space half extents of the cuboid influence region.
+    pub influence_half_extents: [f32; 3],
+    /// World-space half extents represented by the captured environment.
+    pub parallax_half_extents: [f32; 3],
+    pub falloff: [f32; 3],
+    pub diffuse_asset_path: String,
+    pub specular_asset_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

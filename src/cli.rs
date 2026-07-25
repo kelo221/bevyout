@@ -246,6 +246,9 @@ pub struct PrepareArgs {
     /// Rebuild prepared point-shadow cubemaps even when their fingerprint matches.
     #[arg(long)]
     pub(crate) rebuild_shadows: bool,
+    /// Rebuild prepared reflection-probe cubemaps even when their fingerprint matches.
+    #[arg(long)]
+    pub(crate) rebuild_reflection_probes: bool,
     /// Output cache directory.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
@@ -386,6 +389,9 @@ pub struct RenderArgs {
     /// Rebuild prepared point-shadow cubemaps if render refreshes the cell.
     #[arg(long)]
     pub(crate) rebuild_shadows: bool,
+    /// Rebuild prepared reflection probes if render refreshes the cell.
+    #[arg(long)]
+    pub(crate) rebuild_reflection_probes: bool,
     /// Enable the bounded native realtime point-shadow pass at startup.
     #[arg(long)]
     pub(crate) realtime_shadows: bool,

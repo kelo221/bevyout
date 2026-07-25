@@ -32,6 +32,9 @@ mod package_catalog;
 mod placements;
 mod plugins;
 mod recipes;
+mod reflection_probe_distribution;
+mod reflection_probe_policy;
+mod reflection_probes;
 mod selectors;
 mod session;
 mod static_shadows;
@@ -62,6 +65,9 @@ pub(crate) use package_catalog::*;
 pub(crate) use placements::*;
 pub(crate) use plugins::*;
 pub(crate) use recipes::*;
+pub(crate) use reflection_probe_distribution::*;
+pub(crate) use reflection_probe_policy::*;
+pub(crate) use reflection_probes::*;
 pub(crate) use selectors::*;
 pub(crate) use session::*;
 pub(crate) use static_shadows::*;
@@ -92,9 +98,10 @@ use super::manifest::{
     PreparedItemStats, PreparedLight, PreparedLightingTemplate, PreparedMutabilitySummary,
     PreparedNavGraphSource, PreparedNavMeshChunk, PreparedNavMeshSource,
     PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
-    PreparedPluginSource, PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
+    PreparedPluginSource, PreparedReflectionProbe, PreparedReflectionProbeSet,
+    PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
     PreparedStaticPointShadowLight, PreparedStaticPointShadows, PreparedVisualIssue,
-    STATIC_POINT_SHADOW_REVISION,
+    REFLECTION_PROBE_REVISION, STATIC_POINT_SHADOW_REVISION,
 };
 use super::openmw_esm4::{LightingData, OpenMwItemStats};
 use super::paths::{

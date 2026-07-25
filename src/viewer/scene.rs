@@ -12,7 +12,10 @@ use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfMaterialExtras;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
-use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog, VolumetricLight};
+use bevy::light::{
+    EnvironmentMapLight, FogVolume, LightProbe, NotShadowCaster, ParallaxCorrection, VolumetricFog,
+    VolumetricLight,
+};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
@@ -29,6 +32,10 @@ pub(crate) struct FalloutMaterialConfigured;
 
 #[derive(Component)]
 pub(crate) struct CellVolumetricFog;
+
+#[derive(Component)]
+pub(crate) struct PreparedReflectionProbe;
+pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -514,6 +521,7 @@ pub(crate) fn spawn_prepared_scene(
         root_entity.insert(PreparedPointShadowReceiverRoot);
     }
     let root = root_entity.id();
+    spawn_cell_reflection_probes(&mut commands, &asset_server, &manifest, root);
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
@@ -585,6 +593,45 @@ pub(crate) fn spawn_prepared_scene(
     );
     info!(
         "controls: Tab opens Pip-Boy, ` (backquote) opens the console, Esc pauses and releases cursor, left click captures cursor"
+    );
+}
+
+pub(crate) fn spawn_cell_reflection_probes(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    manifest: &crate::vsa::PreparedSceneManifest,
+    root: Entity,
+) {
+    let Some(probe_set) = manifest.reflection_probes.as_ref() else {
+        return;
+    };
+    for probe in &probe_set.probes {
+        let half_extents = Vec3::from_array(probe.influence_half_extents).max(Vec3::splat(0.01));
+        let scale = half_extents * 2.0;
+        let parallax_world = Vec3::from_array(probe.parallax_half_extents).max(Vec3::splat(0.01));
+        let parallax_local = parallax_world / scale;
+        commands.spawn((
+            PreparedReflectionProbe,
+            LightProbe {
+                falloff: Vec3::from_array(probe.falloff),
+            },
+            EnvironmentMapLight {
+                diffuse_map: asset_server.load(probe.diffuse_asset_path.clone()),
+                specular_map: asset_server.load(probe.specular_asset_path.clone()),
+                intensity: PREPARED_REFLECTION_PROBE_INTENSITY,
+                affects_lightmapped_mesh_diffuse: false,
+                ..default()
+            },
+            ParallaxCorrection::Custom(parallax_local),
+            Transform::from_translation(Vec3::from_array(probe.capture_translation))
+                .with_scale(scale),
+            ChildOf(root),
+        ));
+    }
+    info!(
+        "reflection probes: loaded {} prepared probe(s) for {}",
+        probe_set.probes.len(),
+        cell_label(&manifest.cell)
     );
 }
 
@@ -1354,6 +1401,7 @@ mod tests {
             hard_landing_clips: Vec::new(),
             bake: None,
             static_point_shadows: None,
+            reflection_probes: None,
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }

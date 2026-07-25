@@ -142,6 +142,11 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
         let mut query = world.query_filtered::<Entity, With<IrradianceVolume>>();
         query.iter(world).count()
     };
+    let reflection_probe_count = {
+        let mut query =
+            world.query_filtered::<Entity, With<super::scene::PreparedReflectionProbe>>();
+        query.iter(world).count()
+    };
     let collider_count = {
         let mut query = world.query_filtered::<Entity, With<player::PhysicsCollider>>();
         query.iter(world).count()
@@ -155,7 +160,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
         .join(";");
 
     let mut csv = String::from(
-        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_awake_dynamic_bodies,physics_sleeping_dynamic_bodies,physics_dynamic_transform_updates,physics_cooking_ms,physics_sidecar_bytes\n",
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,reflection_probes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_awake_dynamic_bodies,physics_sleeping_dynamic_bodies,physics_dynamic_transform_updates,physics_cooking_ms,physics_sidecar_bytes\n",
     );
     for sample in &samples {
         let fps = if sample.frame_time_ms > f64::EPSILON {
@@ -164,7 +169,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             0.0
         };
         csv.push_str(&format!(
-            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
             sample.sample,
             sample.frame_time_ms,
             fps,
@@ -175,6 +180,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             point_light_count,
             directional_light_count,
             irradiance_volume_count,
+            reflection_probe_count,
             camera_count,
             mesh_assets,
             material_assets,
