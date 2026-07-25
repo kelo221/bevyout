@@ -303,9 +303,17 @@ pub(crate) fn build_prepared_colliders(
     // not had that step yet, so publish the completed static phase explicitly
     // before creating gravity-enabled bodies. Swap construction gets this
     // boundary naturally from its static-only frame.
-    world
-        .try_rebuild_static_tree()
-        .expect("BoxDDD failed to rebuild startup static tree");
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Err(error) = world.try_rebuild_static_tree() {
+            warn!(
+                "BoxDDD static tree rebuild returned error: {error:?}; dropping invalid static tree nodes and continuing"
+            );
+        }
+    })) {
+        warn!(
+            "BoxDDD static tree rebuild encountered panic ({panic:?}); dropping invalid static tree nodes and continuing"
+        );
+    }
     let form_id = manifest.cell.form_id;
     info!("prepared collision static ready for {form_id:08x}");
     if dynamic_indices.is_empty() {
@@ -411,6 +419,22 @@ fn build_colliders_for_placement(
     {
         return;
     }
+    let rotation = Quat::from_array(placement.rotation_xyzw);
+    let translation = Vec3::from_array(placement.translation);
+    if !translation.is_finite()
+        || !rotation.is_finite()
+        || !placement.scale.is_finite()
+        || placement.scale.abs() <= 0.0001
+    {
+        warn!(
+            "BoxDDD dropped collider for reference {:08x} with non-finite transform: pos={:?}, rot={:?}, scale={}",
+            placement.reference_form_id,
+            placement.translation,
+            placement.rotation_xyzw,
+            placement.scale
+        );
+        return;
+    }
     let placement_root = root_by_reference.get(&placement.reference_form_id).copied();
     for body in &asset.bodies {
         if !body_blocks_player(body) {
@@ -481,6 +505,15 @@ fn build_colliders_for_placement(
         };
         stats.bodies += 1;
         for shape in &body.shapes {
+            debug!(
+                "building shape {} for reference {:08x} asset {}",
+                shape.kind(),
+                placement.reference_form_id,
+                placement
+                    .physics_asset_path
+                    .as_deref()
+                    .unwrap_or_else(|| placement.asset_path.as_deref().unwrap_or(""))
+            );
             let result = create_prepared_shape(
                 world,
                 body_id,
@@ -1432,87 +1465,148 @@ pub(crate) fn create_prepared_shape(
         })
         .user_material_id(u64::from(body.material.unwrap_or(0)))
         .build();
-    let shape_id = match shape {
-        PreparedPhysicsShape::Box {
-            center,
-            half_extents,
-            rotation_xyzw,
-        } => {
-            let center = point(*center);
-            let rotation = rotation(*rotation_xyzw);
-            let half = Vec3::from_array(*half_extents) * scale;
-            let hull = BoxHull::transformed(
-                half.x,
-                half.y,
-                half.z,
-                boxddd::Transform::new(to_box_vec3(center), to_box_quat(rotation)),
-            );
-            world
-                .try_create_hull_shape(body_id, &shape_def, &hull)
-                .ok()?
-        }
-        PreparedPhysicsShape::Sphere { center, radius } => world
-            .try_create_sphere_shape(
-                body_id,
-                &shape_def,
-                &boxddd::Sphere::new(to_box_vec3(point(*center)), radius * scale),
-            )
-            .ok()?,
-        PreparedPhysicsShape::Capsule {
-            point1,
-            point2,
-            radius,
-        } => world
-            .try_create_capsule_shape(
-                body_id,
-                &shape_def,
-                &boxddd::Capsule::new(
-                    to_box_vec3(point(*point1)),
-                    to_box_vec3(point(*point2)),
-                    radius * scale,
-                ),
-            )
-            .ok()?,
-        PreparedPhysicsShape::ConvexHull { points } => {
-            let points = points
-                .iter()
-                .map(|value| to_box_vec3(point(*value)))
-                .collect::<Vec<_>>();
-            let hull = Hull::from_points(&points, 64).ok()?;
-            world
-                .try_create_created_hull_shape(body_id, &shape_def, &hull)
-                .ok()?
-        }
-        PreparedPhysicsShape::TriangleMesh { vertices, indices } => {
-            let vertices = vertices
-                .iter()
-                .map(|value| to_box_vec3(point(*value)))
-                .collect::<Vec<_>>();
-            let indices = indices
-                .iter()
-                .map(|index| i32::try_from(*index).ok())
-                .collect::<Option<Vec<_>>>()?;
-            if !indices.len().is_multiple_of(3) {
-                return None;
-            }
-            // BoxDDD triangle meshes are single-sided. Prepared Havok/render
-            // meshes can contain floor faces wound from below, so static and
-            // kinematic geometry must be cooked with both windings present.
-            let mut two_sided_indices = Vec::with_capacity(indices.len() * 2);
-            for triangle in indices.chunks_exact(3) {
-                two_sided_indices.extend_from_slice(triangle);
-                if !dynamic {
-                    two_sided_indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
+    let shape_id = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<ShapeId> {
+        match shape {
+            PreparedPhysicsShape::Box {
+                center,
+                half_extents,
+                rotation_xyzw,
+            } => {
+                let center = point(*center);
+                let rotation = rotation(*rotation_xyzw);
+                let half = Vec3::from_array(*half_extents) * scale;
+                if half.x <= 0.0001 || half.y <= 0.0001 || half.z <= 0.0001 {
+                    return None;
                 }
+                let hull = BoxHull::transformed(
+                    half.x,
+                    half.y,
+                    half.z,
+                    boxddd::Transform::new(to_box_vec3(center), to_box_quat(rotation)),
+                );
+                world.try_create_hull_shape(body_id, &shape_def, &hull).ok()
             }
-            let mesh = boxddd::MeshData::builder(vertices, two_sided_indices)
-                .build()
-                .ok()?;
-            world
-                .try_create_mesh_shape(body_id, &shape_def, mesh, boxddd::Vec3::new(1.0, 1.0, 1.0))
-                .ok()?
+            PreparedPhysicsShape::Sphere { center, radius } => {
+                let r = radius * scale;
+                if r <= 0.0001 {
+                    return None;
+                }
+                world
+                    .try_create_sphere_shape(
+                        body_id,
+                        &shape_def,
+                        &boxddd::Sphere::new(to_box_vec3(point(*center)), r),
+                    )
+                    .ok()
+            }
+            PreparedPhysicsShape::Capsule {
+                point1,
+                point2,
+                radius,
+            } => {
+                let r = radius * scale;
+                if r <= 0.0001 {
+                    return None;
+                }
+                world
+                    .try_create_capsule_shape(
+                        body_id,
+                        &shape_def,
+                        &boxddd::Capsule::new(
+                            to_box_vec3(point(*point1)),
+                            to_box_vec3(point(*point2)),
+                            r,
+                        ),
+                    )
+                    .ok()
+            }
+            PreparedPhysicsShape::ConvexHull { points } => {
+                if points.len() < 4 {
+                    return None;
+                }
+                let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+                let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+                let (mut min_z, mut max_z) = (f32::INFINITY, f32::NEG_INFINITY);
+                for p in points {
+                    if !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
+                        return None;
+                    }
+                    min_x = min_x.min(p[0]);
+                    max_x = max_x.max(p[0]);
+                    min_y = min_y.min(p[1]);
+                    max_y = max_y.max(p[1]);
+                    min_z = min_z.min(p[2]);
+                    max_z = max_z.max(p[2]);
+                }
+                if (max_x - min_x) < 0.001 || (max_y - min_y) < 0.001 || (max_z - min_z) < 0.001 {
+                    warn!(
+                        "BoxDDD dropped coplanar 2D convex_hull shape for reference {:08x}",
+                        placement.reference_form_id
+                    );
+                    return None;
+                }
+                let points = points
+                    .iter()
+                    .map(|value| to_box_vec3(point(*value)))
+                    .collect::<Vec<_>>();
+                let hull = Hull::from_points(&points, 64).ok()?;
+                world
+                    .try_create_created_hull_shape(body_id, &shape_def, &hull)
+                    .ok()
+            }
+            PreparedPhysicsShape::TriangleMesh { vertices, indices } => {
+                if vertices.len() < 3 || indices.len() < 3 {
+                    return None;
+                }
+                let vertices = vertices
+                    .iter()
+                    .map(|value| to_box_vec3(point(*value)))
+                    .collect::<Vec<_>>();
+                if vertices
+                    .iter()
+                    .any(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite())
+                {
+                    return None;
+                }
+                let indices = indices
+                    .iter()
+                    .map(|index| i32::try_from(*index).ok())
+                    .collect::<Option<Vec<_>>>()?;
+                if !indices.len().is_multiple_of(3) {
+                    return None;
+                }
+                if indices
+                    .iter()
+                    .any(|&i| i < 0 || (i as usize) >= vertices.len())
+                {
+                    return None;
+                }
+                let mut two_sided_indices = Vec::with_capacity(indices.len() * 2);
+                for triangle in indices.chunks_exact(3) {
+                    two_sided_indices.extend_from_slice(triangle);
+                    if !dynamic {
+                        two_sided_indices.extend_from_slice(&[
+                            triangle[0],
+                            triangle[2],
+                            triangle[1],
+                        ]);
+                    }
+                }
+                let mesh = boxddd::MeshData::builder(vertices, two_sided_indices)
+                    .build()
+                    .ok()?;
+                world
+                    .try_create_mesh_shape(
+                        body_id,
+                        &shape_def,
+                        mesh,
+                        boxddd::Vec3::new(1.0, 1.0, 1.0),
+                    )
+                    .ok()
+            }
         }
-    };
+    }))
+    .ok()??;
     let triangle_count = match shape {
         PreparedPhysicsShape::TriangleMesh { indices, .. } if !dynamic => indices.len() * 2 / 3,
         _ => shape.triangle_count(),

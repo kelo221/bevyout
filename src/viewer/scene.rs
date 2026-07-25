@@ -12,7 +12,10 @@ use crate::vsa::PreparedPlacement;
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfMaterialExtras;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
-use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog, VolumetricLight};
+use bevy::light::{
+    EnvironmentMapLight, FogVolume, LightProbe, NotShadowCaster, ParallaxCorrection, VolumetricFog,
+    VolumetricLight,
+};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
 use bevy::render::render_resource::TextureFormat;
@@ -29,6 +32,10 @@ pub(crate) struct FalloutMaterialConfigured;
 
 #[derive(Component)]
 pub(crate) struct CellVolumetricFog;
+
+#[derive(Component)]
+pub(crate) struct PreparedReflectionProbe;
+pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -514,6 +521,7 @@ pub(crate) fn spawn_prepared_scene(
         root_entity.insert(PreparedPointShadowReceiverRoot);
     }
     let root = root_entity.id();
+    spawn_cell_reflection_probes(&mut commands, &asset_server, &manifest, root);
     for light in &manifest.lights {
         if !light.initially_enabled {
             continue;
@@ -585,6 +593,45 @@ pub(crate) fn spawn_prepared_scene(
     );
     info!(
         "controls: Tab opens Pip-Boy, ` (backquote) opens the console, Esc pauses and releases cursor, left click captures cursor"
+    );
+}
+
+pub(crate) fn spawn_cell_reflection_probes(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    manifest: &crate::vsa::PreparedSceneManifest,
+    root: Entity,
+) {
+    let Some(probe_set) = manifest.reflection_probes.as_ref() else {
+        return;
+    };
+    for probe in &probe_set.probes {
+        let half_extents = Vec3::from_array(probe.influence_half_extents).max(Vec3::splat(0.01));
+        let scale = half_extents * 2.0;
+        let parallax_world = Vec3::from_array(probe.parallax_half_extents).max(Vec3::splat(0.01));
+        let parallax_local = parallax_world / scale;
+        commands.spawn((
+            PreparedReflectionProbe,
+            LightProbe {
+                falloff: Vec3::from_array(probe.falloff),
+            },
+            EnvironmentMapLight {
+                diffuse_map: asset_server.load(probe.diffuse_asset_path.clone()),
+                specular_map: asset_server.load(probe.specular_asset_path.clone()),
+                intensity: PREPARED_REFLECTION_PROBE_INTENSITY,
+                affects_lightmapped_mesh_diffuse: false,
+                ..default()
+            },
+            ParallaxCorrection::Custom(parallax_local),
+            Transform::from_translation(Vec3::from_array(probe.capture_translation))
+                .with_scale(scale),
+            ChildOf(root),
+        ));
+    }
+    info!(
+        "reflection probes: loaded {} prepared probe(s) for {}",
+        probe_set.probes.len(),
+        cell_label(&manifest.cell)
     );
 }
 
@@ -1123,16 +1170,32 @@ pub(crate) fn camera_post_processing(
     let flags = image_space.flags;
     let mut color_grading = ColorGrading::default();
     if flags & 0x08 != 0 {
-        color_grading.global.exposure = image_space.brightness.max(0.0001).log2();
+        color_grading.global.exposure = image_space.cinematic_brightness.max(0.0001).log2();
     }
     if flags & 0x01 != 0 {
         color_grading.global.post_saturation = image_space.cinematic_saturation.max(0.0);
     }
     if flags & 0x02 != 0 {
-        let contrast = image_space.cinematic_contrast.max(0.0);
-        color_grading.shadows.contrast = contrast;
-        color_grading.midtones.contrast = contrast;
-        color_grading.highlights.contrast = contrast;
+        let contrast = image_space.cinematic_contrast.max(0.01);
+        let contrast_pivot = if image_space.cinematic_contrast_avg_lum.is_finite() {
+            image_space.cinematic_contrast_avg_lum.clamp(0.001, 1.0)
+        } else {
+            0.18
+        };
+        // Bevy's linear contrast stage is hard-coded around 0.5 and runs
+        // before auto-exposure. Fallout's authored average luminance is a
+        // much lower pivot (commonly around 0.14), so feeding its multiplier
+        // to Bevy directly clips almost the whole HDR interior below zero.
+        // A power curve preserves positive HDR values and the authored pivot:
+        //     output = pivot * (input / pivot)^contrast
+        let gamma = contrast.recip();
+        let gain = contrast_pivot.powf((1.0 - contrast) / contrast);
+        color_grading.shadows.gamma = gamma;
+        color_grading.midtones.gamma = gamma;
+        color_grading.highlights.gamma = gamma;
+        color_grading.shadows.gain = gain;
+        color_grading.midtones.gain = gain;
+        color_grading.highlights.gain = gain;
     }
     if flags & 0x04 != 0
         && let Some((temperature, tint)) = image_space_tint_to_white_balance(
@@ -1181,10 +1244,19 @@ pub(crate) fn image_space_tint_to_white_balance(
     }
     let target_x = x / sum;
     let target_y = y / sum;
-    let strength = strength.max(0.0);
+    // Fallout authors this value as the opacity of a cinematic color
+    // overlay. Bevy exposes chromatic white-balance offsets instead, whose
+    // perceptual response is much weaker for the same normalized value.
+    // Calibrate the normalized overlay strength to the closest matching
+    // white-balance response while keeping malformed values bounded.
+    let strength = if strength.is_finite() {
+        strength.clamp(0.0, 1.0) * 4.0
+    } else {
+        0.0
+    };
     Some((
-        (0.3127 - target_x) * strength,
-        (target_y - 0.3290) * strength,
+        (target_x - 0.3127) * strength,
+        (0.3290 - target_y) * strength,
     ))
 }
 
@@ -1354,6 +1426,7 @@ mod tests {
             hard_landing_clips: Vec::new(),
             bake: None,
             static_point_shadows: None,
+            reflection_probes: None,
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }

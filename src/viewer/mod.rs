@@ -6,7 +6,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gltf::GltfMeshName;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
-use bevy::light::{IrradianceVolume, LightProbe, PointLightShadowMap, ShadowFilteringMethod};
+use bevy::light::{IrradianceVolume, PointLightShadowMap, ShadowFilteringMethod};
 use bevy::math::{cubic_splines::LinearSpline, vec2};
 use bevy::mesh::{Mesh, VertexAttributeValues};
 use bevy::pbr::{
@@ -320,6 +320,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
         rebuild_shadows: args.rebuild_shadows,
+        rebuild_reflection_probes: args.rebuild_reflection_probes,
         cache_dir: Some(cache_dir.to_path_buf()),
         force,
         rebuild_assets: false,

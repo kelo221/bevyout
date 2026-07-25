@@ -209,8 +209,11 @@ fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // [2]: https://en.wikipedia.org/wiki/Beer%E2%80%93Lambert_law
 
     // Use Beer's law again to accumulate the ambient light all along the path.
-    var accumulated_color = exp(-ray_length_view * (absorption + scattering)) * ambient_color *
-        ambient_intensity;
+    // Ambient in-scattering starts at zero at the camera and accumulates with
+    // optical depth. Using transmittance directly here inverted that profile:
+    // nearby geometry was greyed out while distant geometry lost the haze.
+    var accumulated_color = (1.0 - exp(-ray_length_view * (absorption + scattering))) *
+        ambient_color * ambient_intensity;
 
     // This is the amount of the background that shows through. We're actually
     // going to recompute this over and over again for each directional light,
@@ -476,6 +479,7 @@ fn fetch_point_shadow_without_normal(light_id: u32, frag_position: vec4<f32>, fr
         depth,
         (*light).shadow_map_index_or_spot_light_tan_angle,
         frag_coord_xy,
+        false,
     );
 }
 

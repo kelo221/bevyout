@@ -176,6 +176,73 @@ pub(crate) fn bake_irradiance(
     })
 }
 
+/// Traces a Bevy/KTX-oriented HDR reflection cubemap from a prepared position.
+/// Four deterministic sub-pixel samples keep the low-resolution 64px capture
+/// stable without turning prepare into a runtime cubemap render pass.
+pub(crate) fn trace_reflection_cubemap(
+    scene: &RustBakeScene,
+    lights: &[JobLight],
+    directional: &DirectionalBakeLight,
+    position: [f32; 3],
+    resolution: u32,
+) -> Result<Vec<Vec<u32>>> {
+    let mut triangles = collect_triangles(scene)?;
+    if triangles.is_empty() {
+        bail!("Rust reflection capture scene contains no triangles");
+    }
+    let bvh = Bvh::build_par(&mut triangles);
+    let origin = Vec3::from_array(position);
+    let max_distance = scene.bounds.extent().length() * 2.0 + 1.0;
+    let sample_offsets = [
+        (0.25_f32, 0.25_f32),
+        (0.75, 0.25),
+        (0.25, 0.75),
+        (0.75, 0.75),
+    ];
+    let faces = (0..6)
+        .into_par_iter()
+        .map(|face| {
+            let mut pixels = Vec::with_capacity((resolution * resolution) as usize);
+            for y in 0..resolution {
+                for x in 0..resolution {
+                    let mut radiance = Vec3::ZERO;
+                    for (offset_x, offset_y) in sample_offsets {
+                        let u = ((x as f32 + offset_x) / resolution as f32) * 2.0 - 1.0;
+                        let v = ((y as f32 + offset_y) / resolution as f32) * 2.0 - 1.0;
+                        let direction = reflection_cubemap_direction(face, u, v);
+                        radiance += trace_radiance(
+                            &bvh,
+                            &triangles,
+                            &scene.materials,
+                            lights,
+                            directional,
+                            origin,
+                            direction,
+                            max_distance,
+                        );
+                    }
+                    pixels.push(pack_rgb9e5(radiance / sample_offsets.len() as f32));
+                }
+            }
+            pixels
+        })
+        .collect();
+    Ok(faces)
+}
+
+fn reflection_cubemap_direction(face: usize, u: f32, v: f32) -> Vec3 {
+    let ktx = match face {
+        0 => Vec3::new(1.0, -v, -u),
+        1 => Vec3::new(-1.0, -v, u),
+        2 => Vec3::new(u, 1.0, v),
+        3 => Vec3::new(u, -1.0, -v),
+        4 => Vec3::new(u, -v, 1.0),
+        5 => Vec3::new(-u, -v, -1.0),
+        _ => unreachable!("cubemap face must be in 0..6"),
+    };
+    Vec3::new(ktx.x, ktx.y, -ktx.z).normalize()
+}
+
 fn collect_triangles(scene: &RustBakeScene) -> Result<Vec<IrradianceTriangle>> {
     let mut triangles = Vec::new();
     for primitive in &scene.primitives {

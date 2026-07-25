@@ -27,7 +27,9 @@ use crate::vsa::{CellMap, PreparedSceneManifest};
 use std::collections::VecDeque;
 
 use super::super::LightingScale;
-use super::super::scene::{spawn_cell_lights, spawn_cell_placements_chunk};
+use super::super::scene::{
+    spawn_cell_lights, spawn_cell_placements_chunk, spawn_cell_reflection_probes,
+};
 use super::policy;
 
 /// Raw `manifest.placements` entries a background preload spawns per frame.
@@ -340,6 +342,7 @@ fn evaluate_preload_plan(
 #[allow(clippy::too_many_arguments)]
 fn poll_preload_parse_tasks(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     lighting: Res<LightingScale>,
     mut pending: Query<(Entity, &mut PendingPreloadParse)>,
     mut resident_cells: ResMut<ResidentCells>,
@@ -374,6 +377,7 @@ fn poll_preload_parse_tasks(
                     .spawn((Transform::default(), Visibility::Hidden))
                     .id();
                 spawn_cell_lights(&mut commands, &manifest, root, lighting.0);
+                spawn_cell_reflection_probes(&mut commands, &asset_server, &manifest, root);
                 resident_cells.0.insert(
                     form_id,
                     ResidentCell {
@@ -591,6 +595,7 @@ mod issue_199_tests {
             hard_landing_clips: Vec::new(),
             bake: None,
             static_point_shadows: None,
+            reflection_probes: None,
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }

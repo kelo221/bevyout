@@ -13,8 +13,8 @@ mod gltf_extension_policy;
 mod job;
 mod plan;
 mod policy;
-mod rust_irradiance;
-mod rust_scene;
+pub(crate) mod rust_irradiance;
+pub(crate) mod rust_scene;
 mod tools;
 
 pub(crate) use batch::*;

@@ -119,12 +119,21 @@ fn image_space_tint_maps_neutral_white_to_neutral_balance() {
 }
 
 #[test]
+fn image_space_warm_tint_produces_a_warm_artistic_cast() {
+    let (temperature, tint) = image_space_tint_to_white_balance([0.69, 0.56, 0.30], 0.5)
+        .expect("warm tint has a valid chromaticity");
+    assert!(temperature > 0.1);
+    assert!(tint < -0.1);
+}
+
+#[test]
 fn image_space_settings_map_to_grading_and_target_exposure() {
     let mut image_space = ImageSpaceInfo {
         flags: 0x0f,
         hdr_target_lum: 2.0,
-        brightness: 4.0,
+        cinematic_brightness: 4.0,
         cinematic_saturation: 0.5,
+        cinematic_contrast_avg_lum: 0.25,
         cinematic_contrast: 1.5,
         cinematic_brightness_tint_rgb: [0.8, 0.9, 1.0],
         cinematic_brightness_tint_value: 1.0,
@@ -136,9 +145,17 @@ fn image_space_settings_map_to_grading_and_target_exposure() {
 
     assert!((grading.global.exposure - 2.0).abs() < f32::EPSILON);
     assert!((grading.global.post_saturation - 0.5).abs() < f32::EPSILON);
-    assert!((grading.shadows.contrast - 1.5).abs() < f32::EPSILON);
-    assert!((grading.midtones.contrast - 1.5).abs() < f32::EPSILON);
-    assert!((grading.highlights.contrast - 1.5).abs() < f32::EPSILON);
+    let expected_gamma = 1.0 / 1.5;
+    let expected_gain = 0.25_f32.powf((1.0 - 1.5) / 1.5);
+    assert_eq!(grading.shadows.contrast, 1.0);
+    assert_eq!(grading.midtones.contrast, 1.0);
+    assert_eq!(grading.highlights.contrast, 1.0);
+    assert!((grading.shadows.gamma - expected_gamma).abs() < f32::EPSILON);
+    assert!((grading.midtones.gamma - expected_gamma).abs() < f32::EPSILON);
+    assert!((grading.highlights.gamma - expected_gamma).abs() < f32::EPSILON);
+    assert!((grading.shadows.gain - expected_gain).abs() < f32::EPSILON);
+    assert!((grading.midtones.gain - expected_gain).abs() < f32::EPSILON);
+    assert!((grading.highlights.gain - expected_gain).abs() < f32::EPSILON);
     assert!(grading.global.tint.abs() > 0.0 || grading.global.temperature.abs() > 0.0);
     let auto_exposure = auto_exposure.expect("image space enables auto exposure");
     assert!((auto_exposure.speed_brighten - 12.25).abs() < f32::EPSILON);
@@ -149,7 +166,7 @@ fn image_space_settings_map_to_grading_and_target_exposure() {
 fn image_space_flags_zero_leave_cinematic_grading_neutral() {
     let image_space = ImageSpaceInfo {
         flags: 0,
-        brightness: 4.0,
+        cinematic_brightness: 4.0,
         cinematic_saturation: 0.1,
         cinematic_contrast: 1.5,
         cinematic_brightness_tint_rgb: [0.1, 0.8, 0.2],
@@ -359,6 +376,11 @@ fn fog_uses_fo3_distances_and_rejects_invalid_ranges() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn volumetric_fog_default_preserves_authored_values_at_five_percent() {
+    assert_eq!(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER, 0.05);
 }
 
 #[test]

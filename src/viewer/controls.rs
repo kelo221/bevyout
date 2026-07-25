@@ -183,8 +183,9 @@ pub(crate) struct FogStrength(pub(crate) f32);
 
 /// Live multiplier for the cell-driven volumetric fog density. This is kept
 /// separate from `FogStrength` so the existing distance-fog tuning remains
-/// unchanged while volumetric visibility can be raised for inspection.
-pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 1.0;
+/// unchanged. The 0.05 baseline preserves authored cell values without the
+/// over-dense result observed in SuperDuperMart.
+pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 0.05;
 
 #[derive(Resource)]
 pub(crate) struct VolumetricFogMultiplier(pub(crate) f32);

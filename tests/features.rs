@@ -54,6 +54,9 @@ mod pause_menu {
     pub use bevyout_core::pause_menu::*;
 }
 
+#[path = "../src/vsa/prepare/reflection_probe_distribution.rs"]
+mod reflection_probe_distribution;
+
 // These files are pulled in verbatim and cover far more ground than the three
 // pure seams this suite drives (placement math, cell selectors, manifest
 // (de)serialization, conversion-profile selection). Everything else in them
@@ -944,6 +947,10 @@ struct BevyoutWorld {
     weapon_actor_definition: actor_state::ActorDefinition,
     weapon_actor_instance: actor_state::ActorInstanceState,
     weapon_damage_outcome: Option<weapon::DamageOutcome>,
+
+    // -- reflection_probes.feature: deterministic, capped room allocation --
+    reflection_probe_region_areas: Vec<f32>,
+    reflection_probe_counts: Vec<usize>,
 }
 
 fn find_placement<'a>(
@@ -12785,4 +12792,34 @@ async fn then_actor_is_dead(world: &mut BevyoutWorld) {
         world.weapon_actor_instance.life_state,
         actor_state::ActorLifeState::Dead
     );
+}
+
+// ---------------------------------------------------------------------
+// reflection_probes.feature
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^reflection-probe region areas "([^"]*)"$"#)]
+async fn given_reflection_probe_region_areas(world: &mut BevyoutWorld, areas: String) {
+    world.reflection_probe_region_areas = areas
+        .split(',')
+        .map(|area| area.trim().parse().expect("region area must be numeric"))
+        .collect();
+}
+
+#[when(regex = r"^probes are allocated with spacing ([\d.]+) and cap (\d+)$")]
+async fn when_reflection_probes_are_allocated(world: &mut BevyoutWorld, spacing: f32, cap: usize) {
+    world.reflection_probe_counts = reflection_probe_distribution::allocate_probe_counts(
+        &world.reflection_probe_region_areas,
+        spacing,
+        cap,
+    );
+}
+
+#[then(regex = r#"^the reflection-probe counts are "([^"]*)"$"#)]
+async fn then_reflection_probe_counts_are(world: &mut BevyoutWorld, counts: String) {
+    let expected = counts
+        .split(',')
+        .map(|count| count.trim().parse().expect("probe count must be numeric"))
+        .collect::<Vec<usize>>();
+    assert_eq!(world.reflection_probe_counts, expected);
 }

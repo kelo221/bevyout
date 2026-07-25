@@ -7424,6 +7424,7 @@ mod tests {
             hard_landing_clips: Vec::new(),
             bake: None,
             static_point_shadows: None,
+            reflection_probes: None,
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
         }

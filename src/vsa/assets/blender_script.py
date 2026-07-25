@@ -12,7 +12,7 @@ def perceptual_roughness_from_glossiness(glossiness):
         exponent = 10.0
     if not math.isfinite(exponent) or exponent < 0.0:
         exponent = 10.0
-    return max(0.0, min(1.0, 1.5 * (2.0 / (exponent + 2.0)) ** 0.25))
+    return max(0.0, min(1.0, 1.25 * (2.0 / (exponent + 2.0)) ** 0.25))
 
 def canonical_texture_reference(path):
     normalized = str(path or '').strip().replace('\\', '/').casefold()

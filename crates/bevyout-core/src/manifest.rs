@@ -86,6 +86,11 @@ pub struct PreparedSceneManifest {
     pub bake: Option<PreparedBake>,
     #[serde(default)]
     pub static_point_shadows: Option<PreparedStaticPointShadows>,
+    /// Automatically placed, prepared reflection probes for this interior.
+    /// The diffuse irradiance volume remains authoritative for diffuse GI;
+    /// these probes primarily provide local specular image-based lighting.
+    #[serde(default)]
+    pub reflection_probes: Option<PreparedReflectionProbeSet>,
     /// QA counts of `PreparedRuntimeMutability` classifications across
     /// `placements`, computed once at prepare time (F38.4).
     #[serde(default)]
@@ -250,6 +255,26 @@ pub struct PreparedStaticPointShadowLight {
     pub range: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedReflectionProbeSet {
+    pub revision: String,
+    pub source_fingerprint: String,
+    pub face_resolution: u32,
+    pub probes: Vec<PreparedReflectionProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedReflectionProbe {
+    pub capture_translation: [f32; 3],
+    /// World-space half extents of the cuboid influence region.
+    pub influence_half_extents: [f32; 3],
+    /// World-space half extents represented by the captured environment.
+    pub parallax_half_extents: [f32; 3],
+    pub falloff: [f32; 3],
+    pub diffuse_asset_path: String,
+    pub specular_asset_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedPluginSource {
     pub name: String,
@@ -409,13 +434,20 @@ pub struct ImageSpaceInfo {
     pub get_hit_blur_damping_constant: f32,
     pub get_hit_damping_constant: f32,
     pub night_eye_tint_rgb: [f32; 3],
+    /// Night-eye brightness, stored immediately after the night-eye tint.
     pub brightness: f32,
     pub cinematic_saturation: f32,
     pub cinematic_contrast_avg_lum: f32,
     pub cinematic_contrast: f32,
+    #[serde(default = "default_cinematic_brightness")]
+    pub cinematic_brightness: f32,
     pub cinematic_brightness_tint_rgb: [f32; 3],
     pub cinematic_brightness_tint_value: f32,
     pub flags: u8,
+}
+
+fn default_cinematic_brightness() -> f32 {
+    1.0
 }
 
 impl Default for ImageSpaceInfo {
@@ -449,6 +481,7 @@ impl Default for ImageSpaceInfo {
             cinematic_saturation: 1.0,
             cinematic_contrast_avg_lum: 0.5,
             cinematic_contrast: 1.0,
+            cinematic_brightness: default_cinematic_brightness(),
             cinematic_brightness_tint_rgb: [1.0, 1.0, 1.0],
             cinematic_brightness_tint_value: 0.0,
             flags: 0,

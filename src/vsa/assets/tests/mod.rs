@@ -14,7 +14,8 @@ fn directx_normal_conversion_flips_only_green() {
 
 #[test]
 fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
-    assert!(BLENDER_CONVERSION_SCRIPT.contains("1.5 * (2.0 / (exponent + 2.0)) ** 0.25"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("(2.0 / (exponent + 2.0)) ** 0.25"));
+    assert!(!BLENDER_CONVERSION_SCRIPT.contains("1.5 *"));
     assert!(
         BLENDER_CONVERSION_SCRIPT
             .contains("Material.import_material_gloss = staticmethod(import_material_gloss_ggx)")

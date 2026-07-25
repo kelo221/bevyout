@@ -1205,12 +1205,38 @@ fn prepare_cell(
             scene_dir: &scene_dir,
             resolution: args.shadow_resolution,
             rebuild: args.rebuild_shadows,
-            ktx: args.toktx,
+            ktx: args.toktx.clone(),
         },
         &placements,
         &lights,
         &mut diagnostics,
     )?;
+    let reflection_layouts = if cell.interior {
+        nav_graph_full
+            .as_ref()
+            .map_or_else(Vec::new, reflection_probe_layouts)
+    } else {
+        Vec::new()
+    };
+    let reflection_probes = if cell.interior {
+        prepare_reflection_probes(
+            ReflectionProbePrepareOptions {
+                asset_root: &cache_dir,
+                scene_dir: &scene_dir,
+                rebuild: args.rebuild_reflection_probes,
+                ktx: args.toktx,
+            },
+            &reflection_layouts,
+            &placements,
+            &lights,
+            cell.effective_lighting
+                .as_ref()
+                .expect("effective cell lighting is prepared before reflection probes"),
+            &mut diagnostics,
+        )?
+    } else {
+        None
+    };
 
     let manifest = PreparedSceneManifest {
         schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
@@ -1247,6 +1273,7 @@ fn prepare_cell(
         mutability_summary,
         bake: None,
         static_point_shadows,
+        reflection_probes,
         leveled_lists,
     };
     let manifest_path = scene_dir.join("scene.ron");

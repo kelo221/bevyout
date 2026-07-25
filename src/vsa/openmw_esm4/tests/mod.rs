@@ -22,6 +22,91 @@ fn direct_resolver() -> FormIdResolver {
     FormIdResolver::new(0, Vec::new())
 }
 
+fn write_f32(data: &mut [u8], offset: usize, value: f32) {
+    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+#[test]
+fn parses_legacy_image_space_layout_without_skin_dimmer_slot() {
+    let mut data = vec![0_u8; 132];
+    write_f32(&mut data, 56, 3.0);
+    write_f32(&mut data, 60, 0.8);
+    write_f32(&mut data, 64, 0.2);
+    write_f32(&mut data, 68, 0.5);
+    write_f32(&mut data, 72, 0.5);
+    write_f32(&mut data, 76, 0.02);
+    write_f32(&mut data, 80, 0.207_843_14);
+    write_f32(&mut data, 84, 0.498_039_22);
+    write_f32(&mut data, 88, 0.776_470_6);
+    write_f32(&mut data, 92, 2.5);
+    write_f32(&mut data, 96, 0.9);
+    write_f32(&mut data, 100, 0.14);
+    write_f32(&mut data, 104, 1.2);
+    write_f32(&mut data, 108, 1.1);
+    write_f32(&mut data, 112, 0.690_196_1);
+    write_f32(&mut data, 116, 0.560_784_34);
+    write_f32(&mut data, 120, 0.301_960_8);
+    write_f32(&mut data, 124, 0.5);
+    data[128..132].copy_from_slice(&7_u32.to_le_bytes());
+
+    let image_space = parse_image_space(&[direct_subrecord("DNAM", data)], 0x0001_507a, 1)
+        .expect("legacy image space");
+
+    assert_eq!(image_space.hdr_skin_dimmer, 1.0);
+    assert_eq!(image_space.bloom_blur_radius, 3.0);
+    assert_eq!(image_space.bloom_alpha_mult_interior, 0.8);
+    assert_eq!(image_space.bloom_alpha_mult_exterior, 0.2);
+    assert_eq!(
+        image_space.night_eye_tint_rgb,
+        [0.207_843_14, 0.498_039_22, 0.776_470_6]
+    );
+    assert_eq!(image_space.brightness, 2.5);
+    assert_eq!(image_space.cinematic_saturation, 0.9);
+    assert_eq!(image_space.cinematic_contrast_avg_lum, 0.14);
+    assert_eq!(image_space.cinematic_contrast, 1.2);
+    assert_eq!(image_space.cinematic_brightness, 1.1);
+    assert_eq!(
+        image_space.cinematic_brightness_tint_rgb,
+        [0.690_196_1, 0.560_784_34, 0.301_960_8]
+    );
+    assert_eq!(image_space.cinematic_brightness_tint_value, 0.5);
+    assert_eq!(image_space.flags, 0x07);
+}
+
+#[test]
+fn parses_modern_image_space_layout_and_trailing_flags() {
+    let mut data = vec![0_u8; 152];
+    write_f32(&mut data, 56, 1.2);
+    write_f32(&mut data, 60, 0.03);
+    write_f32(&mut data, 96, 2.5);
+    write_f32(&mut data, 100, 0.25);
+    write_f32(&mut data, 104, 0.025);
+    write_f32(&mut data, 108, 0.8);
+    write_f32(&mut data, 112, 1.0);
+    write_f32(&mut data, 116, 0.850_980_4);
+    write_f32(&mut data, 120, 0.768_627_5);
+    write_f32(&mut data, 124, 0.592_156_9);
+    write_f32(&mut data, 128, 0.8);
+    data[148] = 0x0e;
+
+    let image_space = parse_image_space(&[direct_subrecord("DNAM", data)], 0x1234, 15)
+        .expect("modern image space");
+
+    assert_eq!(image_space.hdr_skin_dimmer, 1.2);
+    assert_eq!(image_space.bloom_blur_radius, 0.03);
+    assert_eq!(image_space.brightness, 2.5);
+    assert_eq!(image_space.cinematic_saturation, 0.25);
+    assert_eq!(image_space.cinematic_contrast_avg_lum, 0.025);
+    assert_eq!(image_space.cinematic_contrast, 0.8);
+    assert_eq!(image_space.cinematic_brightness, 1.0);
+    assert_eq!(
+        image_space.cinematic_brightness_tint_rgb,
+        [0.850_980_4, 0.768_627_5, 0.592_156_9]
+    );
+    assert_eq!(image_space.cinematic_brightness_tint_value, 0.8);
+    assert_eq!(image_space.flags, 0x0e);
+}
+
 #[test]
 fn parses_openmw_inventory_layouts_and_icon_fallback_fields() {
     let resolver = direct_resolver();

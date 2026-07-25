@@ -3,18 +3,18 @@
 use std::collections::BTreeMap;
 
 pub(crate) const DEFAULT_GLOSSINESS_EXPONENT: f32 = 10.0;
-pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v3-1.5x-roughness";
+pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v5-1.25x-roughness";
 pub(crate) const METALLIC_MATERIALS_CSV: &str = include_str!("metallic_materials.csv");
 
 /// Converts a Blinn-Phong exponent into tuned glTF/Bevy perceptual GGX roughness.
 ///
-/// Fallout's authored exponent conversion is scaled by 1.5 to adjust glossy
-/// surfaces, then clamped to glTF's scalar range.
+/// Preserve Fallout's authored gloss hierarchy while translating its
+/// Blinn-Phong exponent to glTF/Bevy perceptual GGX roughness with a 1.25x modifier.
 pub(crate) fn perceptual_roughness_from_glossiness(glossiness: Option<f32>) -> f32 {
     let exponent = glossiness
         .filter(|value| value.is_finite() && *value >= 0.0)
         .unwrap_or(DEFAULT_GLOSSINESS_EXPONENT);
-    (1.5 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
+    (1.25 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
 }
 
 pub(crate) fn normalize_diffuse_texture_path(path: &str) -> Result<String, String> {
@@ -125,9 +125,9 @@ mod tests {
     fn known_blinn_phong_exponents_map_to_perceptual_ggx_roughness() {
         for (exponent, expected) in [
             (0.0, 1.0),
-            (10.0, 0.958_414_7),
-            (70.0, 0.612_372_4),
-            (100.0, 0.561_304_8),
+            (10.0, 0.798_678_9),
+            (70.0, 0.510_310_4),
+            (100.0, 0.467_754),
         ] {
             let actual = perceptual_roughness_from_glossiness(Some(exponent));
             assert!((actual - expected).abs() < 0.000_001);
@@ -164,6 +164,19 @@ mod tests {
             0.0
         );
         assert_eq!(table.metallic_factor(None), 0.0);
+    }
+
+    #[test]
+    fn rusted_megaton_shingles_are_not_treated_as_bare_metal() {
+        let table = MetallicMaterialTable::built_in().unwrap();
+        for texture in [
+            "textures/architecture/megaton/metalscrapshingle08.dds",
+            "textures/architecture/megaton/metalscrapshingles04.dds",
+            "textures/architecture/megaton/metalscrapshingles05.dds",
+            "textures/architecture/megaton/metalscrapshingles06.dds",
+        ] {
+            assert_eq!(table.metallic_factor(Some(texture)), 0.0, "{texture}");
+        }
     }
 
     #[test]
