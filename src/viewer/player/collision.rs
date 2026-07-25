@@ -306,7 +306,9 @@ pub(crate) fn build_prepared_colliders(
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = world.try_rebuild_static_tree();
     })) {
-        warn!("BoxDDD static tree rebuild encountered panic ({panic:?}); dropping invalid static tree nodes and continuing");
+        warn!(
+            "BoxDDD static tree rebuild encountered panic ({panic:?}); dropping invalid static tree nodes and continuing"
+        );
     }
     let form_id = manifest.cell.form_id;
     info!("prepared collision static ready for {form_id:08x}");
@@ -415,10 +417,17 @@ fn build_colliders_for_placement(
     }
     let rotation = Quat::from_array(placement.rotation_xyzw);
     let translation = Vec3::from_array(placement.translation);
-    if !translation.is_finite() || !rotation.is_finite() || !placement.scale.is_finite() || placement.scale.abs() <= 0.0001 {
+    if !translation.is_finite()
+        || !rotation.is_finite()
+        || !placement.scale.is_finite()
+        || placement.scale.abs() <= 0.0001
+    {
         warn!(
             "BoxDDD dropped collider for reference {:08x} with non-finite transform: pos={:?}, rot={:?}, scale={}",
-            placement.reference_form_id, placement.translation, placement.rotation_xyzw, placement.scale
+            placement.reference_form_id,
+            placement.translation,
+            placement.rotation_xyzw,
+            placement.scale
         );
         return;
     }
@@ -496,7 +505,10 @@ fn build_colliders_for_placement(
                 "building shape {} for reference {:08x} asset {}",
                 shape.kind(),
                 placement.reference_form_id,
-                placement.physics_asset_path.as_deref().unwrap_or_else(|| placement.asset_path.as_deref().unwrap_or(""))
+                placement
+                    .physics_asset_path
+                    .as_deref()
+                    .unwrap_or_else(|| placement.asset_path.as_deref().unwrap_or(""))
             );
             let result = create_prepared_shape(
                 world,
@@ -1515,9 +1527,12 @@ pub(crate) fn create_prepared_shape(
                     if !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
                         return None;
                     }
-                    min_x = min_x.min(p[0]); max_x = max_x.max(p[0]);
-                    min_y = min_y.min(p[1]); max_y = max_y.max(p[1]);
-                    min_z = min_z.min(p[2]); max_z = max_z.max(p[2]);
+                    min_x = min_x.min(p[0]);
+                    max_x = max_x.max(p[0]);
+                    min_y = min_y.min(p[1]);
+                    max_y = max_y.max(p[1]);
+                    min_z = min_z.min(p[2]);
+                    max_z = max_z.max(p[2]);
                 }
                 if (max_x - min_x) < 0.001 || (max_y - min_y) < 0.001 || (max_z - min_z) < 0.001 {
                     warn!(
@@ -1543,7 +1558,10 @@ pub(crate) fn create_prepared_shape(
                     .iter()
                     .map(|value| to_box_vec3(point(*value)))
                     .collect::<Vec<_>>();
-                if vertices.iter().any(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite()) {
+                if vertices
+                    .iter()
+                    .any(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite())
+                {
                     return None;
                 }
                 let indices = indices
@@ -1553,25 +1571,38 @@ pub(crate) fn create_prepared_shape(
                 if !indices.len().is_multiple_of(3) {
                     return None;
                 }
-                if indices.iter().any(|&i| i < 0 || (i as usize) >= vertices.len()) {
+                if indices
+                    .iter()
+                    .any(|&i| i < 0 || (i as usize) >= vertices.len())
+                {
                     return None;
                 }
                 let mut two_sided_indices = Vec::with_capacity(indices.len() * 2);
                 for triangle in indices.chunks_exact(3) {
                     two_sided_indices.extend_from_slice(triangle);
                     if !dynamic {
-                        two_sided_indices.extend_from_slice(&[triangle[0], triangle[2], triangle[1]]);
+                        two_sided_indices.extend_from_slice(&[
+                            triangle[0],
+                            triangle[2],
+                            triangle[1],
+                        ]);
                     }
                 }
                 let mesh = boxddd::MeshData::builder(vertices, two_sided_indices)
                     .build()
                     .ok()?;
                 world
-                    .try_create_mesh_shape(body_id, &shape_def, mesh, boxddd::Vec3::new(1.0, 1.0, 1.0))
+                    .try_create_mesh_shape(
+                        body_id,
+                        &shape_def,
+                        mesh,
+                        boxddd::Vec3::new(1.0, 1.0, 1.0),
+                    )
                     .ok()
             }
         }
-    })).ok()??;
+    }))
+    .ok()??;
     let triangle_count = match shape {
         PreparedPhysicsShape::TriangleMesh { indices, .. } if !dynamic => indices.len() * 2 / 3,
         _ => shape.triangle_count(),

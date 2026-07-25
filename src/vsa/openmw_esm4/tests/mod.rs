@@ -49,18 +49,17 @@ fn parses_legacy_image_space_layout_without_skin_dimmer_slot() {
     write_f32(&mut data, 124, 0.5);
     data[128..132].copy_from_slice(&7_u32.to_le_bytes());
 
-    let image_space = parse_image_space(
-        &[direct_subrecord("DNAM", data)],
-        0x0001_507a,
-        1,
-    )
-    .expect("legacy image space");
+    let image_space = parse_image_space(&[direct_subrecord("DNAM", data)], 0x0001_507a, 1)
+        .expect("legacy image space");
 
     assert_eq!(image_space.hdr_skin_dimmer, 1.0);
     assert_eq!(image_space.bloom_blur_radius, 3.0);
     assert_eq!(image_space.bloom_alpha_mult_interior, 0.8);
     assert_eq!(image_space.bloom_alpha_mult_exterior, 0.2);
-    assert_eq!(image_space.night_eye_tint_rgb, [0.207_843_14, 0.498_039_22, 0.776_470_6]);
+    assert_eq!(
+        image_space.night_eye_tint_rgb,
+        [0.207_843_14, 0.498_039_22, 0.776_470_6]
+    );
     assert_eq!(image_space.brightness, 2.5);
     assert_eq!(image_space.cinematic_saturation, 0.9);
     assert_eq!(image_space.cinematic_contrast_avg_lum, 0.14);
@@ -90,9 +89,8 @@ fn parses_modern_image_space_layout_and_trailing_flags() {
     write_f32(&mut data, 128, 0.8);
     data[148] = 0x0e;
 
-    let image_space =
-        parse_image_space(&[direct_subrecord("DNAM", data)], 0x1234, 15)
-            .expect("modern image space");
+    let image_space = parse_image_space(&[direct_subrecord("DNAM", data)], 0x1234, 15)
+        .expect("modern image space");
 
     assert_eq!(image_space.hdr_skin_dimmer, 1.2);
     assert_eq!(image_space.bloom_blur_radius, 0.03);

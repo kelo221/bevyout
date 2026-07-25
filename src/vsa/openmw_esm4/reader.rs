@@ -119,9 +119,7 @@ pub(crate) fn walk_container(
             "IMGS" => {
                 if flags & RECORD_DELETED != 0 {
                     state.image_spaces.remove(&form_id);
-                } else if let Some(image_space) =
-                    parse_image_space(&subs, form_id, form_version)
-                {
+                } else if let Some(image_space) = parse_image_space(&subs, form_id, form_version) {
                     state.image_spaces.insert(form_id, image_space);
                 }
             }

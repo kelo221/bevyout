@@ -958,16 +958,14 @@ pub(crate) fn parse_image_space(
     offset += 12;
     image_space.brightness = f32_or(data, offset, image_space.brightness);
     offset += 4;
-    image_space.cinematic_saturation =
-        f32_or(data, offset, image_space.cinematic_saturation);
+    image_space.cinematic_saturation = f32_or(data, offset, image_space.cinematic_saturation);
     offset += 4;
     image_space.cinematic_contrast_avg_lum =
         f32_or(data, offset, image_space.cinematic_contrast_avg_lum);
     offset += 4;
     image_space.cinematic_contrast = f32_or(data, offset, image_space.cinematic_contrast);
     offset += 4;
-    image_space.cinematic_brightness =
-        f32_or(data, offset, image_space.cinematic_brightness);
+    image_space.cinematic_brightness = f32_or(data, offset, image_space.cinematic_brightness);
     offset += 4;
     image_space.cinematic_brightness_tint_rgb =
         rgb_or(data, offset, image_space.cinematic_brightness_tint_rgb);

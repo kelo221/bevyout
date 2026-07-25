@@ -120,9 +120,8 @@ fn image_space_tint_maps_neutral_white_to_neutral_balance() {
 
 #[test]
 fn image_space_warm_tint_produces_a_warm_artistic_cast() {
-    let (temperature, tint) =
-        image_space_tint_to_white_balance([0.69, 0.56, 0.30], 0.5)
-            .expect("warm tint has a valid chromaticity");
+    let (temperature, tint) = image_space_tint_to_white_balance([0.69, 0.56, 0.30], 0.5)
+        .expect("warm tint has a valid chromaticity");
     assert!(temperature > 0.1);
     assert!(tint < -0.1);
 }
