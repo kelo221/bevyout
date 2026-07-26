@@ -22,7 +22,7 @@ mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 4;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 5;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -1459,6 +1459,7 @@ fn validate_canonical(snapshot: &ItemLedgerSnapshot) -> Result<()> {
             && let Some(item_id) = binding
                 .equipped
                 .into_iter()
+                .chain(binding.equipped_apparel.iter().copied())
                 .chain(binding.hotkeys.into_iter().flatten())
                 .find(|item_id| state.find(*item_id).is_none())
         {
@@ -1934,9 +1935,9 @@ mod tests {
     }
 
     #[test]
-    fn version_four_actor_state_round_trips_and_is_deterministic() {
+    fn version_five_actor_and_item_combat_state_round_trip_deterministically() {
         let save = sample_save();
-        assert_eq!(save.header.format_version, 4);
+        assert_eq!(save.header.format_version, 5);
         let first = encode_save(&save).unwrap();
         let second = encode_save(&save).unwrap();
         assert_eq!(first, second);
@@ -2320,7 +2321,7 @@ mod tests {
     fn canonical_v3_round_trip_preserves_ids_conditions_and_opaque_state() {
         let mut save = SaveGame::default();
         save.header.content_fingerprint = "content".into();
-        let item = ItemInstance::new(
+        let mut item = ItemInstance::new(
             ItemInstanceId(42),
             0x1234,
             2,
@@ -2335,6 +2336,8 @@ mod tests {
             },
         )
         .unwrap();
+        item.state.combat.magazine.ammo_form_id = Some(0x0000_4241);
+        item.state.combat.magazine.loaded = 7;
         let mut holders = BTreeMap::new();
         holders.insert(
             HolderId::Player,

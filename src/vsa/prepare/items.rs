@@ -11,7 +11,7 @@ use crate::vsa::openmw_esm4::BaseAudioRecord;
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
 /// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v7-player-weapons";
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v8-ammo-magazines";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -319,8 +319,8 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v7-player-weapons");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v7-player-weapons");
+        assert_eq!(catalog.revision, "openmw-items-v8-ammo-magazines");
+        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v8-ammo-magazines");
     }
 
     #[test]

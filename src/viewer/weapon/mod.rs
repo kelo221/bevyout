@@ -8,8 +8,10 @@ mod animation;
 mod hitscan;
 mod presentation;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevyout_core::item_transaction::{HolderId, ItemInstanceId};
 use bevyout_core::weapon::{
     FireDecision, ReloadDecision, WeaponAction, WeaponDefinition, WeaponState,
 };
@@ -17,7 +19,7 @@ use bevyout_core::weapon::{
 use crate::app_state::{AppState, GameplayModal};
 use crate::vsa::{PreparedItemCatalog, PreparedItemDefinition, PreparedItemStats};
 
-use super::interaction::PlayerEquipment;
+use super::interaction::{CanonicalItemLedger, PlayerEquipment, PlayerInventory};
 
 const DEFAULT_HITSCAN_RANGE_METERS: f32 = 100.0;
 
@@ -27,6 +29,8 @@ pub(crate) struct EquippedWeapon {
     pub(crate) label: String,
     pub(crate) damage: f32,
     pub(crate) range_meters: f32,
+    pub(crate) ammo_form_id: Option<u32>,
+    pub(crate) magazine_capacity: u16,
     pub(crate) viewmodel_asset_path: Option<String>,
     pub(crate) fire_sound_3d_form_id: Option<u32>,
     pub(crate) fire_sound_2d_form_id: Option<u32>,
@@ -36,6 +40,8 @@ impl EquippedWeapon {
     fn from_item(item: &PreparedItemDefinition) -> Option<Self> {
         let PreparedItemStats::Weapon {
             damage,
+            clip_size,
+            ammo_form_id,
             first_person_asset_path,
             fire_sound_3d_form_id,
             fire_sound_2d_form_id,
@@ -53,6 +59,8 @@ impl EquippedWeapon {
                 .unwrap_or_else(|| format!("{:08X}", item.base_form_id)),
             damage: f32::from(damage.unwrap_or_default()),
             range_meters: DEFAULT_HITSCAN_RANGE_METERS,
+            ammo_form_id: *ammo_form_id,
+            magazine_capacity: u16::from(clip_size.unwrap_or_default()),
             viewmodel_asset_path: first_person_asset_path
                 .clone()
                 .or_else(|| item.world_asset_path.clone()),
@@ -73,6 +81,7 @@ pub(crate) enum FireStatus {
     NoWeapon,
     BlockedFiring,
     BlockedReloading,
+    BlockedEmpty,
     Miss,
     WorldHit,
     ActorHit,
@@ -87,6 +96,7 @@ impl FireStatus {
             Self::NoWeapon => "no_weapon",
             Self::BlockedFiring => "blocked_firing",
             Self::BlockedReloading => "blocked_reloading",
+            Self::BlockedEmpty => "blocked_empty",
             Self::Miss => "miss",
             Self::WorldHit => "world_hit",
             Self::ActorHit => "actor_hit",
@@ -109,6 +119,7 @@ pub(crate) struct FireReport {
 #[derive(Resource, Default)]
 pub(crate) struct PlayerWeaponRuntime {
     pub(crate) equipped: Option<EquippedWeapon>,
+    pub(crate) equipped_instance_id: Option<ItemInstanceId>,
     pub(crate) state: Option<WeaponState>,
     pub(crate) last_fire: FireReport,
     pub(crate) last_fire_sound_form_id: Option<u32>,
@@ -143,6 +154,13 @@ pub(crate) struct ReloadWeaponRequested;
 struct AcceptedWeaponShot {
     shot_index: u64,
     weapon: EquippedWeapon,
+}
+
+#[derive(SystemParam)]
+struct WeaponActionResources<'w> {
+    inventory: ResMut<'w, PlayerInventory>,
+    canonical: ResMut<'w, CanonicalItemLedger>,
+    runtime: ResMut<'w, PlayerWeaponRuntime>,
 }
 
 pub(crate) struct WeaponPlugin;
@@ -215,13 +233,52 @@ fn collect_weapon_input(
 
 fn sync_equipped_weapon(
     equipment: Res<PlayerEquipment>,
+    inventory: Res<PlayerInventory>,
     catalog: Res<PreparedItemCatalog>,
+    mut canonical: ResMut<CanonicalItemLedger>,
     mut runtime: ResMut<PlayerWeaponRuntime>,
 ) {
     let desired_form_id = equipment.equipped_weapon().map(|key| key.base_form_id);
-    if runtime.equipped.as_ref().map(|weapon| weapon.base_form_id) == desired_form_id {
+    if canonical.sync_player(&inventory.legacy_snapshot()).is_err() {
         return;
     }
+    let desired_instance_id = desired_form_id.and_then(|form_id| {
+        let holder = canonical.ledger.holders().get(&HolderId::Player)?;
+        canonical
+            .ledger
+            .bindings()
+            .get(&HolderId::Player)
+            .and_then(|binding| binding.equipped)
+            .filter(|item_id| {
+                holder
+                    .find(*item_id)
+                    .is_some_and(|item| item.base_form_id == form_id)
+            })
+            .or_else(|| {
+                holder
+                    .items
+                    .iter()
+                    .find(|item| item.base_form_id == form_id)
+                    .map(|item| item.id)
+            })
+    });
+    if let Some(item_id) = desired_instance_id
+        && canonical
+            .ledger
+            .bindings()
+            .get(&HolderId::Player)
+            .and_then(|binding| binding.equipped)
+            != Some(item_id)
+    {
+        let _ = canonical.ledger.unequip(HolderId::Player);
+        let _ = canonical.ledger.equip(HolderId::Player, item_id);
+    }
+    if runtime.equipped.as_ref().map(|weapon| weapon.base_form_id) == desired_form_id
+        && runtime.equipped_instance_id == desired_instance_id
+    {
+        return;
+    }
+    runtime.equipped_instance_id = desired_instance_id;
     runtime.equipped = desired_form_id.and_then(|form_id| {
         catalog
             .items
@@ -248,10 +305,42 @@ fn process_action_requests(
     mut sounds: MessageWriter<super::audio::PlaySound>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     manifest: Option<Res<crate::viewer::LoadedSceneManifest>>,
-    mut runtime: ResMut<PlayerWeaponRuntime>,
+    mut action: WeaponActionResources,
 ) {
+    let inventory = &mut action.inventory;
+    let canonical = &mut action.canonical;
+    let runtime = &mut action.runtime;
     for _ in reload_requests.read() {
-        let decision = runtime.state.as_mut().map(WeaponState::request_reload);
+        let can_start = runtime.action() == WeaponAction::Idle;
+        let reload_committed = if can_start {
+            runtime
+                .equipped
+                .as_ref()
+                .zip(runtime.equipped_instance_id)
+                .and_then(|(weapon, weapon_id)| {
+                    let ammo_form_id = weapon.ammo_form_id?;
+                    let id = canonical.ledger.next_transaction_id();
+                    canonical
+                        .ledger
+                        .reload_weapon_with_id(
+                            id,
+                            HolderId::Player,
+                            weapon_id,
+                            ammo_form_id,
+                            weapon.magazine_capacity,
+                        )
+                        .ok()
+                })
+        } else {
+            None
+        };
+        let decision = reload_committed
+            .as_ref()
+            .and_then(|_| runtime.state.as_mut().map(WeaponState::request_reload));
+        if let Some(receipt) = reload_committed {
+            runtime.equipped_instance_id = Some(receipt.weapon_id);
+        }
+        canonical.write_player_projection(inventory);
         let reload_sound_form_id = (decision == Some(ReloadDecision::Started))
             .then(|| runtime.equipped.as_ref())
             .flatten()
@@ -271,7 +360,7 @@ fn process_action_requests(
         }
     }
     for _ in fire_requests.read() {
-        let Some(decision) = runtime.state.as_mut().map(WeaponState::request_fire) else {
+        if runtime.state.is_none() {
             runtime.last_fire = FireReport {
                 status: FireStatus::NoWeapon,
                 ..Default::default()
@@ -279,7 +368,29 @@ fn process_action_requests(
             runtime.last_fire_sound_form_id = None;
             runtime.last_muzzle_flash_seconds = None;
             continue;
-        };
+        }
+        if runtime.action() == WeaponAction::Idle {
+            let consumed = runtime.equipped_instance_id.is_some_and(|weapon_id| {
+                canonical
+                    .ledger
+                    .consume_weapon_round(HolderId::Player, weapon_id)
+                    .is_ok()
+            });
+            if !consumed {
+                runtime.last_fire = FireReport {
+                    status: FireStatus::BlockedEmpty,
+                    ..Default::default()
+                };
+                runtime.last_fire_sound_form_id = None;
+                runtime.last_muzzle_flash_seconds = None;
+                continue;
+            }
+        }
+        let decision = runtime
+            .state
+            .as_mut()
+            .expect("weapon state checked above")
+            .request_fire();
         match decision {
             FireDecision::Fired { shot_index } => {
                 let Some(weapon) = runtime.equipped.clone() else {

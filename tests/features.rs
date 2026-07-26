@@ -951,6 +951,13 @@ struct BevyoutWorld {
     // -- reflection_probes.feature: deterministic, capped room allocation --
     reflection_probe_region_areas: Vec<f32>,
     reflection_probe_counts: Vec<usize>,
+
+    // -- m5_wave2_ammunition.feature (issues #244-#247) --
+    ammo_magazine: bevyout_core::combat::ammo::MagazineState,
+    ammo_capacity: u16,
+    ammo_reserve: u32,
+    ammo_reload: Option<bevyout_core::combat::ammo::ReloadDecision>,
+    ammo_fire: Option<Result<(), bevyout_core::combat::ammo::FireBlockReason>>,
 }
 
 fn find_placement<'a>(
@@ -10278,6 +10285,88 @@ async fn then_package_diagnostic_containing(
         "expected a diagnostic containing {expected:?} in {:?}",
         entry.diagnostics
     );
+}
+
+// ---------------------------------------------------------------------
+// m5_wave2_ammunition.feature (issues #244-#247)
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^a magazine for ammo ([0-9a-fA-F]{8}) with (\d+) of (\d+) rounds loaded$")]
+async fn given_ammo_magazine(
+    world: &mut BevyoutWorld,
+    ammo_hex: String,
+    loaded: u16,
+    capacity: u16,
+) {
+    world.ammo_magazine = bevyout_core::combat::ammo::MagazineState {
+        ammo_form_id: Some(parse_hex(&ammo_hex)),
+        loaded,
+    };
+    world.ammo_capacity = capacity;
+}
+
+#[given(regex = r"^(\d+) compatible reserve rounds$")]
+async fn given_ammo_reserve(world: &mut BevyoutWorld, reserve: u32) {
+    world.ammo_reserve = reserve;
+}
+
+#[when(regex = r"^a reload with ammo ([0-9a-fA-F]{8}) is planned$")]
+async fn when_ammo_reload_planned(world: &mut BevyoutWorld, ammo_hex: String) {
+    world.ammo_reload = Some(
+        bevyout_core::combat::ammo::plan_reload(
+            world.ammo_magazine,
+            parse_hex(&ammo_hex),
+            world.ammo_capacity,
+            world.ammo_reserve,
+        )
+        .expect("reload should be accepted"),
+    );
+}
+
+#[when("one loaded round is consumed")]
+async fn when_ammo_round_consumed(world: &mut BevyoutWorld) {
+    world.ammo_fire = Some(bevyout_core::combat::ammo::consume_round(
+        &mut world.ammo_magazine,
+    ));
+}
+
+#[then(regex = r"^the reload kind is (operational|ammo switch)$")]
+async fn then_ammo_reload_kind(world: &mut BevyoutWorld, expected: String) {
+    let expected = match expected.as_str() {
+        "operational" => bevyout_core::combat::ammo::ReloadKind::Operational,
+        "ammo switch" => bevyout_core::combat::ammo::ReloadKind::AmmoSwitch,
+        other => panic!("unexpected reload kind {other}"),
+    };
+    assert_eq!(world.ammo_reload.expect("reload planned").kind, expected);
+}
+
+#[then(regex = r"^the reload consumes (\d+) reserve rounds$")]
+async fn then_ammo_reload_consumes(world: &mut BevyoutWorld, expected: u16) {
+    assert_eq!(
+        world.ammo_reload.expect("reload planned").consume_reserve,
+        expected
+    );
+}
+
+#[then(regex = r"^the reload returns (\d+) loaded rounds$")]
+async fn then_ammo_reload_returns(world: &mut BevyoutWorld, expected: u16) {
+    assert_eq!(
+        world.ammo_reload.expect("reload planned").return_loaded,
+        expected
+    );
+}
+
+#[then("fire is blocked because the magazine is empty")]
+async fn then_ammo_fire_blocked_empty(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.ammo_fire,
+        Some(Err(bevyout_core::combat::ammo::FireBlockReason::Empty))
+    );
+}
+
+#[then(regex = r"^the magazine still contains (\d+) rounds$")]
+async fn then_ammo_magazine_loaded(world: &mut BevyoutWorld, expected: u16) {
+    assert_eq!(world.ammo_magazine.loaded, expected);
 }
 
 #[then(

@@ -80,7 +80,20 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     let state = exec(&mut app, "weaponstate");
     assert!(state.ok);
     assert_eq!(state.value["action"], "idle");
-    assert_eq!(state.value["ammo_accounting"], false);
+    assert_eq!(state.value["ammo_accounting"], true);
+    let ammo = exec(&mut app, "ammostate player");
+    assert!(ammo.ok);
+    assert_eq!(ammo.value["schema"], "bevyout.m5.inspect");
+    assert_eq!(ammo.value["available"], true);
+    let combat = exec(&mut app, "combatstate");
+    assert_eq!(combat.value["capabilities"]["ammo"], true);
+    assert_eq!(combat.value["capabilities"]["vats"], false);
+    let vats = exec(&mut app, "vatsstate");
+    assert_eq!(vats.value["available"], false);
+    assert_eq!(vats.value["reason"], "planned_wave_7");
+    let hitboxes = exec(&mut app, "hitboxdebug state");
+    assert_eq!(hitboxes.value["available"], false);
+    assert_eq!(hitboxes.value["reason"], "planned_wave_6");
 
     assert!(exec(&mut app, "weaponfire").ok);
     assert!(exec(&mut app, "weaponreload").ok);

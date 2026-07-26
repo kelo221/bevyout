@@ -2,7 +2,9 @@ use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::prelude::*;
 
-use bevyout_core::weapon::apply_actor_damage;
+use bevyout_core::weapon::{
+    ImpactEvidence, ImpactOutcome, impact_is_in_range, resolve_actor_impact,
+};
 
 use super::{AcceptedWeaponShot, FireReport, FireStatus, PlayerWeaponRuntime};
 use crate::viewer::actor::ActorRuntime;
@@ -51,7 +53,10 @@ pub(super) fn resolve_accepted_shots(
             };
             continue;
         };
-        if hit.distance > shot.weapon.range_meters {
+        let evidence = ImpactEvidence {
+            distance_meters: hit.distance,
+        };
+        if !impact_is_in_range(shot.weapon.definition(), evidence) {
             runtime.last_fire = FireReport {
                 status: FireStatus::Miss,
                 shot_index: Some(shot.shot_index),
@@ -89,8 +94,13 @@ pub(super) fn resolve_accepted_shots(
             };
             continue;
         };
-        match apply_actor_damage(&projected.definition, state, shot.weapon.damage) {
-            Ok(outcome) => {
+        match resolve_actor_impact(
+            shot.weapon.definition(),
+            evidence,
+            &projected.definition,
+            state,
+        ) {
+            Ok(ImpactOutcome::Actor(outcome)) => {
                 runtime.last_fire = FireReport {
                     status: if outcome.killed {
                         FireStatus::ActorKilled
@@ -112,6 +122,7 @@ pub(super) fn resolve_accepted_shots(
                     state.life_state.label()
                 );
             }
+            Ok(ImpactOutcome::OutOfRange) => unreachable!("range checked before actor resolution"),
             Err(error) => {
                 runtime.last_fire = FireReport {
                     status: FireStatus::ActorStateUnavailable,

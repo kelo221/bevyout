@@ -157,6 +157,24 @@ pub struct DamageOutcome {
     pub killed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImpactEvidence {
+    pub distance_meters: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ImpactOutcome {
+    OutOfRange,
+    Actor(DamageOutcome),
+}
+
+#[must_use]
+pub fn impact_is_in_range(weapon: WeaponDefinition, evidence: ImpactEvidence) -> bool {
+    evidence.distance_meters.is_finite()
+        && evidence.distance_meters >= 0.0
+        && evidence.distance_meters <= weapon.range_meters
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DamageError {
     InvalidAmount(f32),
@@ -217,6 +235,21 @@ pub fn apply_actor_damage(
         remaining_health,
         killed,
     })
+}
+
+/// Resolves measured spatial evidence against authoritative weapon policy and
+/// actor state. Adapters report distance and identity; they do not calculate
+/// range or mutate health independently.
+pub fn resolve_actor_impact(
+    weapon: WeaponDefinition,
+    evidence: ImpactEvidence,
+    definition: &ActorDefinition,
+    state: &mut ActorInstanceState,
+) -> Result<ImpactOutcome, DamageError> {
+    if !impact_is_in_range(weapon, evidence) {
+        return Ok(ImpactOutcome::OutOfRange);
+    }
+    apply_actor_damage(definition, state, weapon.damage).map(ImpactOutcome::Actor)
 }
 
 #[cfg(test)]

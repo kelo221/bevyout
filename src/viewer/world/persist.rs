@@ -1339,6 +1339,7 @@ mod tests {
                     tag: *b"TEST",
                     payload: vec![1, 2, 3],
                 }],
+                ..Default::default()
             },
         )
         .unwrap();

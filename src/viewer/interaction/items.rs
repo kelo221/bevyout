@@ -260,6 +260,12 @@ impl CanonicalItemLedger {
         )))
     }
 
+    pub(crate) fn write_player_projection(&self, inventory: &mut PlayerInventory) {
+        if let Some(snapshot) = self.player_legacy_snapshot() {
+            inventory.0 = snapshot;
+        }
+    }
+
     pub(crate) fn sync_player(&mut self, inventory: &Inventory) -> Result<(), TransactionError> {
         if !self.ledger.holders().contains_key(&HolderId::Player) {
             self.ledger

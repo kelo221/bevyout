@@ -27,6 +27,59 @@ fn core_crate_has_no_bevy_dependency() {
 }
 
 #[test]
+fn core_normal_dependencies_remain_serde_and_glam_only() {
+    let manifest = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/bevyout-core/Cargo.toml"),
+    )
+    .expect("read bevyout-core manifest");
+    let dependencies = manifest
+        .split("[dependencies]")
+        .nth(1)
+        .expect("dependencies section")
+        .split("[dev-dependencies]")
+        .next()
+        .expect("normal dependency body");
+    let names = dependencies
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
+        .filter(|name| !name.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names, ["glam", "serde"].into_iter().collect());
+}
+
+#[test]
+fn core_sources_exclude_engine_and_json_adapter_imports() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/bevyout-core/src");
+    let mut files = Vec::new();
+    rust_files_below(&root, &mut files);
+    let offenders = files
+        .into_iter()
+        .filter(|path| {
+            let source = fs::read_to_string(path).expect("read core source");
+            source.contains("use bevy")
+                || source.contains("serde_json")
+                || source.contains("bevy_rapier")
+                || source.contains("avian")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "core contains engine or adapter imports: {offenders:?}"
+    );
+}
+
+#[test]
+fn hitscan_adapter_reports_evidence_instead_of_owning_damage_policy() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/weapon/hitscan.rs"),
+    )
+    .expect("read hitscan adapter");
+    assert!(!source.contains("apply_actor_damage"));
+    assert!(source.contains("resolve_actor_impact"));
+    assert!(source.contains("impact_is_in_range"));
+}
+
+#[test]
 fn preparation_does_not_depend_on_viewer() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vsa");
     let mut files = Vec::new();
