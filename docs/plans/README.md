@@ -12,6 +12,11 @@ amended — not rewritten — when acceptance testing forces changes, so the del
 between "planned" and "shipped" stays visible. Measured results go in the plan
 and as comments on the issues; the PR closes the issues.
 
+Milestone-spanning architecture and sequencing may also have a durable roadmap.
+For M5 combat, see
+[M5_COMBAT_ARCHITECTURE_ROADMAP.md](M5_COMBAT_ARCHITECTURE_ROADMAP.md);
+individual wave plans remain the executable source of truth.
+
 | Wave | Requested | Planned | Landed |
 |------|-----------|---------|--------|
 | M1 runtime foundation | (predates this convention) | [M1_PLAN.md](M1_PLAN.md) | PRs #40, #42, #43, #44 |
@@ -51,3 +56,4 @@ and as comments on the issues; the PR closes the issues.
 | M4 AI-packages wave — autonomous AI: packages, families, perception, key-aware doors | [M4_AI_PACKAGES_PROMPT.md](M4_AI_PACKAGES_PROMPT.md) | [M4_AI_PACKAGES_PLAN.md](M4_AI_PACKAGES_PLAN.md) — see "Shipped amendments" | PR pending (#193–#198, #116, #185); follow-up #213 (deferred package-location subrecords); manual script [M4_AI_PACKAGES_MANUAL.md](M4_AI_PACKAGES_MANUAL.md) |
 | M4 package-points — patrol linked-ref chains + editor-location resolution | [M4_PACKAGE_POINTS_PROMPT.md](M4_PACKAGE_POINTS_PROMPT.md) | [M4_PACKAGE_POINTS_PLAN.md](M4_PACKAGE_POINTS_PLAN.md) — see "Shipped amendments" | PR pending (#213); follow-up #222 (radius not FO3-scaled); manual script [M4_PACKAGE_POINTS_MANUAL.md](M4_PACKAGE_POINTS_MANUAL.md) |
 | M5 wave 1 — functional 10mm pistol | [M5_WAVE1_PROMPT.md](M5_WAVE1_PROMPT.md) | [M5_WAVE1_PLAN.md](M5_WAVE1_PLAN.md) — see "Shipped amendments" (A1) | PR #239 (#235–#238); manual script [M5_WAVE1_MANUAL.md](M5_WAVE1_MANUAL.md) |
+| M5 wave 2 — canonical magazines, persistence, player routing, typed inspection | [M5_WAVE2_PROMPT.md](M5_WAVE2_PROMPT.md) | [M5_WAVE2_PLAN.md](M5_WAVE2_PLAN.md) — governed by the [M5 combat roadmap](M5_COMBAT_ARCHITECTURE_ROADMAP.md) | PR #248 (#244–#247); manual script [M5_WAVE2_MANUAL.md](M5_WAVE2_MANUAL.md) |
