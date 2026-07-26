@@ -179,11 +179,8 @@ fn vats_state(
 
 fn hitbox_debug(
     _world: &mut World,
-    invocation: &ConsoleInvocation,
+    _invocation: &ConsoleInvocation,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
-    if invocation.args.first().is_none_or(|arg| arg != "state") {
-        return Ok(unavailable("hitboxdebug", 6));
-    }
     Ok(unavailable("hitboxdebug", 6))
 }
 
