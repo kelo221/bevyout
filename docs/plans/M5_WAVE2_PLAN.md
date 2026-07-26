@@ -1,5 +1,8 @@
 # M5 wave 2 plan — ammunition, loadout, and save v5
 
+Cross-wave architecture and Waves 3–9 are preserved in
+`M5_COMBAT_ARCHITECTURE_ROADMAP.md`.
+
 ## Execution model recommendation
 
 Use **Sol X-High** in the Codex runtime. The wave crosses the canonical item
