@@ -7,6 +7,7 @@
 pub mod actor;
 pub mod actor_animation;
 pub mod actor_state;
+pub mod combat;
 pub mod content;
 pub mod disposition;
 pub mod faction;

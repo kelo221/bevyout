@@ -1,9 +1,12 @@
 //! Player-weapon inspection and MCP action controls (M5 wave 1).
 
+use bevyout_core::item_transaction::HolderId;
 use bevyout_core::weapon::{ReloadDecision, WeaponAction};
 
 use super::*;
 use crate::viewer::weapon::{FireWeaponRequested, PlayerWeaponRuntime, ReloadWeaponRequested};
+
+const COMBAT_INSPECTION_SCHEMA_VERSION: u32 = 1;
 
 pub(super) struct WeaponCommandProvider;
 
@@ -24,6 +27,30 @@ impl ConsoleCommandProvider for WeaponCommandProvider {
             )
             .mutating(),
             ConsoleCommand::new(
+                "ammostate",
+                "ammostate [player]",
+                "Report canonical active-weapon magazine and reserve ammunition.",
+                ammo_state,
+            ),
+            ConsoleCommand::new(
+                "combatstate",
+                "combatstate [player]",
+                "Report implemented M5 combat capabilities and canonical ammunition state.",
+                combat_state,
+            ),
+            ConsoleCommand::new(
+                "vatsstate",
+                "vatsstate [player]",
+                "Report typed V.A.T.S. availability and state.",
+                vats_state,
+            ),
+            ConsoleCommand::new(
+                "hitboxdebug",
+                "hitboxdebug state|on|off [reference-form-id]",
+                "Report hitbox-debug availability; mutation becomes available in M5 wave 6.",
+                hitbox_debug,
+            ),
+            ConsoleCommand::new(
                 "weaponreload",
                 "weaponreload",
                 "Request the normal player-weapon reload action; firing remains blocked until it completes.",
@@ -35,6 +62,126 @@ impl ConsoleCommandProvider for WeaponCommandProvider {
         }
         Ok(())
     }
+}
+
+fn player_subject(invocation: &ConsoleInvocation) -> Result<(), ConsoleError> {
+    if invocation.args.is_empty()
+        || (invocation.args.len() == 1 && invocation.args[0].eq_ignore_ascii_case("player"))
+    {
+        Ok(())
+    } else {
+        Err(ConsoleError::new(
+            "invalid_arguments",
+            format!(
+                "{} accepts only an optional player subject",
+                invocation.command
+            ),
+        ))
+    }
+}
+
+fn unavailable(command: &str, planned_wave: u32) -> ConsoleCommandResult {
+    ConsoleCommandResult::value(json!({
+        "schema": "bevyout.m5.inspect",
+        "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
+        "command": command,
+        "wave": 2,
+        "available": false,
+        "reason": format!("planned_wave_{planned_wave}"),
+        "policy_revision": "m5-combat-v2",
+        "diagnostics": [],
+    }))
+}
+
+fn ammo_state(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    player_subject(invocation)?;
+    let canonical = world
+        .get_resource::<crate::viewer::interaction::CanonicalItemLedger>()
+        .ok_or_else(|| ConsoleError::new("ammo_unavailable", "canonical item ledger is absent"))?;
+    let holder = canonical.ledger.holders().get(&HolderId::Player);
+    let weapon_id = canonical
+        .ledger
+        .bindings()
+        .get(&HolderId::Player)
+        .and_then(|binding| binding.equipped);
+    let weapon = weapon_id.and_then(|id| holder.and_then(|state| state.find(id)));
+    let magazine = weapon.map(|item| item.state.combat.magazine);
+    let reserve = magazine
+        .and_then(|magazine| magazine.ammo_form_id)
+        .map(|ammo_form_id| {
+            holder.map_or(0, |state| {
+                state
+                    .items
+                    .iter()
+                    .filter(|item| item.base_form_id == ammo_form_id)
+                    .map(|item| item.count)
+                    .sum::<u32>()
+            })
+        })
+        .unwrap_or_default();
+    Ok(ConsoleCommandResult::value(json!({
+        "schema": "bevyout.m5.inspect",
+        "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
+        "command": "ammostate",
+        "wave": 2,
+        "available": true,
+        "subject": {"reference_form_id": "player"},
+        "policy_revision": "m5-combat-v2",
+        "state": {
+            "weapon_instance_id": weapon_id.map(|id| id.0),
+            "weapon_form_id": weapon.map(|item| format!("{:08x}", item.base_form_id)),
+            "ammo_form_id": magazine.and_then(|state| state.ammo_form_id).map(|id| format!("{id:08x}")),
+            "loaded": magazine.map_or(0, |state| state.loaded),
+            "reserve": reserve,
+        },
+        "diagnostics": [],
+    })))
+}
+
+fn combat_state(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    player_subject(invocation)?;
+    let ammo = ammo_state(world, invocation)?.value;
+    Ok(ConsoleCommandResult::value(json!({
+        "schema": "bevyout.m5.inspect",
+        "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
+        "command": "combatstate",
+        "wave": 2,
+        "available": true,
+        "subject": {"reference_form_id": "player"},
+        "capabilities": {
+            "ammo": true,
+            "condition": false,
+            "ballistics": false,
+            "armor": false,
+            "limbs": false,
+            "vats": false,
+            "ai": false,
+        },
+        "policy_revision": "m5-combat-v2",
+        "state": {"ammo": ammo["state"].clone()},
+        "diagnostics": [],
+    })))
+}
+
+fn vats_state(
+    _world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    player_subject(invocation)?;
+    Ok(unavailable("vatsstate", 7))
+}
+
+fn hitbox_debug(
+    _world: &mut World,
+    _invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    Ok(unavailable("hitboxdebug", 6))
 }
 
 fn weapon_state(
@@ -80,7 +227,7 @@ fn weapon_state(
                 "audio_form_id": runtime.last_fire_sound_form_id,
                 "muzzle_flash_seconds": runtime.last_muzzle_flash_seconds,
             },
-            "ammo_accounting": false,
+            "ammo_accounting": true,
         }),
         vec![summary],
     ))

@@ -260,6 +260,12 @@ impl CanonicalItemLedger {
         )))
     }
 
+    pub(crate) fn write_player_projection(&self, inventory: &mut PlayerInventory) {
+        if let Some(snapshot) = self.player_legacy_snapshot() {
+            inventory.0 = snapshot;
+        }
+    }
+
     pub(crate) fn sync_player(&mut self, inventory: &Inventory) -> Result<(), TransactionError> {
         if !self.ledger.holders().contains_key(&HolderId::Player) {
             self.ledger
@@ -273,6 +279,24 @@ impl CanonicalItemLedger {
                     u32::try_from(stack.count).map_err(|_| TransactionError::InvalidCount)?,
                 );
             }
+        }
+        let actual = self
+            .ledger
+            .holders()
+            .get(&HolderId::Player)
+            .map(|state| {
+                let mut counts = BTreeMap::new();
+                for item in &state.items {
+                    let entry = counts
+                        .entry((item.base_form_id, item.state.condition))
+                        .or_insert(0u32);
+                    *entry = entry.saturating_add(item.count);
+                }
+                counts
+            })
+            .unwrap_or_default();
+        if actual == desired {
+            return Ok(());
         }
         let mut missing = desired.clone();
         if let Some(state) = self.ledger.holders_mut().get_mut(&HolderId::Player) {
@@ -462,5 +486,25 @@ impl CanonicalItemLedger {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_player_projection_does_not_churn_holder_revision() {
+        let inventory = PlayerInventory::from_stacks([(0x4241, 24), (0x434f, 1)]);
+        let mut canonical = CanonicalItemLedger::default();
+        canonical.sync_player(&inventory.legacy_snapshot()).unwrap();
+        let before = canonical.ledger.holders()[&HolderId::Player].revision;
+
+        canonical.sync_player(&inventory.legacy_snapshot()).unwrap();
+
+        assert_eq!(
+            canonical.ledger.holders()[&HolderId::Player].revision,
+            before
+        );
     }
 }

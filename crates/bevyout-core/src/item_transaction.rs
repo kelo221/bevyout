@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::combat::ammo::{self, ItemCombatState, ReloadKind};
+
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
 )]
@@ -75,6 +77,8 @@ pub struct ItemState {
     pub condition: Option<u32>,
     pub ownership: OwnershipProvenance,
     pub extras: Vec<ItemExtraEntry>,
+    #[serde(default)]
+    pub combat: ItemCombatState,
 }
 
 impl ItemState {
@@ -129,7 +133,10 @@ impl ItemInstance {
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BindingState {
+    /// Active weapon. The serialized name is retained for v1-v4 compatibility.
     pub equipped: Option<ItemInstanceId>,
+    #[serde(default)]
+    pub equipped_apparel: BTreeSet<ItemInstanceId>,
     pub hotkeys: [Option<ItemInstanceId>; 8],
 }
 
@@ -137,6 +144,9 @@ impl BindingState {
     fn remap(&mut self, from: ItemInstanceId, to: ItemInstanceId) {
         if self.equipped == Some(from) {
             self.equipped = Some(to);
+        }
+        if self.equipped_apparel.remove(&from) {
+            self.equipped_apparel.insert(to);
         }
         for binding in &mut self.hotkeys {
             if *binding == Some(from) {
@@ -146,13 +156,15 @@ impl BindingState {
     }
 
     fn references(&self, id: ItemInstanceId) -> bool {
-        self.equipped == Some(id)
+        self.equipped == Some(id) || self.equipped_apparel.contains(&id)
     }
 
     fn prune_to(&mut self, items: &ItemHolderState) {
         self.equipped = self
             .equipped
             .filter(|item_id| items.find(*item_id).is_some());
+        self.equipped_apparel
+            .retain(|item_id| items.find(*item_id).is_some());
         for hotkey in &mut self.hotkeys {
             *hotkey = hotkey.filter(|item_id| items.find(*item_id).is_some());
         }
@@ -177,6 +189,11 @@ impl ItemHolderState {
                 return Err(TransactionError::DuplicateItemId(item.id));
             }
             item.state.clone().normalized()?;
+            item.state
+                .combat
+                .magazine
+                .validate(u16::MAX)
+                .map_err(|_| TransactionError::InvalidMagazine)?;
         }
         if self.items.windows(2).any(|pair| pair[0].id >= pair[1].id) {
             return Err(TransactionError::UnsortedItems);
@@ -197,6 +214,18 @@ pub struct TransactionReceipt {
     pub caps_delta: BTreeMap<HolderId, i64>,
     pub source_revision: u64,
     pub destination_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AmmoTransactionReceipt {
+    pub id: TransactionId,
+    pub weapon_id: ItemInstanceId,
+    pub ammo_form_id: u32,
+    pub kind: ReloadKind,
+    pub returned: u16,
+    pub consumed: u16,
+    pub loaded: u16,
+    pub holder_revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -246,6 +275,9 @@ pub enum TransactionError {
     InvalidMerchant,
     EquipmentOccupied,
     InvalidHotkey,
+    InvalidMagazine,
+    IncompatibleAmmo,
+    MutableStack(ItemInstanceId),
 }
 
 impl std::fmt::Display for TransactionError {
@@ -261,6 +293,7 @@ pub struct ItemLedger {
     holders: BTreeMap<HolderId, ItemHolderState>,
     bindings: BTreeMap<HolderId, BindingState>,
     finalized: BTreeMap<TransactionId, TransactionReceipt>,
+    ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
     used_transaction_ids: BTreeSet<TransactionId>,
     next_item_id: ItemInstanceId,
     next_transaction_id: TransactionId,
@@ -271,6 +304,8 @@ pub struct ItemLedgerSnapshot {
     pub holders: BTreeMap<HolderId, ItemHolderState>,
     pub bindings: BTreeMap<HolderId, BindingState>,
     pub finalized: BTreeMap<TransactionId, TransactionReceipt>,
+    #[serde(default)]
+    pub ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
     pub used_transaction_ids: BTreeSet<TransactionId>,
     pub next_item_id: ItemInstanceId,
     pub next_transaction_id: TransactionId,
@@ -310,6 +345,7 @@ impl ItemLedger {
             holders: self.holders.clone(),
             bindings: self.bindings.clone(),
             finalized: self.finalized.clone(),
+            ammo_finalized: self.ammo_finalized.clone(),
             used_transaction_ids: self.used_transaction_ids.clone(),
             next_item_id: self.next_item_id,
             next_transaction_id: self.next_transaction_id,
@@ -328,6 +364,7 @@ impl ItemLedger {
             for item_id in bindings
                 .equipped
                 .into_iter()
+                .chain(bindings.equipped_apparel.iter().copied())
                 .chain(bindings.hotkeys.into_iter().flatten())
             {
                 if state.find(item_id).is_none() {
@@ -342,6 +379,7 @@ impl ItemLedger {
             holders: snapshot.holders,
             bindings: snapshot.bindings,
             finalized: snapshot.finalized,
+            ammo_finalized: snapshot.ammo_finalized,
             used_transaction_ids: snapshot.used_transaction_ids,
             next_item_id: snapshot.next_item_id,
             next_transaction_id: snapshot.next_transaction_id,
@@ -393,6 +431,181 @@ impl ItemLedger {
             return Err(TransactionError::InsufficientItems);
         }
         self.bindings.entry(holder).or_default().hotkeys[slot] = Some(item_id);
+        Ok(())
+    }
+
+    pub fn equip_apparel(
+        &mut self,
+        holder: HolderId,
+        item_id: ItemInstanceId,
+    ) -> Result<(), TransactionError> {
+        let state = self
+            .holders
+            .get(&holder)
+            .ok_or(TransactionError::UnknownHolder(holder))?;
+        if state.find(item_id).is_none() {
+            return Err(TransactionError::InsufficientItems);
+        }
+        self.bindings
+            .entry(holder)
+            .or_default()
+            .equipped_apparel
+            .insert(item_id);
+        Ok(())
+    }
+
+    /// Atomically returns switched rounds, consumes compatible reserve rounds,
+    /// and mutates one canonical weapon instance.
+    pub fn reload_weapon_with_id(
+        &mut self,
+        id: TransactionId,
+        holder: HolderId,
+        weapon_id: ItemInstanceId,
+        ammo_form_id: u32,
+        capacity: u16,
+    ) -> Result<AmmoTransactionReceipt, TransactionError> {
+        if let Some(receipt) = self.ammo_finalized.get(&id) {
+            return Ok(receipt.clone());
+        }
+        if self.used_transaction_ids.contains(&id) {
+            return Err(TransactionError::DuplicateTransaction(id));
+        }
+
+        let mut state = self
+            .holders
+            .get(&holder)
+            .cloned()
+            .ok_or(TransactionError::UnknownHolder(holder))?;
+        let mut bindings = self.bindings.get(&holder).cloned().unwrap_or_default();
+        let weapon_index = state
+            .items
+            .iter()
+            .position(|item| item.id == weapon_id)
+            .ok_or(TransactionError::InsufficientItems)?;
+        let mut canonical_weapon_id = weapon_id;
+        let mut next_item_id = self.next_item_id;
+        if state.items[weapon_index].count > 1 {
+            state.items[weapon_index].count -= 1;
+            canonical_weapon_id = next_item_id;
+            next_item_id = ItemInstanceId(next_item_id.0.saturating_add(1));
+            let mut singleton = state.items[weapon_index].clone();
+            singleton.id = canonical_weapon_id;
+            singleton.count = 1;
+            state.items.push(singleton);
+            bindings.remap(weapon_id, canonical_weapon_id);
+        }
+        let weapon_index = state
+            .items
+            .iter()
+            .position(|item| item.id == canonical_weapon_id)
+            .expect("canonical weapon retained");
+        let magazine = state.items[weapon_index].state.combat.magazine;
+        let reserve = state
+            .items
+            .iter()
+            .filter(|item| item.base_form_id == ammo_form_id)
+            .map(|item| item.count)
+            .sum();
+        let decision =
+            ammo::plan_reload(magazine, ammo_form_id, capacity, reserve).map_err(|error| {
+                match error {
+                    ammo::AmmoError::InvalidMagazine | ammo::AmmoError::InvalidCapacity => {
+                        TransactionError::InvalidMagazine
+                    }
+                    ammo::AmmoError::InvalidAmmo | ammo::AmmoError::IncompatibleAmmo => {
+                        TransactionError::IncompatibleAmmo
+                    }
+                    ammo::AmmoError::InsufficientReserve => TransactionError::InsufficientItems,
+                }
+            })?;
+
+        let mut remaining = u32::from(decision.consume_reserve);
+        for item in &mut state.items {
+            if item.base_form_id == ammo_form_id && remaining > 0 {
+                let consumed = item.count.min(remaining);
+                item.count -= consumed;
+                remaining -= consumed;
+            }
+        }
+        state.items.retain(|item| item.count > 0);
+        if decision.return_loaded > 0 {
+            let old_ammo = magazine
+                .ammo_form_id
+                .ok_or(TransactionError::InvalidMagazine)?;
+            if let Some(item) = state
+                .items
+                .iter_mut()
+                .find(|item| item.base_form_id == old_ammo && item.state == ItemState::default())
+            {
+                item.count = item
+                    .count
+                    .checked_add(u32::from(decision.return_loaded))
+                    .ok_or(TransactionError::CapsOverflow)?;
+            } else {
+                let returned_id = next_item_id;
+                next_item_id = ItemInstanceId(next_item_id.0.saturating_add(1));
+                state.items.push(ItemInstance::new(
+                    returned_id,
+                    old_ammo,
+                    u32::from(decision.return_loaded),
+                    ItemState::default(),
+                )?);
+            }
+        }
+        let weapon = state
+            .items
+            .iter_mut()
+            .find(|item| item.id == canonical_weapon_id)
+            .expect("canonical weapon retained");
+        weapon.state.combat.magazine.ammo_form_id = Some(ammo_form_id);
+        weapon.state.combat.magazine.loaded = if decision.kind == ReloadKind::AmmoSwitch {
+            decision.consume_reserve
+        } else {
+            magazine.loaded.saturating_add(decision.consume_reserve)
+        };
+        let loaded = weapon.state.combat.magazine.loaded;
+        state.items.sort_by_key(|item| item.id);
+        state.revision = state.revision.saturating_add(1);
+        let receipt = AmmoTransactionReceipt {
+            id,
+            weapon_id: canonical_weapon_id,
+            ammo_form_id,
+            kind: decision.kind,
+            returned: decision.return_loaded,
+            consumed: decision.consume_reserve,
+            loaded,
+            holder_revision: state.revision,
+        };
+        self.holders.insert(holder, state);
+        self.bindings.insert(holder, bindings);
+        self.next_item_id = next_item_id;
+        self.next_transaction_id =
+            TransactionId(self.next_transaction_id.0.max(id.0.saturating_add(1)));
+        self.used_transaction_ids.insert(id);
+        self.ammo_finalized.insert(id, receipt.clone());
+        Ok(receipt)
+    }
+
+    pub fn consume_weapon_round(
+        &mut self,
+        holder: HolderId,
+        weapon_id: ItemInstanceId,
+    ) -> Result<(), TransactionError> {
+        let state = self
+            .holders
+            .get_mut(&holder)
+            .ok_or(TransactionError::UnknownHolder(holder))?;
+        let weapon = state
+            .items
+            .iter_mut()
+            .find(|item| item.id == weapon_id)
+            .ok_or(TransactionError::InsufficientItems)?;
+        if weapon.count != 1 {
+            return Err(TransactionError::MutableStack(weapon_id));
+        }
+        ammo::consume_round(&mut weapon.state.combat.magazine)
+            .map_err(|_| TransactionError::InsufficientItems)?;
+        state.revision = state.revision.saturating_add(1);
         Ok(())
     }
 
@@ -723,6 +936,110 @@ mod tests {
 
     fn item(id: u64, form: u32, count: u32, condition: Option<u32>) -> ItemInstance {
         ItemInstance::new(ItemInstanceId(id), form, count, state(condition)).unwrap()
+    }
+
+    #[test]
+    fn atomic_reload_consumes_missing_rounds_and_is_idempotent() {
+        let mut weapon = item(1, 0x434f, 1, Some(100));
+        weapon.state.combat.magazine.ammo_form_id = Some(0x4241);
+        weapon.state.combat.magazine.loaded = 7;
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(
+                HolderId::Player,
+                holder(vec![weapon, item(2, 0x4241, 20, None)], 0),
+            )
+            .unwrap();
+        ledger.equip(HolderId::Player, ItemInstanceId(1)).unwrap();
+
+        let first = ledger
+            .reload_weapon_with_id(
+                TransactionId(10),
+                HolderId::Player,
+                ItemInstanceId(1),
+                0x4241,
+                12,
+            )
+            .unwrap();
+        let second = ledger
+            .reload_weapon_with_id(
+                TransactionId(10),
+                HolderId::Player,
+                ItemInstanceId(1),
+                0x4241,
+                12,
+            )
+            .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.consumed, 5);
+        assert_eq!(first.loaded, 12);
+        assert_eq!(ledger.holders()[&HolderId::Player].items[1].count, 15);
+    }
+
+    #[test]
+    fn failed_ammo_switch_rolls_back_weapon_and_reserve() {
+        let mut weapon = item(1, 0x434f, 1, Some(100));
+        weapon.state.combat.magazine.ammo_form_id = Some(0x4241);
+        weapon.state.combat.magazine.loaded = 7;
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(
+                HolderId::Player,
+                holder(vec![weapon, item(2, 0x4241, 20, None)], 0),
+            )
+            .unwrap();
+        let before = ledger.snapshot();
+
+        assert_eq!(
+            ledger.reload_weapon_with_id(
+                TransactionId(11),
+                HolderId::Player,
+                ItemInstanceId(1),
+                0x9999,
+                12,
+            ),
+            Err(TransactionError::InsufficientItems)
+        );
+        assert_eq!(ledger.snapshot(), before);
+    }
+
+    #[test]
+    fn mutable_weapon_stack_is_split_and_active_binding_is_remapped() {
+        let mut ledger = ItemLedger::new();
+        ledger
+            .insert_holder(
+                HolderId::Player,
+                holder(
+                    vec![item(1, 0x434f, 2, Some(100)), item(2, 0x4241, 12, None)],
+                    0,
+                ),
+            )
+            .unwrap();
+        ledger.equip(HolderId::Player, ItemInstanceId(1)).unwrap();
+
+        let receipt = ledger
+            .reload_weapon_with_id(
+                TransactionId(12),
+                HolderId::Player,
+                ItemInstanceId(1),
+                0x4241,
+                12,
+            )
+            .unwrap();
+
+        assert_ne!(receipt.weapon_id, ItemInstanceId(1));
+        assert_eq!(
+            ledger.bindings()[&HolderId::Player].equipped,
+            Some(receipt.weapon_id)
+        );
+        assert_eq!(
+            ledger.holders()[&HolderId::Player]
+                .find(ItemInstanceId(1))
+                .unwrap()
+                .count,
+            1
+        );
     }
 
     #[test]
