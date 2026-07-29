@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::controls::{
     AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides,
-    LightingScale, VolumetricFogMultiplier,
+    LightingScale, VolumetricFogMultiplier, image_space_emission_multiplier,
 };
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
@@ -1065,6 +1065,7 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
     let ambient_scale = world.resource::<AmbientScale>().0;
     let fog_strength = world.resource::<FogStrength>().0;
     let cell_lighting = effective_lighting(&cell);
+    world.insert_resource(image_space_emission_multiplier(cell.image_space.as_ref()));
 
     world.insert_resource(GlobalAmbientLight {
         color: Color::srgb(
@@ -1401,6 +1402,7 @@ mod tests {
                 editor_id: None,
                 name: None,
                 interior: true,
+                behave_like_exterior: false,
                 ambient_rgba: [0.0; 4],
                 directional_rgba: [0.0; 4],
                 image_space_form_id: None,
@@ -1414,6 +1416,8 @@ mod tests {
                 water_height: None,
                 grid: None,
                 worldspace_form_id: None,
+                day_night_profile: None,
+                day_night_preview_profile: None,
             },
             placements,
             lights: Vec::new(),

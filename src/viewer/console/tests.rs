@@ -25,6 +25,8 @@ fn test_app() -> App {
         .insert_resource(player::StepDebugSettings::default())
         .insert_resource(interaction::PlayerInventory::default())
         .insert_resource(interaction::PlayerEquipment::default());
+    app.insert_resource(super::super::day_night::GameClock::default())
+        .insert_resource(super::super::day_night::DayNightPreview::default());
     app.init_resource::<interaction::CanonicalItemLedger>();
     app.init_resource::<super::super::world::ActiveSaveState>();
     app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
@@ -136,6 +138,26 @@ fn toggles_and_time_multiplier_change_focused_state() {
     assert_eq!(
         app.world().resource::<Time<Virtual>>().relative_speed(),
         2.0
+    );
+    assert!(exec(&mut app, "settime 24").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        0.0
+    );
+    assert!(exec(&mut app, "settimescale 1440").ok);
+    let time = exec(&mut app, "gettime");
+    assert_eq!(time.value["timescale"], 1440.0);
+    assert_eq!(time.value["cycle_seconds"], 60.0);
+    assert_eq!(
+        app.world().resource::<Time<Virtual>>().relative_speed(),
+        2.0,
+        "Fallout timescale must not alter sgtm"
+    );
+    assert_eq!(
+        exec(&mut app, "settimescale 86401").error.unwrap().code,
+        "out_of_range"
     );
 }
 
@@ -284,7 +306,12 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        13
+        14
+    );
+    assert!(exec(&mut app, "setrender day_night_preview 1").ok);
+    assert_eq!(
+        exec(&mut app, "getrender day_night_preview").value["value"],
+        1
     );
 }
 

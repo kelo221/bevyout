@@ -591,6 +591,8 @@ fn prepare_cell(
     } else {
         cell.effective_lighting = Some(prepared_lighting(legacy_lighting(&cell)));
     }
+    cell.day_night_profile = resolve_authoritative_day_night_profile(&cell, &parsed);
+    cell.day_night_preview_profile = resolve_preview_day_night_profile(&parsed);
     let (static_converter_revision, actor_converter_revision, prepared_converter_revision) =
         match args.converter {
             PrepareConverter::Blender => (
@@ -718,6 +720,12 @@ fn prepare_cell(
             &mut diagnostics,
         )?;
         stage_pipboy_sprites(
+            &data_root,
+            &session.archives,
+            &staging_dir,
+            &mut diagnostics,
+        )?;
+        stage_hud_sprites(
             &data_root,
             &session.archives,
             &staging_dir,
@@ -1290,6 +1298,210 @@ fn prepare_cell(
         manifest_path.display()
     ));
     Ok(())
+}
+
+fn resolve_authoritative_day_night_profile(
+    cell: &super::super::manifest::CellInfo,
+    parsed: &ParsedPlugin,
+) -> Option<PreparedDayNightProfile> {
+    let climate_form_id = parsed
+        .cell_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.climate_form_id)
+        .or_else(|| {
+            cell.worldspace_form_id.and_then(|worldspace_form_id| {
+                resolve_worldspace_climate(worldspace_form_id, &parsed.worldspaces)
+            })
+        })?;
+    let climate = parsed.climates.get(&climate_form_id)?;
+    let weather = climate
+        .weather_entries
+        .iter()
+        .find(|entry| entry.chance > 0 && parsed.weathers.contains_key(&entry.weather_form_id))
+        .and_then(|entry| parsed.weathers.get(&entry.weather_form_id))?;
+    Some(prepared_day_night_profile(
+        Some(climate),
+        weather,
+        PreparedDayNightProfileSource::Authoritative,
+    ))
+}
+
+fn resolve_worldspace_climate(
+    worldspace_form_id: u32,
+    worldspaces: &HashMap<u32, WorldspaceRecord>,
+) -> Option<u32> {
+    let mut current = worldspace_form_id;
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        let worldspace = worldspaces.get(&current)?;
+        if worldspace.parent_flags & WorldspaceRecord::USE_PARENT_CLIMATE != 0 {
+            current = worldspace.parent_form_id?;
+            continue;
+        }
+        return worldspace.climate_form_id;
+    }
+    None
+}
+
+fn resolve_preview_day_night_profile(parsed: &ParsedPlugin) -> Option<PreparedDayNightProfile> {
+    let candidates = parsed
+        .weathers
+        .values()
+        .map(|weather| (weather.form_id, weather.editor_id.clone()))
+        .collect::<Vec<_>>();
+    let weather_form_id = bevyout_core::time_of_day::select_preview_weather(&candidates)?;
+    let weather = parsed.weathers.get(&weather_form_id)?;
+    let climate = parsed
+        .climates
+        .values()
+        .filter(|climate| {
+            climate
+                .weather_entries
+                .iter()
+                .any(|entry| entry.chance > 0 && entry.weather_form_id == weather.form_id)
+        })
+        .min_by_key(|climate| climate.form_id);
+    Some(prepared_day_night_profile(
+        climate,
+        weather,
+        PreparedDayNightProfileSource::PreviewFallback,
+    ))
+}
+
+fn prepared_day_night_profile(
+    climate: Option<&ClimateRecord>,
+    weather: &WeatherRecord,
+    source: PreparedDayNightProfileSource,
+) -> PreparedDayNightProfile {
+    PreparedDayNightProfile {
+        climate_form_id: climate.map(|value| value.form_id),
+        climate_editor_id: climate.and_then(|value| value.editor_id.clone()),
+        weather_form_id: weather.form_id,
+        weather_editor_id: weather.editor_id.clone(),
+        timings: climate.map(|value| value.timings).unwrap_or_default(),
+        sky_upper: weather.sky_upper,
+        sky_lower: weather.sky_lower,
+        ambient: weather.ambient,
+        sunlight: weather.sunlight,
+        source,
+    }
+}
+
+#[cfg(test)]
+mod day_night_profile_tests {
+    use super::*;
+    use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
+
+    fn colors(value: f32) -> ColorKeyframes {
+        ColorKeyframes {
+            sunrise: [value; 4],
+            day: [value; 4],
+            sunset: [value; 4],
+            night: [value; 4],
+        }
+    }
+
+    fn weather(form_id: u32, editor_id: &str) -> WeatherRecord {
+        WeatherRecord {
+            form_id,
+            editor_id: Some(editor_id.into()),
+            sky_upper: colors(0.1),
+            sky_lower: colors(0.2),
+            ambient: colors(0.3),
+            sunlight: colors(0.4),
+        }
+    }
+
+    fn cell(worldspace_form_id: Option<u32>) -> super::super::super::manifest::CellInfo {
+        super::super::super::manifest::CellInfo {
+            form_id: 1,
+            editor_id: None,
+            name: None,
+            interior: true,
+            behave_like_exterior: true,
+            ambient_rgba: [0.0; 4],
+            directional_rgba: [0.0; 4],
+            image_space_form_id: None,
+            image_space: None,
+            lighting_template_form_id: None,
+            lighting_template_flags: 0,
+            lighting_template: None,
+            raw_lighting: None,
+            effective_lighting: None,
+            water_form_id: None,
+            water_height: None,
+            grid: None,
+            worldspace_form_id,
+            day_night_profile: None,
+            day_night_preview_profile: None,
+        }
+    }
+
+    #[test]
+    fn authoritative_weather_uses_first_resolved_positive_weight_entry() {
+        let mut parsed = ParsedPlugin::default();
+        parsed.weathers.insert(0x20, weather(0x20, "FirstUsable"));
+        parsed.weathers.insert(0x30, weather(0x30, "SecondUsable"));
+        parsed.climates.insert(
+            0x10,
+            ClimateRecord {
+                form_id: 0x10,
+                editor_id: Some("Climate".into()),
+                weather_entries: vec![
+                    super::super::super::openmw_esm4::ClimateWeatherEntry {
+                        weather_form_id: 0x99,
+                        chance: 50,
+                    },
+                    super::super::super::openmw_esm4::ClimateWeatherEntry {
+                        weather_form_id: 0x30,
+                        chance: 0,
+                    },
+                    super::super::super::openmw_esm4::ClimateWeatherEntry {
+                        weather_form_id: 0x20,
+                        chance: 10,
+                    },
+                    super::super::super::openmw_esm4::ClimateWeatherEntry {
+                        weather_form_id: 0x30,
+                        chance: 90,
+                    },
+                ],
+                timings: DayNightTimings::default(),
+            },
+        );
+        parsed.worldspaces.insert(
+            0x01,
+            WorldspaceRecord {
+                form_id: 0x01,
+                editor_id: None,
+                name: None,
+                parent_form_id: None,
+                parent_flags: 0,
+                climate_form_id: Some(0x10),
+            },
+        );
+
+        let profile = resolve_authoritative_day_night_profile(&cell(Some(0x01)), &parsed).unwrap();
+        assert_eq!(profile.weather_form_id, 0x20);
+    }
+
+    #[test]
+    fn preview_prefers_wasteland_clear_then_lowest_usable_form_id() {
+        let mut parsed = ParsedPlugin::default();
+        parsed.weathers.insert(0x01, weather(0x01, "Cloudy"));
+        parsed
+            .weathers
+            .insert(0x50, weather(0x50, "WastelandClear"));
+        let profile = resolve_preview_day_night_profile(&parsed).unwrap();
+        assert_eq!(profile.weather_form_id, 0x50);
+        assert_eq!(
+            profile.source,
+            PreparedDayNightProfileSource::PreviewFallback
+        );
+
+        parsed.weathers.remove(&0x50);
+        let profile = resolve_preview_day_night_profile(&parsed).unwrap();
+        assert_eq!(profile.weather_form_id, 0x01);
+    }
 }
 
 // ---------------------------------------------------------------------

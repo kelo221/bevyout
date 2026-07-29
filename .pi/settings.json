@@ -1,0 +1,15 @@
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 24000,
+    "keepRecentTokens": 12000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2,
+    "provider": {
+      "maxRetries": 0,
+      "maxRetryDelayMs": 30000
+    }
+  }
+}

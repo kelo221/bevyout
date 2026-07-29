@@ -66,6 +66,8 @@ const WORLD_DYNAMIC: u64 = 2;
 const PLAYER_QUERY: u64 = 4;
 const PLAYER_PROXY: u64 = 8;
 const STEP_SUPPORT: u64 = 16;
+const STEP_DEBUG_HUD_TOP_PX: f32 = 32.0;
+const COLLIDER_DEBUG_HUD_TOP_PX: f32 = 56.0;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CameraMode {
@@ -460,10 +462,11 @@ fn spawn_collider_debug_hud(mut commands: Commands) {
         ColliderDebugHud,
         super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
             right: px(10),
-            bottom: px(10),
+            top: px(COLLIDER_DEBUG_HUD_TOP_PX),
             ..default()
         },
         ZIndex(120),
@@ -498,10 +501,11 @@ fn spawn_step_debug_hud(mut commands: Commands) {
         StepDebugHud,
         super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
             right: px(10),
-            bottom: px(34),
+            top: px(STEP_DEBUG_HUD_TOP_PX),
             ..default()
         },
         ZIndex(120),

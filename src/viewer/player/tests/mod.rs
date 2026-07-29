@@ -1,4 +1,5 @@
 use super::*;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshPlugin;
 use bevy::time::TimeUpdateStrategy;
 use std::time::Duration;
@@ -1686,4 +1687,29 @@ fn ragdoll_spawns_from_the_actors_current_runtime_transform() {
     assert_eq!(placement.translation, [8.0, 9.0, 10.0]);
     assert!(Quat::from_array(placement.rotation_xyzw).angle_between(runtime.rotation) < 1e-5);
     assert!((placement.scale - 1.2).abs() < 1e-6);
+}
+
+#[test]
+fn diagnostic_lines_stack_below_fps_in_the_top_right() {
+    let mut world = World::new();
+    world.run_system_once(spawn_step_debug_hud).unwrap();
+    world.run_system_once(spawn_collider_debug_hud).unwrap();
+
+    let step = world
+        .query_filtered::<&Node, With<StepDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(step.position_type, PositionType::Absolute);
+    assert_eq!(step.top, Val::Px(STEP_DEBUG_HUD_TOP_PX));
+    assert_eq!(step.right, Val::Px(10.0));
+    assert_eq!(step.bottom, Val::Auto);
+
+    let collider = world
+        .query_filtered::<&Node, With<ColliderDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(collider.position_type, PositionType::Absolute);
+    assert_eq!(collider.top, Val::Px(COLLIDER_DEBUG_HUD_TOP_PX));
+    assert_eq!(collider.right, Val::Px(10.0));
+    assert_eq!(collider.bottom, Val::Auto);
 }

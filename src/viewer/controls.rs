@@ -202,6 +202,32 @@ pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
 
+/// Active Fallout ImageSpace multiplier layered over the viewer's user-facing
+/// emission control. Keeping this separate means `setrender emission` remains
+/// a stable manual multiplier while cell swaps can still apply each cell's
+/// authored HDR emissive strength.
+#[derive(Clone, Copy, Debug, PartialEq, Resource)]
+pub(crate) struct ImageSpaceEmissionMultiplier(pub(crate) f32);
+
+impl Default for ImageSpaceEmissionMultiplier {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+pub(crate) fn image_space_emission_multiplier(
+    image_space: Option<&ImageSpaceInfo>,
+) -> ImageSpaceEmissionMultiplier {
+    let Some(value) = image_space.map(|image_space| image_space.hdr_emissive_multiplier) else {
+        return ImageSpaceEmissionMultiplier::default();
+    };
+    if value.is_finite() {
+        ImageSpaceEmissionMultiplier(value.clamp(0.0, 8.0))
+    } else {
+        ImageSpaceEmissionMultiplier::default()
+    }
+}
+
 /// Explicit runtime overrides for bloom values that would otherwise be
 /// derived from the active Fallout ImageSpace. The override remains active
 /// across cell swaps until the viewer is restarted, preserving the existing
@@ -510,11 +536,13 @@ pub(crate) fn apply_unlit_mode(
 
 pub(crate) fn apply_emission_scale(
     scale: Res<EmissionScale>,
+    image_space_multiplier: Res<ImageSpaceEmissionMultiplier>,
     authorized: Res<AuthorizedEmissionMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut state: Local<EmissionMaterialState>,
 ) {
     if !scale.is_changed()
+        && !image_space_multiplier.is_changed()
         && state.last_asset_count == materials.len()
         && state.last_authorized_revision == authorized.revision
     {
@@ -523,7 +551,7 @@ pub(crate) fn apply_emission_scale(
     state.last_asset_count = materials.len();
     state.last_authorized_revision = authorized.revision;
 
-    let scale = scale.0.clamp(0.0, 1.0);
+    let scale = scale.0.clamp(0.0, 1.0) * image_space_multiplier.0;
     for (id, material) in materials.iter_mut() {
         if !authorized.ids.contains(&id) {
             continue;
@@ -552,9 +580,10 @@ mod tests {
     use bevy::window::{PrimaryWindow, WindowFocused};
 
     use super::{
-        AuthorizedEmissionMaterials, EmissionScale, apply_emission_scale,
-        horizontal_to_vertical_fov, mouse_look_is_safe, release_stuck_keys_on_focus_change,
-        request_focus_on_click_while_unfocused, should_request_focus,
+        AuthorizedEmissionMaterials, EmissionScale, ImageSpaceEmissionMultiplier,
+        apply_emission_scale, horizontal_to_vertical_fov, mouse_look_is_safe,
+        release_stuck_keys_on_focus_change, request_focus_on_click_while_unfocused,
+        should_request_focus,
     };
 
     #[test]
@@ -564,6 +593,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<AuthorizedEmissionMaterials>()
             .insert_resource(EmissionScale(0.0))
+            .insert_resource(ImageSpaceEmissionMultiplier(1.0))
             .add_systems(Update, apply_emission_scale);
         let material = app
             .world_mut()
@@ -610,6 +640,19 @@ mod tests {
                 .to_f32_array(),
             [0.2, 0.1, 0.05, 0.75]
         );
+
+        app.world_mut()
+            .insert_resource(ImageSpaceEmissionMultiplier(3.0));
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [0.6, 0.3, 0.15, 0.75]
+        );
     }
 
     #[test]
@@ -619,6 +662,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<AuthorizedEmissionMaterials>()
             .insert_resource(EmissionScale(1.0))
+            .insert_resource(ImageSpaceEmissionMultiplier(1.0))
             .add_systems(Update, apply_emission_scale);
         let material = app
             .world_mut()

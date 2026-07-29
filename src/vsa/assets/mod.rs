@@ -46,9 +46,9 @@ pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v32-normal-y-v1-pbr-m
 
 /// Prepared scenes record both conversion paths. Changing either one makes a
 /// completed cell stale while each asset family retains its own cache key.
-pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-emission-authority-v2-ktx2-uastc-v1+pynifly-v32-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1";
+pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-emission-authority-v2-ktx2-uastc-v1+pynifly-v32-normal-y-v1-pbr-material-v2-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1+day-night-profile-v1";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1+actor-assembly-v13-normal-y-v1-pbr-material-v2-selective-head-anims-ktx2-uastc-v1-17f5769";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v2-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1+actor-assembly-v13-normal-y-v1-pbr-material-v2-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,

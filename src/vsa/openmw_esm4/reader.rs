@@ -113,7 +113,25 @@ pub(crate) fn walk_container(
                 } else {
                     state
                         .worldspaces
-                        .insert(form_id, parse_worldspace(&subs, form_id));
+                        .insert(form_id, parse_worldspace(&subs, form_id, resolver));
+                }
+            }
+            "CLMT" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.climates.remove(&form_id);
+                } else {
+                    state
+                        .climates
+                        .insert(form_id, parse_climate(&subs, form_id, resolver));
+                }
+            }
+            "WTHR" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.weathers.remove(&form_id);
+                } else if let Some(weather) = parse_weather(&subs, form_id) {
+                    state.weathers.insert(form_id, weather);
+                } else {
+                    state.weathers.remove(&form_id);
                 }
             }
             "IMGS" => {

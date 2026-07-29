@@ -92,18 +92,20 @@ use super::assets::{
 use super::audio_assets::{load_audio_archives, resolve_audio_asset, stage_audio_asset};
 use super::manifest::{
     CURRENT_MANIFEST_SCHEMA_VERSION, CURRENT_PREPARE_REVISION, Diagnostic, PreparedActor,
-    PreparedAudioClip, PreparedCellAudio, PreparedCellLighting, PreparedDoor,
-    PreparedDoorDestination, PreparedDropCollider, PreparedEnableParent, PreparedInventoryEntry,
-    PreparedItemCatalog, PreparedItemCategory, PreparedItemDefinition, PreparedItemEffect,
-    PreparedItemStats, PreparedLight, PreparedLightingTemplate, PreparedMutabilitySummary,
-    PreparedNavGraphSource, PreparedNavMeshChunk, PreparedNavMeshSource,
-    PreparedPhysicsClassification, PreparedPickup, PreparedPlacement, PreparedPlacementAudio,
-    PreparedPluginSource, PreparedReflectionProbe, PreparedReflectionProbeSet,
-    PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
+    PreparedAudioClip, PreparedCellAudio, PreparedCellLighting, PreparedDayNightProfile,
+    PreparedDayNightProfileSource, PreparedDoor, PreparedDoorDestination, PreparedDropCollider,
+    PreparedEnableParent, PreparedInventoryEntry, PreparedItemCatalog, PreparedItemCategory,
+    PreparedItemDefinition, PreparedItemEffect, PreparedItemStats, PreparedLight,
+    PreparedLightingTemplate, PreparedMutabilitySummary, PreparedNavGraphSource,
+    PreparedNavMeshChunk, PreparedNavMeshSource, PreparedPhysicsClassification, PreparedPickup,
+    PreparedPlacement, PreparedPlacementAudio, PreparedPluginSource, PreparedReflectionProbe,
+    PreparedReflectionProbeSet, PreparedRuntimeMutability, PreparedSceneManifest, PreparedSemantic,
     PreparedStaticPointShadowLight, PreparedStaticPointShadows, PreparedVisualIssue,
     REFLECTION_PROBE_REVISION, STATIC_POINT_SHADOW_REVISION,
 };
-use super::openmw_esm4::{LightingData, OpenMwItemStats};
+use super::openmw_esm4::{
+    ClimateRecord, LightingData, OpenMwItemStats, WeatherRecord, WorldspaceRecord,
+};
 use super::paths::{
     FO3_SCALE, absolutize, fingerprint, is_editor_marker, is_non_rendering_effect,
     normalize_asset_path, parse_cell_selector, placement_transform, placement_transform_parts,

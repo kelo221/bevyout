@@ -135,6 +135,7 @@ fn legacy_lighting_falls_back_to_cell_ambient_and_directional_colors_only() {
         editor_id: None,
         name: None,
         interior: true,
+        behave_like_exterior: false,
         ambient_rgba: [0.1, 0.2, 0.3, 1.0],
         directional_rgba: [0.4, 0.5, 0.6, 1.0],
         image_space_form_id: None,
@@ -148,6 +149,8 @@ fn legacy_lighting_falls_back_to_cell_ambient_and_directional_colors_only() {
         water_height: None,
         grid: None,
         worldspace_form_id: None,
+        day_night_profile: None,
+        day_night_preview_profile: None,
     };
     let lighting = legacy_lighting(&cell);
     assert_eq!(lighting.ambient_rgba, cell.ambient_rgba);

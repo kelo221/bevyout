@@ -749,9 +749,11 @@ pub(crate) fn parse_cell(
     form_id: u32,
     resolver: &FormIdResolver,
 ) -> Result<CellInfo> {
-    let interior = sub(subs, "DATA")
+    let cell_flags = sub(subs, "DATA")
         .and_then(|data| data.first())
-        .is_some_and(|flags| flags & 1 != 0);
+        .copied()
+        .unwrap_or_default();
+    let interior = cell_flags & 1 != 0;
     let mut ambient = [0.18, 0.18, 0.18, 1.0];
     let mut directional = [0.8, 0.8, 0.8, 1.0];
     if let Some(lighting) = sub(subs, "XCLL").and_then(parse_lighting_data) {
@@ -763,6 +765,7 @@ pub(crate) fn parse_cell(
         editor_id: sub(subs, "EDID").map(cstring),
         name: sub(subs, "FULL").map(cstring),
         interior,
+        behave_like_exterior: cell_flags & 0x80 != 0,
         ambient_rgba: ambient,
         directional_rgba: directional,
         image_space_form_id: sub_form_id(subs, "XCIM", resolver),
@@ -781,6 +784,8 @@ pub(crate) fn parse_cell(
         // ("world children") GRUP label, once traversal knows the context a
         // record-local parse function like this one cannot see.
         worldspace_form_id: None,
+        day_night_profile: None,
+        day_night_preview_profile: None,
     })
 }
 
@@ -795,6 +800,7 @@ pub(crate) fn parse_grid(data: &[u8]) -> Option<(i32, i32)> {
 
 pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver) -> CellMetadata {
     CellMetadata {
+        climate_form_id: sub_form_id(subs, "XCCM", resolver),
         acoustic_space_form_id: sub_form_id(subs, "XCAS", resolver),
         music_form_id: sub_form_id(subs, "XCMO", resolver),
         lighting_template_form_id: sub_form_id(subs, "LTMP", resolver),
@@ -808,7 +814,7 @@ pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver)
             subs,
             &[
                 "EDID", "FULL", "DATA", "XCLL", "XCIM", "XCAS", "XCMO", "LTMP", "LNAM", "XCWT",
-                "XCLW", "XCLC",
+                "XCLW", "XCLC", "XCCM",
             ],
         ),
     }
@@ -987,14 +993,85 @@ pub(crate) fn parse_image_space(
     Some(image_space)
 }
 
-/// `WRLD` worldspace record: FormID, `EDID`, `FULL`. OpenMW
-/// `components/esm4/loadwrld.hpp` (`struct World`). Only the fields the
-/// cell map artifact needs (issue #45) are decoded; the many worldspace
-/// gameplay flags/parent/climate fields are left unparsed.
-pub(crate) fn parse_worldspace(subs: &[Subrecord], form_id: u32) -> WorldspaceRecord {
+/// `WRLD` worldspace identity plus parent/climate inheritance fields.
+pub(crate) fn parse_worldspace(
+    subs: &[Subrecord],
+    form_id: u32,
+    resolver: &FormIdResolver,
+) -> WorldspaceRecord {
     WorldspaceRecord {
         form_id,
         editor_id: sub(subs, "EDID").map(cstring),
         name: sub(subs, "FULL").map(cstring),
+        parent_form_id: sub_form_id(subs, "WNAM", resolver),
+        parent_flags: sub(subs, "PNAM")
+            .and_then(|data| data.first())
+            .copied()
+            .unwrap_or_default(),
+        climate_form_id: sub_form_id(subs, "CNAM", resolver),
     }
+}
+
+pub(crate) fn parse_climate(
+    subs: &[Subrecord],
+    form_id: u32,
+    resolver: &FormIdResolver,
+) -> ClimateRecord {
+    let weather_entries = subs
+        .iter()
+        .filter(|subrecord| subrecord.signature == "WLST")
+        .filter(|subrecord| subrecord.data.len() % 12 == 0)
+        .flat_map(|subrecord| subrecord.data.chunks_exact(12))
+        .filter_map(|entry| {
+            Some(ClimateWeatherEntry {
+                weather_form_id: resolver.adjust(u32_at(entry, 0)?),
+                chance: i32_at(entry, 4)?,
+            })
+        })
+        .collect();
+    let timings = sub(subs, "TNAM")
+        .filter(|data| data.len() >= 4)
+        .map(|data| DayNightTimings {
+            sunrise_begin_hour: f32::from(data[0]) / 6.0,
+            sunrise_end_hour: f32::from(data[1]) / 6.0,
+            sunset_begin_hour: f32::from(data[2]) / 6.0,
+            sunset_end_hour: f32::from(data[3]) / 6.0,
+        })
+        .unwrap_or_default();
+    ClimateRecord {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        weather_entries,
+        timings,
+    }
+}
+
+pub(crate) fn parse_weather(subs: &[Subrecord], form_id: u32) -> Option<WeatherRecord> {
+    const COLOR_TYPE_COUNT: usize = 10;
+    const TIME_COUNT: usize = 4;
+    const COLOR_SIZE: usize = 4;
+    let colors = sub(subs, "NAM0")?;
+    if colors.len() != COLOR_TYPE_COUNT * TIME_COUNT * COLOR_SIZE {
+        return None;
+    }
+    let keyframes = |color_type: usize| {
+        let rgba = |time: usize| {
+            let offset = (color_type * TIME_COUNT + time) * COLOR_SIZE;
+            rgba8(&colors[offset..offset + COLOR_SIZE])
+        };
+        ColorKeyframes {
+            sunrise: rgba(0),
+            day: rgba(1),
+            sunset: rgba(2),
+            night: rgba(3),
+        }
+    };
+    Some(WeatherRecord {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        sky_upper: keyframes(0),
+        ambient: keyframes(3),
+        sunlight: keyframes(4),
+        sky_lower: keyframes(7),
+    })
 }

@@ -1,6 +1,7 @@
 //! Rendering, timing, and capture console commands.
 
 use super::*;
+use crate::viewer::day_night::{DayNightPreview, GameClock, profile_for_cell};
 use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
 use bevy::light::EnvironmentMapLight;
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
@@ -57,6 +58,26 @@ impl ConsoleCommandProvider for RenderCommandProvider {
                 "sgtm <0.01..100>",
                 "Set Time<Virtual> relative speed without changing pause state.",
                 set_global_time_multiplier,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "gettime",
+                "gettime",
+                "Report the independent Fallout game clock.",
+                get_time,
+            ),
+            ConsoleCommand::new(
+                "settime",
+                "settime <0..24>",
+                "Set the Fallout game clock hour.",
+                set_time,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "settimescale",
+                "settimescale <0..86400>",
+                "Set Fallout game seconds advanced per real second; zero stops.",
+                set_time_scale,
             )
             .mutating(),
             ConsoleCommand::new(
@@ -187,7 +208,7 @@ fn toggle_reflection_probe_debug(
     ))
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 13] = [
+pub(super) const RENDER_SETTINGS: [&str; 14] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -201,6 +222,7 @@ pub(super) const RENDER_SETTINGS: [&str; 13] = [
     "shadow_samples",
     "realtime_shadows",
     "reflection_probes",
+    "day_night_preview",
 ];
 
 const IMAGE_SPACE_DIAGNOSTIC: &str = "imagespace";
@@ -392,6 +414,14 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         "reflection_probes".into(),
         json!(reflection_probes_enabled as u8),
     );
+    values.insert(
+        "day_night_preview".into(),
+        json!(
+            world
+                .get_resource::<DayNightPreview>()
+                .is_some_and(|preview| preview.0) as u8
+        ),
+    );
     Ok(values)
 }
 
@@ -474,6 +504,7 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
         "reflection_probes" => "Prepared reflection probes",
+        "day_night_preview" => "Day/night preview",
         _ => "Render setting",
     }
 }
@@ -547,7 +578,9 @@ pub(super) fn set_render(
         "volumetric_fog" => (0.0..=100.0).contains(&value),
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
-        "realtime_shadows" | "reflection_probes" => value == 0.0 || value == 1.0,
+        "realtime_shadows" | "reflection_probes" | "day_night_preview" => {
+            value == 0.0 || value == 1.0
+        }
         _ => unreachable!(),
     };
     if !valid {
@@ -580,6 +613,16 @@ pub(super) fn set_render(
                 } else {
                     0.0
                 };
+            }
+        }
+        "day_night_preview" => {
+            if let Some(mut preview) = world.get_resource_mut::<DayNightPreview>() {
+                preview.0 = value == 1.0;
+            } else {
+                world.insert_resource(DayNightPreview(value == 1.0));
+            }
+            if world.contains_resource::<LoadedSceneManifest>() {
+                crate::viewer::day_night::apply_day_night_environment(world);
             }
         }
         "bloom_intensity" | "bloom_threshold" | "bloom_softness" => {
@@ -709,6 +752,105 @@ pub(super) fn set_global_time_multiplier(
         json!({ "relative_speed": multiplier }),
         vec![format!("Time multiplier set to {multiplier}.")],
     ))
+}
+
+pub(super) fn get_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let clock = *world.resource::<GameClock>();
+    let (weather, mode) = world
+        .get_resource::<LoadedSceneManifest>()
+        .map(|manifest| {
+            let preview = world
+                .get_resource::<DayNightPreview>()
+                .is_some_and(|value| value.0);
+            let (profile, mode) = profile_for_cell(&manifest.cell, preview);
+            (
+                profile
+                    .and_then(|profile| profile.weather_editor_id.as_deref())
+                    .unwrap_or("<none>"),
+                mode,
+            )
+        })
+        .unwrap_or(("<none>", "STATIC"));
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "hour": clock.hour,
+            "timescale": clock.timescale,
+            "cycle_seconds": clock.cycle_seconds(),
+            "weather": weather,
+            "mode": mode,
+        }),
+        vec![format!(
+            "Fallout time {:02}:{:02}; timescale x{}.",
+            (clock.hour.floor() as u32) % 24,
+            ((clock.hour.fract() * 60.0).floor() as u32) % 60,
+            clock.timescale
+        )],
+    ))
+}
+
+pub(super) fn set_time(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() != 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "settime expects exactly one hour",
+        ));
+    }
+    let hour = invocation.args[0]
+        .parse::<f32>()
+        .map_err(|_| ConsoleError::new("bad_type", "game hour must be a number"))?;
+    if !hour.is_finite() || !(0.0..=24.0).contains(&hour) {
+        return Err(ConsoleError::new(
+            "out_of_range",
+            "game hour must be between 0 and 24",
+        ));
+    }
+    world.resource_mut::<GameClock>().set_hour(hour);
+    if world.contains_resource::<LoadedSceneManifest>() {
+        crate::viewer::day_night::apply_day_night_environment(world);
+    }
+    get_time(
+        world,
+        &ConsoleInvocation {
+            args: Vec::new(),
+            ..invocation.clone()
+        },
+    )
+}
+
+pub(super) fn set_time_scale(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.len() != 1 {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "settimescale expects exactly one value",
+        ));
+    }
+    let timescale = invocation.args[0]
+        .parse::<f32>()
+        .map_err(|_| ConsoleError::new("bad_type", "timescale must be a number"))?;
+    if !timescale.is_finite() || !(0.0..=86_400.0).contains(&timescale) {
+        return Err(ConsoleError::new(
+            "out_of_range",
+            "timescale must be between 0 and 86400",
+        ));
+    }
+    world.resource_mut::<GameClock>().timescale = timescale;
+    get_time(
+        world,
+        &ConsoleInvocation {
+            args: Vec::new(),
+            ..invocation.clone()
+        },
+    )
 }
 
 pub(super) fn screenshot(
