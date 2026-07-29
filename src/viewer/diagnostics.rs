@@ -289,6 +289,7 @@ pub(crate) struct DebugInfoState {
 pub(crate) struct DebugInfoHud;
 
 const DEBUG_INFO_OFF_LINE: &str = "Debug info: Off";
+const DEBUG_INFO_HUD_TOP_PX: f32 = 56.0;
 
 // Anchor corner note (post-merge fix, real-data smoke test): the existing
 // HUD occupies top-right (`FpsText`) and bottom-right (`ColliderDebugHud`
@@ -296,10 +297,10 @@ const DEBUG_INFO_OFF_LINE: &str = "Debug info: Off";
 // varies at runtime (grows with live test nav agents), so anchoring it to
 // any of those same edges risks it growing into a row already in use --
 // exactly what happened bottom-left/bottom-right sharing the bottom row.
-// Top-left is the only corner nothing else uses, so pinning there rules out
-// the collision by construction regardless of how many lines this block
-// ever renders, instead of relying on padding-based spacing that a future
-// line addition could silently outgrow.
+// Top-left is the diagnostic corner; the player transform HUD owns the first
+// row and this block starts below it. Keeping this block independently
+// anchored prevents its variable line count from colliding with the other
+// fixed-corner diagnostics.
 pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
     commands.spawn((
         Text::new(DEBUG_INFO_OFF_LINE),
@@ -309,7 +310,7 @@ pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             left: px(10),
-            top: px(8),
+            top: px(DEBUG_INFO_HUD_TOP_PX),
             ..default()
         },
         ZIndex(120),
@@ -396,11 +397,10 @@ mod debug_info_tests {
     // multi-line render (a live test nav agent widens it to 4+ lines) grew
     // upward into the same bottom row `ColliderDebugHud`/`StepDebugHud`
     // occupy bottom-right, and the two texts garbled each other on screen.
-    // Top-left is the only screen corner nothing else in the HUD uses
-    // (`FpsText` is top-right, the collider/step HUDs are bottom-right), so
-    // pinning there rules out that collision by construction -- asserting
-    // `bottom`/`right` stay `Val::Auto` here is exactly the guarantee that
-    // no line count can ever grow this block into the existing bottom row.
+    // The player transform HUD owns the first top-left row; this diagnostic
+    // block begins beneath it. Asserting `bottom`/`right` stay `Val::Auto`
+    // guarantees that its variable line count cannot grow into a different
+    // corner's fixed diagnostic row.
     #[test]
     fn hud_is_anchored_top_left_never_the_existing_bottom_right_row() {
         let mut world = World::new();
@@ -408,17 +408,17 @@ mod debug_info_tests {
         let mut query = world.query_filtered::<&Node, With<DebugInfoHud>>();
         let node = query.single(&world).unwrap();
         assert_eq!(node.position_type, PositionType::Absolute);
-        assert_eq!(node.top, Val::Px(8.0));
+        assert_eq!(node.top, Val::Px(DEBUG_INFO_HUD_TOP_PX));
         assert_eq!(node.left, Val::Px(10.0));
         assert_eq!(
             node.bottom,
             Val::Auto,
-            "must not share the existing bottom-right HUD row"
+            "must remain top-anchored rather than sharing a bottom HUD row"
         );
         assert_eq!(
             node.right,
             Val::Auto,
-            "must not share the existing bottom-right HUD row"
+            "must remain left-anchored rather than sharing a right HUD column"
         );
     }
 

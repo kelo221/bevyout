@@ -1713,3 +1713,50 @@ fn diagnostic_lines_stack_below_fps_in_the_top_right() {
     assert_eq!(collider.right, Val::Px(10.0));
     assert_eq!(collider.bottom, Val::Auto);
 }
+
+#[test]
+fn player_debug_hud_uses_the_top_left_diagnostic_layout() {
+    let mut world = World::new();
+    world.run_system_once(spawn_player_debug_hud).unwrap();
+
+    let node = world
+        .query_filtered::<&Node, With<PlayerDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(node.position_type, PositionType::Absolute);
+    assert_eq!(node.left, Val::Px(PLAYER_DEBUG_HUD_LEFT_PX));
+    assert_eq!(node.top, Val::Px(PLAYER_DEBUG_HUD_TOP_PX));
+    assert_eq!(node.right, Val::Auto);
+    assert_eq!(node.bottom, Val::Auto);
+}
+
+#[test]
+fn player_debug_text_formats_position_and_look_angles() {
+    let transform = Transform::from_xyz(12.3456, 6.7894, -4.3215);
+    let player = FpsPlayer {
+        yaw: 90.0_f32.to_radians(),
+        pitch: -12.0_f32.to_radians(),
+    };
+
+    assert_eq!(
+        player_debug_text(Some((&transform, &player))),
+        "PLAYER POS 12.346, 6.789, -4.321\nLOOK YAW 90.0 deg | PITCH -12.0 deg"
+    );
+}
+
+#[test]
+fn player_debug_text_shows_fallback_without_an_fps_player() {
+    assert_eq!(
+        player_debug_text(None),
+        "PLAYER POS --\nLOOK YAW -- | PITCH --"
+    );
+
+    let mut world = World::new();
+    world.spawn((Text::new("stale"), PlayerDebugHud));
+    world.run_system_once(update_player_debug_hud).unwrap();
+    let text = world
+        .query_filtered::<&Text, With<PlayerDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(text.0, "PLAYER POS --\nLOOK YAW -- | PITCH --");
+}

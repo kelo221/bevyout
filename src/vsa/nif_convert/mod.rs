@@ -18,8 +18,9 @@ use serde::Serialize;
 use crate::cli::{NifConversionMode, NifConvertArgs};
 
 use super::assets::{
-    MetallicMaterialTable, RootTransformPolicy, flip_directx_normal_y_texel, load_archives,
-    patch_glb_material_policy, perceptual_roughness_from_glossiness, resolve_asset,
+    MetallicMaterialTable, RootTransformPolicy, fallout_specular_texture_path,
+    flip_directx_normal_y_texel, load_archives, patch_glb_material_policy,
+    perceptual_roughness_from_glossiness, resolve_asset,
 };
 use super::physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsJoint,
@@ -59,7 +60,7 @@ struct ReportIssue {
     message: String,
 }
 
-pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
+pub(crate) const NATIVE_NIF_REPORT_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-skin-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1";
 
 pub(crate) struct NifConversionRequest<'a> {
     pub(crate) source_name: &'a str,
@@ -163,7 +164,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         document.blocks.len()
     ));
     let mut scene = nif::fo3::extract_scene(&document).context("extracting NIF scene")?;
-    apply_native_material_roughness(&document, &mut scene)?;
+    apply_native_material_policy(&document, &mut scene)?;
     let record_zero_non_identity = scene
         .nodes
         .iter()
@@ -618,10 +619,11 @@ fn resolve_textures(
     Ok(textures)
 }
 
-pub(crate) fn apply_native_material_roughness(
+pub(crate) fn apply_native_material_policy(
     document: &nif::fo3::Document,
     scene: &mut nif::fo3::Scene,
 ) -> Result<()> {
+    apply_fallout_specular_texture_policy(&mut scene.materials);
     for material in &mut scene.materials {
         material.roughness = perceptual_roughness_from_glossiness(None);
     }
@@ -656,6 +658,18 @@ pub(crate) fn apply_native_material_roughness(
         material.roughness = perceptual_roughness_from_glossiness(glossiness);
     }
     Ok(())
+}
+
+fn apply_fallout_specular_texture_policy(materials: &mut [nif::fo3::SceneMaterial]) {
+    for material in materials {
+        let features = nif::fo3::FalloutShaderFeatures::from_flags(
+            material.shader_type,
+            material.shader_flags_1,
+            material.shader_flags_2,
+        );
+        material.specular_texture =
+            fallout_specular_texture_path(features.specular, material.normal_texture.as_deref());
+    }
 }
 
 /// Builds a distinct glTF image for every normal-map source. A same-source
@@ -899,6 +913,163 @@ mod tests {
         .unwrap()
         .to_rgba8();
         assert_eq!(converted.get_pixel(0, 0).0, [12, 221, 56, 78]);
+    }
+
+    #[test]
+    fn native_glb_reuses_the_alpha_preserving_normal_for_specular_strength() {
+        let source_path = "textures/furniture/chair03_n.dds".to_string();
+        let mut source = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([12, 34, 56, 61]),
+        ))
+        .write_to(&mut source, image::ImageFormat::Png)
+        .unwrap();
+        let mut textures = BTreeMap::from([(source_path.clone(), source.into_inner())]);
+        let mut materials = vec![nif::fo3::SceneMaterial {
+            name: "Chair03F".into(),
+            base_color: [1.0; 4],
+            emissive: [0.0; 3],
+            emissive_multiplier: 1.0,
+            roughness: 0.817_491_5,
+            alpha_mode: nif::fo3::SceneAlphaMode::Opaque,
+            alpha_cutoff: None,
+            double_sided: false,
+            unlit: false,
+            diffuse_texture: None,
+            normal_texture: Some(source_path),
+            specular_texture: None,
+            glow_texture: None,
+            height_texture: None,
+            environment_texture: None,
+            environment_mask: None,
+            shader_type: nif::fo3::SHADER_TYPE_DEFAULT,
+            shader_flags_1: nif::fo3::SHADER_FLAG1_SPECULAR,
+            shader_flags_2: 0,
+        }];
+
+        apply_fallout_specular_texture_policy(&mut materials);
+        prepare_native_normal_textures(&mut materials, &mut textures).unwrap();
+        let scene = nif::fo3::Scene {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            materials,
+            skins: Vec::new(),
+            issues: Vec::new(),
+            statistics: nif::fo3::SceneStatistics::default(),
+            animations: Vec::new(),
+            animation_sound_cues: Vec::new(),
+        };
+        let output =
+            nif::fo3::encode_glb(&scene, &textures, &nif::fo3::GlbOptions::default()).unwrap();
+        let output =
+            patch_glb_material_policy(&output.bytes, &MetallicMaterialTable::built_in().unwrap())
+                .unwrap();
+        let json_length = u32::from_le_bytes(output[12..16].try_into().unwrap()) as usize;
+        let document: serde_json::Value =
+            serde_json::from_slice(&output[20..20 + json_length]).unwrap();
+        let material = &document["materials"][0];
+
+        assert_eq!(
+            material["normalTexture"]["index"],
+            material["extensions"]["KHR_materials_specular"]["specularTexture"]["index"]
+        );
+        assert_eq!(
+            material["pbrMetallicRoughness"]["roughnessFactor"],
+            serde_json::json!(0.8174915)
+        );
+        assert_eq!(
+            material["pbrMetallicRoughness"]["metallicFactor"],
+            serde_json::json!(0.0)
+        );
+        assert!(
+            document["extensionsUsed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|extension| extension == "KHR_materials_specular")
+        );
+        assert_eq!(document["images"].as_array().unwrap().len(), 1);
+        assert_eq!(document["textures"].as_array().unwrap().len(), 1);
+
+        let gltf = gltf::Gltf::from_slice(&output).unwrap();
+        let blob = gltf.blob.as_deref().unwrap();
+        let source = gltf.document.images().next().unwrap().source();
+        let gltf::image::Source::View { view, .. } = source else {
+            panic!("embedded image must use a buffer view");
+        };
+        let image = image::load_from_memory(&blob[view.offset()..view.offset() + view.length()])
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(image.get_pixel(0, 0).0, [12, 221, 56, 61]);
+    }
+
+    #[test]
+    fn native_glb_omits_specular_extension_when_disabled_or_normal_is_absent() {
+        for (shader_flags_1, normal_texture) in [
+            (0, Some("textures/furniture/chair03_n.dds")),
+            (nif::fo3::SHADER_FLAG1_SPECULAR, None),
+        ] {
+            let mut textures = BTreeMap::new();
+            if let Some(path) = normal_texture {
+                let mut source = Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                    1,
+                    1,
+                    image::Rgba([12, 34, 56, 61]),
+                ))
+                .write_to(&mut source, image::ImageFormat::Png)
+                .unwrap();
+                textures.insert(path.to_string(), source.into_inner());
+            }
+            let mut materials = vec![nif::fo3::SceneMaterial {
+                name: "Chair03F".into(),
+                base_color: [1.0; 4],
+                emissive: [0.0; 3],
+                emissive_multiplier: 1.0,
+                roughness: 0.817_491_5,
+                alpha_mode: nif::fo3::SceneAlphaMode::Opaque,
+                alpha_cutoff: None,
+                double_sided: false,
+                unlit: false,
+                diffuse_texture: None,
+                normal_texture: normal_texture.map(str::to_owned),
+                specular_texture: Some("textures/incorrect_slot7.dds".into()),
+                glow_texture: None,
+                height_texture: None,
+                environment_texture: None,
+                environment_mask: None,
+                shader_type: nif::fo3::SHADER_TYPE_DEFAULT,
+                shader_flags_1,
+                shader_flags_2: 0,
+            }];
+            apply_fallout_specular_texture_policy(&mut materials);
+            assert_eq!(materials[0].specular_texture, None);
+            let scene = nif::fo3::Scene {
+                nodes: Vec::new(),
+                roots: Vec::new(),
+                materials,
+                skins: Vec::new(),
+                issues: Vec::new(),
+                statistics: nif::fo3::SceneStatistics::default(),
+                animations: Vec::new(),
+                animation_sound_cues: Vec::new(),
+            };
+            let output =
+                nif::fo3::encode_glb(&scene, &textures, &nif::fo3::GlbOptions::default()).unwrap();
+            let json_length = u32::from_le_bytes(output.bytes[12..16].try_into().unwrap()) as usize;
+            let document: serde_json::Value =
+                serde_json::from_slice(&output.bytes[20..20 + json_length]).unwrap();
+            assert!(document["materials"][0]["extensions"]["KHR_materials_specular"].is_null());
+            assert!(
+                !document["extensionsUsed"]
+                    .as_array()
+                    .is_some_and(|extensions| extensions
+                        .iter()
+                        .any(|extension| extension == "KHR_materials_specular"))
+            );
+        }
     }
 
     #[test]

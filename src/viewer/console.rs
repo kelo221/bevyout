@@ -20,9 +20,11 @@ use crate::item_transaction::{HolderId, ItemInstanceId, TransactionRequest};
 use crate::vsa::{PreparedItemCatalog, PreparedItemStats, PreparedSemantic};
 
 use super::controls::{
-    AmbientScale, AoStrength, EmissionScale, FogStrength, HorizontalFov, IrradianceIntensity,
-    LightingScale, LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES, MIN_HORIZONTAL_FOV_DEGREES,
-    UnlitMode, VolumetricFogMultiplier, horizontal_to_vertical_fov,
+    AmbientScale, AoStrength, DielectricSpecularGate, EmissionScale, FogStrength, HorizontalFov,
+    IrradianceIntensity, LightingScale, LightsDisabled, MAX_HORIZONTAL_FOV_DEGREES,
+    MAX_REFLECTION_PROBE_STRENGTH, MAX_ROUGHNESS_SCALE, MIN_HORIZONTAL_FOV_DEGREES,
+    MIN_REFLECTION_PROBE_STRENGTH, MIN_ROUGHNESS_SCALE, MetallicGate, ReflectionProbeSettings,
+    RoughnessScale, UnlitMode, VolumetricFogMultiplier, horizontal_to_vertical_fov,
 };
 use super::inventory::{InventoryStack, StackKey};
 #[cfg(test)]

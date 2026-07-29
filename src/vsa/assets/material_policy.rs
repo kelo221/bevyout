@@ -3,18 +3,32 @@
 use std::collections::BTreeMap;
 
 pub(crate) const DEFAULT_GLOSSINESS_EXPONENT: f32 = 10.0;
-pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v5-1.25x-roughness";
+pub(crate) const MATERIAL_POLICY_REVISION: &str = "fallout-pbr-materials-v6-1.75x-roughness";
 pub(crate) const METALLIC_MATERIALS_CSV: &str = include_str!("metallic_materials.csv");
 
 /// Converts a Blinn-Phong exponent into tuned glTF/Bevy perceptual GGX roughness.
 ///
 /// Preserve Fallout's authored gloss hierarchy while translating its
-/// Blinn-Phong exponent to glTF/Bevy perceptual GGX roughness with a 1.25x modifier.
+/// Blinn-Phong exponent to glTF/Bevy perceptual GGX roughness with a 1.75x modifier.
 pub(crate) fn perceptual_roughness_from_glossiness(glossiness: Option<f32>) -> f32 {
     let exponent = glossiness
         .filter(|value| value.is_finite() && *value >= 0.0)
         .unwrap_or(DEFAULT_GLOSSINESS_EXPONENT);
-    (1.25 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
+    (1.75 * (2.0 / (exponent + 2.0)).powf(0.25)).clamp(0.0, 1.0)
+}
+
+/// Selects Fallout 3's authored specular-strength payload.
+///
+/// FO3 stores specular strength in the alpha channel of texture slot 1, the
+/// normal map. The payload is valid only when the material enables specular
+/// shading and a normal texture is present.
+pub(crate) fn fallout_specular_texture_path(
+    specular_enabled: bool,
+    normal_texture: Option<&str>,
+) -> Option<String> {
+    specular_enabled
+        .then(|| normal_texture.map(str::to_owned))
+        .flatten()
 }
 
 pub(crate) fn normalize_diffuse_texture_path(path: &str) -> Result<String, String> {
@@ -125,9 +139,10 @@ mod tests {
     fn known_blinn_phong_exponents_map_to_perceptual_ggx_roughness() {
         for (exponent, expected) in [
             (0.0, 1.0),
-            (10.0, 0.798_678_9),
-            (70.0, 0.510_310_4),
-            (100.0, 0.467_754),
+            (10.0, 1.0),
+            (40.0, 0.817_491_5),
+            (70.0, 0.714_434_5),
+            (100.0, 0.654_855_6),
         ] {
             let actual = perceptual_roughness_from_glossiness(Some(exponent));
             assert!((actual - expected).abs() < 0.000_001);
@@ -147,6 +162,17 @@ mod tests {
             perceptual_roughness_from_glossiness(Some(f32::INFINITY)),
             expected
         );
+    }
+
+    #[test]
+    fn fallout_specular_strength_uses_normal_alpha_only_when_eligible() {
+        let normal = "textures/furniture/chair03_n.dds";
+        assert_eq!(
+            fallout_specular_texture_path(true, Some(normal)).as_deref(),
+            Some(normal)
+        );
+        assert_eq!(fallout_specular_texture_path(false, Some(normal)), None);
+        assert_eq!(fallout_specular_texture_path(true, None), None);
     }
 
     #[test]

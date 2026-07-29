@@ -3,7 +3,6 @@
 use super::*;
 use crate::viewer::day_night::{DayNightPreview, GameClock, profile_for_cell};
 use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
-use bevy::light::EnvironmentMapLight;
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
 pub(super) struct RenderCommandProvider;
@@ -208,7 +207,7 @@ fn toggle_reflection_probe_debug(
     ))
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 14] = [
+pub(super) const RENDER_SETTINGS: [&str; 18] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -219,9 +218,13 @@ pub(super) const RENDER_SETTINGS: [&str; 14] = [
     "volumetric_fog",
     "ao",
     "emission",
+    "metallic",
+    "dielectric_specular",
+    "roughness_scale",
     "shadow_samples",
     "realtime_shadows",
     "reflection_probes",
+    "reflection_probe_strength",
     "day_night_preview",
 ];
 
@@ -396,6 +399,18 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         json!(world.resource::<EmissionScale>().0),
     );
     values.insert(
+        "metallic".into(),
+        json!(world.resource::<MetallicGate>().enabled() as u8),
+    );
+    values.insert(
+        "dielectric_specular".into(),
+        json!(world.resource::<DielectricSpecularGate>().enabled() as u8),
+    );
+    values.insert(
+        "roughness_scale".into(),
+        json!(world.resource::<RoughnessScale>().scale()),
+    );
+    values.insert(
         "shadow_samples".into(),
         json!(world.resource::<PointLightShadowSamples>().0),
     );
@@ -403,16 +418,13 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         "realtime_shadows".into(),
         json!(world.resource::<RealtimeShadowSettings>().enabled as u8),
     );
-    let reflection_probes_enabled = {
-        let mut query = world.query_filtered::<
-            &EnvironmentMapLight,
-            With<crate::viewer::scene::PreparedReflectionProbe>,
-        >();
-        query.iter(world).any(|probe| probe.intensity > 0.0)
-    };
     values.insert(
         "reflection_probes".into(),
-        json!(reflection_probes_enabled as u8),
+        json!(world.resource::<ReflectionProbeSettings>().enabled() as u8),
+    );
+    values.insert(
+        "reflection_probe_strength".into(),
+        json!(world.resource::<ReflectionProbeSettings>().strength()),
     );
     values.insert(
         "day_night_preview".into(),
@@ -501,9 +513,13 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "volumetric_fog" => "Volumetric fog",
         "ao" => "Ambient occlusion",
         "emission" => "Material emission",
+        "metallic" => "Metallic material gate",
+        "dielectric_specular" => "Dielectric specular gate",
+        "roughness_scale" => "Material roughness scale",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
         "reflection_probes" => "Prepared reflection probes",
+        "reflection_probe_strength" => "Reflection probe strength",
         "day_night_preview" => "Day/night preview",
         _ => "Render setting",
     }
@@ -576,11 +592,17 @@ pub(super) fn set_render(
             (0.0..=1.0).contains(&value)
         }
         "volumetric_fog" => (0.0..=100.0).contains(&value),
+        "roughness_scale" => (MIN_ROUGHNESS_SCALE..=MAX_ROUGHNESS_SCALE).contains(&value),
+        "reflection_probe_strength" => {
+            (MIN_REFLECTION_PROBE_STRENGTH..=MAX_REFLECTION_PROBE_STRENGTH).contains(&value)
+        }
         "bloom_threshold" => value >= 0.0,
         "shadow_samples" => value == 0.0 || value == 1.0,
-        "realtime_shadows" | "reflection_probes" | "day_night_preview" => {
-            value == 0.0 || value == 1.0
-        }
+        "metallic"
+        | "dielectric_specular"
+        | "realtime_shadows"
+        | "reflection_probes"
+        | "day_night_preview" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
     };
     if !valid {
@@ -598,23 +620,23 @@ pub(super) fn set_render(
         "volumetric_fog" => world.resource_mut::<VolumetricFogMultiplier>().0 = value,
         "ao" => world.resource_mut::<AoStrength>().0 = value,
         "emission" => world.resource_mut::<EmissionScale>().0 = value,
+        "metallic" => world
+            .resource_mut::<MetallicGate>()
+            .set_enabled(value == 1.0),
+        "dielectric_specular" => world
+            .resource_mut::<DielectricSpecularGate>()
+            .set_enabled(value == 1.0),
+        "roughness_scale" => world.resource_mut::<RoughnessScale>().set_scale(value),
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
         }
-        "reflection_probes" => {
-            let mut query = world.query_filtered::<
-                &mut EnvironmentMapLight,
-                With<crate::viewer::scene::PreparedReflectionProbe>,
-            >();
-            for mut probe in query.iter_mut(world) {
-                probe.intensity = if value == 1.0 {
-                    crate::viewer::scene::PREPARED_REFLECTION_PROBE_INTENSITY
-                } else {
-                    0.0
-                };
-            }
-        }
+        "reflection_probes" => world
+            .resource_mut::<ReflectionProbeSettings>()
+            .set_enabled(value == 1.0),
+        "reflection_probe_strength" => world
+            .resource_mut::<ReflectionProbeSettings>()
+            .set_strength(value),
         "day_night_preview" => {
             if let Some(mut preview) = world.get_resource_mut::<DayNightPreview>() {
                 preview.0 = value == 1.0;

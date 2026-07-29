@@ -36,6 +36,7 @@ pub(crate) struct CellVolumetricFog;
 #[derive(Component)]
 pub(crate) struct PreparedReflectionProbe;
 pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
+pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -315,7 +316,7 @@ pub(crate) fn spawn_prepared_scene(
             manifest.cell.interior,
             &image_space_bloom_overrides,
         ),
-        Tonemapping::AcesFitted,
+        Tonemapping::AgX,
         Exposure { ev100: 12.0 },
         color_grading,
         initial_camera_transform,
@@ -618,7 +619,7 @@ pub(crate) fn spawn_cell_reflection_probes(
             EnvironmentMapLight {
                 diffuse_map: asset_server.load(probe.diffuse_asset_path.clone()),
                 specular_map: asset_server.load(probe.specular_asset_path.clone()),
-                intensity: PREPARED_REFLECTION_PROBE_INTENSITY,
+                intensity: PREPARED_REFLECTION_PROBE_INTENSITY * DEFAULT_REFLECTION_PROBE_STRENGTH,
                 affects_lightmapped_mesh_diffuse: false,
                 ..default()
             },

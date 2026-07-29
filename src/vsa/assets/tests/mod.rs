@@ -15,6 +15,8 @@ fn directx_normal_conversion_flips_only_green() {
 #[test]
 fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
     assert!(BLENDER_CONVERSION_SCRIPT.contains("(2.0 / (exponent + 2.0)) ** 0.25"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("1.75 *"));
+    assert!(!BLENDER_CONVERSION_SCRIPT.contains("1.25 *"));
     assert!(!BLENDER_CONVERSION_SCRIPT.contains("1.5 *"));
     assert!(
         BLENDER_CONVERSION_SCRIPT
@@ -23,6 +25,34 @@ fn blender_uses_the_shared_glossiness_formula_and_diffuse_path_annotation() {
     assert!(BLENDER_CONVERSION_SCRIPT.contains("actor_shape_glossiness(nifnode)"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_diffuse_texture_path"));
     assert!(BLENDER_CONVERSION_SCRIPT.contains("bevyout_perceptual_roughness"));
+}
+
+#[test]
+fn roughness_default_revision_invalidates_the_previous_native_asset_key() {
+    assert!(NATIVE_NIF_CONVERTER_REVISION.contains("pbr-material-v3"));
+    let previous_revision =
+        NATIVE_NIF_CONVERTER_REVISION.replacen("pbr-material-v3", "pbr-material-v2", 1);
+    assert_ne!(previous_revision, NATIVE_NIF_CONVERTER_REVISION);
+    assert_ne!(
+        content_addressed_glb_name(
+            &material_policy_identity(&previous_revision),
+            b"chair03.nif"
+        ),
+        content_addressed_glb_name(
+            &material_policy_identity(NATIVE_NIF_CONVERTER_REVISION),
+            b"chair03.nif"
+        )
+    );
+}
+
+#[test]
+fn blender_already_routes_normal_alpha_to_specular_strength() {
+    assert!(
+        BLENDER_CONVERSION_SCRIPT
+            .contains("specular_input = principled.inputs.get('Specular IOR Level')")
+    );
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("normal_alpha = normal.outputs.get('Alpha')"));
+    assert!(BLENDER_CONVERSION_SCRIPT.contains("tree.links.new(normal_alpha, specular_input)"));
 }
 
 #[test]
@@ -63,6 +93,23 @@ fn content_addressed_glb_names_are_stable_and_revision_sensitive() {
         content_addressed_glb_name("converter-v1", b"changed-nif")
     );
     assert!(first.ends_with(".glb"));
+}
+
+#[test]
+fn specular_mask_revision_invalidates_the_previous_native_asset_key() {
+    let previous_revision =
+        NATIVE_NIF_CONVERTER_REVISION.replacen("specular-normal-alpha-v1-", "", 1);
+    assert_ne!(previous_revision, NATIVE_NIF_CONVERTER_REVISION);
+    assert_ne!(
+        content_addressed_glb_name(
+            &material_policy_identity(&previous_revision),
+            b"chair03.nif"
+        ),
+        content_addressed_glb_name(
+            &material_policy_identity(NATIVE_NIF_CONVERTER_REVISION),
+            b"chair03.nif"
+        )
+    );
 }
 
 #[test]

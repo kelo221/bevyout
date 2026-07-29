@@ -481,6 +481,9 @@ struct BevyoutWorld {
     material_diffuse_texture: Option<String>,
     material_roughness: Option<f32>,
     material_metallic: Option<f32>,
+    material_specular_enabled: bool,
+    material_normal_texture: Option<String>,
+    material_specular_texture: Option<String>,
     directx_normal_texel: Option<[u8; 4]>,
     converted_normal_texel: Option<[u8; 4]>,
     staged_texture_path: Option<String>,
@@ -1406,6 +1409,21 @@ async fn given_material_diffuse_texture(world: &mut BevyoutWorld, path: String) 
     world.material_diffuse_texture = Some(path);
 }
 
+#[given("a Fallout material has specular enabled")]
+async fn given_fallout_material_has_specular_enabled(world: &mut BevyoutWorld) {
+    world.material_specular_enabled = true;
+}
+
+#[given("a Fallout material has specular disabled")]
+async fn given_fallout_material_has_specular_disabled(world: &mut BevyoutWorld) {
+    world.material_specular_enabled = false;
+}
+
+#[given(regex = r#"^its normal texture is "([^"]+)"$"#)]
+async fn given_material_normal_texture(world: &mut BevyoutWorld, path: String) {
+    world.material_normal_texture = Some(path);
+}
+
 #[when("the metallic material CSV is parsed")]
 async fn when_metallic_material_csv_is_parsed(world: &mut BevyoutWorld) {
     world.metallic_csv_rejected =
@@ -1422,6 +1440,10 @@ async fn when_pbr_material_policy_is_evaluated(world: &mut BevyoutWorld) {
         world.material_metallic =
             Some(table.metallic_factor(world.material_diffuse_texture.as_deref()));
     }
+    world.material_specular_texture = assets::fallout_specular_texture_path(
+        world.material_specular_enabled,
+        world.material_normal_texture.as_deref(),
+    );
 }
 
 #[then(regex = r"^its perceptual roughness is approximately ([\d.]+)$")]
@@ -1442,6 +1464,19 @@ async fn then_metallic_factor_is(world: &mut BevyoutWorld, expected: String) {
 #[then("the metallic material CSV is rejected")]
 async fn then_metallic_material_csv_is_rejected(world: &mut BevyoutWorld) {
     assert!(world.metallic_csv_rejected);
+}
+
+#[then(regex = r#"^its specular texture is "([^"]+)"$"#)]
+async fn then_material_specular_texture_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.material_specular_texture.as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+#[then("it has no specular texture")]
+async fn then_material_has_no_specular_texture(world: &mut BevyoutWorld) {
+    assert_eq!(world.material_specular_texture, None);
 }
 
 #[given(regex = r"^a DirectX normal texel \((\d+), (\d+), (\d+), (\d+)\)$")]
