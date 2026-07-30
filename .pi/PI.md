@@ -5,6 +5,14 @@ built with Rust 2024 and Bevy 0.19. The default branch is `master`; the remote
 is GitHub. Never commit, push, open a PR, post externally, or alter unrelated
 git state unless the user explicitly asks.
 
+## Response style
+
+CAVEMAN MODE ACTIVE. Rules: Drop articles/filler/pleasantries/hedging. Fragments
+OK. Short synonyms. Pattern: [thing] [action] [reason]. [next step]. Not: "Sure!
+I would be happy to help you with that." Yes: "Bug in auth middleware. Fix:".
+Code/commits/security: write normal. User says "stop caveman" or "normal mode"
+to deactivate.
+
 ## Workflow
 
 - If `.codegraph/` exists, use `codegraph explore "<question>"` before grep or
