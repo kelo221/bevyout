@@ -28,3 +28,14 @@ Feature: Resolved script record inventory
     When the structural script record is decoded
     Then the script has a SCHR size diagnostic
     And unknown script subrecord ZZZZ is preserved
+
+  Scenario: A direct script attachment resolves through its owner's plugin
+    Given a synthetic owner record with SCRI 01000010
+    When the owner's script attachments are decoded with plugin index 2
+    Then attachment slot 0 targets script 02000010
+
+  Scenario: Package action scripts have stable embedded identities
+    Given a synthetic package with OnBegin and OnEnd embedded scripts
+    When the package's embedded scripts are decoded
+    Then the package has embedded script slots OnBegin, OnEnd
+    And each embedded script preserves its compiled bytes

@@ -6,7 +6,16 @@
 use bevyout_core::form_id::FormId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct EmbeddedScriptSlot(pub(crate) u32);
+pub(crate) enum EmbeddedScriptSlot {
+    Package(PackageScriptSlot),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum PackageScriptSlot {
+    Begin,
+    Change,
+    End,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ScriptAssetId {
@@ -105,7 +114,20 @@ pub(crate) fn decode_script_record(
     subrecords: &[ScriptSubrecordInput<'_>],
     resolve_form_id: impl Fn(u32) -> FormId,
 ) -> DecodedScriptRecord {
-    let id = ScriptAssetId::Record(form_id);
+    decode_script_asset(
+        ScriptAssetId::Record(form_id),
+        source_plugin,
+        subrecords,
+        resolve_form_id,
+    )
+}
+
+pub(crate) fn decode_script_asset(
+    id: ScriptAssetId,
+    source_plugin: &str,
+    subrecords: &[ScriptSubrecordInput<'_>],
+    resolve_form_id: impl Fn(u32) -> FormId,
+) -> DecodedScriptRecord {
     let mut decoded = DecodedScriptRecord {
         record: ScriptRecord {
             id,

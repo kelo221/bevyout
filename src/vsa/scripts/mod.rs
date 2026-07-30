@@ -4,6 +4,7 @@
 //! until later frontends lower them into the engine-owned IR.
 #![allow(dead_code)]
 
+mod attachments;
 mod catalog;
 pub(crate) mod record;
 

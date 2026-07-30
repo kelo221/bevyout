@@ -110,7 +110,11 @@ mod record_winners;
 // catalog adapts shared ESM4 subrecords into the same input contract.
 #[path = "../src/vsa/scripts/record.rs"]
 #[allow(dead_code, unused_imports)]
-mod script_record;
+mod record;
+
+#[path = "../src/vsa/scripts/attachments.rs"]
+#[allow(dead_code, unused_imports)]
+mod attachments;
 
 // `world::policy` (issue #51) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
@@ -996,7 +1000,10 @@ struct BevyoutWorld {
     script_record_versions: Vec<(u32, String, Option<String>)>,
     script_record_winners: Option<record_winners::WinningRecords<String>>,
     script_structural_inputs: Vec<(String, Vec<u8>, usize)>,
-    script_decoded_record: Option<script_record::DecodedScriptRecord>,
+    script_decoded_record: Option<record::DecodedScriptRecord>,
+    script_owner_signature: String,
+    script_owner_plugin_index: u8,
+    script_extracted_owner: Option<attachments::ExtractedOwnerScripts>,
 }
 
 fn find_placement<'a>(
@@ -13208,15 +13215,13 @@ async fn when_structural_script_is_decoded(world: &mut BevyoutWorld) {
     let inputs = world
         .script_structural_inputs
         .iter()
-        .map(
-            |(signature, data, offset)| script_record::ScriptSubrecordInput {
-                signature,
-                data,
-                offset: *offset,
-            },
-        )
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
         .collect::<Vec<_>>();
-    world.script_decoded_record = Some(script_record::decode_script_record(
+    world.script_decoded_record = Some(record::decode_script_record(
         bevyout_core::form_id::FormId(0x400),
         "fixture.esp",
         &inputs,
@@ -13228,7 +13233,7 @@ async fn when_structural_script_is_decoded(world: &mut BevyoutWorld) {
 async fn then_structural_script_is_object(world: &mut BevyoutWorld) {
     assert_eq!(
         world.script_decoded_record.as_ref().unwrap().record.kind,
-        Some(script_record::ScriptKind::Object)
+        Some(record::ScriptKind::Object)
     );
 }
 
@@ -13263,7 +13268,7 @@ async fn then_script_reference_is_resolved(world: &mut BevyoutWorld, form_id: St
             .unwrap()
             .record
             .references
-            .contains(&script_record::ScriptReference::Form(
+            .contains(&record::ScriptReference::Form(
                 bevyout_core::form_id::FormId(expected)
             ))
     );
@@ -13294,5 +13299,134 @@ async fn then_unknown_script_subrecord_is_preserved(world: &mut BevyoutWorld, si
             .unknown_subrecords
             .iter()
             .any(|subrecord| subrecord.signature == signature)
+    );
+}
+
+#[given(regex = r"^a synthetic owner record with SCRI ([0-9a-fA-F]{8})$")]
+async fn given_owner_with_script_attachment(world: &mut BevyoutWorld, form_id: String) {
+    world.script_owner_signature = "ACTI".into();
+    world.script_structural_inputs = vec![(
+        "SCRI".into(),
+        u32::from_str_radix(&form_id, 16)
+            .unwrap()
+            .to_le_bytes()
+            .to_vec(),
+        12,
+    )];
+}
+
+#[when(regex = r"^the owner's script attachments are decoded with plugin index (\d+)$")]
+async fn when_owner_attachments_are_decoded(world: &mut BevyoutWorld, plugin_index: u8) {
+    world.script_owner_plugin_index = plugin_index;
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
+        .collect::<Vec<_>>();
+    let resolver = bevyout_core::form_id::FormIdResolver::new(plugin_index, vec![0]);
+    world.script_extracted_owner = Some(attachments::extract_owner_scripts(
+        bevyout_core::form_id::FormId(0x500),
+        &world.script_owner_signature,
+        "fixture.esp",
+        &inputs,
+        |raw| resolver.resolve(bevyout_core::form_id::FormId(raw)),
+    ));
+}
+
+#[then(regex = r"^attachment slot (\d+) targets script ([0-9a-fA-F]{8})$")]
+async fn then_attachment_targets_script(world: &mut BevyoutWorld, slot: u32, form_id: String) {
+    let attachment = &world.script_extracted_owner.as_ref().unwrap().attachments[0];
+    assert_eq!(
+        attachment.slot,
+        attachments::ScriptAttachmentSlot::Direct(slot)
+    );
+    assert_eq!(
+        attachment.script,
+        record::ScriptAssetId::Record(bevyout_core::form_id::FormId(
+            u32::from_str_radix(&form_id, 16).unwrap()
+        ))
+    );
+}
+
+#[given("a synthetic package with OnBegin and OnEnd embedded scripts")]
+async fn given_package_with_embedded_scripts(world: &mut BevyoutWorld) {
+    let mut header = Vec::new();
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    world.script_owner_signature = "PACK".into();
+    world.script_structural_inputs = vec![
+        ("POBA".into(), Vec::new(), 0),
+        ("SCHR".into(), header.clone(), 6),
+        ("SCDA".into(), vec![0xaa], 32),
+        ("TNAM".into(), vec![0; 4], 39),
+        ("POEA".into(), Vec::new(), 49),
+        ("SCHR".into(), header, 55),
+        ("SCDA".into(), vec![0xbb], 81),
+    ];
+}
+
+#[when("the package's embedded scripts are decoded")]
+async fn when_package_embedded_scripts_are_decoded(world: &mut BevyoutWorld) {
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
+        .collect::<Vec<_>>();
+    world.script_extracted_owner = Some(attachments::extract_owner_scripts(
+        bevyout_core::form_id::FormId(0x600),
+        "PACK",
+        "fixture.esp",
+        &inputs,
+        bevyout_core::form_id::FormId,
+    ));
+}
+
+#[then("the package has embedded script slots OnBegin, OnEnd")]
+async fn then_package_has_named_embedded_slots(world: &mut BevyoutWorld) {
+    let ids = world
+        .script_extracted_owner
+        .as_ref()
+        .unwrap()
+        .embedded
+        .iter()
+        .map(|script| script.record.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            record::ScriptAssetId::Embedded {
+                owner: bevyout_core::form_id::FormId(0x600),
+                slot: record::EmbeddedScriptSlot::Package(record::PackageScriptSlot::Begin),
+            },
+            record::ScriptAssetId::Embedded {
+                owner: bevyout_core::form_id::FormId(0x600),
+                slot: record::EmbeddedScriptSlot::Package(record::PackageScriptSlot::End),
+            },
+        ]
+    );
+}
+
+#[then("each embedded script preserves its compiled bytes")]
+async fn then_embedded_scripts_preserve_compiled_bytes(world: &mut BevyoutWorld) {
+    let embedded = &world.script_extracted_owner.as_ref().unwrap().embedded;
+    assert_eq!(
+        embedded[0].record.compiled_data.as_deref(),
+        Some(&[0xaa][..])
+    );
+    assert_eq!(
+        embedded[1].record.compiled_data.as_deref(),
+        Some(&[0xbb][..])
     );
 }

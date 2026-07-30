@@ -1,6 +1,8 @@
+use super::attachments::{ScriptAttachmentSlot, extract_owner_scripts};
 use super::catalog::ScriptCatalog;
 use super::record::{
-    ScriptAssetId, ScriptKind, ScriptReference, ScriptSubrecordInput, decode_script_record,
+    EmbeddedScriptSlot, PackageScriptSlot, ScriptAssetId, ScriptKind, ScriptReference,
+    ScriptSubrecordInput, decode_script_record,
 };
 use crate::vsa::content_index::{FormId, PluginSource};
 use crate::vsa::openmw_esm4::parse_subrecords_with_offsets;
@@ -282,4 +284,302 @@ fn dangling_extended_size_marker_is_rejected_at_its_offset() {
     assert_eq!(error.offset, 0);
     assert_eq!(error.signature.as_deref(), Some("XXXX"));
     assert!(error.message.contains("no following subrecord"));
+}
+
+#[test]
+fn direct_attachment_is_resolved_and_winning_owner_replaces_prior_attachment() {
+    let mut master = tes4(&[]);
+    master.extend(record(
+        b"ACTI",
+        0,
+        0x500,
+        &subrecord(b"SCRI", &0x400_u32.to_le_bytes()),
+    ));
+    master.extend(record(b"SCPT", 0, 0x400, &script_payload("Old", 0)));
+    master.extend(record(b"SCPT", 0, 0x401, &script_payload("New", 0)));
+    let mut patch = tes4(&["master.esm"]);
+    patch.extend(record(
+        b"ACTI",
+        0,
+        0x500,
+        &subrecord(b"SCRI", &0x0000_0401_u32.to_le_bytes()),
+    ));
+    let sources = [
+        PluginSource {
+            name: "master.esm",
+            bytes: &master,
+        },
+        PluginSource {
+            name: "patch.esp",
+            bytes: &patch,
+        },
+    ];
+
+    let (_index, catalog) = ScriptCatalog::build(&sources).unwrap();
+    let attachments = catalog.attachments().collect::<Vec<_>>();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].owner, FormId(0x500));
+    assert_eq!(attachments[0].owner_signature, "ACTI");
+    assert_eq!(attachments[0].slot, ScriptAttachmentSlot::Direct(0));
+    assert_eq!(attachments[0].script, ScriptAssetId::Record(FormId(0x401)));
+    assert_eq!(attachments[0].winning_plugin, "patch.esp");
+    assert_eq!(attachments[0].provenance, ["master.esm", "patch.esp"]);
+}
+
+#[test]
+fn missing_direct_attachment_target_is_contextual_but_retained() {
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(
+        b"MISC",
+        0,
+        0x500,
+        &subrecord(b"SCRI", &0x999_u32.to_le_bytes()),
+    ));
+    let sources = [PluginSource {
+        name: "missing.esp",
+        bytes: &plugin,
+    }];
+
+    let (_index, catalog) = ScriptCatalog::build(&sources).unwrap();
+    assert_eq!(catalog.attachments().count(), 1);
+    assert!(catalog.diagnostics().iter().any(|diagnostic| {
+        diagnostic.source_plugin == "missing.esp"
+            && diagnostic.subrecord.as_deref() == Some("SCRI")
+            && diagnostic.message.contains("00000999")
+    }));
+}
+
+#[test]
+fn package_embedded_scripts_use_named_slots_and_preserve_unknown_content() {
+    let payload = [
+        subrecord(b"EDID", b"Package\0"),
+        subrecord(b"POBA", &[]),
+        subrecord(b"SCHR", &header(0, 1, 0, 0)),
+        subrecord(b"SCDA", &[0xaa]),
+        subrecord(b"XTRA", &[1, 2]),
+        subrecord(b"TNAM", &0_u32.to_le_bytes()),
+        subrecord(b"POEA", &[]),
+        subrecord(b"SCHR", &header(0, 1, 0, 0)),
+        subrecord(b"SCDA", &[0xbb]),
+    ]
+    .concat();
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(b"PACK", 0, 0x600, &payload));
+    let sources = [PluginSource {
+        name: "package.esp",
+        bytes: &plugin,
+    }];
+
+    let (_index, catalog) = ScriptCatalog::build(&sources).unwrap();
+    let begin = catalog
+        .get(ScriptAssetId::Embedded {
+            owner: FormId(0x600),
+            slot: EmbeddedScriptSlot::Package(PackageScriptSlot::Begin),
+        })
+        .unwrap();
+    let end = catalog
+        .get(ScriptAssetId::Embedded {
+            owner: FormId(0x600),
+            slot: EmbeddedScriptSlot::Package(PackageScriptSlot::End),
+        })
+        .unwrap();
+    assert_eq!(begin.record.compiled_data.as_deref(), Some(&[0xaa][..]));
+    assert_eq!(begin.record.unknown_subrecords[0].signature, "XTRA");
+    assert_eq!(end.record.compiled_data.as_deref(), Some(&[0xbb][..]));
+    assert_eq!(catalog.attachments().count(), 2);
+}
+
+#[test]
+fn deleted_owner_removes_direct_and_embedded_attachments() {
+    let payload = [
+        subrecord(b"POCA", &[]),
+        subrecord(b"SCHR", &header(0, 0, 0, 0)),
+    ]
+    .concat();
+    let mut master = tes4(&[]);
+    master.extend(record(b"PACK", 0, 0x600, &payload));
+    let mut patch = tes4(&["master.esm"]);
+    patch.extend(record(b"PACK", 0x20, 0x600, &[]));
+    let sources = [
+        PluginSource {
+            name: "master.esm",
+            bytes: &master,
+        },
+        PluginSource {
+            name: "patch.esp",
+            bytes: &patch,
+        },
+    ];
+
+    let (_index, catalog) = ScriptCatalog::build(&sources).unwrap();
+    assert_eq!(catalog.attachments().count(), 0);
+    assert!(
+        catalog
+            .get(ScriptAssetId::Embedded {
+                owner: FormId(0x600),
+                slot: EmbeddedScriptSlot::Package(PackageScriptSlot::Change),
+            })
+            .is_none()
+    );
+}
+
+#[test]
+fn structural_extractor_rejects_malformed_scri_without_dropping_other_slots() {
+    let inputs = [
+        ScriptSubrecordInput {
+            signature: "SCRI",
+            data: &[1, 2],
+            offset: 7,
+        },
+        ScriptSubrecordInput {
+            signature: "SCRI",
+            data: &0x400_u32.to_le_bytes(),
+            offset: 15,
+        },
+    ];
+    let extracted = extract_owner_scripts(FormId(0x500), "ACTI", "fixture.esp", &inputs, FormId);
+    assert_eq!(extracted.attachments.len(), 1);
+    assert_eq!(
+        extracted.attachments[0].slot,
+        ScriptAttachmentSlot::Direct(1)
+    );
+    assert!(extracted.diagnostics[0].message.contains("exactly 4 bytes"));
+}
+
+#[test]
+fn package_group_without_header_is_retained_and_diagnosed() {
+    let inputs = [
+        ScriptSubrecordInput {
+            signature: "POBA",
+            data: &[],
+            offset: 4,
+        },
+        ScriptSubrecordInput {
+            signature: "INAM",
+            data: &0_u32.to_le_bytes(),
+            offset: 10,
+        },
+        ScriptSubrecordInput {
+            signature: "SCDA",
+            data: &[0xaa],
+            offset: 20,
+        },
+        ScriptSubrecordInput {
+            signature: "XTRA",
+            data: &[1, 2],
+            offset: 27,
+        },
+        ScriptSubrecordInput {
+            signature: "TNAM",
+            data: &0_u32.to_le_bytes(),
+            offset: 35,
+        },
+    ];
+    let extracted = extract_owner_scripts(FormId(0x600), "PACK", "fixture.esp", &inputs, FormId);
+    assert_eq!(extracted.embedded.len(), 1);
+    assert_eq!(
+        extracted.embedded[0].record.compiled_data.as_deref(),
+        Some(&[0xaa][..])
+    );
+    assert_eq!(
+        extracted.embedded[0].record.unknown_subrecords[0].signature,
+        "XTRA"
+    );
+    assert!(
+        extracted
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing required SCHR"))
+    );
+}
+
+#[test]
+fn package_topic_closes_the_embedded_group() {
+    let header = header(0, 0, 0, 0);
+    let inputs = [
+        ScriptSubrecordInput {
+            signature: "POBA",
+            data: &[],
+            offset: 0,
+        },
+        ScriptSubrecordInput {
+            signature: "SCHR",
+            data: &header,
+            offset: 6,
+        },
+        ScriptSubrecordInput {
+            signature: "TNAM",
+            data: &0_u32.to_le_bytes(),
+            offset: 32,
+        },
+        ScriptSubrecordInput {
+            signature: "SCHR",
+            data: &header,
+            offset: 42,
+        },
+    ];
+    let extracted = extract_owner_scripts(FormId(0x600), "PACK", "fixture.esp", &inputs, FormId);
+    assert_eq!(extracted.embedded.len(), 1);
+    assert!(extracted.diagnostics.is_empty());
+}
+
+#[test]
+fn empty_package_script_group_retains_its_identity_and_missing_header_diagnostic() {
+    let inputs = [
+        ScriptSubrecordInput {
+            signature: "POBA",
+            data: &[],
+            offset: 0,
+        },
+        ScriptSubrecordInput {
+            signature: "INAM",
+            data: &0_u32.to_le_bytes(),
+            offset: 6,
+        },
+        ScriptSubrecordInput {
+            signature: "TNAM",
+            data: &0_u32.to_le_bytes(),
+            offset: 16,
+        },
+    ];
+    let extracted = extract_owner_scripts(FormId(0x600), "PACK", "fixture.esp", &inputs, FormId);
+    assert_eq!(extracted.embedded.len(), 1);
+    assert_eq!(
+        extracted.embedded[0].record.id,
+        ScriptAssetId::Embedded {
+            owner: FormId(0x600),
+            slot: EmbeddedScriptSlot::Package(PackageScriptSlot::Begin),
+        }
+    );
+    assert!(
+        extracted
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing required SCHR"))
+    );
+}
+
+#[test]
+fn diagnostics_are_stable_by_winning_form_id() {
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(b"SCPT", 0, 0x500, &[]));
+    plugin.extend(record(b"SCPT", 0, 0x400, &[]));
+    let sources = [PluginSource {
+        name: "order.esp",
+        bytes: &plugin,
+    }];
+
+    let (_index, catalog) = ScriptCatalog::build(&sources).unwrap();
+    let scripts = catalog
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.script)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scripts,
+        [
+            ScriptAssetId::Record(FormId(0x400)),
+            ScriptAssetId::Record(FormId(0x500)),
+        ]
+    );
 }
