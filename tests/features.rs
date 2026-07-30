@@ -98,6 +98,14 @@ mod assets;
 #[allow(dead_code, unused_imports)]
 mod cell_map;
 
+// M7/#252's generic winning-record collector is std-only. The ESM4 byte
+// walker feeds it in production; this suite drives the exact override,
+// provenance, and deletion policy without pulling the parser into the
+// integration-test crate.
+#[path = "../src/vsa/record_stream/winners.rs"]
+#[allow(dead_code, unused_imports)]
+mod record_winners;
+
 // `world::policy` (issue #51) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
 #[path = "../src/viewer/world/policy.rs"]
@@ -977,6 +985,10 @@ struct BevyoutWorld {
     sampled_weather_color: [f32; 4],
     preview_weather_candidates: Vec<(u32, Option<String>)>,
     selected_preview_weather: Option<u32>,
+
+    // -- script_inventory.feature (M7 wave 1, issue #252) --
+    script_record_versions: Vec<(u32, String, Option<String>)>,
+    script_record_winners: Option<record_winners::WinningRecords<String>>,
 }
 
 fn find_placement<'a>(
@@ -13071,5 +13083,83 @@ async fn then_preview_weather_selected(world: &mut BevyoutWorld, expected: Strin
     assert_eq!(
         world.selected_preview_weather,
         Some(u32::from_str_radix(&expected, 16).unwrap())
+    );
+}
+
+// ---------------------------------------------------------------------
+// script_inventory.feature — issue #252
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^record ([0-9a-fA-F]{8}) from ([^ ]+) carries payload "([^"]*)"$"#)]
+async fn given_script_record_version(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    source: String,
+    payload: String,
+) {
+    world.script_record_versions.push((
+        u32::from_str_radix(&form_id, 16).unwrap(),
+        source,
+        Some(payload),
+    ));
+}
+
+#[given(regex = r"^record ([0-9a-fA-F]{8}) is deleted by ([^ ]+)$")]
+async fn given_script_record_deletion(world: &mut BevyoutWorld, form_id: String, source: String) {
+    world
+        .script_record_versions
+        .push((u32::from_str_radix(&form_id, 16).unwrap(), source, None));
+}
+
+#[when("the record versions are collected in load order")]
+async fn when_script_records_are_collected(world: &mut BevyoutWorld) {
+    let mut winners = record_winners::WinningRecords::default();
+    for (form_id, source, payload) in std::mem::take(&mut world.script_record_versions) {
+        match payload {
+            Some(payload) => winners.upsert(form_id, source, payload),
+            None => winners.delete(form_id),
+        }
+    }
+    world.script_record_winners = Some(winners);
+}
+
+#[then(regex = r#"^record ([0-9a-fA-F]{8}) has winning payload "([^"]*)"$"#)]
+async fn then_script_record_has_payload(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    expected: String,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    let winner = world
+        .script_record_winners
+        .as_ref()
+        .and_then(|winners| winners.get(form_id))
+        .expect("record should have a winner");
+    assert_eq!(winner.value, expected);
+}
+
+#[then(regex = r#"^record ([0-9a-fA-F]{8}) has provenance "([^"]*)"$"#)]
+async fn then_script_record_has_provenance(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    expected: String,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    let winner = world
+        .script_record_winners
+        .as_ref()
+        .and_then(|winners| winners.get(form_id))
+        .expect("record should have a winner");
+    assert_eq!(winner.provenance.join(","), expected);
+}
+
+#[then(regex = r"^record ([0-9a-fA-F]{8}) is absent from the winning records$")]
+async fn then_script_record_is_absent(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    assert!(
+        world
+            .script_record_winners
+            .as_ref()
+            .is_some_and(|winners| winners.get(form_id).is_none())
     );
 }

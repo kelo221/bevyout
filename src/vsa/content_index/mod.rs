@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::vsa::record_stream::RecordEnvelope;
 use anyhow::Result;
 use bevyout_core::content::{ContentRecordResolver, ContentRecordView};
 pub(crate) use bevyout_core::form_id::FormId;
@@ -61,6 +62,15 @@ impl ContentIndex {
     /// `builder::validate_load_order`.
     pub(crate) fn build(sources: &[PluginSource<'_>]) -> Result<Self> {
         builder::build(sources)
+    }
+
+    /// Build the metadata index while forwarding every callback-scoped record
+    /// version to another preparation collector in the same load-order scan.
+    pub(crate) fn build_with(
+        sources: &[PluginSource<'_>],
+        on_record: impl FnMut(RecordEnvelope<'_>),
+    ) -> Result<Self> {
+        builder::build_with(sources, on_record)
     }
 
     /// Look up a record by its resolved FormID.

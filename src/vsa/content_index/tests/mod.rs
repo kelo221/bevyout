@@ -3,6 +3,9 @@
 //! `openmw_esm4/tests/mod.rs`'s `record`/`subrecord`/`tes4` fixture writer.
 
 use super::*;
+use crate::vsa::record_stream::{RecordPayload, walk_resolved_records, winners::WinningRecords};
+use flate2::{Compression, write::ZlibEncoder};
+use std::io::Write;
 
 fn subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut result = signature.to_vec();
@@ -37,6 +40,15 @@ fn edid_record(signature: &[u8; 4], form_id: u32, editor_id: &str) -> Vec<u8> {
         form_id,
         &subrecord(b"EDID", format!("{editor_id}\0").as_bytes()),
     )
+}
+
+fn compressed_record(signature: &[u8; 4], form_id: u32, data: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut payload = (data.len() as u32).to_le_bytes().to_vec();
+    payload.extend(compressed);
+    record(signature, 0x0004_0000, form_id, &payload)
 }
 
 #[test]
@@ -264,5 +276,146 @@ fn t39_8_summary_is_byte_identical_across_runs() {
     assert_eq!(
         first, "dependent.esp\tSTAT\t1\nmaster.esm\tMISC\t2",
         "summary should be sorted by plugin then record type"
+    );
+}
+
+#[test]
+fn t252_1_stream_exposes_decompressed_payload_and_resolved_identity() {
+    let mut unrelated = tes4(&[]);
+    unrelated.extend(edid_record(b"GLOB", 0x000001, "Unrelated"));
+    let master = tes4(&[]);
+    let mut script_payload = subrecord(b"EDID", b"CompressedScript\0");
+    script_payload.extend(subrecord(b"SCRO", &0x0000_1234_u32.to_le_bytes()));
+    script_payload.extend(subrecord(b"SCRO", &0x0100_5678_u32.to_le_bytes()));
+    let mut dependent = tes4(&["master.esm"]);
+    dependent.extend(compressed_record(b"SCPT", 0x0000_0400, &script_payload));
+
+    let sources = [
+        PluginSource {
+            name: "unrelated.esm",
+            bytes: &unrelated,
+        },
+        PluginSource {
+            name: "master.esm",
+            bytes: &master,
+        },
+        PluginSource {
+            name: "dependent.esp",
+            bytes: &dependent,
+        },
+    ];
+    let mut observed = Vec::new();
+    walk_resolved_records(&sources, |record| {
+        if record.signature == "SCPT" {
+            let payload = match record.payload {
+                RecordPayload::Decoded(payload) => payload.to_vec(),
+                RecordPayload::Unavailable(error) => panic!("unexpected payload error: {error}"),
+            };
+            observed.push((
+                record.form_id,
+                record.source_plugin.to_string(),
+                record.flags,
+                payload,
+                record.resolve_form_id(0x0000_1234),
+                record.resolve_form_id(0x0100_5678),
+            ));
+        }
+    })
+    .unwrap();
+
+    assert_eq!(
+        observed,
+        [(
+            FormId(0x0100_0400),
+            "dependent.esp".to_string(),
+            0x0004_0000,
+            script_payload,
+            FormId(0x0100_1234),
+            FormId(0x0200_5678),
+        )]
+    );
+}
+
+#[test]
+fn t252_2_stream_fans_out_override_and_deletion_events_in_load_order() {
+    let mut master = tes4(&[]);
+    master.extend(edid_record(b"SCPT", 0x400, "Original"));
+    master.extend(edid_record(b"SCPT", 0x401, "Deleted"));
+    let mut patch = tes4(&["master.esm"]);
+    patch.extend(edid_record(b"SCPT", 0x400, "Overridden"));
+    patch.extend(record(b"SCPT", 0x0000_0020, 0x401, &[]));
+    let sources = [
+        PluginSource {
+            name: "master.esm",
+            bytes: &master,
+        },
+        PluginSource {
+            name: "patch.esp",
+            bytes: &patch,
+        },
+    ];
+    let mut all_record_count = 0;
+    let mut scripts = Vec::new();
+    let mut payload_winners = WinningRecords::default();
+    let index = ContentIndex::build_with(&sources, |record| {
+        all_record_count += 1;
+        if record.signature == "SCPT" {
+            scripts.push((
+                record.form_id,
+                record.source_plugin.to_string(),
+                record.deleted,
+            ));
+            if record.deleted {
+                payload_winners.delete(record.form_id.0);
+            } else if let RecordPayload::Decoded(payload) = record.payload {
+                payload_winners.upsert(
+                    record.form_id.0,
+                    record.source_plugin.to_string(),
+                    payload.to_vec(),
+                );
+            }
+        }
+    })
+    .unwrap();
+
+    assert_eq!(all_record_count, 4);
+    assert_eq!(
+        scripts,
+        [
+            (FormId(0x400), "master.esm".to_string(), false),
+            (FormId(0x401), "master.esm".to_string(), false),
+            (FormId(0x400), "patch.esp".to_string(), false),
+            (FormId(0x401), "patch.esp".to_string(), true),
+        ]
+    );
+    let indexed_winner = index.get(FormId(0x400)).unwrap();
+    assert_eq!(indexed_winner.editor_id.as_deref(), Some("Overridden"));
+    assert_eq!(indexed_winner.provenance, ["master.esm", "patch.esp"]);
+    assert!(index.get(FormId(0x401)).is_none());
+    let payload_winner = payload_winners.get(0x400).unwrap();
+    assert_eq!(payload_winner.value, subrecord(b"EDID", b"Overridden\0"));
+    assert_eq!(payload_winner.provenance, ["master.esm", "patch.esp"]);
+    assert!(payload_winners.get(0x401).is_none());
+}
+
+#[test]
+fn t252_3_unavailable_payload_is_diagnostic_but_record_remains_indexed() {
+    let mut plugin = tes4(&[]);
+    plugin.extend(record(b"SCPT", 0x0004_0000, 0x400, &[4, 0, 0, 0, 0xff]));
+    let sources = [PluginSource {
+        name: "broken.esp",
+        bytes: &plugin,
+    }];
+
+    let index = ContentIndex::build(&sources).unwrap();
+    assert!(index.get(FormId(0x400)).is_some());
+    assert!(
+        index.diagnostics().iter().any(|diagnostic| {
+            diagnostic.contains("broken.esp")
+                && diagnostic.contains("SCPT")
+                && diagnostic.contains("00000400")
+        }),
+        "diagnostics were {:?}",
+        index.diagnostics()
     );
 }
