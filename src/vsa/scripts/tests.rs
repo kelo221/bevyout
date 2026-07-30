@@ -163,7 +163,7 @@ fn malformed_header_and_unknown_subrecord_are_reported_without_panicking() {
 fn malformed_framing_preserves_the_complete_payload_and_failure_offset() {
     let mut payload = subrecord(b"SCHR", &header(0, 0, 0, 0));
     let failure_offset = payload.len();
-    payload.extend([b'B', b'A']);
+    payload.extend(*b"BA");
     let mut plugin = tes4(&[]);
     plugin.extend(record(b"SCPT", 0, 0x400, &payload));
     let sources = [PluginSource {
