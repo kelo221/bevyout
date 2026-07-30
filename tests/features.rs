@@ -98,6 +98,28 @@ mod assets;
 #[allow(dead_code, unused_imports)]
 mod cell_map;
 
+// M7/#252's generic winning-record collector is std-only. The ESM4 byte
+// walker feeds it in production; this suite drives the exact override,
+// provenance, and deletion policy without pulling the parser into the
+// integration-test crate.
+#[path = "../src/vsa/record_stream/winners.rs"]
+#[allow(dead_code, unused_imports)]
+mod record_winners;
+
+// M7/#253's structural script-record decoder is std/core-only. The production
+// catalog adapts shared ESM4 subrecords into the same input contract.
+#[path = "../src/vsa/scripts/record.rs"]
+#[allow(dead_code, unused_imports)]
+mod record;
+
+#[path = "../src/vsa/scripts/attachments.rs"]
+#[allow(dead_code, unused_imports)]
+mod attachments;
+
+#[path = "../src/vsa/report/schema.rs"]
+#[allow(dead_code, unused_imports)]
+mod report_schema;
+
 // `world::policy` (issue #51) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
 #[path = "../src/viewer/world/policy.rs"]
@@ -977,6 +999,17 @@ struct BevyoutWorld {
     sampled_weather_color: [f32; 4],
     preview_weather_candidates: Vec<(u32, Option<String>)>,
     selected_preview_weather: Option<u32>,
+
+    // -- script_inventory.feature (M7 wave 1, issue #252) --
+    script_record_versions: Vec<(u32, String, Option<String>)>,
+    script_record_winners: Option<record_winners::WinningRecords<String>>,
+    script_structural_inputs: Vec<(String, Vec<u8>, usize)>,
+    script_decoded_record: Option<record::DecodedScriptRecord>,
+    script_owner_signature: String,
+    script_owner_plugin_index: u8,
+    script_extracted_owner: Option<attachments::ExtractedOwnerScripts>,
+    script_inventory_report: Option<report_schema::CompatibilityReport>,
+    script_inventory_renders: Vec<String>,
 }
 
 fn find_placement<'a>(
@@ -7811,12 +7844,22 @@ async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form
 }
 
 fn main() {
-    futures::executor::block_on(async {
-        BevyoutWorld::cucumber()
-            .fail_on_skipped()
-            .run_and_exit("features")
-            .await;
-    });
+    // The cucumber driver future is large (every step's async state plus the
+    // BevyoutWorld test state), which exceeds the default 1 MiB main-thread
+    // stack on Windows. Run it on a worker thread with an explicit stack.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            futures::executor::block_on(async {
+                BevyoutWorld::cucumber()
+                    .fail_on_skipped()
+                    .run_and_exit("features")
+                    .await;
+            });
+        })
+        .expect("failed to spawn cucumber driver thread")
+        .join()
+        .expect("cucumber driver thread panicked");
 }
 
 // ---------------------------------------------------------------------
@@ -13072,4 +13115,383 @@ async fn then_preview_weather_selected(world: &mut BevyoutWorld, expected: Strin
         world.selected_preview_weather,
         Some(u32::from_str_radix(&expected, 16).unwrap())
     );
+}
+
+// ---------------------------------------------------------------------
+// script_inventory.feature — issue #252
+// ---------------------------------------------------------------------
+
+#[given(regex = r#"^record ([0-9a-fA-F]{8}) from ([^ ]+) carries payload "([^"]*)"$"#)]
+async fn given_script_record_version(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    source: String,
+    payload: String,
+) {
+    world.script_record_versions.push((
+        u32::from_str_radix(&form_id, 16).unwrap(),
+        source,
+        Some(payload),
+    ));
+}
+
+#[given(regex = r"^record ([0-9a-fA-F]{8}) is deleted by ([^ ]+)$")]
+async fn given_script_record_deletion(world: &mut BevyoutWorld, form_id: String, source: String) {
+    world
+        .script_record_versions
+        .push((u32::from_str_radix(&form_id, 16).unwrap(), source, None));
+}
+
+#[when("the record versions are collected in load order")]
+async fn when_script_records_are_collected(world: &mut BevyoutWorld) {
+    let mut winners = record_winners::WinningRecords::default();
+    for (form_id, source, payload) in std::mem::take(&mut world.script_record_versions) {
+        match payload {
+            Some(payload) => winners.upsert(form_id, source, payload),
+            None => winners.delete(form_id),
+        }
+    }
+    world.script_record_winners = Some(winners);
+}
+
+#[then(regex = r#"^record ([0-9a-fA-F]{8}) has winning payload "([^"]*)"$"#)]
+async fn then_script_record_has_payload(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    expected: String,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    let winner = world
+        .script_record_winners
+        .as_ref()
+        .and_then(|winners| winners.get(form_id))
+        .expect("record should have a winner");
+    assert_eq!(winner.value, expected);
+}
+
+#[then(regex = r#"^record ([0-9a-fA-F]{8}) has provenance "([^"]*)"$"#)]
+async fn then_script_record_has_provenance(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    expected: String,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    let winner = world
+        .script_record_winners
+        .as_ref()
+        .and_then(|winners| winners.get(form_id))
+        .expect("record should have a winner");
+    assert_eq!(winner.provenance.join(","), expected);
+}
+
+#[then(regex = r"^record ([0-9a-fA-F]{8}) is absent from the winning records$")]
+async fn then_script_record_is_absent(world: &mut BevyoutWorld, form_id: String) {
+    let form_id = u32::from_str_radix(&form_id, 16).unwrap();
+    assert!(
+        world
+            .script_record_winners
+            .as_ref()
+            .is_some_and(|winners| winners.get(form_id).is_none())
+    );
+}
+
+#[given("a synthetic object script with one local and one reference")]
+async fn given_structural_object_script(world: &mut BevyoutWorld) {
+    let mut header = Vec::new();
+    header.extend(0_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(3_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    header.extend(1_u16.to_le_bytes());
+    let mut local = vec![0; 24];
+    local[0..4].copy_from_slice(&3_u32.to_le_bytes());
+    local[16] = 1;
+    world.script_structural_inputs = vec![
+        ("EDID".into(), b"FixtureScript\0".to_vec(), 0),
+        ("SCHR".into(), header, 16),
+        ("SCDA".into(), vec![1, 2, 3], 42),
+        ("SCTX".into(), b"begin GameMode\0".to_vec(), 51),
+        ("SLSD".into(), local, 73),
+        ("SCVR".into(), b"Counter\0".to_vec(), 103),
+        ("SCRO".into(), 0x10_u32.to_le_bytes().to_vec(), 117),
+    ];
+}
+
+#[given(
+    regex = r"^a synthetic script with a malformed header and unknown subrecord ([A-Z0-9_]{4})$"
+)]
+async fn given_malformed_structural_script(world: &mut BevyoutWorld, unknown: String) {
+    world.script_structural_inputs =
+        vec![("SCHR".into(), vec![0; 3], 0), (unknown, vec![9, 8, 7], 9)];
+}
+
+#[when("the structural script record is decoded")]
+async fn when_structural_script_is_decoded(world: &mut BevyoutWorld) {
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
+        .collect::<Vec<_>>();
+    world.script_decoded_record = Some(record::decode_script_record(
+        bevyout_core::form_id::FormId(0x400),
+        "fixture.esp",
+        &inputs,
+        bevyout_core::form_id::FormId,
+    ));
+}
+
+#[then("the script kind is object")]
+async fn then_structural_script_is_object(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.script_decoded_record.as_ref().unwrap().record.kind,
+        Some(record::ScriptKind::Object)
+    );
+}
+
+#[then("the compiled script bytes are preserved")]
+async fn then_compiled_script_bytes_are_preserved(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .compiled_data
+            .as_deref(),
+        Some([1, 2, 3].as_slice())
+    );
+}
+
+#[then(regex = r#"^local slot (\d+) is named "([^"]*)"$"#)]
+async fn then_script_local_is_named(world: &mut BevyoutWorld, slot: u32, name: String) {
+    let local = &world.script_decoded_record.as_ref().unwrap().record.locals[0];
+    assert_eq!(local.slot, slot);
+    assert_eq!(local.name.as_deref(), Some(name.as_str()));
+}
+
+#[then(regex = r"^script reference ([0-9a-fA-F]{8}) is resolved$")]
+async fn then_script_reference_is_resolved(world: &mut BevyoutWorld, form_id: String) {
+    let expected = u32::from_str_radix(&form_id, 16).unwrap();
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .references
+            .contains(&record::ScriptReference::Form(
+                bevyout_core::form_id::FormId(expected)
+            ))
+    );
+}
+
+#[then("the script has a SCHR size diagnostic")]
+async fn then_script_has_header_size_diagnostic(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.subrecord.as_deref() == Some("SCHR")
+                && diagnostic.message.contains("20 bytes"))
+    );
+}
+
+#[then(regex = r"^unknown script subrecord ([A-Z0-9_]{4}) is preserved$")]
+async fn then_unknown_script_subrecord_is_preserved(world: &mut BevyoutWorld, signature: String) {
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .unknown_subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == signature)
+    );
+}
+
+#[given(regex = r"^a synthetic owner record with SCRI ([0-9a-fA-F]{8})$")]
+async fn given_owner_with_script_attachment(world: &mut BevyoutWorld, form_id: String) {
+    world.script_owner_signature = "ACTI".into();
+    world.script_structural_inputs = vec![(
+        "SCRI".into(),
+        u32::from_str_radix(&form_id, 16)
+            .unwrap()
+            .to_le_bytes()
+            .to_vec(),
+        12,
+    )];
+}
+
+#[when(regex = r"^the owner's script attachments are decoded with plugin index (\d+)$")]
+async fn when_owner_attachments_are_decoded(world: &mut BevyoutWorld, plugin_index: u8) {
+    world.script_owner_plugin_index = plugin_index;
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
+        .collect::<Vec<_>>();
+    let resolver = bevyout_core::form_id::FormIdResolver::new(plugin_index, vec![0]);
+    world.script_extracted_owner = Some(attachments::extract_owner_scripts(
+        bevyout_core::form_id::FormId(0x500),
+        &world.script_owner_signature,
+        "fixture.esp",
+        &inputs,
+        |raw| resolver.resolve(bevyout_core::form_id::FormId(raw)),
+    ));
+}
+
+#[then(regex = r"^attachment slot (\d+) targets script ([0-9a-fA-F]{8})$")]
+async fn then_attachment_targets_script(world: &mut BevyoutWorld, slot: u32, form_id: String) {
+    let attachment = &world.script_extracted_owner.as_ref().unwrap().attachments[0];
+    assert_eq!(
+        attachment.slot,
+        attachments::ScriptAttachmentSlot::Direct(slot)
+    );
+    assert_eq!(
+        attachment.script,
+        record::ScriptAssetId::Record(bevyout_core::form_id::FormId(
+            u32::from_str_radix(&form_id, 16).unwrap()
+        ))
+    );
+}
+
+#[given("a synthetic package with OnBegin and OnEnd embedded scripts")]
+async fn given_package_with_embedded_scripts(world: &mut BevyoutWorld) {
+    let mut header = Vec::new();
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    world.script_owner_signature = "PACK".into();
+    world.script_structural_inputs = vec![
+        ("POBA".into(), Vec::new(), 0),
+        ("SCHR".into(), header.clone(), 6),
+        ("SCDA".into(), vec![0xaa], 32),
+        ("TNAM".into(), vec![0; 4], 39),
+        ("POEA".into(), Vec::new(), 49),
+        ("SCHR".into(), header, 55),
+        ("SCDA".into(), vec![0xbb], 81),
+    ];
+}
+
+#[when("the package's embedded scripts are decoded")]
+async fn when_package_embedded_scripts_are_decoded(world: &mut BevyoutWorld) {
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(|(signature, data, offset)| record::ScriptSubrecordInput {
+            signature,
+            data,
+            offset: *offset,
+        })
+        .collect::<Vec<_>>();
+    world.script_extracted_owner = Some(attachments::extract_owner_scripts(
+        bevyout_core::form_id::FormId(0x600),
+        "PACK",
+        "fixture.esp",
+        &inputs,
+        bevyout_core::form_id::FormId,
+    ));
+}
+
+#[then("the package has embedded script slots OnBegin, OnEnd")]
+async fn then_package_has_named_embedded_slots(world: &mut BevyoutWorld) {
+    let ids = world
+        .script_extracted_owner
+        .as_ref()
+        .unwrap()
+        .embedded
+        .iter()
+        .map(|script| script.record.id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            record::ScriptAssetId::Embedded {
+                owner: bevyout_core::form_id::FormId(0x600),
+                slot: record::EmbeddedScriptSlot::Package(record::PackageScriptSlot::Begin),
+            },
+            record::ScriptAssetId::Embedded {
+                owner: bevyout_core::form_id::FormId(0x600),
+                slot: record::EmbeddedScriptSlot::Package(record::PackageScriptSlot::End),
+            },
+        ]
+    );
+}
+
+#[then("each embedded script preserves its compiled bytes")]
+async fn then_embedded_scripts_preserve_compiled_bytes(world: &mut BevyoutWorld) {
+    let embedded = &world.script_extracted_owner.as_ref().unwrap().embedded;
+    assert_eq!(
+        embedded[0].record.compiled_data.as_deref(),
+        Some(&[0xaa][..])
+    );
+    assert_eq!(
+        embedded[1].record.compiled_data.as_deref(),
+        Some(&[0xbb][..])
+    );
+}
+
+#[given("a synthetic script inventory report")]
+async fn given_synthetic_script_inventory_report(world: &mut BevyoutWorld) {
+    world.script_inventory_report = Some(report_schema::CompatibilityReport {
+        schema_version: report_schema::CURRENT_REPORT_SCHEMA_VERSION,
+        source_plugin: "Fixture.esm".into(),
+        source_fingerprint: "source".into(),
+        entries: Vec::new(),
+        script_inventory: report_schema::ScriptInventoryReport {
+            content_fingerprint: "content".into(),
+            totals: report_schema::ScriptInventoryTotals {
+                top_level: 1,
+                embedded: 1,
+                attachments: 1,
+                compiled_bytes: 4,
+                variables: 2,
+                references: 1,
+                diagnostics: 0,
+            },
+            by_kind: std::collections::BTreeMap::from([("object".into(), 2)]),
+            by_representation: std::collections::BTreeMap::from([("scda_sctx".into(), 2)]),
+            attachment_owner_signatures: std::collections::BTreeMap::from([("PACK".into(), 1)]),
+            scripts: Vec::new(),
+            attachments: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+    });
+}
+
+#[when("the script inventory report is rendered twice")]
+async fn when_script_inventory_report_is_rendered_twice(world: &mut BevyoutWorld) {
+    let report = world.script_inventory_report.as_ref().unwrap();
+    world.script_inventory_renders = vec![report.to_json(), report.to_json()];
+}
+
+#[then("both script inventory JSON renders are byte-identical")]
+async fn then_script_inventory_renders_are_identical(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.script_inventory_renders[0],
+        world.script_inventory_renders[1]
+    );
+}
+
+#[then("the script inventory summary reports 1 top-level and 1 embedded script")]
+async fn then_script_inventory_summary_has_totals(world: &mut BevyoutWorld) {
+    assert!(world.script_inventory_report.as_ref().unwrap().summary().contains(
+        "scripts: top-level=1 embedded=1 attachments=1 compiled-bytes=4 variables=2 references=1 diagnostics=0"
+    ));
 }

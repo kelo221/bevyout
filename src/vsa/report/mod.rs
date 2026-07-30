@@ -15,9 +15,13 @@ mod generator;
 mod registry;
 mod schema;
 
+#[cfg(test)]
 pub(crate) use generator::generate_report;
+pub(crate) use generator::generate_report_for_sources;
 
 use crate::cli::ReportArgs;
+use crate::vsa::content_index::PluginSource;
+use crate::vsa::prepare::load_plugin_chain;
 
 /// Default directory (relative to the working directory) that reports are
 /// written under when `--out-dir` is not given. Always inside the
@@ -42,8 +46,22 @@ pub fn report(args: ReportArgs) -> Result<()> {
         .to_string();
     let bytes = fs::read(&plugin_path)
         .with_context(|| format!("failed to read plugin {}", plugin_path.display()))?;
+    let data_root = args
+        .game_root
+        .as_ref()
+        .map(|root| root.join("Data"))
+        .or_else(|| plugin_path.parent().map(std::path::Path::to_path_buf))
+        .context("plugin path has no parent directory")?;
+    let loaded_plugins = load_plugin_chain(&plugin_path, &data_root)?;
+    let sources = loaded_plugins
+        .iter()
+        .map(|plugin| PluginSource {
+            name: &plugin.name,
+            bytes: &plugin.bytes,
+        })
+        .collect::<Vec<_>>();
 
-    let compatibility_report = generate_report(&plugin_name, &bytes)?;
+    let compatibility_report = generate_report_for_sources(&plugin_name, &bytes, &sources)?;
 
     let out_dir = args
         .out_dir

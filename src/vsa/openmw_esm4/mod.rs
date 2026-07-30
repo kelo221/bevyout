@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{Cursor, Read};
 
 use bevyout_core::form_id::FormIdResolver;
@@ -834,6 +835,28 @@ pub(crate) struct Subrecord {
     signature: String,
     data: Vec<u8>,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocatedSubrecord {
+    pub(crate) signature: String,
+    pub(crate) data: Vec<u8>,
+    pub(crate) offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubrecordParseError {
+    pub(crate) offset: usize,
+    pub(crate) signature: Option<String>,
+    pub(crate) message: String,
+}
+
+impl fmt::Display for SubrecordParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} at byte offset {}", self.message, self.offset)
+    }
+}
+
+impl std::error::Error for SubrecordParseError {}
 
 pub(crate) fn parse_content_set(
     sources: &[PluginSource<'_>],

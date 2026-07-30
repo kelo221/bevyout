@@ -41,35 +41,84 @@ pub(crate) fn record_payload(data: &[u8], flags: u32, sig: &str, form_id: u32) -
 }
 
 pub(crate) fn parse_subrecords(data: &[u8]) -> Result<Vec<Subrecord>> {
+    Ok(parse_subrecords_with_offsets(data)?
+        .into_iter()
+        .map(|subrecord| Subrecord {
+            signature: subrecord.signature,
+            data: subrecord.data,
+        })
+        .collect())
+}
+
+pub(crate) fn parse_subrecords_with_offsets(
+    data: &[u8],
+) -> std::result::Result<Vec<LocatedSubrecord>, SubrecordParseError> {
     let mut result = Vec::new();
     let mut offset = 0;
     let mut extended = None;
     while offset < data.len() {
+        let subrecord_offset = offset;
         if offset + 6 > data.len() {
-            bail!("truncated subrecord")
+            return Err(subrecord_error(
+                subrecord_offset,
+                None,
+                "truncated subrecord header",
+            ));
         }
         let signature = String::from_utf8_lossy(&data[offset..offset + 4]).to_string();
         let size = u16::from_le_bytes(data[offset + 4..offset + 6].try_into().unwrap()) as usize;
         offset += 6;
         if signature == "XXXX" {
-            if size != 4 || offset + 4 > data.len() {
-                bail!("invalid XXXX")
+            if extended.is_some() {
+                return Err(subrecord_error(
+                    subrecord_offset,
+                    Some(signature),
+                    "consecutive XXXX subrecords",
+                ));
             }
-            extended = Some(read_u32(data, offset)? as usize);
+            if size != 4 || offset + 4 > data.len() {
+                return Err(subrecord_error(
+                    subrecord_offset,
+                    Some(signature),
+                    "invalid XXXX subrecord",
+                ));
+            }
+            extended =
+                Some(u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize);
             offset += 4;
             continue;
         }
         let actual_size = extended.take().unwrap_or(size);
         if offset + actual_size > data.len() {
-            bail!("subrecord exceeds record")
+            return Err(subrecord_error(
+                subrecord_offset,
+                Some(signature),
+                "subrecord exceeds record payload",
+            ));
         }
-        result.push(Subrecord {
+        result.push(LocatedSubrecord {
             signature,
             data: data[offset..offset + actual_size].to_vec(),
+            offset: subrecord_offset,
         });
         offset += actual_size;
     }
+    if extended.is_some() {
+        return Err(subrecord_error(
+            data.len().saturating_sub(10),
+            Some("XXXX".into()),
+            "XXXX has no following subrecord",
+        ));
+    }
     Ok(result)
+}
+
+fn subrecord_error(offset: usize, signature: Option<String>, message: &str) -> SubrecordParseError {
+    SubrecordParseError {
+        offset,
+        signature,
+        message: message.into(),
+    }
 }
 
 pub(crate) fn sub<'a>(subs: &'a [Subrecord], signature: &str) -> Option<&'a [u8]> {

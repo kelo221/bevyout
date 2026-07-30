@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// Current report schema version. Bump when the JSON shape changes.
-pub(crate) const CURRENT_REPORT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CURRENT_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// The kind of thing a [`ReportEntry`] describes.
 ///
@@ -108,6 +108,62 @@ pub(crate) struct CompatibilityReport {
     pub(crate) source_fingerprint: String,
     /// Fully sorted by (class, key); deterministic across runs (F37.3).
     pub(crate) entries: Vec<ReportEntry>,
+    pub(crate) script_inventory: ScriptInventoryReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ScriptInventoryReport {
+    pub(crate) content_fingerprint: String,
+    pub(crate) totals: ScriptInventoryTotals,
+    pub(crate) by_kind: BTreeMap<String, usize>,
+    pub(crate) by_representation: BTreeMap<String, usize>,
+    pub(crate) attachment_owner_signatures: BTreeMap<String, usize>,
+    pub(crate) scripts: Vec<ScriptInventoryEntry>,
+    pub(crate) attachments: Vec<ScriptAttachmentEntry>,
+    pub(crate) diagnostics: Vec<ScriptDiagnosticEntry>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ScriptInventoryTotals {
+    pub(crate) top_level: usize,
+    pub(crate) embedded: usize,
+    pub(crate) attachments: usize,
+    pub(crate) compiled_bytes: usize,
+    pub(crate) variables: usize,
+    pub(crate) references: usize,
+    pub(crate) diagnostics: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct ScriptInventoryEntry {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) has_scda: bool,
+    pub(crate) has_sctx: bool,
+    pub(crate) compiled_bytes: usize,
+    pub(crate) variables: usize,
+    pub(crate) references: usize,
+    pub(crate) winning_plugin: String,
+    pub(crate) provenance: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct ScriptAttachmentEntry {
+    pub(crate) owner: String,
+    pub(crate) owner_signature: String,
+    pub(crate) slot: String,
+    pub(crate) script: String,
+    pub(crate) winning_plugin: String,
+    pub(crate) provenance: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct ScriptDiagnosticEntry {
+    pub(crate) script: String,
+    pub(crate) source_plugin: String,
+    pub(crate) subrecord: Option<String>,
+    pub(crate) offset: Option<usize>,
+    pub(crate) message: String,
 }
 
 impl CompatibilityReport {
@@ -169,6 +225,36 @@ impl CompatibilityReport {
             out,
             "save-affecting unresolved entries: {save_affecting_unresolved}"
         );
+        let scripts = &self.script_inventory;
+        let _ = writeln!(
+            out,
+            "scripts: top-level={} embedded={} attachments={} compiled-bytes={} variables={} references={} diagnostics={}",
+            scripts.totals.top_level,
+            scripts.totals.embedded,
+            scripts.totals.attachments,
+            scripts.totals.compiled_bytes,
+            scripts.totals.variables,
+            scripts.totals.references,
+            scripts.totals.diagnostics,
+        );
+        if !scripts.by_kind.is_empty() {
+            let values = scripts
+                .by_kind
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(out, "script kinds: {values}");
+        }
+        if !scripts.by_representation.is_empty() {
+            let values = scripts
+                .by_representation
+                .iter()
+                .map(|(kind, count)| format!("{kind}={count}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(out, "script representations: {values}");
+        }
         out
     }
 }

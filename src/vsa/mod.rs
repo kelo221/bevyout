@@ -13,8 +13,10 @@ mod physics;
 mod plugin;
 mod prepare;
 mod recipe;
+mod record_stream;
 mod report;
 mod scenes;
+mod scripts;
 
 #[cfg(test)]
 pub(crate) use assets::PREPARED_CONVERTER_REVISION;
