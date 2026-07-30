@@ -220,6 +220,7 @@ state machines) in pure modules and let thin Bevy systems consume them.
 Bevy-side behavior gets ordinary `#[cfg(test)]` unit tests against `World`
 or a minimal `App` (see `src/viewer/console.rs` tests for the console
 harness and `src/viewer/player/tests/` for bare-`World` helpers).
+Do not place unit test modules (`#[cfg(test)] mod tests { ... }`) directly in the same file as implementation source code (e.g. `transfer_ui.rs`). Separate unit tests into dedicated test files or submodules (e.g. using `#[cfg(test)] #[path = "..."] mod tests;` or placing them inside a dedicated `tests/` directory or `tests.rs` file). Keep implementation files clean and focused strictly on feature code.
 
 ## Logging
 
