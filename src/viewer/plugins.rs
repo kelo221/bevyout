@@ -89,6 +89,22 @@ impl PluginGroup for ViewerPlugins {
             .add(world::WorldPlugin {
                 resident_cell_limit: self.resident_cell_limit,
             })
+            .add(interaction::InteractionPlugin)
+            .add(actor::ActorPlugin)
+            .add(actor_state::ActorStatePlugin)
+            .add(weapon::WeaponPlugin)
+            .add(perception::PerceptionPlugin)
+            .add(actor_animation::ActorAnimationPlugin)
+            .add(pipboy::PipBoyPlugin)
+            .add(pipboy_reader::PipBoyReaderPlugin)
+            .add(animation::PlacementAnimationPlugin)
+            .add(console::ViewerConsolePlugin)
+            .add(console_ui::ConsoleUiPlugin)
+            .add(pause_menu::PauseMenuPlugin)
+            .add(cinema::CinemaPlugin)
+            .add(world::WorldPlugin {
+                resident_cell_limit: self.resident_cell_limit,
+            })
             .add(world_items::WorldItemsPlugin)
             .add(nav::NavPlugin)
             .add(ai::AiPackagePlugin)
@@ -96,34 +112,5 @@ impl PluginGroup for ViewerPlugins {
 }
 
 #[cfg(test)]
-mod tests {
-    use bevy::asset::AssetPlugin;
-    use bevy::state::app::StatesPlugin;
-
-    use super::*;
-
-    #[test]
-    fn viewer_group_installs_feature_plugins_and_forwards_configuration() {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
-            .add_plugins(ViewerPlugins {
-                disable_physics: true,
-                resident_cell_limit: 7,
-                agent_port: None,
-                day_night_cycle_seconds: None,
-            });
-
-        assert!(app.is_plugin_added::<player::PlayerPlugin>());
-        assert!(app.is_plugin_added::<hud::HudPlugin>());
-        assert!(app.is_plugin_added::<interaction::InteractionPlugin>());
-        assert!(app.is_plugin_added::<actor::ActorPlugin>());
-        assert!(app.is_plugin_added::<actor_state::ActorStatePlugin>());
-        assert!(app.is_plugin_added::<weapon::WeaponPlugin>());
-        assert!(app.is_plugin_added::<actor_animation::ActorAnimationPlugin>());
-        assert!(app.is_plugin_added::<pause_menu::PauseMenuPlugin>());
-        assert!(app.is_plugin_added::<world::WorldPlugin>());
-        assert!(app.is_plugin_added::<nav::NavPlugin>());
-        assert!(app.world().resource::<player::PhysicsDisabled>().0);
-        assert_eq!(app.world().resource::<world::ResidentCellLimit>().0, 7);
-    }
-}
+#[path = "tests/plugins.rs"]
+mod tests;
