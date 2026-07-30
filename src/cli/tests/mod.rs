@@ -2,6 +2,58 @@ use super::*;
 use std::path::Path;
 
 #[test]
+fn view_and_render_validate_day_night_cycle_duration() {
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "view",
+        "--manifest",
+        "scene.ron",
+        "--day-night-cycle-seconds",
+        "60",
+    ])
+    .unwrap();
+    let CommandLine::View(args) = cli.command else {
+        panic!("expected view command");
+    };
+    assert_eq!(args.day_night_cycle_seconds, Some(60.0));
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--day-night-cycle-seconds",
+        "86400",
+    ])
+    .unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(args.day_night_cycle_seconds, Some(86_400.0));
+
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "view",
+            "--manifest",
+            "scene.ron",
+            "--day-night-cycle-seconds",
+            "0",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "render",
+            "SuperDuperMart",
+            "--day-night-cycle-seconds",
+            "86401",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
     let cli = Cli::try_parse_from([
         "bevyout",

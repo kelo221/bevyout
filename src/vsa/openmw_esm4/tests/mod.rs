@@ -27,6 +27,178 @@ fn write_f32(data: &mut [u8], offset: usize, value: f32) {
 }
 
 #[test]
+fn parses_cell_exterior_behavior_and_explicit_climate() {
+    let resolver = direct_resolver();
+    let cell = parse_cell(&[direct_subrecord("DATA", vec![0x81])], 0x1234, &resolver).unwrap();
+    let metadata = parse_cell_metadata(
+        &[direct_subrecord(
+            "XCCM",
+            0x0001_2345_u32.to_le_bytes().to_vec(),
+        )],
+        &resolver,
+    );
+
+    assert!(cell.interior);
+    assert!(cell.behave_like_exterior);
+    assert_eq!(metadata.climate_form_id, Some(0x0001_2345));
+}
+
+#[test]
+fn parses_climate_weather_list_and_ten_minute_times() {
+    let resolver = direct_resolver();
+    let mut weather_list = Vec::new();
+    weather_list.extend_from_slice(&0x0001_1111_u32.to_le_bytes());
+    weather_list.extend_from_slice(&25_i32.to_le_bytes());
+    weather_list.extend_from_slice(&0_u32.to_le_bytes());
+    let climate = parse_climate(
+        &[
+            direct_subrecord("EDID", b"SyntheticClimate\0".to_vec()),
+            direct_subrecord("WLST", weather_list),
+            direct_subrecord("TNAM", vec![30, 42, 102, 114, 0, 0]),
+        ],
+        0x2000,
+        &resolver,
+    );
+
+    assert_eq!(
+        climate.weather_entries,
+        vec![ClimateWeatherEntry {
+            weather_form_id: 0x0001_1111,
+            chance: 25,
+        }]
+    );
+    assert_eq!(climate.timings.sunrise_begin_hour, 5.0);
+    assert_eq!(climate.timings.sunrise_end_hour, 7.0);
+    assert_eq!(climate.timings.sunset_begin_hour, 17.0);
+    assert_eq!(climate.timings.sunset_end_hour, 19.0);
+}
+
+#[test]
+fn rejects_malformed_climate_and_weather_color_lengths() {
+    let resolver = direct_resolver();
+    let climate = parse_climate(
+        &[
+            direct_subrecord("WLST", vec![0; 13]),
+            direct_subrecord("TNAM", vec![30, 42, 102]),
+        ],
+        0x2000,
+        &resolver,
+    );
+    assert!(climate.weather_entries.is_empty());
+    assert_eq!(climate.timings, DayNightTimings::default());
+    assert!(parse_weather(&[direct_subrecord("NAM0", vec![0; 159])], 0x3000).is_none());
+}
+
+#[test]
+fn parses_weather_nam0_in_type_major_layout() {
+    let mut nam0 = vec![0_u8; 160];
+    for color_type in 0..10 {
+        for time in 0..4 {
+            let offset = (color_type * 4 + time) * 4;
+            nam0[offset..offset + 4].copy_from_slice(&[(color_type * 10 + time) as u8, 0, 0, 255]);
+        }
+    }
+    let weather = parse_weather(
+        &[
+            direct_subrecord("EDID", b"WastelandClear\0".to_vec()),
+            direct_subrecord("NAM0", nam0),
+        ],
+        0x3000,
+    )
+    .unwrap();
+
+    assert_eq!(weather.sky_upper.sunrise[0], 0.0);
+    assert_eq!(weather.sky_upper.night[0], 3.0 / 255.0);
+    assert_eq!(weather.ambient.sunrise[0], 30.0 / 255.0);
+    assert_eq!(weather.sunlight.day[0], 41.0 / 255.0);
+    assert_eq!(weather.sky_lower.sunset[0], 72.0 / 255.0);
+}
+
+#[test]
+fn parses_worldspace_parent_climate_inheritance_fields() {
+    let resolver = direct_resolver();
+    let worldspace = parse_worldspace(
+        &[
+            direct_subrecord("WNAM", 0x1000_u32.to_le_bytes().to_vec()),
+            direct_subrecord("PNAM", vec![WorldspaceRecord::USE_PARENT_CLIMATE, 0]),
+            direct_subrecord("CNAM", 0x2000_u32.to_le_bytes().to_vec()),
+        ],
+        0x3000,
+        &resolver,
+    );
+    assert_eq!(worldspace.parent_form_id, Some(0x1000));
+    assert_eq!(
+        worldspace.parent_flags,
+        WorldspaceRecord::USE_PARENT_CLIMATE
+    );
+    assert_eq!(worldspace.climate_form_id, Some(0x2000));
+}
+
+#[test]
+fn synthetic_cell_world_climate_and_weather_records_flow_through_content_set() {
+    let cell_id = 0x0000_1000_u32;
+    let climate_id = 0x0000_2000_u32;
+    let weather_id = 0x0000_3000_u32;
+    let world_id = 0x0000_4000_u32;
+
+    let mut weather_list = Vec::new();
+    weather_list.extend_from_slice(&weather_id.to_le_bytes());
+    weather_list.extend_from_slice(&100_i32.to_le_bytes());
+    weather_list.extend_from_slice(&0_u32.to_le_bytes());
+    let climate_data = [
+        subrecord(b"EDID", b"SyntheticClimate\0"),
+        subrecord(b"WLST", &weather_list),
+        subrecord(b"TNAM", &[30, 42, 102, 114, 0, 0]),
+    ]
+    .concat();
+    let mut nam0 = vec![0_u8; 160];
+    nam0[0..4].copy_from_slice(&[10, 20, 30, 255]);
+    let weather_data = [
+        subrecord(b"EDID", b"WastelandClear\0"),
+        subrecord(b"NAM0", &nam0),
+    ]
+    .concat();
+    let cell_data = [
+        subrecord(b"EDID", b"SyntheticCell\0"),
+        subrecord(b"DATA", &[0x81]),
+        subrecord(b"XCCM", &climate_id.to_le_bytes()),
+    ]
+    .concat();
+    let world_data = [
+        subrecord(b"EDID", b"SyntheticWorld\0"),
+        subrecord(b"CNAM", &climate_id.to_le_bytes()),
+    ]
+    .concat();
+    let plugin = [
+        tes4(&[]),
+        record(b"WRLD", 0, world_id, &world_data),
+        record(b"CLMT", 0, climate_id, &climate_data),
+        record(b"WTHR", 0, weather_id, &weather_data),
+        record(b"CELL", 0, cell_id, &cell_data),
+    ]
+    .concat();
+
+    let parsed = parse_plugin(&plugin, cell_id).unwrap();
+    assert!(parsed.cell.as_ref().unwrap().behave_like_exterior);
+    assert_eq!(
+        parsed.cell_metadata.as_ref().unwrap().climate_form_id,
+        Some(climate_id)
+    );
+    assert_eq!(
+        parsed.climates[&climate_id].weather_entries[0].weather_form_id,
+        weather_id
+    );
+    assert_eq!(
+        parsed.weathers[&weather_id].editor_id.as_deref(),
+        Some("WastelandClear")
+    );
+    assert_eq!(
+        parsed.worldspaces[&world_id].climate_form_id,
+        Some(climate_id)
+    );
+}
+
+#[test]
 fn parses_legacy_image_space_layout_without_skin_dimmer_slot() {
     let mut data = vec![0_u8; 132];
     write_f32(&mut data, 56, 3.0);

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use bevyout_core::form_id::FormIdResolver;
+use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
 
 use super::manifest::{CellInfo, ImageSpaceInfo};
 use super::paths::CellSelector;
@@ -302,6 +303,37 @@ pub(crate) struct WorldspaceRecord {
     pub(crate) form_id: u32,
     pub(crate) editor_id: Option<String>,
     pub(crate) name: Option<String>,
+    pub(crate) parent_form_id: Option<u32>,
+    pub(crate) parent_flags: u8,
+    pub(crate) climate_form_id: Option<u32>,
+}
+
+impl WorldspaceRecord {
+    pub(crate) const USE_PARENT_CLIMATE: u8 = 0x10;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClimateWeatherEntry {
+    pub(crate) weather_form_id: u32,
+    pub(crate) chance: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ClimateRecord {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) weather_entries: Vec<ClimateWeatherEntry>,
+    pub(crate) timings: DayNightTimings,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WeatherRecord {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) sky_upper: ColorKeyframes,
+    pub(crate) sky_lower: ColorKeyframes,
+    pub(crate) ambient: ColorKeyframes,
+    pub(crate) sunlight: ColorKeyframes,
 }
 
 /// A directed door edge in the content-set-wide connectivity graph produced
@@ -496,6 +528,7 @@ pub(crate) struct LightingTemplateRecord {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct CellMetadata {
+    pub(crate) climate_form_id: Option<u32>,
     pub(crate) acoustic_space_form_id: Option<u32>,
     pub(crate) music_form_id: Option<u32>,
     pub(crate) lighting_template_form_id: Option<u32>,
@@ -522,6 +555,9 @@ pub(crate) struct ParsedPlugin {
     pub(crate) acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,
     pub(crate) music: HashMap<u32, MusicRecord>,
     pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
+    pub(crate) climates: HashMap<u32, ClimateRecord>,
+    pub(crate) weathers: HashMap<u32, WeatherRecord>,
+    pub(crate) worldspaces: HashMap<u32, WorldspaceRecord>,
     pub(crate) references: Vec<ReferenceRecord>,
     pub(crate) navmeshes: Vec<NavMeshRecord>,
     /// Content-set-wide `NAVI` singleton (issue #111, M4 wave 2):
@@ -745,6 +781,9 @@ impl ParsedContentSet {
             acoustic_spaces: state.acoustic_spaces,
             music: state.music,
             lighting_templates: state.lighting_templates,
+            climates: state.climates,
+            weathers: state.weathers,
+            worldspaces: state.worldspaces,
             references,
             navmeshes,
             navigation: state.navigation,
@@ -775,6 +814,8 @@ pub(crate) struct ParsedState {
     acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,
     music: HashMap<u32, MusicRecord>,
     lighting_templates: HashMap<u32, LightingTemplateRecord>,
+    climates: HashMap<u32, ClimateRecord>,
+    weathers: HashMap<u32, WeatherRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
     navigation: Option<NaviRecord>,

@@ -2,9 +2,13 @@
 
 use bevy::ecs::system::NonSendMarker;
 use bevy::input::keyboard::{Key, KeyboardFocusLost};
+use bevy::light::EnvironmentMapLight;
 use bevy::window::{PrimaryWindow, WindowFocused};
 
-use super::scene::CellDirectionalLight;
+use super::scene::{
+    CellDirectionalLight, DEFAULT_REFLECTION_PROBE_STRENGTH, PREPARED_REFLECTION_PROBE_INTENSITY,
+    PreparedReflectionProbe,
+};
 use super::*;
 
 /// Issue #131: Bevy 0.19.0's `bevy_input::keyboard::keyboard_input_system`
@@ -202,6 +206,171 @@ pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
 
+/// Reversible runtime gate for StandardMaterial metalness.
+///
+/// Disabling the gate snapshots every loaded material's metallic factor and
+/// forces it to zero. Materials that finish loading while disabled are
+/// captured on the next update. Re-enabling restores the exact snapshots.
+#[derive(Resource)]
+pub(crate) struct MetallicGate {
+    enabled: bool,
+    baselines: HashMap<AssetId<StandardMaterial>, f32>,
+}
+
+impl Default for MetallicGate {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            baselines: HashMap::new(),
+        }
+    }
+}
+
+impl MetallicGate {
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+/// Reversible runtime gate for the dielectric reflectance term.
+///
+/// `StandardMaterial::reflectance` contributes to dielectric F0 but not the
+/// base-color F0 of pure metals. Disabling this gate therefore isolates
+/// non-metal specular response without destroying authored metallic shading.
+#[derive(Resource)]
+pub(crate) struct DielectricSpecularGate {
+    enabled: bool,
+    baselines: HashMap<AssetId<StandardMaterial>, f32>,
+}
+
+impl Default for DielectricSpecularGate {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            baselines: HashMap::new(),
+        }
+    }
+}
+
+impl DielectricSpecularGate {
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+pub(crate) const MIN_ROUGHNESS_SCALE: f32 = 0.5;
+pub(crate) const MAX_ROUGHNESS_SCALE: f32 = 2.0;
+pub(crate) const MIN_REFLECTION_PROBE_STRENGTH: f32 = 0.0;
+pub(crate) const MAX_REFLECTION_PROBE_STRENGTH: f32 = 4096.0;
+
+/// Reversible multiplier over each material's original perceptual roughness.
+///
+/// Baselines remain stable while the scale changes, so repeated console
+/// adjustments never compound. Returning to 1 restores exact authored values.
+#[derive(Resource)]
+pub(crate) struct RoughnessScale {
+    scale: f32,
+    baselines: HashMap<AssetId<StandardMaterial>, f32>,
+}
+
+impl Default for RoughnessScale {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            baselines: HashMap::new(),
+        }
+    }
+}
+
+impl RoughnessScale {
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub(crate) fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+}
+
+/// Runtime multiplier over the prepared reflection probe intensity.
+///
+/// Enablement remains independent so `setrender reflection_probes 0|1` can
+/// temporarily gate probes without discarding a tuned strength.
+#[derive(Clone, Copy, Debug, Resource)]
+pub(crate) struct ReflectionProbeSettings {
+    enabled: bool,
+    strength: f32,
+}
+
+impl Default for ReflectionProbeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strength: DEFAULT_REFLECTION_PROBE_STRENGTH,
+        }
+    }
+}
+
+impl ReflectionProbeSettings {
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    pub(crate) fn strength(&self) -> f32 {
+        self.strength
+    }
+
+    pub(crate) fn set_strength(&mut self, strength: f32) {
+        self.strength = strength;
+    }
+
+    fn effective_intensity(&self) -> f32 {
+        if self.enabled {
+            PREPARED_REFLECTION_PROBE_INTENSITY * self.strength
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Active Fallout ImageSpace multiplier layered over the viewer's user-facing
+/// emission control. Keeping this separate means `setrender emission` remains
+/// a stable manual multiplier while cell swaps can still apply each cell's
+/// authored HDR emissive strength.
+#[derive(Clone, Copy, Debug, PartialEq, Resource)]
+pub(crate) struct ImageSpaceEmissionMultiplier(pub(crate) f32);
+
+impl Default for ImageSpaceEmissionMultiplier {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+pub(crate) fn image_space_emission_multiplier(
+    image_space: Option<&ImageSpaceInfo>,
+) -> ImageSpaceEmissionMultiplier {
+    let Some(value) = image_space.map(|image_space| image_space.hdr_emissive_multiplier) else {
+        return ImageSpaceEmissionMultiplier::default();
+    };
+    if value.is_finite() {
+        ImageSpaceEmissionMultiplier(value.clamp(0.0, 8.0))
+    } else {
+        ImageSpaceEmissionMultiplier::default()
+    }
+}
+
 /// Explicit runtime overrides for bloom values that would otherwise be
 /// derived from the active Fallout ImageSpace. The override remains active
 /// across cell swaps until the viewer is restarted, preserving the existing
@@ -309,6 +478,18 @@ pub(crate) fn apply_irradiance_intensity(
     }
     for mut volume in &mut volumes {
         volume.intensity = intensity.0;
+    }
+}
+
+pub(crate) fn apply_reflection_probe_settings(
+    settings: Res<ReflectionProbeSettings>,
+    mut probes: Query<&mut EnvironmentMapLight, With<PreparedReflectionProbe>>,
+) {
+    let target = settings.effective_intensity();
+    for mut probe in &mut probes {
+        if (probe.intensity - target).abs() > f32::EPSILON {
+            probe.intensity = target;
+        }
     }
 }
 
@@ -508,13 +689,145 @@ pub(crate) fn apply_unlit_mode(
     }
 }
 
+pub(crate) fn apply_metallic_gate(
+    mut gate: ResMut<MetallicGate>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if gate.enabled {
+        if gate.baselines.is_empty() {
+            return;
+        }
+        let baselines = std::mem::take(&mut gate.baselines);
+        for (id, baseline) in baselines {
+            let Some(material) = materials.get(id) else {
+                continue;
+            };
+            if material.metallic != baseline
+                && let Some(mut material) = materials.get_mut(id)
+            {
+                material.metallic = baseline;
+            }
+        }
+        return;
+    }
+
+    let newly_loaded = materials
+        .iter()
+        .filter(|(id, _)| !gate.baselines.contains_key(id))
+        .map(|(id, material)| (id, material.metallic))
+        .collect::<Vec<_>>();
+    gate.baselines.extend(newly_loaded);
+
+    let metallic_ids = materials
+        .iter()
+        .filter(|(_, material)| material.metallic != 0.0)
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    for id in metallic_ids {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.metallic = 0.0;
+        }
+    }
+}
+
+pub(crate) fn apply_dielectric_specular_gate(
+    mut gate: ResMut<DielectricSpecularGate>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if gate.enabled {
+        if gate.baselines.is_empty() {
+            return;
+        }
+        let baselines = std::mem::take(&mut gate.baselines);
+        for (id, baseline) in baselines {
+            let Some(material) = materials.get(id) else {
+                continue;
+            };
+            if material.reflectance != baseline
+                && let Some(mut material) = materials.get_mut(id)
+            {
+                material.reflectance = baseline;
+            }
+        }
+        return;
+    }
+
+    let newly_loaded = materials
+        .iter()
+        .filter(|(id, _)| !gate.baselines.contains_key(id))
+        .map(|(id, material)| (id, material.reflectance))
+        .collect::<Vec<_>>();
+    gate.baselines.extend(newly_loaded);
+
+    let reflective_ids = materials
+        .iter()
+        .filter(|(_, material)| material.reflectance != 0.0)
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    for id in reflective_ids {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.reflectance = 0.0;
+        }
+    }
+}
+
+pub(crate) fn apply_roughness_scale(
+    mut control: ResMut<RoughnessScale>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if control.scale == 1.0 {
+        if control.baselines.is_empty() {
+            return;
+        }
+        let baselines = std::mem::take(&mut control.baselines);
+        for (id, baseline) in baselines {
+            let Some(material) = materials.get(id) else {
+                continue;
+            };
+            if material.perceptual_roughness != baseline
+                && let Some(mut material) = materials.get_mut(id)
+            {
+                material.perceptual_roughness = baseline;
+            }
+        }
+        return;
+    }
+
+    let newly_loaded = materials
+        .iter()
+        .filter(|(id, _)| !control.baselines.contains_key(id))
+        .map(|(id, material)| (id, material.perceptual_roughness))
+        .collect::<Vec<_>>();
+    control.baselines.extend(newly_loaded);
+
+    let scale = control.scale;
+    let updates = control
+        .baselines
+        .iter()
+        .filter_map(|(id, baseline)| {
+            let target = (baseline * scale).clamp(0.0, 1.0);
+            materials
+                .get(*id)
+                .filter(|material| material.perceptual_roughness != target)
+                .map(|_| (*id, target))
+        })
+        .collect::<Vec<_>>();
+    for (id, target) in updates {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.perceptual_roughness = target;
+        }
+    }
+}
+
 pub(crate) fn apply_emission_scale(
     scale: Res<EmissionScale>,
+    image_space_multiplier: Res<ImageSpaceEmissionMultiplier>,
     authorized: Res<AuthorizedEmissionMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut state: Local<EmissionMaterialState>,
 ) {
     if !scale.is_changed()
+        && !image_space_multiplier.is_changed()
         && state.last_asset_count == materials.len()
         && state.last_authorized_revision == authorized.revision
     {
@@ -523,7 +836,7 @@ pub(crate) fn apply_emission_scale(
     state.last_asset_count = materials.len();
     state.last_authorized_revision = authorized.revision;
 
-    let scale = scale.0.clamp(0.0, 1.0);
+    let scale = scale.0.clamp(0.0, 1.0) * image_space_multiplier.0;
     for (id, material) in materials.iter_mut() {
         if !authorized.ids.contains(&id) {
             continue;
@@ -545,6 +858,7 @@ mod tests {
     use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
     use bevy::input::mouse::MouseButtonInput;
     use bevy::input::{ButtonInput, InputPlugin, InputSystems};
+    use bevy::light::EnvironmentMapLight;
     use bevy::pbr::StandardMaterial;
     use bevy::prelude::{
         App, ColorToComponents, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window, default,
@@ -552,10 +866,308 @@ mod tests {
     use bevy::window::{PrimaryWindow, WindowFocused};
 
     use super::{
-        AuthorizedEmissionMaterials, EmissionScale, apply_emission_scale,
-        horizontal_to_vertical_fov, mouse_look_is_safe, release_stuck_keys_on_focus_change,
+        AuthorizedEmissionMaterials, DielectricSpecularGate, EmissionScale,
+        ImageSpaceEmissionMultiplier, MetallicGate, ReflectionProbeSettings, RoughnessScale,
+        apply_dielectric_specular_gate, apply_emission_scale, apply_metallic_gate,
+        apply_reflection_probe_settings, apply_roughness_scale, horizontal_to_vertical_fov,
+        mouse_look_is_safe, release_stuck_keys_on_focus_change,
         request_focus_on_click_while_unfocused, should_request_focus,
     };
+    use crate::viewer::scene::{PREPARED_REFLECTION_PROBE_INTENSITY, PreparedReflectionProbe};
+
+    #[test]
+    fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<MetallicGate>()
+            .add_systems(Update, apply_metallic_gate);
+        let metal = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                metallic: 1.0,
+                ..default()
+            });
+        let mixed = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                metallic: 0.35,
+                ..default()
+            });
+
+        app.world_mut()
+            .resource_mut::<MetallicGate>()
+            .set_enabled(false);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&metal)
+                .unwrap()
+                .metallic,
+            0.0
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&mixed)
+                .unwrap()
+                .metallic,
+            0.0
+        );
+
+        let late = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                metallic: 0.8,
+                ..default()
+            });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&late)
+                .unwrap()
+                .metallic,
+            0.0
+        );
+
+        app.world_mut()
+            .resource_mut::<MetallicGate>()
+            .set_enabled(true);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(materials.get(&metal).unwrap().metallic, 1.0);
+        assert_eq!(materials.get(&mixed).unwrap().metallic, 0.35);
+        assert_eq!(materials.get(&late).unwrap().metallic, 0.8);
+    }
+
+    #[test]
+    fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<DielectricSpecularGate>()
+            .add_systems(Update, apply_dielectric_specular_gate);
+        let default_reflectance = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                reflectance: 0.5,
+                ..default()
+            });
+        let custom_reflectance = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                reflectance: 0.2,
+                ..default()
+            });
+
+        app.world_mut()
+            .resource_mut::<DielectricSpecularGate>()
+            .set_enabled(false);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials.get(&default_reflectance).unwrap().reflectance,
+            0.0
+        );
+        assert_eq!(materials.get(&custom_reflectance).unwrap().reflectance, 0.0);
+
+        let late = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                reflectance: 0.8,
+                ..default()
+            });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&late)
+                .unwrap()
+                .reflectance,
+            0.0
+        );
+
+        app.world_mut()
+            .resource_mut::<DielectricSpecularGate>()
+            .set_enabled(true);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials.get(&default_reflectance).unwrap().reflectance,
+            0.5
+        );
+        assert_eq!(materials.get(&custom_reflectance).unwrap().reflectance, 0.2);
+        assert_eq!(materials.get(&late).unwrap().reflectance, 0.8);
+    }
+
+    #[test]
+    fn roughness_scale_uses_original_baselines_and_catches_late_loaded_materials() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<RoughnessScale>()
+            .add_systems(Update, apply_roughness_scale);
+        let rough = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                perceptual_roughness: 0.4,
+                ..default()
+            });
+        let saturated = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                perceptual_roughness: 0.8,
+                ..default()
+            });
+
+        app.world_mut()
+            .resource_mut::<RoughnessScale>()
+            .set_scale(1.5);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert!((materials.get(&rough).unwrap().perceptual_roughness - 0.6).abs() < 1e-6);
+        assert_eq!(materials.get(&saturated).unwrap().perceptual_roughness, 1.0);
+
+        let late = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                perceptual_roughness: 0.2,
+                ..default()
+            });
+        app.update();
+        assert!(
+            (app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&late)
+                .unwrap()
+                .perceptual_roughness
+                - 0.3)
+                .abs()
+                < 1e-6
+        );
+
+        app.world_mut()
+            .resource_mut::<RoughnessScale>()
+            .set_scale(0.5);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(materials.get(&rough).unwrap().perceptual_roughness, 0.2);
+        assert_eq!(materials.get(&saturated).unwrap().perceptual_roughness, 0.4);
+        assert_eq!(materials.get(&late).unwrap().perceptual_roughness, 0.1);
+
+        app.world_mut()
+            .resource_mut::<RoughnessScale>()
+            .set_scale(1.0);
+        app.update();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(materials.get(&rough).unwrap().perceptual_roughness, 0.4);
+        assert_eq!(materials.get(&saturated).unwrap().perceptual_roughness, 0.8);
+        assert_eq!(materials.get(&late).unwrap().perceptual_roughness, 0.2);
+    }
+
+    #[test]
+    fn reflection_probe_settings_preserve_strength_across_the_gate_and_catch_late_probes() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ReflectionProbeSettings>()
+            .add_systems(Update, apply_reflection_probe_settings);
+        let first = app
+            .world_mut()
+            .spawn((
+                PreparedReflectionProbe,
+                EnvironmentMapLight {
+                    intensity: 99.0,
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            PREPARED_REFLECTION_PROBE_INTENSITY * 100.0
+        );
+
+        app.world_mut()
+            .resource_mut::<ReflectionProbeSettings>()
+            .set_strength(2.5);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            PREPARED_REFLECTION_PROBE_INTENSITY * 2.5
+        );
+
+        app.world_mut()
+            .resource_mut::<ReflectionProbeSettings>()
+            .set_enabled(false);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            0.0
+        );
+        let late = app
+            .world_mut()
+            .spawn((
+                PreparedReflectionProbe,
+                EnvironmentMapLight {
+                    intensity: 99.0,
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(late)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            0.0
+        );
+
+        app.world_mut()
+            .resource_mut::<ReflectionProbeSettings>()
+            .set_enabled(true);
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(first)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            PREPARED_REFLECTION_PROBE_INTENSITY * 2.5
+        );
+        assert_eq!(
+            app.world()
+                .entity(late)
+                .get::<EnvironmentMapLight>()
+                .unwrap()
+                .intensity,
+            PREPARED_REFLECTION_PROBE_INTENSITY * 2.5
+        );
+    }
 
     #[test]
     fn emission_scale_reuses_baseline_without_scaling_exposure_alpha() {
@@ -564,6 +1176,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<AuthorizedEmissionMaterials>()
             .insert_resource(EmissionScale(0.0))
+            .insert_resource(ImageSpaceEmissionMultiplier(1.0))
             .add_systems(Update, apply_emission_scale);
         let material = app
             .world_mut()
@@ -610,6 +1223,19 @@ mod tests {
                 .to_f32_array(),
             [0.2, 0.1, 0.05, 0.75]
         );
+
+        app.world_mut()
+            .insert_resource(ImageSpaceEmissionMultiplier(3.0));
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .unwrap()
+                .emissive
+                .to_f32_array(),
+            [0.6, 0.3, 0.15, 0.75]
+        );
     }
 
     #[test]
@@ -619,6 +1245,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<AuthorizedEmissionMaterials>()
             .insert_resource(EmissionScale(1.0))
+            .insert_resource(ImageSpaceEmissionMultiplier(1.0))
             .add_systems(Update, apply_emission_scale);
         let material = app
             .world_mut()

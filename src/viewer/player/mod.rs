@@ -52,6 +52,8 @@ const CAMERA_LOCAL_HEIGHT: f32 = EYE_HEIGHT - CAPSULE_HEIGHT * 0.5;
 const PLAYER_SPEED: f32 = 4.5;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 const FOOTSTEP_DISTANCE: f32 = 1.45;
+const PLAYER_DEBUG_HUD_TOP_PX: f32 = 8.0;
+const PLAYER_DEBUG_HUD_LEFT_PX: f32 = 10.0;
 const DEFAULT_FOOTSTEP_SURFACE: &str = "concrete";
 const CAMERA_VERTICAL_SETTLE_SECONDS: f32 = 0.12;
 const CAMERA_VERTICAL_SETTLE_LOG_FACTOR: f32 = 2.995_732_3;
@@ -66,6 +68,8 @@ const WORLD_DYNAMIC: u64 = 2;
 const PLAYER_QUERY: u64 = 4;
 const PLAYER_PROXY: u64 = 8;
 const STEP_SUPPORT: u64 = 16;
+const STEP_DEBUG_HUD_TOP_PX: f32 = 32.0;
+const COLLIDER_DEBUG_HUD_TOP_PX: f32 = 56.0;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CameraMode {
@@ -412,7 +416,14 @@ fn install(app: &mut App, disable_physics: bool) {
     .insert_resource(CellPhysicsReadiness::default())
     .insert_resource(StepDebugSettings::default())
     .insert_resource(PendingColliderBuild::default())
-    .add_systems(Startup, (spawn_collider_debug_hud, spawn_step_debug_hud))
+    .add_systems(
+        Startup,
+        (
+            spawn_collider_debug_hud,
+            spawn_step_debug_hud,
+            spawn_player_debug_hud,
+        ),
+    )
     .add_systems(
         Update,
         (
@@ -443,7 +454,14 @@ fn install(app: &mut App, disable_physics: bool) {
             .run_if(in_state(AppState::InGame))
             .run_if(in_state(GameplayModal::None)),
     )
-    .add_systems(Update, (update_collider_debug_hud, update_step_debug_hud))
+    .add_systems(
+        Update,
+        (
+            update_collider_debug_hud,
+            update_step_debug_hud,
+            update_player_debug_hud,
+        ),
+    )
     .add_systems(
         Update,
         initialize_default_fps.run_if(in_state(AppState::InGame)),
@@ -460,10 +478,11 @@ fn spawn_collider_debug_hud(mut commands: Commands) {
         ColliderDebugHud,
         super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
             right: px(10),
-            bottom: px(10),
+            top: px(COLLIDER_DEBUG_HUD_TOP_PX),
             ..default()
         },
         ZIndex(120),
@@ -498,10 +517,11 @@ fn spawn_step_debug_hud(mut commands: Commands) {
         StepDebugHud,
         super::console::DiagnosticUi,
         TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
             right: px(10),
-            bottom: px(34),
+            top: px(STEP_DEBUG_HUD_TOP_PX),
             ..default()
         },
         ZIndex(120),
@@ -525,6 +545,48 @@ fn update_step_debug_hud(
         "Stair logs: {}",
         if settings.enabled { "On" } else { "Off" }
     );
+}
+
+#[derive(Component)]
+struct PlayerDebugHud;
+
+fn spawn_player_debug_hud(mut commands: Commands) {
+    commands.spawn((
+        Text::new(player_debug_text(None)),
+        PlayerDebugHud,
+        super::console::DiagnosticUi,
+        TextColor(Color::srgb(0.7, 0.9, 1.0)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(PLAYER_DEBUG_HUD_LEFT_PX),
+            top: px(PLAYER_DEBUG_HUD_TOP_PX),
+            ..default()
+        },
+        ZIndex(120),
+    ));
+}
+
+fn update_player_debug_hud(
+    players: Query<(&Transform, &FpsPlayer)>,
+    mut text: Single<&mut Text, With<PlayerDebugHud>>,
+) {
+    let player = players.iter().next();
+    text.0 = player_debug_text(player);
+}
+
+fn player_debug_text(player: Option<(&Transform, &FpsPlayer)>) -> String {
+    let Some((transform, fps_player)) = player else {
+        return "PLAYER POS --\nLOOK YAW -- | PITCH --".to_string();
+    };
+
+    format!(
+        "PLAYER POS {:.3}, {:.3}, {:.3}\nLOOK YAW {:.1} deg | PITCH {:.1} deg",
+        transform.translation.x,
+        transform.translation.y,
+        transform.translation.z,
+        fps_player.yaw.to_degrees(),
+        fps_player.pitch.to_degrees(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

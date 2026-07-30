@@ -56,14 +56,15 @@ Feature: Asset conversion profile selection
     Examples:
       | glossiness | roughness |
       | 0          | 1.000000  |
-      | 10         | 0.798679  |
-      | 70         | 0.510310  |
-      | 100        | 0.467754  |
+      | 10         | 1.000000  |
+      | 40         | 0.817492  |
+      | 70         | 0.714435  |
+      | 100        | 0.654856  |
 
   Scenario Outline: Missing or invalid glossiness uses exponent ten
     Given a NIF material glossiness value "<glossiness>"
     When its PBR material policy is evaluated
-    Then its perceptual roughness is approximately 0.798679
+    Then its perceptual roughness is approximately 1.000000
 
     Examples:
       | glossiness |
@@ -99,6 +100,23 @@ Feature: Asset conversion profile selection
     Given a DirectX normal texel (12, 34, 56, 78)
     When its normal convention is converted for Bevy
     Then the converted normal texel is (12, 221, 56, 78)
+
+  Scenario: Specular-enabled Fallout materials reuse normal alpha as specular strength
+    Given a Fallout material has specular enabled
+    And its normal texture is "textures/furniture/chair03_n.dds"
+    When its PBR material policy is evaluated
+    Then its specular texture is "textures/furniture/chair03_n.dds"
+
+  Scenario: Specular-disabled Fallout materials export no specular texture
+    Given a Fallout material has specular disabled
+    And its normal texture is "textures/furniture/chair03_n.dds"
+    When its PBR material policy is evaluated
+    Then it has no specular texture
+
+  Scenario: Fallout materials without a normal map export no specular texture
+    Given a Fallout material has specular enabled
+    When its PBR material policy is evaluated
+    Then it has no specular texture
 
   Scenario Outline: Blender staging recognizes only normal-map filenames
     Given the staged texture path "<path>"

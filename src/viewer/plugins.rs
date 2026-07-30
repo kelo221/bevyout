@@ -11,8 +11,8 @@ use crate::app_state::AppStatePlugin;
 
 use super::{
     actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
-    console, console_ui, interaction, nav, pause_menu, perception, pipboy, pipboy_reader, player,
-    weapon, world, world_items,
+    console, console_ui, day_night, hud, interaction, nav, pause_menu, perception, pipboy,
+    pipboy_reader, player, weapon, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -49,6 +49,7 @@ pub(crate) struct ViewerPlugins {
     pub(crate) disable_physics: bool,
     pub(crate) resident_cell_limit: usize,
     pub(crate) agent_port: Option<u16>,
+    pub(crate) day_night_cycle_seconds: Option<f32>,
 }
 
 impl PluginGroup for ViewerPlugins {
@@ -68,6 +69,10 @@ impl PluginGroup for ViewerPlugins {
             })
             .add(bindings::BindingsPlugin)
             .add(audio::ViewerAudioPlugin)
+            .add(day_night::DayNightPlugin {
+                cycle_seconds: self.day_night_cycle_seconds,
+            })
+            .add(hud::HudPlugin)
             .add(interaction::InteractionPlugin)
             .add(actor::ActorPlugin)
             .add(actor_state::ActorStatePlugin)
@@ -105,9 +110,11 @@ mod tests {
                 disable_physics: true,
                 resident_cell_limit: 7,
                 agent_port: None,
+                day_night_cycle_seconds: None,
             });
 
         assert!(app.is_plugin_added::<player::PlayerPlugin>());
+        assert!(app.is_plugin_added::<hud::HudPlugin>());
         assert!(app.is_plugin_added::<interaction::InteractionPlugin>());
         assert!(app.is_plugin_added::<actor::ActorPlugin>());
         assert!(app.is_plugin_added::<actor_state::ActorStatePlugin>());

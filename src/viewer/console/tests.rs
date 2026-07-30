@@ -16,6 +16,10 @@ fn test_app() -> App {
         .insert_resource(VolumetricFogMultiplier(1.0))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(0.0))
+        .insert_resource(MetallicGate::default())
+        .insert_resource(super::super::controls::DielectricSpecularGate::default())
+        .insert_resource(super::super::controls::RoughnessScale::default())
+        .insert_resource(super::super::controls::ReflectionProbeSettings::default())
         .insert_resource(ImageSpaceBloomOverrides::default())
         .insert_resource(UnlitMode(false))
         .insert_resource(LightsDisabled(false))
@@ -25,7 +29,10 @@ fn test_app() -> App {
         .insert_resource(player::StepDebugSettings::default())
         .insert_resource(interaction::PlayerInventory::default())
         .insert_resource(interaction::PlayerEquipment::default());
+    app.insert_resource(super::super::day_night::GameClock::default())
+        .insert_resource(super::super::day_night::DayNightPreview::default());
     app.init_resource::<interaction::CanonicalItemLedger>();
+    app.init_resource::<Assets<StandardMaterial>>();
     app.init_resource::<super::super::world::ActiveSaveState>();
     app.init_resource::<super::super::actor_state::ActorDefinitionCatalogs>();
     app.init_state::<GameplayModal>();
@@ -137,6 +144,26 @@ fn toggles_and_time_multiplier_change_focused_state() {
         app.world().resource::<Time<Virtual>>().relative_speed(),
         2.0
     );
+    assert!(exec(&mut app, "settime 24").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::day_night::GameClock>()
+            .hour,
+        0.0
+    );
+    assert!(exec(&mut app, "settimescale 1440").ok);
+    let time = exec(&mut app, "gettime");
+    assert_eq!(time.value["timescale"], 1440.0);
+    assert_eq!(time.value["cycle_seconds"], 60.0);
+    assert_eq!(
+        app.world().resource::<Time<Virtual>>().relative_speed(),
+        2.0,
+        "Fallout timescale must not alter sgtm"
+    );
+    assert_eq!(
+        exec(&mut app, "settimescale 86401").error.unwrap().code,
+        "out_of_range"
+    );
 }
 
 #[test]
@@ -223,6 +250,10 @@ fn developer_commands_and_aliases_are_registered_and_structured() {
 #[test]
 fn render_settings_validate_boundaries_before_mutation() {
     let mut app = test_app();
+    assert_eq!(
+        exec(&mut app, "getrender reflection_probe_strength").value["value"],
+        100.0
+    );
     for (setting, low, high) in [
         ("lighting", 0.0001, 262_144.0),
         ("irradiance", 0.0, 4096.0),
@@ -233,6 +264,8 @@ fn render_settings_validate_boundaries_before_mutation() {
         ("volumetric_fog", 0.0, 100.0),
         ("ao", 0.0, 1.0),
         ("emission", 0.0, 1.0),
+        ("roughness_scale", 0.5, 2.0),
+        ("reflection_probe_strength", 0.0, 4096.0),
     ] {
         assert!(exec(&mut app, &format!("setrender {setting} {low}")).ok);
         assert!(exec(&mut app, &format!("setrender {setting} {high}")).ok);
@@ -249,6 +282,67 @@ fn render_settings_validate_boundaries_before_mutation() {
     assert_eq!(
         exec(&mut app, "getrender realtime_shadows").value["value"],
         0
+    );
+    assert!(exec(&mut app, "setrender metallic 0").ok);
+    assert!(!app.world().resource::<MetallicGate>().enabled());
+    assert_eq!(exec(&mut app, "getrender metallic").value["value"], 0);
+    assert!(exec(&mut app, "setrender metallic 1").ok);
+    assert!(app.world().resource::<MetallicGate>().enabled());
+    assert!(exec(&mut app, "setrender dielectric_specular 0").ok);
+    assert!(
+        !app.world()
+            .resource::<super::super::controls::DielectricSpecularGate>()
+            .enabled()
+    );
+    assert_eq!(
+        exec(&mut app, "getrender dielectric_specular").value["value"],
+        0
+    );
+    assert!(exec(&mut app, "setrender dielectric_specular 1").ok);
+    assert!(
+        app.world()
+            .resource::<super::super::controls::DielectricSpecularGate>()
+            .enabled()
+    );
+    assert!(exec(&mut app, "setrender roughness_scale 1.75").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::controls::RoughnessScale>()
+            .scale(),
+        1.75
+    );
+    assert_eq!(
+        exec(&mut app, "getrender roughness_scale").value["value"],
+        1.75
+    );
+    assert!(exec(&mut app, "setrender reflection_probe_strength 2.5").ok);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::controls::ReflectionProbeSettings>()
+            .strength(),
+        2.5
+    );
+    assert_eq!(
+        exec(&mut app, "getrender reflection_probe_strength").value["value"],
+        2.5
+    );
+    assert!(exec(&mut app, "setrender reflection_probes 0").ok);
+    assert!(
+        !app.world()
+            .resource::<super::super::controls::ReflectionProbeSettings>()
+            .enabled()
+    );
+    assert_eq!(
+        app.world()
+            .resource::<super::super::controls::ReflectionProbeSettings>()
+            .strength(),
+        2.5
+    );
+    assert!(exec(&mut app, "setrender reflection_probes 1").ok);
+    assert!(
+        app.world()
+            .resource::<super::super::controls::ReflectionProbeSettings>()
+            .enabled()
     );
     assert!(exec(&mut app, "setrender bloom_threshold 5000").ok);
     assert_eq!(
@@ -277,6 +371,27 @@ fn render_settings_validate_boundaries_before_mutation() {
             .code,
         "out_of_range"
     );
+    assert_eq!(
+        exec(&mut app, "setrender dielectric_specular 0.5")
+            .error
+            .unwrap()
+            .code,
+        "out_of_range"
+    );
+    assert_eq!(
+        exec(&mut app, "setrender roughness_scale 2.01")
+            .error
+            .unwrap()
+            .code,
+        "out_of_range"
+    );
+    assert_eq!(
+        exec(&mut app, "setrender reflection_probe_strength 4096.01")
+            .error
+            .unwrap()
+            .code,
+        "out_of_range"
+    );
     assert!(exec(&mut app, "shadowcache status").ok);
     assert_eq!(
         exec(&mut app, "shadowcache rebuild").error.unwrap().code,
@@ -284,7 +399,12 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        13
+        18
+    );
+    assert!(exec(&mut app, "setrender day_night_preview 1").ok);
+    assert_eq!(
+        exec(&mut app, "getrender day_night_preview").value["value"],
+        1
     );
 }
 

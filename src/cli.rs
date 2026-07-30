@@ -280,6 +280,17 @@ fn parse_shadow_resolution(value: &str) -> Result<u32, String> {
     }
 }
 
+fn parse_day_night_cycle_seconds(value: &str) -> Result<f32, String> {
+    let value = value
+        .parse::<f32>()
+        .map_err(|error| format!("invalid day/night cycle duration: {error}"))?;
+    if value.is_finite() && (1.0..=86_400.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("day/night cycle duration must be between 1 and 86400 seconds".into())
+    }
+}
+
 #[derive(Parser, Debug)]
 pub struct ViewArgs {
     /// Prepared scene manifest to open.
@@ -294,6 +305,9 @@ pub struct ViewArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Preview a complete Fallout day in this many real seconds.
+    #[arg(long, value_name = "SECONDS", value_parser = parse_day_night_cycle_seconds)]
+    pub(crate) day_night_cycle_seconds: Option<f32>,
     /// Expose the running viewer to a local agent through Bevy Remote Protocol.
     #[arg(long)]
     pub(crate) agent_bridge: bool,
@@ -404,6 +418,9 @@ pub struct RenderArgs {
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
+    /// Preview a complete Fallout day in this many real seconds.
+    #[arg(long, value_name = "SECONDS", value_parser = parse_day_night_cycle_seconds)]
+    pub(crate) day_night_cycle_seconds: Option<f32>,
     /// Expose the running viewer to a local agent through Bevy Remote Protocol.
     #[arg(long)]
     pub(crate) agent_bridge: bool,

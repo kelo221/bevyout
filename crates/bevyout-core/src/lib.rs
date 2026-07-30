@@ -18,4 +18,5 @@ pub mod items;
 pub mod manifest;
 pub mod pause_menu;
 pub mod perception;
+pub mod time_of_day;
 pub mod weapon;

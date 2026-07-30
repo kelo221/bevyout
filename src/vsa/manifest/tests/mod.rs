@@ -177,12 +177,48 @@ fn schema_five_lighting_round_trip_and_legacy_defaults() {
             editor_id: None,
             name: None,
             interior: true,
+            behave_like_exterior: false,
             ambient_rgba: (0.0, 0.0, 0.0, 0.0),
             directional_rgba: (0.0, 0.0, 0.0, 0.0),
         )"#;
     let legacy_cell: CellInfo = ron::de::from_str(legacy).unwrap();
     assert!(legacy_cell.raw_lighting.is_none());
     assert!(legacy_cell.effective_lighting.is_none());
+    assert!(!legacy_cell.behave_like_exterior);
+    assert!(legacy_cell.day_night_profile.is_none());
+    assert!(legacy_cell.day_night_preview_profile.is_none());
+}
+
+#[test]
+fn day_night_profile_round_trips_authored_identity_times_and_colors() {
+    use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
+
+    let colors = ColorKeyframes {
+        sunrise: [0.1, 0.2, 0.3, 1.0],
+        day: [0.4, 0.5, 0.6, 1.0],
+        sunset: [0.7, 0.4, 0.2, 1.0],
+        night: [0.01, 0.02, 0.05, 1.0],
+    };
+    let profile = PreparedDayNightProfile {
+        climate_form_id: Some(0x0001_5e62),
+        climate_editor_id: Some("WastelandClimate".into()),
+        weather_form_id: 0x0001_5e63,
+        weather_editor_id: Some("WastelandClear".into()),
+        timings: DayNightTimings {
+            sunrise_begin_hour: 5.0,
+            sunrise_end_hour: 7.0,
+            sunset_begin_hour: 17.0,
+            sunset_end_hour: 19.0,
+        },
+        sky_upper: colors,
+        sky_lower: colors,
+        ambient: colors,
+        sunlight: colors,
+        source: PreparedDayNightProfileSource::Authoritative,
+    };
+    let encoded = ron::ser::to_string(&profile).unwrap();
+    let decoded: PreparedDayNightProfile = ron::de::from_str(&encoded).unwrap();
+    assert_eq!(decoded, profile);
 }
 
 // --- Issue #38: PreparedRuntimeMutability schema -------------------------
@@ -498,6 +534,7 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
             editor_id: None,
             name: None,
             interior: true,
+            behave_like_exterior: false,
             ambient_rgba: [0.0; 4],
             directional_rgba: [0.0; 4],
             image_space_form_id: None,
@@ -511,6 +548,8 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
             water_height: None,
             grid: None,
             worldspace_form_id: None,
+            day_night_profile: None,
+            day_night_preview_profile: None,
         },
         placements: Vec::new(),
         lights: Vec::new(),

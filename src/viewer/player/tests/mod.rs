@@ -1,4 +1,5 @@
 use super::*;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::MeshPlugin;
 use bevy::time::TimeUpdateStrategy;
 use std::time::Duration;
@@ -1686,4 +1687,76 @@ fn ragdoll_spawns_from_the_actors_current_runtime_transform() {
     assert_eq!(placement.translation, [8.0, 9.0, 10.0]);
     assert!(Quat::from_array(placement.rotation_xyzw).angle_between(runtime.rotation) < 1e-5);
     assert!((placement.scale - 1.2).abs() < 1e-6);
+}
+
+#[test]
+fn diagnostic_lines_stack_below_fps_in_the_top_right() {
+    let mut world = World::new();
+    world.run_system_once(spawn_step_debug_hud).unwrap();
+    world.run_system_once(spawn_collider_debug_hud).unwrap();
+
+    let step = world
+        .query_filtered::<&Node, With<StepDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(step.position_type, PositionType::Absolute);
+    assert_eq!(step.top, Val::Px(STEP_DEBUG_HUD_TOP_PX));
+    assert_eq!(step.right, Val::Px(10.0));
+    assert_eq!(step.bottom, Val::Auto);
+
+    let collider = world
+        .query_filtered::<&Node, With<ColliderDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(collider.position_type, PositionType::Absolute);
+    assert_eq!(collider.top, Val::Px(COLLIDER_DEBUG_HUD_TOP_PX));
+    assert_eq!(collider.right, Val::Px(10.0));
+    assert_eq!(collider.bottom, Val::Auto);
+}
+
+#[test]
+fn player_debug_hud_uses_the_top_left_diagnostic_layout() {
+    let mut world = World::new();
+    world.run_system_once(spawn_player_debug_hud).unwrap();
+
+    let node = world
+        .query_filtered::<&Node, With<PlayerDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(node.position_type, PositionType::Absolute);
+    assert_eq!(node.left, Val::Px(PLAYER_DEBUG_HUD_LEFT_PX));
+    assert_eq!(node.top, Val::Px(PLAYER_DEBUG_HUD_TOP_PX));
+    assert_eq!(node.right, Val::Auto);
+    assert_eq!(node.bottom, Val::Auto);
+}
+
+#[test]
+fn player_debug_text_formats_position_and_look_angles() {
+    let transform = Transform::from_xyz(12.3456, 6.7894, -4.3215);
+    let player = FpsPlayer {
+        yaw: 90.0_f32.to_radians(),
+        pitch: -12.0_f32.to_radians(),
+    };
+
+    assert_eq!(
+        player_debug_text(Some((&transform, &player))),
+        "PLAYER POS 12.346, 6.789, -4.321\nLOOK YAW 90.0 deg | PITCH -12.0 deg"
+    );
+}
+
+#[test]
+fn player_debug_text_shows_fallback_without_an_fps_player() {
+    assert_eq!(
+        player_debug_text(None),
+        "PLAYER POS --\nLOOK YAW -- | PITCH --"
+    );
+
+    let mut world = World::new();
+    world.spawn((Text::new("stale"), PlayerDebugHud));
+    world.run_system_once(update_player_debug_hud).unwrap();
+    let text = world
+        .query_filtered::<&Text, With<PlayerDebugHud>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(text.0, "PLAYER POS --\nLOOK YAW -- | PITCH --");
 }

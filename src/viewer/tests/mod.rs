@@ -1,4 +1,5 @@
 use super::*;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog};
 use bevy::pbr::BakedPointShadowReceiver;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
@@ -210,6 +211,23 @@ fn image_space_bloom_keeps_old_viewer_values_as_the_neutral_profile() {
     assert!((exterior.0 - 0.15).abs() < 0.00001);
     assert!((exterior.1 - (0.05 * 0.35 / 0.225)).abs() < 0.00001);
     assert!((exterior.2 - 0.22).abs() < 0.00001);
+}
+
+#[test]
+fn image_space_emission_uses_the_authored_hdr_multiplier() {
+    let image_space = ImageSpaceInfo {
+        hdr_emissive_multiplier: 3.0,
+        ..default()
+    };
+
+    assert_eq!(
+        image_space_emission_multiplier(Some(&image_space)),
+        ImageSpaceEmissionMultiplier(3.0)
+    );
+    assert_eq!(
+        image_space_emission_multiplier(None),
+        ImageSpaceEmissionMultiplier(1.0)
+    );
 }
 
 #[test]
@@ -495,4 +513,19 @@ fn directional_rotation_and_light_scale_are_deterministic() {
         20_000.0
     );
     assert_eq!(scaled_directional_illuminance(10_000.0, 256.0, true), 0.0);
+}
+
+#[test]
+fn fps_diagnostic_stays_at_the_head_of_the_top_right_stack() {
+    let mut world = World::new();
+    world.run_system_once(spawn_reticle).unwrap();
+
+    let node = world
+        .query_filtered::<&Node, With<FpsText>>()
+        .single(&world)
+        .unwrap();
+    assert_eq!(node.position_type, PositionType::Absolute);
+    assert_eq!(node.top, Val::Px(8.0));
+    assert_eq!(node.right, Val::Px(10.0));
+    assert_eq!(node.bottom, Val::Auto);
 }

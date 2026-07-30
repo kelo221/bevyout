@@ -53,6 +53,10 @@ mod actor_state {
 mod pause_menu {
     pub use bevyout_core::pause_menu::*;
 }
+#[allow(dead_code, unused_imports)]
+mod time_of_day {
+    pub use bevyout_core::time_of_day::*;
+}
 
 #[path = "../src/vsa/prepare/reflection_probe_distribution.rs"]
 mod reflection_probe_distribution;
@@ -477,6 +481,9 @@ struct BevyoutWorld {
     material_diffuse_texture: Option<String>,
     material_roughness: Option<f32>,
     material_metallic: Option<f32>,
+    material_specular_enabled: bool,
+    material_normal_texture: Option<String>,
+    material_specular_texture: Option<String>,
     directx_normal_texel: Option<[u8; 4]>,
     converted_normal_texel: Option<[u8; 4]>,
     staged_texture_path: Option<String>,
@@ -958,6 +965,18 @@ struct BevyoutWorld {
     ammo_reserve: u32,
     ammo_reload: Option<bevyout_core::combat::ammo::ReloadDecision>,
     ammo_fire: Option<Result<(), bevyout_core::combat::ammo::FireBlockReason>>,
+
+    // -- day_night_lighting.feature --
+    day_night_interior: bool,
+    day_night_behave_like_exterior: bool,
+    day_night_preview: bool,
+    day_night_dynamic: bool,
+    game_hour: f32,
+    game_timescale: f32,
+    weather_keyframes: time_of_day::ColorKeyframes,
+    sampled_weather_color: [f32; 4],
+    preview_weather_candidates: Vec<(u32, Option<String>)>,
+    selected_preview_weather: Option<u32>,
 }
 
 fn find_placement<'a>(
@@ -1390,6 +1409,21 @@ async fn given_material_diffuse_texture(world: &mut BevyoutWorld, path: String) 
     world.material_diffuse_texture = Some(path);
 }
 
+#[given("a Fallout material has specular enabled")]
+async fn given_fallout_material_has_specular_enabled(world: &mut BevyoutWorld) {
+    world.material_specular_enabled = true;
+}
+
+#[given("a Fallout material has specular disabled")]
+async fn given_fallout_material_has_specular_disabled(world: &mut BevyoutWorld) {
+    world.material_specular_enabled = false;
+}
+
+#[given(regex = r#"^its normal texture is "([^"]+)"$"#)]
+async fn given_material_normal_texture(world: &mut BevyoutWorld, path: String) {
+    world.material_normal_texture = Some(path);
+}
+
 #[when("the metallic material CSV is parsed")]
 async fn when_metallic_material_csv_is_parsed(world: &mut BevyoutWorld) {
     world.metallic_csv_rejected =
@@ -1406,6 +1440,10 @@ async fn when_pbr_material_policy_is_evaluated(world: &mut BevyoutWorld) {
         world.material_metallic =
             Some(table.metallic_factor(world.material_diffuse_texture.as_deref()));
     }
+    world.material_specular_texture = assets::fallout_specular_texture_path(
+        world.material_specular_enabled,
+        world.material_normal_texture.as_deref(),
+    );
 }
 
 #[then(regex = r"^its perceptual roughness is approximately ([\d.]+)$")]
@@ -1426,6 +1464,19 @@ async fn then_metallic_factor_is(world: &mut BevyoutWorld, expected: String) {
 #[then("the metallic material CSV is rejected")]
 async fn then_metallic_material_csv_is_rejected(world: &mut BevyoutWorld) {
     assert!(world.metallic_csv_rejected);
+}
+
+#[then(regex = r#"^its specular texture is "([^"]+)"$"#)]
+async fn then_material_specular_texture_is(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.material_specular_texture.as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+#[then("it has no specular texture")]
+async fn then_material_has_no_specular_texture(world: &mut BevyoutWorld) {
+    assert_eq!(world.material_specular_texture, None);
 }
 
 #[given(regex = r"^a DirectX normal texel \((\d+), (\d+), (\d+), (\d+)\)$")]
@@ -12911,4 +12962,114 @@ async fn then_reflection_probe_counts_are(world: &mut BevyoutWorld, counts: Stri
         .map(|count| count.trim().parse().expect("probe count must be numeric"))
         .collect::<Vec<usize>>();
     assert_eq!(world.reflection_probe_counts, expected);
+}
+
+// ---------------------------------------------------------------------
+// day_night_lighting.feature
+// ---------------------------------------------------------------------
+
+#[given("an ordinary interior cell")]
+async fn given_ordinary_interior(world: &mut BevyoutWorld) {
+    world.day_night_interior = true;
+    world.day_night_behave_like_exterior = false;
+}
+
+#[given("an interior cell that behaves like exterior")]
+async fn given_exterior_like_interior(world: &mut BevyoutWorld) {
+    world.day_night_interior = true;
+    world.day_night_behave_like_exterior = true;
+}
+
+#[when(regex = r"^day-night preview is (enabled|disabled)$")]
+async fn when_day_night_preview(world: &mut BevyoutWorld, state: String) {
+    world.day_night_preview = state == "enabled";
+    world.day_night_dynamic = time_of_day::uses_dynamic_lighting(
+        world.day_night_interior,
+        world.day_night_behave_like_exterior,
+        world.day_night_preview,
+    );
+}
+
+#[then(regex = r"^dynamic day-night lighting is (enabled|disabled)$")]
+async fn then_day_night_dynamic(world: &mut BevyoutWorld, state: String) {
+    assert_eq!(world.day_night_dynamic, state == "enabled");
+}
+
+#[given(regex = r"^a Fallout clock at hour ([\d.]+) with timescale ([\d.]+)$")]
+async fn given_fallout_clock(world: &mut BevyoutWorld, hour: f32, timescale: f32) {
+    world.game_hour = hour;
+    world.game_timescale = timescale;
+}
+
+#[when(regex = r"^([\d.]+) real seconds elapse$")]
+async fn when_real_seconds_elapse(world: &mut BevyoutWorld, seconds: f32) {
+    world.game_hour =
+        time_of_day::advance_game_hour(world.game_hour, world.game_timescale, seconds);
+}
+
+#[then(regex = r"^the Fallout clock reads hour ([\d.]+)$")]
+async fn then_fallout_clock_reads(world: &mut BevyoutWorld, expected: f32) {
+    assert!((world.game_hour - expected).abs() < 1e-4);
+}
+
+#[given(
+    regex = r"^scalar weather colors night ([\d.]+) sunrise ([\d.]+) day ([\d.]+) sunset ([\d.]+)$"
+)]
+async fn given_scalar_weather_colors(
+    world: &mut BevyoutWorld,
+    night: f32,
+    sunrise: f32,
+    day: f32,
+    sunset: f32,
+) {
+    world.weather_keyframes = time_of_day::ColorKeyframes {
+        sunrise: [sunrise; 4],
+        day: [day; 4],
+        sunset: [sunset; 4],
+        night: [night; 4],
+    };
+}
+
+#[when(regex = r"^weather color is sampled at hour ([\d.]+)$")]
+async fn when_weather_color_sampled(world: &mut BevyoutWorld, hour: f32) {
+    world.sampled_weather_color = time_of_day::interpolate_keyframes(
+        world.weather_keyframes,
+        time_of_day::DayNightTimings::default(),
+        hour,
+    );
+}
+
+#[then(regex = r"^the sampled weather color is ([\d.]+)$")]
+async fn then_sampled_weather_color(world: &mut BevyoutWorld, expected: f32) {
+    assert!((world.sampled_weather_color[0] - expected).abs() < 1e-4);
+}
+
+#[given(regex = r#"^preview weather candidates "([^"]*)"$"#)]
+async fn given_preview_weather_candidates(world: &mut BevyoutWorld, candidates: String) {
+    world.preview_weather_candidates = candidates
+        .split(',')
+        .map(|candidate| {
+            let (form_id, editor_id) = candidate
+                .split_once(':')
+                .expect("weather candidate must be FORMID:EditorID");
+            (
+                u32::from_str_radix(form_id, 16).expect("weather FormID must be hexadecimal"),
+                Some(editor_id.into()),
+            )
+        })
+        .collect();
+}
+
+#[when("preview fallback weather is selected")]
+async fn when_preview_fallback_weather_selected(world: &mut BevyoutWorld) {
+    world.selected_preview_weather =
+        time_of_day::select_preview_weather(&world.preview_weather_candidates);
+}
+
+#[then(regex = r"^preview weather ([0-9a-fA-F]{8}) is selected$")]
+async fn then_preview_weather_selected(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.selected_preview_weather,
+        Some(u32::from_str_radix(&expected, 16).unwrap())
+    );
 }

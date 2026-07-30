@@ -70,8 +70,10 @@ mod bindings;
 mod console;
 mod console_ui;
 mod controls;
+mod day_night;
 mod diagnostics;
 mod fallout_ui;
+mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
 mod lighting;
@@ -84,7 +86,7 @@ mod ragdoll_lab;
 mod scene;
 
 pub use animation_zoo::animation_zoo;
-pub(crate) use app::run_view;
+pub(crate) use app::{RunViewOptions, run_view};
 pub(crate) use controls::*;
 pub(crate) use diagnostics::*;
 pub(crate) use lighting::*;
@@ -106,12 +108,15 @@ pub(crate) const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
 pub fn view(args: ViewArgs) -> Result<()> {
     run_view(
         args.manifest,
-        args.disable_physics,
-        args.realtime_shadows,
-        args.trace_seconds,
-        args.agent_bridge.then_some(args.agent_port),
-        args.unfocused,
-        args.save_slot,
+        RunViewOptions {
+            disable_physics: args.disable_physics,
+            realtime_shadows: args.realtime_shadows,
+            trace_seconds: args.trace_seconds,
+            day_night_cycle_seconds: args.day_night_cycle_seconds,
+            agent_port: args.agent_bridge.then_some(args.agent_port),
+            unfocused: args.unfocused,
+            save_slot: args.save_slot,
+        },
     )
 }
 
@@ -203,15 +208,18 @@ pub fn render(args: RenderArgs) -> Result<()> {
     }
     run_view(
         manifest_path,
-        args.disable_physics,
-        args.realtime_shadows,
-        args.trace_seconds,
-        args.agent_bridge.then_some(args.agent_port),
-        // `render` has no standalone `--unfocused` flag (issue #180 only
-        // added one to `view`); an agent-bridge launch still starts
-        // unfocused automatically via `run_view`'s own agent_port check.
-        false,
-        None,
+        RunViewOptions {
+            disable_physics: args.disable_physics,
+            realtime_shadows: args.realtime_shadows,
+            trace_seconds: args.trace_seconds,
+            day_night_cycle_seconds: args.day_night_cycle_seconds,
+            agent_port: args.agent_bridge.then_some(args.agent_port),
+            // `render` has no standalone `--unfocused` flag (issue #180 only
+            // added one to `view`); an agent-bridge launch still starts
+            // unfocused automatically via `run_view`'s own agent_port check.
+            unfocused: false,
+            save_slot: None,
+        },
     )
 }
 
@@ -271,6 +279,7 @@ fn spawn_reticle(mut commands: Commands) {
         Text::new("FPS --"),
         FpsText,
         console::DiagnosticUi,
+        TextLayout::justify(Justify::Right),
         Node {
             position_type: PositionType::Absolute,
             top: px(8),

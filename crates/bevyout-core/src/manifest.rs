@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use glam::{EulerRot, Quat};
 use serde::{Deserialize, Serialize};
 
+use crate::time_of_day::{ColorKeyframes, DayNightTimings};
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PreparedPhysicsSource {
     AuthoredHavok,
@@ -308,6 +310,9 @@ pub struct CellInfo {
     pub editor_id: Option<String>,
     pub name: Option<String>,
     pub interior: bool,
+    /// Fallout `CELL.DATA` bit `0x80`.
+    #[serde(default)]
+    pub behave_like_exterior: bool,
     pub ambient_rgba: [f32; 4],
     pub directional_rgba: [f32; 4],
     #[serde(default)]
@@ -336,6 +341,12 @@ pub struct CellInfo {
     /// group-type-1 "world children" GRUP), `None` for interiors.
     #[serde(default)]
     pub worldspace_form_id: Option<u32>,
+    /// Climate-selected profile used by exteriors and exterior-like cells.
+    #[serde(default)]
+    pub day_night_profile: Option<PreparedDayNightProfile>,
+    /// Deterministic clear/lowest-FormID profile available only to preview.
+    #[serde(default)]
+    pub day_night_preview_profile: Option<PreparedDayNightProfile>,
 }
 
 pub fn cell_label(cell: &CellInfo) -> String {
@@ -444,6 +455,27 @@ pub struct ImageSpaceInfo {
     pub cinematic_brightness_tint_rgb: [f32; 3],
     pub cinematic_brightness_tint_value: f32,
     pub flags: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PreparedDayNightProfileSource {
+    #[default]
+    Authoritative,
+    PreviewFallback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedDayNightProfile {
+    pub climate_form_id: Option<u32>,
+    pub climate_editor_id: Option<String>,
+    pub weather_form_id: u32,
+    pub weather_editor_id: Option<String>,
+    pub timings: DayNightTimings,
+    pub sky_upper: ColorKeyframes,
+    pub sky_lower: ColorKeyframes,
+    pub ambient: ColorKeyframes,
+    pub sunlight: ColorKeyframes,
+    pub source: PreparedDayNightProfileSource,
 }
 
 fn default_cinematic_brightness() -> f32 {

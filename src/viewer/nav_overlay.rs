@@ -703,6 +703,7 @@ mod tests {
             editor_id: None,
             name: None,
             interior: true,
+            behave_like_exterior: false,
             ambient_rgba: [0.0; 4],
             directional_rgba: [0.0; 4],
             image_space_form_id: None,
@@ -716,6 +717,8 @@ mod tests {
             water_height: None,
             grid: None,
             worldspace_form_id: None,
+            day_night_profile: None,
+            day_night_preview_profile: None,
         }
     }
 

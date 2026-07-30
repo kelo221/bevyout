@@ -160,7 +160,7 @@ fn convert_native_actor(
         .with_context(|| format!("parsing actor skeleton {}", descriptor.skeleton))?;
     let mut actor = nif::fo3::extract_scene(&skeleton_document)
         .with_context(|| format!("extracting actor skeleton scene {}", descriptor.skeleton))?;
-    super::super::nif_convert::apply_native_material_roughness(&skeleton_document, &mut actor)?;
+    super::super::nif_convert::apply_native_material_policy(&skeleton_document, &mut actor)?;
 
     let apparel = descriptor
         .apparel
@@ -298,7 +298,7 @@ fn extract_actor_part(path: &str) -> Result<nif::fo3::Scene> {
         nif::fo3::parse(&bytes).with_context(|| format!("parsing actor visual {path}"))?;
     let mut scene = nif::fo3::extract_scene(&document)
         .with_context(|| format!("extracting actor visual {path}"))?;
-    super::super::nif_convert::apply_native_material_roughness(&document, &mut scene)?;
+    super::super::nif_convert::apply_native_material_policy(&document, &mut scene)?;
     Ok(scene)
 }
 

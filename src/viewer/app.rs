@@ -1,14 +1,25 @@
 use super::*;
 
-pub(crate) fn run_view(
-    manifest_path: PathBuf,
-    disable_physics: bool,
-    realtime_shadows: bool,
-    trace_seconds: Option<f32>,
-    agent_port: Option<u16>,
-    unfocused: bool,
-    save_slot: Option<String>,
-) -> Result<()> {
+pub(crate) struct RunViewOptions {
+    pub(crate) disable_physics: bool,
+    pub(crate) realtime_shadows: bool,
+    pub(crate) trace_seconds: Option<f32>,
+    pub(crate) day_night_cycle_seconds: Option<f32>,
+    pub(crate) agent_port: Option<u16>,
+    pub(crate) unfocused: bool,
+    pub(crate) save_slot: Option<String>,
+}
+
+pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Result<()> {
+    let RunViewOptions {
+        disable_physics,
+        realtime_shadows,
+        trace_seconds,
+        day_night_cycle_seconds,
+        agent_port,
+        unfocused,
+        save_slot,
+    } = options;
     let manifest_path = fs::canonicalize(&manifest_path).context("manifest does not exist")?;
     let text = fs::read_to_string(&manifest_path)?;
     let manifest: PreparedSceneManifest = from_str(&text).context("invalid scene manifest")?;
@@ -155,6 +166,7 @@ pub(crate) fn run_view(
         disable_physics,
         resident_cell_limit: crate::config::resident_cell_limit(),
         agent_port,
+        day_night_cycle_seconds,
     });
     app.insert_resource(LoadingTarget::NewGame {
         manifest: manifest_path.clone(),
@@ -289,6 +301,7 @@ pub(crate) fn run_view(
         app.insert_resource(world::ActiveSaveState(save.world));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
     }
+    let image_space_emission = image_space_emission_multiplier(manifest.cell.image_space.as_ref());
     app.insert_resource(crate::viewer::LoadedSceneManifest(manifest))
         .insert_resource(UnlitMode(false))
         .insert_resource(LightingScale(DEFAULT_LIGHTING_SCALE))
@@ -298,6 +311,11 @@ pub(crate) fn run_view(
         .insert_resource(VolumetricFogMultiplier(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
+        .insert_resource(MetallicGate::default())
+        .insert_resource(DielectricSpecularGate::default())
+        .insert_resource(RoughnessScale::default())
+        .insert_resource(ReflectionProbeSettings::default())
+        .insert_resource(image_space_emission)
         .insert_resource(ImageSpaceBloomOverrides::default())
         .insert_resource(AuthorizedEmissionMaterials::default())
         .insert_resource(AoMeshBases::default())
@@ -369,6 +387,10 @@ pub(crate) fn run_view(
                 apply_horizontal_fov,
                 update_fps_text,
                 apply_unlit_mode,
+                apply_metallic_gate,
+                apply_dielectric_specular_gate,
+                apply_roughness_scale,
+                apply_reflection_probe_settings,
                 configure_glow_cards,
                 configure_fallout_translucency,
             ),

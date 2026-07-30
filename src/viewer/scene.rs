@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::controls::{
     AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides,
-    LightingScale, VolumetricFogMultiplier,
+    LightingScale, VolumetricFogMultiplier, image_space_emission_multiplier,
 };
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
@@ -36,6 +36,7 @@ pub(crate) struct CellVolumetricFog;
 #[derive(Component)]
 pub(crate) struct PreparedReflectionProbe;
 pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
+pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
@@ -315,7 +316,7 @@ pub(crate) fn spawn_prepared_scene(
             manifest.cell.interior,
             &image_space_bloom_overrides,
         ),
-        Tonemapping::AcesFitted,
+        Tonemapping::AgX,
         Exposure { ev100: 12.0 },
         color_grading,
         initial_camera_transform,
@@ -618,7 +619,7 @@ pub(crate) fn spawn_cell_reflection_probes(
             EnvironmentMapLight {
                 diffuse_map: asset_server.load(probe.diffuse_asset_path.clone()),
                 specular_map: asset_server.load(probe.specular_asset_path.clone()),
-                intensity: PREPARED_REFLECTION_PROBE_INTENSITY,
+                intensity: PREPARED_REFLECTION_PROBE_INTENSITY * DEFAULT_REFLECTION_PROBE_STRENGTH,
                 affects_lightmapped_mesh_diffuse: false,
                 ..default()
             },
@@ -1065,6 +1066,7 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
     let ambient_scale = world.resource::<AmbientScale>().0;
     let fog_strength = world.resource::<FogStrength>().0;
     let cell_lighting = effective_lighting(&cell);
+    world.insert_resource(image_space_emission_multiplier(cell.image_space.as_ref()));
 
     world.insert_resource(GlobalAmbientLight {
         color: Color::srgb(
@@ -1401,6 +1403,7 @@ mod tests {
                 editor_id: None,
                 name: None,
                 interior: true,
+                behave_like_exterior: false,
                 ambient_rgba: [0.0; 4],
                 directional_rgba: [0.0; 4],
                 image_space_form_id: None,
@@ -1414,6 +1417,8 @@ mod tests {
                 water_height: None,
                 grid: None,
                 worldspace_form_id: None,
+                day_night_profile: None,
+                day_night_preview_profile: None,
             },
             placements,
             lights: Vec::new(),
