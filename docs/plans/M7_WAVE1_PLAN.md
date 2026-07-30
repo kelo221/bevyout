@@ -100,5 +100,13 @@ steps.
 
 ## Shipped amendments
 
-None yet. Append acceptance-driven changes here rather than rewriting the
-fixed plan.
+- Fallout3.esm acceptance found every one of 3,021 PACK records carries all
+  three action markers and an `SCHR`; 8,553 of those scripts are header-only
+  with neither SCDA nor SCTX. They remain counted as embedded scripts under
+  the explicit `neither` representation bucket. A bare action marker with no
+  script subrecords is not counted; non-empty groups without `SCHR` remain
+  retained and diagnosed.
+- Real data also proved `SCHR.variable_count` is not the cardinality of SLSD
+  entries (348 valid scripts differ, often by one). The report uses the
+  authoritative header count and the catalog no longer emits that false
+  mismatch diagnostic; decoded SLSD slots remain independently preserved.

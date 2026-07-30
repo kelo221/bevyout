@@ -150,6 +150,9 @@ fn finish_package_script(
     let Some((slot, source_offset)) = marker else {
         return;
     };
+    if subrecords.is_empty() {
+        return;
+    }
     let id = ScriptAssetId::Embedded { owner, slot };
     let decoded = decode_script_asset(id, source_plugin, subrecords, resolve_form_id);
     extracted

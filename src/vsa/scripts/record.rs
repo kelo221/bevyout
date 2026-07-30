@@ -362,18 +362,6 @@ fn validate_header_counts(decoded: &mut DecodedScriptRecord, source_plugin: &str
             ),
         );
     }
-    if decoded.record.locals.len() != header.variable_count as usize {
-        diagnostic(
-            decoded,
-            source_plugin,
-            None,
-            format!(
-                "SCHR variable count {} does not match {} SLSD entries",
-                header.variable_count,
-                decoded.record.locals.len()
-            ),
-        );
-    }
     if decoded.record.references.len() != header.reference_count as usize {
         diagnostic(
             decoded,

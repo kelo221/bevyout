@@ -39,3 +39,9 @@ Feature: Resolved script record inventory
     When the package's embedded scripts are decoded
     Then the package has embedded script slots OnBegin, OnEnd
     And each embedded script preserves its compiled bytes
+
+  Scenario: Script inventory JSON is byte-identical across repeated renders
+    Given a synthetic script inventory report
+    When the script inventory report is rendered twice
+    Then both script inventory JSON renders are byte-identical
+    And the script inventory summary reports 1 top-level and 1 embedded script

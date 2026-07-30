@@ -524,7 +524,7 @@ fn package_topic_closes_the_embedded_group() {
 }
 
 #[test]
-fn empty_package_script_group_retains_its_identity_and_missing_header_diagnostic() {
+fn empty_package_action_slot_is_not_counted_as_an_embedded_script() {
     let inputs = [
         ScriptSubrecordInput {
             signature: "POBA",
@@ -543,20 +543,9 @@ fn empty_package_script_group_retains_its_identity_and_missing_header_diagnostic
         },
     ];
     let extracted = extract_owner_scripts(FormId(0x600), "PACK", "fixture.esp", &inputs, FormId);
-    assert_eq!(extracted.embedded.len(), 1);
-    assert_eq!(
-        extracted.embedded[0].record.id,
-        ScriptAssetId::Embedded {
-            owner: FormId(0x600),
-            slot: EmbeddedScriptSlot::Package(PackageScriptSlot::Begin),
-        }
-    );
-    assert!(
-        extracted
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("missing required SCHR"))
-    );
+    assert!(extracted.embedded.is_empty());
+    assert!(extracted.attachments.is_empty());
+    assert!(extracted.diagnostics.is_empty());
 }
 
 #[test]

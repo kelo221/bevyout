@@ -116,6 +116,10 @@ mod record;
 #[allow(dead_code, unused_imports)]
 mod attachments;
 
+#[path = "../src/vsa/report/schema.rs"]
+#[allow(dead_code, unused_imports)]
+mod report_schema;
+
 // `world::policy` (issue #51) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
 #[path = "../src/viewer/world/policy.rs"]
@@ -1004,6 +1008,8 @@ struct BevyoutWorld {
     script_owner_signature: String,
     script_owner_plugin_index: u8,
     script_extracted_owner: Option<attachments::ExtractedOwnerScripts>,
+    script_inventory_report: Option<report_schema::CompatibilityReport>,
+    script_inventory_renders: Vec<String>,
 }
 
 fn find_placement<'a>(
@@ -7838,12 +7844,22 @@ async fn then_parsed_npc_base_does_not_start_dead(world: &mut BevyoutWorld, form
 }
 
 fn main() {
-    futures::executor::block_on(async {
-        BevyoutWorld::cucumber()
-            .fail_on_skipped()
-            .run_and_exit("features")
-            .await;
-    });
+    // The cucumber driver future is large (every step's async state plus the
+    // BevyoutWorld test state), which exceeds the default 1 MiB main-thread
+    // stack on Windows. Run it on a worker thread with an explicit stack.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            futures::executor::block_on(async {
+                BevyoutWorld::cucumber()
+                    .fail_on_skipped()
+                    .run_and_exit("features")
+                    .await;
+            });
+        })
+        .expect("failed to spawn cucumber driver thread")
+        .join()
+        .expect("cucumber driver thread panicked");
 }
 
 // ---------------------------------------------------------------------
@@ -13429,4 +13445,53 @@ async fn then_embedded_scripts_preserve_compiled_bytes(world: &mut BevyoutWorld)
         embedded[1].record.compiled_data.as_deref(),
         Some(&[0xbb][..])
     );
+}
+
+#[given("a synthetic script inventory report")]
+async fn given_synthetic_script_inventory_report(world: &mut BevyoutWorld) {
+    world.script_inventory_report = Some(report_schema::CompatibilityReport {
+        schema_version: report_schema::CURRENT_REPORT_SCHEMA_VERSION,
+        source_plugin: "Fixture.esm".into(),
+        source_fingerprint: "source".into(),
+        entries: Vec::new(),
+        script_inventory: report_schema::ScriptInventoryReport {
+            content_fingerprint: "content".into(),
+            totals: report_schema::ScriptInventoryTotals {
+                top_level: 1,
+                embedded: 1,
+                attachments: 1,
+                compiled_bytes: 4,
+                variables: 2,
+                references: 1,
+                diagnostics: 0,
+            },
+            by_kind: std::collections::BTreeMap::from([("object".into(), 2)]),
+            by_representation: std::collections::BTreeMap::from([("scda_sctx".into(), 2)]),
+            attachment_owner_signatures: std::collections::BTreeMap::from([("PACK".into(), 1)]),
+            scripts: Vec::new(),
+            attachments: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+    });
+}
+
+#[when("the script inventory report is rendered twice")]
+async fn when_script_inventory_report_is_rendered_twice(world: &mut BevyoutWorld) {
+    let report = world.script_inventory_report.as_ref().unwrap();
+    world.script_inventory_renders = vec![report.to_json(), report.to_json()];
+}
+
+#[then("both script inventory JSON renders are byte-identical")]
+async fn then_script_inventory_renders_are_identical(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.script_inventory_renders[0],
+        world.script_inventory_renders[1]
+    );
+}
+
+#[then("the script inventory summary reports 1 top-level and 1 embedded script")]
+async fn then_script_inventory_summary_has_totals(world: &mut BevyoutWorld) {
+    assert!(world.script_inventory_report.as_ref().unwrap().summary().contains(
+        "scripts: top-level=1 embedded=1 attachments=1 compiled-bytes=4 variables=2 references=1 diagnostics=0"
+    ));
 }

@@ -8,5 +8,9 @@ mod attachments;
 mod catalog;
 pub(crate) mod record;
 
+pub(crate) use attachments::ScriptAttachmentSlot;
+pub(crate) use catalog::ScriptCatalog;
+pub(crate) use record::{EmbeddedScriptSlot, PackageScriptSlot, ScriptAssetId, ScriptKind};
+
 #[cfg(test)]
 mod tests;

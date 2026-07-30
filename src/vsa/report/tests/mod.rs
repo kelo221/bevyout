@@ -1,5 +1,6 @@
-use super::generate_report;
 use super::schema::{ReportClass, SupportStatus};
+use super::{generate_report, generate_report_for_sources};
+use crate::vsa::content_index::PluginSource;
 
 fn subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut result = signature.to_vec();
@@ -20,6 +21,37 @@ fn record(signature: &[u8; 4], flags: u32, form_id: u32, data: &[u8]) -> Vec<u8>
 
 fn tes4() -> Vec<u8> {
     record(b"TES4", 0, 0, &[])
+}
+
+fn tes4_with_masters(masters: &[&str]) -> Vec<u8> {
+    let payload = masters
+        .iter()
+        .flat_map(|master| {
+            [
+                subrecord(b"MAST", format!("{master}\0").as_bytes()),
+                subrecord(b"DATA", &[0; 8]),
+            ]
+            .concat()
+        })
+        .collect::<Vec<_>>();
+    record(b"TES4", 0, 0, &payload)
+}
+
+fn script_payload(editor_id: &str) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(0_u32.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    header.extend(1_u16.to_le_bytes());
+    [
+        subrecord(b"EDID", format!("{editor_id}\0").as_bytes()),
+        subrecord(b"SCHR", &header),
+        subrecord(b"SCDA", &[0xaa]),
+        subrecord(b"SCTX", b"begin GameMode\0"),
+    ]
+    .concat()
 }
 
 /// Entirely synthetic ESM4 byte stream (no Bethesda-derived content)
@@ -165,6 +197,73 @@ fn generation_is_deterministic_across_runs() {
     let second = generate_report("Fixture.esm", &bytes).unwrap();
     assert_eq!(first, second);
     assert_eq!(first.to_json(), second.to_json());
+}
+
+#[test]
+fn script_inventory_reports_structural_totals_and_diagnostics() {
+    let report = generate_report("Fixture.esm", &fixture_plugin()).unwrap();
+    let scripts = &report.script_inventory;
+    assert_eq!(scripts.totals.top_level, 1);
+    assert_eq!(scripts.totals.embedded, 0);
+    assert_eq!(scripts.totals.attachments, 0);
+    assert_eq!(scripts.totals.compiled_bytes, 0);
+    assert_eq!(scripts.by_kind.get("missing"), Some(&1));
+    assert_eq!(scripts.by_representation.get("sctx_only"), Some(&1));
+    assert_eq!(scripts.scripts[0].id, "record:00000300");
+    assert!(
+        scripts
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing required SCHR"))
+    );
+}
+
+#[test]
+fn load_order_report_uses_winners_deletions_and_complete_owner_provenance() {
+    let mut master = tes4();
+    master.extend(record(b"SCPT", 0, 0x400, &script_payload("Old")));
+    master.extend(record(b"SCPT", 0, 0x401, &script_payload("New")));
+    master.extend(record(b"SCPT", 0, 0x402, &script_payload("Deleted")));
+    master.extend(record(
+        b"ACTI",
+        0,
+        0x500,
+        &subrecord(b"SCRI", &0x400_u32.to_le_bytes()),
+    ));
+    let mut patch = tes4_with_masters(&["Master.esm"]);
+    patch.extend(record(b"SCPT", 0x20, 0x402, &[]));
+    patch.extend(record(
+        b"ACTI",
+        0,
+        0x500,
+        &subrecord(b"SCRI", &0x0000_0401_u32.to_le_bytes()),
+    ));
+    let sources = [
+        PluginSource {
+            name: "Master.esm",
+            bytes: &master,
+        },
+        PluginSource {
+            name: "Patch.esp",
+            bytes: &patch,
+        },
+    ];
+
+    let first = generate_report_for_sources("Patch.esp", &patch, &sources).unwrap();
+    let second = generate_report_for_sources("Patch.esp", &patch, &sources).unwrap();
+    assert_eq!(first.to_json(), second.to_json());
+    assert_eq!(first.script_inventory.totals.top_level, 2);
+    assert!(
+        first
+            .script_inventory
+            .scripts
+            .iter()
+            .all(|script| script.id != "record:00000402")
+    );
+    let attachment = &first.script_inventory.attachments[0];
+    assert_eq!(attachment.script, "record:00000401");
+    assert_eq!(attachment.winning_plugin, "Patch.esp");
+    assert_eq!(attachment.provenance, ["Master.esm", "Patch.esp"]);
 }
 
 #[test]
