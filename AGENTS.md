@@ -30,6 +30,36 @@ data, preparation, and runtime code. Expose only a narrow command/plugin API
 to `main.rs`. Prefer Bevy `Plugin` values for new runtime feature groups
 instead of growing `main.rs` or one large startup system.
 
+### Modularity within VSA
+
+VSA defines ownership boundaries; it does not justify one large module per
+slice. Keep each slice internally modular and make its dependency direction
+visible:
+
+- Split a slice by responsibility: input/CLI, domain policy, preparation and
+  serialization, runtime adapter, presentation/UI, and tests. Keep pure
+  decisions in dependency-light modules and make Bevy systems thin consumers.
+- Keep slice roots as composition and wiring files. Expose one narrow public
+  entry point where possible (`Plugin`, command provider, or preparation
+  function); keep helpers, resources, components, and policies private unless
+  another slice genuinely needs them.
+- Prefer capability-named submodules over generic `utils`, `common`, `helpers`,
+  or global service layers. Split a module when it has multiple independent
+  responsibilities or reasons to change, not merely when it becomes long.
+- Give every mutable resource and policy one clear authority. Other modules
+  query that authority or project its results; they must not duplicate state or
+  silently override its transitions.
+- Keep cross-slice dependencies on explicit contracts: narrow domain types,
+  traits, messages, or plugin APIs. Do not reach through sibling internals,
+  create circular dependencies, or make `main.rs` a feature integration layer.
+- Treat the existing 250-line interaction and 150-line console root limits as
+  concrete constraints for those roots. For other roots, optimize for
+  cohesion, independent testability, and a small public surface rather than a
+  universal line-count rule.
+- When a change spans multiple responsibilities, extract the pure policy and
+  the runtime/presentation adapter separately and test each at its narrowest
+  seam. Do not create abstractions solely for theoretical reuse.
+
 ## OpenMW
 If any code is ported from OpenMW to Rust it must be placed in the isolated to folder.
 

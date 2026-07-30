@@ -1376,4 +1376,3 @@ fn quantity_button(parent: &mut ChildSpawnerCommands, label: &str, action: Quant
 #[cfg(test)]
 #[path = "tests/transfer_ui.rs"]
 mod tests;
-
