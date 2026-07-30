@@ -106,6 +106,12 @@ mod cell_map;
 #[allow(dead_code, unused_imports)]
 mod record_winners;
 
+// M7/#253's structural script-record decoder is std/core-only. The production
+// catalog adapts shared ESM4 subrecords into the same input contract.
+#[path = "../src/vsa/scripts/record.rs"]
+#[allow(dead_code, unused_imports)]
+mod script_record;
+
 // `world::policy` (issue #51) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
 #[path = "../src/viewer/world/policy.rs"]
@@ -989,6 +995,8 @@ struct BevyoutWorld {
     // -- script_inventory.feature (M7 wave 1, issue #252) --
     script_record_versions: Vec<(u32, String, Option<String>)>,
     script_record_winners: Option<record_winners::WinningRecords<String>>,
+    script_structural_inputs: Vec<(String, Vec<u8>, usize)>,
+    script_decoded_record: Option<script_record::DecodedScriptRecord>,
 }
 
 fn find_placement<'a>(
@@ -13161,5 +13169,130 @@ async fn then_script_record_is_absent(world: &mut BevyoutWorld, form_id: String)
             .script_record_winners
             .as_ref()
             .is_some_and(|winners| winners.get(form_id).is_none())
+    );
+}
+
+#[given("a synthetic object script with one local and one reference")]
+async fn given_structural_object_script(world: &mut BevyoutWorld) {
+    let mut header = Vec::new();
+    header.extend(0_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(3_u32.to_le_bytes());
+    header.extend(1_u32.to_le_bytes());
+    header.extend(0_u16.to_le_bytes());
+    header.extend(1_u16.to_le_bytes());
+    let mut local = vec![0; 24];
+    local[0..4].copy_from_slice(&3_u32.to_le_bytes());
+    local[16] = 1;
+    world.script_structural_inputs = vec![
+        ("EDID".into(), b"FixtureScript\0".to_vec(), 0),
+        ("SCHR".into(), header, 16),
+        ("SCDA".into(), vec![1, 2, 3], 42),
+        ("SCTX".into(), b"begin GameMode\0".to_vec(), 51),
+        ("SLSD".into(), local, 73),
+        ("SCVR".into(), b"Counter\0".to_vec(), 103),
+        ("SCRO".into(), 0x10_u32.to_le_bytes().to_vec(), 117),
+    ];
+}
+
+#[given(
+    regex = r"^a synthetic script with a malformed header and unknown subrecord ([A-Z0-9_]{4})$"
+)]
+async fn given_malformed_structural_script(world: &mut BevyoutWorld, unknown: String) {
+    world.script_structural_inputs =
+        vec![("SCHR".into(), vec![0; 3], 0), (unknown, vec![9, 8, 7], 9)];
+}
+
+#[when("the structural script record is decoded")]
+async fn when_structural_script_is_decoded(world: &mut BevyoutWorld) {
+    let inputs = world
+        .script_structural_inputs
+        .iter()
+        .map(
+            |(signature, data, offset)| script_record::ScriptSubrecordInput {
+                signature,
+                data,
+                offset: *offset,
+            },
+        )
+        .collect::<Vec<_>>();
+    world.script_decoded_record = Some(script_record::decode_script_record(
+        bevyout_core::form_id::FormId(0x400),
+        "fixture.esp",
+        &inputs,
+        bevyout_core::form_id::FormId,
+    ));
+}
+
+#[then("the script kind is object")]
+async fn then_structural_script_is_object(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.script_decoded_record.as_ref().unwrap().record.kind,
+        Some(script_record::ScriptKind::Object)
+    );
+}
+
+#[then("the compiled script bytes are preserved")]
+async fn then_compiled_script_bytes_are_preserved(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .compiled_data
+            .as_deref(),
+        Some([1, 2, 3].as_slice())
+    );
+}
+
+#[then(regex = r#"^local slot (\d+) is named "([^"]*)"$"#)]
+async fn then_script_local_is_named(world: &mut BevyoutWorld, slot: u32, name: String) {
+    let local = &world.script_decoded_record.as_ref().unwrap().record.locals[0];
+    assert_eq!(local.slot, slot);
+    assert_eq!(local.name.as_deref(), Some(name.as_str()));
+}
+
+#[then(regex = r"^script reference ([0-9a-fA-F]{8}) is resolved$")]
+async fn then_script_reference_is_resolved(world: &mut BevyoutWorld, form_id: String) {
+    let expected = u32::from_str_radix(&form_id, 16).unwrap();
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .references
+            .contains(&script_record::ScriptReference::Form(
+                bevyout_core::form_id::FormId(expected)
+            ))
+    );
+}
+
+#[then("the script has a SCHR size diagnostic")]
+async fn then_script_has_header_size_diagnostic(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.subrecord.as_deref() == Some("SCHR")
+                && diagnostic.message.contains("20 bytes"))
+    );
+}
+
+#[then(regex = r"^unknown script subrecord ([A-Z0-9_]{4}) is preserved$")]
+async fn then_unknown_script_subrecord_is_preserved(world: &mut BevyoutWorld, signature: String) {
+    assert!(
+        world
+            .script_decoded_record
+            .as_ref()
+            .unwrap()
+            .record
+            .unknown_subrecords
+            .iter()
+            .any(|subrecord| subrecord.signature == signature)
     );
 }
