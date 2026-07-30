@@ -56,7 +56,7 @@ enum TransferPaneSide {
     Container,
 }
 
-/// Quantity-picker overlay state, opened when a right-click's `drop_action`
+/// Quantity-picker overlay state, opened when a row click's `drop_action`
 /// policy (F71's threshold: <=3 units moves one immediately, more opens this
 /// picker) calls for a choice. Mirrors `pipboy::QuantityPicker` field-for-
 /// field; `condition` carries the selected player stack's identity through
@@ -225,6 +225,8 @@ fn handle_action_buttons(
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
     mut canonical: ResMut<CanonicalItemLedger>,
+    catalog: Res<PreparedItemCatalog>,
+    mut sounds: MessageWriter<PlaySound>,
     mut requests: MessageWriter<RequestStateTransition>,
 ) {
     for (interaction, action) in &buttons {
@@ -243,6 +245,7 @@ fn handle_action_buttons(
                 else {
                     continue;
                 };
+                let mut played_sound = false;
                 for (form_id, result) in take_all(
                     container,
                     &mut inventory,
@@ -250,12 +253,20 @@ fn handle_action_buttons(
                     active_container.reference_form_id,
                     &mut canonical,
                 ) {
-                    log_transfer(
+                    if log_transfer(
                         result,
                         form_id,
                         active_container.reference_form_id,
                         "-> player",
-                    );
+                    ) && !played_sound
+                    {
+                        played_sound = write_transfer_sound(
+                            &mut sounds,
+                            &catalog,
+                            form_id,
+                            TransferDirection::ContainerToPlayer,
+                        );
+                    }
                 }
             }
         }
@@ -370,194 +381,156 @@ fn count_suffix(count: i32) -> String {
 #[allow(clippy::too_many_arguments)]
 fn handle_container_rows(
     mut commands: Commands,
-    mouse: Res<ButtonInput<MouseButton>>,
     rows: Query<(&Interaction, &ContainerRow), Changed<Interaction>>,
-    all_rows: Query<(&Interaction, &ContainerRow)>,
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
     mut canonical: ResMut<CanonicalItemLedger>,
     catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    mut sounds: MessageWriter<PlaySound>,
     mut ui_state: ResMut<TransferUiState>,
-    roots: Query<Entity, With<TransferRoot>>,
     picker: Option<Res<TransferQuantityPicker>>,
 ) {
     let Some(active_container) = active.0.as_ref() else {
         return;
     };
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed {
-            let changed = ui_state.selected_container != Some(row.0)
-                || ui_state.active_pane != TransferPaneSide::Container;
-            ui_state.selected_container = Some(row.0);
-            ui_state.active_pane = TransferPaneSide::Container;
-            if changed {
-                rebuild(
-                    &mut commands,
-                    &roots,
-                    active_container,
-                    &container_states,
-                    &inventory,
-                    &catalog,
-                    &assets,
-                    &ui_state,
-                );
-            }
+        if *interaction != Interaction::Pressed || picker.is_some() {
+            continue;
+        }
+        let form_id = row.0;
+        ui_state.selected_container = Some(form_id);
+        ui_state.active_pane = TransferPaneSide::Container;
+        let Some(container) = container_states.get_mut(active_container.reference_form_id) else {
             return;
-        }
-    }
-    if !mouse.just_pressed(MouseButton::Right) || picker.is_some() {
-        return;
-    }
-    let Some(form_id) = all_rows
-        .iter()
-        .find_map(|(interaction, row)| (*interaction == Interaction::Hovered).then_some(row.0))
-    else {
-        return;
-    };
-    ui_state.selected_container = Some(form_id);
-    ui_state.active_pane = TransferPaneSide::Container;
-    let Some(container) = container_states.get_mut(active_container.reference_form_id) else {
-        return;
-    };
-    let count = container_policy::stack_count(&container.stacks, form_id);
-    match drop_action(count) {
-        Some(DropAction::DropOne) => {
-            log_transfer(
-                take(
-                    container,
-                    &mut inventory,
+        };
+        let count = container_policy::stack_count(&container.stacks, form_id);
+        match drop_action(count) {
+            Some(DropAction::DropOne) => {
+                if log_transfer(
+                    take(
+                        container,
+                        &mut inventory,
+                        form_id,
+                        1,
+                        active_container.owner_form_id,
+                        active_container.reference_form_id,
+                        &mut canonical,
+                    ),
                     form_id,
-                    1,
-                    active_container.owner_form_id,
                     active_container.reference_form_id,
-                    &mut canonical,
-                ),
-                form_id,
-                active_container.reference_form_id,
-                "-> player",
-            );
+                    "-> player",
+                ) {
+                    write_transfer_sound(
+                        &mut sounds,
+                        &catalog,
+                        form_id,
+                        TransferDirection::ContainerToPlayer,
+                    );
+                }
+            }
+            Some(DropAction::ChooseQuantity { max, default, .. }) => {
+                commands.insert_resource(TransferQuantityPicker {
+                    direction: TransferDirection::ContainerToPlayer,
+                    form_id,
+                    condition: None,
+                    quantity: default,
+                    max,
+                });
+                spawn_quantity_picker(&mut commands, default, max);
+            }
+            None => {}
         }
-        Some(DropAction::ChooseQuantity { max, default, .. }) => {
-            commands.insert_resource(TransferQuantityPicker {
-                direction: TransferDirection::ContainerToPlayer,
-                form_id,
-                condition: None,
-                quantity: default,
-                max,
-            });
-            spawn_quantity_picker(&mut commands, default, max);
-        }
-        None => {}
+        return;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_player_rows(
     mut commands: Commands,
-    mouse: Res<ButtonInput<MouseButton>>,
     rows: Query<(&Interaction, &PlayerRow), Changed<Interaction>>,
-    all_rows: Query<(&Interaction, &PlayerRow)>,
     active: Res<ActiveContainerTarget>,
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
     mut canonical: ResMut<CanonicalItemLedger>,
     equipment: Res<PlayerEquipment>,
     catalog: Res<PreparedItemCatalog>,
-    assets: Res<AssetServer>,
+    mut sounds: MessageWriter<PlaySound>,
     mut ui_state: ResMut<TransferUiState>,
-    roots: Query<Entity, With<TransferRoot>>,
     picker: Option<Res<TransferQuantityPicker>>,
 ) {
     let Some(active_container) = active.0.as_ref() else {
         return;
     };
     for (interaction, row) in &rows {
-        if *interaction == Interaction::Pressed {
-            let changed = ui_state.selected_player != Some(row.0)
-                || ui_state.active_pane != TransferPaneSide::Player;
-            ui_state.selected_player = Some(row.0);
-            ui_state.active_pane = TransferPaneSide::Player;
-            if changed {
-                rebuild(
-                    &mut commands,
-                    &roots,
-                    active_container,
-                    &container_states,
-                    &inventory,
-                    &catalog,
-                    &assets,
-                    &ui_state,
-                );
-            }
+        if *interaction != Interaction::Pressed || picker.is_some() {
+            continue;
+        }
+        let key = row.0;
+        ui_state.selected_player = Some(key);
+        ui_state.active_pane = TransferPaneSide::Player;
+        // Issue #98 (F98.2): equipped items cannot be stored into a container.
+        if equipment.is_equipped(key) {
+            warn!(
+                "container transfer rejected: item is equipped {:08x}",
+                key.base_form_id
+            );
             return;
         }
-    }
-    if !mouse.just_pressed(MouseButton::Right) || picker.is_some() {
-        return;
-    }
-    let Some(key) = all_rows
-        .iter()
-        .find_map(|(interaction, row)| (*interaction == Interaction::Hovered).then_some(row.0))
-    else {
-        return;
-    };
-    ui_state.selected_player = Some(key);
-    ui_state.active_pane = TransferPaneSide::Player;
-    // Issue #98 (F98.2): equipped items cannot be stored into a container.
-    if equipment.is_equipped(key) {
-        warn!(
-            "container transfer rejected: item is equipped {:08x}",
-            key.base_form_id
-        );
-        return;
-    }
-    // Issue #81: quest items never enter containers; the rejection happens
-    // before store-one or the quantity picker, so the confirm path stays
-    // unreachable for them.
-    if let Err(rejection) = item_rules::can_store(quest_item(&catalog, key.base_form_id)) {
-        warn!(
-            "container transfer rejected: {rejection:?} {:08x}",
-            key.base_form_id
-        );
-        return;
-    }
-    let count = inventory
-        .stack_states()
-        .into_iter()
-        .find(|stack| stack.key() == key)
-        .map_or(0, |stack| stack.count);
-    let Some(container) = container_states.get_mut(active_container.reference_form_id) else {
-        return;
-    };
-    match drop_action(count) {
-        Some(DropAction::DropOne) => {
-            log_transfer(
-                store(
-                    container,
-                    &mut inventory,
-                    key,
-                    1,
-                    active_container.reference_form_id,
-                    &mut canonical,
-                ),
-                key.base_form_id,
-                active_container.reference_form_id,
-                "-> container",
+        // Issue #81: quest items never enter containers; the rejection happens
+        // before store-one or the quantity picker, so the confirm path stays
+        // unreachable for them.
+        if let Err(rejection) = item_rules::can_store(quest_item(&catalog, key.base_form_id)) {
+            warn!(
+                "container transfer rejected: {rejection:?} {:08x}",
+                key.base_form_id
             );
+            return;
         }
-        Some(DropAction::ChooseQuantity { max, default, .. }) => {
-            commands.insert_resource(TransferQuantityPicker {
-                direction: TransferDirection::PlayerToContainer,
-                form_id: key.base_form_id,
-                condition: key.condition,
-                quantity: default,
-                max,
-            });
-            spawn_quantity_picker(&mut commands, default, max);
+        let count = inventory
+            .stack_states()
+            .into_iter()
+            .find(|stack| stack.key() == key)
+            .map_or(0, |stack| stack.count);
+        let Some(container) = container_states.get_mut(active_container.reference_form_id) else {
+            return;
+        };
+        match drop_action(count) {
+            Some(DropAction::DropOne) => {
+                if log_transfer(
+                    store(
+                        container,
+                        &mut inventory,
+                        key,
+                        1,
+                        active_container.reference_form_id,
+                        &mut canonical,
+                    ),
+                    key.base_form_id,
+                    active_container.reference_form_id,
+                    "-> container",
+                ) {
+                    write_transfer_sound(
+                        &mut sounds,
+                        &catalog,
+                        key.base_form_id,
+                        TransferDirection::PlayerToContainer,
+                    );
+                }
+            }
+            Some(DropAction::ChooseQuantity { max, default, .. }) => {
+                commands.insert_resource(TransferQuantityPicker {
+                    direction: TransferDirection::PlayerToContainer,
+                    form_id: key.base_form_id,
+                    condition: key.condition,
+                    quantity: default,
+                    max,
+                });
+                spawn_quantity_picker(&mut commands, default, max);
+            }
+            None => {}
         }
-        None => {}
+        return;
     }
 }
 
@@ -572,6 +545,8 @@ fn handle_quantity_buttons(
     mut container_states: ResMut<ContainerStates>,
     mut inventory: ResMut<PlayerInventory>,
     mut canonical: ResMut<CanonicalItemLedger>,
+    catalog: Res<PreparedItemCatalog>,
+    mut sounds: MessageWriter<PlaySound>,
 ) {
     let Some(ref mut picker) = picker else {
         return;
@@ -590,7 +565,8 @@ fn handle_quantity_buttons(
                 if let Some(container) =
                     container_states.get_mut(active_container.reference_form_id)
                 {
-                    let (result, form_id, direction) = match picker.direction {
+                    let transfer_direction = picker.direction;
+                    let (result, form_id, direction_label) = match transfer_direction {
                         TransferDirection::ContainerToPlayer => (
                             take(
                                 container,
@@ -623,12 +599,14 @@ fn handle_quantity_buttons(
                             )
                         }
                     };
-                    log_transfer(
+                    if log_transfer(
                         result,
                         form_id,
                         active_container.reference_form_id,
-                        direction,
-                    );
+                        direction_label,
+                    ) {
+                        write_transfer_sound(&mut sounds, &catalog, form_id, transfer_direction);
+                    }
                 }
                 close_quantity_picker(&mut commands, &overlays);
                 return;
@@ -647,10 +625,8 @@ fn handle_quantity_buttons(
 /// F75.2/F75.4/T75.3: rebuilds the screen whenever the container's stacks or
 /// the player's inventory actually changed -- `take`/`store` mutate these
 /// resources directly (rather than this system rebuilding inline), so a
-/// take/store and a same-frame selection-only rebuild (see
-/// `handle_container_rows`/`handle_player_rows`) never race into spawning
-/// two screens; see `pipboy::refresh_after_inventory_change` for the same
-/// pattern.
+/// take/store and a same-frame refresh never race into spawning two screens;
+/// see `pipboy::refresh_after_inventory_change` for the same pattern.
 #[allow(clippy::too_many_arguments)]
 fn refresh_after_change(
     mut commands: Commands,
@@ -700,14 +676,81 @@ fn log_transfer(
     form_id: u32,
     reference_form_id: u32,
     direction: &str,
-) {
+) -> bool {
     match result {
-        Ok(moved) => info!(
-            "container transfer: {:08x} x{} {} {:08x}",
-            form_id, moved, direction, reference_form_id
-        ),
-        Err(error) => warn!("container transfer rejected: {error:?}"),
+        Ok(moved) => {
+            info!(
+                "container transfer: {:08x} x{} {} {:08x}",
+                form_id, moved, direction, reference_form_id
+            );
+            true
+        }
+        Err(error) => {
+            warn!("container transfer rejected: {error:?}");
+            false
+        }
     }
+}
+
+fn write_transfer_sound(
+    sounds: &mut MessageWriter<PlaySound>,
+    catalog: &PreparedItemCatalog,
+    form_id: u32,
+    direction: TransferDirection,
+) -> bool {
+    let action = match direction {
+        TransferDirection::ContainerToPlayer => "pickup",
+        TransferDirection::PlayerToContainer => "drop",
+    };
+    let Some(item) = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == form_id)
+    else {
+        warn!(
+            "container transfer audio: item={form_id:08x} action={action} missing item catalog entry"
+        );
+        return false;
+    };
+    let Some(request) = transfer_sound_request(catalog, form_id, direction) else {
+        warn!(
+            "container transfer audio: item={form_id:08x} action={action} missing {} descriptor",
+            match direction {
+                TransferDirection::ContainerToPlayer => "pickup_sound_form_id",
+                TransferDirection::PlayerToContainer => "drop_sound_form_id",
+            }
+        );
+        return false;
+    };
+    info!(
+        "container transfer audio: item={:08x} name={} action={} sound={:08x} queued",
+        form_id,
+        catalog_item_name(item),
+        action,
+        request.form_id
+    );
+    sounds.write(request);
+    true
+}
+
+fn transfer_sound_request(
+    catalog: &PreparedItemCatalog,
+    form_id: u32,
+    direction: TransferDirection,
+) -> Option<PlaySound> {
+    let item = catalog
+        .items
+        .iter()
+        .find(|item| item.base_form_id == form_id)?;
+    let sound_form_id = match direction {
+        TransferDirection::ContainerToPlayer => item.audio.pickup_sound_form_id,
+        TransferDirection::PlayerToContainer => item.audio.drop_sound_form_id,
+    };
+    Some(PlaySound {
+        form_id: sound_form_id?,
+        position: None,
+        gain_db: 0.0,
+    })
 }
 
 fn close_quantity_picker(commands: &mut Commands, overlays: &Query<Entity, With<QuantityOverlay>>) {
@@ -719,7 +762,7 @@ fn close_quantity_picker(commands: &mut Commands, overlays: &Query<Entity, With<
 
 /// Container -> player, dispatching to whichever of `container_policy`'s
 /// named ops matches the request: exactly the whole stack is `take_all`,
-/// exactly one unit is `take_one` (the right-click "drop one" gesture),
+/// exactly one unit is `take_one` (the row-click gesture),
 /// anything else (the quantity picker's chosen amount) is `take_stack`.
 ///
 /// Ceiling (follow-up, not this issue): `ContainerState` stores condition-
@@ -1407,6 +1450,114 @@ mod tests {
     }
 
     #[test]
+    fn left_clicking_container_row_takes_item_and_plays_pickup_sound() {
+        let mut item = test_item(0x10, "Container Item");
+        item.audio.pickup_sound_form_id = Some(0x20);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<PlaySound>()
+            .insert_resource(ActiveContainerTarget(Some(super::super::ActiveContainer {
+                kind: super::super::LootHolderKind::Container,
+                entity: Entity::PLACEHOLDER,
+                reference_form_id: 0x100,
+                name: "Test Container".into(),
+                item_names: Default::default(),
+                owner_form_id: None,
+            })))
+            .insert_resource(ContainerStates(std::collections::HashMap::from([(
+                0x100,
+                container_policy::ContainerState {
+                    stacks: vec![(0x10, 1)],
+                    resolved: true,
+                },
+            )])))
+            .insert_resource(PlayerInventory::default())
+            .insert_resource(CanonicalItemLedger::default())
+            .insert_resource(PreparedItemCatalog {
+                revision: "test".into(),
+                source_fingerprint: "test".into(),
+                items: vec![item],
+            })
+            .insert_resource(TransferUiState::default())
+            .add_systems(Update, handle_container_rows);
+        app.world_mut()
+            .spawn((Interaction::Pressed, ContainerRow(0x10)));
+
+        app.update();
+
+        assert_eq!(app.world().resource::<PlayerInventory>().count(0x10), 1);
+        let messages = app.world().resource::<Messages<PlaySound>>();
+        let sounds = messages
+            .get_cursor()
+            .read(messages)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!((sounds[0].form_id, sounds[0].position), (0x20, None));
+    }
+
+    #[test]
+    fn left_clicking_player_row_stores_item_and_plays_drop_sound() {
+        let mut item = test_item(0x10, "Player Item");
+        item.audio.drop_sound_form_id = Some(0x30);
+        let key = StackKey {
+            base_form_id: 0x10,
+            condition: None,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<PlaySound>()
+            .insert_resource(ActiveContainerTarget(Some(super::super::ActiveContainer {
+                kind: super::super::LootHolderKind::Container,
+                entity: Entity::PLACEHOLDER,
+                reference_form_id: 0x100,
+                name: "Test Container".into(),
+                item_names: Default::default(),
+                owner_form_id: None,
+            })))
+            .insert_resource(ContainerStates(std::collections::HashMap::from([(
+                0x100,
+                container_policy::ContainerState {
+                    stacks: Vec::new(),
+                    resolved: true,
+                },
+            )])))
+            .insert_resource(PlayerInventory::from_stack_states([InventoryStack {
+                base_form_id: 0x10,
+                count: 1,
+                condition: None,
+            }]))
+            .insert_resource(CanonicalItemLedger::default())
+            .insert_resource(PlayerEquipment::default())
+            .insert_resource(PreparedItemCatalog {
+                revision: "test".into(),
+                source_fingerprint: "test".into(),
+                items: vec![item],
+            })
+            .insert_resource(TransferUiState::default())
+            .add_systems(Update, handle_player_rows);
+        app.world_mut()
+            .spawn((Interaction::Pressed, PlayerRow(key)));
+
+        app.update();
+
+        assert_eq!(app.world().resource::<PlayerInventory>().count(0x10), 0);
+        let states = app.world().resource::<ContainerStates>();
+        assert_eq!(
+            container_policy::stack_count(&states.get(0x100).unwrap().stacks, 0x10),
+            1
+        );
+        let messages = app.world().resource::<Messages<PlaySound>>();
+        let sounds = messages
+            .get_cursor()
+            .read(messages)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!((sounds[0].form_id, sounds[0].position), (0x30, None));
+    }
+
+    #[test]
     fn take_all_moves_every_container_stack_through_the_canonical_path() {
         let mut container = container_policy::ContainerState {
             stacks: vec![(0x10, 2), (0x20, 3)],
@@ -1421,5 +1572,25 @@ mod tests {
         assert!(container.stacks.is_empty());
         assert_eq!(inventory.count(0x10), 2);
         assert_eq!(inventory.count(0x20), 3);
+    }
+
+    #[test]
+    fn transfer_uses_pickup_sound_when_taking_and_drop_sound_when_storing() {
+        let mut item = test_item(0x10, "Item");
+        item.audio.pickup_sound_form_id = Some(0x20);
+        item.audio.drop_sound_form_id = Some(0x30);
+        let catalog = PreparedItemCatalog {
+            revision: "test".into(),
+            source_fingerprint: "test".into(),
+            items: vec![item],
+        };
+
+        let take = transfer_sound_request(&catalog, 0x10, TransferDirection::ContainerToPlayer)
+            .expect("taking should use the prepared pickup sound");
+        let store = transfer_sound_request(&catalog, 0x10, TransferDirection::PlayerToContainer)
+            .expect("storing should use the prepared drop sound");
+
+        assert_eq!((take.form_id, take.position), (0x20, None));
+        assert_eq!((store.form_id, store.position), (0x30, None));
     }
 }

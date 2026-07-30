@@ -11,7 +11,8 @@ use crate::vsa::openmw_esm4::BaseAudioRecord;
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
 /// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v8-ammo-magazines";
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v9-transfer-audio-defaults";
+pub(crate) const DEFAULT_ITEM_TRANSFER_SOUND_EDITOR_ID: &str = "UIMenuOK";
 
 /// Synthetic one-per-base references route every supported item model through
 /// the ordinary content-addressed GLB/physics preparation path. Their IDs are
@@ -207,6 +208,28 @@ pub(crate) fn build_item_catalog(
     }
 }
 
+pub(crate) fn item_transfer_audio_defaults(parsed: &ParsedPlugin) -> (Option<u32>, Option<u32>) {
+    let menu_ok = sound_form_ids_by_editor_id(parsed, DEFAULT_ITEM_TRANSFER_SOUND_EDITOR_ID)
+        .into_iter()
+        .next();
+    (menu_ok, menu_ok)
+}
+
+pub(crate) fn apply_item_transfer_audio_defaults(
+    catalog: &mut PreparedItemCatalog,
+    pickup_sound_form_id: Option<u32>,
+    drop_sound_form_id: Option<u32>,
+) {
+    for item in &mut catalog.items {
+        if item.audio.pickup_sound_form_id.is_none() {
+            item.audio.pickup_sound_form_id = pickup_sound_form_id;
+        }
+        if item.audio.drop_sound_form_id.is_none() {
+            item.audio.drop_sound_form_id = drop_sound_form_id;
+        }
+    }
+}
+
 pub(crate) fn write_item_catalog(
     cache_dir: &Path,
     catalog: &PreparedItemCatalog,
@@ -319,8 +342,40 @@ mod tests {
             &HashMap::new(),
             "abc",
         );
-        assert_eq!(catalog.revision, "openmw-items-v8-ammo-magazines");
-        assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v8-ammo-magazines");
+        assert_eq!(catalog.revision, "openmw-items-v9-transfer-audio-defaults");
+        assert_eq!(
+            ITEM_CATALOG_REVISION,
+            "openmw-items-v9-transfer-audio-defaults"
+        );
+    }
+
+    #[test]
+    fn transfer_audio_defaults_fill_only_missing_item_descriptors() {
+        let mut explicit = BaseRecord::default();
+        explicit.kind = "MISC".into();
+        explicit.audio.pickup_sound_form_id = Some(0x11);
+        explicit.audio.drop_sound_form_id = Some(0x12);
+        let mut missing = BaseRecord::default();
+        missing.kind = "MISC".into();
+        let bases = HashMap::from([(1, explicit), (2, missing)]);
+        let mut catalog = build_item_catalog(&bases, &HashMap::new(), &[], &HashMap::new(), "abc");
+
+        apply_item_transfer_audio_defaults(&mut catalog, Some(0x21), Some(0x22));
+
+        let explicit = catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 1)
+            .unwrap();
+        assert_eq!(explicit.audio.pickup_sound_form_id, Some(0x11));
+        assert_eq!(explicit.audio.drop_sound_form_id, Some(0x12));
+        let defaulted = catalog
+            .items
+            .iter()
+            .find(|item| item.base_form_id == 2)
+            .unwrap();
+        assert_eq!(defaulted.audio.pickup_sound_form_id, Some(0x21));
+        assert_eq!(defaulted.audio.drop_sound_form_id, Some(0x22));
     }
 
     #[test]

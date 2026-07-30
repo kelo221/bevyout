@@ -986,13 +986,15 @@ fn prepare_cell(
         });
         output.push(door_summary);
     }
-    let item_catalog = build_item_catalog(
+    let mut item_catalog = build_item_catalog(
         &parsed.bases,
         &item_icons,
         &catalog_placements,
         &physics_assets,
         &source_fingerprint,
     );
+    let (generic_pickup, generic_drop) = item_transfer_audio_defaults(&parsed);
+    apply_item_transfer_audio_defaults(&mut item_catalog, generic_pickup, generic_drop);
     apply_actor_weapon_assets(&mut placements, &item_catalog);
     let finalized_actor_assemblies = placements
         .iter()

@@ -211,7 +211,7 @@ fn play_requested_sounds(
     mut requests: MessageReader<PlaySound>,
 ) {
     for request in requests.read() {
-        spawn_catalog_sound(
+        let spawned = spawn_catalog_sound(
             &mut commands,
             &asset_server,
             &catalog,
@@ -222,6 +222,14 @@ fn play_requested_sounds(
             request.position.is_none(),
             request.gain_db,
         );
+        if spawned.is_some() {
+            info!(
+                "sound playback: form={:08x} spatial={} gain_db={} started",
+                request.form_id,
+                request.position.is_some(),
+                request.gain_db
+            );
+        }
     }
 }
 

@@ -77,6 +77,8 @@ pub(crate) fn stage_audio(
             .flatten(),
         );
     }
+    let (generic_pickup, generic_drop) = item_transfer_audio_defaults(parsed);
+    form_ids.extend([generic_pickup, generic_drop].into_iter().flatten());
 
     let clips = stage_audio_clips(
         data_root,
