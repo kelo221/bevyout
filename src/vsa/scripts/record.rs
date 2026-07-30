@@ -338,6 +338,12 @@ fn invalid_u32(
     preserve_raw(&mut decoded.record, subrecord);
 }
 
+// Note: `header.variable_count` is deliberately NOT compared against the
+// number of decoded SLSD subrecords. Real Fallout3.esm data proves they are
+// not equal (348 valid scripts differ, often by one), so that check produced
+// a false diagnostic and was removed; the header count stays authoritative
+// for reporting while decoded SLSD slots are preserved independently. See
+// `docs/plans/M7_WAVE1_PLAN.md` (Shipped amendments).
 fn validate_header_counts(decoded: &mut DecodedScriptRecord, source_plugin: &str) {
     let Some(header) = decoded.record.header else {
         if decoded.record.header_raw.is_none() {
