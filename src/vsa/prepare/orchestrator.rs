@@ -1175,6 +1175,7 @@ fn prepare_cell(
     let dialogue = prepare_authored_dialogue_bundle(
         &cache_dir,
         &args.dialogue_sources,
+        &args.dialogue_voice_manifests,
         &placements,
         &mut diagnostics,
         output,
@@ -1313,11 +1314,15 @@ fn prepare_cell(
 fn prepare_authored_dialogue_bundle(
     asset_root: &Path,
     source_paths: &[PathBuf],
+    voice_manifest_paths: &[PathBuf],
     placements: &[PreparedPlacement],
     diagnostics: &mut Vec<Diagnostic>,
     output: &mut Vec<String>,
 ) -> Result<Option<bevyout_core::dialogue::PreparedDialogueBundleRef>> {
     if source_paths.is_empty() {
+        if !voice_manifest_paths.is_empty() {
+            bail!("dialogue voice manifests require at least one --dialogue-source");
+        }
         return Ok(None);
     }
 
@@ -1371,7 +1376,9 @@ fn prepare_authored_dialogue_bundle(
         });
     }
 
-    let prepared = crate::vsa::dialogue::prepare_dialogue_bundle(asset_root, sources)?;
+    let voice_input = read_dialogue_voice_input(&workspace, voice_manifest_paths)?;
+    let prepared =
+        crate::vsa::dialogue::prepare_dialogue_bundle_with_voice(asset_root, sources, voice_input)?;
     let bundle = prepared.bundle.clone();
     let binding_count = prepared
         .catalog
@@ -1384,9 +1391,25 @@ fn prepare_authored_dialogue_bundle(
         })
         .count();
     let summary = format!(
-        "dialogue bundle: {} conversation(s), {} source(s), {} stable placement binding(s) -> {}",
+        "dialogue bundle: {} conversation(s), {} source(s), {} voice line(s), {} stable placement binding(s) -> {}",
         prepared.catalog.conversations.len(),
         prepared.catalog.source_paths.len(),
+        prepared
+            .bundle
+            .as_ref()
+            .and_then(|bundle| bundle.voice_index_path.as_ref())
+            .and_then(|path| {
+                fs::read(asset_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                    .ok()
+                    .and_then(|bytes| {
+                        ron::de::from_bytes::<bevyout_core::dialogue::PreparedDialogueVoiceIndex>(
+                            &bytes,
+                        )
+                        .ok()
+                    })
+                    .map(|index| index.entries.len())
+            })
+            .unwrap_or(0),
         binding_count,
         bundle
             .as_ref()
@@ -1399,6 +1422,84 @@ fn prepare_authored_dialogue_bundle(
     });
     output.push(summary);
     Ok(bundle)
+}
+
+fn read_dialogue_voice_input(
+    workspace: &Path,
+    manifest_paths: &[PathBuf],
+) -> Result<Option<crate::vsa::dialogue::DialogueVoiceInput>> {
+    if manifest_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let mut requested_paths = manifest_paths
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    requested_paths.sort();
+    requested_paths.dedup();
+
+    let mut entries = Vec::new();
+    for requested in &requested_paths {
+        let path = Path::new(requested);
+        if path.is_absolute()
+            || path.components().any(|component| {
+                component == std::path::Component::ParentDir
+                    || component == std::path::Component::RootDir
+            })
+        {
+            bail!(
+                "dialogue voice manifest must be workspace-relative: {}",
+                requested
+            );
+        }
+        let absolute = fs::canonicalize(workspace.join(path))
+            .with_context(|| format!("reading dialogue voice manifest {requested}"))?;
+        if !absolute.starts_with(workspace) {
+            bail!(
+                "dialogue voice manifest must stay inside the workspace: {}",
+                requested
+            );
+        }
+        let content = fs::read_to_string(&absolute)
+            .with_context(|| format!("reading dialogue voice manifest {requested}"))?;
+        let manifest = crate::vsa::dialogue::parse_voice_manifest(&content)
+            .with_context(|| format!("validating dialogue voice manifest {requested}"))?;
+        for entry in manifest.entries {
+            let source_path = Path::new(&entry.source_path);
+            if source_path.is_absolute()
+                || source_path.components().any(|component| {
+                    component == std::path::Component::ParentDir
+                        || component == std::path::Component::RootDir
+                })
+            {
+                bail!(
+                    "dialogue voice source must be workspace-relative: {}",
+                    entry.source_path
+                );
+            }
+            let source_absolute = fs::canonicalize(workspace.join(source_path))
+                .with_context(|| format!("reading dialogue voice asset {}", entry.source_path))?;
+            if !source_absolute.starts_with(workspace) {
+                bail!(
+                    "dialogue voice source must stay inside the workspace: {}",
+                    entry.source_path
+                );
+            }
+            entries.push(crate::vsa::dialogue::DialogueVoiceInputEntry {
+                line_key: entry.line_key,
+                source_path: entry.source_path.replace('\\', "/"),
+                bytes: fs::read(&source_absolute).with_context(|| {
+                    format!("reading dialogue voice asset {}", entry.source_path)
+                })?,
+            });
+        }
+    }
+
+    Ok(Some(crate::vsa::dialogue::DialogueVoiceInput {
+        manifest_path: requested_paths.join("|"),
+        entries,
+    }))
 }
 
 fn resolve_authoritative_day_night_profile(

@@ -119,6 +119,8 @@ pub(super) fn dialogue_state(
         "bundle_hash": runtime.bundle_hash,
         "voice_anchor": runtime.voice_anchor.label(),
         "voice_spatial": runtime.voice_anchor.is_spatial(),
+        "voice_state": runtime.voice_timing.label(),
+        "timing_source": runtime.voice_timing.timing_source(),
         "line": line,
         "options": options,
         "trace_tail": runtime.trace.iter().rev().take(8).cloned().collect::<Vec<_>>(),

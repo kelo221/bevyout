@@ -1027,6 +1027,8 @@ struct BevyoutWorld {
     dialogue_catalog: Option<dialogue::PreparedDialogueCatalog>,
     dialogue_catalog_again: Option<dialogue::PreparedDialogueCatalog>,
     dialogue_bundle: Option<bevyout_core::dialogue::PreparedDialogueBundleRef>,
+    dialogue_voice_index: Option<bevyout_core::dialogue::PreparedDialogueVoiceIndex>,
+    dialogue_voice_fingerprints: Option<(String, String)>,
     dialogue_host_command: Option<dialogue_host::HostCommand>,
     dialogue_snapshot: bevyout_core::dialogue::DialogueSnapshot,
     dialogue_policy: bevyout_core::dialogue::DialoguePresentationPolicy,
@@ -1044,6 +1046,28 @@ fn synthetic_dialogue_source() -> dialogue::DialogueSource {
         kind: dialogue::DialogueSourceKind::Authored,
         content: "title: Start\n---\nGuard: Welcome.\n-> Continue -> Checkpoint\n===\n\ntitle: Checkpoint\n---\nGuard: The gate opens.\n<<bo_run_action open_gate>>\n===\n".into(),
     }
+}
+
+fn synthetic_wav_bytes(sample_rate: u32, samples: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let mut writer = hound::WavWriter::new(
+            cursor,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .expect("synthetic WAV writer");
+        for _ in 0..samples {
+            writer.write_sample(0i16).expect("synthetic WAV sample");
+        }
+        writer.finalize().expect("synthetic WAV finalize");
+    }
+    bytes
 }
 
 #[given("a synthetic Yarn dialogue source")]
@@ -1332,6 +1356,66 @@ async fn then_dialogue_timing_and_coverage_are_deterministic(world: &mut Bevyout
     assert_eq!(coverage.total_lines, 1);
     assert_eq!(coverage.missing_localization.len(), 1);
     assert_eq!(coverage.missing_voice.len(), 1);
+}
+
+#[given("a synthetic WAV voice manifest for the Start line")]
+async fn given_synthetic_wav_voice_manifest(world: &mut BevyoutWorld) {
+    world.dialogue_sources = vec![synthetic_dialogue_source()];
+    world.dialogue_voice_index = None;
+    world.dialogue_voice_fingerprints = None;
+}
+
+#[when("dialogue voice preparation is run twice")]
+async fn when_dialogue_voice_preparation_is_run_twice(world: &mut BevyoutWorld) {
+    let input = || dialogue::DialogueVoiceInput {
+        manifest_path: "dialogue/voice/fixture.ron".into(),
+        entries: vec![dialogue::DialogueVoiceInputEntry {
+            line_key: bevyout_core::dialogue::DialogueLineKey::new("Start:0"),
+            source_path: "dialogue/voice/fixture.wav".into(),
+            bytes: synthetic_wav_bytes(16_000, 8_000),
+        }],
+    };
+    let roots = [
+        std::env::temp_dir().join(format!(
+            "bevyout-dialogue-voice-feature-a-{}",
+            std::process::id()
+        )),
+        std::env::temp_dir().join(format!(
+            "bevyout-dialogue-voice-feature-b-{}",
+            std::process::id()
+        )),
+    ];
+    let mut fingerprints = Vec::new();
+    for root in &roots {
+        let _ = std::fs::remove_dir_all(root);
+        let output = dialogue::prepare_dialogue_bundle_with_voice(
+            root,
+            world.dialogue_sources.clone(),
+            Some(input()),
+        )
+        .expect("synthetic voice bundle prepares");
+        let bundle = output.bundle.expect("voice bundle reference");
+        let path = root.join("dialogue/voice_index.ron");
+        let index: bevyout_core::dialogue::PreparedDialogueVoiceIndex =
+            ron::de::from_bytes(&std::fs::read(path).expect("voice index bytes"))
+                .expect("voice index RON");
+        world.dialogue_voice_index = Some(index);
+        fingerprints.push(bundle.content_fingerprint);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    world.dialogue_voice_fingerprints = Some((fingerprints[0].clone(), fingerprints[1].clone()));
+}
+
+#[then("the prepared voice index contains one half-second entry")]
+async fn then_prepared_voice_index_contains_half_second_entry(world: &mut BevyoutWorld) {
+    let index = world.dialogue_voice_index.as_ref().expect("voice index");
+    assert_eq!(index.entries.len(), 1);
+    assert_eq!(index.entries[0].duration_millis, 500);
+    let fingerprints = world
+        .dialogue_voice_fingerprints
+        .as_ref()
+        .expect("voice fingerprints");
+    assert_eq!(fingerprints.0, fingerprints.1);
 }
 
 fn find_placement<'a>(

@@ -4,16 +4,17 @@
 //! contracts. NPC entities only carry [`DialogueBinding`]; the one persistent
 //! runner marker is spawned once for the local player.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevyout_core::dialogue::{
-    ActiveDialogueCheckpoint, DialogueChoiceId, DialogueError, DialogueErrorCode, DialogueKey,
-    DialogueLineKey, DialogueLinePresentation, DialoguePhase, DialoguePresentation,
-    DialogueSessionId, DialogueSpeaker, DialogueStartRequest, NarrativeVariableState,
+    ActiveDialogueCheckpoint, DIALOGUE_BUNDLE_REVISION, DIALOGUE_VOICE_INDEX_REVISION,
+    DialogueChoiceId, DialogueError, DialogueErrorCode, DialogueKey, DialogueLineKey,
+    DialogueLinePresentation, DialoguePhase, DialoguePresentation, DialogueSessionId,
+    DialogueSpeaker, DialogueStartRequest, NarrativeVariableState, PreparedDialogueVoiceIndex,
 };
 
 use super::interaction::PlacementRoot;
@@ -84,6 +85,36 @@ impl DialogueVoiceAnchorKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DialogueVoiceTimingState {
+    #[default]
+    None,
+    Loading,
+    Playing,
+    Fallback,
+    Completed,
+}
+
+impl DialogueVoiceTimingState {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Loading => "Loading",
+            Self::Playing => "Playing",
+            Self::Fallback => "Fallback",
+            Self::Completed => "Completed",
+        }
+    }
+
+    pub(crate) const fn timing_source(self) -> &'static str {
+        match self {
+            Self::Playing | Self::Completed => "Audio",
+            Self::Fallback => "Text",
+            Self::None | Self::Loading => "Pending",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Component)]
 pub(crate) struct PrimaryDialogueRunner;
 
@@ -126,6 +157,8 @@ pub(crate) struct DialogueRuntime {
     pub(crate) line_duration_seconds: f32,
     pub(crate) active_line_key: Option<DialogueLineKey>,
     pub(crate) voice_anchor: DialogueVoiceAnchorKind,
+    pub(crate) voice_timing: DialogueVoiceTimingState,
+    pub(crate) voice_load_elapsed_seconds: f32,
     pub(crate) diagnostics: Vec<DialogueError>,
     pub(crate) trace: Vec<String>,
     active: Option<ActiveDialogue>,
@@ -158,6 +191,8 @@ impl Default for DialogueRuntime {
             line_duration_seconds: 0.0,
             active_line_key: None,
             voice_anchor: DialogueVoiceAnchorKind::Unanchored,
+            voice_timing: DialogueVoiceTimingState::None,
+            voice_load_elapsed_seconds: 0.0,
             diagnostics: Vec::new(),
             trace: Vec::new(),
             active: None,
@@ -578,6 +613,7 @@ fn hot_reload_dialogue(
 
 fn load_prepared_catalog(
     mut runtime: ResMut<DialogueRuntime>,
+    mut providers: ResMut<presentation::DialoguePresentationProviders>,
     manifest: Option<Res<super::LoadedSceneManifest>>,
 ) {
     if runtime.catalog.is_some() {
@@ -594,49 +630,182 @@ fn load_prepared_catalog(
             .catalog_path
             .replace('/', std::path::MAIN_SEPARATOR_STR),
     );
-    match fs::read(&catalog_path)
+    let Some(catalog) = fs::read(&catalog_path)
         .ok()
         .and_then(|bytes| ron::de::from_bytes::<PreparedDialogueCatalog>(&bytes).ok())
+    else {
+        runtime.report(DialogueError::new(
+            DialogueErrorCode::MissingDialogue,
+            format!(
+                "unable to load prepared dialogue catalog {}",
+                catalog_path.display()
+            ),
+        ));
+        return;
+    };
+
+    load_dialogue_catalog_with_voice(&mut runtime, &mut providers, &manifest, bundle, catalog);
+}
+
+fn load_dialogue_catalog_with_voice(
+    runtime: &mut DialogueRuntime,
+    providers: &mut presentation::DialoguePresentationProviders,
+    manifest: &super::LoadedSceneManifest,
+    bundle: &bevyout_core::dialogue::PreparedDialogueBundleRef,
+    catalog: PreparedDialogueCatalog,
+) {
+    providers.voice.clear();
+    let voice_index = bundle.voice_index_path.as_deref().and_then(|path| {
+        load_prepared_voice_index(
+            &PathBuf::from(&manifest.asset_root),
+            path,
+            &catalog,
+            &mut runtime.diagnostics,
+            &mut providers.voice,
+        )
+    });
+    let fingerprint_matches = if bundle.revision == DIALOGUE_BUNDLE_REVISION {
+        crate::vsa::dialogue::dialogue_bundle_fingerprint(&catalog, voice_index.as_ref())
+            == bundle.content_fingerprint
+    } else {
+        catalog.source_fingerprint == bundle.content_fingerprint
+            || bundle.content_fingerprint == catalog.bundle_hash()
+    };
+    #[cfg(feature = "dialogue-yarn")]
+    if let Err(diagnostics) =
+        yarn::compile_sources(&PathBuf::from(&manifest.asset_root), &catalog.source_paths)
     {
-        Some(catalog)
-            if catalog.source_fingerprint == bundle.content_fingerprint
-                || bundle.content_fingerprint == catalog.bundle_hash() =>
-        {
-            #[cfg(feature = "dialogue-yarn")]
-            if let Err(diagnostics) =
-                yarn::compile_sources(&PathBuf::from(&manifest.asset_root), &catalog.source_paths)
-            {
-                for diagnostic in diagnostics {
-                    runtime.diagnostics.push(DialogueError::new(
-                        DialogueErrorCode::MalformedContent,
-                        diagnostic.message,
-                    ));
-                }
-                runtime.readiness = DialogueReadiness::Failed;
-                runtime.phase = DialoguePhase::Failed;
-            } else {
-                runtime.set_catalog(catalog);
-            }
-            #[cfg(not(feature = "dialogue-yarn"))]
-            runtime.set_catalog(catalog);
-        }
-        Some(catalog) => {
-            runtime.set_catalog(catalog);
-            runtime.report(DialogueError::new(
-                DialogueErrorCode::BundleMismatch,
-                "prepared dialogue catalog fingerprint does not match the manifest",
+        for diagnostic in diagnostics {
+            runtime.diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                diagnostic.message,
             ));
         }
-        None => {
+        runtime.readiness = DialogueReadiness::Failed;
+        runtime.phase = DialoguePhase::Failed;
+    } else {
+        runtime.set_catalog(catalog);
+        if !fingerprint_matches {
             runtime.report(DialogueError::new(
-                DialogueErrorCode::MissingDialogue,
-                format!(
-                    "unable to load prepared dialogue catalog {}",
-                    catalog_path.display()
-                ),
+                DialogueErrorCode::BundleMismatch,
+                "prepared dialogue bundle fingerprint does not match the manifest",
             ));
         }
     }
+    #[cfg(not(feature = "dialogue-yarn"))]
+    {
+        runtime.set_catalog(catalog);
+        if !fingerprint_matches {
+            runtime.report(DialogueError::new(
+                DialogueErrorCode::BundleMismatch,
+                "prepared dialogue bundle fingerprint does not match the manifest",
+            ));
+        }
+    }
+}
+
+pub(super) fn load_prepared_voice_index(
+    asset_root: &std::path::Path,
+    relative_path: &str,
+    catalog: &PreparedDialogueCatalog,
+    diagnostics: &mut Vec<DialogueError>,
+    voices: &mut BTreeMap<DialogueLineKey, bevyout_core::dialogue::DialogueVoiceAsset>,
+) -> Option<PreparedDialogueVoiceIndex> {
+    let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MissingDialogue,
+                format!(
+                    "unable to load prepared dialogue voice index {}: {error}",
+                    path.display()
+                ),
+            ));
+            return None;
+        }
+    };
+    let index = match ron::de::from_bytes::<PreparedDialogueVoiceIndex>(&bytes) {
+        Ok(index) => index,
+        Err(error) => {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                format!(
+                    "unable to parse prepared dialogue voice index {}: {error}",
+                    path.display()
+                ),
+            ));
+            return None;
+        }
+    };
+    if index.revision != DIALOGUE_VOICE_INDEX_REVISION {
+        diagnostics.push(DialogueError::new(
+            DialogueErrorCode::MalformedContent,
+            format!(
+                "unsupported prepared dialogue voice index revision {}",
+                index.revision
+            ),
+        ));
+        return None;
+    }
+    for diagnostic in &index.diagnostics {
+        diagnostics.push(DialogueError::new(
+            DialogueErrorCode::MalformedContent,
+            format!("voice index {}: {}", diagnostic.code, diagnostic.message),
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for voice in &index.entries {
+        if !seen.insert(voice.line_key.clone()) {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                format!("prepared dialogue voice index repeats {}", voice.line_key),
+            ));
+            continue;
+        }
+        if !catalog.line_keys.contains(&voice.line_key) {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                format!(
+                    "prepared dialogue voice index references unknown {}",
+                    voice.line_key
+                ),
+            ));
+            continue;
+        }
+        let relative_asset = std::path::Path::new(&voice.asset_path);
+        if relative_asset.is_absolute()
+            || relative_asset.components().any(|component| {
+                component == std::path::Component::ParentDir
+                    || component == std::path::Component::RootDir
+            })
+            || !voice.asset_path.to_ascii_lowercase().ends_with(".wav")
+        {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                format!(
+                    "prepared dialogue voice asset path is invalid: {}",
+                    voice.asset_path
+                ),
+            ));
+            continue;
+        }
+        let asset_file =
+            asset_root.join(voice.asset_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !asset_file.is_file() {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MissingDialogue,
+                format!(
+                    "prepared dialogue voice asset is missing: {}",
+                    asset_file.display()
+                ),
+            ));
+            continue;
+        }
+        voices.insert(voice.line_key.clone(), voice.clone());
+    }
+    Some(index)
 }
 
 fn read_dialogue_input(
@@ -791,6 +960,8 @@ fn process_dialogue_lifecycle(
         runtime.line_duration_seconds = 0.0;
         runtime.active_line_key = None;
         runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
+        runtime.voice_timing = DialogueVoiceTimingState::None;
+        runtime.voice_load_elapsed_seconds = 0.0;
         modal_requests.write(RequestStateTransition::Modal(GameplayModal::Dialogue));
         let session = runtime
             .active
@@ -944,6 +1115,8 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
         runtime.line_elapsed_seconds = 0.0;
         runtime.line_duration_seconds = 0.0;
         runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
+        runtime.voice_timing = DialogueVoiceTimingState::None;
+        runtime.voice_load_elapsed_seconds = 0.0;
         runtime.presentation.options = node
             .options
             .iter()
@@ -976,6 +1149,8 @@ fn close_dialogue(
     runtime.line_duration_seconds = 0.0;
     runtime.active_line_key = None;
     runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
+    runtime.voice_timing = DialogueVoiceTimingState::None;
+    runtime.voice_load_elapsed_seconds = 0.0;
     runtime.phase = DialoguePhase::Ready;
     runtime.ui_phase = DialogueUiPhase::Closing;
     runtime.input_gated = false;

@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::form_id::FormId;
 
 pub const DIALOGUE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-pub const DIALOGUE_BUNDLE_REVISION: &str = "dialogue-bundle-v2";
+pub const DIALOGUE_BUNDLE_REVISION: &str = "dialogue-bundle-v3";
+pub const DIALOGUE_VOICE_INDEX_REVISION: &str = "dialogue-voice-v2";
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -254,6 +255,28 @@ pub struct DialogueVoiceAsset {
     pub line_key: DialogueLineKey,
     pub asset_path: String,
     pub duration_millis: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DialogueVoiceDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub line_key: Option<DialogueLineKey>,
+    pub source_path: Option<String>,
+    pub message: String,
+}
+
+/// Prepared, content-addressed voice assets keyed by stable dialogue line.
+///
+/// The source manifest and its fingerprint are retained so preparation can
+/// invalidate stale voice data without making the viewer scan source folders.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PreparedDialogueVoiceIndex {
+    pub revision: String,
+    pub source_manifest_path: String,
+    pub source_fingerprint: String,
+    pub entries: Vec<DialogueVoiceAsset>,
+    pub diagnostics: Vec<DialogueVoiceDiagnostic>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

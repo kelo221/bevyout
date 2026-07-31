@@ -395,6 +395,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
                 apply_roughness_scale,
                 apply_reflection_probe_settings,
                 configure_glow_cards,
+                configure_fallout_surface_materials,
                 configure_fallout_translucency,
             ),
         )

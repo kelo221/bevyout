@@ -59,3 +59,9 @@ Feature: Standalone Yarn dialogue waves
     Given a dialogue presentation policy for language "en-US"
     When dialogue coverage is calculated for one line
     Then the dialogue timing and coverage are deterministic
+
+  @dialogue-wave9
+  Scenario: prepared voice assets are deterministic and duration keyed
+    Given a synthetic WAV voice manifest for the Start line
+    When dialogue voice preparation is run twice
+    Then the prepared voice index contains one half-second entry

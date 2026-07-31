@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use bevy::audio::{PlaybackMode, Volume};
+use bevy::audio::{AudioSink, AudioSinkPlayback, PlaybackMode, SpatialAudioSink, Volume};
 use bevy::prelude::*;
 use bevyout_core::dialogue::{
     DialogueChoiceId, DialogueCoverageReport, DialogueLineKey, DialoguePresentationPolicy,
@@ -8,8 +8,9 @@ use bevyout_core::dialogue::{
 };
 
 use super::{
-    DialogueBinding, DialogueChoiceSelected, DialogueContinueRequested, DialogueRuntime,
-    DialogueTelemetry, DialogueUiPhase, DialogueVoiceAnchorKind,
+    DialogueBinding, DialogueChoiceSelected, DialogueContinueRequested, DialogueError,
+    DialogueErrorCode, DialogueRuntime, DialogueTelemetry, DialogueUiPhase,
+    DialogueVoiceAnchorKind, DialogueVoiceTimingState,
 };
 use crate::viewer::fallout_ui::{PHOSPHOR, PHOSPHOR_DIM, PHOSPHOR_FAINT, SCREEN_TRANSLUCENT, glow};
 
@@ -22,6 +23,7 @@ const LINE_FONT_SIZE: f32 = 24.0;
 const OPTION_FONT_SIZE: f32 = 21.0;
 const OPTION_ROW_MIN_HEIGHT: f32 = 46.0;
 const BORDER_WIDTH: f32 = 1.0;
+const VOICE_LOAD_TIMEOUT_SECONDS: f32 = 1.0;
 
 #[derive(Component)]
 pub(crate) struct DialogueUiRoot;
@@ -205,14 +207,17 @@ fn option_colors(interaction: Interaction) -> Color {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn sync_dialogue_timing(
     time: Res<Time>,
     mut commands: Commands,
     mut runtime: ResMut<DialogueRuntime>,
     providers: Res<DialoguePresentationProviders>,
     asset_server: Option<Res<AssetServer>>,
-    players: Query<Entity, With<DialogueVoicePlayer>>,
+    players: Query<
+        (Entity, Option<&AudioSink>, Option<&SpatialAudioSink>),
+        With<DialogueVoicePlayer>,
+    >,
     bindings: Query<(Entity, &DialogueBinding)>,
     children: Query<&Children>,
     names: Query<&Name>,
@@ -228,13 +233,15 @@ pub(crate) fn sync_dialogue_timing(
     };
 
     if current_line != runtime.active_line_key {
-        for entity in &players {
+        for (entity, _, _) in &players {
             commands.entity(entity).despawn();
         }
         runtime.active_line_key = current_line.clone();
         runtime.line_elapsed_seconds = 0.0;
         runtime.line_duration_seconds = 0.0;
         runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
+        runtime.voice_timing = DialogueVoiceTimingState::None;
+        runtime.voice_load_elapsed_seconds = 0.0;
 
         if let Some(line) = runtime
             .presentation
@@ -243,10 +250,9 @@ pub(crate) fn sync_dialogue_timing(
             .filter(|_| current_line.is_some())
         {
             let voice = providers.voice.get(&line.line_key);
-            runtime.line_duration_seconds = providers.policy.auto_advance_duration_seconds(
-                &line.text,
-                voice.map(|voice| voice.duration_millis),
-            );
+            runtime.line_duration_seconds = providers
+                .policy
+                .auto_advance_duration_seconds(&line.text, None);
             let speaker = runtime
                 .active
                 .as_ref()
@@ -254,9 +260,10 @@ pub(crate) fn sync_dialogue_timing(
             let anchor = resolve_voice_anchor(speaker, &bindings, &children, &names);
             runtime.voice_anchor = anchor.kind;
             record_voice_anchor(&mut runtime, &line.line_key, anchor, false);
-            if let (Some(asset_server), Some(voice)) = (asset_server.as_deref(), voice)
-                && !voice.asset_path.is_empty()
+            if let Some(voice) = voice.filter(|voice| !voice.asset_path.is_empty())
+                && let Some(asset_server) = asset_server.as_deref()
             {
+                runtime.voice_timing = DialogueVoiceTimingState::Loading;
                 let mut emitter = commands.spawn((
                     DialogueVoicePlayer,
                     DialogueVoiceEmitter {
@@ -270,17 +277,107 @@ pub(crate) fn sync_dialogue_timing(
                 if let Some(anchor_entity) = anchor.entity {
                     emitter.insert(ChildOf(anchor_entity));
                 }
+            } else {
+                runtime.voice_timing = DialogueVoiceTimingState::Fallback;
             }
         }
     }
 
-    if runtime.phase == bevyout_core::dialogue::DialoguePhase::PresentingLine {
-        runtime.line_elapsed_seconds += time.delta_secs();
-        if runtime.line_duration_seconds > 0.0
-            && runtime.line_elapsed_seconds >= runtime.line_duration_seconds
-        {
-            runtime.continue_edge = true;
+    if runtime.phase != bevyout_core::dialogue::DialoguePhase::PresentingLine {
+        return;
+    }
+
+    runtime.line_elapsed_seconds += time.delta_secs();
+    let sink_state = players.iter().find_map(|(_, sink, spatial_sink)| {
+        sink.map(AudioSinkPlayback::empty)
+            .or_else(|| spatial_sink.map(AudioSinkPlayback::empty))
+    });
+    if runtime.voice_timing == DialogueVoiceTimingState::Loading {
+        runtime.voice_load_elapsed_seconds += time.delta_secs();
+    }
+    match voice_timing_action(
+        runtime.voice_timing,
+        sink_state,
+        runtime.voice_load_elapsed_seconds,
+        runtime.line_elapsed_seconds,
+        runtime.line_duration_seconds,
+    ) {
+        DialogueVoiceTimingAction::Started => {
+            runtime.voice_timing = DialogueVoiceTimingState::Playing;
+            if let Some(line_key) = runtime.active_line_key.clone() {
+                runtime.trace.push(format!("voice started line={line_key}"));
+            }
         }
+        DialogueVoiceTimingAction::CompleteAudio => {
+            runtime.voice_timing = DialogueVoiceTimingState::Completed;
+            runtime.continue_edge = true;
+            let line_key = runtime.active_line_key.clone();
+            record_voice_completion(&mut runtime, line_key.as_ref(), "Audio");
+        }
+        DialogueVoiceTimingAction::EnterTextFallback => {
+            runtime.voice_timing = DialogueVoiceTimingState::Fallback;
+            runtime.line_elapsed_seconds = 0.0;
+            let line_key = runtime
+                .active_line_key
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<unknown>".into());
+            runtime.diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MissingDialogue,
+                format!(
+                    "dialogue voice did not begin within {VOICE_LOAD_TIMEOUT_SECONDS:.1}s; using text timing for {line_key}"
+                ),
+            ));
+        }
+        DialogueVoiceTimingAction::CompleteText => {
+            runtime.continue_edge = true;
+            let line_key = runtime.active_line_key.clone();
+            record_voice_completion(&mut runtime, line_key.as_ref(), "Text");
+        }
+        DialogueVoiceTimingAction::Wait => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DialogueVoiceTimingAction {
+    Wait,
+    Started,
+    CompleteAudio,
+    EnterTextFallback,
+    CompleteText,
+}
+
+pub(super) fn voice_timing_action(
+    state: DialogueVoiceTimingState,
+    sink_state: Option<bool>,
+    load_elapsed_seconds: f32,
+    line_elapsed_seconds: f32,
+    line_duration_seconds: f32,
+) -> DialogueVoiceTimingAction {
+    match state {
+        DialogueVoiceTimingState::Loading => match sink_state {
+            Some(true) => DialogueVoiceTimingAction::CompleteAudio,
+            Some(false) => DialogueVoiceTimingAction::Started,
+            None if load_elapsed_seconds >= VOICE_LOAD_TIMEOUT_SECONDS => {
+                DialogueVoiceTimingAction::EnterTextFallback
+            }
+            None => DialogueVoiceTimingAction::Wait,
+        },
+        DialogueVoiceTimingState::Playing => {
+            if sink_state.is_some_and(|finished| finished) {
+                DialogueVoiceTimingAction::CompleteAudio
+            } else {
+                DialogueVoiceTimingAction::Wait
+            }
+        }
+        DialogueVoiceTimingState::Fallback
+            if line_duration_seconds > 0.0 && line_elapsed_seconds >= line_duration_seconds =>
+        {
+            DialogueVoiceTimingAction::CompleteText
+        }
+        DialogueVoiceTimingState::None
+        | DialogueVoiceTimingState::Fallback
+        | DialogueVoiceTimingState::Completed => DialogueVoiceTimingAction::Wait,
     }
 }
 
@@ -399,11 +496,25 @@ fn find_named_descendant(
 
 pub(super) fn dialogue_voice_playback_settings(spatial: bool) -> PlaybackSettings {
     PlaybackSettings {
-        mode: PlaybackMode::Despawn,
+        mode: PlaybackMode::Once,
         spatial,
         volume: Volume::Decibels(0.0),
         ..default()
     }
+}
+
+fn record_voice_completion(
+    runtime: &mut DialogueRuntime,
+    line_key: Option<&bevyout_core::dialogue::DialogueLineKey>,
+    timing: &str,
+) {
+    let line_key = line_key
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "<unknown>".into());
+    runtime
+        .trace
+        .push(format!("voice complete line={line_key} timing={timing}"));
+    info!(line_key, timing, "dialogue voice completion");
 }
 
 fn record_voice_anchor(

@@ -128,6 +128,48 @@ fn fallout_material_extra_accepts_native_object_and_blender_json_string() {
 }
 
 #[test]
+fn fallout_surface_classification_uses_flags_for_shader_type_one_assets() {
+    let hair = parse_fallout_material_extra(
+        &serde_json::json!({
+            "bevyout_fallout_material": {
+                "shader_type": 1,
+                "shader_flags_1": 1u32 << 18
+            }
+        })
+        .to_string(),
+    )
+    .expect("hair extras");
+    assert_eq!(
+        fallout_surface_kind(&hair, Some("NoHat")),
+        FALLOUT_SURFACE_HAIR
+    );
+
+    let eye = parse_fallout_material_extra(
+        &serde_json::json!({
+            "bevyout_fallout_material": {
+                "shader_type": 1,
+                "shader_flags_1": 1u32 << 17
+            }
+        })
+        .to_string(),
+    )
+    .expect("eye extras");
+    assert_eq!(
+        fallout_surface_kind(&eye, Some("EyeLeftHuman:0")),
+        FALLOUT_SURFACE_EYE
+    );
+    assert_eq!(
+        fallout_surface_kind(&eye, Some("GlassesReadingGO:0")),
+        FALLOUT_SURFACE_STANDARD
+    );
+    assert_eq!(
+        fallout_surface_kind(&eye, None),
+        FALLOUT_SURFACE_EYE,
+        "source flag remains authoritative when a mesh name is unavailable"
+    );
+}
+
+#[test]
 fn translucency_marks_non_fallout_extras_as_configured() {
     let mut app = test_app();
     let material = app

@@ -4,14 +4,17 @@
 //! it deliberately exposes only serialized Bevy-free data to the viewer.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use bevyout_core::dialogue::{
     DIALOGUE_BUNDLE_REVISION, DialogueActionKey, DialogueChoiceId, DialogueKey, DialogueLineKey,
-    PreparedDialogueBundleRef,
+    PreparedDialogueBundleRef, PreparedDialogueVoiceIndex,
 };
+use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -30,6 +33,94 @@ pub struct DialogueSource {
     pub relative_path: String,
     pub kind: DialogueSourceKind,
     pub content: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DialogueVoiceManifest {
+    #[serde(default = "default_voice_manifest_revision")]
+    pub revision: String,
+    pub entries: Vec<DialogueVoiceManifestEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DialogueVoiceManifestEntry {
+    #[serde(deserialize_with = "deserialize_dialogue_line_key")]
+    pub line_key: DialogueLineKey,
+    pub source_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DialogueVoiceInput {
+    pub manifest_path: String,
+    pub entries: Vec<DialogueVoiceInputEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DialogueVoiceInputEntry {
+    pub line_key: DialogueLineKey,
+    pub source_path: String,
+    pub bytes: Vec<u8>,
+}
+
+fn default_voice_manifest_revision() -> String {
+    "dialogue-voice-source-v1".into()
+}
+
+fn deserialize_dialogue_line_key<'de, D>(deserializer: D) -> Result<DialogueLineKey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DialogueLineKeyVisitor;
+
+    impl<'de> Visitor<'de> for DialogueLineKeyVisitor {
+        type Value = DialogueLineKey;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a dialogue line key string or one-element tuple")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(DialogueLineKey::new(value))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(DialogueLineKey::new(value))
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let value: Option<String> = sequence.next_element()?;
+            value
+                .filter(|value| !value.is_empty())
+                .map(DialogueLineKey::new)
+                .ok_or_else(|| serde::de::Error::custom("dialogue line key tuple is empty"))
+        }
+    }
+
+    deserializer.deserialize_any(DialogueLineKeyVisitor)
+}
+
+pub fn parse_voice_manifest(content: &str) -> Result<DialogueVoiceManifest> {
+    let manifest: DialogueVoiceManifest =
+        ron::de::from_str(content).context("parsing dialogue voice manifest as RON")?;
+    if manifest.revision != "dialogue-voice-source-v1" {
+        bail!(
+            "unsupported dialogue voice manifest revision {}",
+            manifest.revision
+        );
+    }
+    if manifest.entries.is_empty() {
+        bail!("dialogue voice manifest contains no entries");
+    }
+    Ok(manifest)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -165,6 +256,14 @@ pub fn prepare_dialogue_bundle(
     asset_root: impl AsRef<Path>,
     sources: Vec<DialogueSource>,
 ) -> Result<DialoguePreparationOutput> {
+    prepare_dialogue_bundle_with_voice(asset_root, sources, None)
+}
+
+pub fn prepare_dialogue_bundle_with_voice(
+    asset_root: impl AsRef<Path>,
+    sources: Vec<DialogueSource>,
+    voice_input: Option<DialogueVoiceInput>,
+) -> Result<DialoguePreparationOutput> {
     let asset_root = asset_root.as_ref();
     fs::create_dir_all(asset_root).with_context(|| format!("creating {}", asset_root.display()))?;
     let mut normalized = Vec::with_capacity(sources.len());
@@ -241,6 +340,21 @@ pub fn prepare_dialogue_bundle(
         ron::ser::to_string_pretty(&index, ron::ser::PrettyConfig::default())?,
     )?;
 
+    let voice_index = voice_input
+        .as_ref()
+        .map(|input| prepare_voice_index(asset_root, &catalog, input))
+        .transpose()?;
+    let voice_index_path = if let Some(voice_index) = voice_index.as_ref() {
+        let path = dialogue_dir.join("voice_index.ron");
+        fs::write(
+            &path,
+            ron::ser::to_string_pretty(voice_index, ron::ser::PrettyConfig::default())?,
+        )?;
+        Some(path)
+    } else {
+        None
+    };
+
     let relative = |path: &Path| -> String {
         path.strip_prefix(asset_root)
             .unwrap_or(path)
@@ -252,14 +366,140 @@ pub fn prepare_dialogue_bundle(
         catalog_path: relative(&catalog_path),
         source_paths: catalog.source_paths.clone(),
         node_index_path: relative(&node_index_path),
-        voice_index_path: None,
+        voice_index_path: voice_index_path.as_deref().map(relative),
         localization_index_path: None,
-        content_fingerprint: catalog.bundle_hash(),
+        content_fingerprint: dialogue_bundle_fingerprint(&catalog, voice_index.as_ref()),
     };
     Ok(DialoguePreparationOutput {
         catalog,
         bundle: Some(bundle),
     })
+}
+
+fn prepare_voice_index(
+    asset_root: &Path,
+    catalog: &PreparedDialogueCatalog,
+    input: &DialogueVoiceInput,
+) -> Result<PreparedDialogueVoiceIndex> {
+    let mut entries = input.entries.clone();
+    entries.sort_by(|left, right| {
+        left.line_key
+            .cmp(&right.line_key)
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+
+    let mut seen = BTreeSet::new();
+    let mut prepared = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.line_key.as_str().is_empty() {
+            bail!("dialogue voice entry has an empty line key");
+        }
+        if !seen.insert(entry.line_key.clone()) {
+            bail!(
+                "dialogue voice line is listed more than once: {}",
+                entry.line_key
+            );
+        }
+        if !catalog.line_keys.contains(&entry.line_key) {
+            bail!(
+                "dialogue voice line is not present in the catalog: {}",
+                entry.line_key
+            );
+        }
+        let source_path = Path::new(&entry.source_path);
+        if source_path.is_absolute()
+            || source_path.components().any(|component| {
+                component == std::path::Component::ParentDir
+                    || component == std::path::Component::RootDir
+            })
+        {
+            bail!(
+                "dialogue voice source must be workspace-relative: {}",
+                entry.source_path
+            );
+        }
+        if !entry.source_path.to_ascii_lowercase().ends_with(".wav") {
+            bail!(
+                "dialogue voice asset is not a supported WAV file: {}",
+                entry.source_path
+            );
+        }
+
+        let reader = hound::WavReader::new(Cursor::new(entry.bytes.as_slice()))
+            .with_context(|| format!("reading dialogue voice WAV {}", entry.source_path))?;
+        let spec = reader.spec();
+        if spec.channels == 0 || spec.sample_rate == 0 || reader.duration() == 0 {
+            bail!(
+                "dialogue voice WAV has no playable samples: {}",
+                entry.source_path
+            );
+        }
+        let duration_millis =
+            (u64::from(reader.duration()) * 1_000).div_ceil(u64::from(spec.sample_rate));
+        let staged_path =
+            stage_voice_bytes(&entry.source_path, &entry.bytes, &asset_root.join("audio"))?;
+        let asset_path = staged_path
+            .strip_prefix(asset_root)
+            .unwrap_or(&staged_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        prepared.push(bevyout_core::dialogue::DialogueVoiceAsset {
+            line_key: entry.line_key,
+            asset_path,
+            duration_millis: duration_millis.min(u64::from(u32::MAX)) as u32,
+        });
+    }
+
+    Ok(PreparedDialogueVoiceIndex {
+        revision: bevyout_core::dialogue::DIALOGUE_VOICE_INDEX_REVISION.into(),
+        source_manifest_path: input.manifest_path.clone(),
+        source_fingerprint: voice_input_fingerprint(input),
+        entries: prepared,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn stage_voice_bytes(
+    source_path: &str,
+    bytes: &[u8],
+    audio_dir: &Path,
+) -> Result<std::path::PathBuf> {
+    let content_hash = Sha256::digest(bytes);
+    let extension = source_path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .filter(|extension| !extension.is_empty() && extension.len() <= 8)
+        .unwrap_or_else(|| "wav".into());
+    let path = audio_dir.join(format!("{content_hash:x}.{extension}"));
+    if !path.is_file() {
+        fs::create_dir_all(audio_dir)
+            .with_context(|| format!("creating dialogue audio cache {}", audio_dir.display()))?;
+        fs::write(&path, bytes)
+            .with_context(|| format!("staging dialogue voice asset {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+pub fn dialogue_bundle_fingerprint(
+    catalog: &PreparedDialogueCatalog,
+    voice_index: Option<&PreparedDialogueVoiceIndex>,
+) -> String {
+    fingerprint(&(catalog.bundle_hash(), voice_index))
+}
+
+fn voice_input_fingerprint(input: &DialogueVoiceInput) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.manifest_path.as_bytes());
+    hasher.update([0]);
+    for entry in &input.entries {
+        hasher.update(entry.line_key.as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.source_path.as_bytes());
+        hasher.update([0]);
+        hasher.update(&entry.bytes);
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn parse_source(source: &DialogueSource, catalog: &mut PreparedDialogueCatalog) {

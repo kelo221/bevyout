@@ -1,9 +1,11 @@
+use bevy::audio::PlaybackMode;
 use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 
 use bevyout_core::dialogue::{
-    DialogueKey, DialoguePhase, DialogueStartRequest, DialogueStartSource,
+    DIALOGUE_VOICE_INDEX_REVISION, DialogueKey, DialogueLineKey, DialoguePhase,
+    DialogueStartRequest, DialogueStartSource, DialogueVoiceAsset, PreparedDialogueVoiceIndex,
 };
 
 use super::*;
@@ -352,6 +354,94 @@ fn unvoiced_line_advances_after_the_deterministic_reading_duration() {
     );
 }
 
+#[test]
+fn voice_timing_waits_for_sink_completion_and_falls_back_after_load_timeout() {
+    assert_eq!(
+        presentation::voice_timing_action(
+            DialogueVoiceTimingState::Playing,
+            Some(false),
+            0.0,
+            20.0,
+            0.5,
+        ),
+        presentation::DialogueVoiceTimingAction::Wait
+    );
+    assert_eq!(
+        presentation::voice_timing_action(
+            DialogueVoiceTimingState::Playing,
+            Some(true),
+            0.0,
+            0.1,
+            0.5,
+        ),
+        presentation::DialogueVoiceTimingAction::CompleteAudio
+    );
+    assert_eq!(
+        presentation::voice_timing_action(DialogueVoiceTimingState::Loading, None, 1.0, 0.0, 0.5,),
+        presentation::DialogueVoiceTimingAction::EnterTextFallback
+    );
+    assert_eq!(
+        presentation::voice_timing_action(DialogueVoiceTimingState::Fallback, None, 0.0, 0.5, 0.5,),
+        presentation::DialogueVoiceTimingAction::CompleteText
+    );
+}
+
+#[test]
+fn prepared_voice_index_loads_only_catalog_keys_and_existing_wavs() {
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-dialogue-runtime-voice-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("dialogue/audio")).unwrap();
+    std::fs::write(root.join("dialogue/audio/guard.wav"), b"synthetic").unwrap();
+
+    let catalog = catalog();
+    let key = DialogueLineKey::new("Guard:0");
+    let index = PreparedDialogueVoiceIndex {
+        revision: DIALOGUE_VOICE_INDEX_REVISION.into(),
+        source_manifest_path: "dialogue/voice/guard.ron".into(),
+        source_fingerprint: "fingerprint".into(),
+        entries: vec![
+            DialogueVoiceAsset {
+                line_key: key.clone(),
+                asset_path: "dialogue/audio/guard.wav".into(),
+                duration_millis: 500,
+            },
+            DialogueVoiceAsset {
+                line_key: DialogueLineKey::new("Unknown:0"),
+                asset_path: "dialogue/audio/guard.wav".into(),
+                duration_millis: 500,
+            },
+        ],
+        diagnostics: Vec::new(),
+    };
+    std::fs::write(
+        root.join("dialogue/voice_index.ron"),
+        ron::ser::to_string(&index).unwrap(),
+    )
+    .unwrap();
+
+    let mut diagnostics = Vec::new();
+    let mut voices = std::collections::BTreeMap::new();
+    let loaded = load_prepared_voice_index(
+        &root,
+        "dialogue/voice_index.ron",
+        &catalog,
+        &mut diagnostics,
+        &mut voices,
+    )
+    .expect("valid voice index");
+    assert_eq!(loaded.entries.len(), 2);
+    assert_eq!(
+        voices.get(&key).map(|voice| voice.duration_millis),
+        Some(500)
+    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, DialogueErrorCode::MalformedContent);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn dialogue_binding(speaker: u32) -> DialogueBinding {
     DialogueBinding {
         dialogue: DialogueKey::new("Guard"),
@@ -428,7 +518,9 @@ fn voice_emitter_uses_identity_local_transform_and_spatial_settings() {
         .id();
     assert_eq!(world.get::<Transform>(voice), Some(&Transform::IDENTITY));
     assert_eq!(world.get::<ChildOf>(voice).map(ChildOf::parent), Some(root));
-    assert!(world.get::<PlaybackSettings>(voice).unwrap().spatial);
+    let playback = world.get::<PlaybackSettings>(voice).unwrap();
+    assert!(playback.spatial);
+    assert!(matches!(playback.mode, PlaybackMode::Once));
 }
 
 #[test]

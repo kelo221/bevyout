@@ -41,3 +41,19 @@ with final visual, audio, and accessibility evidence.
 ## Shipped amendments
 
 <!-- Record acceptance-driven changes here; do not rewrite the fixed plan. -->
+
+### Voice import and completion timing
+
+- Added explicit repeatable `--dialogue-voice-manifest` input for workspace-
+  relative Yarn line-to-WAV mappings. Preparation validates line keys and WAV
+  headers, stages clips content-addressed below `.bevyout`, and writes the
+  versioned `dialogue/voice_index.ron` artifact.
+- Bumped prepared dialogue bundles to `dialogue-bundle-v3`; the bundle
+  fingerprint now includes the prepared voice index. Older v2 bundles remain
+  readable without voice playback.
+- Dialogue voice entities use `PlaybackMode::Once`. `AudioSink` and
+  `SpatialAudioSink` completion drives line continuation; missing or stalled
+  assets enter deterministic text timing after a one-second load grace period.
+- `dialoguestate` now reports `voice_state` and `timing_source`, and traces
+  `voice complete line=<key> timing=Audio|Text`.
+- Raw voice files remain external inputs; no audio assets are committed.

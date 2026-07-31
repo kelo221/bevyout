@@ -256,6 +256,10 @@ pub struct PrepareArgs {
     /// be repeated; no dialogue sources are discovered implicitly.
     #[arg(long = "dialogue-source", value_name = "PATH")]
     pub(crate) dialogue_sources: Vec<PathBuf>,
+    /// Explicit Yarn line-to-WAV voice manifest to include in the prepared
+    /// bundle. May be repeated; voice files are never discovered implicitly.
+    #[arg(long = "dialogue-voice-manifest", value_name = "PATH")]
+    pub(crate) dialogue_voice_manifests: Vec<PathBuf>,
     /// Refresh the manifest and scene metadata.
     #[arg(long)]
     pub(crate) force: bool,

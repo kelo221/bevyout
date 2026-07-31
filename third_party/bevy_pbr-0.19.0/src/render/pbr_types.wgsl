@@ -28,6 +28,8 @@ struct StandardMaterial {
     max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     deferred_lighting_pass_id: u32,
+    // Internal Fallout surface variant: 0 standard, 1 hair, 2 eye.
+    fallout_surface_kind: u32,
 };
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -88,6 +90,7 @@ fn standard_material_new() -> StandardMaterial {
     material.max_parallax_layer_count = 16.0;
     material.max_relief_mapping_search_steps = 5u;
     material.deferred_lighting_pass_id = 1u;
+    material.fallout_surface_kind = 0u;
     // scale 1, translation 0, rotation 0
     material.uv_transform = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
 

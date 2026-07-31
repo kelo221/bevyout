@@ -333,6 +333,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         rebuild_reflection_probes: args.rebuild_reflection_probes,
         cache_dir: Some(cache_dir.to_path_buf()),
         dialogue_sources: Vec::new(),
+        dialogue_voice_manifests: Vec::new(),
         force,
         rebuild_assets: false,
         strict: false,

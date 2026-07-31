@@ -16,7 +16,7 @@ From the repository root:
 
 Expected output includes:
 
-    dialogue bundle: 4 conversation(s), 1 source(s), 1 stable placement binding(s) -> dialogue/catalog.ron
+    dialogue bundle: 4 conversation(s), 1 source(s), 0 voice line(s), 1 stable placement binding(s) -> dialogue/catalog.ron
 
 Expected prepared files are written below .bevyout/cache/scenes/00003a2a/
 and the shared prepared asset root .bevyout/cache/dialogue/. The scene manifest has a
@@ -81,8 +81,10 @@ Expected result: ok is true, active is true, phase is PresentingLine,
 modal is Dialogue, and input_gated is true. With Moira's prepared actor
 hierarchy loaded, the same state reports `voice_anchor: Mouth` and
 `voice_spatial: true`. The authored smoke conversation currently has no
-prepared voice asset, so this bridge check verifies the mouth-anchor
-resolution; a voiced line is required to verify the audible spatial playback.
+prepared voice asset, so it reports `voice_state: Fallback` and
+`timing_source: Text`; this bridge check verifies the mouth-anchor resolution
+and deterministic fallback. Use `DIALOGUE_WAVE9_MANUAL.md` with a supplied
+voice manifest to verify audible spatial playback.
 
 ## 5. Continue to the options
 
