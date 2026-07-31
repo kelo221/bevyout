@@ -1,10 +1,12 @@
 # M4 autonomous-actors wave — plan (#215, #218, #224, #225)
 
-**Execution model recommendation:** **Sonnet** (Claude runtime), one executor,
-**sequential** on the `m4-autonomous-actors` branch (all four pieces touch the
-same nav/actor seam — AGENTS.md sequential-exception). Orchestrator (Opus)
-evaluates. Do the features in the order below (small independent wins first, then
-the spine), committing per feature as each goes green.
+**Execution model recommendation:** **Sol High** in the Codex runtime; **Sonnet**
+in the Claude runtime, one executor **sequential** on the
+`m4-autonomous-actors` branch (all four pieces touch the same nav/actor seam —
+AGENTS.md sequential-exception). In the Claude runtime the Opus orchestrator
+evaluates; in Codex the orchestrating session executes directly. Do the features
+in the order below (small independent wins first, then the spine), committing per
+feature as each goes green.
 
 ## Architecture (mapped at plan time — file:line seams)
 
@@ -143,6 +145,26 @@ big file). The package radius/`FO3_SCALE` scaling (#222) is a separate follow-up
 
 ## Shipped amendments
 
+- **PR #228 repair on current master:** the first #224 implementation averaged
+  scalar speed, which cannot cancel equal-and-opposite collision jitter and can
+  latch an actor into Run while stationary. The repaired implementation averages
+  signed horizontal velocity and classifies its magnitude. Regression tests pin
+  both net-zero jitter (Idle) and sustained travel (Run).
+- **Catalog startup cost:** autonomous startup originally deserialized
+  `actors.ron` and the content-wide `packages.ron` once per actor inside an
+  exclusive system. The AI-owned cache now keys actor data by manifest
+  path/hash/revision and package data by content fingerprint; a multi-actor
+  regression requires one disk load of each. Failed package startup also rolls
+  back its newly-created nav bind rather than leaving an orphan agent.
+- **Clock and ordering:** current master now has `day_night::GameClock`, so the
+  autonomous selector consumes its live hour (with noon only as the resource-
+  absent fallback). Its queue is explicitly ordered after actor-state seeding.
+- **Agent-set coverage and input safety:** gameplay nav systems now enumerate the
+  agent component set, not only console roster slots, so autonomous actors retain
+  door/fall/telemetry behavior. Growable dense debug indices are validated before
+  allocation/restoration; inputs above the defensive 65,535 ceiling are rejected
+  instead of resizing toward an arbitrary `usize`.
+
 - **F4 reuse shape differs from the literal plan text, on purpose.**
   `build_resolution_context` and `resolve_family_point` moved exactly as
   specified (into `ai::family_runtime`/`ai::resolution` respectively —
@@ -162,12 +184,10 @@ big file). The package radius/`FO3_SCALE` scaling (#222) is a separate follow-up
   architecture test enforces a console→ai-only direction; `tests/
   architecture.rs` only asserts bevyout-core/Bevy and vsa/viewer
   boundaries).
-- **Live clock:** confirmed no gameplay clock resource exists anywhere in
-  this codebase (grepped `GameInstant`/game-hour/`Time<Virtual>` — only the
-  plain `GameInstant` *input* type turned up, never a ticking source). The
-  autonomous driver uses `GameInstant::default()` (noon), matching the
-  console's own default, with a `// ponytail:` comment at the call site
-  naming the follow-up rather than building a clock system in this wave.
+- **Live clock at the original wave head:** no gameplay clock resource existed,
+  so the first implementation used deterministic noon. Current master gained
+  `day_night::GameClock`; the PR repair now reads its live hour and retains noon
+  only for minimal/headless worlds where that resource is absent.
 - **`Added<ActorStateRuntime>` needed two systems, not one.** An ad-hoc
   `World::query_filtered` built fresh inside an exclusive system (the shape
   every other exclusive system in `nav/agent.rs` uses) does not track

@@ -5019,7 +5019,6 @@ fn restore_ledgered_agent(world: &mut World, index: usize, entry: ledger_policy:
     );
 }
 
-
 #[cfg(test)]
 #[path = "tests/agent.rs"]
 mod tests;

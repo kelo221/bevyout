@@ -2,22 +2,23 @@
 //! package catalog. Per AGENTS.md's "the human must be able to see what a
 //! wave shipped" rule -- #175 alone is only inspectable as a RON file.
 //!
-//! Both the per-cell actor catalog (`actors.ron`) and the content-set-wide
-//! package catalog (`packages.ron`) are read from disk on demand when this
-//! command runs, the same way `viewer::nav_overlay`'s `tnm` reads
-//! `navgraph.ron` on demand rather than through a resource preloaded at
-//! `view` startup -- unlike `PreparedItemCatalog`, neither prepared catalog
-//! is cell-invariant content-set-wide-and-nothing-else: `actors.ron`
-//! changes on every cell swap, so keeping it as a static `Resource` would
-//! need its own reload-on-swap wiring this issue does not need to build.
+//! The first package query for a loaded manifest reads the per-cell actor
+//! catalog (`actors.ron`) and content-wide package catalog (`packages.ron`)
+//! on demand. The AI-owned cache then reuses them: actor data is keyed by the
+//! manifest path/hash/revision and naturally invalidates on a cell swap,
+//! while package data is keyed by the content fingerprint and survives swaps.
+//! This matters for autonomous startup, which selects packages for the whole
+//! actor population in one exclusive-system batch.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::vsa::{
     ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, PACKAGE_CATALOG_REVISION,
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };
 
+use super::super::ai::catalog_cache::PackageCatalogCache;
 use super::super::ai::families::{self, PackageFamily, Waypoint};
 use super::super::ai::family_runtime::{
     ActorPackageController, DEFAULT_ARRIVAL_TOLERANCE, PackageInteractionOccupancy,
@@ -116,7 +117,7 @@ fn target_type_label(target_type: i32) -> &'static str {
 /// Reads and validates the active cell's per-cell actor catalog
 /// (`actors.ron`), mirroring `viewer::app::run_view`'s item-catalog
 /// validation (revision pinned to this build's compiled constant).
-fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleError> {
+fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, ConsoleError> {
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(|| {
@@ -130,6 +131,25 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
     })?;
     let path = PathBuf::from(&manifest.0.asset_root)
         .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let key = format!(
+        "{}|{}|{}|{}",
+        path.display(),
+        manifest.0.source_fingerprint,
+        manifest.0.actor_catalog_hash.as_deref().unwrap_or_default(),
+        manifest
+            .0
+            .actor_catalog_revision
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    if let Some(catalog) = world
+        .get_resource::<PackageCatalogCache>()
+        .and_then(|cache| cache.actor.as_ref())
+        .filter(|(cached_key, _)| cached_key == &key)
+        .map(|(_, catalog)| Arc::clone(catalog))
+    {
+        return Ok(catalog);
+    }
     let text = std::fs::read_to_string(&path).map_err(|error| {
         ConsoleError::new(
             "catalog_unreadable",
@@ -148,6 +168,10 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
             ),
         ));
     }
+    let catalog = Arc::new(catalog);
+    let mut cache = world.get_resource_or_insert_with(PackageCatalogCache::default);
+    cache.actor = Some((key, Arc::clone(&catalog)));
+    cache.actor_disk_loads += 1;
     Ok(catalog)
 }
 
@@ -157,7 +181,7 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
 /// `package_catalog::write_package_catalog` uses -- so there is no
 /// manifest-carried pointer to follow (see that module's `write_package_catalog`
 /// doc comment).
-fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, ConsoleError> {
+fn load_package_catalog(world: &mut World) -> Result<Arc<PreparedPackageCatalog>, ConsoleError> {
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(|| {
@@ -167,6 +191,15 @@ fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, Console
         .join(&manifest.0.source_fingerprint)
         .join("packages.ron");
     let path = PathBuf::from(&manifest.0.asset_root).join(&relative);
+    let key = format!("{}|{}", path.display(), manifest.0.source_fingerprint);
+    if let Some(catalog) = world
+        .get_resource::<PackageCatalogCache>()
+        .and_then(|cache| cache.packages.as_ref())
+        .filter(|(cached_key, _)| cached_key == &key)
+        .map(|(_, catalog)| Arc::clone(catalog))
+    {
+        return Ok(catalog);
+    }
     let text = std::fs::read_to_string(&path).map_err(|error| {
         ConsoleError::new(
             "catalog_unreadable",
@@ -188,6 +221,10 @@ fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, Console
             ),
         ));
     }
+    let catalog = Arc::new(catalog);
+    let mut cache = world.get_resource_or_insert_with(PackageCatalogCache::default);
+    cache.packages = Some((key, Arc::clone(&catalog)));
+    cache.package_disk_loads += 1;
     Ok(catalog)
 }
 

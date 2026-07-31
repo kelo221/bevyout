@@ -264,3 +264,36 @@ fn linked_reference_chain_terminates_cleanly_on_a_broken_or_missing_link() {
     assert_eq!(points.len(), 1);
     assert_eq!(points[0].position, [5.0, 5.0, 5.0]);
 }
+
+#[test]
+fn resolve_family_point_falls_back_from_the_preferred_slot() {
+    let context = context_with(vec![reference(0x70, 0xFF, [7.0, 0.0, 0.0])]);
+    let location = location(0, Some(0x70), 0);
+    let target = PackageTarget {
+        target_type: 2,
+        ..PackageTarget::default()
+    };
+
+    let direct = resolve_family_point(Some(location), Some(target), &context, false).unwrap();
+    assert_eq!(direct.position, [7.0, 0.0, 0.0]);
+    let fallback = resolve_family_point(Some(location), Some(target), &context, true).unwrap();
+    assert_eq!(fallback.position, [7.0, 0.0, 0.0]);
+}
+
+#[test]
+fn resolve_family_point_reports_the_preferred_diagnostic() {
+    let context = context_with(vec![]);
+    let location = location(3, None, 0);
+    let target = PackageTarget {
+        target_type: 2,
+        ..PackageTarget::default()
+    };
+    let error = resolve_family_point(Some(location), Some(target), &context, false).unwrap_err();
+    assert!(error.message.contains("editor location") || error.message.contains("authored"));
+}
+
+#[test]
+fn resolve_family_point_without_slots_is_a_diagnostic() {
+    let error = resolve_family_point(None, None, &context_with(vec![]), false).unwrap_err();
+    assert!(error.message.contains("no resolvable location or target"));
+}

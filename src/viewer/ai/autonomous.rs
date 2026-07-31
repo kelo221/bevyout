@@ -46,6 +46,7 @@ use super::selection::GameInstant;
 use crate::viewer::actor::ActorRuntime;
 use crate::viewer::actor_state::ActorStateRuntime;
 use crate::viewer::console::ai_package_commands::start_package;
+use crate::viewer::day_night::GameClock;
 use crate::viewer::nav::agent;
 
 /// Toggle for the autonomous driver, default on -- this wave's whole
@@ -106,6 +107,7 @@ fn drive_pending_autonomous_starts(world: &mut World) {
     if !enabled {
         return;
     }
+    let instant = game_instant(world);
     for (entity, reference_form_id, is_alive) in pending {
         let already_nav_bound = agent::is_nav_bound(world, entity);
         let already_has_controller = world.get::<ActorPackageController>(entity).is_some();
@@ -119,22 +121,30 @@ fn drive_pending_autonomous_starts(world: &mut World) {
             );
             continue;
         }
-        // ponytail: no gameplay clock resource exists yet anywhere in this
-        // codebase (grepped for GameInstant/game-hour/Time<Virtual> -- only
-        // the plain `GameInstant` *input* type turned up, never a ticking
-        // source); `GameInstant::default()` (noon) matches the console
-        // `runpackage` command's own default until a real clock lands.
-        match start_package(world, entity, reference_form_id, GameInstant::default()) {
+        match start_package(world, entity, reference_form_id, instant) {
             Ok(_) => {
                 info!("autonomous package driver: bound + started actor {reference_form_id:08x}");
             }
             Err(error) => {
+                // Binding and package start form one autonomous transaction.
+                // A catalog/schedule/resolution failure must not leave an
+                // agent with no controller consuming nav runtime work forever.
+                agent::release_bound_actor(world, entity);
                 warn!(
                     "autonomous package driver: start {reference_form_id:08x} skipped: {} ({})",
                     error.message, error.code
                 );
             }
         }
+    }
+}
+
+fn game_instant(world: &World) -> GameInstant {
+    GameInstant {
+        hour: world
+            .get_resource::<GameClock>()
+            .map_or(GameInstant::default().hour, |clock| clock.hour),
+        ..GameInstant::default()
     }
 }
 
@@ -152,6 +162,7 @@ pub(crate) fn register(app: &mut App) {
                 drive_pending_autonomous_starts,
             )
                 .chain()
+                .after(crate::viewer::actor_state::seed_actor_states)
                 .before(super::family_runtime::drive_actor_packages),
         );
 }
@@ -375,6 +386,61 @@ mod tests {
             .resource_mut::<AutonomousPackageDriverEnabled>()
             .0 = false;
         let actor = spawn_actor(&mut fixture.world, 0x1004, ActorLifeState::Alive);
+
+        fixture
+            .world
+            .run_system_once(queue_autonomous_start_candidates)
+            .unwrap();
+        drive_pending_autonomous_starts(&mut fixture.world);
+
+        assert!(!agent::is_nav_bound(&fixture.world, actor));
+        assert!(fixture.world.get::<ActorPackageController>(actor).is_none());
+    }
+
+    #[test]
+    fn an_autonomous_batch_reads_each_catalog_once() {
+        let mut fixture = build_fixture("catalog-cache", 0x1005, 5);
+        let first = spawn_actor(&mut fixture.world, 0x1005, ActorLifeState::Alive);
+        let second = spawn_actor(&mut fixture.world, 0x1005, ActorLifeState::Alive);
+
+        fixture
+            .world
+            .run_system_once(queue_autonomous_start_candidates)
+            .unwrap();
+        drive_pending_autonomous_starts(&mut fixture.world);
+
+        assert!(fixture.world.get::<ActorPackageController>(first).is_some());
+        assert!(
+            fixture
+                .world
+                .get::<ActorPackageController>(second)
+                .is_some()
+        );
+        assert_eq!(
+            fixture
+                .world
+                .resource::<super::super::catalog_cache::PackageCatalogCache>()
+                .disk_loads(),
+            (1, 1),
+            "the whole actor batch must share its prepared catalog reads"
+        );
+    }
+
+    #[test]
+    fn autonomous_selection_uses_the_live_game_clock() {
+        let mut world = World::new();
+        world.insert_resource(GameClock {
+            hour: 19.5,
+            timescale: 30.0,
+        });
+
+        assert_eq!(game_instant(&world).hour, 19.5);
+    }
+
+    #[test]
+    fn a_failed_package_start_rolls_back_the_autonomous_bind() {
+        let mut fixture = build_fixture("rollback", 0x1006, 16 /* unsupported */);
+        let actor = spawn_actor(&mut fixture.world, 0x1006, ActorLifeState::Alive);
 
         fixture
             .world

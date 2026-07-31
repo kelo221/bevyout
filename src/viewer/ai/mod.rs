@@ -20,6 +20,7 @@
 
 mod autonomous;
 mod autonomous_gate;
+pub(crate) mod catalog_cache;
 pub(crate) mod families;
 pub(crate) mod family_runtime;
 pub(crate) mod lifecycle;

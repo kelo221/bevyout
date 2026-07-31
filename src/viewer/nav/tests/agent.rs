@@ -2537,11 +2537,10 @@ fn active_link_description_reports_merge_door_and_travel_reached() {
     );
 }
 
-/// Issue #114 feature 4: `tna spawn`'s index is a bounded, independent
-/// slot -- occupying index 0 does not block index 1, and an index at or
-/// past `MAX_TEST_AGENTS` is rejected before anything else runs.
+/// Issue #215: debug indices are independent and grow beyond the original
+/// four slots, while the defensive dense-allocation ceiling is enforced.
 #[test]
-fn spawn_indices_are_independent_slots_bounded_by_the_cap() {
+fn spawn_indices_are_independent_and_grow_past_the_old_cap() {
     let mut world = harness_world();
     // Pre-seed the archipelago as already current so `ensure_archipelago`
     // (which `spawn_agent` always calls first, same as wave 3/4) returns
@@ -2564,7 +2563,10 @@ fn spawn_indices_are_independent_slots_bounded_by_the_cap() {
     let error = tna_command(&mut world, &invocation(&["spawn", "1"])).unwrap_err();
     assert_eq!(error.code, "player_unavailable");
 
-    let out_of_range = MAX_TEST_AGENTS.to_string();
+    let error = tna_command(&mut world, &invocation(&["spawn", "41"])).unwrap_err();
+    assert_eq!(error.code, "player_unavailable");
+
+    let out_of_range = (MAX_AGENT_INDEX + 1).to_string();
     let error = tna_command(&mut world, &invocation(&["spawn", &out_of_range])).unwrap_err();
     assert_eq!(error.code, "bad_agent_index");
 }

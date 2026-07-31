@@ -329,6 +329,7 @@ pub(crate) struct AiPackagePlugin;
 impl Plugin for AiPackagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PackageInteractionOccupancy>()
+            .init_resource::<super::catalog_cache::PackageCatalogCache>()
             .add_systems(Update, drive_actor_packages);
         // Satisfy nav's bound-actor release contract: when nav releases this
         // actor (the #164 fall guard / `tna despawn`), tear its package down too
