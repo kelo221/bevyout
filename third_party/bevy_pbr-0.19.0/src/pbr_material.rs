@@ -779,6 +779,12 @@ pub struct StandardMaterial {
     /// PBR deferred lighting pass. Ignored in the case of forward materials.
     pub deferred_lighting_pass_id: u8,
 
+    /// Internal Fallout surface variant consumed by the local PBR shader.
+    ///
+    /// `0` is the regular material path, `1` is hair, and `2` is an eye.
+    /// This is configured from GLB material metadata by the viewer.
+    pub fallout_surface_kind: u32,
+
     /// The transform applied to the UVs corresponding to `ATTRIBUTE_UV_0` on the mesh before sampling. Default is identity.
     pub uv_transform: Affine2,
 }
@@ -935,6 +941,7 @@ impl Default for StandardMaterial {
             parallax_mapping_method: ParallaxMappingMethod::Occlusion,
             opaque_render_method: OpaqueRendererMethod::Auto,
             deferred_lighting_pass_id: DEFAULT_PBR_DEFERRED_LIGHTING_PASS_ID,
+            fallout_surface_kind: 0,
             uv_transform: Affine2::IDENTITY,
         }
     }
@@ -1061,6 +1068,8 @@ pub struct StandardMaterialUniform {
     pub max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     pub deferred_lighting_pass_id: u32,
+    /// Internal Fallout surface variant consumed by the local PBR shader.
+    pub fallout_surface_kind: u32,
 }
 
 impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
@@ -1206,6 +1215,7 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             lightmap_exposure: self.lightmap_exposure,
             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
+            fallout_surface_kind: self.fallout_surface_kind,
             uv_transform: self.uv_transform.into(),
         }
     }

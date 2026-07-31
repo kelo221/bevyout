@@ -601,6 +601,7 @@ mod issue_199_tests {
             reflection_probes: None,
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
+            dialogue: None,
         }
     }
 

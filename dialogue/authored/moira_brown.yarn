@@ -1,0 +1,26 @@
+title: MoiraBrown
+---
+Moira: I have a few things to ask about, if you have a moment.
+-> Ask about the crater -> MoiraCrater
+-> Ask about supplies -> MoiraSupplies
+-> Say goodbye -> MoiraEnd
+===
+
+title: MoiraCrater
+---
+Moira: The crater is dangerous, but helping the town starts with understanding it.
+<<bo_run_action moira_crater_questioned>>
+-> Continue -> MoiraEnd
+===
+
+title: MoiraSupplies
+---
+Moira: Supplies keep the shop and the town moving.
+<<bo_run_action moira_supplies_questioned>>
+-> Continue -> MoiraEnd
+===
+
+title: MoiraEnd
+---
+Moira: Come back if you think of anything else.
+===

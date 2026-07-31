@@ -17,12 +17,13 @@ use crate::item_transaction::{
     TransactionId,
 };
 use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackageCheckpoint};
+use bevyout_core::dialogue::DialogueSnapshot;
 
 mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 5;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 6;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,8 @@ pub struct SaveGame {
     /// Canonical M3 item-holder state. `None` is retained for v1/v2 callers;
     /// decoding or encoding a legacy save deterministically migrates it.
     pub canonical: Option<ItemLedgerSnapshot>,
+    /// Boundary-only narrative state; no Yarn VM or Bevy entity is saved.
+    pub dialogue: DialogueSnapshot,
 }
 
 impl PartialEq for SaveGame {
@@ -48,6 +51,7 @@ impl PartialEq for SaveGame {
             && self.player == other.player
             && self.next_runtime_item_id == other.next_runtime_item_id
             && self.rng_state == other.rng_state
+            && self.dialogue == other.dialogue
             && canonical_for_compare(self) == canonical_for_compare(other)
     }
 }
@@ -65,6 +69,7 @@ impl Default for SaveGame {
             next_runtime_item_id: 1,
             rng_state: 0,
             canonical: None,
+            dialogue: DialogueSnapshot::default(),
         }
     }
 }
@@ -252,6 +257,15 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
                 .as_bytes(),
         )?;
     }
+    if save.header.format_version >= 6 {
+        write_record(
+            &mut bytes,
+            tag("DLOG"),
+            ron::ser::to_string(&save.dialogue)
+                .context("encoding dialogue snapshot")?
+                .as_bytes(),
+        )?;
+    }
     for (cell_form_id, cell) in &save.world.cells {
         let mut payload = Vec::new();
         write_subrecord(&mut payload, tag("FORM"), &cell_form_id.to_le_bytes())?;
@@ -300,6 +314,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut saw_rng = false;
     let mut saw_next_runtime_item = false;
     let mut saw_canonical = false;
+    let mut saw_dialogue = false;
     let mut checksum = None;
     let mut checksum_offset = None;
     let mut offset = 0usize;
@@ -360,6 +375,17 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                             .context("decoding canonical item state")?,
                     );
                     saw_canonical = true;
+                }
+                record_tag if *record_tag == tag("DLOG") => {
+                    if saw_dialogue {
+                        bail!("save contains duplicate DLOG records");
+                    }
+                    if !saw_header || save.header.format_version < 6 {
+                        bail!("DLOG is only valid in save format v6 or newer");
+                    }
+                    save.dialogue = ron::de::from_bytes(&record.payload)
+                        .context("decoding dialogue snapshot")?;
+                    saw_dialogue = true;
                 }
                 record_tag if *record_tag == tag("CSTA") => {
                     let cell_form_id = decode_cell_state(&record.payload)?;
@@ -1361,6 +1387,24 @@ fn validate_save(save: &SaveGame) -> Result<()> {
     }
     if save.next_runtime_item_id == 0 {
         bail!("next runtime item id must be non-zero");
+    }
+    if save.dialogue.schema_version != bevyout_core::dialogue::DIALOGUE_SNAPSHOT_SCHEMA_VERSION {
+        bail!(
+            "unsupported dialogue snapshot schema version {}",
+            save.dialogue.schema_version
+        );
+    }
+    if let Some(checkpoint) = &save.dialogue.active {
+        if checkpoint.dialogue.as_str().is_empty() || checkpoint.node.is_empty() {
+            bail!("dialogue checkpoint must identify a dialogue and node");
+        }
+        if checkpoint
+            .completed_actions
+            .windows(2)
+            .any(|window| window[0] >= window[1])
+        {
+            bail!("dialogue checkpoint action keys must be sorted and unique");
+        }
     }
     let mut plugin_names = Vec::new();
     for plugin in &save.header.plugins {

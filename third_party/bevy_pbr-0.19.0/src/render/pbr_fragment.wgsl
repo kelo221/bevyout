@@ -86,11 +86,14 @@ fn pbr_input_from_standard_material(
     let base_color = pbr_bindings::material_array[material_indices[slot].material].base_color;
     let deferred_lighting_pass_id =
         pbr_bindings::material_array[material_indices[slot].material].deferred_lighting_pass_id;
+    let fallout_surface_kind =
+        pbr_bindings::material_array[material_indices[slot].material].fallout_surface_kind;
     let alpha_cutoff = pbr_bindings::material_array[material_indices[slot].material].alpha_cutoff;
 #else   // BINDLESS
     let flags = pbr_bindings::material.flags;
     let base_color = pbr_bindings::material.base_color;
     let deferred_lighting_pass_id = pbr_bindings::material.deferred_lighting_pass_id;
+    let fallout_surface_kind = pbr_bindings::material.fallout_surface_kind;
     let alpha_cutoff = pbr_bindings::material.alpha_cutoff;
 #endif
 
@@ -100,6 +103,7 @@ fn pbr_input_from_standard_material(
     pbr_input.material.flags = flags;
     pbr_input.material.base_color *= base_color;
     pbr_input.material.deferred_lighting_pass_id = deferred_lighting_pass_id;
+    pbr_input.material.fallout_surface_kind = fallout_surface_kind;
 
     // Neubelt and Pettineo 2013, "Crafting a Next-gen Material Pipeline for The Order: 1886"
     let NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
@@ -767,7 +771,6 @@ pbr_input.material.uv_transform = uv_transform;
         //
         // This code comes from the `KHR_materials_anisotropy` spec:
         // <https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_anisotropy/README.md#individual-lights>
-#ifdef PBR_ANISOTROPY_TEXTURE_SUPPORTED
 #ifdef VERTEX_TANGENTS
 #ifdef STANDARD_MATERIAL_ANISOTROPY
 
@@ -781,6 +784,7 @@ pbr_input.material.uv_transform = uv_transform;
         var anisotropy_direction = pbr_bindings::material.anisotropy_rotation;
 #endif  // BINDLESS
 
+#ifdef PBR_ANISOTROPY_TEXTURE_SUPPORTED
         // Adjust based on the anisotropy map if there is one.
         if ((flags & pbr_types::STANDARD_MATERIAL_FLAGS_ANISOTROPY_TEXTURE_BIT) != 0u) {
             let anisotropy_texel =
@@ -816,6 +820,7 @@ pbr_input.material.uv_transform = uv_transform;
                 anisotropy_direction_from_texture;
             anisotropy_strength *= anisotropy_texel.b;
         }
+#endif  // PBR_ANISOTROPY_TEXTURE_SUPPORTED
 
         pbr_input.anisotropy_strength = anisotropy_strength;
 
@@ -826,7 +831,6 @@ pbr_input.material.uv_transform = uv_transform;
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
 #endif  // VERTEX_TANGENTS
-#endif  // PBR_ANISOTROPY_TEXTURE_SUPPORTED
 
 #endif  // LOAD_PREPASS_NORMALS
 

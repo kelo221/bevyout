@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use glam::{EulerRot, Quat};
 use serde::{Deserialize, Serialize};
 
+use crate::dialogue::PreparedDialogueBundleRef;
 use crate::time_of_day::{ColorKeyframes, DayNightTimings};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +104,10 @@ pub struct PreparedSceneManifest {
     /// deserialize with an empty map.
     #[serde(default)]
     pub leveled_lists: BTreeMap<u32, PreparedLeveledList>,
+    /// Optional prepared authored/imported dialogue bundle. Old manifests do
+    /// not contain this field and remain readable as dialogue-less scenes.
+    #[serde(default)]
+    pub dialogue: Option<PreparedDialogueBundleRef>,
 }
 
 /// A single prepared leveled list's body: `LVLD` chance-none percentage,

@@ -11,8 +11,8 @@ use crate::app_state::AppStatePlugin;
 
 use super::{
     actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
-    console, console_ui, day_night, hud, interaction, nav, pause_menu, perception, pipboy,
-    pipboy_reader, player, weapon, world, world_items,
+    console, console_ui, day_night, dialogue, hud, interaction, nav, pause_menu, perception,
+    pipboy, pipboy_reader, player, weapon, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -22,6 +22,7 @@ use super::{
 pub(crate) enum ViewerSet {
     Input,
     Interaction,
+    Dialogue,
     WorldSync,
     Ui,
 }
@@ -35,6 +36,7 @@ impl Plugin for ViewerSchedulePlugin {
             (
                 ViewerSet::Input,
                 ViewerSet::Interaction,
+                ViewerSet::Dialogue,
                 ViewerSet::WorldSync,
                 ViewerSet::Ui,
             )
@@ -74,6 +76,7 @@ impl PluginGroup for ViewerPlugins {
             })
             .add(hud::HudPlugin)
             .add(interaction::InteractionPlugin)
+            .add(dialogue::DialoguePlugin)
             .add(actor::ActorPlugin)
             .add(actor_state::ActorStatePlugin)
             .add(weapon::WeaponPlugin)
