@@ -61,6 +61,16 @@ fn test_app() -> App {
     app
 }
 
+#[test]
+fn catalog_cache_keys_are_unambiguous_across_component_boundaries() {
+    let left = super::ai_package_commands::catalog_cache_key(&["a|b", "c"]);
+    let right = super::ai_package_commands::catalog_cache_key(&["a", "b|c"]);
+    let same = super::ai_package_commands::catalog_cache_key(&["a|b", "c"]);
+
+    assert_ne!(left, right);
+    assert_eq!(left, same);
+}
+
 fn current_tonemapper(app: &mut App) -> Tonemapping {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&Tonemapping, With<Camera3d>>();

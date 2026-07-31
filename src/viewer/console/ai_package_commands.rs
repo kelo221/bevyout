@@ -48,6 +48,19 @@ const DEFAULT_WANDER_RADIUS: f32 = 8.0;
 /// Seconds a sandbox actor idles at each reached roam point.
 const DEFAULT_WANDER_IDLE_SECONDS: f32 = 3.0;
 
+/// Builds a collision-free cache key from constrained and unconstrained
+/// catalog identity fields. Length-prefixing each UTF-8 component means a
+/// path or future fingerprint containing a separator cannot alias another
+/// tuple.
+pub(super) fn catalog_cache_key(parts: &[&str]) -> String {
+    let mut encoded = Vec::new();
+    for part in parts {
+        encoded.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(part.as_bytes());
+    }
+    crate::viewer::fingerprint(&encoded)
+}
+
 pub(super) struct AiPackageCommandProvider;
 
 impl ConsoleCommandProvider for AiPackageCommandProvider {
@@ -131,17 +144,17 @@ fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, Co
     })?;
     let path = PathBuf::from(&manifest.0.asset_root)
         .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let key = format!(
-        "{}|{}|{}|{}",
-        path.display(),
-        manifest.0.source_fingerprint,
+    let path_string = path.display().to_string();
+    let key = catalog_cache_key(&[
+        &path_string,
+        &manifest.0.source_fingerprint,
         manifest.0.actor_catalog_hash.as_deref().unwrap_or_default(),
         manifest
             .0
             .actor_catalog_revision
             .as_deref()
             .unwrap_or_default(),
-    );
+    ]);
     if let Some(catalog) = world
         .get_resource::<PackageCatalogCache>()
         .and_then(|cache| cache.actor.as_ref())
@@ -205,7 +218,8 @@ fn load_package_catalog(world: &mut World) -> Result<Arc<PreparedPackageCatalog>
         .join(&manifest.0.source_fingerprint)
         .join("packages.ron");
     let path = PathBuf::from(&manifest.0.asset_root).join(&relative);
-    let key = format!("{}|{}", path.display(), manifest.0.source_fingerprint);
+    let path_string = path.display().to_string();
+    let key = catalog_cache_key(&[&path_string, &manifest.0.source_fingerprint]);
     if let Some(catalog) = world
         .get_resource::<PackageCatalogCache>()
         .and_then(|cache| cache.packages.as_ref())

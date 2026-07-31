@@ -423,6 +423,5 @@ pub fn resolve_family_point(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 #[path = "tests/resolution.rs"]
 mod tests;

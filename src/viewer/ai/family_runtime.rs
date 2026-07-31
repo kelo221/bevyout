@@ -430,6 +430,5 @@ pub(crate) fn build_resolution_context(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 #[path = "tests/family_runtime.rs"]
 mod tests;

@@ -175,6 +175,5 @@ pub(crate) fn decide_swap_eligibility(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 #[path = "tests/ledger_policy.rs"]
 mod tests;
