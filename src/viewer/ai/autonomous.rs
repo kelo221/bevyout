@@ -231,12 +231,11 @@ mod tests {
             counters: Default::default(),
             faction_table: Default::default(),
         };
-        std::fs::write(
-            scene_dir.join("actors.ron"),
+        let actor_catalog_ron =
             ron::ser::to_string_pretty(&actor_catalog, ron::ser::PrettyConfig::default())
-                .expect("serialize synthetic actor catalog"),
-        )
-        .expect("write synthetic actor catalog fixture");
+                .expect("serialize synthetic actor catalog");
+        std::fs::write(scene_dir.join("actors.ron"), &actor_catalog_ron)
+            .expect("write synthetic actor catalog fixture");
 
         // Hand-authored RON, not a Rust struct literal: `PreparedPackageEntry
         // ::location`'s `PackageLocationInput` type is private to
@@ -284,6 +283,8 @@ mod tests {
         manifest.asset_root = temp_root.to_string_lossy().into_owned();
         manifest.source_fingerprint = fingerprint;
         manifest.actor_catalog_path = Some(format!("scenes/{cell_form_id:08x}/actors.ron"));
+        manifest.actor_catalog_hash =
+            Some(crate::viewer::fingerprint(actor_catalog_ron.as_bytes()));
         manifest.nav_graph = Some(crate::vsa::PreparedNavGraphSource::default());
         world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
 

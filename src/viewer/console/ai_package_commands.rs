@@ -156,6 +156,14 @@ fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, Co
             format!("reading actor catalog {}: {error}", path.display()),
         )
     })?;
+    if let Some(expected_hash) = manifest.0.actor_catalog_hash.as_deref()
+        && crate::viewer::fingerprint(text.as_bytes()) != expected_hash
+    {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "actor catalog hash does not match the active scene manifest; run `prepare` again",
+        ));
+    }
     let catalog: PreparedActorCatalog = ron::de::from_str(&text).map_err(|error| {
         ConsoleError::new("catalog_invalid", format!("invalid actor catalog: {error}"))
     })?;
@@ -166,6 +174,12 @@ fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, Co
                 "actor catalog revision {} is stale, expected {ACTOR_CATALOG_REVISION}; run `prepare` again",
                 catalog.revision
             ),
+        ));
+    }
+    if catalog.source_fingerprint != manifest.0.source_fingerprint {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "actor catalog fingerprint does not match the active scene; run `prepare` again",
         ));
     }
     let catalog = Arc::new(catalog);
@@ -219,6 +233,12 @@ fn load_package_catalog(world: &mut World) -> Result<Arc<PreparedPackageCatalog>
                 "package catalog revision {} is stale, expected {PACKAGE_CATALOG_REVISION}; run `prepare` again",
                 catalog.revision
             ),
+        ));
+    }
+    if catalog.source_fingerprint != manifest.0.source_fingerprint {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "package catalog fingerprint does not match the active scene; run `prepare` again",
         ));
     }
     let catalog = Arc::new(catalog);
