@@ -116,8 +116,9 @@ fn bound_actor_target_yaw(desired: Vec2) -> f32 {
 /// Marks an [`ActorRuntime`] entity that owns a nav agent. Insertion (by
 /// `super::bind_actor_agent`) is what turns an ordinary projected actor into
 /// a routed one; removal releases it back to `actor_animation`'s own
-/// unbound-actor behaviour. Carries only the locomotion state machine's
-/// memory, because hysteresis needs the previous verdict and nothing else.
+/// unbound-actor behaviour. Carries the locomotion state machine's verdict and
+/// the bounded motion filters that keep collision/facing jitter from
+/// restarting clips.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub(super) struct NavBoundActor {
     /// The locomotion state last requested, i.e. the `previous` argument
@@ -127,6 +128,17 @@ pub(super) struct NavBoundActor {
     /// tick -- the *achieved* turn, matching the achieved-not-desired rule
     /// the speed input follows.
     pub(super) yaw_rate: f32,
+    /// Net achieved yaw rate used by the locomotion classifier. Facing can
+    /// apply opposite full-rate corrections while a holding actor's desired
+    /// direction settles; the rolling window prevents those corrections from
+    /// restarting opposite one-shot turn clips every tick.
+    pub(super) smoothed_yaw_rate: f32,
+    /// Signed achieved-velocity average used for locomotion classification.
+    /// Its magnitude represents net travel over the motion window.
+    pub(super) smoothed_velocity: Vec2,
+    pub(super) velocity_window: locomotion::VelocityWindow,
+    pub(super) yaw_rate_window: locomotion::YawRateWindow,
+    pub(super) locomotion_debounce: locomotion::LocomotionDebounce,
 }
 
 /// Which authority owns a bound actor's `Transform.rotation` this frame -- the
@@ -226,18 +238,39 @@ fn shortest_yaw_delta(delta: f32) -> f32 {
 /// `movement_policy::decide_collision_outcome`, and the yaw rate is what
 /// [`face_bound_actors`] actually applied.
 pub(super) fn drive_bound_actor_locomotion(world: &mut World) {
+    let dt = world.resource::<Time>().delta_secs();
     let mut query = world.query_filtered::<(Entity, &AgentKcc, &mut NavBoundActor), ()>();
     let requests: Vec<(Entity, LocomotionState, LocomotionState)> = query
         .iter_mut(world)
         .map(|(entity, kcc, mut bound)| {
             let previous = bound.locomotion;
-            let next = locomotion::next_locomotion_state(
+            bound.smoothed_velocity = Vec2::from_array(
+                bound
+                    .velocity_window
+                    .push(kcc.last_achieved_horizontal.to_array()),
+            );
+            let raw_yaw_rate = bound.yaw_rate;
+            bound.smoothed_yaw_rate = bound.yaw_rate_window.push(raw_yaw_rate);
+            let achieved_horizontal_speed =
+                if bound.velocity_window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+                    bound.smoothed_velocity.length()
+                } else {
+                    0.0
+                };
+            let yaw_rate =
+                if bound.yaw_rate_window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+                    bound.smoothed_yaw_rate
+                } else {
+                    0.0
+                };
+            let candidate = locomotion::next_locomotion_state(
                 previous,
                 LocomotionObservation {
-                    achieved_horizontal_speed: kcc.last_achieved_horizontal_speed,
-                    yaw_rate: bound.yaw_rate,
+                    achieved_horizontal_speed,
+                    yaw_rate,
                 },
             );
+            let next = bound.locomotion_debounce.update(previous, candidate, dt);
             bound.locomotion = next;
             (entity, previous, next)
         })
@@ -248,7 +281,7 @@ pub(super) fn drive_bound_actor_locomotion(world: &mut World) {
                 "nav actor locomotion {} {} -> {}",
                 entity,
                 previous.label(),
-                next.label()
+                next.label(),
             );
         }
         // Requested every tick, not only on change: `actor_animation`

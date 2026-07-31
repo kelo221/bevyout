@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use bevy::animation::{AnimationTargetId, RepeatAnimation, animated_field};
+use bevy::animation::{AnimatedBy, AnimationTargetId, RepeatAnimation, animated_field};
 use bevy::app::AnimationSystems;
 use bevy::asset::LoadState;
 use bevy::gltf::{Gltf, GltfNode};
@@ -490,6 +490,31 @@ fn bind_gameplay_actors(
     globals: Query<&GlobalTransform>,
 ) {
     for (root, mut runtime) in &mut actors {
+        // A WorldAsset scene can finish (or refresh) its hierarchy after the
+        // animation controller has already bound it. In that case the old
+        // retarget entities are despawned and the controller would keep
+        // sampling clips into dead targets forever, leaving the newly spawned
+        // appearance in its bind/T-pose. Treat a missing bound target as a
+        // recoverable load and bind the current hierarchy again.
+        if runtime.phase == RuntimePhase::Playing
+            && runtime
+                .retarget_targets
+                .iter()
+                .any(|target| globals.get(target.entity).is_err())
+        {
+            runtime.phase = RuntimePhase::Loading;
+            runtime.retarget_targets.clear();
+            runtime.selected_clip = None;
+            runtime.started_clip = None;
+            runtime.previous_clip = None;
+            runtime.current_state = ActorAnimationState::Idle;
+            runtime.transition_elapsed = TRANSITION_SECONDS;
+            runtime.diagnostic = None;
+            info!(
+                "actor-animation rebinding root={} reason=appearance-hierarchy-changed",
+                root
+            );
+        }
         if runtime.phase != RuntimePhase::Loading {
             continue;
         }
@@ -551,6 +576,17 @@ fn bind_gameplay_actors(
             let Ok(global) = globals.get(entity) else {
                 continue;
             };
+            // Gameplay actors use the same manually retargeted clip pack as
+            // the animation zoo, but their appearance hierarchy is spawned
+            // separately from the clip-pack GLB. Register the resolved pack
+            // target and player on each matched appearance node so Bevy's
+            // animation systems know which player owns the target. The
+            // explicit retarget pass below still writes the final pose in
+            // the actor's local space after AnimationSystems.
+            let target_id = set.pack_targets[source_index].id;
+            commands
+                .entity(entity)
+                .insert((target_id, AnimatedBy(root)));
             targets.push(RetargetTarget {
                 entity,
                 source_index,
@@ -620,7 +656,8 @@ fn bind_gameplay_actors(
             AnimationTransitions::new(),
         ));
         info!(
-            "actor-animation ready set={} targets={}",
+            "actor-animation ready root={} set={} targets={}",
+            root,
             runtime.set_id,
             runtime.retarget_targets.len()
         );

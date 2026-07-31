@@ -28,21 +28,28 @@ fn requested(world: &World, entity: Entity) -> Option<ActorAnimationState> {
         .and_then(|intent| intent.requested)
 }
 
+fn settle_locomotion(world: &mut World) {
+    for _ in 0..40 {
+        advance(world, 1.0 / 64.0);
+        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+    }
+}
+
 #[test]
 fn a_moving_bound_actor_requests_a_locomotion_state() {
     let (mut world, entity) = bound_actor_world();
     world
         .get_mut::<AgentKcc>(entity)
         .unwrap()
-        .last_achieved_horizontal_speed = AGENT_DESIRED_SPEED;
-    world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        .last_achieved_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
+    settle_locomotion(&mut world);
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Run));
 
     world
         .get_mut::<AgentKcc>(entity)
         .unwrap()
-        .last_achieved_horizontal_speed = 0.8;
-    world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        .last_achieved_horizontal = Vec2::new(0.8, 0.0);
+    settle_locomotion(&mut world);
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Walk));
 }
 
@@ -62,7 +69,7 @@ fn a_wedged_bound_actor_requests_idle() {
     {
         let mut kcc = world.get_mut::<AgentKcc>(entity).unwrap();
         kcc.last_desired_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
-        kcc.last_achieved_horizontal_speed = 0.0;
+        kcc.last_achieved_horizontal = Vec2::ZERO;
     }
     world.run_system_once(drive_bound_actor_locomotion).unwrap();
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Idle));
@@ -191,13 +198,54 @@ fn a_bound_actor_pivoting_in_place_requests_a_turn_clip() {
         .get_mut::<AgentKcc>(entity)
         .unwrap()
         .last_desired_horizontal = Vec2::new(0.0, AGENT_DESIRED_SPEED);
-    advance(&mut world, 1.0 / 64.0);
-    world.run_system_once(face_bound_actors).unwrap();
-    world.run_system_once(drive_bound_actor_locomotion).unwrap();
+    // A single facing sample is intentionally filtered by the yaw EMA. A
+    // sustained pivot crosses the turn-enter band after a few fixed ticks.
+    for _ in 0..8 {
+        advance(&mut world, 1.0 / 64.0);
+        world.run_system_once(face_bound_actors).unwrap();
+        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+    }
     assert_eq!(
         requested(&world, entity),
         Some(ActorAnimationState::TurnLeft)
     );
+}
+
+/// Regression for the live T-pose: a holding actor whose desired direction
+/// flips every tick receives alternating full-rate turns from the facing
+/// system. The animation request must settle to idle instead of restarting
+/// `turn_left`/`turn_right` one-shots indefinitely.
+#[test]
+fn a_holding_actor_with_a_jittery_direction_settles_to_idle() {
+    let (mut world, entity) = bound_actor_world();
+    let mut turn_requests_after_warmup = 0;
+    for tick in 0..128 {
+        let direction = if tick % 2 == 0 {
+            Vec2::new(0.0, AGENT_DESIRED_SPEED)
+        } else {
+            Vec2::new(0.0, -AGENT_DESIRED_SPEED)
+        };
+        world
+            .get_mut::<AgentKcc>(entity)
+            .unwrap()
+            .last_desired_horizontal = direction;
+        advance(&mut world, 1.0 / 64.0);
+        world.run_system_once(face_bound_actors).unwrap();
+        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        if tick >= 40
+            && matches!(
+                requested(&world, entity),
+                Some(ActorAnimationState::TurnLeft | ActorAnimationState::TurnRight)
+            )
+        {
+            turn_requests_after_warmup += 1;
+        }
+    }
+    assert_eq!(
+        turn_requests_after_warmup, 0,
+        "a holding actor kept requesting one-shot turn clips"
+    );
+    assert_eq!(requested(&world, entity), Some(ActorAnimationState::Idle));
 }
 
 /// **The one-authority invariant** (issue #188 feature 4, verdict
@@ -219,7 +267,7 @@ fn agent_transform_is_bit_identical_with_and_without_clip_playback() {
         {
             let mut kcc = world.get_mut::<AgentKcc>(entity).unwrap();
             kcc.last_desired_horizontal = Vec2::new(1.7, 1.1);
-            kcc.last_achieved_horizontal_speed = 2.02;
+            kcc.last_achieved_horizontal = Vec2::new(2.02, 0.0);
         }
         // A skeleton bone under the actor root, standing in for an
         // animated accumulation root.
@@ -277,7 +325,7 @@ fn an_unbound_tna_capsule_is_untouched_by_the_binding_systems() {
             Transform::from_translation(Vec3::new(4.0, 5.0, 6.0)),
             AgentKcc {
                 last_desired_horizontal: Vec2::new(AGENT_DESIRED_SPEED, 0.0),
-                last_achieved_horizontal_speed: AGENT_DESIRED_SPEED,
+                last_achieved_horizontal: Vec2::new(AGENT_DESIRED_SPEED, 0.0),
                 ..default()
             },
             crate::viewer::actor_animation::ActorAnimationIntent::default(),

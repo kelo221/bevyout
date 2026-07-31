@@ -19,7 +19,7 @@
 //! there. `family_driver_writes_no_transform_translation` below is the
 //! minimal-`App` test that fails if that ever changes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
@@ -28,8 +28,10 @@ use super::families::{
     PackageFamily, Waypoint,
 };
 use super::lifecycle::{LifecyclePhase, PackageLifecycle};
+use super::resolution::{ResolutionContext, ResolvedReference};
 use crate::viewer::actor_animation::policy::ActorAnimationState;
 use crate::viewer::actor_animation::request_actor_animation;
+use crate::viewer::interaction;
 use crate::viewer::nav::agent;
 
 /// Default arrival tolerance (metres) a family treats a waypoint as reached
@@ -327,12 +329,103 @@ pub(crate) struct AiPackagePlugin;
 impl Plugin for AiPackagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PackageInteractionOccupancy>()
+            .init_resource::<super::catalog_cache::PackageCatalogCache>()
             .add_systems(Update, drive_actor_packages);
         // Satisfy nav's bound-actor release contract: when nav releases this
         // actor (the #164 fall guard / `tna despawn`), tear its package down too
         // -- otherwise the controller keeps ticking an agent-less actor forever
         // and its interaction point never frees.
         agent::register_bound_actor_release_hook(app.world_mut(), release_actor_package);
+        // Issue #218: the always-on autonomous package driver. Registered
+        // here (not a separate plugin) because it is the other half of this
+        // plugin's job -- making a package actually run -- just triggered by
+        // a fresh actor life-state instead of a `runpackage` console command.
+        super::autonomous::register(app);
+    }
+}
+
+/// Builds the pure [`ResolutionContext`] snapshot `ai::resolution` resolves
+/// against, from the active cell's placements and every live
+/// `interaction::PlacementRoot` entity (issue #218: moved out of the console
+/// layer, mechanically -- it only reads `World` state -- so `runpackage` and
+/// the autonomous package driver share one implementation).
+///
+/// Two passes because placements know the *authored* layout (every
+/// reference, even ones with no live entity yet) while the live entity query
+/// is what supplies an entity handle for a follow leader/interaction point;
+/// the second pass's `position`/`entity` overwrite the first's for any
+/// reference that is actually spawned, which is the live position that
+/// matters once the actor has moved.
+pub(crate) fn build_resolution_context(
+    world: &mut World,
+    actor_reference_form_id: u32,
+) -> ResolutionContext {
+    let current_cell_form_id = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .map_or(0, |manifest| manifest.0.cell.form_id);
+    let mut references = HashMap::new();
+    let mut bases: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut actor_position = [0.0f32; 3];
+    let mut actor_editor_location = None;
+    let mut linked_reference = None;
+
+    if let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() {
+        for placement in &manifest.0.placements {
+            let resolved = ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position: placement.translation,
+                entity: None,
+                linked_reference: placement.linked_reference_form_id,
+            };
+            if placement.reference_form_id == actor_reference_form_id {
+                actor_position = placement.translation;
+                actor_editor_location = Some(placement.translation);
+                linked_reference = placement.linked_reference_form_id;
+            }
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+            references.insert(placement.reference_form_id, resolved);
+        }
+    }
+
+    let mut query = world.query::<(Entity, &interaction::PlacementRoot, &Transform)>();
+    for (entity, root, transform) in query.iter(world) {
+        let placement = root.placement();
+        let position = transform.translation.to_array();
+        if !references.contains_key(&placement.reference_form_id) {
+            bases
+                .entry(placement.base_form_id)
+                .or_default()
+                .push(placement.reference_form_id);
+        }
+        references.insert(
+            placement.reference_form_id,
+            ResolvedReference {
+                reference_form_id: placement.reference_form_id,
+                base_form_id: placement.base_form_id,
+                cell_form_id: current_cell_form_id,
+                position,
+                entity: Some(entity.to_bits()),
+                linked_reference: placement.linked_reference_form_id,
+            },
+        );
+        if placement.reference_form_id == actor_reference_form_id {
+            actor_position = position;
+        }
+    }
+
+    ResolutionContext {
+        current_cell_form_id,
+        actor_position,
+        actor_editor_location,
+        linked_reference,
+        references,
+        bases,
+        ..ResolutionContext::default()
     }
 }
 

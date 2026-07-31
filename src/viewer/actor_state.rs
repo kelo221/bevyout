@@ -111,7 +111,7 @@ pub(crate) fn load_catalog_for_manifest(
     Ok(Some(catalog))
 }
 
-fn seed_actor_states(
+pub(crate) fn seed_actor_states(
     mut commands: Commands,
     actors: Query<(Entity, &ActorRuntime), Added<ActorRuntime>>,
     catalogs: Res<ActorDefinitionCatalogs>,

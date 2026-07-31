@@ -116,4 +116,3 @@ commands are known.
 - No runtime folder scanning for production dialogue sources.
 - No arbitrary Fallout condition reimplementation in Yarn.
 - No FOSE/NVSE expansion before measured vanilla Fallout 3 coverage.
-

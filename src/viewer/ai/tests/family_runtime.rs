@@ -260,3 +260,42 @@ fn wander_family_routes_within_radius_without_moving_the_actor() {
     // A wandering actor requested no animation on its first roam tick.
     assert_eq!(requested(&world, entity), None);
 }
+
+#[test]
+fn build_resolution_context_preserves_the_actors_linked_patrol_marker() {
+    const ACTOR_REF: u32 = 0x9010;
+    const MARKER_REF: u32 = 0x9020;
+    let mut manifest: crate::vsa::PreparedSceneManifest =
+        ron::de::from_str(include_str!("../../../../features/fixtures/scene.ron"))
+            .expect("synthetic scene fixture should parse");
+    let mut actor = manifest.placements[0].clone();
+    actor.reference_form_id = ACTOR_REF;
+    actor.translation = [1.0, 2.0, 3.0];
+    actor.linked_reference_form_id = Some(MARKER_REF);
+    let mut marker = actor.clone();
+    marker.reference_form_id = MARKER_REF;
+    marker.translation = [5.0, 0.0, 5.0];
+    marker.linked_reference_form_id = None;
+    manifest.placements = vec![actor, marker];
+
+    let mut world = World::new();
+    world.insert_resource(crate::viewer::LoadedSceneManifest(manifest));
+    let context = build_resolution_context(&mut world, ACTOR_REF);
+
+    assert_eq!(context.linked_reference, Some(MARKER_REF));
+    let resolved = crate::viewer::ai::resolution::resolve_location(
+        &crate::viewer::ai::resolution::PackageLocation {
+            location_type: 6,
+            form_id: None,
+            raw_value: 0,
+            radius: 0,
+        },
+        &context,
+    )
+    .expect("near-linked-reference location resolves");
+    assert_eq!(resolved.position, [5.0, 0.0, 5.0]);
+    assert_eq!(
+        resolved.source,
+        crate::viewer::ai::resolution::ResolutionSource::LinkedReference(MARKER_REF)
+    );
+}

@@ -98,8 +98,8 @@ pub(crate) enum PrepareConverter {
 
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ActorAnimationConverter {
-    #[default]
     Disabled,
+    #[default]
     Native,
     Blender,
 }

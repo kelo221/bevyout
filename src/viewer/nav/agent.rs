@@ -18,11 +18,12 @@
 //! Deterministic grounded/collision/stuck decisions live in the pure
 //! `movement_policy` module; this file only feeds it observations.
 //!
-//! Up to [`MAX_TEST_AGENTS`] agents can be spawned at once (bounded local
-//! avoidance is otherwise unobservable with a single test agent): `tna`
-//! subcommands take an optional leading agent index, with every
-//! previously-single-agent command form left unchanged and defaulting to
-//! agent 0.
+//! Any number of agents can be spawned at once (issue #215 removed the
+//! original 4-slot cap -- local avoidance among same-cell test agents was
+//! otherwise unobservable with a single test agent, but the roster itself
+//! is a growable `Vec`, not a fixed budget): `tna` subcommands take an
+//! optional leading agent index, with every previously-single-agent command
+//! form left unchanged and defaulting to agent 0.
 //!
 //! Mid-route door gating (issue #137): a closed door does not always sit at
 //! a #113 link boundary. Real FO3 doors are single-sided NAVM triangles
@@ -278,6 +279,7 @@ use bevy_landmass::{
 use serde_json::json;
 
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
+use crate::viewer::actor::ActorRuntime;
 #[cfg(test)]
 use crate::vsa::PreparedSceneManifest;
 
@@ -548,24 +550,32 @@ fn archipelago_options() -> ArchipelagoOptions<ThreeD> {
     options
 }
 
-/// Bounded multi-agent cap (issue #114 feature 4): small and fixed so local
-/// avoidance among same-cell test agents is observable without an
-/// unbounded actor budget. Every previously single-agent `tna` command form
-/// still works unchanged, addressing agent index 0.
-pub(crate) const MAX_TEST_AGENTS: usize = 4;
+/// `TestNavAgentState`'s initial pre-allocated slot count (issue #215):
+/// purely a small default capacity carried over from the original fixed
+/// roster size, not a cap -- `TestNavAgentState::set` grows the vector on
+/// demand past this for any higher index.
+const INITIAL_AGENT_SLOTS: usize = 4;
 
-/// The ledger/tracing identity for agent `index` (`0..MAX_TEST_AGENTS`):
-/// stable, 1-based so it never collides with the "no id" sentinel `0`,
-/// consistent with wave 3/4's single `TEST_AGENT_ID = 1`. Formatted as a
-/// small decimal in tracing lines (it identifies a spawn slot, not a
-/// FormID), but still handed to `ledger_policy` as a plain `u32`.
+/// Defensive ceiling for the console-addressed debug roster. The roster is
+/// growable well past the old four-agent limit, but it is still a dense `Vec`:
+/// accepting an arbitrary `usize` would let input such as `usize::MAX` request
+/// an impossible allocation. 65,536 simultaneous debug agents is far beyond a
+/// viable scene while keeping worst-case growth small and ledger IDs unique.
+const MAX_AGENT_INDEX: usize = u16::MAX as usize;
+
+/// The ledger/tracing identity for agent `index`: stable, 1-based so it
+/// never collides with the "no id" sentinel `0`, consistent with wave 3/4's
+/// single `TEST_AGENT_ID = 1`. Formatted as a small decimal in tracing lines
+/// (it identifies a spawn slot, not a FormID), but still handed to
+/// `ledger_policy` as a plain `u32`.
 fn agent_ledger_id(index: usize) -> u32 {
+    debug_assert!(index <= MAX_AGENT_INDEX);
     index as u32 + 1
 }
 
 /// Marks a test nav agent this console command family drives. `Entity`
 /// identity plus `TestNavAgentState::index_of` recovers which of the
-/// bounded `MAX_TEST_AGENTS` slots an entity belongs to.
+/// (unbounded, issue #215) roster slots an entity belongs to.
 #[derive(Component)]
 struct TestNavAgentMarker;
 
@@ -705,11 +715,10 @@ struct AgentKcc {
     /// this system already computes instead of recomputing a second,
     /// possibly disagreeing one.
     last_desired_horizontal: Vec2,
-    /// The achieved half of that same pair: the length of the horizontal
-    /// motion the KCC sweep actually delivered this tick, m/s. This -- not
-    /// `last_desired_horizontal` -- is what selects an actor's locomotion
-    /// clip, so a wedged agent stands still rather than striding on the spot.
-    last_achieved_horizontal_speed: f32,
+    /// The achieved half of that same pair: signed horizontal velocity in
+    /// `[x, z]`. The sign lets the locomotion window cancel back-and-forth
+    /// collision jitter instead of mistaking its magnitude for travel.
+    last_achieved_horizontal: Vec2,
 }
 
 /// The previous and latest solved desired velocities landmass has produced
@@ -878,8 +887,9 @@ struct MidRouteDoor {
 
 /// Per-agent bookkeeping that used to live in the single-agent
 /// `TestNavAgentState` (waves 3/4), now a `Component` on each agent entity
-/// so `MAX_TEST_AGENTS` agents can each carry their own door-link/travel/
-/// diagnostics state without a parallel resource-side index.
+/// so any number of agents (issue #215) can each carry their own
+/// door-link/travel/diagnostics state without a parallel resource-side
+/// index.
 #[derive(Component, Default)]
 struct AgentRuntime {
     door_link: door_link::DoorLinkState,
@@ -914,20 +924,27 @@ struct AgentRuntime {
     quarantined_merge_link_kinds: BTreeSet<usize>,
 }
 
-/// The bounded roster of spawned test-agent entities, indexed by agent
-/// index (`0..MAX_TEST_AGENTS`). All other per-agent state
-/// (`AgentRuntime`, `AgentKcc`, door-link/traversal components) lives on
-/// the entity itself; this resource only answers "which entity is agent
-/// N" and its inverse.
+/// The growable roster of spawned test-agent entities, indexed by agent
+/// index. All other per-agent state (`AgentRuntime`, `AgentKcc`,
+/// door-link/traversal components) lives on the entity itself; this
+/// resource only answers "which entity is agent N" and its inverse.
+///
+/// Issue #215: this used to be a fixed `[Option<Entity>; 4]` -- `bind_agent`
+/// and `spawn_agent` rejected any index at or past that size, capping the
+/// whole cell at 4 concurrent agents even though every other per-agent
+/// state already lives on the entity and has no such limit. `entities` is
+/// now a plain `Vec` that grows through [`Self::set`] on demand. A generous
+/// defensive ceiling prevents hostile indices from turning that growth into
+/// an out-of-memory allocation.
 #[derive(Resource)]
 struct TestNavAgentState {
-    entities: [Option<Entity>; MAX_TEST_AGENTS],
+    entities: Vec<Option<Entity>>,
 }
 
 impl Default for TestNavAgentState {
     fn default() -> Self {
         Self {
-            entities: [None; MAX_TEST_AGENTS],
+            entities: vec![None; INITIAL_AGENT_SLOTS],
         }
     }
 }
@@ -944,6 +961,92 @@ impl TestNavAgentState {
             .enumerate()
             .filter_map(|(index, slot)| slot.map(|entity| (index, entity)))
     }
+
+    /// The entity occupying `index`, if any -- `None` both for an empty
+    /// slot and for an index past the current length (an unallocated slot
+    /// reads exactly like an empty one, not an error).
+    fn get(&self, index: usize) -> Option<Entity> {
+        self.entities.get(index).copied().flatten()
+    }
+
+    /// Whether `index` is currently occupied.
+    fn is_occupied(&self, index: usize) -> bool {
+        self.get(index).is_some()
+    }
+
+    /// Sets slot `index` to `value`, growing the vector with `None`s first
+    /// if `index` is past the current length -- the growable replacement
+    /// for the old fixed-size array's direct indexing (issue #215).
+    fn set(&mut self, index: usize, value: Option<Entity>) {
+        debug_assert!(index <= MAX_AGENT_INDEX);
+        if index >= self.entities.len() {
+            self.entities.resize(index + 1, None);
+        }
+        self.entities[index] = value;
+    }
+}
+
+/// Renders one nav agent's identity for the stable `nav agent ...` evidence
+/// lines and the debug HUD (issue #241).
+///
+/// Those lines used to interpolate the [`TestNavAgentState`] roster index and
+/// were skipped *entirely* for an agent that had none -- which is every actor
+/// the autonomous package driver binds through [`bind_agent_entity`], since
+/// that path deliberately takes no console index. Five behaviours rode on the
+/// same gate (door links, the fall guard, collision/stuck telemetry, state-
+/// change logging, the HUD), so an autonomously-routed NPC silently lost all
+/// of them and reported nothing at all -- which is why earlier investigations
+/// into "actors get stuck" (#148) saw zero telemetry for exactly the actors
+/// that were stuck. The roster is now purely console *addressing* (`tna goto
+/// 2`), and the index is only the preferred *rendering* of an identity:
+///
+/// - a console-addressed agent keeps its bare decimal index, so every existing
+///   line, doc and manual script reads exactly as before;
+/// - any other bound actor renders its reference FormID in the `{formid:08x}`
+///   form used everywhere else here -- always 8 hex digits, so it can never be
+///   misread as a roster index;
+/// - a bare `tna` capsule with neither falls back to its `e<entity>` id.
+fn format_agent_id(
+    roster_index: Option<usize>,
+    reference_form_id: Option<u32>,
+    entity: Entity,
+) -> String {
+    match (roster_index, reference_form_id) {
+        (Some(index), _) => index.to_string(),
+        (None, Some(form_id)) => format!("{form_id:08x}"),
+        (None, None) => format!("e{entity}"),
+    }
+}
+
+/// [`format_agent_id`] resolved against a whole world, for the exclusive
+/// (`&mut World`) systems that have no query params to read the two sources
+/// from.
+fn agent_log_id(world: &World, entity: Entity) -> String {
+    format_agent_id(
+        world
+            .get_resource::<TestNavAgentState>()
+            .and_then(|roster| roster.index_of(entity)),
+        world
+            .get::<ActorRuntime>(entity)
+            .map(|actor| actor.reference_form_id),
+        entity,
+    )
+}
+
+/// Every live nav agent, in a deterministic spawn-ish order, for the systems
+/// that used to walk `TestNavAgentState::active()` instead. Sorted rather
+/// than left in archetype order so a tick that drives several agents through
+/// shared state (the door lifecycle) stays reproducible. Keyed on
+/// `Entity::index_u32`, not `Entity`'s own `Ord`: the latter compares
+/// `to_bits`, which bevy documents as opaque and which in practice orders
+/// indices *backwards*.
+fn all_agent_entities(world: &mut World) -> Vec<Entity> {
+    let mut agents: Vec<Entity> = world
+        .query_filtered::<Entity, With<TestNavAgentMarker>>()
+        .iter(world)
+        .collect();
+    agents.sort_unstable_by_key(|entity| entity.index_u32());
+    agents
 }
 
 /// Intercell nav-agent ledger (issue #134): survives cell-swap teardown
@@ -1043,37 +1146,38 @@ fn nav_fall_guard_system(world: &mut World) {
     let Some(min_y) = world.resource::<NavCellFallBounds>().min_y else {
         return;
     };
-    let fallen: Vec<(usize, Entity, f32)> = {
-        let roster = world.resource::<TestNavAgentState>();
-        let mut fallen = Vec::new();
-        for (index, entity) in roster.active() {
-            let Some(transform) = world.get::<Transform>(entity) else {
-                continue;
-            };
-            let agent_y = transform.translation.y;
-            if fall_guard::evaluate_fall(min_y, agent_y) == fall_guard::FallVerdict::FellOutOfWorld
-            {
-                fallen.push((index, entity, agent_y));
-            }
-        }
-        fallen
-    };
+    // Issue #241: every nav agent, not just the roster-indexed ones -- an
+    // autonomously-bound actor falling through missing collision must be
+    // caught by the same guard.
+    let fallen: Vec<(Entity, f32)> = all_agent_entities(world)
+        .into_iter()
+        .filter_map(|entity| {
+            let agent_y = world.get::<Transform>(entity)?.translation.y;
+            (fall_guard::evaluate_fall(min_y, agent_y) == fall_guard::FallVerdict::FellOutOfWorld)
+                .then_some((entity, agent_y))
+        })
+        .collect();
     if fallen.is_empty() {
         return;
     }
     let kill_z = fall_guard::fall_kill_z(min_y);
-    for (index, entity, agent_y) in fallen {
-        warn!("nav agent fell out of world {index} y={agent_y} kill_z={kill_z}");
+    for (entity, agent_y) in fallen {
+        let id = agent_log_id(world, entity);
+        warn!("nav agent fell out of world {id} y={agent_y} kill_z={kill_z}");
         // Issue #188 feature 5: a fallen *bound actor* releases its agent
         // and its locomotion animation state instead of being deleted --
         // this guard exists to end a runaway descent, not to destroy an NPC
         // the world/actor slice owns. A `tna` capsule still despawns whole.
         if world.get::<actor_binding::NavBoundActor>(entity).is_some() {
             release_bound_actor(world, entity);
-        } else if let Ok(entity) = world.get_entity_mut(entity) {
-            entity.despawn();
+        } else if let Ok(entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.despawn();
         }
-        world.resource_mut::<TestNavAgentState>().entities[index] = None;
+        // Only a *console-addressed* agent owns a roster slot to free; an
+        // autonomously-bound one never had one (issue #241).
+        if let Some(index) = world.resource::<TestNavAgentState>().index_of(entity) {
+            world.resource_mut::<TestNavAgentState>().set(index, None);
+        }
     }
 }
 
@@ -2194,19 +2298,20 @@ fn solve_rate_command(
     }
 }
 
-/// Parses an agent index argument, bounded to `0..MAX_TEST_AGENTS`. Every
-/// `tna` subcommand that used to address the single spike agent now takes
-/// this as an optional leading token; omitting it defaults to agent 0
-/// (issue #114 feature 4's back-compat requirement).
+/// Parses an agent index argument. Every `tna` subcommand that used to
+/// address the single spike agent now takes this as an optional leading
+/// token; omitting it defaults to agent 0 (issue #114 feature 4's
+/// back-compat requirement). Issue #215 removed the four-slot cap; the only
+/// remaining ceiling is the defensive dense-allocation bound.
 fn parse_agent_index(value: &str) -> Result<usize, ConsoleError> {
     value
         .parse::<usize>()
         .ok()
-        .filter(|&index| index < MAX_TEST_AGENTS)
+        .filter(|index| *index <= MAX_AGENT_INDEX)
         .ok_or_else(|| {
             ConsoleError::new(
                 "bad_agent_index",
-                format!("agent index must be an integer 0..{}", MAX_TEST_AGENTS - 1),
+                format!("agent index must be an integer 0..={MAX_AGENT_INDEX}"),
             )
         })
 }
@@ -2282,7 +2387,7 @@ fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResul
         }
     };
     ensure_archipelago(world)?;
-    if world.resource::<TestNavAgentState>().entities[index].is_some() {
+    if world.resource::<TestNavAgentState>().is_occupied(index) {
         return Err(ConsoleError::new(
             "already_spawned",
             "a test nav agent is already spawned at this index; use tna despawn first",
@@ -2291,7 +2396,9 @@ fn spawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResul
     let position = player_transform_query(world)
         .ok_or_else(|| ConsoleError::new("player_unavailable", "the FPS player does not exist"))?;
     let agent_entity = spawn_test_agent(world, position);
-    world.resource_mut::<TestNavAgentState>().entities[index] = Some(agent_entity);
+    world
+        .resource_mut::<TestNavAgentState>()
+        .set(index, Some(agent_entity));
     info!(
         "nav agent {index} spawn position=({:.2},{:.2},{:.2})",
         position.x, position.y, position.z
@@ -2458,40 +2565,15 @@ pub(crate) fn set_facing_authority(world: &mut World, entity: Entity, pose_autho
     });
 }
 
-/// `tna bind [<index>] <actor-reference-formid>` (issue #188): gives an
-/// already-projected actor a nav agent in roster slot `index`, so every
-/// existing `tna goto`/`travel`/`status`/`despawn` form drives a real NPC
-/// with a skeleton and locomotion clips instead of a debug capsule. The
-/// capsule path is deliberately not migrated onto this -- it is the harness
-/// every nav wave has relied on -- so both populations coexist in the same
-/// roster.
-fn bind_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
-    let (index, form_id) = match rest {
-        [form_id] => (0, form_id),
-        [index, form_id] => (parse_agent_index(index)?, form_id),
-        _ => {
-            return Err(ConsoleError::new(
-                "bad_arity",
-                "tna bind requires [<index>] <actor-reference-formid>",
-            ));
-        }
-    };
-    let reference_form_id = parse_form_id(form_id)
-        .ok_or_else(|| ConsoleError::new("bad_type", "tna bind actor FormID must be hex"))?;
+/// Core, index-free bind (issue #215's extraction for the autonomous
+/// package driver, #218): gives an already-projected actor entity a nav
+/// agent -- the same component set `bind_agent` (the `tna bind` console
+/// wrapper) inserts, with none of the console index/`ConsoleCommandResult`
+/// layer. Callers that do not need a debug index (the autonomous driver)
+/// call this directly; `bind_agent` calls it too and only adds the roster
+/// bookkeeping on top, so there is exactly one bind implementation.
+pub(crate) fn bind_agent_entity(world: &mut World, entity: Entity) -> Result<(), ConsoleError> {
     ensure_archipelago(world)?;
-    if world.resource::<TestNavAgentState>().entities[index].is_some() {
-        return Err(ConsoleError::new(
-            "already_spawned",
-            "a nav agent already occupies this index; use tna despawn first",
-        ));
-    }
-    let entity =
-        actor_binding::actor_entity_by_reference(world, reference_form_id).ok_or_else(|| {
-            ConsoleError::new(
-                "no_actor",
-                format!("no projected actor with reference FormID {reference_form_id:08x}"),
-            )
-        })?;
     if world.get::<AgentKcc>(entity).is_some() {
         return Err(ConsoleError::new(
             "already_bound",
@@ -2510,7 +2592,47 @@ fn bind_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
             actor_binding::BOUND_ACTOR_CAPSULE_OFFSET_Y,
         ),
     ));
-    world.resource_mut::<TestNavAgentState>().entities[index] = Some(entity);
+    Ok(())
+}
+
+/// `tna bind [<index>] <actor-reference-formid>` (issue #188): gives an
+/// already-projected actor a nav agent in roster slot `index`, so every
+/// existing `tna goto`/`travel`/`status`/`despawn` form drives a real NPC
+/// with a skeleton and locomotion clips instead of a debug capsule. The
+/// capsule path is deliberately not migrated onto this -- it is the harness
+/// every nav wave has relied on -- so both populations coexist in the same
+/// roster. A thin wrapper over [`bind_agent_entity`]: resolves the actor
+/// entity and records the debug index, nothing more.
+fn bind_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (index, form_id) = match rest {
+        [form_id] => (0, form_id),
+        [index, form_id] => (parse_agent_index(index)?, form_id),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna bind requires [<index>] <actor-reference-formid>",
+            ));
+        }
+    };
+    let reference_form_id = parse_form_id(form_id)
+        .ok_or_else(|| ConsoleError::new("bad_type", "tna bind actor FormID must be hex"))?;
+    if world.resource::<TestNavAgentState>().is_occupied(index) {
+        return Err(ConsoleError::new(
+            "already_spawned",
+            "a nav agent already occupies this index; use tna despawn first",
+        ));
+    }
+    let entity =
+        actor_binding::actor_entity_by_reference(world, reference_form_id).ok_or_else(|| {
+            ConsoleError::new(
+                "no_actor",
+                format!("no projected actor with reference FormID {reference_form_id:08x}"),
+            )
+        })?;
+    bind_agent_entity(world, entity)?;
+    world
+        .resource_mut::<TestNavAgentState>()
+        .set(index, Some(entity));
     let position = world
         .get::<Transform>(entity)
         .map_or(Vec3::ZERO, |transform| transform.translation);
@@ -2621,7 +2743,7 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
             ));
         }
     };
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
         return Err(ConsoleError::new(
             "no_agent",
             "no test nav agent is spawned at this index; use tna spawn first",
@@ -2731,6 +2853,24 @@ pub(crate) fn insert_test_archipelago_state(world: &mut World) {
     world.init_resource::<NavArchipelagoState>();
 }
 
+/// Test-only cross-module support (issue #218's autonomous package driver
+/// tests): marks a `NavArchipelagoState` already current for `cell_form_id`
+/// with `archipelago` as its entity, so [`ensure_archipelago`]'s
+/// already-current check short-circuits without a real nav-graph file --
+/// exactly [`bind_agent_entity`]'s own test harness, exposed for other
+/// modules' tests since neither `NavArchipelagoState` nor its fields are
+/// nameable outside this module.
+#[cfg(test)]
+pub(crate) fn mark_test_archipelago_current(
+    world: &mut World,
+    cell_form_id: u32,
+    archipelago: Entity,
+) {
+    let mut state = world.get_resource_or_insert_with(NavArchipelagoState::default);
+    state.cell_form_id = Some(cell_form_id);
+    state.archipelago = Some(archipelago);
+}
+
 fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
     let index = match rest {
         [] => 0,
@@ -2742,7 +2882,7 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
             ));
         }
     };
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
         // Issue #134: a handed-off or frozen agent has no live entity but
         // still exists in the ledger -- report that instead of the "no
         // agent" error `tna spawn` would otherwise imply is needed.
@@ -2836,22 +2976,47 @@ fn resolve_status(
     landmass_graph::map_agent_state(landmass_state)
 }
 
-/// Issue #151: one deterministic line per currently-spawned test nav agent
-/// for the console debug-info HUD, reusing the exact same
-/// status/grounded/stuck/blocked fields `tna status` (`agent_status` above)
-/// reports -- read-only, so this can run from a plain `Update` HUD system
-/// instead of needing the console command's `&mut World`/`ConsoleInvocation`
-/// plumbing.
-pub(crate) fn hud_agent_status_lines(world: &World) -> Vec<String> {
-    let Some(state) = world.get_resource::<TestNavAgentState>() else {
+// ponytail: fixed cap, no console knob. The `tdi` HUD shares a screen corner
+// with the rest of the debug block, and a real cell holds dozens of
+// autonomously-bound actors -- printing them all would bury the player/cell
+// lines above it. Eight lines plus a `+N more` tail is enough to see that the
+// population is being driven at all; `tna status <index>` remains the way to
+// interrogate one specific agent. Raise the constant if that ever stops being
+// true rather than adding a setting for it.
+const HUD_AGENT_LINE_LIMIT: usize = 8;
+
+/// Issue #151: one deterministic line per live nav agent for the console
+/// debug-info HUD, reusing the exact same status/grounded/stuck/blocked
+/// fields `tna status` (`agent_status` above) reports.
+///
+/// Issue #241: driven off the agent component set rather than the console
+/// roster, so an autonomously-bound actor is visible here too -- which also
+/// means it needs `&mut World` (a query, not a resource read) and a
+/// [`HUD_AGENT_LINE_LIMIT`] cap, because a real cell can hold dozens of them.
+pub(crate) fn hud_agent_status_lines(world: &mut World) -> Vec<String> {
+    if world.get_resource::<TestNavAgentState>().is_none() {
         return Vec::new();
-    };
-    state
-        .entities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entity)| {
-            let entity = (*entity)?;
+    }
+    let mut agents = all_agent_entities(world);
+    // Console-addressed agents first, in index order (what the operator is
+    // usually debugging, and the order this HUD block has always printed);
+    // every other bound actor follows in entity order. The cap therefore
+    // truncates the anonymous tail, not the agent someone just spawned.
+    agents.sort_by_key(|&entity| {
+        (
+            world
+                .resource::<TestNavAgentState>()
+                .index_of(entity)
+                .unwrap_or(usize::MAX),
+            entity.index_u32(),
+        )
+    });
+    let hidden = agents.len().saturating_sub(HUD_AGENT_LINE_LIMIT);
+    let mut lines: Vec<String> = agents
+        .into_iter()
+        .take(HUD_AGENT_LINE_LIMIT)
+        .map(|entity| {
+            let id = agent_log_id(world, entity);
             let position = world
                 .get::<GlobalTransform>(entity)
                 .map(|transform| transform.translation())
@@ -2866,15 +3031,19 @@ pub(crate) fn hud_agent_status_lines(world: &World) -> Vec<String> {
                 .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
                 .unwrap_or_default();
             let status = resolve_status(landmass_state, door_link_state);
-            Some(format!(
-                "nav agent {index} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
+            format!(
+                "nav agent {id} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
                 status.as_str(),
                 position.x,
                 position.y,
                 position.z,
-            ))
+            )
         })
-        .collect()
+        .collect();
+    if hidden > 0 {
+        lines.push(format!("nav agent +{hidden} more"));
+    }
+    lines
 }
 
 /// The `link=` suffix for `tna status` (issue #113 feature 5): the active
@@ -2915,7 +3084,7 @@ fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandRes
             ));
         }
     };
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
         return Err(ConsoleError::new(
             "no_agent",
             "no test nav agent is spawned at this index; use tna spawn first",
@@ -2933,7 +3102,7 @@ fn despawn_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandRes
     } else if let Ok(entity) = world.get_entity_mut(agent_entity) {
         entity.despawn();
     }
-    world.resource_mut::<TestNavAgentState>().entities[index] = None;
+    world.resource_mut::<TestNavAgentState>().set(index, None);
     let verb = if bound { "released" } else { "despawned" };
     Ok(ConsoleCommandResult::new(
         json!({ "index": index, "despawned": true, "bound_actor": bound }),
@@ -3149,6 +3318,10 @@ fn apply_agent_physics_movement(
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut agents: AgentPhysicsQuery<'_, '_>,
     targets: Query<&GlobalTransform>,
+    // Issue #241: the diagnostics below identify a non-roster agent by its
+    // bound actor's reference FormID, so they need the actor identity
+    // alongside the roster. Read-only and disjoint from `agents`.
+    actor_identities: Query<&ActorRuntime>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -3181,6 +3354,20 @@ fn apply_agent_physics_movement(
         movement_policy::steps_since_solve(solve_counter.0, solve_rate.0),
         solve_rate.0,
     );
+    // Issue #241: every agent gets telemetry, identified by roster index when
+    // it has one and by bound-actor FormID otherwise -- the diagnostics used
+    // to be gated on `roster.index_of(entity)` and therefore never fired for
+    // an autonomously-bound actor, the exact population #148 is about.
+    let agent_id = |entity: Entity| {
+        format_agent_id(
+            roster.index_of(entity),
+            actor_identities
+                .get(entity)
+                .ok()
+                .map(|actor| actor.reference_form_id),
+            entity,
+        )
+    };
 
     for (entity, mut transform, mut velocity, blend, mut kcc, target, agent_state) in &mut agents {
         let desired_velocity = blend.previous.lerp(blend.latest, solve_blend_fraction);
@@ -3211,7 +3398,7 @@ fn apply_agent_physics_movement(
         // Issue #188: hand the locomotion consumer the very pair this
         // system just computed, rather than letting it derive a second one.
         kcc.last_desired_horizontal = desired_horizontal;
-        kcc.last_achieved_horizontal_speed = Vec2::new(achieved.x, achieved.z).length();
+        kcc.last_achieved_horizontal = Vec2::new(achieved.x, achieved.z);
 
         let outcome =
             movement_policy::decide_collision_outcome(movement_policy::VelocityObservation {
@@ -3220,11 +3407,9 @@ fn apply_agent_physics_movement(
             });
         let was_blocked = kcc.collision_blocked;
         kcc.collision_blocked = matches!(outcome, movement_policy::CollisionOutcome::Blocked);
-        if kcc.collision_blocked
-            && !was_blocked
-            && let Some(index) = roster.index_of(entity)
-        {
-            info!("nav agent collision-blocked {index}");
+        if kcc.collision_blocked && !was_blocked {
+            let id = agent_id(entity);
+            info!("nav agent collision-blocked {id}");
             // Issue #148: "blocked" alone never said *what* blocked, which
             // sent two waves chasing the wrong collider. Report the
             // obstructing contact geometry on the rising edge: the
@@ -3242,7 +3427,7 @@ fn apply_agent_physics_movement(
                 collision_filter,
                 desired_horizontal,
             );
-            info!("nav agent collision-blocked {index} contacts {contacts}");
+            info!("nav agent collision-blocked {id} contacts {contacts}");
         }
 
         // Stuck detection needs a live target distance -- an agent with no
@@ -3366,16 +3551,14 @@ fn apply_agent_physics_movement(
                 if let Some(rebuilt) = rebuilt {
                     commands.entity(entity).insert(rebuilt);
                 }
-                if let Some(index) = roster.index_of(entity) {
-                    info!("nav agent stuck-recovery {index}");
-                }
+                info!("nav agent stuck-recovery {}", agent_id(entity));
             }
             movement_policy::StuckDecision::RecoveryPending => {}
             movement_policy::StuckDecision::Stuck => {
                 let was_stuck = kcc.stuck;
                 kcc.stuck = true;
-                if !was_stuck && let Some(index) = roster.index_of(entity) {
-                    info!("nav agent stuck {index}");
+                if !was_stuck {
+                    info!("nav agent stuck {}", agent_id(entity));
                 }
             }
         }
@@ -3434,10 +3617,26 @@ fn door_traversal_system(
                         runtime.active_link = None;
                         continue;
                     };
-                    let Some(index) = roster.index_of(entity) else {
-                        continue;
-                    };
-                    let agent_id = agent_ledger_id(index);
+                    // Issue #241: the intercell ledger is keyed by console
+                    // index (`agent_ledger_id`), so only a roster agent can
+                    // actually be handed off to another cell -- an
+                    // autonomously-bound actor belongs to the AI/actor slice,
+                    // which respawns it with its own cell. It must still
+                    // *finish* the lifecycle rather than being skipped: the
+                    // old `continue` here left it latched in `Traversing`
+                    // forever with its travel intent intact, i.e. a
+                    // permanently wedged actor -- exactly the failure mode
+                    // this issue is about. Fall through to the same "left at
+                    // the travel door" terminal the missing-metadata branch
+                    // below already used.
+                    let ledger_target = roster.index_of(entity).and_then(|index| {
+                        archipelago_state
+                            .travel_doors
+                            .get(&door_form_id)
+                            .map(|link| {
+                                (agent_ledger_id(index), index, link.destination_door_form_id)
+                            })
+                    });
                     // Issue #113's terminal travel seam: the agent stopped at
                     // the traversed door. Issue #134 owns what happens next:
                     // the agent leaves the active cell entirely, ledgered for
@@ -3445,12 +3644,8 @@ fn door_traversal_system(
                     info!(
                         "nav agent travel reached {door_form_id:08x} -> cell {destination_cell_form_id:08x}"
                     );
-                    let destination_door_form_id = archipelago_state
-                        .travel_doors
-                        .get(&door_form_id)
-                        .map(|link| link.destination_door_form_id);
-                    match destination_door_form_id {
-                        Some(destination_door_form_id) => {
+                    match ledger_target {
+                        Some((agent_id, index, destination_door_form_id)) => {
                             ledger.0.record(ledger_policy::LedgerEntry {
                                 agent_id,
                                 cell_form_id: destination_cell_form_id,
@@ -3463,16 +3658,18 @@ fn door_traversal_system(
                                 "nav agent handoff {agent_id:08x} -> cell {destination_cell_form_id:08x}"
                             );
                             commands.entity(entity).despawn();
-                            roster.entities[index] = None;
+                            roster.set(index, None);
                         }
                         None => {
-                            // Defensive fallback (should not happen:
-                            // `travel_doors` always carries this once
-                            // `TravelReached` fired through it) -- keep
-                            // #113's original behaviour rather than losing
-                            // the agent silently.
+                            // Either no destination-door metadata (defensive:
+                            // `travel_doors` always carries it once
+                            // `TravelReached` fired through it) or a
+                            // non-roster, autonomously-bound actor that has
+                            // no ledger identity -- both end the lifecycle
+                            // here, standing at the door, rather than losing
+                            // or wedging the agent.
                             warn!(
-                                "nav agent handoff {door_form_id:08x}: no destination door metadata; agent left at the travel door"
+                                "nav agent handoff {door_form_id:08x}: not ledgered; agent left at the travel door"
                             );
                             commands.entity(entity).remove::<AgentTarget3d>();
                             runtime.travel_intent = None;
@@ -3556,6 +3753,9 @@ fn merge_traversal_system(
     archipelago_state: Res<NavArchipelagoState>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut agents: MergeTraversalQuery<'_, '_>,
+    // Issue #241: same identity sources as `apply_agent_physics_movement`'s
+    // telemetry, so a non-roster agent's quarantine is reported too.
+    actor_identities: Query<&ActorRuntime>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -3632,17 +3832,25 @@ fn merge_traversal_system(
                     .insert(AgentTarget3d::None)
                     .insert(PendingMergeRepath { target: snapshot });
             }
-            if !was_reported && let Some(index) = roster.index_of(entity) {
+            if !was_reported {
+                let id = format_agent_id(
+                    roster.index_of(entity),
+                    actor_identities
+                        .get(entity)
+                        .ok()
+                        .map(|actor| actor.reference_form_id),
+                    entity,
+                );
                 warn!(
                     "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s",
                     traversal.timeout
                 );
                 info!(
-                    "nav agent portal quarantined {index} link={}",
+                    "nav agent portal quarantined {id} link={}",
                     traversal.link_kind
                 );
-                info!("nav agent collision-blocked {index}");
-                info!("nav agent stuck {index}");
+                info!("nav agent collision-blocked {id}");
+                info!("nav agent stuck {id}");
             }
             continue;
         }
@@ -3787,12 +3995,11 @@ fn agent_family_refuses_doors(world: &World, agent_entity: Entity) -> bool {
 /// both query components and call into `interaction`'s `&mut World`-based
 /// scripted door boundary in the same step.
 fn door_link_system(world: &mut World) {
-    let active: Vec<Entity> = world
-        .resource::<TestNavAgentState>()
-        .active()
-        .map(|(_, entity)| entity)
-        .collect();
-    for agent_entity in active {
+    // Issue #241: driven off the agent component set, not the console roster
+    // -- an autonomously-bound actor whose route crosses a door used to get
+    // no door lifecycle at all (no pause, no open request, no traversal, and
+    // no travel arrival), which is a mid-route wedge with zero diagnostics.
+    for agent_entity in all_agent_entities(world) {
         if world.get_entity(agent_entity).is_err() {
             continue;
         }
@@ -4280,11 +4487,10 @@ fn door_availability_system(world: &mut World) {
                 .door_open
                 .insert(*door_form_id, *open);
         }
-        let active_agents: Vec<Entity> = world
-            .resource::<TestNavAgentState>()
-            .active()
-            .map(|(_, entity)| entity)
-            .collect();
+        // Issue #241: every agent, not just roster-indexed ones -- an
+        // autonomously-bound actor's route must replan on a door open/close
+        // flip exactly like a `tna`-driven one.
+        let active_agents = all_agent_entities(world);
         for agent_entity in &active_agents {
             apply_door_lock_overrides(world, *agent_entity);
             let target =
@@ -4390,11 +4596,7 @@ fn door_availability_system(world: &mut World) {
         // Route refresh: re-insert every active agent's current target so
         // landmass replans with the updated link set. `AgentTarget3d` is not
         // `Clone`; rebuild the equivalent value by matching its variants.
-        let active_agents: Vec<Entity> = world
-            .resource::<TestNavAgentState>()
-            .active()
-            .map(|(_, entity)| entity)
-            .collect();
+        let active_agents = all_agent_entities(world);
         // Issue #155 feature 2: every active agent's lock-cost overrides
         // must reflect this exact flip before landmass's next solve --
         // `NavArchipelagoState::door_usable` was already updated above, so
@@ -4451,7 +4653,7 @@ pub(crate) fn request_travel(
     index: usize,
     door_form_id: u32,
 ) -> Result<(), ConsoleError> {
-    let Some(agent_entity) = world.resource::<TestNavAgentState>().entities[index] else {
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
         return Err(ConsoleError::new(
             "no_agent",
             "no test nav agent is spawned at this index; use tna spawn first",
@@ -4502,23 +4704,37 @@ pub(crate) fn request_travel(
 /// instead. `AgentState::AgentNotOnNavMesh` is the off-navmesh diagnostic
 /// now that physics (#114), not navmesh sampling, is ground authority --
 /// its own stable `nav agent off-navmesh <id>` line.
+///
+/// Issue #241: an agent with no roster index used to be `continue`d over
+/// here, so an autonomously-bound actor never reported `reached`,
+/// `off-navmesh` or `unreachable` -- see [`format_agent_id`].
 fn log_agent_state_changes(
-    mut agents: Query<(Entity, &AgentState, &mut AgentRuntime), With<TestNavAgentMarker>>,
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &mut AgentRuntime,
+            Option<&ActorRuntime>,
+        ),
+        With<TestNavAgentMarker>,
+    >,
     roster: Res<TestNavAgentState>,
 ) {
-    for (entity, agent_state, mut runtime) in &mut agents {
+    for (entity, agent_state, mut runtime, actor) in &mut agents {
         if runtime.last_logged_state == Some(*agent_state) {
             continue;
         }
         runtime.last_logged_state = Some(*agent_state);
-        let Some(index) = roster.index_of(entity) else {
-            continue;
-        };
+        let id = format_agent_id(
+            roster.index_of(entity),
+            actor.map(|actor| actor.reference_form_id),
+            entity,
+        );
         match agent_state {
-            AgentState::ReachedTarget => info!("nav agent {index} reached"),
-            AgentState::AgentNotOnNavMesh => info!("nav agent off-navmesh {index}"),
+            AgentState::ReachedTarget => info!("nav agent {id} reached"),
+            AgentState::AgentNotOnNavMesh => info!("nav agent off-navmesh {id}"),
             AgentState::TargetNotOnNavMesh | AgentState::NoPath => {
-                info!("nav agent {index} unreachable state={agent_state:?}");
+                info!("nav agent {id} unreachable state={agent_state:?}");
             }
             _ => {}
         }
@@ -4527,10 +4743,18 @@ fn log_agent_state_changes(
 
 fn log_path_latency(
     time: Res<Time>,
-    mut agents: Query<(Entity, &AgentState, &mut AgentRuntime), With<TestNavAgentMarker>>,
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &mut AgentRuntime,
+            Option<&ActorRuntime>,
+        ),
+        With<TestNavAgentMarker>,
+    >,
     roster: Res<TestNavAgentState>,
 ) {
-    for (entity, agent_state, mut runtime) in &mut agents {
+    for (entity, agent_state, mut runtime, actor) in &mut agents {
         if runtime.latency_logged {
             continue;
         }
@@ -4538,11 +4762,13 @@ fn log_path_latency(
             continue;
         };
         if matches!(agent_state, AgentState::Moving | AgentState::ReachedTarget) {
-            let Some(index) = roster.index_of(entity) else {
-                continue;
-            };
+            let id = format_agent_id(
+                roster.index_of(entity),
+                actor.map(|actor| actor.reference_form_id),
+                entity,
+            );
             let latency_ms = (time.elapsed_secs() - started_at) * 1000.0;
-            info!("nav agent {index} path latency_ms={latency_ms:.1}");
+            info!("nav agent {id} path latency_ms={latency_ms:.1}");
             runtime.latency_logged = true;
         }
     }
@@ -4698,14 +4924,11 @@ fn restore_ledgered_agents_system(world: &mut World) {
     else {
         return;
     };
-    let has_pending = (0..MAX_TEST_AGENTS).any(|index| {
-        world
-            .resource::<NavAgentLedger>()
-            .0
-            .entry_for(agent_ledger_id(index))
-            .is_some_and(|entry| entry.cell_form_id == current_cell)
-    });
-    if !has_pending {
+    if !world
+        .resource::<NavAgentLedger>()
+        .0
+        .has_entry_for_cell(current_cell)
+    {
         return;
     }
 
@@ -4730,14 +4953,16 @@ fn restore_ledgered_agents_system(world: &mut World) {
     }
 
     for entry in claim.restored {
+        // Guard both the "no id" sentinel and the dense roster's defensive
+        // allocation ceiling before restoring an external ledger value.
         let Some(index) = entry
             .agent_id
             .checked_sub(1)
             .map(|zero_based| zero_based as usize)
-            .filter(|&index| index < MAX_TEST_AGENTS)
+            .filter(|index| *index <= MAX_AGENT_INDEX)
         else {
             warn!(
-                "nav agent restore {:08x} cell {:08x}: agent id outside the bounded roster; entry dropped",
+                "nav agent restore {:08x} cell {:08x}: agent id outside the supported roster; entry dropped",
                 entry.agent_id, entry.cell_form_id
             );
             continue;
@@ -4745,7 +4970,7 @@ fn restore_ledgered_agents_system(world: &mut World) {
         // An entry is only ever ledgered while no entity exists at that
         // index, so a live entity here means restoration already happened
         // this activation (or `tna spawn` ran first) -- do not double-spawn.
-        if world.resource::<TestNavAgentState>().entities[index].is_some() {
+        if world.resource::<TestNavAgentState>().is_occupied(index) {
             continue;
         }
         restore_ledgered_agent(world, index, entry);
@@ -4785,7 +5010,9 @@ fn restore_ledgered_agent(world: &mut World, index: usize, entry: ledger_policy:
             .entity_mut(agent_entity)
             .insert(AgentTarget3d::Point(Vec3::from_array(target)));
     }
-    world.resource_mut::<TestNavAgentState>().entities[index] = Some(agent_entity);
+    world
+        .resource_mut::<TestNavAgentState>()
+        .set(index, Some(agent_entity));
     info!(
         "nav agent restore {:08x} cell {:08x}",
         entry.agent_id, entry.cell_form_id

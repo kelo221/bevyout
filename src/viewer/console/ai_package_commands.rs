@@ -2,30 +2,31 @@
 //! package catalog. Per AGENTS.md's "the human must be able to see what a
 //! wave shipped" rule -- #175 alone is only inspectable as a RON file.
 //!
-//! Both the per-cell actor catalog (`actors.ron`) and the content-set-wide
-//! package catalog (`packages.ron`) are read from disk on demand when this
-//! command runs, the same way `viewer::nav_overlay`'s `tnm` reads
-//! `navgraph.ron` on demand rather than through a resource preloaded at
-//! `view` startup -- unlike `PreparedItemCatalog`, neither prepared catalog
-//! is cell-invariant content-set-wide-and-nothing-else: `actors.ron`
-//! changes on every cell swap, so keeping it as a static `Resource` would
-//! need its own reload-on-swap wiring this issue does not need to build.
+//! The first package query for a loaded manifest reads the per-cell actor
+//! catalog (`actors.ron`) and content-wide package catalog (`packages.ron`)
+//! on demand. The AI-owned cache then reuses them: actor data is keyed by the
+//! manifest path/hash/revision and naturally invalidates on a cell swap,
+//! while package data is keyed by the content fingerprint and survives swaps.
+//! This matters for autonomous startup, which selects packages for the whole
+//! actor population in one exclusive-system batch.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::vsa::{
     ACTOR_CATALOG_REVISION, ActorBlueprint, ActorCatalogEntry, PACKAGE_CATALOG_REVISION,
     PreparedActorCatalog, PreparedPackageCatalog, PreparedPackageEntry,
 };
 
+use super::super::ai::catalog_cache::PackageCatalogCache;
 use super::super::ai::families::{self, PackageFamily, Waypoint};
 use super::super::ai::family_runtime::{
     ActorPackageController, DEFAULT_ARRIVAL_TOLERANCE, PackageInteractionOccupancy,
+    build_resolution_context,
 };
 use super::super::ai::lifecycle::{LifecyclePhase, PackageLifecycle};
 use super::super::ai::resolution::{
-    self, PackageLocation, PackageTarget, ResolutionContext, ResolvedPoint, ResolvedReference,
+    self, PackageLocation, PackageTarget, ResolutionContext, ResolvedPoint,
 };
 use super::super::ai::selection::{
     self, CandidateOutcome, GameInstant, NoConditionFunctions, PackageCandidate, PackageSchedule,
@@ -46,6 +47,19 @@ const FOLLOW_MIN_INNER: f32 = 1.0;
 const DEFAULT_WANDER_RADIUS: f32 = 8.0;
 /// Seconds a sandbox actor idles at each reached roam point.
 const DEFAULT_WANDER_IDLE_SECONDS: f32 = 3.0;
+
+/// Builds a collision-free cache key from constrained and unconstrained
+/// catalog identity fields. Length-prefixing each UTF-8 component means a
+/// path or future fingerprint containing a separator cannot alias another
+/// tuple.
+pub(super) fn catalog_cache_key(parts: &[&str]) -> String {
+    let mut encoded = Vec::new();
+    for part in parts {
+        encoded.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        encoded.extend_from_slice(part.as_bytes());
+    }
+    crate::viewer::fingerprint(&encoded)
+}
 
 pub(super) struct AiPackageCommandProvider;
 
@@ -116,7 +130,7 @@ fn target_type_label(target_type: i32) -> &'static str {
 /// Reads and validates the active cell's per-cell actor catalog
 /// (`actors.ron`), mirroring `viewer::app::run_view`'s item-catalog
 /// validation (revision pinned to this build's compiled constant).
-fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleError> {
+fn load_actor_catalog(world: &mut World) -> Result<Arc<PreparedActorCatalog>, ConsoleError> {
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(|| {
@@ -130,12 +144,39 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
     })?;
     let path = PathBuf::from(&manifest.0.asset_root)
         .join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let path_string = path.display().to_string();
+    let key = catalog_cache_key(&[
+        &path_string,
+        &manifest.0.source_fingerprint,
+        manifest.0.actor_catalog_hash.as_deref().unwrap_or_default(),
+        manifest
+            .0
+            .actor_catalog_revision
+            .as_deref()
+            .unwrap_or_default(),
+    ]);
+    if let Some(catalog) = world
+        .get_resource::<PackageCatalogCache>()
+        .and_then(|cache| cache.actor.as_ref())
+        .filter(|(cached_key, _)| cached_key == &key)
+        .map(|(_, catalog)| Arc::clone(catalog))
+    {
+        return Ok(catalog);
+    }
     let text = std::fs::read_to_string(&path).map_err(|error| {
         ConsoleError::new(
             "catalog_unreadable",
             format!("reading actor catalog {}: {error}", path.display()),
         )
     })?;
+    if let Some(expected_hash) = manifest.0.actor_catalog_hash.as_deref()
+        && crate::viewer::fingerprint(text.as_bytes()) != expected_hash
+    {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "actor catalog hash does not match the active scene manifest; run `prepare` again",
+        ));
+    }
     let catalog: PreparedActorCatalog = ron::de::from_str(&text).map_err(|error| {
         ConsoleError::new("catalog_invalid", format!("invalid actor catalog: {error}"))
     })?;
@@ -148,6 +189,16 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
             ),
         ));
     }
+    if catalog.source_fingerprint != manifest.0.source_fingerprint {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "actor catalog fingerprint does not match the active scene; run `prepare` again",
+        ));
+    }
+    let catalog = Arc::new(catalog);
+    let mut cache = world.get_resource_or_insert_with(PackageCatalogCache::default);
+    cache.actor = Some((key, Arc::clone(&catalog)));
+    cache.actor_disk_loads += 1;
     Ok(catalog)
 }
 
@@ -157,7 +208,7 @@ fn load_actor_catalog(world: &World) -> Result<PreparedActorCatalog, ConsoleErro
 /// `package_catalog::write_package_catalog` uses -- so there is no
 /// manifest-carried pointer to follow (see that module's `write_package_catalog`
 /// doc comment).
-fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, ConsoleError> {
+fn load_package_catalog(world: &mut World) -> Result<Arc<PreparedPackageCatalog>, ConsoleError> {
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(|| {
@@ -167,6 +218,16 @@ fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, Console
         .join(&manifest.0.source_fingerprint)
         .join("packages.ron");
     let path = PathBuf::from(&manifest.0.asset_root).join(&relative);
+    let path_string = path.display().to_string();
+    let key = catalog_cache_key(&[&path_string, &manifest.0.source_fingerprint]);
+    if let Some(catalog) = world
+        .get_resource::<PackageCatalogCache>()
+        .and_then(|cache| cache.packages.as_ref())
+        .filter(|(cached_key, _)| cached_key == &key)
+        .map(|(_, catalog)| Arc::clone(catalog))
+    {
+        return Ok(catalog);
+    }
     let text = std::fs::read_to_string(&path).map_err(|error| {
         ConsoleError::new(
             "catalog_unreadable",
@@ -188,6 +249,16 @@ fn load_package_catalog(world: &World) -> Result<PreparedPackageCatalog, Console
             ),
         ));
     }
+    if catalog.source_fingerprint != manifest.0.source_fingerprint {
+        return Err(ConsoleError::new(
+            "stale_catalog",
+            "package catalog fingerprint does not match the active scene; run `prepare` again",
+        ));
+    }
+    let catalog = Arc::new(catalog);
+    let mut cache = world.get_resource_or_insert_with(PackageCatalogCache::default);
+    cache.packages = Some((key, Arc::clone(&catalog)));
+    cache.package_disk_loads += 1;
     Ok(catalog)
 }
 
@@ -447,7 +518,7 @@ pub(super) fn run_package(
     }
     let reference_form_id = placement.reference_form_id;
     match action {
-        "start" => start_package(world, entity, reference_form_id),
+        "start" => start_package(world, entity, reference_form_id, GameInstant::default()),
         "status" => status_package(world, entity, reference_form_id),
         "stop" => stop_package(world, entity, reference_form_id),
         other => Err(ConsoleError::new(
@@ -459,10 +530,16 @@ pub(super) fn run_package(
 
 /// Selects+resolves the actor's active package and attaches a running family
 /// driver. The actor must already own a nav agent (`tna bind`).
-fn start_package(
+///
+/// `pub(crate)` and parameterized by `instant` (issue #218): the console
+/// `runpackage` command (which hardcodes `GameInstant::default()`, noon) and
+/// the autonomous package driver both call this exact function, so there is
+/// one select-resolve-start implementation, not two that could drift.
+pub(crate) fn start_package(
     world: &mut World,
     entity: Entity,
     reference_form_id: u32,
+    instant: GameInstant,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     if !agent::is_nav_bound(world, entity) {
         return Err(ConsoleError::new(
@@ -496,12 +573,14 @@ fn start_package(
         })
         .collect();
     let candidates: Vec<PackageCandidate> = candidate_entries.iter().map(to_candidate).collect();
-    let report =
-        selection::select_package(&candidates, GameInstant::default(), &NoConditionFunctions);
+    let report = selection::select_package(&candidates, instant, &NoConditionFunctions);
     let selected = report.selected.ok_or_else(|| {
         ConsoleError::new(
             "no_selection",
-            format!("actor {reference_form_id:08x} has no package selected at noon (schedule/condition gap)"),
+            format!(
+                "actor {reference_form_id:08x} has no package selected at hour {:.1} (schedule/condition gap)",
+                instant.hour
+            ),
         )
     })?;
     let entry = candidate_entries
@@ -803,52 +882,43 @@ fn stop_package(
     ))
 }
 
+/// Builds the `ai::resolution` mirror types (`PackageLocation`/
+/// `PackageTarget`) from a prepared package entry's raw `PLDT`/`PTDT`
+/// slots, for `resolution::resolve_family_point` (issue #218: that function
+/// moved to `ai::resolution` and no longer knows about `PreparedPackageEntry`
+/// -- keeping it decoupled from `vsa` types is what lets it compile verbatim
+/// into `tests/features.rs`).
+fn location_target_mirrors(
+    entry: &PreparedPackageEntry,
+) -> (Option<PackageLocation>, Option<PackageTarget>) {
+    let location = entry.location.map(|location| PackageLocation {
+        location_type: location.location_type,
+        form_id: location.form_id,
+        raw_value: location.raw_value,
+        radius: location.radius,
+    });
+    let target = entry.target.map(|target| PackageTarget {
+        target_type: target.target_type,
+        form_id: target.form_id,
+        raw_value: target.raw_value,
+        count_or_distance: target.count_or_distance,
+    });
+    (location, target)
+}
+
 /// Resolves a package's location/target into a world point for a family,
-/// preferring one slot but falling back to the other.
+/// preferring one slot but falling back to the other. A thin wrapper over
+/// `resolution::resolve_family_point` (issue #218: moved there so `runpackage`
+/// and the autonomous package driver share one implementation), converting
+/// its pure `ResolutionDiagnostic` into this layer's `ConsoleError`.
 fn resolve_family_point(
     entry: &PreparedPackageEntry,
     context: &ResolutionContext,
     prefer_target: bool,
 ) -> Result<ResolvedPoint, ConsoleError> {
-    let location = entry.location.map(|location| {
-        resolution::resolve_location(
-            &PackageLocation {
-                location_type: location.location_type,
-                form_id: location.form_id,
-                raw_value: location.raw_value,
-                radius: location.radius,
-            },
-            context,
-        )
-    });
-    let target = entry.target.map(|target| {
-        resolution::resolve_target(
-            &PackageTarget {
-                target_type: target.target_type,
-                form_id: target.form_id,
-                raw_value: target.raw_value,
-                count_or_distance: target.count_or_distance,
-            },
-            context,
-        )
-    });
-    let (first, second) = if prefer_target {
-        (target, location)
-    } else {
-        (location, target)
-    };
-    if let Some(Ok(point)) = &first {
-        return Ok(*point);
-    }
-    if let Some(Ok(point)) = &second {
-        return Ok(*point);
-    }
-    // Neither resolved: surface the preferred slot's diagnostic.
-    let diagnostic = first.or(second).and_then(Result::err).map_or_else(
-        || "package has no resolvable location or target".to_string(),
-        |diagnostic| diagnostic.message,
-    );
-    Err(ConsoleError::new("unresolved_point", diagnostic))
+    let (location, target) = location_target_mirrors(entry);
+    resolution::resolve_family_point(location, target, context, prefer_target)
+        .map_err(|diagnostic| ConsoleError::new("unresolved_point", diagnostic.message))
 }
 
 /// Resolves an eat/sleep package's furniture candidates: the target slot (the
@@ -1138,93 +1208,9 @@ fn persisted_checkpoint(
         })
 }
 
-/// Snapshots the runtime into the #195/#213 resolution context: every
-/// visible reference's position and entity, indexed by base for
-/// nearest-of-base resolution, plus the querying actor's own position,
-/// authored editor location, and linked reference.
-///
-/// Two sources are folded together, manifest first so a live entity's own
-/// pass always wins ties:
-/// - `LoadedSceneManifest.0.placements` -- *every* placement prepare wrote,
-///   including asset-less patrol markers (`XMarker`/`IdleMarker`). Those
-///   markers are skipped at spawn (`scene::spawn_cell_content`, no GLB) and
-///   so are never a `PlacementRoot` entity; the manifest is the only place
-///   they are visible at all. Editor location and linked reference are also
-///   read from here -- the actor's own *authored* point, not wherever it
-///   has since walked to.
-/// - Live `PlacementRoot`+`Transform` entities -- every reference actually
-///   spawned, using its current (possibly moved) position. These override
-///   the manifest-only entry for the same reference FormID, so a walking
-///   actor's own live position wins over its stale authored one.
-fn build_resolution_context(world: &mut World, actor_reference_form_id: u32) -> ResolutionContext {
-    let current_cell_form_id = world
-        .get_resource::<crate::viewer::LoadedSceneManifest>()
-        .map_or(0, |manifest| manifest.0.cell.form_id);
-    let mut references = HashMap::new();
-    let mut bases: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut actor_position = [0.0f32; 3];
-    let mut actor_editor_location = None;
-    let mut linked_reference = None;
-
-    if let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() {
-        for placement in &manifest.0.placements {
-            let resolved = ResolvedReference {
-                reference_form_id: placement.reference_form_id,
-                base_form_id: placement.base_form_id,
-                cell_form_id: current_cell_form_id,
-                position: placement.translation,
-                entity: None,
-                linked_reference: placement.linked_reference_form_id,
-            };
-            if placement.reference_form_id == actor_reference_form_id {
-                actor_position = placement.translation;
-                actor_editor_location = Some(placement.translation);
-                linked_reference = placement.linked_reference_form_id;
-            }
-            bases
-                .entry(placement.base_form_id)
-                .or_default()
-                .push(placement.reference_form_id);
-            references.insert(placement.reference_form_id, resolved);
-        }
-    }
-
-    let mut query = world.query::<(Entity, &interaction::PlacementRoot, &Transform)>();
-    for (entity, root, transform) in query.iter(world) {
-        let placement = root.placement();
-        let position = transform.translation.to_array();
-        if !references.contains_key(&placement.reference_form_id) {
-            bases
-                .entry(placement.base_form_id)
-                .or_default()
-                .push(placement.reference_form_id);
-        }
-        references.insert(
-            placement.reference_form_id,
-            ResolvedReference {
-                reference_form_id: placement.reference_form_id,
-                base_form_id: placement.base_form_id,
-                cell_form_id: current_cell_form_id,
-                position,
-                entity: Some(entity.to_bits()),
-                linked_reference: placement.linked_reference_form_id,
-            },
-        );
-        if placement.reference_form_id == actor_reference_form_id {
-            actor_position = position;
-        }
-    }
-
-    ResolutionContext {
-        current_cell_form_id,
-        actor_position,
-        actor_editor_location,
-        linked_reference,
-        references,
-        bases,
-        ..ResolutionContext::default()
-    }
-}
+// `build_resolution_context` moved to `ai::family_runtime` (issue #218): it
+// only reads `World` state, so both `runpackage` (imported above) and the
+// autonomous package driver share one implementation.
 
 fn package_json(index: usize, entry: &PreparedPackageEntry) -> Value {
     json!({

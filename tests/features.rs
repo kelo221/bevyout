@@ -466,6 +466,12 @@ mod ai_selection;
 #[path = "../src/viewer/ai/families.rs"]
 #[allow(dead_code, unused_imports)]
 mod ai_families;
+// The autonomous package driver's pure eligibility gate (issue #218):
+// std-only, no Bevy, so the same "an alive actor is selected for auto-bind"
+// rule the Bevy system consults is what this cucumber scenario exercises.
+#[path = "../src/viewer/ai/autonomous_gate.rs"]
+#[allow(dead_code, unused_imports)]
+mod autonomous_gate;
 
 use assets::AssetConversion;
 use bevyout_core::actor;
@@ -1021,6 +1027,12 @@ struct BevyoutWorld {
     script_extracted_owner: Option<attachments::ExtractedOwnerScripts>,
     script_inventory_report: Option<report_schema::CompatibilityReport>,
     script_inventory_renders: Vec<String>,
+    // -- autonomous_actors.feature (issues #218/#224) --
+    autonomous_life_state_alive: bool,
+    autonomous_already_nav_bound: bool,
+    autonomous_already_has_controller: bool,
+    autonomous_eligible: Option<bool>,
+    nav_locomotion_changes_after_warmup: u32,
 
     // -- dialogue.feature (standalone Yarn dialogue waves) --
     dialogue_sources: Vec<dialogue::DialogueSource>,
@@ -13907,6 +13919,134 @@ async fn then_script_inventory_summary_has_totals(world: &mut BevyoutWorld) {
     assert!(world.script_inventory_report.as_ref().unwrap().summary().contains(
         "scripts: top-level=1 embedded=1 attachments=1 compiled-bytes=4 variables=2 references=1 diagnostics=0"
     ));
+}
+// =======================================================================
+// -- autonomous_actors.feature (issues #218/#224) --
+// Merge-seam addition: appended at the end of the file per
+// docs/plans/README.md's traceability convention.
+// =======================================================================
+
+#[given(regex = r#"^an actor with life state "(alive|dead)"$"#)]
+async fn given_actor_life_state(world: &mut BevyoutWorld, state: String) {
+    world.autonomous_life_state_alive = state == "alive";
+    world.autonomous_already_nav_bound = false;
+    world.autonomous_already_has_controller = false;
+    world.autonomous_eligible = None;
+}
+
+#[given("the actor is already nav-bound")]
+async fn given_actor_already_nav_bound(world: &mut BevyoutWorld) {
+    world.autonomous_already_nav_bound = true;
+}
+
+#[given("the actor already has a running package controller")]
+async fn given_actor_already_has_controller(world: &mut BevyoutWorld) {
+    world.autonomous_already_has_controller = true;
+}
+
+#[given(regex = r"^package type (\d+) dispatches to the Patrol family$")]
+async fn given_package_type_dispatches_to_patrol(world: &mut BevyoutWorld, package_type: u8) {
+    let _ = world; // no World state to record; this is a standalone assertion.
+    assert_eq!(
+        ai_families::PackageFamily::from_package_type(package_type),
+        Some(ai_families::PackageFamily::Patrol),
+        "package type {package_type} must dispatch to the Patrol family"
+    );
+}
+
+#[when("the autonomous package driver evaluates the actor")]
+async fn when_autonomous_driver_evaluates(world: &mut BevyoutWorld) {
+    world.autonomous_eligible = Some(autonomous_gate::eligible_for_autonomous_start(
+        world.autonomous_life_state_alive,
+        world.autonomous_already_nav_bound,
+        world.autonomous_already_has_controller,
+    ));
+}
+
+#[then("the actor is selected for autonomous bind and start")]
+async fn then_actor_is_selected(world: &mut BevyoutWorld) {
+    assert_eq!(world.autonomous_eligible, Some(true));
+}
+
+#[then("the actor is not selected for autonomous bind and start")]
+async fn then_actor_is_not_selected(world: &mut BevyoutWorld) {
+    assert_eq!(world.autonomous_eligible, Some(false));
+}
+
+#[when(
+    regex = r"^its achieved horizontal velocity alternates direction at full route speed for (\d+) ticks, smoothed before classification$"
+)]
+async fn when_locomotion_alternates_smoothed(world: &mut BevyoutWorld, ticks: u32) {
+    const WARMUP_TICKS: u32 = 32;
+    let mut window = locomotion::VelocityWindow::default();
+    world.nav_locomotion_changes_after_warmup = 0;
+    for tick in 0..ticks {
+        let raw = if tick % 2 == 0 {
+            [locomotion::ROUTE_SPEED_METRES_PER_SECOND, 0.0]
+        } else {
+            [-locomotion::ROUTE_SPEED_METRES_PER_SECOND, 0.0]
+        };
+        let net_velocity = window.push(raw);
+        let previous = world.nav_locomotion_state;
+        let achieved_horizontal_speed =
+            if window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+                (net_velocity[0] * net_velocity[0] + net_velocity[1] * net_velocity[1]).sqrt()
+            } else {
+                0.0
+            };
+        let next = step_locomotion(
+            world,
+            locomotion::LocomotionObservation {
+                achieved_horizontal_speed,
+                yaw_rate: 0.0,
+            },
+        );
+        if tick >= WARMUP_TICKS && next != previous {
+            world.nav_locomotion_changes_after_warmup += 1;
+        }
+    }
+}
+
+#[when(
+    regex = r"^its achieved yaw rate alternates sign at full facing rate for (\d+) ticks, smoothed before classification$"
+)]
+async fn when_locomotion_yaw_alternates_smoothed(world: &mut BevyoutWorld, ticks: u32) {
+    const WARMUP_TICKS: u32 = 32;
+    let mut window = locomotion::YawRateWindow::default();
+    world.nav_locomotion_changes_after_warmup = 0;
+    for tick in 0..ticks {
+        let raw = if tick % 2 == 0 {
+            std::f32::consts::PI
+        } else {
+            -std::f32::consts::PI
+        };
+        let net_yaw_rate = window.push(raw);
+        let previous = world.nav_locomotion_state;
+        let yaw_rate = if window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+            net_yaw_rate
+        } else {
+            0.0
+        };
+        let next = step_locomotion(
+            world,
+            locomotion::LocomotionObservation {
+                achieved_horizontal_speed: 0.0,
+                yaw_rate,
+            },
+        );
+        if tick >= WARMUP_TICKS && next != previous {
+            world.nav_locomotion_changes_after_warmup += 1;
+        }
+    }
+}
+
+#[then("its locomotion state is idle after the smoothing warms up")]
+async fn then_locomotion_is_idle_after_warmup(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_locomotion_state,
+        locomotion::LocomotionState::Idle
+    );
+    assert_eq!(world.nav_locomotion_changes_after_warmup, 0);
 }
 
 // -- dialogue.feature review hardening --

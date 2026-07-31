@@ -24,6 +24,54 @@ fn harness_world() -> World {
     world
 }
 
+#[test]
+fn agent_index_must_fit_the_unique_u32_ledger_identity() {
+    let largest_valid = MAX_AGENT_INDEX;
+    assert_eq!(
+        parse_agent_index(&largest_valid.to_string()),
+        Ok(largest_valid)
+    );
+
+    let first_unrepresentable = MAX_AGENT_INDEX + 1;
+    let error = parse_agent_index(&first_unrepresentable.to_string()).unwrap_err();
+    assert_eq!(error.code, "bad_agent_index");
+}
+
+/// Regression for #241: autonomous binding deliberately takes no console
+/// roster slot, but the fall guard is gameplay behavior and must cover the
+/// complete agent component set.
+#[test]
+fn fall_guard_releases_a_bound_actor_without_a_debug_roster_slot() {
+    let mut world = World::new();
+    world.init_resource::<TestNavAgentState>();
+    world.insert_resource(NavCellFallBounds { min_y: Some(0.0) });
+    let actor = world
+        .spawn((
+            TestNavAgentMarker,
+            actor_binding::NavBoundActor::default(),
+            AgentKcc::default(),
+            Transform::from_xyz(0.0, -100.0, 0.0),
+        ))
+        .id();
+
+    assert!(
+        world
+            .resource::<TestNavAgentState>()
+            .index_of(actor)
+            .is_none()
+    );
+    nav_fall_guard_system(&mut world);
+
+    assert!(
+        world.get_entity(actor).is_ok(),
+        "the actor itself remains owned by the world slice"
+    );
+    assert!(
+        !is_nav_bound(&world, actor),
+        "the runaway nav agent was released"
+    );
+}
+
 /// **Wander-no-open-doors (#198), reproduced through the nav-owned flag.**
 /// The door-open seam (`request_door_open`) refuses to open doors for an
 /// actor whose active package must not (Sandbox/Wander) purely by reading the
@@ -2489,11 +2537,10 @@ fn active_link_description_reports_merge_door_and_travel_reached() {
     );
 }
 
-/// Issue #114 feature 4: `tna spawn`'s index is a bounded, independent
-/// slot -- occupying index 0 does not block index 1, and an index at or
-/// past `MAX_TEST_AGENTS` is rejected before anything else runs.
+/// Issue #215: debug indices are independent and grow beyond the original
+/// four slots, while the defensive dense-allocation ceiling is enforced.
 #[test]
-fn spawn_indices_are_independent_slots_bounded_by_the_cap() {
+fn spawn_indices_are_independent_and_grow_past_the_old_cap() {
     let mut world = harness_world();
     // Pre-seed the archipelago as already current so `ensure_archipelago`
     // (which `spawn_agent` always calls first, same as wave 3/4) returns
@@ -2516,7 +2563,10 @@ fn spawn_indices_are_independent_slots_bounded_by_the_cap() {
     let error = tna_command(&mut world, &invocation(&["spawn", "1"])).unwrap_err();
     assert_eq!(error.code, "player_unavailable");
 
-    let out_of_range = MAX_TEST_AGENTS.to_string();
+    let error = tna_command(&mut world, &invocation(&["spawn", "41"])).unwrap_err();
+    assert_eq!(error.code, "player_unavailable");
+
+    let out_of_range = (MAX_AGENT_INDEX + 1).to_string();
     let error = tna_command(&mut world, &invocation(&["spawn", &out_of_range])).unwrap_err();
     assert_eq!(error.code, "bad_agent_index");
 }
