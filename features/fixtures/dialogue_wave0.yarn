@@ -1,0 +1,9 @@
+title: Start
+---
+<<if bo_smoke()>>
+Guide: Welcome to the Bevyout dialogue smoke.
+<<endif>>
+<<bo_smoke_command>>
+-> Continue
+-> Leave
+===

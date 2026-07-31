@@ -300,6 +300,9 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         app.insert_resource(world_items::NextRuntimeItemId(save.next_runtime_item_id));
         app.insert_resource(world::ActiveSaveState(save.world));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
+        app.world_mut()
+            .resource_mut::<dialogue::DialogueRuntime>()
+            .restore_snapshot(save.dialogue);
     }
     let image_space_emission = image_space_emission_multiplier(manifest.cell.image_space.as_ref());
     app.insert_resource(crate::viewer::LoadedSceneManifest(manifest))

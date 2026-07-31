@@ -116,6 +116,17 @@ mod record;
 #[allow(dead_code, unused_imports)]
 mod attachments;
 
+// Standalone Yarn dialogue preparation is dependency-light and is included
+// verbatim so the executable specification drives the same parser/catalog
+// code as the production prepare path.
+#[path = "../src/vsa/dialogue/mod.rs"]
+#[allow(dead_code, unused_imports)]
+mod dialogue;
+
+#[path = "../src/viewer/dialogue/host.rs"]
+#[allow(dead_code, unused_imports)]
+mod dialogue_host;
+
 #[path = "../src/vsa/report/schema.rs"]
 #[allow(dead_code, unused_imports)]
 mod report_schema;
@@ -1010,6 +1021,305 @@ struct BevyoutWorld {
     script_extracted_owner: Option<attachments::ExtractedOwnerScripts>,
     script_inventory_report: Option<report_schema::CompatibilityReport>,
     script_inventory_renders: Vec<String>,
+
+    // -- dialogue.feature (standalone Yarn dialogue waves) --
+    dialogue_sources: Vec<dialogue::DialogueSource>,
+    dialogue_catalog: Option<dialogue::PreparedDialogueCatalog>,
+    dialogue_catalog_again: Option<dialogue::PreparedDialogueCatalog>,
+    dialogue_bundle: Option<bevyout_core::dialogue::PreparedDialogueBundleRef>,
+    dialogue_host_command: Option<dialogue_host::HostCommand>,
+    dialogue_snapshot: bevyout_core::dialogue::DialogueSnapshot,
+    dialogue_policy: bevyout_core::dialogue::DialoguePresentationPolicy,
+    dialogue_inventory: Option<dialogue::FalloutDialogueInventory>,
+    dialogue_generated: Option<(
+        dialogue::DialogueSource,
+        Vec<dialogue::DialogueSourceMapping>,
+    )>,
+    dialogue_coverage: Option<bevyout_core::dialogue::DialogueCoverageReport>,
+}
+
+fn synthetic_dialogue_source() -> dialogue::DialogueSource {
+    dialogue::DialogueSource {
+        relative_path: "authored/guard.yarn".into(),
+        kind: dialogue::DialogueSourceKind::Authored,
+        content: "title: Start\n---\nGuard: Welcome.\n-> Continue -> Checkpoint\n===\n\ntitle: Checkpoint\n---\nGuard: The gate opens.\n<<bo_run_action open_gate>>\n===\n".into(),
+    }
+}
+
+#[given("a synthetic Yarn dialogue source")]
+async fn given_synthetic_dialogue_source(world: &mut BevyoutWorld) {
+    world.dialogue_sources = vec![synthetic_dialogue_source()];
+}
+
+#[when("the dialogue source is parsed")]
+async fn when_dialogue_source_is_parsed(world: &mut BevyoutWorld) {
+    world.dialogue_catalog = Some(dialogue::prepare_catalog(world.dialogue_sources.clone()));
+}
+
+#[then("the dialogue source has a Start node")]
+async fn then_dialogue_source_has_start_node(world: &mut BevyoutWorld) {
+    let catalog = world.dialogue_catalog.as_ref().expect("dialogue catalog");
+    assert!(
+        catalog
+            .conversation(&bevyout_core::dialogue::DialogueKey::new("Start"))
+            .is_some_and(|conversation| conversation.nodes.contains_key("Start"))
+    );
+}
+
+#[when("dialogue preparation is run twice")]
+async fn when_dialogue_preparation_is_run_twice(world: &mut BevyoutWorld) {
+    let first = dialogue::prepare_catalog(world.dialogue_sources.clone());
+    let second = dialogue::prepare_catalog(world.dialogue_sources.clone());
+    world.dialogue_catalog = Some(first);
+    world.dialogue_catalog_again = Some(second);
+    let root =
+        std::env::temp_dir().join(format!("bevyout-dialogue-feature-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let output = dialogue::prepare_dialogue_bundle(&root, world.dialogue_sources.clone())
+        .expect("synthetic dialogue bundle prepares");
+    world.dialogue_bundle = output.bundle;
+    assert!(root.join("dialogue/authored/guard.yarn").is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[then("the dialogue preparation fingerprints match")]
+async fn then_dialogue_preparation_fingerprints_match(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.dialogue_catalog.as_ref().unwrap().bundle_hash(),
+        world.dialogue_catalog_again.as_ref().unwrap().bundle_hash()
+    );
+}
+
+#[when("the dialogue catalog is prepared for runtime")]
+async fn when_dialogue_catalog_is_prepared_for_runtime(world: &mut BevyoutWorld) {
+    world.dialogue_catalog = Some(dialogue::prepare_catalog(world.dialogue_sources.clone()));
+}
+
+#[then("the catalog exposes one line and one choice")]
+async fn then_dialogue_catalog_exposes_line_and_choice(world: &mut BevyoutWorld) {
+    let catalog = world.dialogue_catalog.as_ref().unwrap();
+    let start = catalog
+        .conversation(&bevyout_core::dialogue::DialogueKey::new("Start"))
+        .unwrap()
+        .nodes
+        .get("Start")
+        .unwrap();
+    assert_eq!(start.lines.len(), 1);
+    assert_eq!(start.options.len(), 1);
+}
+
+#[given(regex = r##"^a synthetic dialogue host command \"([^\"]*)\"$"##)]
+async fn given_synthetic_dialogue_host_command(world: &mut BevyoutWorld, command: String) {
+    let bridge = dialogue_host::YarnHostBridge::default();
+    world.dialogue_host_command = Some(
+        bridge
+            .command_from_text(&command, &command)
+            .expect("synthetic host command is supported"),
+    );
+}
+
+#[when("the dialogue host command is normalized")]
+async fn when_dialogue_host_command_is_normalized(_world: &mut BevyoutWorld) {}
+
+#[then(regex = r##"^the dialogue host command key is \"([^\"]*)\"$"##)]
+async fn then_dialogue_host_command_key_is(world: &mut BevyoutWorld, expected: String) {
+    let Some(dialogue_host::HostCommand::RunAction { key, .. }) =
+        world.dialogue_host_command.as_ref()
+    else {
+        panic!("expected a normalized RunAction command");
+    };
+    assert_eq!(key, &expected);
+}
+
+#[given("a dialogue snapshot with persistent and session variables")]
+async fn given_dialogue_snapshot_with_variables(world: &mut BevyoutWorld) {
+    use bevyout_core::dialogue::{DialogueSnapshot, NarrativeValue, NarrativeVariableState};
+    let mut variables = NarrativeVariableState::default();
+    variables.set("$global_reputation", NarrativeValue::Number(7));
+    variables.set("$session_met_guard", NarrativeValue::Bool(true));
+    world.dialogue_snapshot = DialogueSnapshot::boundary("fixture", variables);
+}
+
+#[when("the dialogue snapshot reaches a boundary")]
+async fn when_dialogue_snapshot_reaches_boundary(world: &mut BevyoutWorld) {
+    world.dialogue_snapshot.variables.clear_session_boundary();
+}
+
+#[then("only the persistent dialogue variable remains")]
+async fn then_only_persistent_dialogue_variable_remains(world: &mut BevyoutWorld) {
+    assert_eq!(world.dialogue_snapshot.variables.persistent.len(), 1);
+    assert!(world.dialogue_snapshot.variables.session.is_empty());
+    assert!(world.dialogue_snapshot.variables.temporary.is_empty());
+}
+
+#[when("the authored NPC dialogue key is resolved")]
+async fn when_authored_npc_dialogue_key_is_resolved(world: &mut BevyoutWorld) {
+    world.dialogue_catalog = Some(dialogue::prepare_catalog(world.dialogue_sources.clone()));
+}
+
+#[then("the authored NPC conversation is available")]
+async fn then_authored_npc_conversation_is_available(world: &mut BevyoutWorld) {
+    assert!(
+        world
+            .dialogue_catalog
+            .as_ref()
+            .unwrap()
+            .conversation(&bevyout_core::dialogue::DialogueKey::new("Start"))
+            .is_some()
+    );
+}
+
+#[given("a synthetic Fallout dialogue inventory")]
+async fn given_synthetic_fallout_dialogue_inventory(world: &mut BevyoutWorld) {
+    world.dialogue_inventory = Some(dialogue::inventory_fallout_dialogue(&[
+        dialogue::FalloutDialogueRecord {
+            plugin: "Fixture.esm".into(),
+            form_id: 0x100,
+            signature: "DIAL".into(),
+            topic_key: "Greeting".into(),
+            ..Default::default()
+        },
+        dialogue::FalloutDialogueRecord {
+            plugin: "Fixture.esm".into(),
+            form_id: 0x101,
+            signature: "INFO".into(),
+            speaker_form_id: Some(0x200),
+            text: Some("Hello".into()),
+            topic_key: "Greeting".into(),
+            links: vec!["Greeting".into()],
+            ..Default::default()
+        },
+        dialogue::FalloutDialogueRecord {
+            plugin: "Fixture.esm".into(),
+            form_id: 0x102,
+            signature: "XXXX".into(),
+            topic_key: "Greeting".into(),
+            ..Default::default()
+        },
+    ]));
+}
+
+#[when("the Fallout dialogue inventory is rendered")]
+async fn when_fallout_dialogue_inventory_is_rendered(_world: &mut BevyoutWorld) {}
+
+#[then("the inventory reports one topic and one unsupported record")]
+async fn then_inventory_reports_topic_and_unsupported(world: &mut BevyoutWorld) {
+    let report = world.dialogue_inventory.as_ref().unwrap();
+    assert_eq!(report.dial_total, 1);
+    assert_eq!(report.info_total, 1);
+    assert_eq!(report.unsupported.len(), 1);
+    assert!(report.topic_links.contains_key("Greeting"));
+}
+
+fn synthetic_fallout_records() -> Vec<dialogue::FalloutDialogueRecord> {
+    vec![
+        dialogue::FalloutDialogueRecord {
+            plugin: "Fixture.esm".into(),
+            form_id: 0x200,
+            signature: "INFO".into(),
+            speaker_form_id: Some(0x300),
+            text: Some("[choice] Open the gate".into()),
+            topic_key: "Gate".into(),
+            actions: vec!["open_gate".into()],
+            ..Default::default()
+        },
+        dialogue::FalloutDialogueRecord {
+            plugin: "Fixture.esm".into(),
+            form_id: 0x201,
+            signature: "INFO".into(),
+            speaker_form_id: Some(0x300),
+            text: Some("The gate opens.".into()),
+            topic_key: "Gate".into(),
+            ..Default::default()
+        },
+    ]
+}
+
+#[given("a synthetic Fallout conversation")]
+async fn given_synthetic_fallout_conversation(_world: &mut BevyoutWorld) {
+    let _ = synthetic_fallout_records();
+}
+
+#[when("the Fallout conversation is generated twice")]
+async fn when_fallout_conversation_generated_twice(world: &mut BevyoutWorld) {
+    let records = synthetic_fallout_records();
+    let first = dialogue::generate_fallout_conversation("Gate", &records).unwrap();
+    let second = dialogue::generate_fallout_conversation("Gate", &records).unwrap();
+    assert_eq!(first, second);
+    world.dialogue_generated = Some(first);
+}
+
+#[then("the generated dialogue bytes and mappings match")]
+async fn then_generated_dialogue_bytes_and_mappings_match(world: &mut BevyoutWorld) {
+    let (source, mappings) = world.dialogue_generated.as_ref().unwrap();
+    assert!(source.content.contains("bo_run_action"));
+    assert_eq!(mappings.len(), 2);
+}
+
+#[given(regex = r##"^an explicit dialogue checkpoint at node \"([^\"]*)\"$"##)]
+async fn given_explicit_dialogue_checkpoint(world: &mut BevyoutWorld, node: String) {
+    use bevyout_core::dialogue::{
+        ActiveDialogueCheckpoint, DialogueActionKey, DialogueKey, DialogueSnapshot,
+    };
+    world.dialogue_snapshot = DialogueSnapshot {
+        schema_version: bevyout_core::dialogue::DIALOGUE_SNAPSHOT_SCHEMA_VERSION,
+        bundle_hash: "fixture".into(),
+        variables: Default::default(),
+        active: Some(ActiveDialogueCheckpoint {
+            dialogue: DialogueKey::new("Start"),
+            node,
+            speaker: None,
+            listener: None,
+            completed_actions: vec![DialogueActionKey::new("bo_run_action open_gate")],
+        }),
+    };
+}
+
+#[when("the checkpoint snapshot is inspected")]
+async fn when_checkpoint_snapshot_is_inspected(_world: &mut BevyoutWorld) {}
+
+#[then("the checkpoint contains no Yarn VM state")]
+async fn then_checkpoint_contains_no_yarn_vm_state(world: &mut BevyoutWorld) {
+    let checkpoint = world.dialogue_snapshot.active.as_ref().unwrap();
+    assert_eq!(checkpoint.dialogue.as_str(), "Start");
+    assert_eq!(checkpoint.node, "Checkpoint");
+    assert_eq!(world.dialogue_snapshot.schema_version, 1);
+}
+
+#[given(regex = r##"^a dialogue presentation policy for language \"([^\"]*)\"$"##)]
+async fn given_dialogue_presentation_policy(world: &mut BevyoutWorld, language: String) {
+    world.dialogue_policy = bevyout_core::dialogue::DialoguePresentationPolicy {
+        language,
+        subtitles_enabled: true,
+        typewriter_enabled: true,
+        skip_requires_second_press: true,
+        accessible_choice_numbers: true,
+    };
+}
+
+#[when("dialogue coverage is calculated for one line")]
+async fn when_dialogue_coverage_is_calculated(world: &mut BevyoutWorld) {
+    let key = bevyout_core::dialogue::DialogueLineKey::new("Start:0");
+    world.dialogue_coverage = Some(bevyout_core::dialogue::DialogueCoverageReport {
+        total_lines: 1,
+        localized_lines: 0,
+        voiced_lines: 0,
+        missing_localization: vec![key.clone()],
+        missing_voice: vec![key],
+        unsupported_records: 0,
+    });
+}
+
+#[then("the dialogue timing and coverage are deterministic")]
+async fn then_dialogue_timing_and_coverage_are_deterministic(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.dialogue_policy.reveal_duration_seconds("Hello", None),
+        0.125
+    );
+    let coverage = world.dialogue_coverage.as_ref().unwrap();
+    assert_eq!(coverage.total_lines, 1);
+    assert_eq!(coverage.missing_localization.len(), 1);
+    assert_eq!(coverage.missing_voice.len(), 1);
 }
 
 fn find_placement<'a>(

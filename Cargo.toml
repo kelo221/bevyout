@@ -8,6 +8,13 @@ members = [".", "crates/bevyout-core"]
 exclude = ["NifConverter/nifty"]
 resolver = "3"
 
+[features]
+default = []
+# Yarn's Bevy-free compiler/runtime is the optional compatibility boundary.
+# The Bevy 0.18-only upstream plugin is intentionally not enabled; the viewer
+# adapter owns the Bevy 0.19 integration and keeps the default build Yarn-free.
+dialogue-yarn = ["dep:yarnspinner"]
+
 [dependencies]
 bevyout-core = { path = "crates/bevyout-core" }
 # WAV covers the ambient and interaction clips staged by the importer. MP3
@@ -53,6 +60,7 @@ glam = "=0.32.1"
 # adding it directly here does not change what gets built, only what this
 # one file may call.
 tracing = "0.1"
+yarnspinner = { version = "0.8.0", optional = true, features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
@@ -73,6 +81,11 @@ proptest = "1.6"
 [[test]]
 name = "features"
 harness = false
+
+[[example]]
+name = "yarn_smoke"
+path = "examples/yarn_smoke.rs"
+required-features = ["dialogue-yarn"]
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

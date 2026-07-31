@@ -5,6 +5,8 @@ mod bsa;
 mod catalog;
 mod cell_map;
 mod content_index;
+#[allow(dead_code)]
+pub(crate) mod dialogue;
 mod manifest;
 mod nif_convert;
 mod openmw_esm4;

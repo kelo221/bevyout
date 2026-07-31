@@ -1285,6 +1285,7 @@ fn prepare_cell(
         static_point_shadows,
         reflection_probes,
         leveled_lists,
+        dialogue: None,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(

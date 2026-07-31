@@ -72,6 +72,8 @@ mod console_ui;
 mod controls;
 mod day_night;
 mod diagnostics;
+#[allow(dead_code)]
+mod dialogue;
 mod fallout_ui;
 mod hud;
 #[cfg(test)]
