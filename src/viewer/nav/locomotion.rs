@@ -95,10 +95,25 @@ pub(crate) const TURN_ENTER_RATE: f32 = std::f32::consts::FRAC_PI_4;
 /// [`WALK_EXIT_SPEED`].
 pub(crate) const TURN_EXIT_RATE: f32 = std::f32::consts::FRAC_PI_2 / 6.0;
 
-/// Time constant for the signed achieved-velocity EMA. A short net-motion
-/// window cancels alternating collision jitter while preserving sustained
-/// travel and lets a genuine stop return to idle promptly.
-const VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS: f32 = 0.17;
+/// Number of fixed ticks in the signed motion window. The nav/physics schedule
+/// runs at 64 Hz, so this is a 125 ms net-motion sample. That is long enough
+/// to cancel the equal-and-opposite KCC corrections seen when an agent is
+/// holding against a corner, while short enough that a real stop or start is
+/// reflected promptly.
+pub(crate) const MOTION_WINDOW_TICKS: usize = 8;
+
+/// Minimum directional agreement for a window to count as locomotion. A
+/// non-zero average alone is not sufficient: a collision jitter sequence can
+/// have a small residual when one side contributes an extra sample. Requiring
+/// three quarters of the window's signed motion to agree keeps genuine travel responsive
+/// while treating that residual as a stop.
+pub(crate) const MOTION_COHERENCE_THRESHOLD: f32 = 0.75;
+
+/// Minimum time a different locomotion verdict must remain stable before it
+/// can replace the current clip. This is a transition debounce, not a
+/// movement timer: it only protects the animation boundary from a candidate
+/// that flips faster than a visible clip transition can begin.
+pub(crate) const LOCOMOTION_CHANGE_DWELL_SECONDS: f32 = 0.1;
 
 const _: () = {
     // The exit edges are documented as restatements of `actor_animation`'s
@@ -117,37 +132,154 @@ const _: () = {
     // A running agent must pass through walking on the way to idle: the run
     // leave edge sits above the walk enter edge.
     assert!(WALK_ENTER_SPEED < RUN_EXIT_SPEED);
-    let dt = 1.0 / FIXED_TICK_HZ;
-    let alpha = dt / (VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS + dt);
-    let alternating_residual = ROUTE_SPEED_METRES_PER_SECOND * alpha / (2.0 - alpha);
-    assert!(alternating_residual < WALK_EXIT_SPEED);
+    assert!(MOTION_WINDOW_TICKS > 0);
 };
 
-fn exponential_moving_average(previous: f32, raw: f32, dt: f32, time_constant: f32) -> f32 {
-    if dt <= 0.0 {
-        return previous;
-    }
-    let alpha = dt / (time_constant + dt);
-    previous + (raw - previous) * alpha
+/// A fixed-tick rolling average of signed achieved horizontal velocity.
+///
+/// Averaging the vector, rather than its scalar length, is the important bit:
+/// `+v, -v` collision jitter has a large instantaneous speed but zero net
+/// travel. Keeping the samples in a bounded ring makes the filter state
+/// `Copy`, so it can live directly on [`NavBoundActor`] without a heap
+/// allocation or a second ECS resource.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VelocityWindow {
+    samples: [[f32; 2]; MOTION_WINDOW_TICKS],
+    next: usize,
+    len: usize,
+    sum: [f32; 2],
+    magnitude_sum: f32,
 }
 
-/// Smooths signed horizontal velocity componentwise. Keeping the direction is
-/// essential: `+v, -v` jitter has high scalar speed but zero net motion.
-pub(crate) fn smooth_achieved_velocity(previous: [f32; 2], raw: [f32; 2], dt: f32) -> [f32; 2] {
-    [
-        exponential_moving_average(
-            previous[0],
-            raw[0],
-            dt,
-            VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS,
-        ),
-        exponential_moving_average(
-            previous[1],
-            raw[1],
-            dt,
-            VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS,
-        ),
-    ]
+impl Default for VelocityWindow {
+    fn default() -> Self {
+        Self {
+            samples: [[0.0; 2]; MOTION_WINDOW_TICKS],
+            next: 0,
+            len: 0,
+            sum: [0.0; 2],
+            magnitude_sum: 0.0,
+        }
+    }
+}
+
+impl VelocityWindow {
+    pub(crate) fn push(&mut self, raw: [f32; 2]) -> [f32; 2] {
+        if self.len == MOTION_WINDOW_TICKS {
+            let old = self.samples[self.next];
+            self.sum[0] -= old[0];
+            self.sum[1] -= old[1];
+            self.magnitude_sum -= (old[0] * old[0] + old[1] * old[1]).sqrt();
+        } else {
+            self.len += 1;
+        }
+        self.samples[self.next] = raw;
+        self.sum[0] += raw[0];
+        self.sum[1] += raw[1];
+        self.magnitude_sum += (raw[0] * raw[0] + raw[1] * raw[1]).sqrt();
+        self.next = (self.next + 1) % MOTION_WINDOW_TICKS;
+        let divisor = self.len as f32;
+        [self.sum[0] / divisor, self.sum[1] / divisor]
+    }
+
+    /// Ratio of net signed motion to all achieved motion in the window. One
+    /// means every sample agrees; zero means equal-and-opposite corrections.
+    pub(crate) fn coherence(&self) -> f32 {
+        if self.magnitude_sum <= f32::EPSILON {
+            0.0
+        } else {
+            (self.sum[0] * self.sum[0] + self.sum[1] * self.sum[1]).sqrt() / self.magnitude_sum
+        }
+    }
+}
+
+/// A fixed-tick rolling average of the yaw rate actually applied by the
+/// facing system. It uses the same short net-motion window as velocity so a
+/// holding actor's equal-and-opposite heading corrections do not restart
+/// opposite one-shot turn clips every tick.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct YawRateWindow {
+    samples: [f32; MOTION_WINDOW_TICKS],
+    next: usize,
+    len: usize,
+    sum: f32,
+    magnitude_sum: f32,
+}
+
+impl Default for YawRateWindow {
+    fn default() -> Self {
+        Self {
+            samples: [0.0; MOTION_WINDOW_TICKS],
+            next: 0,
+            len: 0,
+            sum: 0.0,
+            magnitude_sum: 0.0,
+        }
+    }
+}
+
+impl YawRateWindow {
+    pub(crate) fn push(&mut self, raw: f32) -> f32 {
+        if self.len == MOTION_WINDOW_TICKS {
+            let old = self.samples[self.next];
+            self.sum -= old;
+            self.magnitude_sum -= old.abs();
+        } else {
+            self.len += 1;
+        }
+        self.samples[self.next] = raw;
+        self.sum += raw;
+        self.magnitude_sum += raw.abs();
+        self.next = (self.next + 1) % MOTION_WINDOW_TICKS;
+        self.sum / self.len as f32
+    }
+
+    /// Ratio of net signed yaw to all yaw in the window. One means a
+    /// sustained turn; zero means equal-and-opposite heading corrections.
+    pub(crate) fn coherence(&self) -> f32 {
+        if self.magnitude_sum <= f32::EPSILON {
+            0.0
+        } else {
+            self.sum.abs() / self.magnitude_sum
+        }
+    }
+}
+
+/// Debounces the state selected by [`next_locomotion_state`]. Navigation can
+/// legitimately report a few opposite corrections while a KCC is resolving a
+/// corner; requiring a short stable candidate keeps those corrections from
+/// repeatedly restarting gameplay clips.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LocomotionDebounce {
+    pending: Option<LocomotionState>,
+    elapsed: f32,
+}
+
+impl LocomotionDebounce {
+    pub(crate) fn update(
+        &mut self,
+        current: LocomotionState,
+        candidate: LocomotionState,
+        dt: f32,
+    ) -> LocomotionState {
+        if candidate == current {
+            self.pending = None;
+            self.elapsed = 0.0;
+            return current;
+        }
+        if self.pending != Some(candidate) {
+            self.pending = Some(candidate);
+            self.elapsed = 0.0;
+        }
+        self.elapsed += dt.max(0.0);
+        if self.elapsed >= LOCOMOTION_CHANGE_DWELL_SECONDS {
+            self.pending = None;
+            self.elapsed = 0.0;
+            candidate
+        } else {
+            current
+        }
+    }
 }
 
 /// The locomotion clip family an actor should be playing. Deliberately its

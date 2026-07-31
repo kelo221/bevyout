@@ -5,8 +5,8 @@ Feature: Autonomous package driver (issues #218/#224)
   opposite collision jitter. This feature exercises the pure decision rules
   behind both fixes: the eligibility gate the autonomous package driver
   (`viewer::ai::autonomous`) consults before binding + starting an actor with
-  no console command, and signed achieved-velocity smoothing
-  (`viewer::nav::locomotion::smooth_achieved_velocity`) that distinguishes
+  no console command, and bounded signed achieved-motion windows
+  (`viewer::nav::locomotion::{VelocityWindow,YawRateWindow}`) that distinguish
   net travel from back-and-forth jitter.
 
   Scenario: An alive actor with a Patrol package is selected for autonomous bind and start
@@ -35,4 +35,9 @@ Feature: Autonomous package driver (issues #218/#224)
   Scenario: Equal-and-opposite achieved velocity jitter settles to idle
     Given a bound actor currently in the idle locomotion state
     When its achieved horizontal velocity alternates direction at full route speed for 128 ticks, smoothed before classification
+    Then its locomotion state is idle after the smoothing warms up
+
+  Scenario: Equal-and-opposite achieved yaw jitter settles to idle
+    Given a bound actor currently in the idle locomotion state
+    When its achieved yaw rate alternates sign at full facing rate for 128 ticks, smoothed before classification
     Then its locomotion state is idle after the smoothing warms up

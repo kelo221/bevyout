@@ -13566,9 +13566,8 @@ async fn then_actor_is_not_selected(world: &mut BevyoutWorld) {
     regex = r"^its achieved horizontal velocity alternates direction at full route speed for (\d+) ticks, smoothed before classification$"
 )]
 async fn when_locomotion_alternates_smoothed(world: &mut BevyoutWorld, ticks: u32) {
-    const TICK_SECONDS: f32 = 1.0 / 64.0;
     const WARMUP_TICKS: u32 = 32;
-    let mut smoothed = [0.0f32; 2];
+    let mut window = locomotion::VelocityWindow::default();
     world.nav_locomotion_changes_after_warmup = 0;
     for tick in 0..ticks {
         let raw = if tick % 2 == 0 {
@@ -13576,14 +13575,52 @@ async fn when_locomotion_alternates_smoothed(world: &mut BevyoutWorld, ticks: u3
         } else {
             [-locomotion::ROUTE_SPEED_METRES_PER_SECOND, 0.0]
         };
-        smoothed = locomotion::smooth_achieved_velocity(smoothed, raw, TICK_SECONDS);
+        let net_velocity = window.push(raw);
         let previous = world.nav_locomotion_state;
+        let achieved_horizontal_speed =
+            if window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+                (net_velocity[0] * net_velocity[0] + net_velocity[1] * net_velocity[1]).sqrt()
+            } else {
+                0.0
+            };
         let next = step_locomotion(
             world,
             locomotion::LocomotionObservation {
-                achieved_horizontal_speed: (smoothed[0] * smoothed[0] + smoothed[1] * smoothed[1])
-                    .sqrt(),
+                achieved_horizontal_speed,
                 yaw_rate: 0.0,
+            },
+        );
+        if tick >= WARMUP_TICKS && next != previous {
+            world.nav_locomotion_changes_after_warmup += 1;
+        }
+    }
+}
+
+#[when(
+    regex = r"^its achieved yaw rate alternates sign at full facing rate for (\d+) ticks, smoothed before classification$"
+)]
+async fn when_locomotion_yaw_alternates_smoothed(world: &mut BevyoutWorld, ticks: u32) {
+    const WARMUP_TICKS: u32 = 32;
+    let mut window = locomotion::YawRateWindow::default();
+    world.nav_locomotion_changes_after_warmup = 0;
+    for tick in 0..ticks {
+        let raw = if tick % 2 == 0 {
+            std::f32::consts::PI
+        } else {
+            -std::f32::consts::PI
+        };
+        let net_yaw_rate = window.push(raw);
+        let previous = world.nav_locomotion_state;
+        let yaw_rate = if window.coherence() >= locomotion::MOTION_COHERENCE_THRESHOLD {
+            net_yaw_rate
+        } else {
+            0.0
+        };
+        let next = step_locomotion(
+            world,
+            locomotion::LocomotionObservation {
+                achieved_horizontal_speed: 0.0,
+                yaw_rate,
             },
         );
         if tick >= WARMUP_TICKS && next != previous {
