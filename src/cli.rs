@@ -253,13 +253,21 @@ pub struct PrepareArgs {
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
     /// Authored Yarn dialogue source to include in the prepared bundle. May
-    /// be repeated; no dialogue sources are discovered implicitly.
+    /// be repeated; cell-scoped Fallout dialogue and voice discovery is
+    /// automatic for every normally prepared cell.
     #[arg(long = "dialogue-source", value_name = "PATH")]
     pub(crate) dialogue_sources: Vec<PathBuf>,
     /// Explicit Yarn line-to-WAV voice manifest to include in the prepared
     /// bundle. May be repeated; voice files are never discovered implicitly.
     #[arg(long = "dialogue-voice-manifest", value_name = "PATH")]
     pub(crate) dialogue_voice_manifests: Vec<PathBuf>,
+    /// Compatibility no-op. Cell-scoped Fallout voice discovery is automatic
+    /// during normal preparation.
+    #[arg(long)]
+    pub(crate) dialogue_voice_discover: bool,
+    /// Optional .bevyout report path for cell-scoped Fallout voice discovery.
+    #[arg(long = "dialogue-voice-report", value_name = "PATH")]
+    pub(crate) dialogue_voice_report: Option<PathBuf>,
     /// Refresh the manifest and scene metadata.
     #[arg(long)]
     pub(crate) force: bool,

@@ -128,10 +128,15 @@ fn voice_manifest_is_versioned_and_wav_duration_is_prepared() {
         )],
         Some(DialogueVoiceInput {
             manifest_path: "dialogue/voice.ron".into(),
+            cell_form_id: None,
             entries: vec![DialogueVoiceInputEntry {
                 line_key: DialogueLineKey::new("Start:0"),
                 source_path: "dialogue/voice/hello.wav".into(),
                 bytes: wav_bytes(16_000, 8_000),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             }],
         }),
     )
@@ -156,6 +161,82 @@ fn voice_manifest_is_versioned_and_wav_duration_is_prepared() {
 }
 
 #[test]
+fn scoped_voice_bundle_paths_resolve_from_the_shared_asset_root() {
+    let root = std::env::temp_dir().join(format!("bevyout-dialogue-scoped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let output = prepare_dialogue_bundle_with_voice_and_demand_scoped(
+        &root,
+        vec![authored(
+            "authored/guard.yarn",
+            "title: Start\n---\nGuard: hello\n===\n",
+        )],
+        Some(DialogueVoiceInput {
+            manifest_path: "dialogue/voice.ron".into(),
+            cell_form_id: Some(0x0000_3a2a),
+            entries: vec![DialogueVoiceInputEntry {
+                line_key: DialogueLineKey::new("Start:0"),
+                source_path: "dialogue/voice/hello.wav".into(),
+                bytes: wav_bytes(16_000, 8_000),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: Some(0x10),
+                voice_type_form_id: Some(0x20),
+            }],
+        }),
+        None,
+        Some("scenes/00003a2a"),
+    )
+    .unwrap();
+    let bundle = output.bundle.unwrap();
+    assert_eq!(bundle.catalog_path, "scenes/00003a2a/dialogue/catalog.ron");
+    assert_eq!(
+        bundle.voice_index_path.as_deref(),
+        Some("scenes/00003a2a/dialogue/voice_index.ron")
+    );
+    let index: PreparedDialogueVoiceIndex = ron::de::from_bytes(
+        &std::fs::read(root.join(bundle.voice_index_path.clone().unwrap())).unwrap(),
+    )
+    .unwrap();
+    assert!(index.entries[0].asset_path.starts_with("audio/"));
+    assert!(root.join(&index.entries[0].asset_path).is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn discovered_voice_demand_participates_in_the_bundle_fingerprint() {
+    let catalog = prepare_catalog(vec![authored(
+        "authored/guard.yarn",
+        "title: Start\n---\nGuard: hello\n===\n",
+    )]);
+    let report = bevyout_core::dialogue::PreparedDialogueVoiceDemandReport {
+        revision: bevyout_core::dialogue::DIALOGUE_VOICE_DEMAND_REVISION.into(),
+        cell_form_id: 0x3a2a,
+        source_fingerprint: "plugins".into(),
+        demands: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    assert_ne!(
+        dialogue_bundle_fingerprint(&catalog, None),
+        dialogue_bundle_fingerprint_with_demand(&catalog, None, Some(&report))
+    );
+}
+
+#[test]
+fn content_addressed_voice_staging_retains_ogg_extension() {
+    let root =
+        std::env::temp_dir().join(format!("bevyout-dialogue-ogg-stage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let bytes = b"synthetic-ogg-payload";
+    let path = stage_voice_bytes("dialogue/voice/hello.ogg", bytes, &root).unwrap();
+    assert_eq!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("ogg")
+    );
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn voice_preparation_rejects_duplicate_unknown_and_unsupported_entries() {
     let source = authored(
         "authored/guard.yarn",
@@ -163,16 +244,25 @@ fn voice_preparation_rejects_duplicate_unknown_and_unsupported_entries() {
     );
     let duplicate = DialogueVoiceInput {
         manifest_path: "voice.ron".into(),
+        cell_form_id: None,
         entries: vec![
             DialogueVoiceInputEntry {
                 line_key: DialogueLineKey::new("Start:0"),
                 source_path: "one.wav".into(),
                 bytes: wav_bytes(8_000, 8),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             },
             DialogueVoiceInputEntry {
                 line_key: DialogueLineKey::new("Start:0"),
                 source_path: "two.wav".into(),
                 bytes: wav_bytes(8_000, 8),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             },
         ],
     };
@@ -191,10 +281,15 @@ fn voice_preparation_rejects_duplicate_unknown_and_unsupported_entries() {
         vec![source.clone()],
         Some(DialogueVoiceInput {
             manifest_path: "voice.ron".into(),
+            cell_form_id: None,
             entries: vec![DialogueVoiceInputEntry {
                 line_key: DialogueLineKey::new("Missing:0"),
                 source_path: "missing.wav".into(),
                 bytes: wav_bytes(8_000, 8),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             }],
         }),
     )
@@ -207,10 +302,15 @@ fn voice_preparation_rejects_duplicate_unknown_and_unsupported_entries() {
         vec![source],
         Some(DialogueVoiceInput {
             manifest_path: "voice.ron".into(),
+            cell_form_id: None,
             entries: vec![DialogueVoiceInputEntry {
                 line_key: DialogueLineKey::new("Start:0"),
                 source_path: "hello.mp3".into(),
                 bytes: Vec::new(),
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             }],
         }),
     )

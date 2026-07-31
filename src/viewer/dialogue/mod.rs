@@ -450,17 +450,18 @@ fn attach_prepared_dialogue_bindings(
     };
     for (entity, root, existing) in &roots {
         let placement = root.placement();
-        let desired = match (&placement.semantic, placement.editor_id.as_deref()) {
-            (PreparedSemantic::Npc(_), Some(editor_id)) => {
-                let dialogue = DialogueKey::new(editor_id);
-                catalog.conversation(&dialogue).map(|_| DialogueBinding {
-                    dialogue,
-                    speaker: placement.reference_form_id,
-                    listener: None,
-                })
-            }
-            _ => None,
-        };
+        let desired = select_prepared_dialogue(
+            catalog,
+            matches!(&placement.semantic, PreparedSemantic::Npc(_)),
+            placement.reference_form_id,
+            placement.base_form_id,
+            placement.editor_id.as_deref(),
+        )
+        .map(|dialogue| DialogueBinding {
+            dialogue,
+            speaker: placement.reference_form_id,
+            listener: None,
+        });
         match (existing, desired) {
             (Some(current), Some(desired)) if current == &desired => {}
             (_, Some(desired)) => {
@@ -472,6 +473,36 @@ fn attach_prepared_dialogue_bindings(
             (None, None) => {}
         }
     }
+}
+
+fn select_prepared_dialogue(
+    catalog: &PreparedDialogueCatalog,
+    is_npc: bool,
+    reference_form_id: u32,
+    base_form_id: u32,
+    editor_id: Option<&str>,
+) -> Option<DialogueKey> {
+    if !is_npc {
+        return None;
+    }
+    catalog
+        .actor_bindings
+        .iter()
+        .find(|binding| {
+            binding.actor_reference_form_id == reference_form_id
+                || binding.actor_base_form_id == base_form_id
+        })
+        .and_then(|binding| {
+            catalog
+                .conversation(&binding.dialogue)
+                .map(|_| binding.dialogue.clone())
+        })
+        .or_else(|| {
+            editor_id.and_then(|editor_id| {
+                let dialogue = DialogueKey::new(editor_id);
+                catalog.conversation(&dialogue).map(|_| dialogue)
+            })
+        })
 }
 
 fn spawn_primary_runner(mut commands: Commands, mut runtime: ResMut<DialogueRuntime>) {
@@ -664,9 +695,19 @@ fn load_dialogue_catalog_with_voice(
             &mut providers.voice,
         )
     });
+    let voice_demand = bundle.voice_demand_path.as_deref().and_then(|path| {
+        load_prepared_voice_demand_report(
+            &PathBuf::from(&manifest.asset_root),
+            path,
+            &mut runtime.diagnostics,
+        )
+    });
     let fingerprint_matches = if bundle.revision == DIALOGUE_BUNDLE_REVISION {
-        crate::vsa::dialogue::dialogue_bundle_fingerprint(&catalog, voice_index.as_ref())
-            == bundle.content_fingerprint
+        crate::vsa::dialogue::dialogue_bundle_fingerprint_with_demand(
+            &catalog,
+            voice_index.as_ref(),
+            voice_demand.as_ref(),
+        ) == bundle.content_fingerprint
     } else {
         catalog.source_fingerprint == bundle.content_fingerprint
             || bundle.content_fingerprint == catalog.bundle_hash()
@@ -704,12 +745,63 @@ fn load_dialogue_catalog_with_voice(
     }
 }
 
+fn load_prepared_voice_demand_report(
+    asset_root: &std::path::Path,
+    relative_path: &str,
+    diagnostics: &mut Vec<DialogueError>,
+) -> Option<bevyout_core::dialogue::PreparedDialogueVoiceDemandReport> {
+    let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MissingDialogue,
+                format!(
+                    "unable to load prepared dialogue voice demand {}: {error}",
+                    path.display()
+                ),
+            ));
+            return None;
+        }
+    };
+    let report = match ron::de::from_bytes::<
+        bevyout_core::dialogue::PreparedDialogueVoiceDemandReport,
+    >(&bytes)
+    {
+        Ok(report) => report,
+        Err(error) => {
+            diagnostics.push(DialogueError::new(
+                DialogueErrorCode::MalformedContent,
+                format!(
+                    "unable to parse prepared dialogue voice demand {}: {error}",
+                    path.display()
+                ),
+            ));
+            return None;
+        }
+    };
+    if report.revision != bevyout_core::dialogue::DIALOGUE_VOICE_DEMAND_REVISION {
+        diagnostics.push(DialogueError::new(
+            DialogueErrorCode::MalformedContent,
+            format!(
+                "unsupported prepared dialogue voice demand revision {}",
+                report.revision
+            ),
+        ));
+        return None;
+    }
+    Some(report)
+}
+
 pub(super) fn load_prepared_voice_index(
     asset_root: &std::path::Path,
     relative_path: &str,
     catalog: &PreparedDialogueCatalog,
     diagnostics: &mut Vec<DialogueError>,
-    voices: &mut BTreeMap<DialogueLineKey, bevyout_core::dialogue::DialogueVoiceAsset>,
+    voices: &mut BTreeMap<
+        (DialogueLineKey, Option<u32>),
+        bevyout_core::dialogue::DialogueVoiceAsset,
+    >,
 ) -> Option<PreparedDialogueVoiceIndex> {
     let path = asset_root.join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
     let bytes = match fs::read(&path) {
@@ -757,10 +849,17 @@ pub(super) fn load_prepared_voice_index(
 
     let mut seen = BTreeSet::new();
     for voice in &index.entries {
-        if !seen.insert(voice.line_key.clone()) {
+        if !seen.insert((voice.line_key.clone(), voice.speaker_form_id)) {
             diagnostics.push(DialogueError::new(
                 DialogueErrorCode::MalformedContent,
-                format!("prepared dialogue voice index repeats {}", voice.line_key),
+                format!(
+                    "prepared dialogue voice index repeats {} for speaker {}",
+                    voice.line_key,
+                    voice
+                        .speaker_form_id
+                        .map(|speaker| format!("{speaker:08x}"))
+                        .unwrap_or_else(|| "<unscoped>".into())
+                ),
             ));
             continue;
         }
@@ -780,7 +879,14 @@ pub(super) fn load_prepared_voice_index(
                 component == std::path::Component::ParentDir
                     || component == std::path::Component::RootDir
             })
-            || !voice.asset_path.to_ascii_lowercase().ends_with(".wav")
+            || !matches!(
+                std::path::Path::new(&voice.asset_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| extension.to_ascii_lowercase())
+                    .as_deref(),
+                Some("wav" | "ogg")
+            )
         {
             diagnostics.push(DialogueError::new(
                 DialogueErrorCode::MalformedContent,
@@ -803,7 +909,10 @@ pub(super) fn load_prepared_voice_index(
             ));
             continue;
         }
-        voices.insert(voice.line_key.clone(), voice.clone());
+        voices.insert(
+            (voice.line_key.clone(), voice.speaker_form_id),
+            voice.clone(),
+        );
     }
     Some(index)
 }
@@ -1091,7 +1200,12 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
         let line = &node.lines[active.line_index];
         let speaker = DialogueSpeaker {
             stable_id: active.request.speaker,
-            display_name: line.speaker.clone().unwrap_or_default(),
+            display_name: prepared_speaker_display_name(
+                runtime.catalog.as_ref(),
+                &active.request.dialogue,
+                active.request.speaker,
+                line.speaker.as_deref(),
+            ),
         };
         runtime.speaker = speaker.clone();
         runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
@@ -1135,6 +1249,26 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
         runtime.phase = DialoguePhase::WaitingCommand;
         runtime.ui_phase = DialogueUiPhase::Command;
     }
+}
+
+fn prepared_speaker_display_name(
+    catalog: Option<&PreparedDialogueCatalog>,
+    dialogue: &DialogueKey,
+    speaker: Option<bevyout_core::form_id::FormId>,
+    authored_fallback: Option<&str>,
+) -> String {
+    speaker
+        .and_then(|speaker| {
+            catalog.and_then(|catalog| {
+                catalog.actor_bindings.iter().find(|binding| {
+                    binding.dialogue == *dialogue && binding.actor_reference_form_id == speaker.0
+                })
+            })
+        })
+        .and_then(|binding| binding.actor_display_name.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| authored_fallback.unwrap_or_default().to_owned())
 }
 
 fn close_dialogue(

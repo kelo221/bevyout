@@ -17,6 +17,49 @@ fn compatible_render_manifest() -> PreparedSceneManifest {
 }
 
 #[test]
+fn render_readiness_names_missing_keys_and_allows_labelled_text_fallback() {
+    let root = std::env::temp_dir().join(format!("bevyout-render-voice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("dialogue")).unwrap();
+    let key = bevyout_core::dialogue::DialogueLineKey::new("MoiraBrown:0");
+    let catalog = crate::vsa::dialogue::PreparedDialogueCatalog {
+        revision: crate::vsa::dialogue::PREPARED_DIALOGUE_CATALOG_REVISION.into(),
+        source_paths: vec!["authored/moira_brown.yarn".into()],
+        line_keys: std::collections::BTreeSet::from([key.clone()]),
+        voice_requirements: vec![crate::vsa::dialogue::PreparedDialogueVoiceRequirement {
+            line_key: key,
+            speaker_form_id: None,
+            source_path: "authored/moira_brown.yarn".into(),
+            origin: crate::vsa::dialogue::DialogueVoiceRequirementOrigin::Authored,
+        }],
+        ..Default::default()
+    };
+    std::fs::write(
+        root.join("dialogue/catalog.ron"),
+        ron::ser::to_string(&catalog).unwrap(),
+    )
+    .unwrap();
+    let mut manifest = compatible_render_manifest();
+    manifest.asset_root = root.to_string_lossy().into_owned();
+    manifest.dialogue = Some(bevyout_core::dialogue::PreparedDialogueBundleRef {
+        catalog_path: "dialogue/catalog.ron".into(),
+        source_paths: catalog.source_paths.clone(),
+        ..Default::default()
+    });
+
+    let status = dialogue_voice_status(&manifest, "MegatonCratersideSupply").unwrap();
+    let DialogueVoiceRenderStatus::TextFallback(message) = status else {
+        panic!("missing authored voice must be a visible text fallback");
+    };
+    assert!(message.contains("TEXT-FALLBACK"));
+    assert!(message.contains("MoiraBrown:0"));
+    assert!(message.contains(
+        "cargo run-dev -- prepare MegatonCratersideSupply --dialogue-source dialogue/authored/moira_brown.yarn --dialogue-voice-manifest dialogue/voice/moira_brown.ron"
+    ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn render_recovery_refreshes_preparation_before_offering_a_bake() {
     let mut manifest = compatible_render_manifest();
     manifest.schema_version -= 1;

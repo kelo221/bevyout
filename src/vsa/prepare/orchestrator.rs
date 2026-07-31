@@ -641,6 +641,18 @@ fn prepare_cell(
         .filter(|reference| matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature))
         .cloned()
         .collect::<Vec<_>>();
+    diagnostics.extend(session.dialogue_voice_diagnostics.iter().cloned());
+    let dialogue_voice_discovery = should_discover_dialogue_voice(args.dialogue_voice_discover)
+        .then(|| {
+            discover_dialogue_voice(
+                cell_id,
+                &parsed,
+                &plugin_sources,
+                &data_root,
+                &session.dialogue_voice_archives,
+            )
+        })
+        .transpose()?;
     let actor_catalog_inputs = build_actor_catalog_inputs(&parsed, &actor_references);
     let mut actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
     // Issue #175 (M4 wave 11 lane C): the package catalog's `known_form_ids`
@@ -1174,9 +1186,13 @@ fn prepare_cell(
     let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
     let dialogue = prepare_authored_dialogue_bundle(
         &cache_dir,
+        cell_id,
+        &selector_input,
         &args.dialogue_sources,
         &args.dialogue_voice_manifests,
         &placements,
+        dialogue_voice_discovery,
+        args.dialogue_voice_report.as_deref(),
         &mut diagnostics,
         output,
     )?;
@@ -1311,15 +1327,20 @@ fn prepare_cell(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_authored_dialogue_bundle(
     asset_root: &Path,
+    cell_form_id: u32,
+    selector: &str,
     source_paths: &[PathBuf],
     voice_manifest_paths: &[PathBuf],
     placements: &[PreparedPlacement],
+    discovery: Option<DialogueVoiceDiscovery>,
+    report_path: Option<&Path>,
     diagnostics: &mut Vec<Diagnostic>,
     output: &mut Vec<String>,
 ) -> Result<Option<bevyout_core::dialogue::PreparedDialogueBundleRef>> {
-    if source_paths.is_empty() {
+    if source_paths.is_empty() && discovery.is_none() {
         if !voice_manifest_paths.is_empty() {
             bail!("dialogue voice manifests require at least one --dialogue-source");
         }
@@ -1375,41 +1396,137 @@ fn prepare_authored_dialogue_bundle(
             content,
         });
     }
+    if source_paths.is_empty() {
+        let preserved = read_existing_authored_dialogue_sources(asset_root, cell_form_id)?;
+        if !preserved.is_empty() {
+            let message = format!(
+                "dialogue sources preserved: {} authored source(s) from the existing cell bundle",
+                preserved.len()
+            );
+            diagnostics.push(Diagnostic {
+                severity: "info".into(),
+                message: message.clone(),
+            });
+            output.push(message);
+            sources.extend(preserved);
+        }
+    }
 
-    let voice_input = read_dialogue_voice_input(&workspace, voice_manifest_paths)?;
+    let dialogue_scope = discovery
+        .as_ref()
+        .map(|discovery| format!("scenes/{:08x}", discovery.demand_report.cell_form_id));
+    let dialogue_output_root = dialogue_scope
+        .as_deref()
+        .map(|scope| asset_root.join(scope))
+        .unwrap_or_else(|| asset_root.to_owned());
+    let explicit_voice_input = if voice_manifest_paths.is_empty() {
+        read_existing_authored_voice_input(asset_root, cell_form_id)?
+    } else {
+        read_dialogue_voice_input(&workspace, voice_manifest_paths)?
+    };
+    let (demand_report, discovered_voice_input, actor_bindings) = discovery
+        .map(|discovery| {
+            sources.extend(discovery.generated_sources);
+            (
+                Some(discovery.demand_report),
+                Some(discovery.voice_input),
+                discovery.actor_bindings,
+            )
+        })
+        .unwrap_or((None, None, Vec::new()));
+    let voice_input = merge_dialogue_voice_inputs(explicit_voice_input, discovered_voice_input);
+    if sources.is_empty() {
+        if let Some(report) = demand_report {
+            write_dialogue_voice_demand_report(&dialogue_output_root, &report)?;
+            write_dialogue_voice_report(report_path, &report)?;
+        }
+        return Ok(None);
+    }
     let prepared =
-        crate::vsa::dialogue::prepare_dialogue_bundle_with_voice(asset_root, sources, voice_input)?;
+        crate::vsa::dialogue::prepare_dialogue_bundle_with_voice_demand_and_bindings_scoped(
+            asset_root,
+            sources,
+            voice_input,
+            demand_report,
+            dialogue_scope.as_deref(),
+            actor_bindings,
+        )?;
+    if let Some(report_path) = report_path
+        && let Some(bundle) = prepared.bundle.as_ref()
+        && let Some(demand_path) = bundle.voice_demand_path.as_deref()
+    {
+        let bytes =
+            fs::read(asset_root.join(demand_path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                .with_context(|| format!("reading prepared dialogue voice demand {demand_path}"))?;
+        write_dialogue_voice_report_bytes(report_path, &bytes)?;
+    }
     let bundle = prepared.bundle.clone();
-    let binding_count = prepared
-        .catalog
-        .conversations
-        .keys()
-        .filter(|dialogue| {
-            placements
-                .iter()
-                .any(|placement| placement.editor_id.as_deref() == Some(dialogue.as_str()))
+    let binding_count = placements
+        .iter()
+        .filter(|placement| {
+            prepared.catalog.actor_bindings.iter().any(|binding| {
+                binding.actor_reference_form_id == placement.reference_form_id
+                    && binding.actor_base_form_id == placement.base_form_id
+            }) || placement.editor_id.as_ref().is_some_and(|editor_id| {
+                prepared
+                    .catalog
+                    .conversations
+                    .keys()
+                    .any(|dialogue| dialogue.as_str() == editor_id)
+            })
         })
         .count();
+    let voice_index = prepared
+        .bundle
+        .as_ref()
+        .and_then(|bundle| bundle.voice_index_path.as_deref())
+        .and_then(|path| {
+            fs::read(asset_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+                .ok()
+                .and_then(|bytes| ron::de::from_bytes(&bytes).ok())
+        });
+    let coverage = crate::vsa::dialogue::coverage::assess_voice_coverage(
+        asset_root,
+        &prepared.catalog,
+        voice_index.as_ref(),
+    );
+    let voice_coverage = coverage.summary();
+    diagnostics.push(Diagnostic {
+        severity: if coverage.is_ready() {
+            "info"
+        } else {
+            "warning"
+        }
+        .into(),
+        message: voice_coverage.clone(),
+    });
+    output.push(voice_coverage);
+    if !coverage.is_ready() {
+        let missing = coverage.missing_labels().join(", ");
+        let missing_line = format!("dialogue voice missing keys: {missing}");
+        let next_command = crate::vsa::dialogue::coverage::exact_prepare_command(
+            selector,
+            &prepared.catalog,
+            &coverage,
+        );
+        let next_line = format!("dialogue voice next command: {next_command}");
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: missing_line.clone(),
+        });
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            message: next_line.clone(),
+        });
+        output.push(missing_line);
+        output.push(next_line);
+    }
+    let voice_line_count = coverage.mapped_lines;
     let summary = format!(
         "dialogue bundle: {} conversation(s), {} source(s), {} voice line(s), {} stable placement binding(s) -> {}",
         prepared.catalog.conversations.len(),
         prepared.catalog.source_paths.len(),
-        prepared
-            .bundle
-            .as_ref()
-            .and_then(|bundle| bundle.voice_index_path.as_ref())
-            .and_then(|path| {
-                fs::read(asset_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR)))
-                    .ok()
-                    .and_then(|bytes| {
-                        ron::de::from_bytes::<bevyout_core::dialogue::PreparedDialogueVoiceIndex>(
-                            &bytes,
-                        )
-                        .ok()
-                    })
-                    .map(|index| index.entries.len())
-            })
-            .unwrap_or(0),
+        voice_line_count,
         binding_count,
         bundle
             .as_ref()
@@ -1422,6 +1539,174 @@ fn prepare_authored_dialogue_bundle(
     });
     output.push(summary);
     Ok(bundle)
+}
+
+fn read_existing_authored_dialogue_sources(
+    asset_root: &Path,
+    cell_form_id: u32,
+) -> Result<Vec<crate::vsa::dialogue::DialogueSource>> {
+    let dialogue_root = asset_root
+        .join("scenes")
+        .join(format!("{cell_form_id:08x}"))
+        .join("dialogue");
+    let catalog_path = dialogue_root.join("catalog.ron");
+    if !catalog_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let catalog = ron::de::from_bytes::<crate::vsa::dialogue::PreparedDialogueCatalog>(
+        &fs::read(&catalog_path).with_context(|| {
+            format!(
+                "reading existing dialogue catalog {}",
+                catalog_path.display()
+            )
+        })?,
+    )
+    .with_context(|| {
+        format!(
+            "parsing existing dialogue catalog {}",
+            catalog_path.display()
+        )
+    })?;
+    let mut sources = Vec::new();
+    for source_path in catalog
+        .source_paths
+        .iter()
+        .filter(|path| path.starts_with("authored/"))
+    {
+        let path = dialogue_root.join(source_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("reading preserved dialogue source {}", path.display()))?;
+        sources.push(crate::vsa::dialogue::DialogueSource {
+            relative_path: source_path.clone(),
+            kind: crate::vsa::dialogue::DialogueSourceKind::Authored,
+            content,
+        });
+    }
+    sources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(sources)
+}
+
+fn read_existing_authored_voice_input(
+    asset_root: &Path,
+    cell_form_id: u32,
+) -> Result<Option<crate::vsa::dialogue::DialogueVoiceInput>> {
+    let index_path = asset_root
+        .join("scenes")
+        .join(format!("{cell_form_id:08x}"))
+        .join("dialogue/voice_index.ron");
+    if !index_path.is_file() {
+        return Ok(None);
+    }
+    let index = ron::de::from_bytes::<bevyout_core::dialogue::PreparedDialogueVoiceIndex>(
+        &fs::read(&index_path)
+            .with_context(|| format!("reading existing voice index {}", index_path.display()))?,
+    )
+    .with_context(|| format!("parsing existing voice index {}", index_path.display()))?;
+    let mut entries = Vec::new();
+    for voice in index.entries.into_iter().filter(|voice| {
+        voice.speaker_form_id.is_none() && !voice.line_key.as_str().starts_with("fallout:")
+    }) {
+        let staged_path =
+            asset_root.join(voice.asset_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let bytes = fs::read(&staged_path).with_context(|| {
+            format!("reading preserved dialogue voice {}", staged_path.display())
+        })?;
+        entries.push(crate::vsa::dialogue::DialogueVoiceInputEntry {
+            line_key: voice.line_key,
+            source_path: voice.source_path.unwrap_or(voice.asset_path),
+            bytes,
+            source_fingerprint: voice.source_fingerprint,
+            source_origin: voice.source_origin,
+            speaker_form_id: None,
+            voice_type_form_id: voice.voice_type_form_id,
+        });
+    }
+    if entries.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(crate::vsa::dialogue::DialogueVoiceInput {
+            manifest_path: format!("preserved-dialogue-voice:{cell_form_id:08x}"),
+            cell_form_id: Some(cell_form_id),
+            entries,
+        }))
+    }
+}
+
+fn merge_dialogue_voice_inputs(
+    explicit: Option<crate::vsa::dialogue::DialogueVoiceInput>,
+    discovered: Option<crate::vsa::dialogue::DialogueVoiceInput>,
+) -> Option<crate::vsa::dialogue::DialogueVoiceInput> {
+    match (explicit, discovered) {
+        (None, None) => None,
+        (Some(input), None) | (None, Some(input)) => Some(input),
+        (Some(mut explicit), Some(discovered)) => {
+            let explicit_keys = explicit
+                .entries
+                .iter()
+                .map(|entry| (entry.line_key.clone(), entry.speaker_form_id))
+                .collect::<HashSet<_>>();
+            explicit
+                .entries
+                .extend(discovered.entries.into_iter().filter(|entry| {
+                    !explicit_keys.contains(&(entry.line_key.clone(), entry.speaker_form_id))
+                }));
+            explicit.entries.sort_by(|left, right| {
+                left.line_key
+                    .cmp(&right.line_key)
+                    .then_with(|| left.speaker_form_id.cmp(&right.speaker_form_id))
+            });
+            explicit.manifest_path =
+                format!("{}|{}", explicit.manifest_path, discovered.manifest_path);
+            explicit.cell_form_id = discovered.cell_form_id.or(explicit.cell_form_id);
+            Some(explicit)
+        }
+    }
+}
+
+fn should_discover_dialogue_voice(_legacy_explicit_flag: bool) -> bool {
+    true
+}
+
+fn write_dialogue_voice_demand_report(
+    asset_root: &Path,
+    report: &bevyout_core::dialogue::PreparedDialogueVoiceDemandReport,
+) -> Result<()> {
+    let path = asset_root.join("dialogue/voice_demand.ron");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        path,
+        ron::ser::to_string_pretty(report, ron::ser::PrettyConfig::default())?,
+    )?;
+    Ok(())
+}
+
+fn write_dialogue_voice_report(
+    report_path: Option<&Path>,
+    report: &bevyout_core::dialogue::PreparedDialogueVoiceDemandReport,
+) -> Result<()> {
+    let Some(report_path) = report_path else {
+        return Ok(());
+    };
+    let bytes = ron::ser::to_string_pretty(report, ron::ser::PrettyConfig::default())?;
+    write_dialogue_voice_report_bytes(report_path, bytes.as_bytes())
+}
+
+fn write_dialogue_voice_report_bytes(report_path: &Path, bytes: &[u8]) -> Result<()> {
+    let report_path = absolutize(report_path)?;
+    let bevyout_root = absolutize(Path::new(".bevyout"))?;
+    if !report_path.starts_with(&bevyout_root) {
+        bail!(
+            "dialogue voice report must stay inside .bevyout: {}",
+            report_path.display()
+        );
+    }
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(report_path, bytes)?;
+    Ok(())
 }
 
 fn read_dialogue_voice_input(
@@ -1492,12 +1777,17 @@ fn read_dialogue_voice_input(
                 bytes: fs::read(&source_absolute).with_context(|| {
                     format!("reading dialogue voice asset {}", entry.source_path)
                 })?,
+                source_fingerprint: None,
+                source_origin: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             });
         }
     }
 
     Ok(Some(crate::vsa::dialogue::DialogueVoiceInput {
         manifest_path: requested_paths.join("|"),
+        cell_form_id: None,
         entries,
     }))
 }

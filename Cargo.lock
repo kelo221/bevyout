@@ -2953,6 +2953,7 @@ dependencies = [
  "gltf",
  "hound",
  "image",
+ "lewton",
  "nalgebra",
  "nif",
  "proptest",

@@ -83,7 +83,7 @@ struct DialogueUiModel {
 pub(crate) struct DialoguePresentationProviders {
     pub policy: DialoguePresentationPolicy,
     pub localization: BTreeMap<(String, String), String>,
-    pub voice: BTreeMap<DialogueLineKey, DialogueVoiceAsset>,
+    pub voice: BTreeMap<(DialogueLineKey, Option<u32>), DialogueVoiceAsset>,
     pub diagnostics: Vec<String>,
 }
 
@@ -127,13 +127,31 @@ impl DialoguePresentationProviders {
             } else {
                 report.missing_localization.push(key.clone());
             }
-            if self.voice.contains_key(&key) {
+            if self
+                .voice
+                .keys()
+                .any(|(candidate, _speaker)| candidate == &key)
+            {
                 report.voiced_lines += 1;
             } else {
                 report.missing_voice.push(key);
             }
         }
         report
+    }
+
+    pub(super) fn voice_for(
+        &self,
+        line_key: &DialogueLineKey,
+        speaker_form_id: Option<u32>,
+    ) -> Option<&DialogueVoiceAsset> {
+        self.voice
+            .get(&(line_key.clone(), speaker_form_id))
+            .or_else(|| {
+                (!line_key.as_str().starts_with("fallout:"))
+                    .then(|| self.voice.get(&(line_key.clone(), None)))
+                    .flatten()
+            })
     }
 }
 
@@ -249,14 +267,14 @@ pub(crate) fn sync_dialogue_timing(
             .clone()
             .filter(|_| current_line.is_some())
         {
-            let voice = providers.voice.get(&line.line_key);
-            runtime.line_duration_seconds = providers
-                .policy
-                .auto_advance_duration_seconds(&line.text, None);
             let speaker = runtime
                 .active
                 .as_ref()
                 .and_then(|active| active.request.speaker.map(u32::from));
+            let voice = providers.voice_for(&line.line_key, speaker);
+            runtime.line_duration_seconds = providers
+                .policy
+                .auto_advance_duration_seconds(&line.text, None);
             let anchor = resolve_voice_anchor(speaker, &bindings, &children, &names);
             runtime.voice_anchor = anchor.kind;
             record_voice_anchor(&mut runtime, &line.line_key, anchor, false);
@@ -279,6 +297,20 @@ pub(crate) fn sync_dialogue_timing(
                 }
             } else {
                 runtime.voice_timing = DialogueVoiceTimingState::Fallback;
+                let line_key = line.line_key.to_string();
+                let reason = if voice.is_none() {
+                    "no prepared voice mapping"
+                } else {
+                    "prepared voice mapping has no asset path"
+                };
+                runtime.trace.push(format!(
+                    "voice fallback line={line_key} reason={reason} timing=Text"
+                ));
+                info!(line_key, reason, "dialogue voice fallback");
+                runtime.diagnostics.push(DialogueError::new(
+                    DialogueErrorCode::MissingDialogue,
+                    format!("dialogue voice unavailable for {line_key}: {reason}"),
+                ));
             }
         }
     }
@@ -306,6 +338,7 @@ pub(crate) fn sync_dialogue_timing(
             runtime.voice_timing = DialogueVoiceTimingState::Playing;
             if let Some(line_key) = runtime.active_line_key.clone() {
                 runtime.trace.push(format!("voice started line={line_key}"));
+                info!(line_key = %line_key, "voice started");
             }
         }
         DialogueVoiceTimingAction::CompleteAudio => {
@@ -603,6 +636,10 @@ fn dialogue_ui_model(
     providers: &DialoguePresentationProviders,
     telemetry: &mut DialogueTelemetry,
 ) -> DialogueUiModel {
+    let active_speaker = runtime
+        .active
+        .as_ref()
+        .and_then(|active| active.request.speaker.map(u32::from));
     let line_snapshot = if runtime.phase == bevyout_core::dialogue::DialoguePhase::PresentingLine {
         runtime.presentation.line.clone()
     } else {
@@ -610,8 +647,7 @@ fn dialogue_ui_model(
     };
     let line = line_snapshot.map(|line| {
         let voice_millis = providers
-            .voice
-            .get(&line.line_key)
+            .voice_for(&line.line_key, active_speaker)
             .map(|voice| voice.duration_millis);
         let reveal_seconds = providers
             .policy

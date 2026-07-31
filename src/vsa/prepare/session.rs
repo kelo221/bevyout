@@ -30,6 +30,7 @@
 //! `orchestrator.rs`).
 
 use super::*;
+use crate::vsa::audio_assets::load_dialogue_voice_archives;
 
 pub(crate) struct BatchSession {
     pub(crate) loaded_plugins: Vec<LoadedPlugin>,
@@ -43,6 +44,8 @@ pub(crate) struct BatchSession {
     pub(crate) archive_diagnostics: Vec<Diagnostic>,
     pub(crate) audio_archives: Vec<crate::vsa::audio_assets::AudioArchive>,
     pub(crate) audio_diagnostics: Vec<Diagnostic>,
+    pub(crate) dialogue_voice_archives: Vec<crate::vsa::audio_assets::AudioArchive>,
+    pub(crate) dialogue_voice_diagnostics: Vec<Diagnostic>,
     pub(crate) footstep_sets: Vec<crate::vsa::manifest::PreparedFootstepSet>,
     pub(crate) hard_landing_clips: Vec<String>,
     pub(crate) footstep_diagnostics: Vec<Diagnostic>,
@@ -101,6 +104,17 @@ impl BatchSession {
             })
             .collect::<Vec<_>>();
 
+        let dialogue_voice_archive_load =
+            load_dialogue_voice_archives(data_root, &audio_plugin_names);
+        let dialogue_voice_diagnostics = dialogue_voice_archive_load
+            .diagnostics
+            .into_iter()
+            .map(|message| Diagnostic {
+                severity: "info".into(),
+                message,
+            })
+            .collect::<Vec<_>>();
+
         let mut footstep_diagnostics = Vec::new();
         let (footstep_sets, hard_landing_clips) = stage_footsteps(
             data_root,
@@ -117,6 +131,8 @@ impl BatchSession {
             archive_diagnostics,
             audio_archives: audio_archive_load.archives,
             audio_diagnostics,
+            dialogue_voice_archives: dialogue_voice_archive_load.archives,
+            dialogue_voice_diagnostics,
             footstep_sets,
             hard_landing_clips,
             footstep_diagnostics,

@@ -45,11 +45,11 @@ with final visual, audio, and accessibility evidence.
 ### Voice import and completion timing
 
 - Added explicit repeatable `--dialogue-voice-manifest` input for workspace-
-  relative Yarn line-to-WAV mappings. Preparation validates line keys and WAV
-  headers, stages clips content-addressed below `.bevyout`, and writes the
+  relative Yarn line-to-WAV/OGG mappings. Preparation validates line keys and
+  WAV/OGG headers, stages clips content-addressed below `.bevyout`, and writes the
   versioned `dialogue/voice_index.ron` artifact.
-- Bumped prepared dialogue bundles to `dialogue-bundle-v3`; the bundle
-  fingerprint now includes the prepared voice index. Older v2 bundles remain
+- Bumped prepared dialogue bundles to `dialogue-bundle-v4`; the bundle
+  fingerprint now includes the prepared voice index. Older prepared bundles remain
   readable without voice playback.
 - Dialogue voice entities use `PlaybackMode::Once`. `AudioSink` and
   `SpatialAudioSink` completion drives line continuation; missing or stalled
@@ -57,3 +57,56 @@ with final visual, audio, and accessibility evidence.
 - `dialoguestate` now reports `voice_state` and `timing_source`, and traces
   `voice complete line=<key> timing=Audio|Text`.
 - Raw voice files remain external inputs; no audio assets are committed.
+
+### Cell-scoped Fallout voice discovery
+
+- Added `--dialogue-voice-discover` and `.bevyout`-validated
+  `--dialogue-voice-report PATH` preparation inputs. Supplying an authored
+  `--dialogue-source` enables discovery automatically; the flag remains a
+  force/explicit form for cell-only discovery. Discovery is limited to
+  initially enabled voice-capable actors present in the selected cell and
+  writes `dialogue/voice_demand.ron` alongside the prepared bundle.
+- The resolved Fallout `DIAL`, `INFO`, `QUST`, and `VTYP` data uses stable
+  `fallout:<plugin>:<info-form-id>:<response-number>` line keys. Load-order
+  winners, actor demands, missing voice types, missing responses, source paths,
+  and archive provenance are retained in deterministic diagnostics.
+- Loose voice files and the supported voice archives are searched by exact
+  normalized virtual path. Identical bytes are content-addressed and reused
+  across cell bundles; the viewer never scans archives or production voice
+  folders at runtime.
+- WAV and OGG are both accepted. The Bevy 0.19 `vorbis` audio feature is
+  enabled explicitly, so preparation validates and fingerprints the source
+  OGG and stages its original bytes with an `.ogg` extension. No unnecessary
+  transcoding is performed; WAV remains supported as a direct input format.
+- Cell-scoped artifacts are written below the shared prepared cache using
+  `scenes/<cell-form-id>/dialogue/...`, while the scene manifest continues to
+  resolve all prepared assets from its cache root. Content-addressed audio is
+  shared at the cache-root `audio/` directory so identical bytes are staged
+  once across cells. Fallout-derived audio stays under `.bevyout` and is never
+  committed.
+
+### Automatic readiness and exact actor conversations
+
+- Normal cell preparation now always runs cell-scoped dialogue/voice discovery;
+  `--dialogue-voice-discover` remains only as a compatibility no-op. Preparation
+  reports total, mapped, authored-missing, and Fallout-discovery-missing lines,
+  lists every missing stable key, and prints a concrete follow-up prepare
+  command.
+- Bumped the prepared bundle and voice index revisions to v5 and the prepared
+  catalogue to v4. Voice identity is the compound `(line key, actor reference)`
+  key, so a Fallout line never borrows another actor's clip. Source and staged
+  hashes are validated before render readiness succeeds.
+- Render performs the same prepared coverage check before viewer launch.
+  Incomplete coverage intentionally allows visual rendering, but only after a
+  labelled `TEXT-FALLBACK` warning containing the missing keys and follow-up
+  command. A render-triggered prepare recovers the existing authored sources
+  and explicit authored voice entries before merging fresh discovery output.
+- Present actors receive generated actor-specific Yarn rooted at the lowest
+  stable resolved `GREETING` INFO. Spoken text and OGG voice use the exact
+  `fallout:<plugin>:<info>:<response>` identity. Player options come only from
+  explicit INFO topic links or top-level DIAL records with non-empty authored
+  `FULL` labels; EDID-only internal transitions are not shown as choices.
+- The synthetic `dialogue/authored/moira_brown.yarn` remains a valid explicit
+  authored source, but it is not bound to Moira and is never paired with
+  approximate Fallout audio. Moira's placement is bound to the generated
+  actor conversation instead.

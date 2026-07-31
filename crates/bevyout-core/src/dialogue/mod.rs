@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::form_id::FormId;
 
 pub const DIALOGUE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-pub const DIALOGUE_BUNDLE_REVISION: &str = "dialogue-bundle-v3";
-pub const DIALOGUE_VOICE_INDEX_REVISION: &str = "dialogue-voice-v2";
+pub const DIALOGUE_BUNDLE_REVISION: &str = "dialogue-bundle-v5";
+pub const DIALOGUE_VOICE_INDEX_REVISION: &str = "dialogue-voice-v5";
+pub const DIALOGUE_VOICE_DEMAND_REVISION: &str = "dialogue-voice-demand-v1";
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -242,6 +243,8 @@ pub struct PreparedDialogueBundleRef {
     pub source_paths: Vec<String>,
     pub node_index_path: String,
     pub voice_index_path: Option<String>,
+    #[serde(default)]
+    pub voice_demand_path: Option<String>,
     pub localization_index_path: Option<String>,
     pub content_fingerprint: String,
 }
@@ -255,6 +258,18 @@ pub struct DialogueVoiceAsset {
     pub line_key: DialogueLineKey,
     pub asset_path: String,
     pub duration_millis: u32,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub source_origin: Option<String>,
+    #[serde(default)]
+    pub source_fingerprint: Option<String>,
+    #[serde(default)]
+    pub staged_fingerprint: Option<String>,
+    #[serde(default)]
+    pub speaker_form_id: Option<u32>,
+    #[serde(default)]
+    pub voice_type_form_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,7 +290,27 @@ pub struct PreparedDialogueVoiceIndex {
     pub revision: String,
     pub source_manifest_path: String,
     pub source_fingerprint: String,
+    #[serde(default)]
+    pub cell_form_id: Option<u32>,
     pub entries: Vec<DialogueVoiceAsset>,
+    pub diagnostics: Vec<DialogueVoiceDiagnostic>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PreparedDialogueVoiceDemand {
+    pub actor_reference_form_id: u32,
+    pub actor_base_form_id: u32,
+    pub voice_type_form_id: Option<u32>,
+    pub voice_type_editor_id: Option<String>,
+    pub matched_line_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PreparedDialogueVoiceDemandReport {
+    pub revision: String,
+    pub cell_form_id: u32,
+    pub source_fingerprint: String,
+    pub demands: Vec<PreparedDialogueVoiceDemand>,
     pub diagnostics: Vec<DialogueVoiceDiagnostic>,
 }
 

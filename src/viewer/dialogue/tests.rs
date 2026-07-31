@@ -1,3 +1,4 @@
+use bevy::asset::AssetLoader;
 use bevy::audio::PlaybackMode;
 use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
@@ -26,6 +27,12 @@ fn app_with_dialogue() -> App {
     app.update();
     app.update();
     app
+}
+
+#[test]
+fn bevy_runtime_audio_loader_registers_original_ogg_vorbis_assets() {
+    let loader = bevy::audio::AudioLoader;
+    assert!(loader.extensions().contains(&"ogg"));
 }
 
 fn catalog() -> crate::vsa::dialogue::PreparedDialogueCatalog {
@@ -147,6 +154,72 @@ fn focused_authored_npc_starts_from_the_existing_use_key() {
             .map(|line| line.text.as_str()),
         Some("Halt.")
     );
+}
+
+#[test]
+fn moira_uses_the_exact_generated_fallout_conversation_binding() {
+    let source_path = "dialogue/generated/actors/0002d2bc.yarn";
+    let dialogue = DialogueKey::new("fallout_actor_0002d2bc");
+    let mut prepared = prepare_catalog(vec![DialogueSource {
+        relative_path: source_path.into(),
+        kind: DialogueSourceKind::ImportedGenerated,
+        content: "title: fallout_actor_0002d2bc\nmode: imported\n---\n// bo_line_key: fallout:fallout3.esm:0001d76a:1\nSpeaker0002d2bc: Exact line\n-> Real option -> fallout_actor_0002d2bc_topic\n===\ntitle: fallout_actor_0002d2bc_topic\nmode: imported\n---\n// bo_line_key: fallout:fallout3.esm:0002d2b5:1\nSpeaker0002d2bc: Exact answer\n===\n".into(),
+    }]);
+    prepared
+        .actor_bindings
+        .push(crate::vsa::dialogue::PreparedDialogueActorBinding {
+            actor_reference_form_id: 0x0002_d2bc,
+            actor_base_form_id: 0x0002_d3c0,
+            actor_editor_id: Some("MoiraBrown".into()),
+            actor_display_name: Some("Moira Brown".into()),
+            dialogue: dialogue.clone(),
+            source_path: source_path.into(),
+        });
+
+    assert_eq!(
+        select_prepared_dialogue(
+            &prepared,
+            true,
+            0x0002_d2bc,
+            0x0002_d3c0,
+            Some("MoiraBrown"),
+        ),
+        Some(dialogue)
+    );
+
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(prepared);
+    let entity = app
+        .world_mut()
+        .spawn(DialogueBinding {
+            dialogue: DialogueKey::new("fallout_actor_0002d2bc"),
+            speaker: 0x0002_d2bc,
+            listener: None,
+        })
+        .id();
+    app.insert_resource(crate::viewer::interaction::InteractionState {
+        focused: Some(entity),
+        open: Default::default(),
+    });
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyE);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.update();
+
+    let line = app
+        .world()
+        .resource::<DialogueRuntime>()
+        .presentation
+        .line
+        .as_ref()
+        .expect("Moira's first generated line is presented");
+    assert_eq!(line.speaker.display_name, "Moira Brown");
 }
 
 #[test]
@@ -285,6 +358,47 @@ fn clicked_option_uses_the_same_choice_message_as_keyboard_selection() {
 }
 
 #[test]
+fn number_key_selects_the_same_dialogue_option_as_click() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+    app.world_mut()
+        .resource_mut::<Messages<DialogueContinueRequested>>()
+        .write(DialogueContinueRequested);
+    app.update();
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Digit1);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .resource::<DialogueRuntime>()
+            .presentation
+            .line
+            .as_ref()
+            .map(|line| line.text.as_str()),
+        Some("Leave")
+    );
+}
+
+#[test]
 fn clicked_spoken_line_advances_without_waiting_for_the_timer() {
     let mut app = app_with_dialogue();
     app.world_mut()
@@ -402,16 +516,29 @@ fn prepared_voice_index_loads_only_catalog_keys_and_existing_wavs() {
         revision: DIALOGUE_VOICE_INDEX_REVISION.into(),
         source_manifest_path: "dialogue/voice/guard.ron".into(),
         source_fingerprint: "fingerprint".into(),
+        cell_form_id: None,
         entries: vec![
             DialogueVoiceAsset {
                 line_key: key.clone(),
                 asset_path: "dialogue/audio/guard.wav".into(),
                 duration_millis: 500,
+                source_path: None,
+                source_origin: None,
+                source_fingerprint: None,
+                staged_fingerprint: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             },
             DialogueVoiceAsset {
                 line_key: DialogueLineKey::new("Unknown:0"),
                 asset_path: "dialogue/audio/guard.wav".into(),
                 duration_millis: 500,
+                source_path: None,
+                source_origin: None,
+                source_fingerprint: None,
+                staged_fingerprint: None,
+                speaker_form_id: None,
+                voice_type_form_id: None,
             },
         ],
         diagnostics: Vec::new(),
@@ -434,12 +561,44 @@ fn prepared_voice_index_loads_only_catalog_keys_and_existing_wavs() {
     .expect("valid voice index");
     assert_eq!(loaded.entries.len(), 2);
     assert_eq!(
-        voices.get(&key).map(|voice| voice.duration_millis),
+        voices.get(&(key, None)).map(|voice| voice.duration_millis),
         Some(500)
     );
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, DialogueErrorCode::MalformedContent);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn fallout_voice_lookup_is_exact_for_the_active_actor() {
+    let key = DialogueLineKey::new("fallout:fallout3.esm:0001d76a:1");
+    let mut providers = presentation::DialoguePresentationProviders::default();
+    providers.voice.insert(
+        (key.clone(), Some(0x0001_ff18)),
+        DialogueVoiceAsset {
+            line_key: key.clone(),
+            asset_path: "audio/merc.ogg".into(),
+            speaker_form_id: Some(0x0001_ff18),
+            ..Default::default()
+        },
+    );
+    providers.voice.insert(
+        (key.clone(), Some(0x0002_d2bc)),
+        DialogueVoiceAsset {
+            line_key: key.clone(),
+            asset_path: "audio/moira.ogg".into(),
+            speaker_form_id: Some(0x0002_d2bc),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        providers
+            .voice_for(&key, Some(0x0002_d2bc))
+            .map(|voice| voice.asset_path.as_str()),
+        Some("audio/moira.ogg")
+    );
+    assert!(providers.voice_for(&key, Some(0xdead_beef)).is_none());
 }
 
 fn dialogue_binding(speaker: u32) -> DialogueBinding {

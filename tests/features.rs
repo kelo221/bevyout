@@ -1369,10 +1369,15 @@ async fn given_synthetic_wav_voice_manifest(world: &mut BevyoutWorld) {
 async fn when_dialogue_voice_preparation_is_run_twice(world: &mut BevyoutWorld) {
     let input = || dialogue::DialogueVoiceInput {
         manifest_path: "dialogue/voice/fixture.ron".into(),
+        cell_form_id: None,
         entries: vec![dialogue::DialogueVoiceInputEntry {
             line_key: bevyout_core::dialogue::DialogueLineKey::new("Start:0"),
             source_path: "dialogue/voice/fixture.wav".into(),
             bytes: synthetic_wav_bytes(16_000, 8_000),
+            source_fingerprint: None,
+            source_origin: None,
+            speaker_form_id: None,
+            voice_type_form_id: None,
         }],
     };
     let roots = [

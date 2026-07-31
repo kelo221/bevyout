@@ -1,5 +1,62 @@
 use super::*;
 
+#[test]
+fn dialogue_voice_discovery_is_automatic_without_the_legacy_flag() {
+    assert!(should_discover_dialogue_voice(false));
+    assert!(should_discover_dialogue_voice(true));
+}
+
+#[test]
+fn normal_reprepare_recovers_existing_authored_dialogue_and_voice() {
+    let root = std::env::temp_dir().join(format!("bevyout-reprepare-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let dialogue_root = root.join("scenes/00003a2a/dialogue");
+    fs::create_dir_all(dialogue_root.join("authored")).unwrap();
+    fs::create_dir_all(root.join("audio")).unwrap();
+    fs::write(
+        dialogue_root.join("authored/moira_brown.yarn"),
+        "title: MoiraBrown\n---\nMoira: hello\n===\n",
+    )
+    .unwrap();
+    let catalog =
+        crate::vsa::dialogue::prepare_catalog(vec![crate::vsa::dialogue::DialogueSource {
+            relative_path: "authored/moira_brown.yarn".into(),
+            kind: crate::vsa::dialogue::DialogueSourceKind::Authored,
+            content: "title: MoiraBrown\n---\nMoira: hello\n===\n".into(),
+        }]);
+    fs::write(
+        dialogue_root.join("catalog.ron"),
+        ron::ser::to_string(&catalog).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("audio/moira.ogg"), b"preserved-voice").unwrap();
+    let index = bevyout_core::dialogue::PreparedDialogueVoiceIndex {
+        revision: bevyout_core::dialogue::DIALOGUE_VOICE_INDEX_REVISION.into(),
+        entries: vec![bevyout_core::dialogue::DialogueVoiceAsset {
+            line_key: bevyout_core::dialogue::DialogueLineKey::new("MoiraBrown:0"),
+            asset_path: "audio/moira.ogg".into(),
+            source_path: Some("dialogue/voice/moira.ogg".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    fs::write(
+        dialogue_root.join("voice_index.ron"),
+        ron::ser::to_string(&index).unwrap(),
+    )
+    .unwrap();
+
+    let sources = read_existing_authored_dialogue_sources(&root, 0x0000_3a2a).unwrap();
+    let voice = read_existing_authored_voice_input(&root, 0x0000_3a2a)
+        .unwrap()
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].relative_path, "authored/moira_brown.yarn");
+    assert_eq!(voice.entries.len(), 1);
+    assert_eq!(voice.entries[0].bytes, b"preserved-voice");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(test)]
 mod day_night_profile_tests {
     use super::*;
