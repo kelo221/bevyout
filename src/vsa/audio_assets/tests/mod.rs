@@ -61,10 +61,28 @@ fn emits_base_dlc_and_plugin_stem_archive_names() {
         ]
     );
     assert_eq!(
+        dialogue_voice_archive_candidate_names("Fallout3.esm"),
+        vec![
+            "Fallout - Voices.bsa",
+            "Fallout - MenuVoices.bsa",
+            "Fallout3 - Voices.bsa",
+            "Fallout3 - MenuVoices.bsa",
+            "Fallout3.bsa",
+        ]
+    );
+    assert_eq!(
         audio_archive_candidate_names("BrokenSteel.esm"),
         vec![
             "BrokenSteel - Sound.bsa",
             "BrokenSteel - Sounds.bsa",
+            "BrokenSteel.bsa",
+        ]
+    );
+    assert_eq!(
+        dialogue_voice_archive_candidate_names("BrokenSteel.esm"),
+        vec![
+            "BrokenSteel - Voices.bsa",
+            "BrokenSteel - MenuVoices.bsa",
             "BrokenSteel.bsa",
         ]
     );

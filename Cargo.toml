@@ -8,12 +8,20 @@ members = [".", "crates/bevyout-core"]
 exclude = ["NifConverter/nifty"]
 resolver = "3"
 
+[features]
+default = []
+# Yarn's Bevy-free compiler/runtime is the optional compatibility boundary.
+# The Bevy 0.18-only upstream plugin is intentionally not enabled; the viewer
+# adapter owns the Bevy 0.19 integration and keeps the default build Yarn-free.
+dialogue-yarn = ["dep:yarnspinner"]
+
 [dependencies]
 bevyout-core = { path = "crates/bevyout-core" }
-# WAV covers the ambient and interaction clips staged by the importer. MP3
-# metadata is retained in manifests, but Bevy's MP3 feature currently resolves
-# to an unavailable symphonia patch in this workspace's offline cache.
-bevy = { version = "0.19.0", features = ["wav", "pbr_specular_textures", "pbr_transmission_textures", "bevy_remote", "ktx2", "basis-universal", "system_clipboard"] }
+# WAV covers the ambient and interaction clips staged by the importer, while
+# Vorbis enables the original Fallout OGG voice assets. MP3 metadata is
+# retained in manifests, but Bevy's MP3 feature currently resolves to an
+# unavailable symphonia patch in this workspace's offline cache.
+bevy = { version = "0.19.0", features = ["wav", "vorbis", "pbr_specular_textures", "pbr_transmission_textures", "bevy_remote", "ktx2", "basis-universal", "system_clipboard"] }
 avian3d = { version = "=0.7.0", default-features = false, features = ["3d", "f32", "parry-f32", "parallel", "xpbd_joints"] }
 bevy_boxddd = { version = "0.2.0", features = ["debug-gizmos"] }
 bvh = "0.12"
@@ -22,7 +30,9 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 flate2 = "1.1"
 gltf = { version = "1.4", default-features = false, features = ["names", "utils", "KHR_materials_volume"] }
+hound = "3.5.1"
 image = { version = "0.25", default-features = false, features = ["dds", "png"] }
+lewton = "0.10.2"
 nalgebra = "0.34"
 nif = { git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = ["fo3_glb"] }
 rayon = "1.10"
@@ -53,6 +63,7 @@ glam = "=0.32.1"
 # adding it directly here does not change what gets built, only what this
 # one file may call.
 tracing = "0.1"
+yarnspinner = { version = "0.8.0", optional = true, features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
@@ -73,6 +84,11 @@ proptest = "1.6"
 [[test]]
 name = "features"
 harness = false
+
+[[example]]
+name = "yarn_smoke"
+path = "examples/yarn_smoke.rs"
+required-features = ["dialogue-yarn"]
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

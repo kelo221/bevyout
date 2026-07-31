@@ -68,7 +68,7 @@ impl PlacementRoot {
 /// apply. Everything else stays private to this module.
 #[derive(Resource, Default)]
 pub(crate) struct InteractionState {
-    pub(super) focused: Option<Entity>,
+    pub(crate) focused: Option<Entity>,
     pub(crate) open: HashSet<Entity>,
 }
 

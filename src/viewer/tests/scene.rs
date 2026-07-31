@@ -98,6 +98,7 @@ fn minimal_manifest(placements: Vec<PreparedPlacement>) -> PreparedSceneManifest
         reflection_probes: None,
         mutability_summary: Default::default(),
         leveled_lists: Default::default(),
+        dialogue: None,
     }
 }
 
@@ -124,6 +125,48 @@ fn fallout_material_extra_accepts_native_object_and_blender_json_string() {
     });
     let parsed = parse_fallout_material_extra(&blender.to_string()).expect("Blender extras");
     assert_eq!(parsed.translucency_strength, 0.2);
+}
+
+#[test]
+fn fallout_surface_classification_uses_flags_for_shader_type_one_assets() {
+    let hair = parse_fallout_material_extra(
+        &serde_json::json!({
+            "bevyout_fallout_material": {
+                "shader_type": 1,
+                "shader_flags_1": 1u32 << 18
+            }
+        })
+        .to_string(),
+    )
+    .expect("hair extras");
+    assert_eq!(
+        fallout_surface_kind(&hair, Some("NoHat")),
+        FALLOUT_SURFACE_HAIR
+    );
+
+    let eye = parse_fallout_material_extra(
+        &serde_json::json!({
+            "bevyout_fallout_material": {
+                "shader_type": 1,
+                "shader_flags_1": 1u32 << 17
+            }
+        })
+        .to_string(),
+    )
+    .expect("eye extras");
+    assert_eq!(
+        fallout_surface_kind(&eye, Some("EyeLeftHuman:0")),
+        FALLOUT_SURFACE_EYE
+    );
+    assert_eq!(
+        fallout_surface_kind(&eye, Some("GlassesReadingGO:0")),
+        FALLOUT_SURFACE_STANDARD
+    );
+    assert_eq!(
+        fallout_surface_kind(&eye, None),
+        FALLOUT_SURFACE_EYE,
+        "source flag remains authoritative when a mesh name is unavailable"
+    );
 }
 
 #[test]

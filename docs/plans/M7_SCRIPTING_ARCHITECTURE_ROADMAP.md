@@ -37,6 +37,13 @@ Bevy `World` access may become the runtime API.
 - Script-generated events enter a later processing round; execution is never
   recursively invoked by gameplay systems or coupled to render frequency.
 
+Yarn dialogue is documented as a standalone adapter sequence in
+`DIALOGUE_YARN_ROADMAP.md`. It consumes the typed registry, deterministic Bevy
+adapter, save barrier, and condition/quest/effect authorities described below;
+it does not create a second scripting runtime. The dialogue roadmap owns Yarn
+presentation, prepared dialogue bundles, Fallout dialogue normalization, and
+the replaceable Yarn host bridge.
+
 ## Delivery sequence
 
 ### Wave 1 — record stream and script inventory

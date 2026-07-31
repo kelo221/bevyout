@@ -9,6 +9,7 @@ pub mod actor_animation;
 pub mod actor_state;
 pub mod combat;
 pub mod content;
+pub mod dialogue;
 pub mod disposition;
 pub mod faction;
 pub mod form_id;

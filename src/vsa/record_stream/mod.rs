@@ -32,6 +32,10 @@ pub(crate) struct RecordEnvelope<'a> {
     pub(crate) source_plugin: &'a str,
     pub(crate) payload: RecordPayload<'a>,
     pub(crate) deleted: bool,
+    /// FormID label of the enclosing topic-children GRUP (type 7), when the
+    /// record is nested under one. Fallout INFO records commonly omit TPIC /
+    /// NAME and inherit their topic from this group.
+    pub(crate) topic_group_form_id: Option<FormId>,
     #[allow(dead_code)]
     resolver: &'a FormIdResolver,
 }
@@ -87,6 +91,7 @@ fn walk_plugin(
         source.bytes.len(),
         source.name,
         resolver,
+        None,
         on_record,
     )
 }
@@ -97,6 +102,7 @@ fn walk_range(
     end: usize,
     source_plugin: &str,
     resolver: &FormIdResolver,
+    topic_group_form_id: Option<FormId>,
     on_record: &mut impl FnMut(RecordEnvelope<'_>),
 ) -> Result<()> {
     while offset + 4 <= end {
@@ -109,12 +115,24 @@ fn walk_range(
             if size < 24 || offset + size > end {
                 bail!("invalid GRUP size")
             }
+            let group_label = read_u32(bytes, offset + 8)?;
+            let group_type = i32::from_le_bytes(
+                bytes[offset + 12..offset + 16]
+                    .try_into()
+                    .expect("GRUP type has four bytes"),
+            );
+            let child_topic_group_form_id = if group_type == 7 {
+                Some(resolver.resolve(FormId(group_label)))
+            } else {
+                topic_group_form_id
+            };
             walk_range(
                 bytes,
                 offset + 24,
                 offset + size,
                 source_plugin,
                 resolver,
+                child_topic_group_form_id,
                 on_record,
             )?;
             offset += size;
@@ -147,6 +165,7 @@ fn walk_range(
                     source_plugin,
                     payload: RecordPayload::Decoded(&payload),
                     deleted: flags & RECORD_DELETED != 0,
+                    topic_group_form_id,
                     resolver,
                 }),
                 Err(error) => {
@@ -161,6 +180,7 @@ fn walk_range(
                         source_plugin,
                         payload: RecordPayload::Unavailable(&diagnostic),
                         deleted: flags & RECORD_DELETED != 0,
+                        topic_group_form_id,
                         resolver,
                     });
                 }

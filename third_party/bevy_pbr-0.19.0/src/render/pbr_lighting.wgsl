@@ -10,6 +10,19 @@
 
 const LAYER_BASE: u32 = 0;
 const LAYER_CLEARCOAT: u32 = 1;
+const DIFFUSE_WRAP_AMOUNT: f32 = 0.3;
+
+// Runtime surface variants set by the Fallout GLB material bridge.
+const FALLOUT_SURFACE_STANDARD: u32 = 0u;
+const FALLOUT_SURFACE_HAIR: u32 = 1u;
+const FALLOUT_SURFACE_EYE: u32 = 2u;
+
+// Kajiya–Kay controls. These remain deliberately fixed until visual review
+// establishes a need for material-level tuning.
+const FALLOUT_HAIR_PRIMARY_SHIFT: f32 = 0.08;
+const FALLOUT_HAIR_SECONDARY_SHIFT: f32 = -0.08;
+const FALLOUT_HAIR_PRIMARY_EXPONENT: f32 = 96.0;
+const FALLOUT_HAIR_SECONDARY_EXPONENT: f32 = 28.0;
 
 // From the Filament design doc
 // https://google.github.io/filament/Filament.md.html#table_symbols
@@ -91,6 +104,9 @@ struct LightingInput {
     // <https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile>.
     // What we call `F_ab` they call `AB`.
     F_ab: vec2<f32>,
+
+    // Internal Fallout surface variant: standard, hair, or eye.
+    surface_kind: u32,
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     // The strength of the clearcoat layer.
@@ -495,6 +511,94 @@ fn specular_anisotropy(
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
 
+fn fallout_eye_specular(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    roughness: f32,
+    specular_intensity: f32,
+) -> vec3<f32> {
+    // Keep the normal GGX lobe and add a restrained view-angle response. The
+    // runtime also enables Bevy's clearcoat layer for eyes, which supplies the
+    // sharper wet-corneal highlight without changing the albedo.
+    let base = specular(input, derived_input, roughness, specular_intensity);
+    let NdotV = saturate((*input).layers[LAYER_BASE].NdotV);
+    let rim = F_Schlick(0.04, 1.0, NdotV);
+    let rim_tint = vec3<f32>(0.08, 0.12, 0.18);
+    return base + rim_tint * rim * 0.35;
+}
+
+#ifdef STANDARD_MATERIAL_ANISOTROPY
+
+fn fallout_kajiya_kay_lobe(T: vec3<f32>, H: vec3<f32>, exponent: f32) -> f32 {
+    let TdotH = dot(T, H);
+    let sin_theta_h = sqrt(max(0.0, 1.0 - TdotH * TdotH));
+    return pow(sin_theta_h, exponent);
+}
+
+fn fallout_hair_specular(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    roughness: f32,
+    specular_intensity: f32,
+) -> vec3<f32> {
+    let T = (*input).Ta;
+    // A hair material can still be used with an older or incomplete mesh. In
+    // that case the tangent is zero and the ordinary GGX path is the safe
+    // fallback instead of manufacturing a highlight direction.
+    if dot(T, T) < 0.25 {
+        return specular(input, derived_input, roughness, specular_intensity);
+    }
+
+    let N = (*input).layers[LAYER_BASE].N;
+    let H = (*derived_input).H;
+    let shifted_primary = normalize(T + N * FALLOUT_HAIR_PRIMARY_SHIFT);
+    let shifted_secondary = normalize(T + N * FALLOUT_HAIR_SECONDARY_SHIFT);
+    let primary = fallout_kajiya_kay_lobe(
+        shifted_primary,
+        H,
+        FALLOUT_HAIR_PRIMARY_EXPONENT,
+    );
+    let secondary = fallout_kajiya_kay_lobe(
+        shifted_secondary,
+        H,
+        FALLOUT_HAIR_SECONDARY_EXPONENT,
+    );
+    let fresnel_term = fresnel(vec3<f32>(0.04), (*derived_input).LdotH);
+
+    // The primary lobe is neutral white. The secondary lobe takes a subdued
+    // tint from the hair albedo so dark hair does not produce a flat white cap.
+    let primary_color = vec3<f32>(0.65) + 0.35 * fresnel_term;
+    let secondary_color = (*input).diffuse_color * (0.16 + 0.12 * fresnel_term);
+    return (primary_color * primary + secondary_color * secondary) * specular_intensity;
+}
+
+#endif  // STANDARD_MATERIAL_ANISOTROPY
+
+fn fallout_surface_specular(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+    L: vec3<f32>,
+    roughness: f32,
+    specular_intensity: f32,
+) -> vec3<f32> {
+    if (*input).surface_kind == FALLOUT_SURFACE_HAIR {
+#ifdef STANDARD_MATERIAL_ANISOTROPY
+        return fallout_hair_specular(input, derived_input, roughness, specular_intensity);
+#else   // STANDARD_MATERIAL_ANISOTROPY
+        return specular(input, derived_input, roughness, specular_intensity);
+#endif  // STANDARD_MATERIAL_ANISOTROPY
+    }
+    if (*input).surface_kind == FALLOUT_SURFACE_EYE {
+        return fallout_eye_specular(input, derived_input, roughness, specular_intensity);
+    }
+
+#ifdef STANDARD_MATERIAL_ANISOTROPY
+    return specular_anisotropy(input, derived_input, L, roughness, specular_intensity);
+#else   // STANDARD_MATERIAL_ANISOTROPY
+    return specular(input, derived_input, roughness, specular_intensity);
+#endif  // STANDARD_MATERIAL_ANISOTROPY
+}
+
 // Diffuse BRDF
 // https://google.github.io/filament/Filament.md.html#materialsystem/diffusebrdf
 // fd(v,l) = σ/π * 1 / { |n⋅v||n⋅l| } ∫Ω D(m,α) G(v,l,m) (v⋅m) (l⋅m) dm
@@ -556,6 +660,15 @@ fn Fd_Chan(
     let fd = mix(fd0, fd255, t) +
         A * exp2(-B * sqrt(NdotH)) * LdotH;
     return fd * (1.0 / PI);
+}
+
+// A restrained artistic wrap for direct diffuse visibility. Keep this
+// separate from Chan's internal angular terms so the existing diffuse model
+// remains unchanged while tangent-facing surfaces receive a small amount of
+// light. The raw N⋅L is intentional: fully back-facing surfaces still fade to
+// zero instead of receiving a Half-Lambert floor.
+fn diffuse_wrap_visibility(N: vec3<f32>, L: vec3<f32>) -> f32 {
+    return saturate((dot(N, L) + DIFFUSE_WRAP_AMOUNT) / (1.0 + DIFFUSE_WRAP_AMOUNT));
 }
 
 // Scale/bias approximation
@@ -705,11 +818,13 @@ fn point_light(
 
     let brdf_roughness = mix(a, a_prime, specular_fix_remap(a));
 
-#ifdef STANDARD_MATERIAL_ANISOTROPY
-    var specular_light = specular_anisotropy(input, &specular_derived_input, L, brdf_roughness, specular_intensity);
-#else   // STANDARD_MATERIAL_ANISOTROPY
-    var specular_light = specular(input, &specular_derived_input, brdf_roughness, specular_intensity);
-#endif  // STANDARD_MATERIAL_ANISOTROPY
+    var specular_light = fallout_surface_specular(
+        input,
+        &specular_derived_input,
+        L,
+        brdf_roughness,
+        specular_intensity,
+    );
 
     // Sphere area light visibility (solid-angle attenuation)
     let light_radius = (*light).position_radius.w;
@@ -778,6 +893,7 @@ fn point_light(
         );
         diffuse = diffuse_color * diffuse_brdf;
     }
+    let diffuse_visibility = diffuse_wrap_visibility(N, L);
 
     // See https://google.github.io/filament/Filament.md.html#mjx-eqn-pointLightLuminanceEquation
     // Lout = f(v,l) Φ / { 4 π d^2 }⟨n⋅l⟩
@@ -797,9 +913,9 @@ fn point_light(
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.md.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
-    color_times_NdotL = (diffuse * derived_input.NdotL + specular_light * specular_derived_input.NdotL * inv_Fc) * inv_Fc + Frc * clearcoat_specular_derived_input.NdotL;
+    color_times_NdotL = (diffuse * diffuse_visibility + specular_light * specular_derived_input.NdotL * inv_Fc) * inv_Fc + Frc * clearcoat_specular_derived_input.NdotL;
 #else   // STANDARD_MATERIAL_CLEARCOAT
-    color_times_NdotL = diffuse * derived_input.NdotL + specular_light * specular_derived_input.NdotL;
+    color_times_NdotL = diffuse * diffuse_visibility + specular_light * specular_derived_input.NdotL;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     var texture_sample = 1f;
@@ -901,12 +1017,9 @@ fn directional_light(
         );
         diffuse = diffuse_color * diffuse_brdf;
     }
+    let diffuse_visibility = diffuse_wrap_visibility(N, L);
 
-#ifdef STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular_anisotropy(input, &derived_input, L, roughness, 1.0);
-#else   // STANDARD_MATERIAL_ANISOTROPY
-    let specular_light = specular(input, &derived_input, roughness, 1.0);
-#endif  // STANDARD_MATERIAL_ANISOTROPY
+    let specular_light = fallout_surface_specular(input, &derived_input, L, roughness, 1.0);
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     let clearcoat_N = (*input).layers[LAYER_CLEARCOAT].N;
@@ -929,10 +1042,10 @@ fn directional_light(
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.md.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
-    color = (diffuse + specular_light * inv_Fc) * inv_Fc * derived_input.NdotL +
+    color = (diffuse * diffuse_visibility + specular_light * inv_Fc * derived_input.NdotL) * inv_Fc +
         Frc * derived_clearcoat_input.NdotL;
 #else   // STANDARD_MATERIAL_CLEARCOAT
-    color = (diffuse + specular_light) * derived_input.NdotL;
+    color = diffuse * diffuse_visibility + specular_light * derived_input.NdotL;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     var texture_sample = 1f;

@@ -88,6 +88,46 @@ pub(crate) fn load_audio_archives(data_root: &Path, plugin_names: &[String]) -> 
     load
 }
 
+/// Index dialogue voice archives without changing the precedence used by the
+/// existing SFX/container audio path.
+pub(crate) fn load_dialogue_voice_archives(
+    data_root: &Path,
+    plugin_names: &[String],
+) -> AudioArchiveLoad {
+    let mut load = AudioArchiveLoad::default();
+    let mut seen = HashSet::new();
+    for plugin_name in plugin_names {
+        let candidates = dialogue_voice_archive_candidate_names(plugin_name);
+        let mut found_for_plugin = false;
+        let mut tried = Vec::new();
+        for name in candidates {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                continue;
+            }
+            tried.push(name.clone());
+            let path = data_root.join(&name);
+            if !path.is_file() {
+                continue;
+            }
+            found_for_plugin = true;
+            match BsaArchive::open(&path) {
+                Ok(archive) => load.archives.push(AudioArchive { path, archive }),
+                Err(error) => load.diagnostics.push(format!(
+                    "could not index dialogue voice archive {}: {error}",
+                    path.display()
+                )),
+            }
+        }
+        if !found_for_plugin && !tried.is_empty() {
+            load.diagnostics.push(format!(
+                "no dialogue voice archive found for {plugin_name}; tried {}",
+                tried.join(", ")
+            ));
+        }
+    }
+    load
+}
+
 /// Resolve an OpenMW-style sound path. Paths are normalized beneath `sound/`.
 /// The recorded extension is attempted first, followed by an `.mp3` variant.
 /// For each virtual-path candidate, a loose Data file takes precedence over
@@ -229,6 +269,27 @@ pub(crate) fn audio_archive_candidate_names(plugin_name: &str) -> Vec<String> {
     }
     candidates.push(format!("{stem} - Sound.bsa"));
     candidates.push(format!("{stem} - Sounds.bsa"));
+    candidates.push(format!("{stem}.bsa"));
+    deduplicate_case_insensitive(candidates)
+}
+
+pub(crate) fn dialogue_voice_archive_candidate_names(plugin_name: &str) -> Vec<String> {
+    let Some(stem) = Path::new(plugin_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    if stem.eq_ignore_ascii_case("fallout3") {
+        candidates.push("Fallout - Voices.bsa".to_string());
+        candidates.push("Fallout - MenuVoices.bsa".to_string());
+    }
+    candidates.push(format!("{stem} - Voices.bsa"));
+    candidates.push(format!("{stem} - MenuVoices.bsa"));
     candidates.push(format!("{stem}.bsa"));
     deduplicate_case_insensitive(candidates)
 }

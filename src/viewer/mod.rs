@@ -72,6 +72,7 @@ mod console_ui;
 mod controls;
 mod day_night;
 mod diagnostics;
+pub(crate) mod dialogue;
 mod fallout_ui;
 mod hud;
 #[cfg(test)]
@@ -206,6 +207,14 @@ pub fn render(args: RenderArgs) -> Result<()> {
             return Err(error);
         }
     }
+    if let Some(status) = dialogue_voice_status(&manifest, &args.selector) {
+        match status {
+            DialogueVoiceRenderStatus::Ready(message) => eprintln!("{message}"),
+            DialogueVoiceRenderStatus::TextFallback(message) => {
+                eprintln!("warning: {message}")
+            }
+        }
+    }
     run_view(
         manifest_path,
         RunViewOptions {
@@ -221,6 +230,48 @@ pub fn render(args: RenderArgs) -> Result<()> {
             save_slot: None,
         },
     )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DialogueVoiceRenderStatus {
+    Ready(String),
+    TextFallback(String),
+}
+
+fn dialogue_voice_status(
+    manifest: &PreparedSceneManifest,
+    selector: &str,
+) -> Option<DialogueVoiceRenderStatus> {
+    let bundle = manifest.dialogue.as_ref()?;
+    let asset_root = PathBuf::from(&manifest.asset_root);
+    let (catalog, coverage) = match crate::vsa::dialogue::coverage::read_prepared_voice_coverage(
+        &asset_root,
+        bundle,
+    ) {
+        Ok(coverage) => coverage,
+        Err(error) => {
+            return Some(DialogueVoiceRenderStatus::TextFallback(format!(
+                "TEXT-FALLBACK dialogue voice readiness failed for {}: {error}. Visual rendering will continue intentionally with text timing. next command: cargo run-dev -- prepare {selector}",
+                cell_label(&manifest.cell),
+            )));
+        }
+    };
+    if coverage.is_ready() {
+        return Some(DialogueVoiceRenderStatus::Ready(format!(
+            "dialogue voice ready for {}: {}",
+            cell_label(&manifest.cell),
+            coverage.summary()
+        )));
+    }
+    let missing = coverage.missing_labels().join(", ");
+    let repair_guidance =
+        crate::vsa::dialogue::coverage::voice_repair_guidance(selector, &catalog, &coverage);
+    Some(DialogueVoiceRenderStatus::TextFallback(format!(
+        "TEXT-FALLBACK dialogue voice coverage incomplete for {}: {}; missing keys=[{}]; visual rendering will continue intentionally with bounded runtime text fallback; {repair_guidance}",
+        cell_label(&manifest.cell),
+        coverage.summary(),
+        missing,
+    )))
 }
 
 fn read_manifest(manifest_path: &Path) -> Result<PreparedSceneManifest> {
@@ -331,6 +382,10 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         rebuild_shadows: args.rebuild_shadows,
         rebuild_reflection_probes: args.rebuild_reflection_probes,
         cache_dir: Some(cache_dir.to_path_buf()),
+        dialogue_sources: Vec::new(),
+        dialogue_voice_manifests: Vec::new(),
+        dialogue_voice_discover: false,
+        dialogue_voice_report: None,
         force,
         rebuild_assets: false,
         strict: false,

@@ -139,6 +139,7 @@ fn sample_save() -> SaveGame {
         next_runtime_item_id: 6,
         rng_state: 0x0123_4567_89ab_cdef,
         canonical: None,
+        dialogue: Default::default(),
     }
 }
 
@@ -249,9 +250,9 @@ fn version_three_save_round_trips_equipment_and_hotkeys() {
 }
 
 #[test]
-fn version_five_actor_and_item_combat_state_round_trip_deterministically() {
+fn version_six_actor_item_and_dialogue_state_round_trip_deterministically() {
     let save = sample_save();
-    assert_eq!(save.header.format_version, 5);
+    assert_eq!(save.header.format_version, 6);
     let first = encode_save(&save).unwrap();
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);
@@ -260,6 +261,32 @@ fn version_five_actor_and_item_combat_state_round_trip_deterministically() {
     let actor = &decoded.world.cells[&0x0001_51e3].actors[&0x0004_1600];
     assert_eq!(actor.life_state, ActorLifeState::Alive);
     assert_eq!(actor.package.unwrap().procedure_index, 3);
+}
+
+#[test]
+fn version_five_save_loads_with_empty_dialogue_state() {
+    let mut save = sample_save();
+    save.header.format_version = 5;
+    let bytes = encode_save(&save).unwrap();
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(
+        decoded.dialogue,
+        bevyout_core::dialogue::DialogueSnapshot::default()
+    );
+    assert!(!bytes.windows(4).any(|tag| tag == b"DLOG"));
+}
+
+#[test]
+fn version_six_writes_persistent_dialogue_variables_in_dlog() {
+    let mut save = sample_save();
+    save.dialogue.variables.set(
+        "$global_opened_gate",
+        bevyout_core::dialogue::NarrativeValue::Bool(true),
+    );
+    let bytes = encode_save(&save).unwrap();
+    assert!(bytes.windows(4).any(|tag| tag == b"DLOG"));
+    let decoded = decode_save(&bytes).unwrap();
+    assert_eq!(decoded, save);
 }
 
 #[test]

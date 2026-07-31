@@ -31,6 +31,9 @@ pub(crate) struct PreparedPointShadowReceiverRoot;
 pub(crate) struct FalloutMaterialConfigured;
 
 #[derive(Component)]
+pub(crate) struct FalloutSurfaceConfigured;
+
+#[derive(Component)]
 pub(crate) struct CellVolumetricFog;
 
 #[derive(Component)]
@@ -40,6 +43,8 @@ pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
 
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
+    #[serde(default)]
+    shader_flags_1: u32,
     #[serde(default)]
     emission_authorized: Option<bool>,
     #[serde(default)]
@@ -65,6 +70,84 @@ fn parse_fallout_material_extra(value: &str) -> Option<FalloutMaterialExtra> {
         serde_json::Value::Object(_) => serde_json::from_value(nested).ok(),
         serde_json::Value::String(serialized) => serde_json::from_str(&serialized).ok(),
         _ => None,
+    }
+}
+
+const FALLOUT_SURFACE_STANDARD: u32 = 0;
+const FALLOUT_SURFACE_HAIR: u32 = 1;
+const FALLOUT_SURFACE_EYE: u32 = 2;
+const FALLOUT_SHADER_FLAG1_EYE_ENVIRONMENT_MAPPING: u32 = 1 << 17;
+const FALLOUT_SHADER_FLAG1_HAIR_SOFT_LIGHTING: u32 = 1 << 18;
+const FALLOUT_HAIR_ANISOTROPY_STRENGTH: f32 = 1.0;
+const FALLOUT_EYE_CLEARCOAT: f32 = 1.0;
+const FALLOUT_EYE_CLEARCOAT_ROUGHNESS: f32 = 0.04;
+
+fn is_eye_surface_mesh_name(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("eye")
+}
+
+fn fallout_surface_kind(metadata: &FalloutMaterialExtra, mesh_name: Option<&str>) -> u32 {
+    if metadata.shader_flags_1 & FALLOUT_SHADER_FLAG1_HAIR_SOFT_LIGHTING != 0 {
+        return FALLOUT_SURFACE_HAIR;
+    }
+
+    // The eye-environment flag is also authored on some glasses materials.
+    // Existing GLB mesh names provide the narrowest runtime discriminator;
+    // when a name is unavailable, preserve the source flag as the fallback.
+    if metadata.shader_flags_1 & FALLOUT_SHADER_FLAG1_EYE_ENVIRONMENT_MAPPING != 0
+        && mesh_name.is_none_or(is_eye_surface_mesh_name)
+    {
+        return FALLOUT_SURFACE_EYE;
+    }
+
+    FALLOUT_SURFACE_STANDARD
+}
+
+/// Applies the runtime-only Fallout hair and eye variants to the existing
+/// `StandardMaterial` handles. The GLB metadata remains the source of truth;
+/// no scene hierarchy or prepared manifest data is changed here.
+#[allow(clippy::type_complexity)]
+pub(crate) fn configure_fallout_surface_materials(
+    mut commands: Commands,
+    extras: Query<
+        (
+            Entity,
+            &MeshMaterial3d<StandardMaterial>,
+            &GltfMaterialExtras,
+            Option<&GltfMeshName>,
+        ),
+        (With<Mesh3d>, Without<FalloutSurfaceConfigured>),
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, material_handle, extras, mesh_name) in &extras {
+        let Some(metadata) = parse_fallout_material_extra(&extras.value) else {
+            commands.entity(entity).insert(FalloutSurfaceConfigured);
+            continue;
+        };
+        let surface_kind = fallout_surface_kind(&metadata, mesh_name.map(|name| name.0.as_str()));
+        let Some(mut material) = materials.get_mut(&material_handle.0) else {
+            // The scene entity can arrive before its material asset. Leave it
+            // unmarked so the next frame can configure it once loaded.
+            continue;
+        };
+
+        match surface_kind {
+            FALLOUT_SURFACE_HAIR => {
+                material.fallout_surface_kind = FALLOUT_SURFACE_HAIR;
+                // This also selects Bevy's tangent-capable PBR variant. The
+                // shader falls back to GGX if the mesh has no tangent data.
+                material.anisotropy_strength = FALLOUT_HAIR_ANISOTROPY_STRENGTH;
+            }
+            FALLOUT_SURFACE_EYE => {
+                material.fallout_surface_kind = FALLOUT_SURFACE_EYE;
+                material.clearcoat = FALLOUT_EYE_CLEARCOAT;
+                material.clearcoat_perceptual_roughness = FALLOUT_EYE_CLEARCOAT_ROUGHNESS;
+            }
+            _ => {}
+        }
+
+        commands.entity(entity).insert(FalloutSurfaceConfigured);
     }
 }
 

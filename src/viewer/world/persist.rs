@@ -816,6 +816,18 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         equipped: capture_equipped(world),
         hotkeys: capture_hotkeys(world),
     };
+    let dialogue = if let Some(mut runtime) =
+        world.get_resource_mut::<crate::viewer::dialogue::DialogueRuntime>()
+    {
+        if runtime.is_active() {
+            anyhow::bail!(
+                "dialogue save deferred: an active dialogue must reach a boundary before saving"
+            );
+        }
+        runtime.boundary_snapshot()
+    } else {
+        Default::default()
+    };
     let save = SaveGame {
         header,
         world: world
@@ -833,6 +845,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         canonical: world
             .get_resource::<interaction::CanonicalItemLedger>()
             .map(interaction::CanonicalItemLedger::snapshot),
+        dialogue,
     };
     let save_dir = world
         .get_resource::<SaveDirectory>()
