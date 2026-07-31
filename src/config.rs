@@ -68,9 +68,6 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             if args.cache_dir.is_none() {
                 args.cache_dir = config.output.cache_dir;
             }
-            if args.blender.is_none() {
-                args.blender = config.tools.blender;
-            }
             if args.toktx.is_none() {
                 args.toktx = config.tools.ktx;
             }
@@ -96,9 +93,6 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             if args.plugin.is_none() {
                 args.plugin = config.fallout3.plugin.clone();
             }
-            if args.blender.is_none() {
-                args.blender = config.tools.blender.clone();
-            }
             if args.irradiance_blender.is_none() {
                 args.irradiance_blender = config.tools.irradiance_blender.clone();
             }
@@ -119,7 +113,10 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
                 args.cache_dir = config.output.cache_dir.clone();
             }
         }
-        CommandLine::View(_) | CommandLine::Script(_) => {}
+        CommandLine::View(_)
+        | CommandLine::Script(_)
+        | CommandLine::ExteriorConversionReport(_)
+        | CommandLine::ExteriorCatalog(_) => {}
         CommandLine::NifConvert(args) => {
             if args.game_root.is_none() {
                 args.game_root = config.fallout3.game_root.clone();

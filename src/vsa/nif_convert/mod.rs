@@ -1,8 +1,12 @@
-//! Experimental native FO3/FNV NIF-to-GLB vertical slice.
+//! Production native FO3/FNV NIF-to-GLB conversion.
 //!
 //! This owns its CLI input resolution, focused NIF conversion, texture
-//! resolution, reports, and output writes. The established Blender conversion
-//! route used by `prepare` intentionally remains unchanged.
+//! resolution, reports, and output writes. The production preparation path no
+//! longer selects Blender. Remaining limitations are deliberately reported by
+//! the native converter: LAND terrain material/layer fidelity, VWD/distant
+//! geometry generation, and NIF blocks that are unsupported or lossy. Exterior
+//! packages own terrain, distant references, and navigation; the converter is
+//! not invoked by the runtime viewer.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

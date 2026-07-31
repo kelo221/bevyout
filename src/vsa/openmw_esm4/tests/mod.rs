@@ -9,6 +9,55 @@ fn parse_plugin(bytes: &[u8], target_cell: u32) -> Result<ParsedPlugin> {
         &CellSelector::FormId(target_cell),
     )
 }
+
+#[test]
+fn land_preserves_height_normal_color_and_texture_assignment_shape() {
+    let mut heights = vec![0_u8; 33 * 33];
+    heights[0] = 8;
+    let mut vnml = vec![0_u8; 33 * 33 * 3];
+    vnml[1] = 127;
+    let mut vclr = vec![0_u8; 33 * 33 * 3];
+    vclr[0] = 12;
+    let mut btxt = 0x0000_0101_u32.to_le_bytes().to_vec();
+    btxt.extend_from_slice(&[2, 0]);
+    let mut atxt = 0x0000_0102_u32.to_le_bytes().to_vec();
+    atxt.extend_from_slice(&[2, 1]);
+    let land = parse_land(
+        &[
+            direct_subrecord("VHGT", heights.split_off(0)),
+            direct_subrecord("VNML", vnml),
+            direct_subrecord("VCLR", vclr),
+            direct_subrecord("BTXT", btxt),
+            direct_subrecord("ATXT", atxt),
+        ],
+        0x9000,
+        0x9001,
+    );
+    assert_eq!(land.heights.len(), 33 * 33);
+    assert_eq!(land.normals.len(), 33 * 33);
+    assert_eq!(land.colors[0], [12, 0, 0]);
+    assert_eq!(land.texture_layers, vec![0x101, 0x102]);
+    assert_eq!(land.texture_assignments.len(), 2);
+    assert!(land.texture_assignments[0].base);
+}
+
+#[test]
+fn bethesda_vhgt_decodes_row_deltas_with_eight_unit_height_scale() {
+    let count = LandRecord::GRID_SIZE * LandRecord::GRID_SIZE;
+    let mut vhgt = vec![0_u8; 4 + count + 3];
+    vhgt[..4].copy_from_slice(&10.0_f32.to_le_bytes());
+    vhgt[4] = 1;
+    vhgt[5] = 2;
+    vhgt[4 + LandRecord::GRID_SIZE] = 3;
+    vhgt[5 + LandRecord::GRID_SIZE] = 4;
+
+    let land = parse_land(&[direct_subrecord("VHGT", vhgt)], 0x9000, 0x9001);
+
+    assert_eq!(land.heights[0], 88.0);
+    assert_eq!(land.heights[1], 104.0);
+    assert_eq!(land.heights[LandRecord::GRID_SIZE], 112.0);
+    assert_eq!(land.heights[LandRecord::GRID_SIZE + 1], 144.0);
+}
 use std::io::Write;
 
 fn direct_subrecord(signature: &str, data: Vec<u8>) -> Subrecord {

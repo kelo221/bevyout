@@ -92,6 +92,9 @@ impl PluginGroup for ViewerPlugins {
             .add(world::WorldPlugin {
                 resident_cell_limit: self.resident_cell_limit,
             })
+            .add(world::exterior::ExteriorWorldPlugin {
+                resident_cell_limit: self.resident_cell_limit,
+            })
             .add(interaction::InteractionPlugin)
             .add(actor::ActorPlugin)
             .add(actor_state::ActorStatePlugin)

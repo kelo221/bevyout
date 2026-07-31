@@ -7,6 +7,7 @@ mod cell_map;
 mod content_index;
 #[allow(dead_code)]
 pub(crate) mod dialogue;
+mod exterior;
 mod manifest;
 mod nif_convert;
 mod openmw_esm4;
@@ -29,6 +30,8 @@ pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
+pub(crate) use exterior::{apply_staged_assets, build_cell_package, build_worldspace_indexes};
+pub use exterior::{exterior_catalog, exterior_conversion_report};
 /// Test-only re-export (issue #120): `viewer::scene`'s spawn-path unit tests
 /// construct a `PreparedSemantic::Npc(PreparedActor { .. })` placement to
 /// prove living-actor placements stay unspawned exactly like before this
@@ -89,6 +92,6 @@ pub(crate) use prepare::{
 #[cfg(test)]
 pub(crate) use prepare::PreparedNavPolygon;
 pub use prepare::prepare;
-pub(crate) use prepare::{PreparedNavGraph, PreparedNavMesh};
+pub(crate) use prepare::{PreparedNavGraph, PreparedNavMesh, exterior_nav_graph};
 pub use report::report;
 pub(crate) use scenes::{find_cached_manifest, resolve_cached_manifest};

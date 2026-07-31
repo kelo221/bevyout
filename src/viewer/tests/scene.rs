@@ -99,6 +99,7 @@ fn minimal_manifest(placements: Vec<PreparedPlacement>) -> PreparedSceneManifest
         mutability_summary: Default::default(),
         leveled_lists: Default::default(),
         dialogue: None,
+        exterior: None,
     }
 }
 

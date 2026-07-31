@@ -182,12 +182,11 @@ fn nif_convert_requires_one_source_and_parses_conversion_options() {
 }
 
 #[test]
-fn native_converter_is_default_and_blender_remains_explicit() {
+fn native_conversion_is_authoritative_and_blender_flags_are_rejected() {
     let cli = Cli::try_parse_from(["bevyout", "prepare", "SuperDuperMart"]).unwrap();
     let CommandLine::Prepare(args) = cli.command else {
         panic!("expected prepare command");
     };
-    assert_eq!(args.converter, PrepareConverter::Native);
     assert_eq!(
         args.actor_animation_converter,
         ActorAnimationConverter::Native
@@ -204,63 +203,10 @@ fn native_converter_is_default_and_blender_remains_explicit() {
     let CommandLine::Prepare(args) = cli.command else {
         panic!("expected prepare command");
     };
-    assert_eq!(args.converter, PrepareConverter::Native);
     assert_eq!(
         args.actor_animation_converter,
         ActorAnimationConverter::Disabled
     );
-
-    let cli = Cli::try_parse_from([
-        "bevyout",
-        "prepare",
-        "SuperDuperMart",
-        "--actor-animation-converter",
-        "blender",
-    ])
-    .unwrap();
-    let CommandLine::Prepare(args) = cli.command else {
-        panic!("expected prepare command");
-    };
-    assert_eq!(args.converter, PrepareConverter::Native);
-    assert_eq!(
-        args.actor_animation_converter,
-        ActorAnimationConverter::Blender
-    );
-
-    let cli = Cli::try_parse_from([
-        "bevyout",
-        "prepare",
-        "SuperDuperMart",
-        "--converter",
-        "blender",
-        "--jobs",
-        "8",
-    ])
-    .unwrap();
-    let CommandLine::Prepare(args) = cli.command else {
-        panic!("expected prepare command");
-    };
-    assert_eq!(args.converter, PrepareConverter::Blender);
-    assert_eq!(args.jobs, Some(8));
-
-    let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
-    let CommandLine::Render(args) = cli.command else {
-        panic!("expected render command");
-    };
-    assert_eq!(args.converter, PrepareConverter::Native);
-
-    let cli = Cli::try_parse_from([
-        "bevyout",
-        "render",
-        "SuperDuperMart",
-        "--converter",
-        "blender",
-    ])
-    .unwrap();
-    let CommandLine::Render(args) = cli.command else {
-        panic!("expected render command");
-    };
-    assert_eq!(args.converter, PrepareConverter::Blender);
 
     assert!(
         Cli::try_parse_from([
@@ -269,6 +215,16 @@ fn native_converter_is_default_and_blender_remains_explicit() {
             "SuperDuperMart",
             "--converter",
             "unknown",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "prepare",
+            "SuperDuperMart",
+            "--actor-animation-converter",
+            "blender",
         ])
         .is_err()
     );

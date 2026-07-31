@@ -263,6 +263,20 @@ pub(crate) fn build_prepared_colliders(
         .collect::<HashMap<_, _>>();
     let mut unknown_layers = HashSet::new();
     let mut static_marker_spawned = false;
+    if manifest
+        .exterior
+        .as_ref()
+        .is_some_and(|package| package.terrain.is_some())
+    {
+        build_exterior_terrain_collider(
+            world,
+            manifest.exterior.as_ref().expect("package still borrowed"),
+            static_body,
+            &mut collision_world,
+            &mut stats,
+            &mut static_marker_spawned,
+        );
+    }
     // The startup path is intentionally all-at-once, but it still needs the
     // same collision ordering as a cell swap: BoxDDD must see every static
     // and keyframed shape before a dynamic body is allowed to simulate.
@@ -362,6 +376,113 @@ pub(crate) fn build_prepared_colliders(
     state.collision_build_complete = false;
     state.collisions_ready = stats.shapes > 0;
     *cell_physics = CellPhysicsReadiness::BuildingDynamic;
+}
+
+/// Exterior packages carry terrain collision beside their render samples,
+/// rather than as a model physics sidecar. Feed that prepared mesh through
+/// the same BoxDDD shape path used by interior static placements so the FPS
+/// controller has one collision authority for both scene kinds.
+fn build_exterior_terrain_collider(
+    world: &mut boxddd::World,
+    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
+    static_body: BodyId,
+    collision_world: &mut PreparedCollisionWorld,
+    stats: &mut CollisionRuntimeStats,
+    static_marker_spawned: &mut bool,
+) {
+    let Some(terrain) = package.terrain.as_ref() else {
+        return;
+    };
+    if !terrain.is_well_formed() || terrain.width < 2 || terrain.height < 2 {
+        return;
+    }
+    let width = usize::from(terrain.width);
+    let height = usize::from(terrain.height);
+    let mut indices = Vec::with_capacity((width - 1) * (height - 1) * 3 * 2);
+    for y in 0..height - 1 {
+        for x in 0..width - 1 {
+            let i = (y * width + x) as u32;
+            let next = i + width as u32;
+            indices.extend_from_slice(&[i, next, i + 1, i + 1, next, next + 1]);
+        }
+    }
+    let placement = PreparedPlacement {
+        reference_form_id: package.cell_form_id,
+        base_form_id: package.cell_form_id,
+        asset_path: None,
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: Some("<exterior-terrain>".into()),
+        physics_source: Some(PreparedPhysicsSource::GeneratedRender),
+        physics_classification: PreparedPhysicsClassification::Static,
+        step_support: true,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "LAND".into(),
+        base_kind: "LAND".into(),
+        editor_id: None,
+        display_name: Some("Exterior terrain".into()),
+        count: 1,
+        semantic: Default::default(),
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    };
+    let body = PreparedPhysicsBody {
+        friction: 0.8,
+        ..PreparedPhysicsBody::default()
+    };
+    let shape = PreparedPhysicsShape::TriangleMesh {
+        vertices: terrain.positions.clone(),
+        indices,
+    };
+    let Some((shape_id, triangles)) = create_prepared_shape(
+        world,
+        static_body,
+        &body,
+        &shape,
+        &placement,
+        PreparedShapeOptions {
+            dynamic: false,
+            local_space: false,
+            collision_group: 0,
+        },
+    ) else {
+        warn!(
+            "BoxDDD rejected exterior terrain collider for cell {:08x}",
+            package.cell_form_id
+        );
+        return;
+    };
+    collision_world.surfaces.insert(
+        shape_id,
+        CollisionSurface {
+            material: body.material,
+        },
+    );
+    collision_world
+        .ledger
+        .record_static_shape(package.cell_form_id, shape_id);
+    stats.bodies += 1;
+    stats.shapes += 1;
+    stats.packed_triangles += triangles;
+    *stats.shape_kinds.entry("triangle_mesh").or_default() += 1;
+    if !*static_marker_spawned {
+        *static_marker_spawned = true;
+    }
+    info!(
+        "prepared exterior terrain collision {:08x}: {} vertices, {} triangles",
+        package.cell_form_id,
+        terrain.positions.len(),
+        triangles
+    );
 }
 
 /// Builds every BoxDDD body/shape for one placement (shared by the startup

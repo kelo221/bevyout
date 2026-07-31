@@ -384,7 +384,7 @@ pub(crate) fn retain_static_step_support(
 
 #[derive(Debug)]
 pub(crate) struct PlacementStage {
-    pub(crate) jobs: Vec<BlenderAssetJob>,
+    pub(crate) jobs: Vec<AssetJob>,
     pub(crate) visual_assets: Vec<PreparedVisualAsset>,
     pub(crate) placements: Vec<PreparedPlacement>,
     pub(crate) lights: Vec<PreparedLight>,
@@ -451,7 +451,7 @@ pub(crate) fn stage_placements(
         .iter()
         .filter_map(|reference| reference.linked_reference_form_id)
         .collect();
-    let mut jobs: Vec<BlenderAssetJob> = Vec::new();
+    let mut jobs: Vec<AssetJob> = Vec::new();
     let mut visual_assets = Vec::new();
     let mut placements = Vec::new();
     let mut lights = Vec::new();
@@ -727,7 +727,7 @@ pub(crate) fn stage_placements(
                 AssetCacheDecision::Reuse => cache_hits += 1,
                 AssetCacheDecision::BuildMissing => {
                     cache_missing += 1;
-                    jobs.push(BlenderAssetJob {
+                    jobs.push(AssetJob {
                         kind: if assembly {
                             AssetJobKind::ActorAssembly
                         } else {
@@ -762,7 +762,7 @@ pub(crate) fn stage_placements(
                             output.display()
                         ),
                     });
-                    jobs.push(BlenderAssetJob {
+                    jobs.push(AssetJob {
                         kind: if assembly {
                             AssetJobKind::ActorAssembly
                         } else {
@@ -790,7 +790,7 @@ pub(crate) fn stage_placements(
                 }
                 AssetCacheDecision::RebuildRequested => {
                     cache_explicit_rebuilds += 1;
-                    jobs.push(BlenderAssetJob {
+                    jobs.push(AssetJob {
                         kind: if assembly {
                             AssetJobKind::ActorAssembly
                         } else {

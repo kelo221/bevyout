@@ -382,23 +382,6 @@ fn material_emission_policy_preserves_source_strength_and_override_precedence() 
 }
 
 #[test]
-fn blender_job_json_carries_quick_ao_profile() {
-    let json = blender_jobs_json(&[BlenderAssetJob {
-        kind: AssetJobKind::StaticNif,
-        input: PathBuf::from("C:\\staging\\mesh.nif"),
-        output: PathBuf::from("C:\\cache\\mesh.glb"),
-        physics_output: PathBuf::from("C:\\cache\\mesh.physics.json.gz"),
-        model: "architecture/test.nif".into(),
-        conversion: AssetConversion::QuickAo,
-        root_transform_policy: RootTransformPolicy::PreserveReviewRequired,
-    }]);
-    assert!(json.contains("\"conversion\":\"ao-quick-v1\""));
-    assert!(json.contains("mesh.physics.json.gz"));
-    assert!(json.contains("architecture/test.nif"));
-    assert!(json.contains("preserve_review_required"));
-}
-
-#[test]
 fn root_transform_policy_is_normalized_and_limited_to_verified_models() {
     assert_eq!(
         root_transform_policy(r"MESHES\Dungeons\Vault\Room\VRmWallScreen01.NIF"),

@@ -1297,11 +1297,10 @@ fn teardown_archipelago(world: &mut World) {
 /// islands, and door-link entities for the active cell's prepared nav
 /// graph. Lazy: only called from `tna spawn`, never eagerly per cell swap.
 fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
-    let (current_cell, path, travel_destinations, mut door_lock_info, door_positions) = {
+    let (current_cell, travel_destinations, mut door_lock_info, door_positions) = {
         let manifest = world
             .get_resource::<crate::viewer::LoadedSceneManifest>()
             .ok_or_else(no_nav_graph_error)?;
-        let path = super::nav_graph_path(manifest).ok_or_else(no_nav_graph_error)?;
         let travel_destinations = super::travel_door_destinations(manifest);
         let mut door_lock_info = HashMap::new();
         let mut door_positions = HashMap::new();
@@ -1322,8 +1321,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
             }
         }
         (
-            manifest.cell.form_id,
-            path,
+            manifest
+                .exterior
+                .as_ref()
+                .map(|package| package.cell_form_id)
+                .unwrap_or(manifest.cell.form_id),
             travel_destinations,
             door_lock_info,
             door_positions,
@@ -1355,8 +1357,11 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 
     teardown_archipelago(world);
 
-    let graph = super::read_nav_graph(&path).map_err(|error| {
-        warn!("nav graph read failed at {}: {error:#}", path.display());
+    let manifest = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .ok_or_else(no_nav_graph_error)?;
+    let graph = super::read_nav_graph_for_manifest(manifest).map_err(|error| {
+        warn!("nav graph read failed for cell {current_cell:08x}: {error:#}");
         no_nav_graph_error()
     })?;
     // Issue #164: capture this cell's lowest prepared geometry Y so the fall

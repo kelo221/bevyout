@@ -188,10 +188,7 @@ fn prepare_batch(args: PrepareArgs, explicit: Vec<String>) -> Result<()> {
     // toolchain and exits nonzero on any staleness. Performs no
     // preparation: it returns before the cell map is written or the job
     // manifest's `pending` entries and on-disk copy are touched.
-    let selected_scene_converter_revision = match args.converter {
-        PrepareConverter::Blender => PREPARED_CONVERTER_REVISION,
-        PrepareConverter::Native => NATIVE_PREPARED_CONVERTER_REVISION,
-    };
+    let selected_scene_converter_revision = NATIVE_PREPARED_CONVERTER_REVISION;
     let selected_actor_animation_backend = crate::converter_policy::resolve_actor_animation_backend(
         Some(args.actor_animation_converter.backend()),
     );
@@ -486,8 +483,16 @@ fn prepare_cell(
     let mut diagnostics = Vec::new();
     diagnostics.extend(session.plugin_diagnostics.iter().cloned());
     let plugin_sources = session.plugin_sources();
-    let mut parsed = parse_content_set(&plugin_sources, &selector)
-        .context("failed to parse Fallout content set")?;
+    // Parse the content set once. Exterior preparation needs both the selected
+    // cell and the deterministic all-worldspace index; selecting first and
+    // reparsing here doubled the retained base/reference state and made large
+    // exterior cells spike memory unnecessarily.
+    let all_parsed =
+        parse_content_set_all(&plugin_sources).context("failed to parse Fallout content set")?;
+    let exterior_indexes = crate::vsa::build_worldspace_indexes(&all_parsed, &source_fingerprint);
+    let mut parsed = all_parsed
+        .select(&selector)
+        .context("failed to select Fallout content set cell")?;
     diagnostics.extend(parsed.diagnostics.drain(..).map(|message| Diagnostic {
         severity: "info".into(),
         message,
@@ -514,13 +519,6 @@ fn prepare_cell(
             });
         }
     }
-    if !cell.interior {
-        bail!(
-            "{} is not an interior cell; LAND support is not part of this slice",
-            super::super::manifest::cell_label(&cell)
-        )
-    }
-
     // BSA archive indexes: indexed once in `BatchSession::new`, not per cell
     // (F47.2).
     diagnostics.extend(session.archive_diagnostics.iter().cloned());
@@ -542,7 +540,9 @@ fn prepare_cell(
         cell.lighting_template_form_id = metadata.lighting_template_form_id;
         cell.lighting_template_flags = metadata.lighting_template_flags;
         cell.water_form_id = metadata.water_form_id;
-        cell.water_height = metadata.water_height;
+        cell.water_height = metadata
+            .water_height
+            .filter(|height| height.is_finite() && height.abs() < 1_000_000.0);
         let raw_lighting = metadata.lighting;
         let mut effective_lighting = raw_lighting.unwrap_or_else(|| legacy_lighting(&cell));
         cell.raw_lighting = raw_lighting.map(prepared_lighting);
@@ -593,26 +593,147 @@ fn prepare_cell(
     }
     cell.day_night_profile = resolve_authoritative_day_night_profile(&cell, &parsed);
     cell.day_night_preview_profile = resolve_preview_day_night_profile(&parsed);
-    let (static_converter_revision, actor_converter_revision, prepared_converter_revision) =
-        match args.converter {
-            PrepareConverter::Blender => (
-                NIF_CONVERTER_REVISION,
-                ACTOR_CONVERTER_REVISION,
-                PREPARED_CONVERTER_REVISION,
-            ),
-            PrepareConverter::Native => (
-                NATIVE_NIF_CONVERTER_REVISION,
-                NATIVE_ACTOR_CONVERTER_REVISION,
-                NATIVE_PREPARED_CONVERTER_REVISION,
-            ),
+    if !cell.interior {
+        let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
+        let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
+        let exterior_stage = stage_placements(
+            parsed.references.clone(),
+            &parsed.bases,
+            &HashMap::new(),
+            &data_root,
+            &session.archives,
+            &staging_dir,
+            &assets_dir,
+            &mut diagnostics,
+            args.rebuild_assets,
+            static_converter_revision,
+            actor_converter_revision,
+        )?;
+        let mut failed_native_assets = HashMap::new();
+        if !exterior_stage.jobs.is_empty() {
+            let batch = run_native_batch(
+                &exterior_stage.jobs,
+                &data_root,
+                &session.archives,
+                args.jobs,
+                args.strict,
+            )
+            .context("native exterior asset conversion failed")?;
+            output.push(batch.summary().line());
+            batch.enforce_strict(args.strict)?;
+            failed_native_assets = batch.failed_outputs(&exterior_stage.jobs);
+        }
+        let mut package = crate::vsa::build_cell_package(&parsed, &cell, &source_fingerprint)
+            .with_context(|| {
+                format!(
+                    "exterior cell {} is missing a worldspace or XCLC grid",
+                    super::super::manifest::cell_label(&cell)
+                )
+            })?;
+        crate::vsa::apply_staged_assets(
+            &mut package,
+            &exterior_stage.placements,
+            &failed_native_assets
+                .into_iter()
+                .filter_map(|(path, reason)| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| (format!("assets/{name}"), reason))
+                })
+                .collect(),
+        );
+        let package_path = cache_dir
+            .join("worldspaces")
+            .join(format!("{:08x}", package.worldspace_form_id))
+            .join("cells")
+            .join(format!("{:08x}.ron", package.cell_form_id));
+        if let Some(parent) = package_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &package_path,
+            to_string_pretty(&package, PrettyConfig::default())?,
+        )?;
+        for mut index in exterior_indexes {
+            let index_path = cache_dir
+                .join("worldspaces")
+                .join(format!("{:08x}", index.worldspace_form_id))
+                .join("index.ron");
+            if let Some(parent) = index_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            index.sort_deterministically();
+            fs::write(
+                &index_path,
+                to_string_pretty(&index, PrettyConfig::default())?,
+            )?;
+        }
+        let manifest = PreparedSceneManifest {
+            schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+            prepare_revision: Some(CURRENT_PREPARE_REVISION.into()),
+            converter_revision: Some(NATIVE_PREPARED_CONVERTER_REVISION.into()),
+            physics_schema_version: Some(PHYSICS_ASSET_SCHEMA_VERSION),
+            asset_root: cache_dir.to_string_lossy().to_string(),
+            source_plugin: plugin_path.to_string_lossy().to_string(),
+            source_fingerprint,
+            item_catalog_path: None,
+            item_catalog_revision: None,
+            item_catalog_hash: None,
+            recipe_catalog_path: None,
+            recipe_catalog_revision: None,
+            recipe_catalog_hash: None,
+            actor_catalog_path: None,
+            actor_catalog_revision: None,
+            actor_catalog_hash: None,
+            actor_animation_catalog_path: None,
+            actor_animation_catalog_revision: None,
+            actor_animation_catalog_hash: None,
+            source_plugins,
+            cell,
+            placements: Vec::new(),
+            lights: Vec::new(),
+            diagnostics,
+            visual_issues: Vec::new(),
+            navmeshes: Vec::new(),
+            nav_graph: None,
+            cell_audio: PreparedCellAudio::default(),
+            audio_clips: Vec::new(),
+            footstep_sets: Vec::new(),
+            hard_landing_clips: Vec::new(),
+            bake: None,
+            static_point_shadows: None,
+            reflection_probes: None,
+            mutability_summary: PreparedMutabilitySummary::default(),
+            leveled_lists: std::collections::BTreeMap::new(),
+            dialogue: None,
+            exterior: Some(package),
         };
+        let manifest_path = scene_dir.join("scene.ron");
+        fs::write(
+            &manifest_path,
+            to_string_pretty(&manifest, PrettyConfig::default())?,
+        )?;
+        output.push(format!(
+            "prepared exterior {} terrain={} objects={} -> {}",
+            super::super::manifest::cell_label(&manifest.cell),
+            manifest
+                .exterior
+                .as_ref()
+                .and_then(|package| package.terrain.as_ref())
+                .is_some(),
+            manifest.exterior.as_ref().map_or(0, |package| {
+                package.static_objects.len()
+                    + package.dynamic_objects.len()
+                    + package.distant_objects.len()
+            }),
+            manifest_path.display()
+        ));
+        return Ok(());
+    }
+    let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
+    let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
+    let prepared_converter_revision = NATIVE_PREPARED_CONVERTER_REVISION;
     let actor_animation_backend = args.actor_animation_converter.backend();
-    let blender = (args.converter == PrepareConverter::Blender
-        || crate::converter_policy::actor_animation_backend_requires_blender(
-            actor_animation_backend,
-        ))
-    .then(|| find_blender(args.blender.clone()))
-    .transpose()?;
     let (navmeshes, mut nav_graph, mut nav_graph_full, nav_graph_summary) = stage_navmeshes(
         &cache_dir,
         &scene_dir,
@@ -630,7 +751,7 @@ fn prepare_cell(
     // cells racing to stage the *same* missing asset write the same bytes
     // to the same path -- redundant in the worst case, not corrupting. That
     // is what makes it safe to run for several cells concurrently, unlike
-    // the Blender/texture-conversion step immediately below.
+    // the shared texture-staging/native-conversion step immediately below.
     // Snapshot every ACHR/ACRE reference before `references` is taken below
     // (issue #103, M4 wave 1 task C): the actor catalog needs the raw
     // reference identity/transform/enable state independent of whether
@@ -711,18 +832,14 @@ fn prepare_cell(
     } = stage;
     // F48.4 serialization point: `convert_staged_textures` walks every
     // `.dds` under the *whole* `staging_dir` (not just this cell's), and
-    // `run_blender_batch` writes the job list to a fixed filename
-    // (`staging_dir/blender_jobs.ron`) before invoking Blender. Two cells
-    // running this concurrently could convert/miss each other's textures,
-    // or overwrite each other's job file mid-Blender-run. Neither is
-    // content-addressed the way the staging writes above are, so this
-    // block holds `session.blender_lock` for its duration: only one cell's
-    // Blender/texture-conversion step runs at a time, while every other
-    // cell's parse/stage phase keeps running in parallel around it.
+    // Native conversion and `convert_staged_textures` walk shared staging
+    // paths. Neither operation is content-addressed at the staging boundary,
+    // so this block holds `session.asset_stage_lock` while one cell performs
+    // its conversion phase; other workers keep parsing and staging around it.
     let item_icons;
     let mut failed_native_assets = HashMap::new();
     {
-        let _blender_guard = session.blender_lock.lock().unwrap();
+        let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
         item_icons = stage_item_icons(
             &parsed.bases,
             &data_root,
@@ -743,77 +860,58 @@ fn prepare_cell(
             &staging_dir,
             &mut diagnostics,
         )?;
-        match args.converter {
-            PrepareConverter::Blender => {
-                convert_staged_textures(&staging_dir, &mut diagnostics)?;
-                if !jobs.is_empty() {
-                    run_blender_batch(
-                        blender.as_deref().expect("Blender backend resolved above"),
-                        &jobs,
-                        &data_root,
-                        &staging_dir,
-                    )
-                    .context("headless Blender conversion failed")?;
-                }
-            }
-            PrepareConverter::Native => {
-                convert_staged_textures(
-                    &staging_dir.join("item-icons").join(&source_fingerprint),
-                    &mut diagnostics,
-                )?;
-                convert_staged_textures(&staging_dir.join("interface"), &mut diagnostics)?;
-                if !jobs.is_empty() {
-                    let batch = run_native_batch(
-                        &jobs,
-                        &data_root,
-                        &session.archives,
-                        args.jobs,
-                        args.strict,
-                    )
-                    .context("native NIF batch conversion failed")?;
-                    let summary = batch.summary();
-                    let summary_line = summary.line();
-                    output.push(summary_line.clone());
-                    diagnostics.push(Diagnostic {
-                        severity: "info".into(),
-                        message: summary_line,
-                    });
-                    for outcome in &batch.outcomes {
-                        if outcome.status == NativeJobStatus::Converted {
-                            if let Some(warning) = &outcome.error {
-                                diagnostics.push(Diagnostic {
-                                    severity: "warning".into(),
-                                    message: format!(
-                                        "native conversion lossy: model={} job={} {warning}",
-                                        outcome.model, outcome.index
-                                    ),
-                                });
-                            }
-                            continue;
+        {
+            convert_staged_textures(
+                &staging_dir.join("item-icons").join(&source_fingerprint),
+                &mut diagnostics,
+            )?;
+            convert_staged_textures(&staging_dir.join("interface"), &mut diagnostics)?;
+            if !jobs.is_empty() {
+                let batch =
+                    run_native_batch(&jobs, &data_root, &session.archives, args.jobs, args.strict)
+                        .context("native NIF batch conversion failed")?;
+                let summary = batch.summary();
+                let summary_line = summary.line();
+                output.push(summary_line.clone());
+                diagnostics.push(Diagnostic {
+                    severity: "info".into(),
+                    message: summary_line,
+                });
+                for outcome in &batch.outcomes {
+                    if outcome.status == NativeJobStatus::Converted {
+                        if let Some(warning) = &outcome.error {
+                            diagnostics.push(Diagnostic {
+                                severity: "warning".into(),
+                                message: format!(
+                                    "native conversion lossy: model={} job={} {warning}",
+                                    outcome.model, outcome.index
+                                ),
+                            });
                         }
-                        let message = format!(
-                            "native conversion {}: model={} job={} stage={} error={}",
-                            match outcome.status {
-                                NativeJobStatus::Unsupported => "unsupported",
-                                NativeJobStatus::Failed => "failed",
-                                NativeJobStatus::Converted => unreachable!(),
-                            },
-                            outcome.model,
-                            outcome.index,
-                            outcome.stage,
-                            outcome.error.as_deref().unwrap_or("unknown error")
-                        );
-                        output.push(message.clone());
-                        diagnostics.push(Diagnostic {
-                            severity: "warning".into(),
-                            message,
-                        });
+                        continue;
                     }
-                    batch.enforce_strict(args.strict)?;
-                    for (path, reason) in batch.failed_outputs(&jobs) {
-                        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-                            failed_native_assets.insert(format!("assets/{file_name}"), reason);
-                        }
+                    let message = format!(
+                        "native conversion {}: model={} job={} stage={} error={}",
+                        match outcome.status {
+                            NativeJobStatus::Unsupported => "unsupported",
+                            NativeJobStatus::Failed => "failed",
+                            NativeJobStatus::Converted => unreachable!(),
+                        },
+                        outcome.model,
+                        outcome.index,
+                        outcome.stage,
+                        outcome.error.as_deref().unwrap_or("unknown error")
+                    );
+                    output.push(message.clone());
+                    diagnostics.push(Diagnostic {
+                        severity: "warning".into(),
+                        message,
+                    });
+                }
+                batch.enforce_strict(args.strict)?;
+                for (path, reason) in batch.failed_outputs(&jobs) {
+                    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                        failed_native_assets.insert(format!("assets/{file_name}"), reason);
                     }
                 }
             }
@@ -1028,7 +1126,6 @@ fn prepare_cell(
     let conversion_context = ActorAnimationConversionContext {
         converter: actor_animation_backend,
         converter_revision: actor_animation_converter_revision(actor_animation_backend),
-        blender: blender.as_deref(),
         data_root: &data_root,
         archives: &session.archives,
         staging_dir: &staging_dir,
@@ -1036,16 +1133,7 @@ fn prepare_cell(
         rebuild: args.rebuild_assets,
     };
     let actor_animation_conversion =
-        if crate::converter_policy::actor_animation_backend_requires_blender(
-            actor_animation_backend,
-        ) {
-            let _blender_guard = session.blender_lock.lock().unwrap();
-            convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?
-        } else {
-            // Disabled catalog preparation performs no external conversion and
-            // must not serialize otherwise parallel native cell preparation.
-            convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?
-        };
+        convert_actor_animation_catalog(&mut actor_animation_catalog, &conversion_context)?;
     let (catalog_path, catalog_hash) = write_item_catalog(&cache_dir, &item_catalog)?;
     output.push(format!(
         "item catalog: {} records, {} icons, {} world assets -> {}",
@@ -1310,6 +1398,7 @@ fn prepare_cell(
         reflection_probes,
         leveled_lists,
         dialogue,
+        exterior: None,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(

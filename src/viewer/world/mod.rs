@@ -38,6 +38,7 @@
 //! in bounded chunks across a few frames instead of all at once -- see that
 //! module's doc comment for the measured spike this amortizes.
 
+pub(crate) mod exterior;
 mod ownership_policy;
 mod persist;
 mod persist_policy;

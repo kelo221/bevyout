@@ -22,7 +22,8 @@ use crate::app_state::{AppState, GameplayModal};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
     PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
-    PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
+    PreparedPhysicsSource, PreparedPlacement, PreparedSceneManifest, body_blocks_player,
+    read_physics_asset,
 };
 
 use super::FlyCamera;

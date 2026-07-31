@@ -1,10 +1,29 @@
 //! Pure converter-selection policy shared by CLI adapters and feature tests.
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ConverterBackend {
     #[default]
     Native,
-    Blender,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl ConverterBackend {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) const fn resolve_converter_backend(
+    _requested: Option<ConverterBackend>,
+) -> ConverterBackend {
+    ConverterBackend::Native
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -12,7 +31,6 @@ pub(crate) enum ActorAnimationBackend {
     #[default]
     Disabled,
     Native,
-    Blender,
 }
 
 impl ActorAnimationBackend {
@@ -20,26 +38,7 @@ impl ActorAnimationBackend {
         match self {
             Self::Disabled => "disabled",
             Self::Native => "native",
-            Self::Blender => "blender",
         }
-    }
-}
-
-impl ConverterBackend {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Blender => "blender",
-        }
-    }
-}
-
-pub(crate) const fn resolve_converter_backend(
-    requested: Option<ConverterBackend>,
-) -> ConverterBackend {
-    match requested {
-        Some(backend) => backend,
-        None => ConverterBackend::Native,
     }
 }
 
@@ -50,12 +49,6 @@ pub(crate) const fn resolve_actor_animation_backend(
         Some(backend) => backend,
         None => ActorAnimationBackend::Disabled,
     }
-}
-
-pub(crate) const fn actor_animation_backend_requires_blender(
-    backend: ActorAnimationBackend,
-) -> bool {
-    matches!(backend, ActorAnimationBackend::Blender)
 }
 
 pub(crate) fn prepare_converter_identity(
@@ -70,9 +63,6 @@ pub(crate) fn prepare_converter_identity(
         ),
         ActorAnimationBackend::Native => format!(
             "{scene_converter_revision}+actor-animation=native@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
-        ),
-        ActorAnimationBackend::Blender => format!(
-            "{scene_converter_revision}+actor-animation=blender@{actor_animation_catalog_revision}+{actor_animation_converter_revision}"
         ),
     }
 }

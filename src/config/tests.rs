@@ -69,7 +69,6 @@ fn prepare_cli_value_wins_and_none_is_filled_from_config() {
     // None is filled from config.
     assert_eq!(args.plugin.as_deref(), Some(Path::new("config-plugin.esm")));
     assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
-    assert_eq!(args.blender.as_deref(), Some(Path::new("/config/blender")));
 }
 
 #[test]
@@ -126,7 +125,6 @@ fn render_cli_value_wins_and_none_is_filled_from_config() {
     assert_eq!(args.game_root.as_deref(), Some(Path::new("/cli/game-root")));
     // None is filled from config.
     assert_eq!(args.plugin.as_deref(), Some(Path::new("config-plugin.esm")));
-    assert_eq!(args.blender.as_deref(), Some(Path::new("/config/blender")));
     assert_eq!(
         args.irradiance_blender.as_deref(),
         Some(Path::new("/config/irradiance-blender"))

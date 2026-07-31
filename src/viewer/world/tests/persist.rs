@@ -341,6 +341,7 @@ fn minimal_manifest(cell_form_id: u32) -> PreparedSceneManifest {
         mutability_summary: Default::default(),
         leveled_lists: Default::default(),
         dialogue: None,
+        exterior: None,
     }
 }
 

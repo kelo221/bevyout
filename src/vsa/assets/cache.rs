@@ -481,21 +481,3 @@ pub(crate) fn validate_asset_cache_pair(glb: &Path, physics: &Path) -> Result<()
         .with_context(|| format!("cached physics sidecar is invalid: {}", physics.display()))?;
     Ok(())
 }
-
-pub(crate) fn blender_jobs_json(jobs: &[BlenderAssetJob]) -> String {
-    serde_json::Value::Array(
-        jobs.iter()
-            .map(|job| {
-                serde_json::json!({
-                    "input": job.input.to_string_lossy(),
-                    "output": job.output.to_string_lossy(),
-                    "physics_output": job.physics_output.to_string_lossy(),
-                    "model": job.model,
-                    "conversion": job.conversion.profile_tag(),
-                    "root_transform_policy": job.root_transform_policy.tag(),
-                })
-            })
-            .collect(),
-    )
-    .to_string()
-}

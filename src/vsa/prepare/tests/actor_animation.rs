@@ -35,7 +35,6 @@ fn disabled_conversion_is_diagnostic_not_failure() {
             converter_revision: actor_animation_converter_revision(
                 crate::converter_policy::ActorAnimationBackend::Disabled,
             ),
-            blender: None,
             data_root: Path::new("unused-data"),
             archives: &[],
             staging_dir: Path::new("unused-staging"),

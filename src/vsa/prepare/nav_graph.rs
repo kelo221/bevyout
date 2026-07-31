@@ -460,6 +460,79 @@ pub(crate) struct PreparedNavGraph {
     pub(crate) mesh_merges: Vec<PreparedNavMeshMerge>,
 }
 
+/// Build the runtime graph adapter for one prepared exterior tile.
+///
+/// Exterior packages intentionally keep a smaller contract than the interior
+/// graph: the package owns one flattened vertex buffer and triangle list, so
+/// there are no authored doors, clearance annotations, or same-cell merge
+/// records to reconstruct here. Keeping the adapter in this module lets the
+/// viewer reuse the existing `PreparedNavGraph -> landmass` boundary without
+/// making the Bevy runtime understand the source NAVM format.
+pub(crate) fn exterior_nav_graph(
+    cell_form_id: u32,
+    vertices: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+) -> PreparedNavGraph {
+    let polygons = triangles
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, vertex_indices)| {
+            let valid = vertex_indices
+                .iter()
+                .all(|&vertex| (vertex as usize) < vertices.len());
+            valid.then_some(PreparedNavPolygon {
+                index: index as u32,
+                vertex_indices,
+                ..PreparedNavPolygon::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    let bounds = exterior_graph_bounds(&vertices);
+    let vertex_count = vertices.len();
+    let polygon_count = polygons.len();
+    PreparedNavGraph {
+        revision: "exterior-nav-runtime-v1".into(),
+        cell_form_id,
+        meshes: vec![PreparedNavMesh {
+            form_id: cell_form_id,
+            cell_form_id: Some(cell_form_id),
+            vertices,
+            polygons,
+            ..PreparedNavMesh::default()
+        }],
+        bounds,
+        counters: NavGraphCounters {
+            meshes: 1,
+            polygons: polygon_count,
+            vertices: vertex_count,
+            ..NavGraphCounters::default()
+        },
+        ..PreparedNavGraph::default()
+    }
+}
+
+fn exterior_graph_bounds(vertices: &[[f32; 3]]) -> PreparedNavAabb {
+    let mut bounds = PreparedNavAabb {
+        min: [f32::INFINITY; 3],
+        max: [f32::NEG_INFINITY; 3],
+    };
+    for vertex in vertices
+        .iter()
+        .copied()
+        .filter(|vertex| vertex.iter().all(|component| component.is_finite()))
+    {
+        for axis in 0..3 {
+            bounds.min[axis] = bounds.min[axis].min(vertex[axis]);
+            bounds.max[axis] = bounds.max[axis].max(vertex[axis]);
+        }
+    }
+    if bounds.min.iter().any(|value| !value.is_finite()) {
+        PreparedNavAabb::default()
+    } else {
+        bounds
+    }
+}
+
 // ---------------------------------------------------------------------
 // Graph construction
 // ---------------------------------------------------------------------

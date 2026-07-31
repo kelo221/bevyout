@@ -26,10 +26,81 @@ impl ConsoleCommandProvider for WorldCommandProvider {
                 teleport_player,
             )
             .mutating(),
+            ConsoleCommand::new(
+                "worldstream",
+                "worldstream <status|cells|water|trace 0|1>",
+                "Inspect or trace prepared exterior cell residency.",
+                worldstream,
+            ),
         ] {
             registry.register(command)?;
         }
         Ok(())
+    }
+}
+
+fn worldstream(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    match invocation.args.as_slice() {
+        [] => {
+            let state = world
+                .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+                .ok_or_else(|| {
+                    ConsoleError::new("unavailable", "exterior streaming is not installed")
+                })?;
+            Ok(ConsoleCommandResult::value(
+                super::super::world::exterior::exterior_status_json(state),
+            ))
+        }
+        [command] if command == "status" => {
+            let state = world
+                .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+                .ok_or_else(|| {
+                    ConsoleError::new("unavailable", "exterior streaming is not installed")
+                })?;
+            Ok(ConsoleCommandResult::value(
+                super::super::world::exterior::exterior_status_json(state),
+            ))
+        }
+        [command] if command == "cells" => {
+            let state = world
+                .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+                .ok_or_else(|| {
+                    ConsoleError::new("unavailable", "exterior streaming is not installed")
+                })?;
+            Ok(ConsoleCommandResult::value(
+                super::super::world::exterior::exterior_cells_json(state),
+            ))
+        }
+        [command] if command == "water" => {
+            let water = world
+                .get_resource::<super::super::world::exterior::ExteriorWaterState>()
+                .ok_or_else(|| {
+                    ConsoleError::new("unavailable", "exterior water is not installed")
+                })?;
+            Ok(ConsoleCommandResult::value(serde_json::json!({
+                "contact": water.contact,
+            })))
+        }
+        [command, value] if command == "trace" && matches!(value.as_str(), "0" | "1") => {
+            let enabled = value == "1";
+            world
+                .resource_mut::<super::super::world::exterior::ExteriorStreamState>()
+                .trace = enabled;
+            Ok(ConsoleCommandResult::new(
+                serde_json::json!({ "trace": enabled }),
+                vec![format!(
+                    "exterior stream trace {}",
+                    if enabled { "on" } else { "off" }
+                )],
+            ))
+        }
+        _ => Err(ConsoleError::new(
+            "bad_args",
+            "worldstream expects status, cells, water, or trace 0|1",
+        )),
     }
 }
 

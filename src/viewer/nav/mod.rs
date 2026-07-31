@@ -43,6 +43,31 @@ pub(crate) fn read_nav_graph(path: &Path) -> anyhow::Result<PreparedNavGraph> {
     ron::de::from_str(&text).with_context(|| format!("invalid nav graph RON: {}", path.display()))
 }
 
+/// Resolve the active cell's prepared navigation graph. Interior cells keep
+/// their existing standalone graph asset; an exterior scene carries the
+/// equivalent tile directly in its prepared cell package. Both paths return
+/// the same runtime-neutral graph contract to `nav::agent`.
+pub(crate) fn read_nav_graph_for_manifest(
+    manifest: &PreparedSceneManifest,
+) -> anyhow::Result<PreparedNavGraph> {
+    if let Some(path) = nav_graph_path(manifest) {
+        return read_nav_graph(&path);
+    }
+    let package = manifest
+        .exterior
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no prepared exterior package"))?;
+    let navigation = package
+        .navigation
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("exterior package has no navigation tile"))?;
+    Ok(crate::vsa::exterior_nav_graph(
+        package.cell_form_id,
+        navigation.vertices.clone(),
+        navigation.triangles.clone(),
+    ))
+}
+
 /// Resolves `manifest.nav_graph`'s `asset_path` against `asset_root`, the
 /// same way `nav_overlay::toggle_nav_mesh` does. `None` when the cell has no
 /// prepared nav graph.

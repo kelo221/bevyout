@@ -8,7 +8,7 @@ pub(crate) fn blender_conversion_script() -> &'static str {
 
 pub(crate) fn run_blender_batch(
     blender: &Path,
-    jobs: &[BlenderAssetJob],
+    jobs: &[AssetJob],
     data_root: &Path,
     staging_dir: &Path,
 ) -> Result<()> {

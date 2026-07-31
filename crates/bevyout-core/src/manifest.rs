@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::dialogue::PreparedDialogueBundleRef;
 use crate::time_of_day::{ColorKeyframes, DayNightTimings};
 
+pub mod exterior;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PreparedPhysicsSource {
     AuthoredHavok,
@@ -108,6 +110,10 @@ pub struct PreparedSceneManifest {
     /// not contain this field and remain readable as dialogue-less scenes.
     #[serde(default)]
     pub dialogue: Option<PreparedDialogueBundleRef>,
+    /// Optional self-contained exterior cell package. Interior manifests do
+    /// not populate this field; the default keeps older caches readable.
+    #[serde(default)]
+    pub exterior: Option<exterior::ExteriorCellPackage>,
 }
 
 /// A single prepared leveled list's body: `LVLD` chance-none percentage,

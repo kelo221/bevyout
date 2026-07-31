@@ -2,8 +2,8 @@ use super::*;
 use std::sync::Barrier;
 use std::sync::atomic::AtomicUsize;
 
-fn job(root: &Path, index: usize) -> BlenderAssetJob {
-    BlenderAssetJob {
+fn job(root: &Path, index: usize) -> AssetJob {
+    AssetJob {
         kind: super::super::super::assets::AssetJobKind::StaticNif,
         input: root.join(format!("{index}.nif")),
         output: root.join(format!("{index}.glb")),

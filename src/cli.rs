@@ -46,6 +46,29 @@ pub enum CommandLine {
     /// Experimentally convert one FO3/FNV NIF 20.2.0.7 asset to a self-contained GLB.
     #[command(name = "nif-convert")]
     NifConvert(NifConvertArgs),
+    /// Summarize native exterior conversion artifacts from a deterministic corpus.
+    #[command(name = "exterior-conversion-report")]
+    ExteriorConversionReport(ExteriorConversionReportArgs),
+    /// Print a prepared exterior worldspace index in stable catalog form.
+    #[command(name = "exterior-catalog")]
+    ExteriorCatalog(ExteriorCatalogArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct ExteriorConversionReportArgs {
+    /// JSON corpus describing source assets and native conversion outputs.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) corpus: PathBuf,
+    /// Write the normalized native report here instead of stdout.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct ExteriorCatalogArgs {
+    /// Prepared `worldspaces/<formid>/index.ron` file.
+    #[arg(long, value_name = "INDEX.ron")]
+    pub(crate) index: PathBuf,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -90,18 +113,11 @@ pub(crate) enum NifConversionMode {
     QuickAo,
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrepareConverter {
-    Blender,
-    Native,
-}
-
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ActorAnimationConverter {
     Disabled,
     #[default]
     Native,
-    Blender,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,31 +135,11 @@ impl std::fmt::Display for RagdollLabBackend {
     }
 }
 
-impl Default for PrepareConverter {
-    fn default() -> Self {
-        match crate::converter_policy::resolve_converter_backend(None) {
-            crate::converter_policy::ConverterBackend::Native => Self::Native,
-            crate::converter_policy::ConverterBackend::Blender => Self::Blender,
-        }
-    }
-}
-
-impl std::fmt::Display for PrepareConverter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let backend = match self {
-            Self::Blender => crate::converter_policy::ConverterBackend::Blender,
-            Self::Native => crate::converter_policy::ConverterBackend::Native,
-        };
-        formatter.write_str(backend.as_str())
-    }
-}
-
 impl std::fmt::Display for ActorAnimationConverter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let backend = match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
             Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
-            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         };
         formatter.write_str(backend.as_str())
     }
@@ -154,7 +150,6 @@ impl ActorAnimationConverter {
         match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
             Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
-            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         }
     }
 }
@@ -209,7 +204,7 @@ pub struct PrepareArgs {
     #[arg(long, value_name = "WORLDSPACE")]
     pub(crate) worldspace: Option<String>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
-    /// sorted) and exit before any extraction or Blender work.
+    /// sorted) and exit before any extraction or conversion work.
     #[arg(long, conflicts_with = "check_fingerprints")]
     pub(crate) list_only: bool,
     /// Report-only: validate each selected cell's recorded plugin/converter/
@@ -227,14 +222,8 @@ pub struct PrepareArgs {
     /// Legacy hexadecimal cell FormID input.
     #[arg(long, hide = true, conflicts_with = "selectors")]
     pub(crate) cell: Option<String>,
-    /// Blender executable path.
-    #[arg(long)]
-    pub(crate) blender: Option<PathBuf>,
-    /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
-    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
-    pub(crate) converter: PrepareConverter,
     /// External-KF clip-pack backend. Disabled by default; select `native` to
-    /// decode KF files with Nifty or `blender` for the NIFTools comparison path.
+    /// decode KF files with Nifty.
     #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
     pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
@@ -401,12 +390,6 @@ pub struct RenderArgs {
     /// Plugin filename used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) plugin: Option<PathBuf>,
-    /// Blender executable used if render needs to prepare the cell.
-    #[arg(long, hide = true)]
-    pub(crate) blender: Option<PathBuf>,
-    /// NIF-to-GLB backend used if render needs to prepare or refresh the cell.
-    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
-    pub(crate) converter: PrepareConverter,
     /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
     #[arg(long, hide = true)]
     pub(crate) irradiance_blender: Option<PathBuf>,

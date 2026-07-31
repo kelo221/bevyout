@@ -798,6 +798,95 @@ pub(crate) fn parse_grid(data: &[u8]) -> Option<(i32, i32)> {
     Some((i32_at(data, 0)?, i32_at(data, 4)?))
 }
 
+/// Decodes the source-shaped portions of an exterior `LAND` record.  FO3
+/// content uses a 33x33 sample grid.  VHGT is accepted in both the compact
+/// synthetic form (one signed base byte plus 1088 signed deltas) and the
+/// Bethesda form with a four-byte height offset followed by row-wise deltas.
+pub(crate) fn parse_land(subs: &[Subrecord], form_id: u32, cell_form_id: u32) -> LandRecord {
+    let count = LandRecord::GRID_SIZE * LandRecord::GRID_SIZE;
+    let mut land = LandRecord {
+        form_id,
+        cell_form_id,
+        ..Default::default()
+    };
+    if let Some(data) = sub(subs, "VHGT") {
+        if data.len() >= count + 4 {
+            let offset = f32::from_le_bytes(data[..4].try_into().unwrap_or([0; 4]));
+            let deltas = &data[4..4 + count];
+            // Bethesda stores the first byte of every row as a delta from
+            // the previous row's first sample. The remaining bytes are
+            // deltas along that row. Values use an 8x height scale.
+            let mut row_offset = offset;
+            for row in 0..LandRecord::GRID_SIZE {
+                row_offset += f32::from(deltas[row * LandRecord::GRID_SIZE] as i8);
+                let mut height = row_offset;
+                land.heights.push(height * 8.0);
+                for column in 1..LandRecord::GRID_SIZE {
+                    height += f32::from(deltas[row * LandRecord::GRID_SIZE + column] as i8);
+                    land.heights.push(height * 8.0);
+                }
+            }
+        } else if data.len() >= count {
+            let (base, deltas) = (f32::from(data[0] as i8), &data[1..]);
+            if deltas.len() >= count.saturating_sub(1) {
+                let mut height = base;
+                land.heights.push(height);
+                for delta in deltas.iter().copied().take(count.saturating_sub(1)) {
+                    height += f32::from(delta as i8) * 0.125;
+                    land.heights.push(height);
+                }
+            }
+        } else {
+            land.diagnostics.push(format!(
+                "VHGT has {} bytes; expected at least {count}",
+                data.len()
+            ));
+        }
+    }
+    if let Some(data) = sub(subs, "VNML") {
+        for sample in data.chunks_exact(3).take(count) {
+            land.normals
+                .push([sample[0] as i8, sample[1] as i8, sample[2] as i8]);
+        }
+    }
+    if let Some(data) = sub(subs, "VCLR") {
+        for sample in data.chunks_exact(3).take(count) {
+            land.colors.push([sample[0], sample[1], sample[2]]);
+        }
+    }
+    for texture in subs
+        .iter()
+        .filter(|subrecord| subrecord.signature == "BTXT" || subrecord.signature == "ATXT")
+    {
+        if let Some(form_id) = u32_at(&texture.data, 0) {
+            land.texture_layers.push(form_id);
+            land.texture_assignments.push(LandTextureAssignment {
+                form_id,
+                quadrant: texture.data.get(4).copied().unwrap_or_default(),
+                layer: texture.data.get(5).copied().unwrap_or_default(),
+                base: texture.signature == "BTXT",
+            });
+        }
+    }
+    land.texture_layers.sort_unstable();
+    land.texture_layers.dedup();
+    land.texture_assignments.sort_by_key(|assignment| {
+        (
+            assignment.quadrant,
+            assignment.layer,
+            !assignment.base,
+            assignment.form_id,
+        )
+    });
+    let supported = ["VHGT", "VNML", "VCLR", "BTXT", "ATXT", "LTEX"];
+    land.diagnostics.extend(
+        ignored_signatures(subs, &supported)
+            .into_iter()
+            .map(|signature| format!("ignored {signature}")),
+    );
+    land
+}
+
 pub(crate) fn parse_cell_metadata(subs: &[Subrecord], resolver: &FormIdResolver) -> CellMetadata {
     CellMetadata {
         climate_form_id: sub_form_id(subs, "XCCM", resolver),

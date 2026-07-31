@@ -134,6 +134,27 @@ pub(crate) fn walk_container(
                     state.weathers.remove(&form_id);
                 }
             }
+            "LAND" if context.cell.is_some() => {
+                if flags & RECORD_DELETED != 0 {
+                    state.lands.remove(&context.cell.unwrap_or_default());
+                } else {
+                    let cell_form_id = context.cell.unwrap_or_default();
+                    state.lands.insert(
+                        cell_form_id,
+                        (form_id, parse_land(&subs, form_id, cell_form_id)),
+                    );
+                }
+            }
+            "ROAD" if context.cell.is_some() => {
+                if flags & RECORD_DELETED != 0 {
+                    state.road_counts.remove(&context.cell.unwrap_or_default());
+                } else {
+                    *state
+                        .road_counts
+                        .entry(context.cell.unwrap_or_default())
+                        .or_default() += 1;
+                }
+            }
             "IMGS" => {
                 if flags & RECORD_DELETED != 0 {
                     state.image_spaces.remove(&form_id);

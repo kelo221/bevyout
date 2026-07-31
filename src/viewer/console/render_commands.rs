@@ -66,6 +66,12 @@ impl ConsoleCommandProvider for RenderCommandProvider {
                 get_time,
             ),
             ConsoleCommand::new(
+                "environment",
+                "environment status",
+                "Report the resolved cell/worldspace environment identities and water contact.",
+                environment_status,
+            ),
+            ConsoleCommand::new(
                 "settime",
                 "settime <0..24>",
                 "Set the Fallout game clock hour.",
@@ -812,6 +818,41 @@ pub(super) fn get_time(
             clock.timescale
         )],
     ))
+}
+
+fn environment_status(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.as_slice() != ["status"] {
+        return Err(ConsoleError::new("bad_args", "environment expects status"));
+    }
+    let manifest = world.get_resource::<LoadedSceneManifest>();
+    let water = world
+        .get_resource::<super::super::world::exterior::ExteriorWaterState>()
+        .and_then(|state| state.contact);
+    let clock = *world.resource::<GameClock>();
+    let value = json!({
+        "hour": clock.hour,
+        "cell_form_id": manifest.map(|value| format!("{:08x}", value.cell.form_id)),
+        "worldspace_form_id": manifest
+            .and_then(|value| value.exterior.as_ref())
+            .map(|value| format!("{:08x}", value.worldspace_form_id)),
+        "climate_form_id": manifest
+            .and_then(|value| value.exterior.as_ref())
+            .and_then(|value| value.environment.climate_form_id),
+        "weather_form_id": manifest
+            .and_then(|value| value.exterior.as_ref())
+            .and_then(|value| value.environment.weather_form_id),
+        "image_space_form_id": manifest
+            .and_then(|value| value.exterior.as_ref())
+            .and_then(|value| value.environment.image_space_form_id),
+        "dynamic_lighting_allowed": manifest
+            .and_then(|value| value.exterior.as_ref())
+            .is_some_and(|value| value.environment.dynamic_lighting_allowed),
+        "water": water,
+    });
+    Ok(ConsoleCommandResult::value(value))
 }
 
 pub(super) fn set_time(

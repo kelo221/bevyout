@@ -1,0 +1,131 @@
+//! Bevy-free adapters for the exterior residency contract.
+
+use bevyout_core::manifest::exterior::{
+    ExteriorCellState, ExteriorCoordinatePolicy, ExteriorResidencyInput, ExteriorResidencyPlan,
+    ExteriorWorldspaceIndex, GridCoordinate, plan_residency,
+};
+
+pub(crate) fn index_cells(
+    index: &ExteriorWorldspaceIndex,
+) -> std::collections::BTreeMap<GridCoordinate, u32> {
+    let mut cells = std::collections::BTreeMap::new();
+    for cell in &index.cells {
+        cells
+            .entry(cell.grid)
+            .and_modify(|cell_form_id: &mut u32| {
+                *cell_form_id = (*cell_form_id).min(cell.cell_form_id)
+            })
+            .or_insert(cell.cell_form_id);
+    }
+    cells
+}
+
+pub(crate) fn grid_for_translation(
+    policy: &ExteriorCoordinatePolicy,
+    translation: [f32; 3],
+) -> GridCoordinate {
+    policy.grid_for_bevy([
+        f64::from(translation[0]),
+        f64::from(translation[1]),
+        f64::from(translation[2]),
+    ])
+}
+
+pub(crate) fn desired_plan(
+    index: &ExteriorWorldspaceIndex,
+    current_grid: GridCoordinate,
+    velocity_grid: (i32, i32),
+    states: &[ExteriorCellState],
+    resident_budget: usize,
+    byte_budget: u64,
+) -> ExteriorResidencyPlan {
+    plan_residency(
+        ExteriorResidencyInput {
+            current_grid,
+            velocity_grid,
+            resident_budget,
+            byte_budget,
+            near_radius: 1,
+            prefetch_radius: 1,
+            distant_radius: Some(2),
+        },
+        &index_cells(index),
+        states,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevyout_core::manifest::exterior::{
+        ExteriorCellIndexEntry, ExteriorCoordinatePolicy, ExteriorWorldspaceIndex,
+    };
+
+    fn index() -> ExteriorWorldspaceIndex {
+        let policy = ExteriorCoordinatePolicy::default();
+        ExteriorWorldspaceIndex {
+            revision: "test".into(),
+            content_fingerprint: "fp".into(),
+            worldspace_form_id: 1,
+            editor_id: None,
+            name: None,
+            climate_form_id: None,
+            coordinate_policy: policy.clone(),
+            cells: [-1i32, 0, 1]
+                .into_iter()
+                .map(|x| ExteriorCellIndexEntry {
+                    cell_form_id: x.unsigned_abs() + 1,
+                    grid: GridCoordinate::new(x, 0),
+                    origin: policy
+                        .grid_origin(GridCoordinate::new(x, 0))
+                        .map(|v| v as f32),
+                    package_path: String::new(),
+                    land_form_id: None,
+                    road_count: 0,
+                    navm_count: 0,
+                    persistent_reference_count: 0,
+                    distant_reference_count: 0,
+                })
+                .collect(),
+            persistent_references: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn policy_prefers_current_grid_and_keeps_negative_coordinates() {
+        let index = index();
+        let plan = desired_plan(
+            &index,
+            GridCoordinate::new(-1, 0),
+            (-1, 0),
+            &[],
+            4,
+            1_000_000,
+        );
+        assert_eq!(plan.desired[0], GridCoordinate::new(-1, 0));
+        assert!(
+            plan.actions
+                .iter()
+                .any(|action| action.grid == GridCoordinate::new(0, 0))
+        );
+    }
+
+    #[test]
+    fn duplicate_grid_entries_choose_the_lowest_cell_form_id() {
+        let mut index = index();
+        index.cells.push(ExteriorCellIndexEntry {
+            cell_form_id: 99,
+            grid: GridCoordinate::new(0, 0),
+            origin: [0.0; 3],
+            package_path: String::new(),
+            land_form_id: None,
+            road_count: 0,
+            navm_count: 0,
+            persistent_reference_count: 0,
+            distant_reference_count: 0,
+        });
+
+        assert_eq!(index_cells(&index)[&GridCoordinate::new(0, 0)], 1);
+    }
+}

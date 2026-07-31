@@ -2,6 +2,7 @@
 
 use super::*;
 use std::ffi::OsString;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const KTX2_IDENTIFIER: &[u8; 12] = b"\xABKTX 20\xBB\r\n\x1A\n";
