@@ -78,7 +78,11 @@ Inspect it through the bridge:
     Invoke-RestMethod http://127.0.0.1:15702/ -Method Post -ContentType 'application/json' -Body $body
 
 Expected result: ok is true, active is true, phase is PresentingLine,
-modal is Dialogue, and input_gated is true.
+modal is Dialogue, and input_gated is true. With Moira's prepared actor
+hierarchy loaded, the same state reports `voice_anchor: Mouth` and
+`voice_spatial: true`. The authored smoke conversation currently has no
+prepared voice asset, so this bridge check verifies the mouth-anchor
+resolution; a voiced line is required to verify the audible spatial playback.
 
 ## 5. Continue to the options
 

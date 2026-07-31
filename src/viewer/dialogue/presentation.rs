@@ -8,8 +8,8 @@ use bevyout_core::dialogue::{
 };
 
 use super::{
-    DialogueChoiceSelected, DialogueContinueRequested, DialogueRuntime, DialogueTelemetry,
-    DialogueUiPhase,
+    DialogueBinding, DialogueChoiceSelected, DialogueContinueRequested, DialogueRuntime,
+    DialogueTelemetry, DialogueUiPhase, DialogueVoiceAnchorKind,
 };
 use crate::viewer::fallout_ui::{PHOSPHOR, PHOSPHOR_DIM, PHOSPHOR_FAINT, SCREEN_TRANSLUCENT, glow};
 
@@ -49,6 +49,21 @@ struct DialogueUiOptionText;
 
 #[derive(Component)]
 pub(crate) struct DialogueVoicePlayer;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct DialogueVoiceEmitter {
+    pub(super) anchor: DialogueVoiceAnchorKind,
+    pub(super) anchor_entity: Option<Entity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DialogueVoiceAnchor {
+    pub(super) kind: DialogueVoiceAnchorKind,
+    pub(super) entity: Option<Entity>,
+}
+
+const VOICE_MOUTH_ANCHORS: [&str; 3] = ["MouthHuman", "Mouth", "Bip01 Mouth"];
+const VOICE_HEAD_ANCHORS: [&str; 2] = ["Bip01 Head", "Head"];
 
 #[derive(Debug, Default, Resource)]
 pub(crate) struct DialogueUiState {
@@ -190,6 +205,7 @@ fn option_colors(interaction: Interaction) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_dialogue_timing(
     time: Res<Time>,
     mut commands: Commands,
@@ -197,6 +213,9 @@ pub(crate) fn sync_dialogue_timing(
     providers: Res<DialoguePresentationProviders>,
     asset_server: Option<Res<AssetServer>>,
     players: Query<Entity, With<DialogueVoicePlayer>>,
+    bindings: Query<(Entity, &DialogueBinding)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
 ) {
     let current_line = if runtime.phase == bevyout_core::dialogue::DialoguePhase::PresentingLine {
         runtime
@@ -215,11 +234,12 @@ pub(crate) fn sync_dialogue_timing(
         runtime.active_line_key = current_line.clone();
         runtime.line_elapsed_seconds = 0.0;
         runtime.line_duration_seconds = 0.0;
+        runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
 
         if let Some(line) = runtime
             .presentation
             .line
-            .as_ref()
+            .clone()
             .filter(|_| current_line.is_some())
         {
             let voice = providers.voice.get(&line.line_key);
@@ -227,19 +247,29 @@ pub(crate) fn sync_dialogue_timing(
                 &line.text,
                 voice.map(|voice| voice.duration_millis),
             );
+            let speaker = runtime
+                .active
+                .as_ref()
+                .and_then(|active| active.request.speaker.map(u32::from));
+            let anchor = resolve_voice_anchor(speaker, &bindings, &children, &names);
+            runtime.voice_anchor = anchor.kind;
+            record_voice_anchor(&mut runtime, &line.line_key, anchor, false);
             if let (Some(asset_server), Some(voice)) = (asset_server.as_deref(), voice)
                 && !voice.asset_path.is_empty()
             {
-                commands.spawn((
+                let mut emitter = commands.spawn((
                     DialogueVoicePlayer,
-                    AudioPlayer::new(asset_server.load(voice.asset_path.clone())),
-                    PlaybackSettings {
-                        mode: PlaybackMode::Despawn,
-                        spatial: false,
-                        volume: Volume::Decibels(0.0),
-                        ..default()
+                    DialogueVoiceEmitter {
+                        anchor: anchor.kind,
+                        anchor_entity: anchor.entity,
                     },
+                    AudioPlayer::new(asset_server.load(voice.asset_path.clone())),
+                    dialogue_voice_playback_settings(anchor.entity.is_some()),
+                    Transform::IDENTITY,
                 ));
+                if let Some(anchor_entity) = anchor.entity {
+                    emitter.insert(ChildOf(anchor_entity));
+                }
             }
         }
     }
@@ -252,6 +282,149 @@ pub(crate) fn sync_dialogue_timing(
             runtime.continue_edge = true;
         }
     }
+}
+
+pub(crate) fn reanchor_dialogue_voice(
+    mut commands: Commands,
+    mut runtime: ResMut<DialogueRuntime>,
+    mut players: Query<
+        (
+            Entity,
+            &mut DialogueVoiceEmitter,
+            Option<&mut PlaybackSettings>,
+        ),
+        With<DialogueVoicePlayer>,
+    >,
+    bindings: Query<(Entity, &DialogueBinding)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+) {
+    if runtime.phase != bevyout_core::dialogue::DialoguePhase::PresentingLine {
+        return;
+    }
+    let speaker = runtime
+        .active
+        .as_ref()
+        .and_then(|active| active.request.speaker.map(u32::from));
+    let anchor = resolve_voice_anchor(speaker, &bindings, &children, &names);
+    let anchor_changed = runtime.voice_anchor != anchor.kind;
+    runtime.voice_anchor = anchor.kind;
+    let Some(line_key) = runtime.active_line_key.clone() else {
+        return;
+    };
+    if anchor_changed {
+        record_voice_anchor(&mut runtime, &line_key, anchor, true);
+    }
+
+    for (entity, mut emitter, playback) in &mut players {
+        if emitter.anchor == anchor.kind && emitter.anchor_entity == anchor.entity {
+            continue;
+        }
+        if let Some(anchor_entity) = anchor.entity {
+            commands.entity(entity).insert(ChildOf(anchor_entity));
+        } else if emitter.anchor_entity.is_some() {
+            commands.entity(entity).remove::<ChildOf>();
+        }
+        if let Some(mut playback) = playback {
+            playback.spatial = anchor.entity.is_some();
+        }
+        emitter.anchor = anchor.kind;
+        emitter.anchor_entity = anchor.entity;
+        if !anchor_changed {
+            record_voice_anchor(&mut runtime, &line_key, anchor, true);
+        }
+    }
+}
+
+pub(super) fn resolve_voice_anchor(
+    speaker: Option<u32>,
+    bindings: &Query<(Entity, &DialogueBinding)>,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> DialogueVoiceAnchor {
+    let Some(actor_root) = speaker.and_then(|speaker| {
+        bindings
+            .iter()
+            .find_map(|(entity, binding)| (binding.speaker == speaker).then_some(entity))
+    }) else {
+        return DialogueVoiceAnchor {
+            kind: DialogueVoiceAnchorKind::Unanchored,
+            entity: None,
+        };
+    };
+
+    for candidate in VOICE_MOUTH_ANCHORS {
+        if let Some(entity) = find_named_descendant(actor_root, candidate, children, names) {
+            return DialogueVoiceAnchor {
+                kind: DialogueVoiceAnchorKind::Mouth,
+                entity: Some(entity),
+            };
+        }
+    }
+    for candidate in VOICE_HEAD_ANCHORS {
+        if let Some(entity) = find_named_descendant(actor_root, candidate, children, names) {
+            return DialogueVoiceAnchor {
+                kind: DialogueVoiceAnchorKind::Head,
+                entity: Some(entity),
+            };
+        }
+    }
+    DialogueVoiceAnchor {
+        kind: DialogueVoiceAnchorKind::ActorRoot,
+        entity: Some(actor_root),
+    }
+}
+
+fn find_named_descendant(
+    root: Entity,
+    candidate: &str,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    let mut pending = vec![root];
+    while let Some(entity) = pending.pop() {
+        if entity != root
+            && names.get(entity).is_ok_and(|name| {
+                crate::viewer::player::actor_node_names_match(candidate, name.as_str())
+            })
+        {
+            return Some(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            pending.extend(child_list.iter());
+        }
+    }
+    None
+}
+
+pub(super) fn dialogue_voice_playback_settings(spatial: bool) -> PlaybackSettings {
+    PlaybackSettings {
+        mode: PlaybackMode::Despawn,
+        spatial,
+        volume: Volume::Decibels(0.0),
+        ..default()
+    }
+}
+
+fn record_voice_anchor(
+    runtime: &mut DialogueRuntime,
+    line_key: &bevyout_core::dialogue::DialogueLineKey,
+    anchor: DialogueVoiceAnchor,
+    reanchored: bool,
+) {
+    let label = anchor.kind.label();
+    let spatial = anchor.kind.is_spatial();
+    let phase = if reanchored { "reanchor" } else { "selected" };
+    runtime.trace.push(format!(
+        "voice {phase} line={line_key} anchor={label} spatial={spatial}"
+    ));
+    info!(
+        line_key = %line_key,
+        voice_anchor = label,
+        voice_spatial = spatial,
+        reanchored,
+        "dialogue voice anchor"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

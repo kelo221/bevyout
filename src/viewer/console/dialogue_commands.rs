@@ -117,6 +117,8 @@ pub(super) fn dialogue_state(
         "input_gated": runtime.input_gated,
         "camera_focused": runtime.camera_focused,
         "bundle_hash": runtime.bundle_hash,
+        "voice_anchor": runtime.voice_anchor.label(),
+        "voice_spatial": runtime.voice_anchor.is_spatial(),
         "line": line,
         "options": options,
         "trace_tail": runtime.trace.iter().rev().take(8).cloned().collect::<Vec<_>>(),

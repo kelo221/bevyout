@@ -121,7 +121,16 @@ fn dialogue_commands_expose_state_and_queue_visible_choices() {
     let state = exec(&mut app, "dialoguestate");
     assert!(state.ok);
     assert_eq!(state.value["phase"], "PresentingOptions");
+    assert_eq!(state.value["voice_anchor"], "Unanchored");
+    assert_eq!(state.value["voice_spatial"], false);
     assert_eq!(state.value["options"][1]["text"], "Ask about supplies");
+
+    app.world_mut()
+        .resource_mut::<crate::viewer::dialogue::DialogueRuntime>()
+        .voice_anchor = crate::viewer::dialogue::DialogueVoiceAnchorKind::Mouth;
+    let state = exec(&mut app, "dialoguestate");
+    assert_eq!(state.value["voice_anchor"], "Mouth");
+    assert_eq!(state.value["voice_spatial"], true);
 
     let choice = exec(&mut app, "dialoguechoice 2");
     assert!(choice.ok);

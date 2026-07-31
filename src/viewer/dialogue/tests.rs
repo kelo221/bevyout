@@ -1,3 +1,4 @@
+use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 
@@ -349,6 +350,148 @@ fn unvoiced_line_advances_after_the_deterministic_reading_duration() {
         app.world().resource::<DialogueRuntime>().phase,
         DialoguePhase::PresentingOptions
     );
+}
+
+fn dialogue_binding(speaker: u32) -> DialogueBinding {
+    DialogueBinding {
+        dialogue: DialogueKey::new("Guard"),
+        speaker,
+        listener: None,
+    }
+}
+
+#[test]
+fn voice_anchor_prefers_mouth_then_head_then_actor_root() {
+    let mut world = World::new();
+    let root = world
+        .spawn((Name::new("ActorRoot"), dialogue_binding(0x10)))
+        .id();
+    let head = world.spawn((Name::new("bIp01 HeAd"), ChildOf(root))).id();
+    let mouth = world.spawn((Name::new("mouthhuman"), ChildOf(head))).id();
+    let mut queries = SystemState::<(
+        Query<(Entity, &DialogueBinding)>,
+        Query<&Children>,
+        Query<&Name>,
+    )>::new(&mut world);
+    let (bindings, children, names) = queries.get(&world).unwrap();
+
+    let anchor = presentation::resolve_voice_anchor(Some(0x10), &bindings, &children, &names);
+    assert_eq!(anchor.kind, DialogueVoiceAnchorKind::Mouth);
+    assert_eq!(anchor.entity, Some(mouth));
+
+    world.despawn(mouth);
+    let (bindings, children, names) = queries.get(&world).unwrap();
+    let anchor = presentation::resolve_voice_anchor(Some(0x10), &bindings, &children, &names);
+    assert_eq!(anchor.kind, DialogueVoiceAnchorKind::Head);
+    assert_eq!(anchor.entity, Some(head));
+
+    world.despawn(head);
+    let (bindings, children, names) = queries.get(&world).unwrap();
+    let anchor = presentation::resolve_voice_anchor(Some(0x10), &bindings, &children, &names);
+    assert_eq!(anchor.kind, DialogueVoiceAnchorKind::ActorRoot);
+    assert_eq!(anchor.entity, Some(root));
+}
+
+#[test]
+fn unresolved_voice_speaker_remains_unanchored_and_non_spatial() {
+    let mut world = World::new();
+    let _ = world
+        .spawn((Name::new("ActorRoot"), dialogue_binding(0x10)))
+        .id();
+    let mut queries = SystemState::<(
+        Query<(Entity, &DialogueBinding)>,
+        Query<&Children>,
+        Query<&Name>,
+    )>::new(&mut world);
+    let (bindings, children, names) = queries.get(&world).unwrap();
+    let anchor = presentation::resolve_voice_anchor(Some(0x20), &bindings, &children, &names);
+    assert_eq!(anchor.kind, DialogueVoiceAnchorKind::Unanchored);
+    assert_eq!(anchor.entity, None);
+    assert!(!anchor.kind.is_spatial());
+}
+
+#[test]
+fn voice_emitter_uses_identity_local_transform_and_spatial_settings() {
+    let mut world = World::new();
+    let root = world.spawn_empty().id();
+    let voice = world
+        .spawn((
+            presentation::DialogueVoicePlayer,
+            presentation::DialogueVoiceEmitter {
+                anchor: DialogueVoiceAnchorKind::Mouth,
+                anchor_entity: Some(root),
+            },
+            presentation::dialogue_voice_playback_settings(true),
+            Transform::IDENTITY,
+            ChildOf(root),
+        ))
+        .id();
+    assert_eq!(world.get::<Transform>(voice), Some(&Transform::IDENTITY));
+    assert_eq!(world.get::<ChildOf>(voice).map(ChildOf::parent), Some(root));
+    assert!(world.get::<PlaybackSettings>(voice).unwrap().spatial);
+}
+
+#[test]
+fn voice_reanchors_existing_player_when_imported_mouth_arrives() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    let root = app
+        .world_mut()
+        .spawn((Name::new("ActorRoot"), dialogue_binding(0x10)))
+        .id();
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+
+    let voice = app
+        .world_mut()
+        .spawn((
+            presentation::DialogueVoicePlayer,
+            presentation::DialogueVoiceEmitter {
+                anchor: DialogueVoiceAnchorKind::ActorRoot,
+                anchor_entity: Some(root),
+            },
+            presentation::dialogue_voice_playback_settings(true),
+            Transform::IDENTITY,
+            ChildOf(root),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        app.world().get::<ChildOf>(voice).map(ChildOf::parent),
+        Some(root)
+    );
+
+    let mouth = app
+        .world_mut()
+        .spawn((Name::new("MouthHuman"), ChildOf(root)))
+        .id();
+    app.update();
+
+    assert_eq!(
+        app.world().get::<ChildOf>(voice).map(ChildOf::parent),
+        Some(mouth)
+    );
+    assert_eq!(
+        app.world()
+            .get::<presentation::DialogueVoiceEmitter>(voice)
+            .unwrap()
+            .anchor,
+        DialogueVoiceAnchorKind::Mouth
+    );
+    let mut players = app
+        .world_mut()
+        .query_filtered::<Entity, With<presentation::DialogueVoicePlayer>>();
+    assert_eq!(players.iter(app.world()).count(), 1);
 }
 
 #[test]

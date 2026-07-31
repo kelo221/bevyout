@@ -60,6 +60,30 @@ pub(crate) enum DialogueUiPhase {
     Closing,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DialogueVoiceAnchorKind {
+    Mouth,
+    Head,
+    ActorRoot,
+    #[default]
+    Unanchored,
+}
+
+impl DialogueVoiceAnchorKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Mouth => "Mouth",
+            Self::Head => "Head",
+            Self::ActorRoot => "ActorRoot",
+            Self::Unanchored => "Unanchored",
+        }
+    }
+
+    pub(crate) const fn is_spatial(self) -> bool {
+        !matches!(self, Self::Unanchored)
+    }
+}
+
 #[derive(Debug, Clone, Component)]
 pub(crate) struct PrimaryDialogueRunner;
 
@@ -101,6 +125,7 @@ pub(crate) struct DialogueRuntime {
     pub(crate) line_elapsed_seconds: f32,
     pub(crate) line_duration_seconds: f32,
     pub(crate) active_line_key: Option<DialogueLineKey>,
+    pub(crate) voice_anchor: DialogueVoiceAnchorKind,
     pub(crate) diagnostics: Vec<DialogueError>,
     pub(crate) trace: Vec<String>,
     active: Option<ActiveDialogue>,
@@ -132,6 +157,7 @@ impl Default for DialogueRuntime {
             line_elapsed_seconds: 0.0,
             line_duration_seconds: 0.0,
             active_line_key: None,
+            voice_anchor: DialogueVoiceAnchorKind::Unanchored,
             diagnostics: Vec::new(),
             trace: Vec::new(),
             active: None,
@@ -321,6 +347,10 @@ impl Plugin for DialoguePlugin {
                         .after(advance_dialogue),
                 )
                     .in_set(ViewerSet::Dialogue),
+            )
+            .add_systems(
+                Update,
+                presentation::reanchor_dialogue_voice.in_set(ViewerSet::WorldSync),
             )
             .add_systems(
                 Update,
@@ -760,6 +790,7 @@ fn process_dialogue_lifecycle(
         runtime.line_elapsed_seconds = 0.0;
         runtime.line_duration_seconds = 0.0;
         runtime.active_line_key = None;
+        runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
         modal_requests.write(RequestStateTransition::Modal(GameplayModal::Dialogue));
         let session = runtime
             .active
@@ -892,6 +923,7 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
             display_name: line.speaker.clone().unwrap_or_default(),
         };
         runtime.speaker = speaker.clone();
+        runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
         runtime.presentation.line = Some(DialogueLinePresentation {
             line_key: line.key.clone(),
             text: line.text.clone(),
@@ -911,6 +943,7 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
         runtime.active_line_key = None;
         runtime.line_elapsed_seconds = 0.0;
         runtime.line_duration_seconds = 0.0;
+        runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
         runtime.presentation.options = node
             .options
             .iter()
@@ -942,6 +975,7 @@ fn close_dialogue(
     runtime.line_elapsed_seconds = 0.0;
     runtime.line_duration_seconds = 0.0;
     runtime.active_line_key = None;
+    runtime.voice_anchor = DialogueVoiceAnchorKind::Unanchored;
     runtime.phase = DialoguePhase::Ready;
     runtime.ui_phase = DialogueUiPhase::Closing;
     runtime.input_gated = false;
