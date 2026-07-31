@@ -72,8 +72,7 @@ mod console_ui;
 mod controls;
 mod day_night;
 mod diagnostics;
-#[allow(dead_code)]
-mod dialogue;
+pub(crate) mod dialogue;
 mod fallout_ui;
 mod hud;
 #[cfg(test)]
@@ -333,6 +332,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         rebuild_shadows: args.rebuild_shadows,
         rebuild_reflection_probes: args.rebuild_reflection_probes,
         cache_dir: Some(cache_dir.to_path_buf()),
+        dialogue_sources: Vec::new(),
         force,
         rebuild_assets: false,
         strict: false,

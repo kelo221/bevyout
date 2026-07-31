@@ -282,6 +282,13 @@ impl DialoguePresentationPolicy {
         }
         (text.chars().count() as f32 * 0.025).max(0.05)
     }
+
+    pub fn auto_advance_duration_seconds(&self, text: &str, voice_millis: Option<u32>) -> f32 {
+        if let Some(duration) = voice_millis {
+            return duration as f32 / 1000.0;
+        }
+        (text.chars().count() as f32 * 0.025).max(0.5)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

@@ -78,6 +78,68 @@ fn exec(app: &mut App, line: &str) -> crate::console::ConsoleOutput {
 }
 
 #[test]
+fn dialogue_commands_expose_state_and_queue_visible_choices() {
+    let mut app = test_app();
+    app.insert_resource(ButtonInput::<KeyCode>::default())
+        .add_message::<crate::app_state::RequestStateTransition>();
+    app.add_plugins(crate::viewer::dialogue::DialoguePlugin);
+    app.update();
+
+    let start = exec(&mut app, "dialoguestart MoiraBrown");
+    assert!(start.ok);
+    assert_eq!(start.value["dialogue"], "MoiraBrown");
+    assert_eq!(
+        app.world()
+            .resource::<Messages<crate::viewer::dialogue::DialogueStartRequested>>()
+            .iter_current_update_messages()
+            .count(),
+        1
+    );
+
+    {
+        let mut runtime = app
+            .world_mut()
+            .resource_mut::<crate::viewer::dialogue::DialogueRuntime>();
+        runtime.readiness = crate::viewer::dialogue::DialogueReadiness::Ready;
+        runtime.phase = bevyout_core::dialogue::DialoguePhase::PresentingOptions;
+        runtime.presentation.options = vec![
+            bevyout_core::dialogue::DialogueOptionPresentation {
+                choice: bevyout_core::dialogue::DialogueChoiceId::new("MoiraBrown:0"),
+                text: "Ask about the crater".into(),
+                line_key: None,
+                enabled: true,
+            },
+            bevyout_core::dialogue::DialogueOptionPresentation {
+                choice: bevyout_core::dialogue::DialogueChoiceId::new("MoiraBrown:1"),
+                text: "Ask about supplies".into(),
+                line_key: None,
+                enabled: true,
+            },
+        ];
+    }
+
+    let state = exec(&mut app, "dialoguestate");
+    assert!(state.ok);
+    assert_eq!(state.value["phase"], "PresentingOptions");
+    assert_eq!(state.value["options"][1]["text"], "Ask about supplies");
+
+    let choice = exec(&mut app, "dialoguechoice 2");
+    assert!(choice.ok);
+    assert_eq!(choice.value["choice"], "MoiraBrown:1");
+    assert_eq!(
+        app.world()
+            .resource::<Messages<crate::viewer::dialogue::DialogueChoiceSelected>>()
+            .iter_current_update_messages()
+            .count(),
+        1
+    );
+    assert_eq!(
+        exec(&mut app, "dialoguechoice 3").error.unwrap().code,
+        "out_of_range"
+    );
+}
+
+#[test]
 fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     let mut app = test_app();
     app.init_resource::<super::super::weapon::PlayerWeaponRuntime>()

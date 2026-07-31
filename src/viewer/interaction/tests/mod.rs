@@ -141,10 +141,39 @@ fn interaction_prompts_use_e_in_fps_mode() {
         ao_mode: "ao-none".into(),
     };
 
-    let prompt = interaction_prompt(&placement, false, &PlayerInventory::default())
+    let prompt = interaction_prompt(&placement, false, &PlayerInventory::default(), false)
         .expect("containers should have an interaction prompt");
     assert!(prompt.starts_with("[E]"));
     assert!(!prompt.contains("Enter"));
+
+    let mut npc = placement;
+    npc.editor_id = Some("MoiraBrown".into());
+    npc.display_name = Some("Moira Brown".into());
+    npc.semantic = PreparedSemantic::Npc(Default::default());
+    assert_eq!(
+        interaction_prompt(&npc, false, &PlayerInventory::default(), true),
+        Some("[E] Talk to Moira Brown".into())
+    );
+    assert_eq!(
+        interaction_prompt(&npc, false, &PlayerInventory::default(), false),
+        None
+    );
+}
+
+#[test]
+fn interaction_prompt_uses_lower_phosphor_hud_presentation() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_systems(Startup, super::ui::spawn_interaction_ui);
+    app.update();
+
+    let world = app.world_mut();
+    let mut prompts =
+        world.query_filtered::<(&TextColor, &TextFont, &Node), With<InteractionPromptText>>();
+    let (color, font, node) = prompts.single(world).expect("interaction prompt");
+    assert_eq!(color.0, crate::viewer::fallout_ui::PHOSPHOR);
+    assert_eq!(font.font_size, FontSize::Px(22.0));
+    assert_eq!(node.bottom, Val::Percent(10.0));
 }
 
 #[test]

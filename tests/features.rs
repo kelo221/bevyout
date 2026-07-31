@@ -1316,6 +1316,18 @@ async fn then_dialogue_timing_and_coverage_are_deterministic(world: &mut Bevyout
         world.dialogue_policy.reveal_duration_seconds("Hello", None),
         0.125
     );
+    assert_eq!(
+        world
+            .dialogue_policy
+            .auto_advance_duration_seconds("Hello", None),
+        0.5
+    );
+    assert_eq!(
+        world
+            .dialogue_policy
+            .auto_advance_duration_seconds("Hello", Some(1250)),
+        1.25
+    );
     let coverage = world.dialogue_coverage.as_ref().unwrap();
     assert_eq!(coverage.total_lines, 1);
     assert_eq!(coverage.missing_localization.len(), 1);

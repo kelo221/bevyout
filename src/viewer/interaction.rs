@@ -109,6 +109,10 @@ fn install(app: &mut App) {
         .add_message::<RequestStateTransition>()
         .add_systems(Startup, spawn_interaction_ui)
         .add_systems(
+            OnEnter(GameplayModal::Dialogue),
+            ui::clear_interaction_prompt,
+        )
+        .add_systems(
             Update,
             (
                 update_focused_placement,

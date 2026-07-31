@@ -22,6 +22,7 @@ pub(super) fn interaction_prompt(
     placement: &PreparedPlacement,
     is_open: bool,
     inventory: &PlayerInventory,
+    has_dialogue: bool,
 ) -> Option<String> {
     let name = placement_name(placement);
     match &placement.semantic {
@@ -52,6 +53,7 @@ pub(super) fn interaction_prompt(
             }
         }
         PreparedSemantic::Activator => Some(format!("[E] Activate {name}")),
+        PreparedSemantic::Npc(_) if has_dialogue => Some(format!("[E] Talk to {name}")),
         _ => None,
     }
 }

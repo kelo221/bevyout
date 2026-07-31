@@ -9,16 +9,20 @@ use std::fs;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevyout_core::dialogue::{
     ActiveDialogueCheckpoint, DialogueChoiceId, DialogueError, DialogueErrorCode, DialogueKey,
-    DialogueLinePresentation, DialoguePhase, DialoguePresentation, DialogueSessionId,
-    DialogueSpeaker, DialogueStartRequest, NarrativeVariableState,
+    DialogueLineKey, DialogueLinePresentation, DialoguePhase, DialoguePresentation,
+    DialogueSessionId, DialogueSpeaker, DialogueStartRequest, NarrativeVariableState,
 };
 
+use super::interaction::PlacementRoot;
 use super::plugins::ViewerSet;
 use crate::app_state::{GameplayModal, RequestStateTransition};
+use crate::vsa::PreparedSemantic;
 use crate::vsa::dialogue::{PreparedDialogueCatalog, PreparedDialogueNode};
 
+#[allow(dead_code)]
 mod host;
 mod presentation;
 #[cfg(feature = "dialogue-yarn")]
@@ -59,7 +63,7 @@ pub(crate) enum DialogueUiPhase {
 #[derive(Debug, Clone, Component)]
 pub(crate) struct PrimaryDialogueRunner;
 
-#[derive(Debug, Clone, Component)]
+#[derive(Debug, Clone, Component, PartialEq, Eq)]
 pub(crate) struct DialogueBinding {
     pub dialogue: DialogueKey,
     pub speaker: u32,
@@ -84,6 +88,7 @@ pub(crate) struct DialogueRuntime {
     pub(crate) phase: DialoguePhase,
     pub(crate) ui_phase: DialogueUiPhase,
     pub(crate) presentation: DialoguePresentation,
+    pub(crate) speaker: DialogueSpeaker,
     pub(crate) variables: NarrativeVariableState,
     pub(crate) runner_entity: Option<Entity>,
     pub(crate) camera_focused: bool,
@@ -93,6 +98,9 @@ pub(crate) struct DialogueRuntime {
     pub(crate) pending_starts: VecDeque<DialogueStartRequest>,
     pub(crate) pending_commands: VecDeque<HostCommand>,
     pub(crate) completed_action_keys: BTreeSet<String>,
+    pub(crate) line_elapsed_seconds: f32,
+    pub(crate) line_duration_seconds: f32,
+    pub(crate) active_line_key: Option<DialogueLineKey>,
     pub(crate) diagnostics: Vec<DialogueError>,
     pub(crate) trace: Vec<String>,
     active: Option<ActiveDialogue>,
@@ -111,6 +119,7 @@ impl Default for DialogueRuntime {
             phase: DialoguePhase::Loading,
             ui_phase: DialogueUiPhase::Hidden,
             presentation: DialoguePresentation::default(),
+            speaker: DialogueSpeaker::default(),
             variables: NarrativeVariableState::default(),
             runner_entity: None,
             camera_focused: false,
@@ -120,6 +129,9 @@ impl Default for DialogueRuntime {
             pending_starts: VecDeque::new(),
             pending_commands: VecDeque::new(),
             completed_action_keys: BTreeSet::new(),
+            line_elapsed_seconds: 0.0,
+            line_duration_seconds: 0.0,
+            active_line_key: None,
             diagnostics: Vec::new(),
             trace: Vec::new(),
             active: None,
@@ -266,6 +278,7 @@ impl Plugin for DialoguePlugin {
             .init_resource::<DialoguePrefetchQueue>()
             .init_resource::<DialogueTelemetry>()
             .init_resource::<presentation::DialoguePresentationProviders>()
+            .init_resource::<presentation::DialogueUiState>()
             .init_resource::<YarnHostBridge>()
             .init_resource::<DialogueHostState>()
             .add_message::<DialogueStartRequested>()
@@ -288,7 +301,11 @@ impl Plugin for DialoguePlugin {
             .add_systems(
                 Update,
                 (
-                    load_prepared_catalog,
+                    load_prepared_catalog
+                        .in_set(DialogueSet::Lifecycle)
+                        .before(attach_prepared_dialogue_bindings),
+                    attach_prepared_dialogue_bindings.in_set(DialogueSet::Lifecycle),
+                    presentation::handle_dialogue_ui_input.in_set(DialogueSet::Input),
                     read_dialogue_input.in_set(DialogueSet::Input),
                     activate_bound_npc.in_set(DialogueSet::Input),
                     populate_dialogue_prefetch.in_set(DialogueSet::Input),
@@ -299,13 +316,39 @@ impl Plugin for DialoguePlugin {
                     collect_dialogue_diagnostics.in_set(DialogueSet::Host),
                     record_dialogue_telemetry.in_set(DialogueSet::Host),
                     host::apply_host_commands.in_set(DialogueSet::Host),
-                ),
+                    presentation::sync_dialogue_timing
+                        .in_set(DialogueSet::Advance)
+                        .after(advance_dialogue),
+                )
+                    .in_set(ViewerSet::Dialogue),
             )
             .add_systems(
                 Update,
-                presentation::update_dialogue_ui.in_set(ViewerSet::Ui),
+                (
+                    presentation::update_dialogue_ui,
+                    presentation::update_dialogue_ui_styles,
+                )
+                    .in_set(ViewerSet::Ui),
             )
-            .add_systems(OnExit(GameplayModal::Dialogue), clear_input_gate);
+            .add_systems(OnEnter(GameplayModal::Dialogue), open_dialogue_cursor)
+            .add_systems(
+                OnExit(GameplayModal::Dialogue),
+                (clear_input_gate, close_dialogue_cursor).chain(),
+            );
+    }
+}
+
+fn open_dialogue_cursor(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    if let Ok(mut cursor) = cursor.single_mut() {
+        cursor.visible = true;
+        cursor.grab_mode = CursorGrabMode::None;
+    }
+}
+
+fn close_dialogue_cursor(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    if let Ok(mut cursor) = cursor.single_mut() {
+        cursor.visible = false;
+        cursor.grab_mode = CursorGrabMode::Locked;
     }
 }
 
@@ -330,6 +373,40 @@ fn activate_bound_npc(
         listener: binding.listener.map(Into::into),
         source: bevyout_core::dialogue::DialogueStartSource::AuthoredNpc,
     }));
+}
+
+fn attach_prepared_dialogue_bindings(
+    runtime: Res<DialogueRuntime>,
+    roots: Query<(Entity, &PlacementRoot, Option<&DialogueBinding>)>,
+    mut commands: Commands,
+) {
+    let Some(catalog) = runtime.catalog.as_ref() else {
+        return;
+    };
+    for (entity, root, existing) in &roots {
+        let placement = root.placement();
+        let desired = match (&placement.semantic, placement.editor_id.as_deref()) {
+            (PreparedSemantic::Npc(_), Some(editor_id)) => {
+                let dialogue = DialogueKey::new(editor_id);
+                catalog.conversation(&dialogue).map(|_| DialogueBinding {
+                    dialogue,
+                    speaker: placement.reference_form_id,
+                    listener: None,
+                })
+            }
+            _ => None,
+        };
+        match (existing, desired) {
+            (Some(current), Some(desired)) if current == &desired => {}
+            (_, Some(desired)) => {
+                commands.entity(entity).insert(desired);
+            }
+            (Some(_), None) => {
+                commands.entity(entity).remove::<DialogueBinding>();
+            }
+            (None, None) => {}
+        }
+    }
 }
 
 fn spawn_primary_runner(mut commands: Commands, mut runtime: ResMut<DialogueRuntime>) {
@@ -680,6 +757,9 @@ fn process_dialogue_lifecycle(
         runtime.ui_phase = DialogueUiPhase::Revealing;
         runtime.input_gated = true;
         runtime.camera_focused = true;
+        runtime.line_elapsed_seconds = 0.0;
+        runtime.line_duration_seconds = 0.0;
+        runtime.active_line_key = None;
         modal_requests.write(RequestStateTransition::Modal(GameplayModal::Dialogue));
         let session = runtime
             .active
@@ -772,6 +852,7 @@ fn advance_dialogue(
                     active.node = destination.into();
                     active.line_index = 0;
                 }
+                runtime.presentation.line = None;
                 runtime.presentation.options.clear();
                 runtime.phase = DialoguePhase::Running;
                 present_node(
@@ -806,13 +887,15 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
     };
     if active.line_index < node.lines.len() {
         let line = &node.lines[active.line_index];
+        let speaker = DialogueSpeaker {
+            stable_id: active.request.speaker,
+            display_name: line.speaker.clone().unwrap_or_default(),
+        };
+        runtime.speaker = speaker.clone();
         runtime.presentation.line = Some(DialogueLinePresentation {
             line_key: line.key.clone(),
             text: line.text.clone(),
-            speaker: DialogueSpeaker {
-                stable_id: active.request.speaker,
-                display_name: line.speaker.clone().unwrap_or_default(),
-            },
+            speaker,
             voice_key: None,
             localization_key: Some(line.key.to_string()),
             reveal_seconds: 0.0,
@@ -825,6 +908,9 @@ fn present_node(runtime: &mut DialogueRuntime, node: &PreparedDialogueNode) {
     }
     if !node.options.is_empty() {
         runtime.presentation.line = None;
+        runtime.active_line_key = None;
+        runtime.line_elapsed_seconds = 0.0;
+        runtime.line_duration_seconds = 0.0;
         runtime.presentation.options = node
             .options
             .iter()
@@ -852,6 +938,10 @@ fn close_dialogue(
     runtime.active = None;
     runtime.pending_commands.clear();
     runtime.presentation = DialoguePresentation::default();
+    runtime.speaker = DialogueSpeaker::default();
+    runtime.line_elapsed_seconds = 0.0;
+    runtime.line_duration_seconds = 0.0;
+    runtime.active_line_key = None;
     runtime.phase = DialoguePhase::Ready;
     runtime.ui_phase = DialogueUiPhase::Closing;
     runtime.input_gated = false;

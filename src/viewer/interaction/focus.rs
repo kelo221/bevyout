@@ -10,6 +10,7 @@ pub(super) fn update_focused_placement(
     mut raycast: MeshRayCast,
     parents: Query<&ChildOf>,
     roots: Query<&PlacementRoot>,
+    dialogue_bindings: Query<(), With<crate::viewer::dialogue::DialogueBinding>>,
     inventory: Res<PlayerInventory>,
     mut state: ResMut<InteractionState>,
     mut prompt: Query<&mut Text, With<InteractionPromptText>>,
@@ -43,6 +44,7 @@ pub(super) fn update_focused_placement(
             &root.placement,
             state.open.contains(&root_entity),
             &inventory,
+            dialogue_bindings.get(root_entity).is_ok(),
         )
         .map(|text| (root_entity, text))
     });

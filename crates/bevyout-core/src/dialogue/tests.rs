@@ -56,4 +56,9 @@ fn presentation_timing_prefers_voice_and_is_deterministic_without_it() {
     };
     assert_eq!(policy.reveal_duration_seconds("hello", Some(1250)), 1.25);
     assert_eq!(policy.reveal_duration_seconds("hello", None), 0.125);
+    assert_eq!(policy.auto_advance_duration_seconds("hello", None), 0.5);
+    assert_eq!(
+        policy.auto_advance_duration_seconds("hello", Some(1250)),
+        1.25
+    );
 }

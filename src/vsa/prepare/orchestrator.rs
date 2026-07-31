@@ -1172,6 +1172,13 @@ fn prepare_cell(
     let actor_animation_catalog_path = Some(actor_animation_catalog_artifact.relative_path);
     let actor_animation_catalog_revision = Some(ACTOR_ANIMATION_CATALOG_REVISION.into());
     let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
+    let dialogue = prepare_authored_dialogue_bundle(
+        &cache_dir,
+        &args.dialogue_sources,
+        &placements,
+        &mut diagnostics,
+        output,
+    )?;
     let mutability_summary = summarize_mutability(&placements);
     let mutability_log = format!(
         "runtime mutability: immutable {}, enable_group {}, script_addressable {}, unknown {}",
@@ -1285,7 +1292,7 @@ fn prepare_cell(
         static_point_shadows,
         reflection_probes,
         leveled_lists,
-        dialogue: None,
+        dialogue,
     };
     let manifest_path = scene_dir.join("scene.ron");
     fs::write(
@@ -1301,6 +1308,97 @@ fn prepare_cell(
         manifest_path.display()
     ));
     Ok(())
+}
+
+fn prepare_authored_dialogue_bundle(
+    asset_root: &Path,
+    source_paths: &[PathBuf],
+    placements: &[PreparedPlacement],
+    diagnostics: &mut Vec<Diagnostic>,
+    output: &mut Vec<String>,
+) -> Result<Option<bevyout_core::dialogue::PreparedDialogueBundleRef>> {
+    if source_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let workspace =
+        fs::canonicalize(std::env::current_dir().context("resolving dialogue source workspace")?)
+            .context("canonicalizing dialogue source workspace")?;
+    let mut sources = Vec::with_capacity(source_paths.len());
+    for source_path in source_paths {
+        if source_path.is_absolute() {
+            bail!(
+                "dialogue source must be a workspace-relative path: {}",
+                source_path.display()
+            );
+        }
+        let requested = source_path.to_string_lossy().replace('\\', "/");
+        let relative = requested
+            .strip_prefix("dialogue/")
+            .unwrap_or(&requested)
+            .to_owned();
+        if relative.starts_with("../")
+            || relative == ".."
+            || relative.starts_with('/')
+            || Path::new(&relative)
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        {
+            bail!(
+                "dialogue source must be a workspace-relative path: {}",
+                source_path.display()
+            );
+        }
+        let absolute = fs::canonicalize(workspace.join(source_path))
+            .with_context(|| format!("reading dialogue source {}", source_path.display()))?;
+        if !absolute.starts_with(&workspace) {
+            bail!(
+                "dialogue source must stay inside the workspace: {}",
+                source_path.display()
+            );
+        }
+        let content = fs::read_to_string(&absolute)
+            .with_context(|| format!("reading dialogue source {}", absolute.display()))?;
+        let relative = if relative.starts_with("authored/") {
+            relative
+        } else {
+            format!("authored/{relative}")
+        };
+        sources.push(crate::vsa::dialogue::DialogueSource {
+            relative_path: relative,
+            kind: crate::vsa::dialogue::DialogueSourceKind::Authored,
+            content,
+        });
+    }
+
+    let prepared = crate::vsa::dialogue::prepare_dialogue_bundle(asset_root, sources)?;
+    let bundle = prepared.bundle.clone();
+    let binding_count = prepared
+        .catalog
+        .conversations
+        .keys()
+        .filter(|dialogue| {
+            placements
+                .iter()
+                .any(|placement| placement.editor_id.as_deref() == Some(dialogue.as_str()))
+        })
+        .count();
+    let summary = format!(
+        "dialogue bundle: {} conversation(s), {} source(s), {} stable placement binding(s) -> {}",
+        prepared.catalog.conversations.len(),
+        prepared.catalog.source_paths.len(),
+        binding_count,
+        bundle
+            .as_ref()
+            .map(|bundle| bundle.catalog_path.as_str())
+            .unwrap_or("<none>"),
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: summary.clone(),
+    });
+    output.push(summary);
+    Ok(bundle)
 }
 
 fn resolve_authoritative_day_night_profile(

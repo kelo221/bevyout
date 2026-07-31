@@ -252,6 +252,10 @@ pub struct PrepareArgs {
     /// Output cache directory.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
+    /// Authored Yarn dialogue source to include in the prepared bundle. May
+    /// be repeated; no dialogue sources are discovered implicitly.
+    #[arg(long = "dialogue-source", value_name = "PATH")]
+    pub(crate) dialogue_sources: Vec<PathBuf>,
     /// Refresh the manifest and scene metadata.
     #[arg(long)]
     pub(crate) force: bool,

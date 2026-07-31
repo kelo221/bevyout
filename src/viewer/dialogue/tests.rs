@@ -68,9 +68,17 @@ fn authored_start_presents_a_line_and_restores_controls_after_choice() {
         .resource_mut::<Messages<DialogueContinueRequested>>()
         .write(DialogueContinueRequested);
     app.update();
+    app.update();
     assert_eq!(
         app.world().resource::<DialogueRuntime>().phase,
         DialoguePhase::PresentingOptions
+    );
+    assert!(
+        app.world()
+            .resource::<DialogueRuntime>()
+            .presentation
+            .line
+            .is_none()
     );
 
     let choice = app
@@ -96,6 +104,250 @@ fn authored_start_presents_a_line_and_restores_controls_after_choice() {
     assert_eq!(
         *app.world().resource::<State<GameplayModal>>().get(),
         GameplayModal::None
+    );
+}
+
+#[test]
+fn focused_authored_npc_starts_from_the_existing_use_key() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    let entity = app
+        .world_mut()
+        .spawn(DialogueBinding {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: 0x10,
+            listener: None,
+        })
+        .id();
+    app.insert_resource(crate::viewer::interaction::InteractionState {
+        focused: Some(entity),
+        open: Default::default(),
+    });
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyE);
+    app.update();
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    app.update();
+
+    let runtime = app.world().resource::<DialogueRuntime>();
+    assert_eq!(runtime.phase, DialoguePhase::PresentingLine);
+    assert_eq!(
+        runtime
+            .presentation
+            .line
+            .as_ref()
+            .map(|line| line.text.as_str()),
+        Some("Halt.")
+    );
+}
+
+#[test]
+fn dialogue_ui_root_hides_after_the_session_closes() {
+    let mut app = app_with_dialogue();
+    let root = app
+        .world_mut()
+        .spawn((presentation::DialogueUiRoot, Visibility::Inherited))
+        .id();
+    app.world_mut().resource_mut::<DialogueRuntime>().ui_phase = DialogueUiPhase::Hidden;
+    app.update();
+    assert_eq!(
+        app.world().get::<Visibility>(root),
+        Some(&Visibility::Hidden)
+    );
+
+    app.world_mut().resource_mut::<DialogueRuntime>().ui_phase = DialogueUiPhase::Continue;
+    app.update();
+    assert_eq!(
+        app.world().get::<Visibility>(root),
+        Some(&Visibility::Inherited)
+    );
+}
+
+#[test]
+fn dialogue_visual_states_match_the_fallout_three_layout() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+
+    let world = app.world_mut();
+    let mut panels = world.query_filtered::<&BorderColor, With<presentation::DialogueUiPanel>>();
+    assert_eq!(
+        *panels.single(world).expect("dialogue panel"),
+        BorderColor::all(Color::NONE)
+    );
+    let mut lines =
+        world.query_filtered::<Option<&BorderColor>, With<presentation::DialogueUiLineButton>>();
+    assert_eq!(
+        *lines
+            .single(world)
+            .expect("dialogue line hit target")
+            .expect("explicit borderless line style"),
+        BorderColor::all(Color::NONE)
+    );
+
+    app.world_mut()
+        .resource_mut::<Messages<DialogueContinueRequested>>()
+        .write(DialogueContinueRequested);
+    app.update();
+    app.update();
+
+    assert!(
+        app.world()
+            .resource::<DialogueRuntime>()
+            .presentation
+            .line
+            .is_none()
+    );
+    let world = app.world_mut();
+    let mut panels = world.query_filtered::<&BorderColor, With<presentation::DialogueUiPanel>>();
+    assert_eq!(
+        *panels.single(world).expect("dialogue panel"),
+        BorderColor::all(crate::viewer::fallout_ui::PHOSPHOR_DIM)
+    );
+    let mut options = world.query_filtered::<
+        (&BackgroundColor, Option<&BorderColor>),
+        With<presentation::DialogueUiOptionButton>,
+    >();
+    let options = options.iter(world).collect::<Vec<_>>();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].0.0, Color::NONE);
+    assert_eq!(
+        *options[0].1.expect("explicit borderless option style"),
+        BorderColor::all(Color::NONE)
+    );
+}
+
+#[test]
+fn clicked_option_uses_the_same_choice_message_as_keyboard_selection() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+    app.world_mut()
+        .resource_mut::<Messages<DialogueContinueRequested>>()
+        .write(DialogueContinueRequested);
+    app.update();
+    app.update();
+
+    let option = {
+        let world = app.world_mut();
+        let mut query =
+            world.query_filtered::<Entity, With<presentation::DialogueUiOptionButton>>();
+        query.iter(world).next().expect("dialogue option button")
+    };
+    app.world_mut()
+        .entity_mut(option)
+        .insert(Interaction::Pressed);
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<DialogueRuntime>().phase,
+        DialoguePhase::PresentingLine
+    );
+    assert_eq!(
+        app.world()
+            .resource::<DialogueRuntime>()
+            .presentation
+            .line
+            .as_ref()
+            .map(|line| line.text.as_str()),
+        Some("Leave")
+    );
+}
+
+#[test]
+fn clicked_spoken_line_advances_without_waiting_for_the_timer() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+
+    let line = {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<presentation::DialogueUiLineButton>>();
+        query.iter(world).next().expect("dialogue line button")
+    };
+    app.world_mut()
+        .entity_mut(line)
+        .insert(Interaction::Pressed);
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<DialogueRuntime>().phase,
+        DialoguePhase::PresentingOptions
+    );
+}
+
+#[test]
+fn unvoiced_line_advances_after_the_deterministic_reading_duration() {
+    let mut app = app_with_dialogue();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(catalog());
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Guard"),
+            speaker: Some(0x10.into()),
+            listener: None,
+            source: DialogueStartSource::AuthoredNpc,
+        }));
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world().resource::<DialogueRuntime>().phase,
+        DialoguePhase::PresentingLine
+    );
+
+    let duration = app
+        .world()
+        .resource::<DialogueRuntime>()
+        .line_duration_seconds;
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .line_elapsed_seconds = duration;
+    app.update();
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<DialogueRuntime>().phase,
+        DialoguePhase::PresentingOptions
     );
 }
 

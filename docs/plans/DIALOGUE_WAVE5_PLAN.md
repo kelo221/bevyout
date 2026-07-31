@@ -43,3 +43,20 @@ prepared authored NPC and visible runtime evidence.
 ## Shipped amendments
 
 <!-- Record acceptance-driven changes here; do not rewrite the fixed plan. -->
+
+### 2026-07-31 — Moira Brown authored vertical slice
+
+- Added the explicit authored source
+  dialogue/authored/moira_brown.yarn; preparation accepts repeatable
+  --dialogue-source paths and never discovers dialogue implicitly.
+- NPC roots whose editor_id matches a prepared conversation receive only a
+  DialogueBinding; the persistent runner and narrative state remain in the
+  dialogue runtime.
+- The existing E interaction prompt becomes [E] Talk to Moira Brown when the
+  prepared catalog contains MoiraBrown. The bridge exposes dialoguestate,
+  dialoguecontinue, and dialoguechoice <index> for deterministic inspection
+  and control.
+- The authored text is an original smoke conversation, not a Fallout DIAL/INFO
+  import. Canonical Moira inventory and compatibility work remains in Waves
+  6–7.
+- Manual acceptance is recorded in DIALOGUE_WAVE5_MANUAL.md.
