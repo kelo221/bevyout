@@ -841,6 +841,29 @@ fn host_registration_and_exactly_once_action_mutation_are_deterministic() {
 }
 
 #[test]
+fn registered_skill_check_uses_the_actor_value_threshold() {
+    let mut bridge = YarnHostBridge::default();
+    bridge.install_bevyout_yarn_api();
+    let state = DialogueHostState {
+        actor_values: std::collections::BTreeMap::from([((16, "speech".into()), 50)]),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        bridge
+            .evaluate_function(&state, "bo_skill_check", &["16", "speech", "50"])
+            .unwrap(),
+        bevyout_core::dialogue::NarrativeValue::Bool(true)
+    );
+    assert_eq!(
+        bridge
+            .evaluate_function(&state, "bo_skill_check", &["16", "speech", "51"])
+            .unwrap(),
+        bevyout_core::dialogue::NarrativeValue::Bool(false)
+    );
+}
+
+#[test]
 fn host_async_completion_handles_are_explicit_and_one_shot() {
     let mut bridge = YarnHostBridge::default();
     let handle = bridge.enqueue_async(HostCommand::EndDialogue, "dialogue-command-1");
@@ -890,6 +913,68 @@ fn compatible_checkpoint_resumes_at_the_authored_node() {
             .unwrap()
             .text,
         "Leave"
+    );
+}
+
+#[test]
+fn restored_checkpoint_does_not_replay_a_completed_host_command() {
+    let mut app = app_with_dialogue();
+    let prepared = prepare_catalog(vec![DialogueSource {
+        relative_path: "authored/checkpoint.yarn".into(),
+        kind: DialogueSourceKind::Authored,
+        content: "title: Checkpoint\n---\nGuard: Already handled.\n<<bo_add_item 16 1>>\n===\n"
+            .into(),
+    }]);
+    let bundle_hash = prepared.bundle_hash();
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .set_catalog(prepared);
+    app.world_mut()
+        .resource_mut::<DialogueRuntime>()
+        .restore_snapshot(bevyout_core::dialogue::DialogueSnapshot {
+            schema_version: bevyout_core::dialogue::DIALOGUE_SNAPSHOT_SCHEMA_VERSION,
+            bundle_hash,
+            variables: Default::default(),
+            active: Some(bevyout_core::dialogue::ActiveDialogueCheckpoint {
+                dialogue: DialogueKey::new("Checkpoint"),
+                node: "Checkpoint".into(),
+                speaker: Some(0x10.into()),
+                listener: Some(0x20.into()),
+                completed_actions: vec![bevyout_core::dialogue::DialogueActionKey::new(
+                    "bo_add_item 16 1",
+                )],
+            }),
+        });
+    app.world_mut()
+        .resource_mut::<Messages<DialogueStartRequested>>()
+        .write(DialogueStartRequested(DialogueStartRequest {
+            dialogue: DialogueKey::new("Checkpoint"),
+            speaker: Some(0x10.into()),
+            listener: Some(0x20.into()),
+            source: DialogueStartSource::CheckpointResume,
+        }));
+    app.update();
+    app.update();
+
+    assert!(
+        app.world()
+            .resource::<DialogueRuntime>()
+            .completed_action_keys
+            .contains("bo_add_item 16 1")
+    );
+    app.world_mut()
+        .resource_mut::<Messages<DialogueContinueRequested>>()
+        .write(DialogueContinueRequested);
+    app.update();
+    app.update();
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .resource::<DialogueHostState>()
+            .item_counts
+            .get(&16),
+        None
     );
 }
 

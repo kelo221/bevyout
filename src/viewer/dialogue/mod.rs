@@ -1096,7 +1096,7 @@ fn process_dialogue_lifecycle(
             runtime.report(error);
             return;
         };
-        let completed_actions = checkpoint
+        let completed_actions: BTreeSet<String> = checkpoint
             .map(|checkpoint| {
                 checkpoint
                     .completed_actions
@@ -1105,6 +1105,9 @@ fn process_dialogue_lifecycle(
                     .collect()
             })
             .unwrap_or_default();
+        runtime
+            .completed_action_keys
+            .extend(completed_actions.iter().cloned());
         runtime.active = Some(ActiveDialogue {
             request,
             session: DialogueSessionId::new(format!("dialogue-{}", runtime.next_session)),

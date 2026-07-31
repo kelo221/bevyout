@@ -130,6 +130,19 @@ impl YarnHostBridge {
                         .unwrap_or_default(),
                 ))
             }
+            "bo_skill_check" => {
+                let actor = parse_u32(args, 0, name)?;
+                let key = args.get(1).copied().ok_or_else(|| unsupported(name))?;
+                let threshold = parse_i32(args, 2, name)?;
+                NarrativeValue::Bool(
+                    state
+                        .actor_values
+                        .get(&(actor, key.to_owned()))
+                        .copied()
+                        .unwrap_or_default()
+                        >= threshold,
+                )
+            }
             "bo_reference_enabled" => {
                 let reference = parse_u32(args, 0, name)?;
                 NarrativeValue::Bool(
