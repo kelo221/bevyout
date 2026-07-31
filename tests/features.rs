@@ -1038,6 +1038,8 @@ struct BevyoutWorld {
         Vec<dialogue::DialogueSourceMapping>,
     )>,
     dialogue_coverage: Option<bevyout_core::dialogue::DialogueCoverageReport>,
+    dialogue_repair_guidance: Option<String>,
+    dialogue_metadata_valid: Option<bool>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -13905,4 +13907,83 @@ async fn then_script_inventory_summary_has_totals(world: &mut BevyoutWorld) {
     assert!(world.script_inventory_report.as_ref().unwrap().summary().contains(
         "scripts: top-level=1 embedded=1 attachments=1 compiled-bytes=4 variables=2 references=1 diagnostics=0"
     ));
+}
+
+// -- dialogue.feature review hardening --
+
+#[given("missing authored voice with a recorded mapping manifest")]
+async fn given_missing_authored_voice_with_mapping(world: &mut BevyoutWorld) {
+    let key = bevyout_core::dialogue::DialogueLineKey::new("Start:0");
+    world.dialogue_catalog = Some(dialogue::PreparedDialogueCatalog {
+        revision: dialogue::PREPARED_DIALOGUE_CATALOG_REVISION.into(),
+        source_paths: vec!["authored/guard.yarn".into()],
+        authored_voice_manifest_paths: vec!["dialogue/voice/guard.ron".into()],
+        line_keys: std::collections::BTreeSet::from([key.clone()]),
+        voice_requirements: vec![dialogue::PreparedDialogueVoiceRequirement {
+            line_key: key,
+            speaker_form_id: None,
+            source_path: "authored/guard.yarn".into(),
+            origin: dialogue::DialogueVoiceRequirementOrigin::Authored,
+        }],
+        ..Default::default()
+    });
+}
+
+#[when("dialogue voice repair guidance is rendered")]
+async fn when_dialogue_voice_repair_guidance_is_rendered(world: &mut BevyoutWorld) {
+    let catalog = world.dialogue_catalog.as_ref().unwrap();
+    let coverage =
+        dialogue::coverage::assess_voice_coverage(std::path::Path::new("."), catalog, None);
+    world.dialogue_repair_guidance = Some(dialogue::coverage::voice_repair_guidance(
+        "FixtureCell",
+        catalog,
+        &coverage,
+    ));
+}
+
+#[then("the guidance contains an executable prepare command")]
+async fn then_guidance_contains_prepare_command(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.dialogue_repair_guidance.as_deref(),
+        Some(
+            "next command: cargo run-dev -- prepare FixtureCell --dialogue-source dialogue/authored/guard.yarn --dialogue-voice-manifest dialogue/voice/guard.ron"
+        )
+    );
+}
+
+#[given("a prepared dialogue bundle with a stale voice index revision")]
+async fn given_prepared_dialogue_bundle_with_stale_voice_index(world: &mut BevyoutWorld) {
+    let catalog = dialogue::prepare_catalog(vec![synthetic_dialogue_source()]);
+    let index = bevyout_core::dialogue::PreparedDialogueVoiceIndex {
+        revision: "dialogue-voice-stale".into(),
+        ..Default::default()
+    };
+    let bundle = bevyout_core::dialogue::PreparedDialogueBundleRef {
+        revision: bevyout_core::dialogue::DIALOGUE_BUNDLE_REVISION.into(),
+        source_paths: catalog.source_paths.clone(),
+        voice_index_path: Some("dialogue/voice_index.ron".into()),
+        content_fingerprint: dialogue::dialogue_bundle_fingerprint(&catalog, Some(&index)),
+        ..Default::default()
+    };
+    world.dialogue_catalog = Some(catalog);
+    world.dialogue_voice_index = Some(index);
+    world.dialogue_bundle = Some(bundle);
+}
+
+#[when("dialogue bundle metadata is validated")]
+async fn when_dialogue_bundle_metadata_is_validated(world: &mut BevyoutWorld) {
+    world.dialogue_metadata_valid = Some(
+        dialogue::validate_dialogue_bundle_metadata(
+            world.dialogue_bundle.as_ref().unwrap(),
+            world.dialogue_catalog.as_ref().unwrap(),
+            world.dialogue_voice_index.as_ref(),
+            None,
+        )
+        .is_ok(),
+    );
+}
+
+#[then("the dialogue bundle metadata is rejected")]
+async fn then_dialogue_bundle_metadata_is_rejected(world: &mut BevyoutWorld) {
+    assert_eq!(world.dialogue_metadata_valid, Some(false));
 }

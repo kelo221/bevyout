@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) mod coverage;
 
-pub const PREPARED_DIALOGUE_CATALOG_REVISION: &str = "dialogue-catalog-v5";
+pub const PREPARED_DIALOGUE_CATALOG_REVISION: &str = "dialogue-catalog-v6";
 pub const GENERATED_DIALOGUE_REVISION: &str = "dialogue-yarn-generated-v2";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -220,6 +220,10 @@ pub struct PreparedDialogueCatalog {
     pub source_fingerprint: String,
     #[serde(default)]
     pub source_paths: Vec<String>,
+    /// Workspace-relative authored voice manifests that were actually supplied
+    /// during preparation. Repair diagnostics must never invent these paths.
+    #[serde(default)]
+    pub authored_voice_manifest_paths: Vec<String>,
     pub conversations: BTreeMap<DialogueKey, PreparedConversation>,
     pub condition_set_keys: BTreeSet<String>,
     pub action_set_keys: BTreeSet<String>,
@@ -406,7 +410,11 @@ pub fn prepare_dialogue_bundle_with_voice_demand_and_bindings_scoped(
         normalized.push(source);
     }
 
-    let catalog = prepare_catalog_with_actor_bindings(normalized.clone(), actor_bindings);
+    let mut catalog = prepare_catalog_with_actor_bindings(normalized.clone(), actor_bindings);
+    catalog.authored_voice_manifest_paths = voice_input
+        .as_ref()
+        .map(authored_voice_manifest_paths)
+        .unwrap_or_default();
     let dialogue_dir = output_root.join("dialogue");
     let authored_dir = dialogue_dir.join("authored");
     let generated_dir = dialogue_dir.join("generated");
@@ -675,6 +683,72 @@ pub(crate) fn dialogue_bundle_fingerprint_with_demand(
     demand_report: Option<&PreparedDialogueVoiceDemandReport>,
 ) -> String {
     fingerprint(&(catalog.bundle_hash(), voice_index, demand_report))
+}
+
+pub(crate) fn validate_dialogue_bundle_metadata(
+    bundle: &PreparedDialogueBundleRef,
+    catalog: &PreparedDialogueCatalog,
+    voice_index: Option<&PreparedDialogueVoiceIndex>,
+    demand_report: Option<&PreparedDialogueVoiceDemandReport>,
+) -> Result<()> {
+    anyhow::ensure!(
+        bundle.revision == DIALOGUE_BUNDLE_REVISION,
+        "unsupported prepared dialogue bundle revision {}",
+        bundle.revision
+    );
+    anyhow::ensure!(
+        catalog.revision == PREPARED_DIALOGUE_CATALOG_REVISION,
+        "unsupported prepared dialogue catalog revision {}",
+        catalog.revision
+    );
+    anyhow::ensure!(
+        bundle.source_paths == catalog.source_paths,
+        "prepared dialogue source paths do not match the catalog"
+    );
+    match (bundle.voice_index_path.as_ref(), voice_index) {
+        (Some(_), Some(index)) => anyhow::ensure!(
+            index.revision == bevyout_core::dialogue::DIALOGUE_VOICE_INDEX_REVISION,
+            "unsupported prepared dialogue voice index revision {}",
+            index.revision
+        ),
+        (Some(_), None) => bail!("prepared dialogue voice index is unavailable"),
+        (None, Some(_)) => bail!("prepared dialogue voice index is not referenced by the bundle"),
+        (None, None) => {}
+    }
+    match (bundle.voice_demand_path.as_ref(), demand_report) {
+        (Some(_), Some(report)) => anyhow::ensure!(
+            report.revision == bevyout_core::dialogue::DIALOGUE_VOICE_DEMAND_REVISION,
+            "unsupported prepared dialogue voice demand revision {}",
+            report.revision
+        ),
+        (Some(_), None) => bail!("prepared dialogue voice demand report is unavailable"),
+        (None, Some(_)) => {
+            bail!("prepared dialogue voice demand report is not referenced by the bundle")
+        }
+        (None, None) => {}
+    }
+    anyhow::ensure!(
+        dialogue_bundle_fingerprint_with_demand(catalog, voice_index, demand_report)
+            == bundle.content_fingerprint,
+        "prepared dialogue bundle fingerprint does not match the manifest"
+    );
+    Ok(())
+}
+
+fn authored_voice_manifest_paths(input: &DialogueVoiceInput) -> Vec<String> {
+    let mut paths = input
+        .manifest_path
+        .split('|')
+        .filter(|path| {
+            !path.is_empty()
+                && !path.starts_with("fallout-dialogue-discovery:")
+                && !path.starts_with("preserved-dialogue-voice:")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn voice_input_fingerprint(input: &DialogueVoiceInput) -> String {

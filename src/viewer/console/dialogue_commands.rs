@@ -41,8 +41,39 @@ impl ConsoleCommandProvider for DialogueCommandProvider {
             )
             .mutating(),
         )?;
+        registry.register(
+            ConsoleCommand::new(
+                "dialoguereload",
+                "dialoguereload <prepared-authored-source>...",
+                "Reload explicit authored dialogue sources from the active prepared bundle.",
+                dialogue_reload,
+            )
+            .mutating(),
+        )?;
         Ok(())
     }
+}
+
+pub(super) fn dialogue_reload(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.is_empty() {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "dialoguereload requires at least one prepared authored source path",
+        ));
+    }
+    world.write_message(crate::viewer::dialogue::DialogueHotReloadRequested {
+        source_paths: invocation.args.clone(),
+    });
+    Ok(ConsoleCommandResult::new(
+        json!({ "queued": true, "source_paths": invocation.args }),
+        vec![format!(
+            "Dialogue reload queued: {}.",
+            invocation.args.join(", ")
+        )],
+    ))
 }
 
 pub(super) fn dialogue_start(

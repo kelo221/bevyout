@@ -6,7 +6,8 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, Result};
 use bevyout_core::dialogue::{
-    DialogueLineKey, DialogueVoiceAsset, PreparedDialogueBundleRef, PreparedDialogueVoiceIndex,
+    DialogueLineKey, DialogueVoiceAsset, PreparedDialogueBundleRef,
+    PreparedDialogueVoiceDemandReport, PreparedDialogueVoiceIndex,
 };
 use sha2::{Digest, Sha256};
 
@@ -89,6 +90,19 @@ pub(crate) fn read_prepared_voice_coverage(
             .with_context(|| format!("parsing dialogue voice index {}", path.display()))
         })
         .transpose()?;
+    let demand = bundle
+        .voice_demand_path
+        .as_deref()
+        .map(|relative| {
+            let path = prepared_path(asset_root, relative);
+            ron::de::from_bytes::<PreparedDialogueVoiceDemandReport>(
+                &fs::read(&path)
+                    .with_context(|| format!("reading dialogue voice demand {}", path.display()))?,
+            )
+            .with_context(|| format!("parsing dialogue voice demand {}", path.display()))
+        })
+        .transpose()?;
+    super::validate_dialogue_bundle_metadata(bundle, &catalog, index.as_ref(), demand.as_ref())?;
     let coverage = assess_voice_coverage(asset_root, &catalog, index.as_ref());
     Ok((catalog, coverage))
 }
@@ -143,28 +157,58 @@ pub(crate) fn assess_voice_coverage(
     coverage
 }
 
-pub(crate) fn exact_prepare_command(
+pub(crate) fn voice_repair_guidance(
     selector: &str,
     catalog: &PreparedDialogueCatalog,
     coverage: &DialogueVoiceCoverage,
 ) -> String {
     let mut command = format!("cargo run-dev -- prepare {selector}");
-    if !coverage.missing_authored.is_empty()
-        && let Some(source) = catalog
-            .source_paths
-            .iter()
-            .find(|path| path.starts_with("authored/"))
-    {
-        let source_path = format!("dialogue/{source}");
-        let stem = Path::new(source)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("dialogue");
-        command.push_str(&format!(
-            " --dialogue-source {source_path} --dialogue-voice-manifest dialogue/voice/{stem}.ron"
-        ));
+    if coverage.missing_authored.is_empty() {
+        return format!("next command: {command}");
     }
-    command
+
+    let missing_keys = coverage
+        .missing_authored
+        .iter()
+        .map(|missing| (missing.line_key.clone(), missing.speaker_form_id))
+        .collect::<BTreeSet<_>>();
+    let mut sources = catalog
+        .voice_requirements
+        .iter()
+        .filter(|requirement| {
+            requirement.origin == DialogueVoiceRequirementOrigin::Authored
+                && missing_keys
+                    .contains(&(requirement.line_key.clone(), requirement.speaker_form_id))
+        })
+        .map(|requirement| requirement.source_path.clone())
+        .collect::<BTreeSet<_>>();
+    if sources.is_empty() {
+        sources.extend(
+            catalog
+                .source_paths
+                .iter()
+                .filter(|path| path.starts_with("authored/"))
+                .cloned(),
+        );
+    }
+    let display_sources = sources
+        .iter()
+        .map(|source| source.strip_prefix("dialogue/").unwrap_or(source))
+        .map(|source| format!("dialogue/{source}"))
+        .collect::<Vec<_>>();
+    if catalog.authored_voice_manifest_paths.is_empty() {
+        return format!(
+            "blocker: exact authored voice mapping manifest missing for sources=[{}]; create the mapping contract, then rerun {command}",
+            display_sources.join(", ")
+        );
+    }
+    for source in display_sources {
+        command.push_str(&format!(" --dialogue-source {source}"));
+    }
+    for manifest in &catalog.authored_voice_manifest_paths {
+        command.push_str(&format!(" --dialogue-voice-manifest {manifest}"));
+    }
+    format!("next command: {command}")
 }
 
 fn push_missing(

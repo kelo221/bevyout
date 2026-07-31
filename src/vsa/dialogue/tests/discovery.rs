@@ -98,6 +98,17 @@ fn voice_paths_match_only_the_exact_voice_type_component() {
 }
 
 #[test]
+fn unresolved_speakerless_info_is_aggregated_as_one_information_diagnostic() {
+    assert!(speakerless_skip_diagnostic(0, 2).is_none());
+    let diagnostic = speakerless_skip_diagnostic(25_119, 2).unwrap();
+    assert_eq!(diagnostic.severity, "info");
+    assert_eq!(diagnostic.code, "speakerless_info_skipped");
+    assert!(diagnostic.line_key.is_none());
+    assert!(diagnostic.message.contains("25119"));
+    assert!(diagnostic.message.contains("2 present actor voice types"));
+}
+
+#[test]
 fn malformed_ogg_is_rejected_without_transcoding() {
     let asset = ResolvedAudioAsset {
         source_path: "sound/voice/fallout3.esm/femaleuniquemoira/line.ogg".into(),

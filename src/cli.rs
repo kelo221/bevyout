@@ -257,8 +257,8 @@ pub struct PrepareArgs {
     /// automatic for every normally prepared cell.
     #[arg(long = "dialogue-source", value_name = "PATH")]
     pub(crate) dialogue_sources: Vec<PathBuf>,
-    /// Explicit Yarn line-to-WAV voice manifest to include in the prepared
-    /// bundle. May be repeated; voice files are never discovered implicitly.
+    /// Explicit Yarn line-to-OGG/WAV voice manifest to include in the prepared
+    /// bundle. May be repeated; authored mappings are always exact.
     #[arg(long = "dialogue-voice-manifest", value_name = "PATH")]
     pub(crate) dialogue_voice_manifests: Vec<PathBuf>,
     /// Compatibility no-op. Cell-scoped Fallout voice discovery is automatic

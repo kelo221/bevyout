@@ -264,10 +264,10 @@ fn dialogue_voice_status(
         )));
     }
     let missing = coverage.missing_labels().join(", ");
-    let next_command =
-        crate::vsa::dialogue::coverage::exact_prepare_command(selector, &catalog, &coverage);
+    let repair_guidance =
+        crate::vsa::dialogue::coverage::voice_repair_guidance(selector, &catalog, &coverage);
     Some(DialogueVoiceRenderStatus::TextFallback(format!(
-        "TEXT-FALLBACK dialogue voice coverage incomplete for {}: {}; missing keys=[{}]; visual rendering will continue intentionally with bounded runtime text fallback; next command: {next_command}",
+        "TEXT-FALLBACK dialogue voice coverage incomplete for {}: {}; missing keys=[{}]; visual rendering will continue intentionally with bounded runtime text fallback; {repair_guidance}",
         cell_label(&manifest.cell),
         coverage.summary(),
         missing,

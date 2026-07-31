@@ -101,6 +101,7 @@ pub(crate) fn discover_dialogue_voice(
     let mut actor_records = BTreeMap::<u32, BTreeMap<String, Vec<FalloutDialogueRecord>>>::new();
     let mut entries = Vec::new();
     let mut demand_counts = HashMap::<u32, u32>::new();
+    let mut speakerless_skipped = 0_usize;
 
     let mut info_ids = records.infos.keys().copied().collect::<Vec<_>>();
     info_ids.sort_unstable();
@@ -218,38 +219,34 @@ pub(crate) fn discover_dialogue_voice(
                 }
             }
             if !resolved_any {
-                let voice_types = matching_demands
-                    .iter()
-                    .filter_map(|demand| demand.voice_type_editor_id.as_deref())
-                    .collect::<Vec<_>>();
                 let had_resolution_error = !resolution_errors.is_empty();
-                let diagnostic_message = resolution_errors.into_iter().next().unwrap_or_else(|| {
-                    if info.speaker_form_id.is_none() {
-                        format!(
-                            "INFO {:08x} has no ANAM speaker and no exact voice asset for present voice types [{}]",
-                            info.form_id,
-                            voice_types.join(", ")
-                        )
-                    } else {
-                        format!(
-                            "no voice asset found for {} voice type {}",
-                            voice_key,
-                            voice_types.first().copied().unwrap_or("unknown")
-                        )
-                    }
-                });
-                let diagnostic_code = if had_resolution_error {
-                    "invalid_voice_asset"
+                if had_resolution_error {
+                    diagnostics.push(diagnostic(
+                        "invalid_voice_asset",
+                        Some(voice_key.clone()),
+                        resolution_errors
+                            .into_iter()
+                            .next()
+                            .expect("resolution error was observed"),
+                    ));
                 } else if info.speaker_form_id.is_none() {
-                    "missing_speaker"
+                    // A speakerless INFO with no exact asset for any present
+                    // voice type is not evidence that the cell is missing a
+                    // playable line. Aggregate these global non-matches rather
+                    // than emitting one warning per plugin record.
+                    speakerless_skipped += 1;
                 } else {
-                    "missing_voice_asset"
-                };
-                diagnostics.push(diagnostic(
-                    diagnostic_code,
-                    Some(voice_key.clone()),
-                    diagnostic_message,
-                ));
+                    let voice_type = matching_demands
+                        .iter()
+                        .filter_map(|demand| demand.voice_type_editor_id.as_deref())
+                        .next()
+                        .unwrap_or("unknown");
+                    diagnostics.push(diagnostic(
+                        "missing_voice_asset",
+                        Some(voice_key.clone()),
+                        format!("no voice asset found for {voice_key} voice type {voice_type}"),
+                    ));
+                }
                 // An explicit INFO speaker identifies a real required line even
                 // when its exact source asset is absent. Keep that line in the
                 // generated conversation so readiness reports a Fallout
@@ -349,6 +346,16 @@ pub(crate) fn discover_dialogue_voice(
     });
 
     let source_fingerprint = discovery_fingerprint(cell_form_id, sources);
+    let present_voice_type_count = demands
+        .iter()
+        .filter_map(|demand| demand.voice_type_form_id)
+        .collect::<HashSet<_>>()
+        .len();
+    if let Some(diagnostic) =
+        speakerless_skip_diagnostic(speakerless_skipped, present_voice_type_count)
+    {
+        diagnostics.push(diagnostic);
+    }
     let demand_report = PreparedDialogueVoiceDemandReport {
         revision: DIALOGUE_VOICE_DEMAND_REVISION.into(),
         cell_form_id,
@@ -941,6 +948,21 @@ fn diagnostic(code: &str, line_key: Option<String>, message: String) -> Dialogue
         source_path: None,
         message,
     }
+}
+
+fn speakerless_skip_diagnostic(
+    skipped: usize,
+    present_voice_type_count: usize,
+) -> Option<DialogueVoiceDiagnostic> {
+    (skipped > 0).then(|| DialogueVoiceDiagnostic {
+        severity: "info".into(),
+        code: "speakerless_info_skipped".into(),
+        line_key: None,
+        source_path: None,
+        message: format!(
+            "skipped {skipped} speakerless INFO records with no exact asset for {present_voice_type_count} present actor voice types"
+        ),
+    })
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {

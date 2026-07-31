@@ -42,8 +42,10 @@ fn render_readiness_names_missing_keys_and_allows_labelled_text_fallback() {
     let mut manifest = compatible_render_manifest();
     manifest.asset_root = root.to_string_lossy().into_owned();
     manifest.dialogue = Some(bevyout_core::dialogue::PreparedDialogueBundleRef {
+        revision: bevyout_core::dialogue::DIALOGUE_BUNDLE_REVISION.into(),
         catalog_path: "dialogue/catalog.ron".into(),
         source_paths: catalog.source_paths.clone(),
+        content_fingerprint: crate::vsa::dialogue::dialogue_bundle_fingerprint(&catalog, None),
         ..Default::default()
     });
 
@@ -54,8 +56,57 @@ fn render_readiness_names_missing_keys_and_allows_labelled_text_fallback() {
     assert!(message.contains("TEXT-FALLBACK"));
     assert!(message.contains("MoiraBrown:0"));
     assert!(message.contains(
-        "cargo run-dev -- prepare MegatonCratersideSupply --dialogue-source dialogue/authored/moira_brown.yarn --dialogue-voice-manifest dialogue/voice/moira_brown.ron"
+        "blocker: exact authored voice mapping manifest missing for sources=[dialogue/authored/moira_brown.yarn]"
     ));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn render_readiness_rejects_a_stale_voice_index_revision() {
+    let root =
+        std::env::temp_dir().join(format!("bevyout-render-stale-voice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("dialogue")).unwrap();
+    let catalog =
+        crate::vsa::dialogue::prepare_catalog(vec![crate::vsa::dialogue::DialogueSource {
+            relative_path: "authored/guard.yarn".into(),
+            kind: crate::vsa::dialogue::DialogueSourceKind::Authored,
+            content: "title: Guard\n---\nGuard: Halt.\n===\n".into(),
+        }]);
+    let index = bevyout_core::dialogue::PreparedDialogueVoiceIndex {
+        revision: "dialogue-voice-stale".into(),
+        ..Default::default()
+    };
+    std::fs::write(
+        root.join("dialogue/catalog.ron"),
+        ron::ser::to_string(&catalog).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("dialogue/voice_index.ron"),
+        ron::ser::to_string(&index).unwrap(),
+    )
+    .unwrap();
+    let mut manifest = compatible_render_manifest();
+    manifest.asset_root = root.to_string_lossy().into_owned();
+    manifest.dialogue = Some(bevyout_core::dialogue::PreparedDialogueBundleRef {
+        revision: bevyout_core::dialogue::DIALOGUE_BUNDLE_REVISION.into(),
+        catalog_path: "dialogue/catalog.ron".into(),
+        source_paths: catalog.source_paths.clone(),
+        voice_index_path: Some("dialogue/voice_index.ron".into()),
+        content_fingerprint: crate::vsa::dialogue::dialogue_bundle_fingerprint(
+            &catalog,
+            Some(&index),
+        ),
+        ..Default::default()
+    });
+
+    let status = dialogue_voice_status(&manifest, "FixtureCell").unwrap();
+    let DialogueVoiceRenderStatus::TextFallback(message) = status else {
+        panic!("stale prepared metadata must not be reported ready");
+    };
+    assert!(message.contains("unsupported prepared dialogue voice index revision"));
+    assert!(message.contains("cargo run-dev -- prepare FixtureCell"));
     let _ = std::fs::remove_dir_all(root);
 }
 

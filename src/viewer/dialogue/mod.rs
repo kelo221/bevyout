@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevyout_core::dialogue::{
-    ActiveDialogueCheckpoint, DIALOGUE_BUNDLE_REVISION, DIALOGUE_VOICE_INDEX_REVISION,
-    DialogueChoiceId, DialogueError, DialogueErrorCode, DialogueKey, DialogueLineKey,
-    DialogueLinePresentation, DialoguePhase, DialoguePresentation, DialogueSessionId,
-    DialogueSpeaker, DialogueStartRequest, NarrativeVariableState, PreparedDialogueVoiceIndex,
+    ActiveDialogueCheckpoint, DIALOGUE_VOICE_INDEX_REVISION, DialogueChoiceId, DialogueError,
+    DialogueErrorCode, DialogueKey, DialogueLineKey, DialogueLinePresentation, DialoguePhase,
+    DialoguePresentation, DialogueSessionId, DialogueSpeaker, DialogueStartRequest,
+    NarrativeVariableState, PreparedDialogueVoiceIndex,
 };
 
 use super::interaction::PlacementRoot;
@@ -485,24 +485,29 @@ fn select_prepared_dialogue(
     if !is_npc {
         return None;
     }
-    catalog
+    let binding = catalog
         .actor_bindings
         .iter()
-        .find(|binding| {
-            binding.actor_reference_form_id == reference_form_id
-                || binding.actor_base_form_id == base_form_id
+        .find(|binding| binding.actor_reference_form_id == reference_form_id)
+        .or_else(|| {
+            let mut matching_base = catalog
+                .actor_bindings
+                .iter()
+                .filter(|binding| binding.actor_base_form_id == base_form_id);
+            let first = matching_base.next()?;
+            matching_base.next().is_none().then_some(first)
         })
         .and_then(|binding| {
             catalog
                 .conversation(&binding.dialogue)
                 .map(|_| binding.dialogue.clone())
+        });
+    binding.or_else(|| {
+        editor_id.and_then(|editor_id| {
+            let dialogue = DialogueKey::new(editor_id);
+            catalog.conversation(&dialogue).map(|_| dialogue)
         })
-        .or_else(|| {
-            editor_id.and_then(|editor_id| {
-                let dialogue = DialogueKey::new(editor_id);
-                catalog.conversation(&dialogue).map(|_| dialogue)
-            })
-        })
+    })
 }
 
 fn spawn_primary_runner(mut commands: Commands, mut runtime: ResMut<DialogueRuntime>) {
@@ -596,14 +601,19 @@ fn hot_reload_dialogue(
             ));
             continue;
         }
-        let requested: BTreeSet<_> = request.source_paths.iter().cloned().collect();
+        let requested = request
+            .source_paths
+            .iter()
+            .map(|path| path.strip_prefix("dialogue/").unwrap_or(path).to_owned())
+            .collect::<BTreeSet<_>>();
+        let prepared_sources = bundle
+            .source_paths
+            .iter()
+            .map(|path| path.strip_prefix("dialogue/").unwrap_or(path))
+            .collect::<BTreeSet<_>>();
         if requested.is_empty()
             || requested.iter().any(|path| {
-                !path
-                    .strip_prefix("dialogue/")
-                    .unwrap_or(path)
-                    .starts_with("authored/")
-                    || !bundle.source_paths.contains(path)
+                !path.starts_with("authored/") || !prepared_sources.contains(path.as_str())
             })
         {
             runtime.report(DialogueError::new(
@@ -617,11 +627,11 @@ fn hot_reload_dialogue(
         let mut failed = false;
         for path in &bundle.source_paths {
             let relative = path.strip_prefix("dialogue/").unwrap_or(path);
-            let source_path = asset_root.join("dialogue").join(relative);
+            let source_path = prepared_dialogue_source_path(&asset_root, bundle, path);
             match fs::read_to_string(&source_path) {
                 Ok(content) => sources.push(crate::vsa::dialogue::DialogueSource {
                     relative_path: relative.into(),
-                    kind: crate::vsa::dialogue::DialogueSourceKind::Authored,
+                    kind: prepared_dialogue_source_kind(path),
                     content,
                 }),
                 Err(error) => {
@@ -637,8 +647,51 @@ fn hot_reload_dialogue(
             }
         }
         if !failed {
-            runtime.set_catalog(crate::vsa::dialogue::prepare_catalog(sources));
+            let (actor_bindings, authored_voice_manifest_paths) = runtime
+                .catalog
+                .as_ref()
+                .map(|catalog| {
+                    (
+                        catalog.actor_bindings.clone(),
+                        catalog.authored_voice_manifest_paths.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            let mut catalog =
+                crate::vsa::dialogue::prepare_catalog_with_actor_bindings(sources, actor_bindings);
+            catalog.authored_voice_manifest_paths = authored_voice_manifest_paths;
+            runtime.set_catalog(catalog);
         }
+    }
+}
+
+fn prepared_dialogue_source_path(
+    asset_root: &std::path::Path,
+    bundle: &bevyout_core::dialogue::PreparedDialogueBundleRef,
+    source_path: &str,
+) -> PathBuf {
+    let catalog_path = asset_root.join(
+        bundle
+            .catalog_path
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let dialogue_root = catalog_path.parent().unwrap_or(asset_root);
+    let relative = source_path
+        .strip_prefix("dialogue/")
+        .unwrap_or(source_path)
+        .replace('/', std::path::MAIN_SEPARATOR_STR);
+    dialogue_root.join(relative)
+}
+
+fn prepared_dialogue_source_kind(source_path: &str) -> crate::vsa::dialogue::DialogueSourceKind {
+    if source_path
+        .strip_prefix("dialogue/")
+        .unwrap_or(source_path)
+        .starts_with("authored/")
+    {
+        crate::vsa::dialogue::DialogueSourceKind::Authored
+    } else {
+        crate::vsa::dialogue::DialogueSourceKind::ImportedGenerated
     }
 }
 
@@ -702,16 +755,13 @@ fn load_dialogue_catalog_with_voice(
             &mut runtime.diagnostics,
         )
     });
-    let fingerprint_matches = if bundle.revision == DIALOGUE_BUNDLE_REVISION {
-        crate::vsa::dialogue::dialogue_bundle_fingerprint_with_demand(
-            &catalog,
-            voice_index.as_ref(),
-            voice_demand.as_ref(),
-        ) == bundle.content_fingerprint
-    } else {
-        catalog.source_fingerprint == bundle.content_fingerprint
-            || bundle.content_fingerprint == catalog.bundle_hash()
-    };
+    let metadata_error = crate::vsa::dialogue::validate_dialogue_bundle_metadata(
+        bundle,
+        &catalog,
+        voice_index.as_ref(),
+        voice_demand.as_ref(),
+    )
+    .err();
     #[cfg(feature = "dialogue-yarn")]
     if let Err(diagnostics) =
         yarn::compile_sources(&PathBuf::from(&manifest.asset_root), &catalog.source_paths)
@@ -726,20 +776,22 @@ fn load_dialogue_catalog_with_voice(
         runtime.phase = DialoguePhase::Failed;
     } else {
         runtime.set_catalog(catalog);
-        if !fingerprint_matches {
+        if let Some(error) = metadata_error {
+            runtime.readiness = DialogueReadiness::Failed;
             runtime.report(DialogueError::new(
                 DialogueErrorCode::BundleMismatch,
-                "prepared dialogue bundle fingerprint does not match the manifest",
+                error.to_string(),
             ));
         }
     }
     #[cfg(not(feature = "dialogue-yarn"))]
     {
         runtime.set_catalog(catalog);
-        if !fingerprint_matches {
+        if let Some(error) = metadata_error {
+            runtime.readiness = DialogueReadiness::Failed;
             runtime.report(DialogueError::new(
                 DialogueErrorCode::BundleMismatch,
-                "prepared dialogue bundle fingerprint does not match the manifest",
+                error.to_string(),
             ));
         }
     }

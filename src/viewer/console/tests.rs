@@ -88,6 +88,11 @@ fn dialogue_commands_expose_state_and_queue_visible_choices() {
     let start = exec(&mut app, "dialoguestart MoiraBrown");
     assert!(start.ok);
     assert_eq!(start.value["dialogue"], "MoiraBrown");
+
+    let reload = exec(&mut app, "dialoguereload authored/moira_brown.yarn");
+    assert!(reload.ok);
+    assert_eq!(reload.value["queued"], true);
+    assert_eq!(reload.value["source_paths"][0], "authored/moira_brown.yarn");
     assert_eq!(
         app.world()
             .resource::<Messages<crate::viewer::dialogue::DialogueStartRequested>>()

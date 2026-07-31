@@ -52,8 +52,9 @@ struct DialogueUiOptionText;
 #[derive(Component)]
 pub(crate) struct DialogueVoicePlayer;
 
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone)]
 pub(super) struct DialogueVoiceEmitter {
+    pub(super) line_key: DialogueLineKey,
     pub(super) anchor: DialogueVoiceAnchorKind,
     pub(super) anchor_entity: Option<Entity>,
 }
@@ -233,7 +234,12 @@ pub(crate) fn sync_dialogue_timing(
     providers: Res<DialoguePresentationProviders>,
     asset_server: Option<Res<AssetServer>>,
     players: Query<
-        (Entity, Option<&AudioSink>, Option<&SpatialAudioSink>),
+        (
+            Entity,
+            &DialogueVoiceEmitter,
+            Option<&AudioSink>,
+            Option<&SpatialAudioSink>,
+        ),
         With<DialogueVoicePlayer>,
     >,
     bindings: Query<(Entity, &DialogueBinding)>,
@@ -251,7 +257,7 @@ pub(crate) fn sync_dialogue_timing(
     };
 
     if current_line != runtime.active_line_key {
-        for (entity, _, _) in &players {
+        for (entity, _, _, _) in &players {
             commands.entity(entity).despawn();
         }
         runtime.active_line_key = current_line.clone();
@@ -285,6 +291,7 @@ pub(crate) fn sync_dialogue_timing(
                 let mut emitter = commands.spawn((
                     DialogueVoicePlayer,
                     DialogueVoiceEmitter {
+                        line_key: line.line_key.clone(),
                         anchor: anchor.kind,
                         anchor_entity: anchor.entity,
                     },
@@ -320,9 +327,17 @@ pub(crate) fn sync_dialogue_timing(
     }
 
     runtime.line_elapsed_seconds += time.delta_secs();
-    let sink_state = players.iter().find_map(|(_, sink, spatial_sink)| {
-        sink.map(AudioSinkPlayback::empty)
-            .or_else(|| spatial_sink.map(AudioSinkPlayback::empty))
+    let sink_state = runtime.active_line_key.as_ref().and_then(|line_key| {
+        voice_sink_state_for_line(
+            line_key,
+            players
+                .iter()
+                .filter_map(|(_, emitter, sink, spatial_sink)| {
+                    sink.map(AudioSinkPlayback::empty)
+                        .or_else(|| spatial_sink.map(AudioSinkPlayback::empty))
+                        .map(|empty| (&emitter.line_key, empty))
+                }),
+        )
     });
     if runtime.voice_timing == DialogueVoiceTimingState::Loading {
         runtime.voice_load_elapsed_seconds += time.delta_secs();
@@ -369,6 +384,15 @@ pub(crate) fn sync_dialogue_timing(
         }
         DialogueVoiceTimingAction::Wait => {}
     }
+}
+
+pub(super) fn voice_sink_state_for_line<'a>(
+    active_line: &DialogueLineKey,
+    states: impl IntoIterator<Item = (&'a DialogueLineKey, bool)>,
+) -> Option<bool> {
+    states
+        .into_iter()
+        .find_map(|(line_key, empty)| (line_key == active_line).then_some(empty))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

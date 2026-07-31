@@ -65,3 +65,15 @@ Feature: Standalone Yarn dialogue waves
     Given a synthetic WAV voice manifest for the Start line
     When dialogue voice preparation is run twice
     Then the prepared voice index contains one half-second entry
+
+  @dialogue-wave9
+  Scenario: authored voice repair uses the recorded mapping contract
+    Given missing authored voice with a recorded mapping manifest
+    When dialogue voice repair guidance is rendered
+    Then the guidance contains an executable prepare command
+
+  @dialogue-wave9
+  Scenario: stale prepared voice metadata is rejected before runtime
+    Given a prepared dialogue bundle with a stale voice index revision
+    When dialogue bundle metadata is validated
+    Then the dialogue bundle metadata is rejected

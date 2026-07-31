@@ -1504,12 +1504,12 @@ fn prepare_authored_dialogue_bundle(
     if !coverage.is_ready() {
         let missing = coverage.missing_labels().join(", ");
         let missing_line = format!("dialogue voice missing keys: {missing}");
-        let next_command = crate::vsa::dialogue::coverage::exact_prepare_command(
+        let repair_guidance = crate::vsa::dialogue::coverage::voice_repair_guidance(
             selector,
             &prepared.catalog,
             &coverage,
         );
-        let next_line = format!("dialogue voice next command: {next_command}");
+        let next_line = format!("dialogue voice {repair_guidance}");
         diagnostics.push(Diagnostic {
             severity: "warning".into(),
             message: missing_line.clone(),
@@ -1602,6 +1602,7 @@ fn read_existing_authored_voice_input(
             .with_context(|| format!("reading existing voice index {}", index_path.display()))?,
     )
     .with_context(|| format!("parsing existing voice index {}", index_path.display()))?;
+    let source_manifest_path = index.source_manifest_path.clone();
     let mut entries = Vec::new();
     for voice in index.entries.into_iter().filter(|voice| {
         voice.speaker_form_id.is_none() && !voice.line_key.as_str().starts_with("fallout:")
@@ -1625,7 +1626,7 @@ fn read_existing_authored_voice_input(
         Ok(None)
     } else {
         Ok(Some(crate::vsa::dialogue::DialogueVoiceInput {
-            manifest_path: format!("preserved-dialogue-voice:{cell_form_id:08x}"),
+            manifest_path: source_manifest_path,
             cell_form_id: Some(cell_form_id),
             entries,
         }))

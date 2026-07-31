@@ -223,6 +223,32 @@ fn moira_uses_the_exact_generated_fallout_conversation_binding() {
 }
 
 #[test]
+fn exact_actor_reference_binding_wins_before_same_base_fallback() {
+    let mut prepared = catalog();
+    prepared.actor_bindings = vec![
+        crate::vsa::dialogue::PreparedDialogueActorBinding {
+            actor_reference_form_id: 0x10,
+            actor_base_form_id: 0x20,
+            dialogue: DialogueKey::new("Guard"),
+            source_path: "authored/guard.yarn".into(),
+            ..Default::default()
+        },
+        crate::vsa::dialogue::PreparedDialogueActorBinding {
+            actor_reference_form_id: 0x11,
+            actor_base_form_id: 0x20,
+            dialogue: DialogueKey::new("End"),
+            source_path: "authored/guard.yarn".into(),
+            ..Default::default()
+        },
+    ];
+
+    assert_eq!(
+        select_prepared_dialogue(&prepared, true, 0x11, 0x20, None),
+        Some(DialogueKey::new("End"))
+    );
+}
+
+#[test]
 fn dialogue_ui_root_hides_after_the_session_closes() {
     let mut app = app_with_dialogue();
     let root = app
@@ -501,6 +527,40 @@ fn voice_timing_waits_for_sink_completion_and_falls_back_after_load_timeout() {
 }
 
 #[test]
+fn completed_previous_sink_cannot_complete_the_next_voice_line() {
+    let previous = DialogueLineKey::new("Guard:0");
+    let current = DialogueLineKey::new("Guard:1");
+    assert_eq!(
+        presentation::voice_sink_state_for_line(
+            &current,
+            [(&previous, true), (&current, false)].into_iter(),
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        presentation::voice_sink_state_for_line(&current, [(&previous, true)].into_iter()),
+        None
+    );
+}
+
+#[test]
+fn scoped_dialogue_hot_reload_resolves_sources_from_the_catalog_directory() {
+    let root = std::path::Path::new("C:/cache");
+    let bundle = bevyout_core::dialogue::PreparedDialogueBundleRef {
+        catalog_path: "scenes/00003a2a/dialogue/catalog.ron".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        prepared_dialogue_source_path(root, &bundle, "authored/moira_brown.yarn"),
+        std::path::PathBuf::from("C:/cache/scenes/00003a2a/dialogue/authored/moira_brown.yarn")
+    );
+    assert_eq!(
+        prepared_dialogue_source_kind("dialogue/generated/actors/0002d2bc.yarn"),
+        DialogueSourceKind::ImportedGenerated
+    );
+}
+
+#[test]
 fn prepared_voice_index_loads_only_catalog_keys_and_existing_wavs() {
     let root = std::env::temp_dir().join(format!(
         "bevyout-dialogue-runtime-voice-{}",
@@ -667,6 +727,7 @@ fn voice_emitter_uses_identity_local_transform_and_spatial_settings() {
         .spawn((
             presentation::DialogueVoicePlayer,
             presentation::DialogueVoiceEmitter {
+                line_key: DialogueLineKey::new("Guard:0"),
                 anchor: DialogueVoiceAnchorKind::Mouth,
                 anchor_entity: Some(root),
             },
@@ -708,6 +769,7 @@ fn voice_reanchors_existing_player_when_imported_mouth_arrives() {
         .spawn((
             presentation::DialogueVoicePlayer,
             presentation::DialogueVoiceEmitter {
+                line_key: DialogueLineKey::new("Guard:0"),
                 anchor: DialogueVoiceAnchorKind::ActorRoot,
                 anchor_entity: Some(root),
             },
@@ -859,4 +921,45 @@ fn checkpoint_bundle_mismatch_is_quarantined_without_starting_stale_content() {
             .iter()
             .any(|error| error.code == DialogueErrorCode::BundleMismatch)
     );
+}
+
+#[test]
+fn runtime_readiness_stays_failed_for_stale_bundle_metadata() {
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-dialogue-runtime-metadata-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("dialogue/authored")).unwrap();
+    std::fs::write(
+        root.join("dialogue/authored/guard.yarn"),
+        "title: Guard\n---\nGuard: Halt.\n===\n",
+    )
+    .unwrap();
+
+    let catalog = catalog();
+    let bundle = bevyout_core::dialogue::PreparedDialogueBundleRef {
+        revision: "dialogue-bundle-stale".into(),
+        source_paths: catalog.source_paths.clone(),
+        content_fingerprint: crate::vsa::dialogue::dialogue_bundle_fingerprint(&catalog, None),
+        ..Default::default()
+    };
+    let mut manifest: crate::vsa::PreparedSceneManifest =
+        ron::de::from_str(include_str!("../../../features/fixtures/scene.ron")).unwrap();
+    manifest.asset_root = root.to_string_lossy().into_owned();
+    let manifest = crate::viewer::LoadedSceneManifest(manifest);
+    let mut runtime = DialogueRuntime::default();
+    let mut providers = presentation::DialoguePresentationProviders::default();
+
+    load_dialogue_catalog_with_voice(&mut runtime, &mut providers, &manifest, &bundle, catalog);
+
+    assert_eq!(runtime.readiness, DialogueReadiness::Failed);
+    assert_eq!(runtime.phase, DialoguePhase::Failed);
+    assert!(runtime.diagnostics.iter().any(|error| {
+        error.code == DialogueErrorCode::BundleMismatch
+            && error
+                .message
+                .contains("unsupported prepared dialogue bundle revision")
+    }));
+    let _ = std::fs::remove_dir_all(root);
 }

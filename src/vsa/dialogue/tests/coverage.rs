@@ -51,6 +51,7 @@ fn coverage_distinguishes_authored_mappings_from_fallout_failures() {
             ),
         ],
         source_paths: vec!["authored/moira_brown.yarn".into()],
+        authored_voice_manifest_paths: vec!["dialogue/voice/moira_brown.ron".into()],
         ..Default::default()
     };
     let index = PreparedDialogueVoiceIndex {
@@ -74,10 +75,29 @@ fn coverage_distinguishes_authored_mappings_from_fallout_failures() {
         "fallout:fallout3.esm:0001d76a:2@speaker=0002d2bc"
     );
     assert_eq!(
-        exact_prepare_command("MegatonCratersideSupply", &catalog, &coverage),
-        "cargo run-dev -- prepare MegatonCratersideSupply --dialogue-source dialogue/authored/moira_brown.yarn --dialogue-voice-manifest dialogue/voice/moira_brown.ron"
+        voice_repair_guidance("MegatonCratersideSupply", &catalog, &coverage),
+        "next command: cargo run-dev -- prepare MegatonCratersideSupply --dialogue-source dialogue/authored/moira_brown.yarn --dialogue-voice-manifest dialogue/voice/moira_brown.ron"
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn authored_voice_without_a_recorded_manifest_reports_the_mapping_blocker() {
+    let catalog = PreparedDialogueCatalog {
+        source_paths: vec!["authored/moira_brown.yarn".into()],
+        voice_requirements: vec![requirement(
+            "MoiraBrown:0",
+            None,
+            DialogueVoiceRequirementOrigin::Authored,
+        )],
+        ..Default::default()
+    };
+    let coverage = assess_voice_coverage(Path::new("."), &catalog, None);
+
+    assert_eq!(
+        voice_repair_guidance("MegatonCratersideSupply", &catalog, &coverage),
+        "blocker: exact authored voice mapping manifest missing for sources=[dialogue/authored/moira_brown.yarn]; create the mapping contract, then rerun cargo run-dev -- prepare MegatonCratersideSupply"
+    );
 }
 
 #[test]

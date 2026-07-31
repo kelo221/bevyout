@@ -18,10 +18,10 @@ Fallout mapping. Moira's prepared placement uses the generated
 `fallout_actor_0002d2bc` conversation instead.
 
 Use this deterministic RON shape (the revision is optional and defaults to
-`dialogue-voice-source-v1`):
+`dialogue-voice-source-v1`). Prefer the original OGG/Vorbis source:
 
     (entries: [
-        (line_key: "MoiraBrown:0", source_path: "dialogue/voice/moira_000.wav"),
+        (line_key: "MoiraBrown:0", source_path: "dialogue/voice/moira_000.ogg"),
     ])
 
 ## 1. Prepare the scene and voice index
@@ -32,7 +32,10 @@ From the repository root, with Fallout 3 configured normally:
 
 No dialogue discovery flag is required. Expected output includes deterministic
 `dialogue voice coverage`, `dialogue voice missing keys`, and (when incomplete)
-`dialogue voice next command` lines. The prepared
+either an executable `dialogue voice next command` or an explicit
+`dialogue voice blocker`. A blocker means no authored mapping contract was
+supplied; create a real manifest, then run the command it names. Preparation
+never invents a manifest filename or substitutes an approximate clip. The prepared
 voice index is under `.bevyout/cache/scenes/00003a2a/dialogue/voice_index.ron`,
 the demand report is under `.bevyout/cache/scenes/00003a2a/dialogue/voice_demand.ron`,
 and content-addressed OGG/WAV files are shared under `.bevyout/cache/audio/`.
@@ -46,8 +49,16 @@ The generated Moira source is under
 If every prepared line is mapped, render prints a ready summary. If a preserved
 authored source is still missing explicit mappings, render continues for visual
 inspection only after printing a labelled `TEXT-FALLBACK` warning with every
-missing key and the exact prepare command. That warning is intentional; it must
-never be silent.
+missing key and either the exact prepare command or the missing mapping-contract
+blocker. That warning is intentional; it must never be silent.
+
+To reload an edited prepared authored source without replacing the active
+dialogue bundle, use the existing dialogue runtime and modal:
+
+    dialoguereload authored/moira_brown.yarn
+
+The reload keeps generated Fallout sources, stable actor bindings, and recorded
+authored voice-manifest paths intact.
 
 ## 3. Launch the prepared scene and use Moira
 
