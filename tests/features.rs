@@ -13563,25 +13563,26 @@ async fn then_actor_is_not_selected(world: &mut BevyoutWorld) {
 }
 
 #[when(
-    regex = r"^its achieved horizontal speed alternates every tick between full route speed and near zero for (\d+) ticks, smoothed before classification$"
+    regex = r"^its achieved horizontal velocity alternates direction at full route speed for (\d+) ticks, smoothed before classification$"
 )]
 async fn when_locomotion_alternates_smoothed(world: &mut BevyoutWorld, ticks: u32) {
     const TICK_SECONDS: f32 = 1.0 / 64.0;
     const WARMUP_TICKS: u32 = 32;
-    let mut smoothed = 0.0f32;
+    let mut smoothed = [0.0f32; 2];
     world.nav_locomotion_changes_after_warmup = 0;
     for tick in 0..ticks {
         let raw = if tick % 2 == 0 {
-            locomotion::ROUTE_SPEED_METRES_PER_SECOND
+            [locomotion::ROUTE_SPEED_METRES_PER_SECOND, 0.0]
         } else {
-            0.0
+            [-locomotion::ROUTE_SPEED_METRES_PER_SECOND, 0.0]
         };
-        smoothed = locomotion::smooth_achieved_speed(smoothed, raw, TICK_SECONDS);
+        smoothed = locomotion::smooth_achieved_velocity(smoothed, raw, TICK_SECONDS);
         let previous = world.nav_locomotion_state;
         let next = step_locomotion(
             world,
             locomotion::LocomotionObservation {
-                achieved_horizontal_speed: smoothed,
+                achieved_horizontal_speed: (smoothed[0] * smoothed[0] + smoothed[1] * smoothed[1])
+                    .sqrt(),
                 yaw_rate: 0.0,
             },
         );
@@ -13591,13 +13592,11 @@ async fn when_locomotion_alternates_smoothed(world: &mut BevyoutWorld, ticks: u3
     }
 }
 
-#[then(
-    regex = r"^its locomotion state changed at most (\d+) times? after the smoothing warmed up$"
-)]
-async fn then_locomotion_changed_at_most_after_warmup(world: &mut BevyoutWorld, max_changes: u32) {
-    assert!(
-        world.nav_locomotion_changes_after_warmup <= max_changes,
-        "classifier flapped {} times after the EMA warmed up",
-        world.nav_locomotion_changes_after_warmup
+#[then("its locomotion state is idle after the smoothing warms up")]
+async fn then_locomotion_is_idle_after_warmup(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.nav_locomotion_state,
+        locomotion::LocomotionState::Idle
     );
+    assert_eq!(world.nav_locomotion_changes_after_warmup, 0);
 }

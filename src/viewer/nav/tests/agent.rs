@@ -24,6 +24,54 @@ fn harness_world() -> World {
     world
 }
 
+#[test]
+fn agent_index_must_fit_the_unique_u32_ledger_identity() {
+    let largest_valid = MAX_AGENT_INDEX;
+    assert_eq!(
+        parse_agent_index(&largest_valid.to_string()),
+        Ok(largest_valid)
+    );
+
+    let first_unrepresentable = MAX_AGENT_INDEX + 1;
+    let error = parse_agent_index(&first_unrepresentable.to_string()).unwrap_err();
+    assert_eq!(error.code, "bad_agent_index");
+}
+
+/// Regression for #241: autonomous binding deliberately takes no console
+/// roster slot, but the fall guard is gameplay behavior and must cover the
+/// complete agent component set.
+#[test]
+fn fall_guard_releases_a_bound_actor_without_a_debug_roster_slot() {
+    let mut world = World::new();
+    world.init_resource::<TestNavAgentState>();
+    world.insert_resource(NavCellFallBounds { min_y: Some(0.0) });
+    let actor = world
+        .spawn((
+            TestNavAgentMarker,
+            actor_binding::NavBoundActor::default(),
+            AgentKcc::default(),
+            Transform::from_xyz(0.0, -100.0, 0.0),
+        ))
+        .id();
+
+    assert!(
+        world
+            .resource::<TestNavAgentState>()
+            .index_of(actor)
+            .is_none()
+    );
+    nav_fall_guard_system(&mut world);
+
+    assert!(
+        world.get_entity(actor).is_ok(),
+        "the actor itself remains owned by the world slice"
+    );
+    assert!(
+        !is_nav_bound(&world, actor),
+        "the runaway nav agent was released"
+    );
+}
+
 /// **Wander-no-open-doors (#198), reproduced through the nav-owned flag.**
 /// The door-open seam (`request_door_open`) refuses to open doors for an
 /// actor whose active package must not (Sandbox/Wander) purely by reading the

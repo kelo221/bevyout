@@ -555,12 +555,20 @@ fn archipelago_options() -> ArchipelagoOptions<ThreeD> {
 /// demand past this for any higher index.
 const INITIAL_AGENT_SLOTS: usize = 4;
 
+/// Defensive ceiling for the console-addressed debug roster. The roster is
+/// growable well past the old four-agent limit, but it is still a dense `Vec`:
+/// accepting an arbitrary `usize` would let input such as `usize::MAX` request
+/// an impossible allocation. 65,536 simultaneous debug agents is far beyond a
+/// viable scene while keeping worst-case growth small and ledger IDs unique.
+const MAX_AGENT_INDEX: usize = u16::MAX as usize;
+
 /// The ledger/tracing identity for agent `index`: stable, 1-based so it
 /// never collides with the "no id" sentinel `0`, consistent with wave 3/4's
 /// single `TEST_AGENT_ID = 1`. Formatted as a small decimal in tracing lines
 /// (it identifies a spawn slot, not a FormID), but still handed to
 /// `ledger_policy` as a plain `u32`.
 fn agent_ledger_id(index: usize) -> u32 {
+    debug_assert!(index <= MAX_AGENT_INDEX);
     index as u32 + 1
 }
 
@@ -706,11 +714,10 @@ struct AgentKcc {
     /// this system already computes instead of recomputing a second,
     /// possibly disagreeing one.
     last_desired_horizontal: Vec2,
-    /// The achieved half of that same pair: the length of the horizontal
-    /// motion the KCC sweep actually delivered this tick, m/s. This -- not
-    /// `last_desired_horizontal` -- is what selects an actor's locomotion
-    /// clip, so a wedged agent stands still rather than striding on the spot.
-    last_achieved_horizontal_speed: f32,
+    /// The achieved half of that same pair: signed horizontal velocity in
+    /// `[x, z]`. The sign lets the locomotion window cancel back-and-forth
+    /// collision jitter instead of mistaking its magnitude for travel.
+    last_achieved_horizontal: Vec2,
 }
 
 /// The previous and latest solved desired velocities landmass has produced
@@ -925,8 +932,9 @@ struct AgentRuntime {
 /// and `spawn_agent` rejected any index at or past that size, capping the
 /// whole cell at 4 concurrent agents even though every other per-agent
 /// state already lives on the entity and has no such limit. `entities` is
-/// now a plain `Vec` that grows through [`Self::set`] on demand; nothing
-/// about the `tna` index API changes; there is no upper bound left to hit.
+/// now a plain `Vec` that grows through [`Self::set`] on demand. A generous
+/// defensive ceiling prevents hostile indices from turning that growth into
+/// an out-of-memory allocation.
 #[derive(Resource)]
 struct TestNavAgentState {
     entities: Vec<Option<Entity>>,
@@ -969,6 +977,7 @@ impl TestNavAgentState {
     /// if `index` is past the current length -- the growable replacement
     /// for the old fixed-size array's direct indexing (issue #215).
     fn set(&mut self, index: usize, value: Option<Entity>) {
+        debug_assert!(index <= MAX_AGENT_INDEX);
         if index >= self.entities.len() {
             self.entities.resize(index + 1, None);
         }
@@ -2227,16 +2236,19 @@ fn solve_rate_command(
 /// Parses an agent index argument. Every `tna` subcommand that used to
 /// address the single spike agent now takes this as an optional leading
 /// token; omitting it defaults to agent 0 (issue #114 feature 4's
-/// back-compat requirement). Issue #215 removed the roster's fixed upper
-/// bound -- any non-negative integer is a valid index, growing the roster
-/// on demand; this only rejects a token that is not an integer at all.
+/// back-compat requirement). Issue #215 removed the four-slot cap; the only
+/// remaining ceiling is the defensive dense-allocation bound.
 fn parse_agent_index(value: &str) -> Result<usize, ConsoleError> {
-    value.parse::<usize>().map_err(|_| {
-        ConsoleError::new(
-            "bad_agent_index",
-            "agent index must be a non-negative integer",
-        )
-    })
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|index| *index <= MAX_AGENT_INDEX)
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "bad_agent_index",
+                format!("agent index must be an integer 0..={MAX_AGENT_INDEX}"),
+            )
+        })
 }
 
 /// Spawns the capsule mesh + `bevy_landmass` agent entity at `position` in
@@ -3274,7 +3286,7 @@ fn apply_agent_physics_movement(
         // Issue #188: hand the locomotion consumer the very pair this
         // system just computed, rather than letting it derive a second one.
         kcc.last_desired_horizontal = desired_horizontal;
-        kcc.last_achieved_horizontal_speed = Vec2::new(achieved.x, achieved.z).length();
+        kcc.last_achieved_horizontal = Vec2::new(achieved.x, achieved.z);
 
         let outcome =
             movement_policy::decide_collision_outcome(movement_policy::VelocityObservation {
@@ -4790,16 +4802,16 @@ fn restore_ledgered_agents_system(world: &mut World) {
     }
 
     for entry in claim.restored {
-        // Issue #215: the roster has no upper bound left to check against --
-        // `checked_sub(1)` only guards the "no id" sentinel `0`, which
-        // `agent_ledger_id` never assigns.
+        // Guard both the "no id" sentinel and the dense roster's defensive
+        // allocation ceiling before restoring an external ledger value.
         let Some(index) = entry
             .agent_id
             .checked_sub(1)
             .map(|zero_based| zero_based as usize)
+            .filter(|index| *index <= MAX_AGENT_INDEX)
         else {
             warn!(
-                "nav agent restore {:08x} cell {:08x}: agent id must be >= 1; entry dropped",
+                "nav agent restore {:08x} cell {:08x}: agent id outside the supported roster; entry dropped",
                 entry.agent_id, entry.cell_form_id
             );
             continue;

@@ -124,6 +124,48 @@ fn a_speed_oscillating_across_the_raw_walk_threshold_does_not_flap() {
     }
 }
 
+fn speed_of(velocity: [f32; 2]) -> f32 {
+    (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt()
+}
+
+/// Regression for #224: smoothing scalar speed cannot distinguish genuine
+/// travel from equal-and-opposite collision jitter. The signed velocity must
+/// cancel over the window so a stationary actor does not run in place.
+#[test]
+fn net_zero_velocity_jitter_settles_to_idle() {
+    const TICK_SECONDS: f32 = 1.0 / FIXED_TICK_HZ;
+    let mut smoothed = [0.0; 2];
+    let mut state = LocomotionState::Idle;
+
+    for tick in 0..128 {
+        let direction = if tick % 2 == 0 { 1.0 } else { -1.0 };
+        smoothed = smooth_achieved_velocity(
+            smoothed,
+            [direction * ROUTE_SPEED_METRES_PER_SECOND, 0.0],
+            TICK_SECONDS,
+        );
+        state = next_locomotion_state(state, moving(speed_of(smoothed)));
+        if tick >= 40 {
+            assert_eq!(state, LocomotionState::Idle, "jitter moved at tick {tick}");
+        }
+    }
+}
+
+#[test]
+fn steady_signed_velocity_still_settles_to_run() {
+    const TICK_SECONDS: f32 = 1.0 / FIXED_TICK_HZ;
+    let mut smoothed = [0.0; 2];
+    let mut state = LocomotionState::Idle;
+
+    for _ in 0..128 {
+        smoothed =
+            smooth_achieved_velocity(smoothed, [ROUTE_SPEED_METRES_PER_SECOND, 0.0], TICK_SECONDS);
+        state = next_locomotion_state(state, moving(speed_of(smoothed)));
+    }
+
+    assert_eq!(state, LocomotionState::Run);
+}
+
 #[test]
 fn a_yaw_rate_oscillating_across_the_raw_turn_threshold_does_not_flap() {
     let mut state = LocomotionState::Idle;

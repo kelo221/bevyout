@@ -95,6 +95,11 @@ pub(crate) const TURN_ENTER_RATE: f32 = std::f32::consts::FRAC_PI_4;
 /// [`WALK_EXIT_SPEED`].
 pub(crate) const TURN_EXIT_RATE: f32 = std::f32::consts::FRAC_PI_2 / 6.0;
 
+/// Time constant for the signed achieved-velocity EMA. A short net-motion
+/// window cancels alternating collision jitter while preserving sustained
+/// travel and lets a genuine stop return to idle promptly.
+const VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS: f32 = 0.17;
+
 const _: () = {
     // The exit edges are documented as restatements of `actor_animation`'s
     // per-frame epsilons at the fixed tick. Pin that claim rather than
@@ -112,7 +117,38 @@ const _: () = {
     // A running agent must pass through walking on the way to idle: the run
     // leave edge sits above the walk enter edge.
     assert!(WALK_ENTER_SPEED < RUN_EXIT_SPEED);
+    let dt = 1.0 / FIXED_TICK_HZ;
+    let alpha = dt / (VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS + dt);
+    let alternating_residual = ROUTE_SPEED_METRES_PER_SECOND * alpha / (2.0 - alpha);
+    assert!(alternating_residual < WALK_EXIT_SPEED);
 };
+
+fn exponential_moving_average(previous: f32, raw: f32, dt: f32, time_constant: f32) -> f32 {
+    if dt <= 0.0 {
+        return previous;
+    }
+    let alpha = dt / (time_constant + dt);
+    previous + (raw - previous) * alpha
+}
+
+/// Smooths signed horizontal velocity componentwise. Keeping the direction is
+/// essential: `+v, -v` jitter has high scalar speed but zero net motion.
+pub(crate) fn smooth_achieved_velocity(previous: [f32; 2], raw: [f32; 2], dt: f32) -> [f32; 2] {
+    [
+        exponential_moving_average(
+            previous[0],
+            raw[0],
+            dt,
+            VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS,
+        ),
+        exponential_moving_average(
+            previous[1],
+            raw[1],
+            dt,
+            VELOCITY_SMOOTHING_TIME_CONSTANT_SECONDS,
+        ),
+    ]
+}
 
 /// The locomotion clip family an actor should be playing. Deliberately its
 /// own enum rather than `actor_animation::policy::ActorAnimationState`:

@@ -28,21 +28,28 @@ fn requested(world: &World, entity: Entity) -> Option<ActorAnimationState> {
         .and_then(|intent| intent.requested)
 }
 
+fn settle_locomotion(world: &mut World) {
+    for _ in 0..40 {
+        advance(world, 1.0 / 64.0);
+        world.run_system_once(drive_bound_actor_locomotion).unwrap();
+    }
+}
+
 #[test]
 fn a_moving_bound_actor_requests_a_locomotion_state() {
     let (mut world, entity) = bound_actor_world();
     world
         .get_mut::<AgentKcc>(entity)
         .unwrap()
-        .last_achieved_horizontal_speed = AGENT_DESIRED_SPEED;
-    world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        .last_achieved_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
+    settle_locomotion(&mut world);
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Run));
 
     world
         .get_mut::<AgentKcc>(entity)
         .unwrap()
-        .last_achieved_horizontal_speed = 0.8;
-    world.run_system_once(drive_bound_actor_locomotion).unwrap();
+        .last_achieved_horizontal = Vec2::new(0.8, 0.0);
+    settle_locomotion(&mut world);
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Walk));
 }
 
@@ -62,7 +69,7 @@ fn a_wedged_bound_actor_requests_idle() {
     {
         let mut kcc = world.get_mut::<AgentKcc>(entity).unwrap();
         kcc.last_desired_horizontal = Vec2::new(AGENT_DESIRED_SPEED, 0.0);
-        kcc.last_achieved_horizontal_speed = 0.0;
+        kcc.last_achieved_horizontal = Vec2::ZERO;
     }
     world.run_system_once(drive_bound_actor_locomotion).unwrap();
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Idle));
@@ -219,7 +226,7 @@ fn agent_transform_is_bit_identical_with_and_without_clip_playback() {
         {
             let mut kcc = world.get_mut::<AgentKcc>(entity).unwrap();
             kcc.last_desired_horizontal = Vec2::new(1.7, 1.1);
-            kcc.last_achieved_horizontal_speed = 2.02;
+            kcc.last_achieved_horizontal = Vec2::new(2.02, 0.0);
         }
         // A skeleton bone under the actor root, standing in for an
         // animated accumulation root.
@@ -277,7 +284,7 @@ fn an_unbound_tna_capsule_is_untouched_by_the_binding_systems() {
             Transform::from_translation(Vec3::new(4.0, 5.0, 6.0)),
             AgentKcc {
                 last_desired_horizontal: Vec2::new(AGENT_DESIRED_SPEED, 0.0),
-                last_achieved_horizontal_speed: AGENT_DESIRED_SPEED,
+                last_achieved_horizontal: Vec2::new(AGENT_DESIRED_SPEED, 0.0),
                 ..default()
             },
             crate::viewer::actor_animation::ActorAnimationIntent::default(),

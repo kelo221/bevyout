@@ -127,6 +127,9 @@ pub(super) struct NavBoundActor {
     /// tick -- the *achieved* turn, matching the achieved-not-desired rule
     /// the speed input follows.
     pub(super) yaw_rate: f32,
+    /// Signed achieved-velocity EMA used for locomotion classification. Its
+    /// magnitude represents net travel over the smoothing window.
+    pub(super) smoothed_velocity: Vec2,
 }
 
 /// Which authority owns a bound actor's `Transform.rotation` this frame -- the
@@ -226,15 +229,21 @@ fn shortest_yaw_delta(delta: f32) -> f32 {
 /// `movement_policy::decide_collision_outcome`, and the yaw rate is what
 /// [`face_bound_actors`] actually applied.
 pub(super) fn drive_bound_actor_locomotion(world: &mut World) {
+    let dt = world.resource::<Time>().delta_secs();
     let mut query = world.query_filtered::<(Entity, &AgentKcc, &mut NavBoundActor), ()>();
     let requests: Vec<(Entity, LocomotionState, LocomotionState)> = query
         .iter_mut(world)
         .map(|(entity, kcc, mut bound)| {
             let previous = bound.locomotion;
+            bound.smoothed_velocity = Vec2::from_array(locomotion::smooth_achieved_velocity(
+                bound.smoothed_velocity.to_array(),
+                kcc.last_achieved_horizontal.to_array(),
+                dt,
+            ));
             let next = locomotion::next_locomotion_state(
                 previous,
                 LocomotionObservation {
-                    achieved_horizontal_speed: kcc.last_achieved_horizontal_speed,
+                    achieved_horizontal_speed: bound.smoothed_velocity.length(),
                     yaw_rate: bound.yaw_rate,
                 },
             );
