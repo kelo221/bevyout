@@ -13,16 +13,11 @@
 /// clean: candidate lights always spawn with `shadow_maps_enabled: false`
 /// and the shadow system is the only writer afterwards, so skipping
 /// performs zero writes without leaving stale state behind.
-///
-/// Tests-first stub for issue #267: mirrors the pre-fix behavior (always
-/// rewrite) until the gated policy is wired into the system.
-#[allow(dead_code)]
 pub(crate) fn disabled_shadow_writes_needed(
     settings_changed: bool,
     selection_active: bool,
 ) -> bool {
-    let _ = (settings_changed, selection_active);
-    true
+    settings_changed || selection_active
 }
 
 #[cfg(test)]
