@@ -204,6 +204,13 @@ mod screen_fx_policy;
 #[allow(dead_code, unused_imports)]
 mod hybrid_shadow_policy;
 
+// The realtime-shadow write gate (issue #267, PERF wave 1) is Bevy-free for
+// the same reason: the executable spec drives the same disabled-path policy
+// as the runtime system.
+#[path = "../src/viewer/realtime_shadow_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod realtime_shadow_policy;
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -1064,6 +1071,11 @@ struct BevyoutWorld {
     screen_fx: screen_fx_policy::ScreenFxPolicy,
     screen_fx_definition: Option<screen_fx_policy::ScreenFxDefinition>,
     screen_fx_sample: Option<screen_fx_policy::ScreenFxValues>,
+
+    // -- realtime_shadow_policy.feature (issue #267, PERF wave 1) --
+    realtime_shadow_settings_changed: bool,
+    realtime_shadow_selection_active: bool,
+    realtime_shadow_writes_needed: Option<bool>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -14362,4 +14374,48 @@ async fn then_composed_double_vision(world: &mut BevyoutWorld, expected: f32) {
         (actual - expected).abs() < 0.000_1,
         "actual double vision {actual} != {expected}"
     );
+}
+
+// ---------------------------------------------------------------------
+// realtime_shadow_policy.feature (issue #267, PERF wave 1) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[given("the realtime shadow setting changed this frame")]
+async fn given_realtime_shadow_setting_changed(world: &mut BevyoutWorld) {
+    world.realtime_shadow_settings_changed = true;
+}
+
+#[given("the realtime shadow setting was not changed this frame")]
+async fn given_realtime_shadow_setting_unchanged(world: &mut BevyoutWorld) {
+    world.realtime_shadow_settings_changed = false;
+}
+
+#[given("no realtime shadow light is selected")]
+async fn given_no_realtime_shadow_selection(world: &mut BevyoutWorld) {
+    world.realtime_shadow_selection_active = false;
+}
+
+#[given("a realtime shadow light is selected")]
+async fn given_realtime_shadow_selection(world: &mut BevyoutWorld) {
+    world.realtime_shadow_selection_active = true;
+}
+
+#[when("the disabled realtime-shadow write gate runs")]
+async fn when_realtime_shadow_write_gate_runs(world: &mut BevyoutWorld) {
+    world.realtime_shadow_writes_needed =
+        Some(realtime_shadow_policy::disabled_shadow_writes_needed(
+            world.realtime_shadow_settings_changed,
+            world.realtime_shadow_selection_active,
+        ));
+}
+
+#[then("the disabled realtime-shadow pass is skipped")]
+async fn then_realtime_shadow_pass_skipped(world: &mut BevyoutWorld) {
+    assert_eq!(world.realtime_shadow_writes_needed, Some(false));
+}
+
+#[then("the disabled realtime-shadow pass clears candidate state")]
+async fn then_realtime_shadow_pass_cleans(world: &mut BevyoutWorld) {
+    assert_eq!(world.realtime_shadow_writes_needed, Some(true));
 }
