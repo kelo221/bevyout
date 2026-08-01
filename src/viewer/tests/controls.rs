@@ -17,13 +17,60 @@ use bevy::window::{PrimaryWindow, WindowFocused};
 
 use crate::viewer::scene::{PREPARED_REFLECTION_PROBE_INTENSITY, PreparedReflectionProbe};
 
-#[test]
-fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
+fn material_clamp_test_app() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .init_resource::<Assets<StandardMaterial>>()
-        .init_resource::<MetallicGate>()
-        .add_systems(Update, apply_metallic_gate);
+        .add_message::<AssetEvent<StandardMaterial>>()
+        .insert_resource(ClampWriteProbe::default())
+        .insert_resource(MaterialClampSettings::default())
+        .insert_resource(MaterialClampBaselines::default())
+        .add_systems(Update, (apply_material_clamps, probe_material_clamp_writes).chain());
+    app
+}
+
+/// Change-detection probe chained after the clamp system: a frame with zero
+/// hits on both resources is provably free of baseline and material-store
+/// writes (Bevy change detection fires on deref-mut only).
+#[derive(Resource, Default)]
+struct ClampWriteProbe {
+    baseline_writes: usize,
+    material_store_writes: usize,
+}
+
+fn probe_material_clamp_writes(
+    baselines: Res<MaterialClampBaselines>,
+    materials: Res<Assets<StandardMaterial>>,
+    mut probe: ResMut<ClampWriteProbe>,
+) {
+    probe.baseline_writes += usize::from(baselines.is_changed());
+    probe.material_store_writes += usize::from(materials.is_changed());
+}
+
+fn clamp_probe_frame(app: &mut App) -> (usize, usize) {
+    {
+        let mut probe = app.world_mut().resource_mut::<ClampWriteProbe>();
+        probe.baseline_writes = 0;
+        probe.material_store_writes = 0;
+    }
+    app.update();
+    let probe = app.world().resource::<ClampWriteProbe>();
+    (probe.baseline_writes, probe.material_store_writes)
+}
+
+fn clamp_settings(app: &mut App) -> bevy::ecs::world::Mut<'_, MaterialClampSettings> {
+    app.world_mut().resource_mut::<MaterialClampSettings>()
+}
+
+fn write_material_event(app: &mut App, event: AssetEvent<StandardMaterial>) {
+    app.world_mut()
+        .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+        .write(event);
+}
+
+#[test]
+fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
+    let mut app = material_clamp_test_app();
     let metal = app
         .world_mut()
         .resource_mut::<Assets<StandardMaterial>>()
@@ -39,9 +86,7 @@ fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
             ..default()
         });
 
-    app.world_mut()
-        .resource_mut::<MetallicGate>()
-        .set_enabled(false);
+    clamp_settings(&mut app).set_metallic_enabled(false);
     app.update();
     assert_eq!(
         app.world()
@@ -67,6 +112,7 @@ fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
             metallic: 0.8,
             ..default()
         });
+    write_material_event(&mut app, AssetEvent::Added { id: late.id() });
     app.update();
     assert_eq!(
         app.world()
@@ -77,9 +123,7 @@ fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
         0.0
     );
 
-    app.world_mut()
-        .resource_mut::<MetallicGate>()
-        .set_enabled(true);
+    clamp_settings(&mut app).set_metallic_enabled(true);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(materials.get(&metal).unwrap().metallic, 1.0);
@@ -89,11 +133,7 @@ fn metallic_gate_restores_baselines_and_catches_late_loaded_materials() {
 
 #[test]
 fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials() {
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
-        .init_resource::<Assets<StandardMaterial>>()
-        .init_resource::<DielectricSpecularGate>()
-        .add_systems(Update, apply_dielectric_specular_gate);
+    let mut app = material_clamp_test_app();
     let default_reflectance = app
         .world_mut()
         .resource_mut::<Assets<StandardMaterial>>()
@@ -109,9 +149,7 @@ fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials
             ..default()
         });
 
-    app.world_mut()
-        .resource_mut::<DielectricSpecularGate>()
-        .set_enabled(false);
+    clamp_settings(&mut app).set_dielectric_enabled(false);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(
@@ -127,6 +165,7 @@ fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials
             reflectance: 0.8,
             ..default()
         });
+    write_material_event(&mut app, AssetEvent::Added { id: late.id() });
     app.update();
     assert_eq!(
         app.world()
@@ -137,9 +176,7 @@ fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials
         0.0
     );
 
-    app.world_mut()
-        .resource_mut::<DielectricSpecularGate>()
-        .set_enabled(true);
+    clamp_settings(&mut app).set_dielectric_enabled(true);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(
@@ -152,11 +189,7 @@ fn dielectric_specular_gate_restores_baselines_and_catches_late_loaded_materials
 
 #[test]
 fn roughness_scale_uses_original_baselines_and_catches_late_loaded_materials() {
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins)
-        .init_resource::<Assets<StandardMaterial>>()
-        .init_resource::<RoughnessScale>()
-        .add_systems(Update, apply_roughness_scale);
+    let mut app = material_clamp_test_app();
     let rough = app
         .world_mut()
         .resource_mut::<Assets<StandardMaterial>>()
@@ -172,9 +205,7 @@ fn roughness_scale_uses_original_baselines_and_catches_late_loaded_materials() {
             ..default()
         });
 
-    app.world_mut()
-        .resource_mut::<RoughnessScale>()
-        .set_scale(1.5);
+    clamp_settings(&mut app).set_roughness_scale(1.5);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert!((materials.get(&rough).unwrap().perceptual_roughness - 0.6).abs() < 1e-6);
@@ -187,6 +218,7 @@ fn roughness_scale_uses_original_baselines_and_catches_late_loaded_materials() {
             perceptual_roughness: 0.2,
             ..default()
         });
+    write_material_event(&mut app, AssetEvent::Added { id: late.id() });
     app.update();
     assert!(
         (app.world()
@@ -199,23 +231,144 @@ fn roughness_scale_uses_original_baselines_and_catches_late_loaded_materials() {
             < 1e-6
     );
 
-    app.world_mut()
-        .resource_mut::<RoughnessScale>()
-        .set_scale(0.5);
+    clamp_settings(&mut app).set_roughness_scale(0.5);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(materials.get(&rough).unwrap().perceptual_roughness, 0.2);
     assert_eq!(materials.get(&saturated).unwrap().perceptual_roughness, 0.4);
     assert_eq!(materials.get(&late).unwrap().perceptual_roughness, 0.1);
 
-    app.world_mut()
-        .resource_mut::<RoughnessScale>()
-        .set_scale(1.0);
+    clamp_settings(&mut app).set_roughness_scale(1.0);
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(materials.get(&rough).unwrap().perceptual_roughness, 0.4);
     assert_eq!(materials.get(&saturated).unwrap().perceptual_roughness, 0.8);
     assert_eq!(materials.get(&late).unwrap().perceptual_roughness, 0.2);
+}
+
+#[test]
+fn material_clamp_baseline_is_dropped_when_its_asset_is_removed() {
+    let mut app = material_clamp_test_app();
+    let metal = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            metallic: 1.0,
+            ..default()
+        });
+    let other = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            metallic: 0.5,
+            ..default()
+        });
+
+    clamp_settings(&mut app).set_metallic_enabled(false);
+    app.update();
+    assert_eq!(app.world().resource::<MaterialClampBaselines>().store.baseline_count(), 2);
+
+    app.world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .remove(metal.id());
+    write_material_event(&mut app, AssetEvent::Removed { id: metal.id() });
+    app.update();
+    assert_eq!(
+        app.world().resource::<MaterialClampBaselines>().store.baseline_count(),
+        1,
+        "the removed material's baseline must be dropped on AssetEvent::Removed"
+    );
+
+    // Disengagement restores only surviving materials and empties the store.
+    clamp_settings(&mut app).set_metallic_enabled(true);
+    app.update();
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    assert_eq!(materials.get(&other).unwrap().metallic, 0.5);
+    assert_eq!(app.world().resource::<MaterialClampBaselines>().store.baseline_count(), 0);
+}
+
+#[test]
+fn engaged_steady_frames_perform_no_material_store_writes() {
+    let mut app = material_clamp_test_app();
+    let _metal = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            metallic: 0.75,
+            reflectance: 0.5,
+            perceptual_roughness: 0.9,
+            ..default()
+        });
+
+    {
+        let mut settings = clamp_settings(&mut app);
+        settings.set_metallic_enabled(false);
+        settings.set_dielectric_enabled(false);
+        settings.set_roughness_scale(0.5);
+    }
+    // Absorb the engage pass; the steady-state guarantee starts after it.
+    app.update();
+    app.update();
+
+    for frame in 0..3 {
+        assert_eq!(
+            clamp_probe_frame(&mut app),
+            (0, 0),
+            "engaged steady frame {frame} touched materials or baselines"
+        );
+    }
+}
+
+#[test]
+fn modified_events_fed_back_into_an_engaged_gate_reclamp() {
+    let mut app = material_clamp_test_app();
+    let metal = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            metallic: 1.0,
+            ..default()
+        });
+    clamp_settings(&mut app).set_metallic_enabled(false);
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&metal)
+            .unwrap()
+            .metallic,
+        0.0
+    );
+
+    // An external write sneaks metallic back in; the engaged gate re-clamps
+    // it from the unchanged baseline on its Modified event.
+    app.world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .get_mut(&metal)
+        .unwrap()
+        .metallic = 0.9;
+    write_material_event(&mut app, AssetEvent::Modified { id: metal.id() });
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&metal)
+            .unwrap()
+            .metallic,
+        0.0
+    );
+
+    clamp_settings(&mut app).set_metallic_enabled(true);
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&metal)
+            .unwrap()
+            .metallic,
+        1.0,
+        "the baseline must survive intermediate re-clamps"
+    );
 }
 
 #[test]

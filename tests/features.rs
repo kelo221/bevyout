@@ -223,6 +223,13 @@ mod ao_policy;
 #[allow(dead_code, unused_imports)]
 mod glow_card_policy;
 
+// The material-clamp policy (issue #269, PERF wave 1) is Bevy-free for the
+// same reason as `realtime_shadow_policy`: the executable spec drives the
+// same snapshot/clamp/restore decisions the runtime system applies.
+#[path = "../src/viewer/material_clamp_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod material_clamp_policy;
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -1092,6 +1099,12 @@ struct BevyoutWorld {
     // -- scene_classification.feature (issue #270, PERF wave 1) --
     scene_ao_tracker: ao_policy::AoEligibilityTracker<u32, u32>,
     glow_name_check: Option<bool>,
+
+    // -- material_clamp_policy.feature (issue #269, PERF wave 1) --
+    clamp_settings: material_clamp_policy::ClampSettings,
+    clamp_store: material_clamp_policy::ClampStore<u32>,
+    clamp_materials: std::collections::HashMap<u32, material_clamp_policy::MaterialFactors>,
+    clamp_full_pass_ran: Option<bool>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -14508,4 +14521,172 @@ async fn then_ao_mesh_not_eligible(world: &mut BevyoutWorld, mesh: u32) {
 #[then("the AO tracker has no pending meshes")]
 async fn then_ao_tracker_quiet(world: &mut BevyoutWorld) {
     assert!(!world.scene_ao_tracker.has_pending());
+}
+
+// ---------------------------------------------------------------------
+// material_clamp_policy.feature (issue #269, PERF wave 1) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+/// One simulated `apply_material_clamps` frame over the spec's integer-keyed
+/// material store: a full pass when (and only when) the settings revision
+/// moved. Load/remove steps feed the incremental path directly.
+fn material_clamp_frame(world: &mut BevyoutWorld) {
+    let full_pass = world.clamp_store.needs_full_pass(&world.clamp_settings);
+    world.clamp_full_pass_ran = Some(full_pass);
+    if !full_pass {
+        return;
+    }
+    let ids: Vec<u32> = world.clamp_materials.keys().copied().collect();
+    for id in ids {
+        let current = world.clamp_materials[&id];
+        let mut baseline = world.clamp_store.take(id);
+        let target = material_clamp_policy::decide(&world.clamp_settings, &mut baseline, current);
+        world.clamp_materials.insert(id, target);
+        world.clamp_store.record(id, baseline);
+    }
+    world.clamp_store.prune_disengaged(&world.clamp_settings);
+    world.clamp_store.mark_applied(&world.clamp_settings);
+}
+
+fn material_clamp_factors(
+    metallic: f32,
+    reflectance: f32,
+    roughness: f32,
+) -> material_clamp_policy::MaterialFactors {
+    material_clamp_policy::MaterialFactors {
+        metallic,
+        reflectance,
+        perceptual_roughness: roughness,
+    }
+}
+
+#[given("a fresh material clamp policy")]
+async fn given_fresh_material_clamp_policy(world: &mut BevyoutWorld) {
+    world.clamp_settings = material_clamp_policy::ClampSettings::default();
+    world.clamp_store = material_clamp_policy::ClampStore::default();
+    world.clamp_materials = std::collections::HashMap::new();
+    world.clamp_full_pass_ran = None;
+}
+
+#[given(
+    regex = r#"^clamp material (\d+) has metallic ([\d.]+), reflectance ([\d.]+), and roughness ([\d.]+)$"#
+)]
+async fn given_clamp_material(
+    world: &mut BevyoutWorld,
+    id: u32,
+    metallic: f32,
+    reflectance: f32,
+    roughness: f32,
+) {
+    world
+        .clamp_materials
+        .insert(id, material_clamp_factors(metallic, reflectance, roughness));
+}
+
+#[when(regex = r#"^the clamp \"(metallic|dielectric_specular)\" gate engages$"#)]
+async fn when_clamp_gate_engages(world: &mut BevyoutWorld, gate: String) {
+    match gate.as_str() {
+        "metallic" => world.clamp_settings.set_metallic_enabled(false),
+        "dielectric_specular" => world.clamp_settings.set_dielectric_enabled(false),
+        other => panic!("unknown clamp gate {other:?}"),
+    }
+    material_clamp_frame(world);
+}
+
+#[when(regex = r#"^the clamp \"(metallic|dielectric_specular)\" gate disengages$"#)]
+async fn when_clamp_gate_disengages(world: &mut BevyoutWorld, gate: String) {
+    match gate.as_str() {
+        "metallic" => world.clamp_settings.set_metallic_enabled(true),
+        "dielectric_specular" => world.clamp_settings.set_dielectric_enabled(true),
+        other => panic!("unknown clamp gate {other:?}"),
+    }
+    material_clamp_frame(world);
+}
+
+#[when(regex = r#"^the clamp roughness scale becomes ([\d.]+)$"#)]
+async fn when_clamp_roughness_scale(world: &mut BevyoutWorld, scale: f32) {
+    world.clamp_settings.set_roughness_scale(scale);
+    material_clamp_frame(world);
+}
+
+/// The incremental `AssetEvent::Added` path: baseline + clamp inside the
+/// already-engaged pass, without touching any other material.
+#[when(
+    regex = r#"^clamp material (\d+) loads with metallic ([\d.]+), reflectance ([\d.]+), and roughness ([\d.]+)$"#
+)]
+async fn when_clamp_material_loads(
+    world: &mut BevyoutWorld,
+    id: u32,
+    metallic: f32,
+    reflectance: f32,
+    roughness: f32,
+) {
+    assert!(
+        !world.clamp_store.needs_full_pass(&world.clamp_settings),
+        "load while engaged is incremental: the settings must be settled"
+    );
+    let current = material_clamp_factors(metallic, reflectance, roughness);
+    let stored = if world.clamp_settings.any_engaged() {
+        let mut baseline = world.clamp_store.take(id);
+        let target = material_clamp_policy::decide(&world.clamp_settings, &mut baseline, current);
+        world.clamp_store.record(id, baseline);
+        target
+    } else {
+        current
+    };
+    world.clamp_materials.insert(id, stored);
+    world.clamp_full_pass_ran = Some(false);
+}
+
+#[when(regex = r#"^clamp material (\d+) is removed from the asset store$"#)]
+async fn when_clamp_material_removed(world: &mut BevyoutWorld, id: u32) {
+    world.clamp_materials.remove(&id);
+    world.clamp_store.release(id);
+}
+
+#[when("a steady clamp frame runs")]
+async fn when_steady_clamp_frame_runs(world: &mut BevyoutWorld) {
+    material_clamp_frame(world);
+}
+
+#[then(
+    regex = r#"^clamp material (\d+) has metallic ([\d.]+), reflectance ([\d.]+), and roughness ([\d.]+)$"#
+)]
+async fn then_clamp_material_factors(
+    world: &mut BevyoutWorld,
+    id: u32,
+    metallic: f32,
+    reflectance: f32,
+    roughness: f32,
+) {
+    let actual = world
+        .clamp_materials
+        .get(&id)
+        .expect("clamp material must exist in the spec store");
+    assert_eq!(
+        *actual,
+        material_clamp_factors(metallic, reflectance, roughness)
+    );
+}
+
+#[then("the clamp store holds no baselines")]
+async fn then_clamp_store_holds_no_baselines(world: &mut BevyoutWorld) {
+    assert_eq!(world.clamp_store.baseline_count(), 0);
+}
+
+#[then(regex = r#"^the clamp store keeps (\d+) baseline entry$"#)]
+async fn then_clamp_store_keeps_entries(world: &mut BevyoutWorld, count: usize) {
+    assert_eq!(world.clamp_store.baseline_count(), count);
+}
+
+#[then("a steady clamp frame performs no full material pass")]
+async fn then_steady_clamp_frame_performs_no_full_pass(world: &mut BevyoutWorld) {
+    material_clamp_frame(world);
+    assert_eq!(world.clamp_full_pass_ran, Some(false));
+}
+
+#[then("the steady clamp frame needed no full material pass")]
+async fn then_steady_clamp_frame_needed_no_full_pass(world: &mut BevyoutWorld) {
+    assert_eq!(world.clamp_full_pass_ran, Some(false));
 }
