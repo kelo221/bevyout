@@ -102,23 +102,31 @@ fn worldstream(
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     match invocation.args.as_slice() {
         [] => {
-            let state = world
+            if world
                 .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-                .ok_or_else(|| {
-                    ConsoleError::new("unavailable", "exterior streaming is not installed")
-                })?;
+                .is_none()
+            {
+                return Err(ConsoleError::new(
+                    "unavailable",
+                    "exterior streaming is not installed",
+                ));
+            }
             Ok(ConsoleCommandResult::value(
-                super::super::world::exterior::exterior_status_json(state),
+                super::super::world::exterior::exterior_status_json(world),
             ))
         }
         [command] if command == "status" => {
-            let state = world
+            if world
                 .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-                .ok_or_else(|| {
-                    ConsoleError::new("unavailable", "exterior streaming is not installed")
-                })?;
+                .is_none()
+            {
+                return Err(ConsoleError::new(
+                    "unavailable",
+                    "exterior streaming is not installed",
+                ));
+            }
             Ok(ConsoleCommandResult::value(
-                super::super::world::exterior::exterior_status_json(state),
+                super::super::world::exterior::exterior_status_json(world),
             ))
         }
         [command] if command == "cells" => {
@@ -152,8 +160,12 @@ fn worldstream(
             world
                 .resource_mut::<super::super::world::exterior::ExteriorStreamState>()
                 .trace = enabled;
+            let streaming = super::super::world::exterior::exterior_status_json(world);
             Ok(ConsoleCommandResult::new(
-                serde_json::json!({ "trace": enabled }),
+                serde_json::json!({
+                    "trace": enabled,
+                    "streaming": streaming,
+                }),
                 vec![format!(
                     "exterior stream trace {}",
                     if enabled { "on" } else { "off" }
@@ -168,10 +180,14 @@ fn worldstream(
 }
 
 fn exterior_route_summary(world: &mut World) -> serde_json::Value {
-    let state = world
+    let state = if world
         .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-        .map(super::super::world::exterior::exterior_status_json)
-        .unwrap_or(serde_json::Value::Null);
+        .is_some()
+    {
+        super::super::world::exterior::exterior_status_json(&mut *world)
+    } else {
+        serde_json::Value::Null
+    };
     let presentation = super::super::world::exterior::exterior_presentation_json(world);
     let frame = world
         .get_resource::<super::super::RenderReportBuffer>()
