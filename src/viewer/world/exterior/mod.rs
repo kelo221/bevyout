@@ -21,9 +21,9 @@ use bevy::prelude::*;
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevyout_core::manifest::exterior::{
     EXTERIOR_CELL_PACKAGE_REVISION, EXTERIOR_INDEX_REVISION, ExteriorCellLifecycle,
-    ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorLoadAction, ExteriorWaterContact,
-    ExteriorWorldspaceIndex, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
-    PreparedWater, TerrainLod, resolve_water_contact, select_terrain_lod,
+    ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorLoadAction, ExteriorResidencyAction,
+    ExteriorWaterContact, ExteriorWorldspaceIndex, ExteriorWorldspaceLodAsset, GridCoordinate,
+    PreparedTerrain, PreparedWater, TerrainLod, resolve_water_contact, select_terrain_lod,
 };
 use serde::Serialize;
 
@@ -333,6 +333,7 @@ fn initialize(
             task: None,
             package: Some(package),
             collision_ready,
+            eviction_restore: None,
         },
     );
     if collision_ready {
@@ -485,7 +486,7 @@ fn update_residency(
 fn apply_action(
     commands: &mut Commands,
     state: &mut ExteriorStreamState,
-    action: bevyout_core::manifest::exterior::ExteriorResidencyAction,
+    action: ExteriorResidencyAction,
     tasks: &Query<&loading::ExteriorPackageTask>,
     _asset_root: &str,
 ) {
@@ -497,25 +498,51 @@ fn apply_action(
     }
     match action.action {
         ExteriorLoadAction::Request => {
-            state
-                .cells
-                .entry(action.grid)
-                .or_insert_with(|| lifecycle::RuntimeCell {
-                    state: bevyout_core::manifest::exterior::ExteriorCellState {
-                        cell_form_id: action.form_id,
-                        grid: action.grid,
-                        lifecycle: ExteriorCellLifecycle::Queued,
-                        generation: action.generation,
-                        pinned: false,
-                        estimated_bytes: 0,
-                        failed_attempts: 0,
+            let collision_owned = state.collision_cells.contains_key(&action.grid);
+            let can_request = match state.cells.get(&action.grid) {
+                None => action.generation == 1 && !collision_owned,
+                Some(cell) => {
+                    cell.state.cell_form_id == action.form_id
+                        && cell.state.lifecycle == ExteriorCellLifecycle::Unloaded
+                        && cell.state.generation.saturating_add(1) == action.generation
+                        && cell.task.is_none()
+                        && !cell.owns_runtime_state(collision_owned)
+                }
+            };
+            if !can_request {
+                return;
+            }
+            if let Some(cell) = state.cells.get_mut(&action.grid) {
+                state.resident_bytes = state
+                    .resident_bytes
+                    .saturating_sub(cell.state.estimated_bytes);
+                cell.state.generation = action.generation;
+                cell.state.lifecycle = ExteriorCellLifecycle::Queued;
+                cell.state.estimated_bytes = 0;
+                cell.collision_ready = false;
+                cell.eviction_restore = None;
+            } else {
+                state.cells.insert(
+                    action.grid,
+                    lifecycle::RuntimeCell {
+                        state: bevyout_core::manifest::exterior::ExteriorCellState {
+                            cell_form_id: action.form_id,
+                            grid: action.grid,
+                            lifecycle: ExteriorCellLifecycle::Queued,
+                            generation: action.generation,
+                            pinned: false,
+                            estimated_bytes: 0,
+                            failed_attempts: 0,
+                        },
+                        root: None,
+                        task: None,
+                        package: None,
+                        collision_ready: false,
+                        eviction_restore: None,
                     },
-                    root: None,
-                    task: None,
-                    package: None,
-                    collision_ready: false,
-                });
-            loading::request(
+                );
+            }
+            let _ = loading::request(
                 commands,
                 state,
                 action.grid,
@@ -525,42 +552,86 @@ fn apply_action(
         }
         ExteriorLoadAction::Cancel => {
             let collision_owned = state.collision_cells.contains_key(&action.grid);
+            let current_grid = state.current_grid;
             if let Some(cell) = state.cells.get_mut(&action.grid) {
-                if let Some(task) = cell.task.take()
-                    && tasks.get(task).is_ok()
-                {
-                    commands.entity(task).despawn();
+                if !action_matches_cell(cell, &action) {
+                    return;
                 }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Evicting {
+                    cell.cancel_eviction(current_grid, collision_owned);
+                    return;
+                }
+                if !matches!(
+                    cell.state.lifecycle,
+                    ExteriorCellLifecycle::Queued
+                        | ExteriorCellLifecycle::Loading
+                        | ExteriorCellLifecycle::Ready
+                        | ExteriorCellLifecycle::Resident
+                ) {
+                    return;
+                }
+                despawn_package_task(commands, tasks, cell);
                 cell.state.generation = cell.state.generation.saturating_add(1);
-                // A completed package already owns a render root, package
-                // bytes, and potentially collision even though it remains
-                // logically `Loading` until collision attachment finishes.
-                // Route that state through the same ordered teardown as an
-                // eviction; only a task-only cancellation is truly unloaded.
-                cell.state.lifecycle =
-                    if cell.root.is_some() || cell.package.is_some() || collision_owned {
-                        ExteriorCellLifecycle::Evicting
-                    } else {
-                        ExteriorCellLifecycle::Unloaded
-                    };
+                if cell.owns_runtime_state(collision_owned) {
+                    cell.eviction_restore = Some(cell.state.lifecycle);
+                    cell.state.lifecycle = ExteriorCellLifecycle::Evicting;
+                } else {
+                    cell.state.lifecycle = ExteriorCellLifecycle::Unloaded;
+                    cell.eviction_restore = None;
+                    state.resident_bytes = state
+                        .resident_bytes
+                        .saturating_sub(cell.state.estimated_bytes);
+                    cell.state.estimated_bytes = 0;
+                }
                 state.cancellations += 1;
             }
         }
         ExteriorLoadAction::Evict => {
             if let Some(cell) = state.cells.get_mut(&action.grid) {
-                cell.state.lifecycle = ExteriorCellLifecycle::Evicting;
-                cell.state.generation = cell.state.generation.saturating_add(1);
-                if let Some(task) = cell.task.take()
-                    && tasks.get(task).is_ok()
-                {
-                    commands.entity(task).despawn();
+                if !action_matches_cell(cell, &action) {
+                    return;
                 }
+                cell.begin_eviction();
+                despawn_package_task(commands, tasks, cell);
             }
         }
         ExteriorLoadAction::Activate => {
-            state.set_lifecycle(action.grid, ExteriorCellLifecycle::Resident);
+            let collision_owned = state
+                .collision_cells
+                .get(&action.grid)
+                .is_some_and(|form_id| *form_id == action.form_id);
+            if let Some(cell) = state.cells.get_mut(&action.grid) {
+                if !action_matches_cell(cell, &action) {
+                    return;
+                }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Resident {
+                    return;
+                }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Ready
+                    && cell.collision_ready
+                    && collision_owned
+                {
+                    cell.state.lifecycle = ExteriorCellLifecycle::Resident;
+                }
+            }
         }
         ExteriorLoadAction::RaisePriority | ExteriorLoadAction::Deactivate => {}
+    }
+}
+
+fn action_matches_cell(cell: &lifecycle::RuntimeCell, action: &ExteriorResidencyAction) -> bool {
+    cell.state.cell_form_id == action.form_id && cell.state.generation == action.generation
+}
+
+fn despawn_package_task(
+    commands: &mut Commands,
+    tasks: &Query<&loading::ExteriorPackageTask>,
+    cell: &mut lifecycle::RuntimeCell,
+) {
+    if let Some(task) = cell.task.take()
+        && tasks.get(task).is_ok()
+    {
+        commands.entity(task).despawn();
     }
 }
 
@@ -584,15 +655,21 @@ fn attach_streamed_colliders(
                 && cell.package.is_some()
                 && !cell.collision_ready
         })
-        .map(|(grid, cell)| (*grid, cell.package.clone().expect("package checked above")))
+        .map(|(grid, cell)| {
+            (
+                *grid,
+                cell.state.generation,
+                cell.package.clone().expect("package checked above"),
+            )
+        })
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return;
     }
 
     if physics_disabled.0 {
-        for (grid, package) in pending {
-            mark_collision_ready(&mut state, grid, package.cell_form_id);
+        for (grid, generation, package) in pending {
+            mark_collision_ready(&mut state, grid, package.cell_form_id, generation);
         }
         return;
     }
@@ -605,7 +682,7 @@ fn attach_streamed_colliders(
     let asset_root = state.asset_root.clone().unwrap_or_default();
     let mut changed_static_tree = false;
     let mut completed = Vec::with_capacity(pending.len());
-    for (grid, package) in pending {
+    for (grid, generation, package) in pending {
         if !collision_world.has_cell_colliders(package.cell_form_id) {
             changed_static_tree |= super::super::player::build_exterior_static_colliders(
                 boxddd_world,
@@ -630,21 +707,34 @@ fn attach_streamed_colliders(
         if collision_expected && !collision_world.has_cell_colliders(package.cell_form_id) {
             continue;
         }
-        completed.push((grid, package.cell_form_id));
+        completed.push((grid, package.cell_form_id, generation));
     }
     if changed_static_tree && let Err(error) = boxddd_world.try_rebuild_static_tree() {
         warn!("streamed exterior static tree rebuild returned error: {error:?}");
         return;
     }
-    for (grid, form_id) in completed {
-        mark_collision_ready(&mut state, grid, form_id);
+    for (grid, form_id, generation) in completed {
+        mark_collision_ready(&mut state, grid, form_id, generation);
     }
 }
 
-fn mark_collision_ready(state: &mut ExteriorStreamState, grid: GridCoordinate, form_id: u32) {
+fn mark_collision_ready(
+    state: &mut ExteriorStreamState,
+    grid: GridCoordinate,
+    form_id: u32,
+    generation: u64,
+) {
     let current = state.current_grid;
+    let collision_owner = state.collision_cells.get(&grid).copied();
     if let Some(cell) = state.cells.get_mut(&grid) {
-        if cell.state.lifecycle != ExteriorCellLifecycle::Loading {
+        if cell.state.generation != generation
+            || cell.state.cell_form_id != form_id
+            || cell.state.lifecycle != ExteriorCellLifecycle::Loading
+            || cell.task.is_some()
+            || cell.root.is_none()
+            || cell.collision_ready
+            || collision_owner.is_some_and(|owner| owner != form_id)
+        {
             return;
         }
         cell.collision_ready = true;

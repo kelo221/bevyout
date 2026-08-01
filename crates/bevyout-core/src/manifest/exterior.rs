@@ -544,6 +544,18 @@ pub fn plan_residency(
                     generation: state.generation,
                 })
             }
+            Some(state) if state.lifecycle == ExteriorCellLifecycle::Evicting => {
+                // Eviction is finalized by the runtime after the planner
+                // returns.  If the target re-enters the ring first, cancel
+                // that teardown at the same generation instead of allowing
+                // the package to disappear and be re-requested.
+                actions.push(ExteriorResidencyAction {
+                    form_id,
+                    grid: *grid,
+                    action: ExteriorLoadAction::Cancel,
+                    generation: state.generation,
+                });
+            }
             _ => {}
         }
     }

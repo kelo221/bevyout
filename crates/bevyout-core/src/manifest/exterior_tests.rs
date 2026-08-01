@@ -70,6 +70,137 @@ fn residency_prefers_current_and_cancels_stale_loads() {
 }
 
 #[test]
+fn residency_cancels_queued_and_loading_cells_outside_the_ring() {
+    let indexed = BTreeMap::from([
+        (GridCoordinate::new(0, 0), 1),
+        (GridCoordinate::new(1, 0), 2),
+        (GridCoordinate::new(2, 0), 3),
+    ]);
+    let states = vec![
+        ExteriorCellState {
+            cell_form_id: 2,
+            grid: GridCoordinate::new(1, 0),
+            lifecycle: ExteriorCellLifecycle::Queued,
+            generation: 4,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+        ExteriorCellState {
+            cell_form_id: 3,
+            grid: GridCoordinate::new(2, 0),
+            lifecycle: ExteriorCellLifecycle::Loading,
+            generation: 7,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+    ];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(0, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 0,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions
+            .iter()
+            .filter(|action| action.action == ExteriorLoadAction::Cancel)
+            .map(|action| (action.grid, action.generation))
+            .collect::<Vec<_>>(),
+        vec![
+            (GridCoordinate::new(1, 0), 4),
+            (GridCoordinate::new(2, 0), 7),
+        ]
+    );
+}
+
+#[test]
+fn residency_reverses_an_eviction_when_the_cell_returns_to_the_ring() {
+    let indexed = BTreeMap::from([(GridCoordinate::new(1, 0), 2)]);
+    let states = vec![ExteriorCellState {
+        cell_form_id: 2,
+        grid: GridCoordinate::new(1, 0),
+        lifecycle: ExteriorCellLifecycle::Evicting,
+        generation: 9,
+        pinned: false,
+        estimated_bytes: 32,
+        failed_attempts: 0,
+    }];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(1, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 32,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions,
+        vec![ExteriorResidencyAction {
+            form_id: 2,
+            grid: GridCoordinate::new(1, 0),
+            action: ExteriorLoadAction::Cancel,
+            generation: 9,
+        }]
+    );
+}
+
+#[test]
+fn residency_requests_a_new_generation_after_a_cancelled_load() {
+    let indexed = BTreeMap::from([(GridCoordinate::new(0, 0), 1)]);
+    let states = vec![ExteriorCellState {
+        cell_form_id: 1,
+        grid: GridCoordinate::new(0, 0),
+        lifecycle: ExteriorCellLifecycle::Unloaded,
+        generation: 12,
+        pinned: false,
+        estimated_bytes: 0,
+        failed_attempts: 0,
+    }];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(0, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 0,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions,
+        vec![ExteriorResidencyAction {
+            form_id: 1,
+            grid: GridCoordinate::new(0, 0),
+            action: ExteriorLoadAction::Request,
+            generation: 13,
+        }]
+    );
+}
+
+#[test]
 fn pinned_cells_are_not_evicted_when_the_player_grid_changes() {
     let mut indexed = BTreeMap::new();
     indexed.insert(GridCoordinate::new(0, 0), 1);
