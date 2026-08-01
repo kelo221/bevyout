@@ -622,3 +622,296 @@ fn a_quarantined_kind_past_this_builds_own_range_is_harmless() {
         .expect("a non-empty quarantine must produce an explicit allow-list");
     assert_eq!(permitted, BTreeSet::from([0, 1, 2]));
 }
+
+// -------------------------------------------------------------
+// Resident NAVM topology lifecycle (M6 W3-B)
+// -------------------------------------------------------------
+
+fn resident_key(cell_form_id: u32, generation: u64) -> ResidentNavCellKey {
+    ResidentNavCellKey {
+        cell_form_id,
+        generation,
+    }
+}
+
+fn resident_cell(key: ResidentNavCellKey, state: ResidentNavState) -> ResidentNavCell {
+    ResidentNavCell { key, state }
+}
+
+fn resident_meshes() -> Vec<MeshInput> {
+    let mesh_a = square_mesh([0, 1, 2], [1, 3, 2]);
+    let mut mesh_b = mesh_a.clone();
+    mesh_b.form_id = 0x20;
+    vec![mesh_a, mesh_b]
+}
+
+fn resident_portal(side_a: ResidentNavCellKey, side_b: ResidentNavCellKey) -> ResidentPortal {
+    ResidentPortal {
+        side_a,
+        side_b,
+        merge: MergeInput {
+            mesh_a_form_id: 0x10,
+            triangle_a: 0,
+            mesh_b_form_id: 0x20,
+            triangle_b: 1,
+            interval_a: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            interval_b: [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        },
+    }
+}
+
+fn reversed_resident_portal(portal: ResidentPortal) -> ResidentPortal {
+    ResidentPortal {
+        side_a: portal.side_b,
+        side_b: portal.side_a,
+        merge: MergeInput {
+            mesh_a_form_id: portal.merge.mesh_b_form_id,
+            triangle_a: portal.merge.triangle_b,
+            mesh_b_form_id: portal.merge.mesh_a_form_id,
+            triangle_b: portal.merge.triangle_a,
+            interval_a: portal.merge.interval_b,
+            interval_b: portal.merge.interval_a,
+        },
+    }
+}
+
+#[test]
+fn a_cross_cell_portal_requires_two_valid_navigation_ready_resident_sides() {
+    let meshes = resident_meshes();
+    let side_a = resident_key(0xa, 1);
+    let side_b = resident_key(0xb, 1);
+    let portal = resident_portal(side_a, side_b);
+
+    assert_eq!(
+        resident_merge_link_descriptors(
+            &meshes,
+            &[resident_cell(
+                side_a,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            )],
+            std::slice::from_ref(&portal),
+        )
+        .len(),
+        0,
+        "a missing destination side cannot expose a cross-cell link"
+    );
+
+    for state in [
+        ResidentNavState::Missing,
+        ResidentNavState::Loading,
+        ResidentNavState::Failed,
+        ResidentNavState::Evicting,
+        ResidentNavState::Valid {
+            navigation_ready: false,
+        },
+    ] {
+        assert_eq!(
+            resident_merge_link_descriptors(
+                &meshes,
+                &[
+                    resident_cell(
+                        side_a,
+                        ResidentNavState::Valid {
+                            navigation_ready: true,
+                        },
+                    ),
+                    resident_cell(side_b, state),
+                ],
+                std::slice::from_ref(&portal),
+            )
+            .len(),
+            0,
+            "non-ready state {state:?} must not expose a cross-cell link"
+        );
+    }
+
+    assert_eq!(
+        resident_merge_link_descriptors(
+            &meshes,
+            &[
+                resident_cell(
+                    side_a,
+                    ResidentNavState::Valid {
+                        navigation_ready: true,
+                    },
+                ),
+                resident_cell(
+                    side_b,
+                    ResidentNavState::Valid {
+                        navigation_ready: true,
+                    },
+                ),
+            ],
+            std::slice::from_ref(&portal),
+        )
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn resident_topology_rebuild_removes_evicted_links_and_empty_archipelago_state() {
+    let meshes = resident_meshes();
+    let side_a = resident_key(0xa, 1);
+    let side_b = resident_key(0xb, 1);
+    let portal = resident_portal(side_a, side_b);
+    let ready_a = resident_cell(
+        side_a,
+        ResidentNavState::Valid {
+            navigation_ready: true,
+        },
+    );
+    let ready_b = resident_cell(
+        side_b,
+        ResidentNavState::Valid {
+            navigation_ready: true,
+        },
+    );
+    let mut topology = ResidentNavTopology::default();
+
+    topology.rebuild(&[ready_a, ready_b], &meshes, std::slice::from_ref(&portal));
+    let initial = topology.clone();
+    let initial_archipelago = topology
+        .archipelago
+        .as_ref()
+        .expect("two ready cells create an archipelago");
+    assert_eq!(initial_archipelago.resident_cells, vec![side_a, side_b]);
+    assert_eq!(initial_archipelago.merge_links.len(), 1);
+
+    topology.rebuild(
+        &[ready_a, resident_cell(side_b, ResidentNavState::Evicting)],
+        &meshes,
+        std::slice::from_ref(&portal),
+    );
+    let evicting_archipelago = topology
+        .archipelago
+        .as_ref()
+        .expect("the still-valid side keeps its own archipelago state");
+    assert_eq!(evicting_archipelago.resident_cells, vec![side_a]);
+    assert!(evicting_archipelago.merge_links.is_empty());
+    assert_ne!(topology, initial, "eviction must replace the old topology");
+
+    topology.rebuild(&[], &meshes, std::slice::from_ref(&portal));
+    assert!(
+        topology.archipelago.is_none(),
+        "when no side is resident, no stale archipelago may remain"
+    );
+}
+
+#[test]
+fn resident_topology_reloads_deterministically_and_rejects_stale_generations() {
+    let meshes = resident_meshes();
+    let side_a = resident_key(0xa, 1);
+    let side_b = resident_key(0xb, 1);
+    let portal = resident_portal(side_a, side_b);
+    let ready_a = resident_cell(
+        side_a,
+        ResidentNavState::Valid {
+            navigation_ready: true,
+        },
+    );
+    let ready_b = resident_cell(
+        side_b,
+        ResidentNavState::Valid {
+            navigation_ready: true,
+        },
+    );
+    let mut original = ResidentNavTopology::default();
+    original.rebuild(&[ready_a, ready_b], &meshes, std::slice::from_ref(&portal));
+
+    let mut reversed = ResidentNavTopology::default();
+    let reversed_portal = reversed_resident_portal(portal);
+    reversed.rebuild(
+        &[ready_b, ready_a],
+        &meshes,
+        std::slice::from_ref(&reversed_portal),
+    );
+    assert_eq!(
+        reversed, original,
+        "portal and resident discovery order must not affect the rebuilt topology"
+    );
+
+    let reloaded_a = resident_key(0xa, 2);
+    let reloaded_b = resident_key(0xb, 2);
+    let mut stale = ResidentNavTopology::default();
+    stale.rebuild(
+        &[
+            resident_cell(
+                reloaded_a,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+            resident_cell(
+                reloaded_b,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+        ],
+        &meshes,
+        std::slice::from_ref(&portal),
+    );
+    assert_eq!(
+        stale
+            .archipelago
+            .as_ref()
+            .expect("reloaded cells still form an archipelago")
+            .merge_links
+            .len(),
+        0,
+        "a portal from an evicted generation must not revive after reload"
+    );
+
+    let reloaded_portal = resident_portal(reloaded_a, reloaded_b);
+    let mut reloaded = ResidentNavTopology::default();
+    reloaded.rebuild(
+        &[
+            resident_cell(
+                reloaded_b,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+            resident_cell(
+                reloaded_a,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+        ],
+        &meshes,
+        std::slice::from_ref(&reloaded_portal),
+    );
+    let mut expected_reloaded = ResidentNavTopology::default();
+    expected_reloaded.rebuild(
+        &[
+            resident_cell(
+                reloaded_a,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+            resident_cell(
+                reloaded_b,
+                ResidentNavState::Valid {
+                    navigation_ready: true,
+                },
+            ),
+        ],
+        &meshes,
+        std::slice::from_ref(&reloaded_portal),
+    );
+    assert_eq!(reloaded, expected_reloaded);
+    assert_eq!(
+        reloaded
+            .archipelago
+            .as_ref()
+            .expect("reloaded ready cells form an archipelago")
+            .merge_links
+            .len(),
+        1
+    );
+}
