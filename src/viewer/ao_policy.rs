@@ -108,6 +108,11 @@ where
         }
     }
 
+    // `is_pending`/`is_eligible` complete the tracker's observer surface
+    // for the executable spec (`tests/features.rs`, which includes this
+    // file verbatim) and the pure unit specs; the runtime adapter reads
+    // the iterators instead (they are `#[allow]`-ed, not unused there).
+    #[allow(dead_code)]
     pub(crate) fn is_pending(&self, mesh: K) -> bool {
         self.pending.contains(&mesh)
     }
@@ -116,6 +121,7 @@ where
         !self.pending.is_empty()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_eligible(&self, mesh: K) -> bool {
         self.refcounts.contains_key(&mesh)
     }

@@ -460,14 +460,14 @@ pub(crate) fn default_perspective_projection() -> PerspectiveProjection {
     }
 }
 
+pub(crate) type HorizontalFovCameraQuery<'w> = (&'w HorizontalFov, &'w mut Projection);
+pub(crate) type HorizontalFovGate = (
+    With<Camera3d>,
+    Or<(Changed<HorizontalFov>, Changed<Projection>)>,
+);
+
 pub(crate) fn apply_horizontal_fov(
-    mut cameras: Query<
-        (&HorizontalFov, &mut Projection),
-        (
-            With<Camera3d>,
-            Or<(Changed<HorizontalFov>, Changed<Projection>)>,
-        ),
-    >,
+    mut cameras: Query<HorizontalFovCameraQuery<'_>, HorizontalFovGate>,
 ) {
     for (horizontal, mut projection) in &mut cameras {
         let Projection::Perspective(perspective) = &*projection else {
@@ -540,6 +540,15 @@ fn entity_uses_quick_ao(
     false
 }
 
+/// `track_ao_mesh_eligibility` discovery row: everything the quick-AO
+/// ancestor walk needs from one mesh entity.
+pub(crate) type AoMeshDiscoveryRow<'w> = (
+    Entity,
+    &'w Mesh3d,
+    Option<&'w ChildOf>,
+    Option<&'w interaction::PlacementRoot>,
+);
+
 /// Maintains `AoEligibility` from mesh-entity lifecycle signals instead of
 /// a per-frame count: handle creation/swaps surface through
 /// `Changed<Mesh3d>` discovery, despawn/component-removal through
@@ -547,15 +556,7 @@ fn entity_uses_quick_ao(
 /// nothing.
 pub(crate) fn track_ao_mesh_eligibility(
     mut eligibility: ResMut<AoEligibility>,
-    discovered: Query<
-        (
-            Entity,
-            &Mesh3d,
-            Option<&ChildOf>,
-            Option<&interaction::PlacementRoot>,
-        ),
-        Changed<Mesh3d>,
-    >,
+    discovered: Query<AoMeshDiscoveryRow<'_>, Changed<Mesh3d>>,
     parents: Query<&ChildOf>,
     roots: Query<&interaction::PlacementRoot>,
     mut removed_meshes: RemovedComponents<Mesh3d>,
