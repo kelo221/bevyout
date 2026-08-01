@@ -666,8 +666,8 @@ impl ItemLedger {
 
     /// Atomically accepts one fire intent, consumes one loaded round, applies
     /// condition degradation, and records the deterministic jam draw. The
-    /// ledger and RNG are cloned until every validation succeeds, so a
-    /// rejected intent changes neither authority.
+    /// affected weapon and a candidate RNG state are staged until every
+    /// validation succeeds, so a rejected intent changes neither authority.
     pub fn fire_weapon_with_policy(
         &mut self,
         id: TransactionId,
@@ -684,35 +684,32 @@ impl ItemLedger {
             return Err(TransactionError::DuplicateTransaction(id));
         }
 
-        let mut candidate = self.clone();
         let mut candidate_rng = rng.clone();
         candidate_rng
             .validate()
             .map_err(|_| TransactionError::InvalidCombatRng)?;
-        let mut state = candidate
-            .holders
-            .get(&holder)
-            .cloned()
-            .ok_or(TransactionError::UnknownHolder(holder))?;
-        let weapon_index = state
-            .items
-            .iter()
-            .position(|item| item.id == weapon_id)
-            .ok_or(TransactionError::InsufficientItems)?;
-        if state.items[weapon_index].count != 1 {
-            return Err(TransactionError::MutableStack(weapon_id));
-        }
-        let current = &state.items[weapon_index];
-        if let Some(reason) = current.state.combat.jam {
-            return Err(TransactionError::Jammed(reason));
-        }
-        let condition_before = current.state.condition;
-        let magazine_before = current.state.combat.magazine;
-        let mut magazine = magazine_before;
-        ammo::consume_round(&mut magazine).map_err(|reason| match reason {
-            ammo::FireBlockReason::Empty => TransactionError::InsufficientItems,
-            ammo::FireBlockReason::InvalidMagazine => TransactionError::InvalidMagazine,
-        })?;
+        let (condition_before, magazine) = {
+            let state = self
+                .holders
+                .get(&holder)
+                .ok_or(TransactionError::UnknownHolder(holder))?;
+            let current = state
+                .find(weapon_id)
+                .ok_or(TransactionError::InsufficientItems)?;
+            if current.count != 1 {
+                return Err(TransactionError::MutableStack(weapon_id));
+            }
+            if let Some(reason) = current.state.combat.jam {
+                return Err(TransactionError::Jammed(reason));
+            }
+            let condition_before = current.state.condition;
+            let mut magazine = current.state.combat.magazine;
+            ammo::consume_round(&mut magazine).map_err(|reason| match reason {
+                ammo::FireBlockReason::Empty => TransactionError::InsufficientItems,
+                ammo::FireBlockReason::InvalidMagazine => TransactionError::InvalidMagazine,
+            })?;
+            (condition_before, magazine)
+        };
         let draw = candidate_rng
             .draw(CombatRngDomain::FireJam)
             .map_err(|_| TransactionError::InvalidCombatRng)?;
@@ -720,13 +717,24 @@ impl ItemLedger {
             .evaluate_fire(base_damage, condition_before, draw)
             .map_err(map_condition_error)?;
 
-        let weapon = &mut state.items[weapon_index];
-        weapon.state.combat.magazine = magazine;
-        if policy.max_condition().is_some() {
-            weapon.state.condition = decision.condition_after;
-        }
-        weapon.state.combat.jam = decision.jammed.then_some(JamReason::Fire);
-        state.revision = state.revision.saturating_add(1);
+        let (jam, loaded, holder_revision) = {
+            let state = self
+                .holders
+                .get_mut(&holder)
+                .expect("holder was validated before fire mutation");
+            let weapon = state
+                .find_mut(weapon_id)
+                .expect("weapon was validated before fire mutation");
+            weapon.state.combat.magazine = magazine;
+            if policy.max_condition().is_some() {
+                weapon.state.condition = decision.condition_after;
+            }
+            weapon.state.combat.jam = decision.jammed.then_some(JamReason::Fire);
+            let jam = weapon.state.combat.jam;
+            let loaded = weapon.state.combat.magazine.loaded;
+            state.revision = state.revision.saturating_add(1);
+            (jam, loaded, state.revision)
+        };
         let outcome = if decision.jammed {
             CombatTransactionOutcome::Jammed
         } else {
@@ -745,18 +753,15 @@ impl ItemLedger {
             },
             damage_multiplier_milli: Some(quantize_milli(decision.damage_multiplier)),
             damage_milli: Some(quantize_milli(decision.damage)),
-            jam: weapon.state.combat.jam,
+            jam,
             rng_draw: Some(draw),
-            loaded: magazine.loaded,
-            holder_revision: state.revision,
+            loaded,
+            holder_revision,
         };
-        state.items.sort_by_key(|item| item.id);
-        candidate.holders.insert(holder, state);
-        candidate.used_transaction_ids.insert(id);
-        candidate.next_transaction_id =
-            TransactionId(candidate.next_transaction_id.0.max(id.0.saturating_add(1)));
-        candidate.combat_finalized.insert(id, receipt.clone());
-        *self = candidate;
+        self.used_transaction_ids.insert(id);
+        self.next_transaction_id =
+            TransactionId(self.next_transaction_id.0.max(id.0.saturating_add(1)));
+        self.combat_finalized.insert(id, receipt.clone());
         *rng = candidate_rng;
         Ok(receipt)
     }
@@ -819,6 +824,13 @@ impl ItemLedger {
             weapon.state.combat.jam = jam_decision.jammed.then_some(JamReason::Reload);
             (weapon.state.combat.jam, weapon.state.combat.magazine.loaded)
         };
+        if jam_decision.jammed {
+            let state = candidate
+                .holders
+                .get_mut(&holder)
+                .expect("holder was validated before reload mutation");
+            state.revision = state.revision.saturating_add(1);
+        }
         let holder_revision = candidate
             .holders
             .get(&holder)

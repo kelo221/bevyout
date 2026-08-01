@@ -1,7 +1,7 @@
 //! Player-weapon inspection and MCP action controls (M5 wave 3).
 
-use bevyout_core::combat::{COMBAT_POLICY_REVISION, COMBAT_RNG_REVISION};
-use bevyout_core::item_transaction::HolderId;
+use bevyout_core::combat::{COMBAT_POLICY_REVISION, COMBAT_RNG_REVISION, CombatRngDomain};
+use bevyout_core::item_transaction::{CombatTransactionKind, CombatTransactionOutcome, HolderId};
 use bevyout_core::weapon::{ReloadDecision, WeaponAction};
 
 use super::*;
@@ -157,6 +157,7 @@ fn combat_state(
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     player_subject(invocation)?;
     let ammo = ammo_state(world, invocation)?.value;
+    let (weapon_instance_id, condition, max_condition, jam) = weapon_combat_state(world);
     Ok(ConsoleCommandResult::value(json!({
         "schema": "bevyout.m5.inspect",
         "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
@@ -176,10 +177,10 @@ fn combat_state(
         "policy_revision": COMBAT_POLICY_REVISION,
         "state": {
             "ammo": ammo["state"].clone(),
-            "weapon_instance_id": weapon_combat_state(world).0,
-            "condition": weapon_combat_state(world).1,
-            "max_condition": weapon_combat_state(world).2,
-            "jam": weapon_combat_state(world).3,
+            "weapon_instance_id": weapon_instance_id,
+            "condition": condition,
+            "max_condition": max_condition,
+            "jam": jam,
             "rng": weapon_rng_state(world),
             "last_decision": world
                 .get_resource::<PlayerWeaponRuntime>()
@@ -344,21 +345,46 @@ fn combat_receipt_json(
     json!({
         "id": receipt.id.0,
         "weapon_instance_id": receipt.weapon_id.0,
-        "kind": format!("{:?}", receipt.kind).to_ascii_lowercase(),
-        "outcome": format!("{:?}", receipt.outcome).to_ascii_lowercase(),
+        "kind": combat_transaction_kind_label(receipt.kind),
+        "outcome": combat_transaction_outcome_label(receipt.outcome),
         "condition_before": receipt.condition_before,
         "condition_after": receipt.condition_after,
         "damage_multiplier": receipt.damage_multiplier_milli.map(|value| value as f32 / 1000.0),
         "damage": receipt.damage_milli.map(|value| value as f32 / 1000.0),
         "jam": receipt.jam.map(|reason| reason.label()),
         "rng_draw": receipt.rng_draw.map(|draw| json!({
-            "domain": format!("{:?}", draw.domain).to_ascii_lowercase(),
+            "domain": combat_rng_domain_label(draw.domain),
             "index": draw.index,
             "value": draw.value,
         })),
         "loaded": receipt.loaded,
         "holder_revision": receipt.holder_revision,
     })
+}
+
+const fn combat_transaction_kind_label(kind: CombatTransactionKind) -> &'static str {
+    match kind {
+        CombatTransactionKind::Fire => "fire",
+        CombatTransactionKind::Reload => "reload",
+        CombatTransactionKind::ClearJam => "clearjam",
+    }
+}
+
+const fn combat_transaction_outcome_label(outcome: CombatTransactionOutcome) -> &'static str {
+    match outcome {
+        CombatTransactionOutcome::Fired => "fired",
+        CombatTransactionOutcome::Jammed => "jammed",
+        CombatTransactionOutcome::Reloaded => "reloaded",
+        CombatTransactionOutcome::Cleared => "cleared",
+        CombatTransactionOutcome::AlreadyClear => "alreadyclear",
+    }
+}
+
+const fn combat_rng_domain_label(domain: CombatRngDomain) -> &'static str {
+    match domain {
+        CombatRngDomain::FireJam => "firejam",
+        CombatRngDomain::ReloadJam => "reloadjam",
+    }
 }
 
 const fn action_label(action: WeaponAction) -> &'static str {

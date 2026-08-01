@@ -638,6 +638,8 @@ fn reload_can_jam_and_clear_preserves_instance_identity() {
     assert_eq!(jammed.jam, Some(JamReason::Reload));
     assert_eq!(jammed.weapon_id, ItemInstanceId(1));
     assert_eq!(rng.draw_index, 1);
+    assert_eq!(jammed.holder_revision, 2);
+    assert_eq!(ledger.holders()[&HolderId::Player].revision, 2);
 
     let cleared = ledger
         .clear_weapon_jam_with_id(TransactionId(23), HolderId::Player, jammed.weapon_id)
