@@ -74,7 +74,8 @@ table does not cover. Closest discipline is the Claude runtime: this
 orchestrating session plans, merges, and evaluates; executor subagents write
 all production and test code. Executors run as pi subagents on the session
 model (Kimi-K3). Portability note for reruns: Claude runtime — Sonnet for
-# 267/#268, Fable for #269/#270; Codex runtime — Sol High throughout.
+
+# 267/#268, Fable for #269/#270; Codex runtime — Sol High throughout
 
 ## Sequencing
 
@@ -98,4 +99,26 @@ model (Kimi-K3). Portability note for reruns: Claude runtime — Sonnet for
 
 ## Shipped amendments
 
-(none yet)
+### A1 — Manual uses the real `ao` setting key
+
+The plan text referred to `setrender ao_strength`; the console setting has
+always been `ao` (`unknown_setting` otherwise — verified live). Manual and
+issue language corrected; no code impact.
+
+### A2 — #269 applies revision passes with read+`get_mut`, never `iter_mut()`
+
+Implementation evidence: Bevy 0.19's dense `AssetsMutIterator` queues a
+`Modified` event for *every* slot, so an `iter_mut()` settings pass would
+have forced renderer-wide material re-uploads on every `setrender` tweak —
+exactly the cost class this wave exists to remove. Revision passes are
+read-only `iter()` with targeted `get_mut` writes for differing materials
+only. Recorded here so future clamp-like systems don't reintroduce the
+pattern.
+
+### A3 — #269 feeds its own `Modified` events back through engaged gates
+
+Clamps write materials, and those writes emit `AssetEvent::Modified`;
+consumed by the same incremental path they came from, an engaged gate
+re-clamps its own write harmlessly (idempotent). Covered by
+`modified_events_fed_back_into_an_engaged_gate_reclamp` instead of building
+event-source filtering that would drop legitimate external modifications.
