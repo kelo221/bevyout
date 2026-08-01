@@ -49,6 +49,12 @@ mod item_transaction {
 mod actor_state {
     pub use bevyout_core::actor_state::*;
 }
+// M6 wave 3's actor-residency policy is pure and dependency-light. Include
+// the production seam verbatim so the executable feature coverage exercises
+// the same canonical identity and handoff decisions as the viewer.
+#[path = "../src/viewer/actor_residency.rs"]
+#[allow(unused_imports)]
+mod actor_residency;
 #[allow(dead_code, unused_imports)]
 mod pause_menu {
     pub use bevyout_core::pause_menu::*;
@@ -1128,6 +1134,14 @@ struct BevyoutWorld {
     clamp_store: material_clamp_policy::ClampStore<u32>,
     clamp_materials: std::collections::HashMap<u32, material_clamp_policy::MaterialFactors>,
     clamp_full_pass_ran: Option<bool>,
+
+    // -- m6_wave3_policy.feature --
+    m6_actor_identity: Option<actor_residency::ActorIdentity>,
+    m6_actor_owners: Vec<actor_residency::ActorResidencyOwner>,
+    m6_actor_decision: Option<actor_residency::ActorResidencyDecision>,
+    m6_nav_residents: Vec<landmass_graph::ResidentNavCell>,
+    m6_nav_portals: Vec<landmass_graph::ResidentPortal>,
+    m6_nav_topology: landmass_graph::ResidentNavTopology,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -14899,4 +14913,349 @@ async fn then_m6_exterior_package_estimates(world: &mut BevyoutWorld, resident: 
         Some(resident)
     );
     assert_eq!(report["peak_package_bytes_estimate"].as_u64(), Some(peak));
+}
+
+// ---------------------------------------------------------------------
+// m6_wave3_policy.feature -- canonical actor residency and resident NAVM.
+// ---------------------------------------------------------------------
+
+#[given(
+    regex = r"^actor identity runtime 0x([0-9a-fA-F]+) prepared 0x([0-9a-fA-F]+) and saved state 0x([0-9a-fA-F]+)$"
+)]
+async fn given_m6_actor_identity(
+    world: &mut BevyoutWorld,
+    runtime: String,
+    prepared: String,
+    saved: String,
+) {
+    world.m6_actor_identity = Some(
+        actor_residency::resolve_actor_identity(
+            parse_hex(&runtime),
+            parse_hex(&prepared),
+            Some(parse_hex(&saved)),
+        )
+        .expect("actor identity must agree across runtime, prepared, and saved state"),
+    );
+}
+
+#[given("the actor has no resident owner")]
+async fn given_m6_actor_has_no_resident_owner(world: &mut BevyoutWorld) {
+    world.m6_actor_owners.clear();
+}
+
+fn m6_actor_owner(cell: &str, generation: u64) -> actor_residency::ActorResidencyOwner {
+    actor_residency::ActorResidencyOwner::new(parse_hex(cell), generation)
+        .expect("actor residency cell must be non-zero")
+}
+
+#[given(regex = r"^the actor is observed in cell 0x([0-9a-fA-F]+) generation (\d+)$")]
+async fn given_m6_actor_observed_in_cell(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    world.m6_actor_owners = vec![m6_actor_owner(&cell, generation)];
+}
+
+#[given(
+    regex = r"^the actor has resident owners in cell 0x([0-9a-fA-F]+) generation (\d+) and cell 0x([0-9a-fA-F]+) generation (\d+)$"
+)]
+async fn given_m6_actor_duplicate_resident_owners(
+    world: &mut BevyoutWorld,
+    first_cell: String,
+    first_generation: u64,
+    second_cell: String,
+    second_generation: u64,
+) {
+    world.m6_actor_owners = vec![
+        m6_actor_owner(&first_cell, first_generation),
+        m6_actor_owner(&second_cell, second_generation),
+    ];
+}
+
+fn m6_actor_identity(world: &BevyoutWorld) -> actor_residency::ActorIdentity {
+    world
+        .m6_actor_identity
+        .expect("actor identity must be configured first")
+}
+
+fn m6_decide_actor(world: &mut BevyoutWorld, request: actor_residency::ActorResidencyRequest) {
+    world.m6_actor_decision = Some(actor_residency::decide_actor_residency(
+        m6_actor_identity(world),
+        &world.m6_actor_owners,
+        request,
+    ));
+}
+
+#[when(regex = r"^actor residency bind is requested for cell 0x([0-9a-fA-F]+) generation (\d+)$")]
+async fn when_m6_actor_bind_requested(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    m6_decide_actor(
+        world,
+        actor_residency::ActorResidencyRequest::Bind {
+            destination: m6_actor_owner(&cell, generation),
+        },
+    );
+}
+
+#[when(regex = r"^actor residency retain is requested for cell 0x([0-9a-fA-F]+) generation (\d+)$")]
+async fn when_m6_actor_retain_requested(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    m6_decide_actor(
+        world,
+        actor_residency::ActorResidencyRequest::Retain {
+            owner: m6_actor_owner(&cell, generation),
+        },
+    );
+}
+
+#[when(
+    regex = r"^actor residency handoff is requested from cell 0x([0-9a-fA-F]+) generation (\d+) to cell 0x([0-9a-fA-F]+) generation (\d+)$"
+)]
+async fn when_m6_actor_handoff_requested(
+    world: &mut BevyoutWorld,
+    source_cell: String,
+    source_generation: u64,
+    destination_cell: String,
+    destination_generation: u64,
+) {
+    m6_decide_actor(
+        world,
+        actor_residency::ActorResidencyRequest::Handoff {
+            source: m6_actor_owner(&source_cell, source_generation),
+            destination: m6_actor_owner(&destination_cell, destination_generation),
+        },
+    );
+}
+
+#[when(
+    regex = r"^actor residency unload is requested from cell 0x([0-9a-fA-F]+) generation (\d+)$"
+)]
+async fn when_m6_actor_unload_requested(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    m6_decide_actor(
+        world,
+        actor_residency::ActorResidencyRequest::Unload {
+            source: m6_actor_owner(&cell, generation),
+        },
+    );
+}
+
+#[when(
+    regex = r"^actor residency restore is requested for cell 0x([0-9a-fA-F]+) generation (\d+)$"
+)]
+async fn when_m6_actor_restore_requested(world: &mut BevyoutWorld, cell: String, generation: u64) {
+    m6_decide_actor(
+        world,
+        actor_residency::ActorResidencyRequest::Restore {
+            destination: m6_actor_owner(&cell, generation),
+        },
+    );
+}
+
+#[when("the actor projection is cleared")]
+async fn when_m6_actor_projection_cleared(world: &mut BevyoutWorld) {
+    world.m6_actor_owners.clear();
+}
+
+fn m6_actor_decision(world: &BevyoutWorld) -> actor_residency::ActorResidencyDecision {
+    world
+        .m6_actor_decision
+        .expect("actor residency decision must be computed first")
+}
+
+#[then("actor residency accepts a Bind transition")]
+async fn then_m6_actor_accepts_bind(world: &mut BevyoutWorld) {
+    let actor_residency::ActorResidencyDecision::Apply(plan) = m6_actor_decision(world) else {
+        panic!("expected an accepted actor Bind decision");
+    };
+    assert!(matches!(
+        plan.transition(),
+        actor_residency::ActorResidencyTransition::Bind { .. }
+    ));
+}
+
+#[then("actor residency accepts a Handoff transition")]
+async fn then_m6_actor_accepts_handoff(world: &mut BevyoutWorld) {
+    let actor_residency::ActorResidencyDecision::Apply(plan) = m6_actor_decision(world) else {
+        panic!("expected an accepted actor Handoff decision");
+    };
+    assert!(matches!(
+        plan.transition(),
+        actor_residency::ActorResidencyTransition::Handoff { .. }
+    ));
+}
+
+#[then("actor residency accepts an Unload transition")]
+async fn then_m6_actor_accepts_unload(world: &mut BevyoutWorld) {
+    let actor_residency::ActorResidencyDecision::Apply(plan) = m6_actor_decision(world) else {
+        panic!("expected an accepted actor Unload decision");
+    };
+    assert!(matches!(
+        plan.transition(),
+        actor_residency::ActorResidencyTransition::Unload { .. }
+    ));
+}
+
+#[then("actor residency accepts a Restore transition")]
+async fn then_m6_actor_accepts_restore(world: &mut BevyoutWorld) {
+    let actor_residency::ActorResidencyDecision::Apply(plan) = m6_actor_decision(world) else {
+        panic!("expected an accepted actor Restore decision");
+    };
+    assert!(matches!(
+        plan.transition(),
+        actor_residency::ActorResidencyTransition::Restore { .. }
+    ));
+}
+
+#[then(regex = r"^the canonical actor holder is actor reference 0x([0-9a-fA-F]+)$")]
+async fn then_m6_canonical_actor_holder(world: &mut BevyoutWorld, reference: String) {
+    let actor_residency::ActorResidencyDecision::Apply(plan) = m6_actor_decision(world) else {
+        panic!("canonical actor holder requires an accepted residency decision");
+    };
+    let reference_form_id = parse_hex(&reference);
+    assert_eq!(
+        plan.actor().reference_form_id(),
+        reference_form_id,
+        "the residency plan must retain the prepared/runtime reference identity"
+    );
+    assert_eq!(plan.holder(), HolderId::Actor { reference_form_id });
+}
+
+#[then("actor residency rejects a StaleSource decision")]
+async fn then_m6_actor_rejects_stale(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        m6_actor_decision(world),
+        actor_residency::ActorResidencyDecision::Reject(
+            actor_residency::ActorResidencyRejection::StaleSource { .. }
+        )
+    ));
+}
+
+#[then("actor residency rejects a DuplicateOwner decision")]
+async fn then_m6_actor_rejects_duplicate(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        m6_actor_decision(world),
+        actor_residency::ActorResidencyDecision::Reject(
+            actor_residency::ActorResidencyRejection::DuplicateOwner { .. }
+        )
+    ));
+}
+
+fn m6_resident_meshes() -> Vec<landmass_graph::MeshInput> {
+    let mesh = landmass_graph::MeshInput {
+        form_id: 0x10,
+        vertices: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ],
+        polygons: vec![
+            landmass_graph::PolygonInput {
+                index: 0,
+                vertex_indices: [0, 1, 2],
+                is_water: false,
+                is_preferred_pathing: false,
+            },
+            landmass_graph::PolygonInput {
+                index: 1,
+                vertex_indices: [1, 3, 2],
+                is_water: false,
+                is_preferred_pathing: false,
+            },
+        ],
+        doors: Vec::new(),
+        derived_doors: Vec::new(),
+    };
+    let mut second = mesh.clone();
+    second.form_id = 0x20;
+    vec![mesh, second]
+}
+
+fn m6_resident_key(cell_form_id: &str, generation: u64) -> landmass_graph::ResidentNavCellKey {
+    landmass_graph::ResidentNavCellKey {
+        cell_form_id: parse_hex(cell_form_id),
+        generation,
+    }
+}
+
+fn m6_set_resident_nav_state(
+    world: &mut BevyoutWorld,
+    cell_form_id: String,
+    generation: u64,
+    state: &str,
+) {
+    let key = m6_resident_key(&cell_form_id, generation);
+    let state = match state {
+        "navigation-ready" => landmass_graph::ResidentNavState::Valid {
+            navigation_ready: true,
+        },
+        "Loading" => landmass_graph::ResidentNavState::Loading,
+        "Evicting" => landmass_graph::ResidentNavState::Evicting,
+        other => panic!("unknown resident NAVM state {other:?}"),
+    };
+    // The fixture models the lifecycle owner’s current resident set: a
+    // reload replaces the old generation for the same cell FormID instead of
+    // leaving both generations live in the observation.
+    world
+        .m6_nav_residents
+        .retain(|resident| resident.key.cell_form_id != key.cell_form_id);
+    world
+        .m6_nav_residents
+        .push(landmass_graph::ResidentNavCell { key, state });
+}
+
+#[given(
+    regex = r"^resident NAVM side 0x([0-9a-fA-F]+) generation (\d+) is (navigation-ready|Loading|Evicting)$"
+)]
+async fn given_m6_resident_nav_state(
+    world: &mut BevyoutWorld,
+    cell_form_id: String,
+    generation: u64,
+    state: String,
+) {
+    m6_set_resident_nav_state(world, cell_form_id, generation, &state);
+}
+
+#[given(
+    regex = r"^a resident NAVM portal joins side 0x([0-9a-fA-F]+) generation (\d+) to side 0x([0-9a-fA-F]+) generation (\d+)$"
+)]
+async fn given_m6_resident_nav_portal(
+    world: &mut BevyoutWorld,
+    side_a_cell: String,
+    side_a_generation: u64,
+    side_b_cell: String,
+    side_b_generation: u64,
+) {
+    world.m6_nav_portals.push(landmass_graph::ResidentPortal {
+        side_a: m6_resident_key(&side_a_cell, side_a_generation),
+        side_b: m6_resident_key(&side_b_cell, side_b_generation),
+        merge: landmass_graph::MergeInput {
+            mesh_a_form_id: 0x10,
+            triangle_a: 0,
+            mesh_b_form_id: 0x20,
+            triangle_b: 1,
+            interval_a: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            interval_b: [[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        },
+    });
+}
+
+#[when("the resident NAVM topology is rebuilt")]
+async fn when_m6_resident_nav_topology_rebuilt(world: &mut BevyoutWorld) {
+    let meshes = m6_resident_meshes();
+    world
+        .m6_nav_topology
+        .rebuild(&world.m6_nav_residents, &meshes, &world.m6_nav_portals);
+}
+
+#[then(regex = r"^resident NAVM has (\d+) ready cells? and (\d+) cross-cell links?$")]
+async fn then_m6_resident_nav_topology_counts(
+    world: &mut BevyoutWorld,
+    resident_count: usize,
+    link_count: usize,
+) {
+    let archipelago = world.m6_nav_topology.archipelago.as_ref();
+    assert_eq!(
+        archipelago.map_or(0, |archipelago| archipelago.resident_cells.len()),
+        resident_count
+    );
+    assert_eq!(
+        archipelago.map_or(0, |archipelago| archipelago.merge_links.len()),
+        link_count
+    );
 }
