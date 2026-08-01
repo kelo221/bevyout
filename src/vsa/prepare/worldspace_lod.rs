@@ -40,8 +40,9 @@ pub(crate) fn prepare_worldspace_lod(
         output.push(message);
         return Ok(Vec::new());
     }
+    let source_count = sources.len();
 
-    let mut descriptors = Vec::with_capacity(sources.len());
+    let mut descriptors = Vec::with_capacity(source_count);
     let mut jobs = Vec::new();
     let mut job_descriptors = Vec::new();
     let mut reused = 0usize;
@@ -147,15 +148,14 @@ pub(crate) fn prepare_worldspace_lod(
             asset.asset_path.clone(),
         )
     });
-    let summary = format!(
-        "worldspace LOD {} ({:08x}): sources={} reused={} converted={} failed={} assets={}",
+    let summary = worldspace_lod_summary(
         index.editor_id.as_deref().unwrap_or("unnamed"),
         index.worldspace_form_id,
-        descriptors.len() + failed,
+        source_count,
         reused,
         converted,
         failed,
-        descriptors.len()
+        descriptors.len(),
     );
     output.push(summary.clone());
     diagnostics.push(Diagnostic {
@@ -163,6 +163,20 @@ pub(crate) fn prepare_worldspace_lod(
         message: summary,
     });
     Ok(descriptors)
+}
+
+fn worldspace_lod_summary(
+    name: &str,
+    form_id: u32,
+    sources: usize,
+    reused: usize,
+    converted: usize,
+    failed: usize,
+    assets: usize,
+) -> String {
+    format!(
+        "worldspace LOD {name} ({form_id:08x}): sources={sources} reused={reused} converted={converted} failed={failed} assets={assets}"
+    )
 }
 
 fn lod_sources(

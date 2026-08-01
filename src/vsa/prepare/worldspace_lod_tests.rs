@@ -1,4 +1,4 @@
-use super::parse_lod_source;
+use super::{parse_lod_source, worldspace_lod_summary};
 use bevyout_core::manifest::exterior::GridCoordinate;
 
 #[test]
@@ -36,5 +36,13 @@ fn rejects_non_lod_or_unsupported_level_names() {
             prefix,
         )
         .is_none()
+    );
+}
+
+#[test]
+fn summary_counts_every_discovered_source_when_one_is_missing() {
+    assert_eq!(
+        worldspace_lod_summary("Wasteland", 0x3c, 3, 1, 0, 1, 1),
+        "worldspace LOD Wasteland (0000003c): sources=3 reused=1 converted=0 failed=1 assets=1"
     );
 }

@@ -5,16 +5,23 @@ use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use bevyout_core::manifest::exterior::{EXTERIOR_CELL_PACKAGE_REVISION, ExteriorCellPackage};
 use std::fs;
+use std::path::Path;
 
 use super::lifecycle::ExteriorStreamState;
 use super::spawn_package;
 
 #[derive(Component)]
 pub(crate) struct ExteriorPackageTask {
-    pub(crate) form_id: u32,
-    pub(crate) grid: bevyout_core::manifest::exterior::GridCoordinate,
-    pub(crate) generation: u64,
-    pub(crate) task: Task<Result<ExteriorCellPackage, String>>,
+    form_id: u32,
+    grid: bevyout_core::manifest::exterior::GridCoordinate,
+    generation: u64,
+    task: Task<Result<LoadedExteriorPackage, String>>,
+}
+
+#[derive(Debug)]
+struct LoadedExteriorPackage {
+    package: ExteriorCellPackage,
+    serialized_bytes: u64,
 }
 
 pub(crate) fn request(
@@ -41,7 +48,7 @@ pub(crate) fn request(
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let bytes =
             fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-        ron::de::from_bytes(&bytes).map_err(|error| format!("parsing {}: {error}", path.display()))
+        decode_package(&path, &bytes)
     });
     let task_entity = commands
         .spawn(ExteriorPackageTask {
@@ -91,7 +98,9 @@ pub(crate) fn poll(
             continue;
         }
         match result {
-            Ok(package) if package.revision == EXTERIOR_CELL_PACKAGE_REVISION => {
+            Ok(loaded) if loaded.package.revision == EXTERIOR_CELL_PACKAGE_REVISION => {
+                let package = loaded.package;
+                let estimated_bytes = loaded.serialized_bytes;
                 let root = spawn_package(
                     &mut commands,
                     &asset_server,
@@ -99,7 +108,6 @@ pub(crate) fn poll(
                     &mut materials,
                     &package,
                 );
-                let estimated_bytes = estimate_bytes(&package);
                 {
                     cell.root = Some(root);
                     // Rendering is spawned now, but the package is not
@@ -121,7 +129,7 @@ pub(crate) fn poll(
                     );
                 }
             }
-            Ok(package) => {
+            Ok(loaded) => {
                 cell.state.lifecycle =
                     bevyout_core::manifest::exterior::ExteriorCellLifecycle::Failed;
                 cell.state.failed_attempts = cell.state.failed_attempts.saturating_add(1);
@@ -129,7 +137,7 @@ pub(crate) fn poll(
                 state.failures += 1;
                 warn!(
                     "exterior package failed {:08x}: stale revision {}, expected {}",
-                    pending.form_id, package.revision, EXTERIOR_CELL_PACKAGE_REVISION
+                    pending.form_id, loaded.package.revision, EXTERIOR_CELL_PACKAGE_REVISION
                 );
             }
             Err(error) => {
@@ -144,6 +152,15 @@ pub(crate) fn poll(
     }
 }
 
-fn estimate_bytes(package: &ExteriorCellPackage) -> u64 {
-    u64::try_from(ron::ser::to_string(package).map_or(0, |text| text.len())).unwrap_or(u64::MAX)
+fn decode_package(path: &Path, bytes: &[u8]) -> Result<LoadedExteriorPackage, String> {
+    let package = ron::de::from_bytes(bytes)
+        .map_err(|error| format!("parsing {}: {error}", path.display()))?;
+    Ok(LoadedExteriorPackage {
+        package,
+        serialized_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    })
 }
+
+#[cfg(test)]
+#[path = "loading_tests.rs"]
+mod tests;
