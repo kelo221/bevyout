@@ -18,7 +18,7 @@ For M5 combat, see
 individual wave plans remain the executable source of truth.
 
 | Wave | Requested | Planned | Landed |
-|------|-----------|---------|--------|
+| ------ | ----------- | --------- | -------- |
 | M1 runtime foundation | (predates this convention) | [M1_PLAN.md](M1_PLAN.md) | PRs #40, #42, #43, #44 |
 | Console + agent bridge | (predates this convention) | [CONSOLE_PLAN.md](CONSOLE_PLAN.md) | PR #42 |
 | M2 wave 1 — import (cell map, batch selectors) | (predates this convention) | [M2_PLAN.md](M2_PLAN.md) | PR #50 (#45, #46) |
@@ -58,6 +58,7 @@ individual wave plans remain the executable source of truth.
 | M5 wave 1 — functional 10mm pistol | [M5_WAVE1_PROMPT.md](M5_WAVE1_PROMPT.md) | [M5_WAVE1_PLAN.md](M5_WAVE1_PLAN.md) — see "Shipped amendments" (A1) | PR #239 (#235–#238); manual script [M5_WAVE1_MANUAL.md](M5_WAVE1_MANUAL.md) |
 | M5 wave 2 — ammunition, loadout, and save v5 | [M5_WAVE2_PROMPT.md](M5_WAVE2_PROMPT.md) | [M5_WAVE2_PLAN.md](M5_WAVE2_PLAN.md) — governed by the [M5 combat roadmap](M5_COMBAT_ARCHITECTURE_ROADMAP.md) | PR #248 (#244–#247); manual script [M5_WAVE2_MANUAL.md](M5_WAVE2_MANUAL.md) |
 | M6 wave 1 — native exterior decision, contracts, packages, first streaming lifecycle | [M6_WAVE1_PROMPT.md](M6_WAVE1_PROMPT.md) | [M6_WAVE1_PLAN.md](M6_WAVE1_PLAN.md) — see "Shipped amendments" | in progress (#13); manual script [M6_WAVE1_MANUAL.md](M6_WAVE1_MANUAL.md) |
+| PERF wave 1 — verified idle-frame quick wins: zero-write shadow path, change-driven HUDs, event-driven AO/glow, one material-clamp owner | [PERF_WAVE1_PROMPT.md](PERF_WAVE1_PROMPT.md) | [PERF_WAVE1_PLAN.md](PERF_WAVE1_PLAN.md) | in progress (#267, #268, #269, #270; standalone, no epic) |
 | M7 wave 1 — shared record stream and script inventory | [M7_WAVE1_PROMPT.md](M7_WAVE1_PROMPT.md) | [M7_WAVE1_PLAN.md](M7_WAVE1_PLAN.md) — governed by the [M7 scripting roadmap](M7_SCRIPTING_ARCHITECTURE_ROADMAP.md) | Planned (#252–#255; gate #89, epic #15) |
 | M4 autonomous-actors — on-load auto-bind + patrol + animation, ECS roster, native clips | [M4_AUTONOMOUS_ACTORS_PROMPT.md](M4_AUTONOMOUS_ACTORS_PROMPT.md) | [M4_AUTONOMOUS_ACTORS_PLAN.md](M4_AUTONOMOUS_ACTORS_PLAN.md) — see "Shipped amendments" | PR pending (#215, #218, #224, #225; stacked on #213); follow-ups #226 (creature clips), #227 (turn oscillation); manual script [M4_AUTONOMOUS_ACTORS_MANUAL.md](M4_AUTONOMOUS_ACTORS_MANUAL.md) |
 | M5 gate-support — ImageSpace/IMAD screen feedback + M4A actor gate evidence | [M5_SCREENFX_M4A_PROMPT.md](M5_SCREENFX_M4A_PROMPT.md) | [M5_SCREENFX_M4A_PLAN.md](M5_SCREENFX_M4A_PLAN.md) | In progress (#96, #86); manual script [M5_SCREENFX_M4A_MANUAL.md](M5_SCREENFX_M4A_MANUAL.md) |
