@@ -563,6 +563,59 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
     assert!(!kcc.collision_blocked);
 }
 
+/// A reached animation link remains attached while the KCC crossing is in
+/// flight. The link system runs before `merge_traversal_system`, so calling
+/// it again must leave the elapsed traversal untouched instead of restarting
+/// the short portal every fixed tick.
+#[test]
+fn drive_door_link_does_not_restart_an_active_merge_traversal() {
+    let mut world = harness_world();
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 7 });
+
+    let start = Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0);
+    let end = Vec3::new(0.4, AGENT_HEIGHT / 2.0, 0.0);
+    let agent = world
+        .spawn((
+            AgentRuntime {
+                active_link: Some(LinkKind::Merge { kind: 7 }),
+                ..default()
+            },
+            Transform::from_translation(start),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: start,
+                end_point: end,
+            },
+            MergeTraversal {
+                target: end,
+                reached_distance: merge_traversal_reached_distance(0.4),
+                elapsed: 0.25,
+                timeout: merge_traversal_timeout(0.4),
+                link_kind: 7,
+            },
+            UsingAnimationLink,
+        ))
+        .id();
+
+    drive_door_link_for_agent(&mut world, agent);
+
+    let traversal = world
+        .get::<MergeTraversal>(agent)
+        .expect("an active merge traversal must remain in flight");
+    assert_eq!(traversal.elapsed, 0.25);
+    assert_eq!(traversal.target, end);
+    assert_eq!(
+        world.get::<AgentRuntime>(agent).unwrap().active_link,
+        Some(LinkKind::Merge { kind: 7 })
+    );
+}
+
 /// Issue #154 feature 4 / issue #162: a merge-portal crossing whose far
 /// side is walled off must fail visibly through the existing
 /// stuck/blocked reporting (`kcc.stuck`/`kcc.collision_blocked`, the

@@ -1189,6 +1189,29 @@ polish from the Wave 7/Wave 9 gameplay route gate while preserving a measured
 experimentation path for later hardware/visual review. The separate
 `M6_WAVE8_MANUAL.md` records the opt-in check.
 
+### M6 — short cross-cell merge handoff correction
+
+The focused c49 navigation probe confirmed that the Super-Duper Mart seam link
+was installed, present in the agent corridor, and selected as the next path
+step. The runtime failure was therefore in the handoff lifecycle: the far
+portal endpoint was close enough to the capsule that the fixed `0.5 m` merge
+arrival tolerance completed the crossing on the source side. Capturing a
+per-crossing tolerance capped at half the initial distance guarantees a real
+KCC step before completion. Acceptance then exposed a second lifecycle edge:
+`ReachedAnimationLink3d` remains present during the sweep, while
+`door_link_system` runs before `merge_traversal_system`; the former was
+restarting the traversal and resetting its timeout every fixed tick. The
+handoff now leaves an existing `MergeTraversal` untouched.
+
+The regression covers both the clear and collision-blocked traversal paths,
+the active-traversal re-entry guard, and the full repository tests/clippy gate.
+A live physics-enabled c49 bridge run followed the same
+`(180,176.35,275.30)` to `(235.92,158.53,243.29)` route through the seam and
+ended `status=reached`, `blocked=false`, and `stuck=false`. This closes the
+specific short-portal runtime defect; the Wave 7/Wave 9 ordinary-input,
+interior, water, actor, save/reload, loop, and agreed-budget matrix remains
+separate acceptance work.
+
 [1]: https://github.com/kelo221/bevyout/issues/13 "[Epic] M6 — Exterior conversion, streaming, and dynamic lighting · Issue #13 · kelo221/bevyout · GitHub"
 [2]: https://github.com/kelo221/bevyout/issues/10 "[Gate] M4 — Actors navigate, schedule, and persist · Issue #10 · kelo221/bevyout · GitHub"
 [3]: https://github.com/kelo221/bevyout/blob/master/AGENTS.md "bevyout/AGENTS.md at master · kelo221/bevyout · GitHub"

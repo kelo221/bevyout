@@ -2711,8 +2711,8 @@ fn validate_merge_link_collision_with_support_probe(
     let end_origin = end + to_capsule_center;
     let mid_origin = start_origin.lerp(end_origin, 0.5);
 
-    if probe_midpoint {
-        if player::try_step_down(
+    if probe_midpoint
+        && player::try_step_down(
             world,
             player::to_box_vec3(mid_origin),
             mover,
@@ -2721,9 +2721,8 @@ fn validate_merge_link_collision_with_support_probe(
             support_filter,
         )
         .is_none()
-        {
-            return Err(MergeLinkRejection::NoGroundSupport);
-        }
+    {
+        return Err(MergeLinkRejection::NoGroundSupport);
     }
     if player::try_step_down(
         world,
@@ -5437,6 +5436,15 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
             };
             match link_kind {
                 LinkKind::Merge { kind } => {
+                    // `ReachedAnimationLink3d` remains present while the
+                    // crossing system physically sweeps the capsule. The
+                    // link system runs before `merge_traversal_system` in
+                    // `FixedUpdate`, so without this guard every tick would
+                    // replace the in-flight traversal and reset its elapsed
+                    // timeout before it could ever reach the far endpoint.
+                    if world.get::<MergeTraversal>(agent_entity).is_some() {
+                        return;
+                    }
                     // A merge seam has no door to wait on (issue #154
                     // feature 4): sweep the agent to the far portal point
                     // with the physics KCC (`merge_traversal_system`)
