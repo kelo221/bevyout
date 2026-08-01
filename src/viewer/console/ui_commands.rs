@@ -73,7 +73,8 @@ pub(super) fn toggle_diagnostic_ui(
 
 /// Issue #151: toggles `diagnostics::DebugInfoState`, mirroring `tdt`'s
 /// `toggle_diagnostic_ui` shape exactly (no world side effect beyond the
-/// flag; `diagnostics::update_debug_info_hud` reads it every frame).
+/// flag; `diagnostics::update_debug_info_hud` change-detects it, issue
+/// #268).
 pub(super) fn toggle_debug_info(
     world: &mut World,
     invocation: &ConsoleInvocation,
