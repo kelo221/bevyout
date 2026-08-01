@@ -4,6 +4,8 @@ use bevy::pbr::{BakedPointLightShadow, BakedPointShadowGpuStatus, PointLightShad
 use bevy::prelude::*;
 use serde_json::json;
 
+use super::realtime_shadow_policy::disabled_shadow_writes_needed;
+
 /// A startup-cell light eligible for the single bounded realtime shadow pass.
 /// The stable reference id keeps selection deterministic when authored lights
 /// have equal strength and avoids depending on ECS spawn order.
@@ -88,13 +90,41 @@ pub(crate) fn apply_realtime_shadow_light(
     >,
 ) {
     if !settings.enabled {
-        selected.0 = None;
+        // Disabled is the default configuration, so this fast path carries
+        // the idle-frame CPU budget: a steady disabled frame performs zero
+        // mutable writes -- it must not fire `PointLight` change detection
+        // (needless render-world extraction on every candidate) and must
+        // not touch the selection resource.
+        //
+        // Skipping is sound because construction and mutation authority are
+        // closed: every spawn site adds candidates with
+        // `shadow_maps_enabled: false` (see `scene::spawn_prepared_scene`)
+        // and this system is the only writer afterwards, so "settings
+        // unchanged and nothing selected" implies every candidate flag is
+        // already false. A future spawn path shipping shadow-enabled
+        // candidates would have to add an `Added<RealtimeShadowCandidate>`
+        // trigger here. Any settings change or engaged-phase remnant pays
+        // exactly one conditional cleanup pass instead.
+        if !disabled_shadow_writes_needed(settings.is_changed(), selected.0.is_some()) {
+            return;
+        }
+        if selected.0.is_some() {
+            selected.0 = None;
+        }
         for (_, _, _, mut light) in &mut lights {
-            light.shadow_maps_enabled = false;
+            if light.shadow_maps_enabled {
+                light.shadow_maps_enabled = false;
+            }
         }
         return;
     }
 
+    // The enabled path deliberately rescans candidates every frame: the
+    // camera pose, candidate transforms, and authored intensity may all
+    // change while the opt-in is engaged, and the single realtime pass must
+    // follow the strongest camera-relevant startup light (the contractual
+    // behavior documented above). All writes stay conditional, so a steady
+    // engaged frame performs zero writes as well.
     let strongest = strongest_camera_candidate(
         camera.translation(),
         lights.iter().map(|(entity, candidate, transform, light)| {

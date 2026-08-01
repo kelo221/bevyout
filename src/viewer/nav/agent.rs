@@ -266,6 +266,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use bevy::ecs::system::SystemParam;
 use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy_boxddd::boxddd;
@@ -4217,65 +4218,111 @@ fn resolve_status(
 // true rather than adding a setting for it.
 const HUD_AGENT_LINE_LIMIT: usize = 8;
 
-/// Issue #151: one deterministic line per live nav agent for the console
-/// debug-info HUD, reusing the exact same status/grounded/stuck/blocked
-/// fields `tna status` (`agent_status` above) reports.
-///
-/// Issue #241: driven off the agent component set rather than the console
-/// roster, so an autonomously-bound actor is visible here too -- which also
-/// means it needs `&mut World` (a query, not a resource read) and a
-/// [`HUD_AGENT_LINE_LIMIT`] cap, because a real cell can hold dozens of them.
-pub(crate) fn hud_agent_status_lines(world: &mut World) -> Vec<String> {
-    if world.get_resource::<TestNavAgentState>().is_none() {
-        return Vec::new();
-    }
-    let mut agents = all_agent_entities(world);
-    // Console-addressed agents first, in index order (what the operator is
-    // usually debugging, and the order this HUD block has always printed);
-    // every other bound actor follows in entity order. The cap therefore
-    // truncates the anonymous tail, not the agent someone just spawned.
-    agents.sort_by_key(|&entity| {
-        (
-            world
-                .resource::<TestNavAgentState>()
-                .index_of(entity)
-                .unwrap_or(usize::MAX),
-            entity.index_u32(),
-        )
-    });
-    let hidden = agents.len().saturating_sub(HUD_AGENT_LINE_LIMIT);
-    let mut lines: Vec<String> = agents
+/// One agent's contribution to the debug-info HUD block, reduced to the
+/// sort key the deterministic ordering policy needs plus the already
+/// formatted line. Pure data so the ordering/cap decision is unit-testable
+/// without queries (issue #268).
+struct HudAgentRow {
+    /// Console roster index ([`TestNavAgentState::index_of`]); `None` for an
+    /// autonomously-bound actor the console never spawned.
+    roster_index: Option<usize>,
+    /// `Entity::index_u32`, the deterministic spawn-ish tiebreaker (NOT
+    /// `Entity`'s own `Ord` -- see [`all_agent_entities`]).
+    entity_index: u32,
+    line: String,
+}
+
+/// Deterministic ordering and [`HUD_AGENT_LINE_LIMIT`] cap for the HUD block:
+/// console-addressed agents first in roster order (what the operator is
+/// usually debugging), every other bound actor after them in entity order.
+/// The cap therefore truncates the anonymous tail, not the agent someone
+/// just spawned.
+fn hud_agent_lines_from_rows(mut rows: Vec<HudAgentRow>) -> Vec<String> {
+    rows.sort_by_key(|row| (row.roster_index.unwrap_or(usize::MAX), row.entity_index));
+    let hidden = rows.len().saturating_sub(HUD_AGENT_LINE_LIMIT);
+    let mut lines: Vec<String> = rows
         .into_iter()
         .take(HUD_AGENT_LINE_LIMIT)
-        .map(|entity| {
-            let id = agent_log_id(world, entity);
-            let position = world
-                .get::<GlobalTransform>(entity)
-                .map(|transform| transform.translation())
-                .unwrap_or_default();
-            let landmass_state = world.get::<AgentState>(entity).copied().unwrap_or_default();
-            let door_link_state = world
-                .get::<AgentRuntime>(entity)
-                .map(|runtime| runtime.door_link)
-                .unwrap_or_default();
-            let (grounded, stuck, collision_blocked) = world
-                .get::<AgentKcc>(entity)
-                .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
-                .unwrap_or_default();
-            let status = resolve_status(landmass_state, door_link_state);
-            format!(
-                "nav agent {id} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
-                status.as_str(),
-                position.x,
-                position.y,
-                position.z,
-            )
-        })
+        .map(|row| row.line)
         .collect();
     if hidden > 0 {
         lines.push(format!("nav agent +{hidden} more"));
     }
     lines
+}
+
+/// The component set the debug-info HUD needs per live agent. Every slot
+/// falls back to `Default` when absent, exactly like the pre-#268 world
+/// walk's `unwrap_or_default()` reads, so the rendered lines are unchanged
+/// for partially-populated fixtures.
+type HudAgentQueryData = (
+    Entity,
+    Option<&'static GlobalTransform>,
+    Option<&'static AgentState>,
+    Option<&'static AgentRuntime>,
+    Option<&'static AgentKcc>,
+    Option<&'static ActorRuntime>,
+);
+
+/// Issue #151: one deterministic line per live nav agent for the console
+/// debug-info HUD, reusing the exact same status/grounded/stuck/blocked
+/// fields `tna status` (`agent_status` above) reports.
+///
+/// Issue #241: driven off the agent component set rather than the console
+/// roster, so an autonomously-bound actor is visible here too, with a
+/// [`HUD_AGENT_LINE_LIMIT`] cap because a real cell can hold dozens of them.
+///
+/// Issue #268: exposed as a read-only [`SystemParam`] projection instead of
+/// an exclusive `&mut World` walk, so `diagnostics::update_debug_info_hud`
+/// can stay an ordinary system that composes these lines only when its
+/// refresh gate fires.
+#[derive(SystemParam)]
+pub(crate) struct HudAgentProjection<'w, 's> {
+    state: Option<Res<'w, TestNavAgentState>>,
+    agents: Query<'w, 's, HudAgentQueryData, With<TestNavAgentMarker>>,
+}
+
+impl HudAgentProjection<'_, '_> {
+    /// The HUD block's agent lines, or empty when no console roster resource
+    /// exists at all (nothing agent-shaped has ever run in this session).
+    pub(crate) fn status_lines(&self) -> Vec<String> {
+        let Some(state) = self.state.as_deref() else {
+            return Vec::new();
+        };
+        let rows: Vec<HudAgentRow> = self
+            .agents
+            .iter()
+            .map(|(entity, transform, landmass_state, runtime, kcc, actor)| {
+                let roster_index = state.index_of(entity);
+                let id = format_agent_id(
+                    roster_index,
+                    actor.map(|actor| actor.reference_form_id),
+                    entity,
+                );
+                let position = transform
+                    .map(|transform| transform.translation())
+                    .unwrap_or_default();
+                let landmass_state = landmass_state.copied().unwrap_or_default();
+                let door_link_state = runtime.map(|runtime| runtime.door_link).unwrap_or_default();
+                let (grounded, stuck, collision_blocked) = kcc
+                    .map(|kcc| (kcc.grounded, kcc.stuck, kcc.collision_blocked))
+                    .unwrap_or_default();
+                let status = resolve_status(landmass_state, door_link_state);
+                HudAgentRow {
+                    roster_index,
+                    entity_index: entity.index_u32(),
+                    line: format!(
+                        "nav agent {id} status={} position=({:.2},{:.2},{:.2}) grounded={grounded} stuck={stuck} blocked={collision_blocked}",
+                        status.as_str(),
+                        position.x,
+                        position.y,
+                        position.z,
+                    ),
+                }
+            })
+            .collect();
+        hud_agent_lines_from_rows(rows)
+    }
 }
 
 /// The `link=` suffix for `tna status` (issue #113 feature 5): the active

@@ -17,9 +17,7 @@ fn test_app() -> App {
         .insert_resource(VolumetricFogMultiplier(1.0))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(0.0))
-        .insert_resource(MetallicGate::default())
-        .insert_resource(super::super::controls::DielectricSpecularGate::default())
-        .insert_resource(super::super::controls::RoughnessScale::default())
+        .insert_resource(MaterialClampSettings::default())
         .insert_resource(super::super::controls::ReflectionProbeSettings::default())
         .insert_resource(ImageSpaceBloomOverrides::default())
         .init_resource::<super::super::screen_fx::ScreenFxRuntime>()
@@ -448,15 +446,23 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert!(exec(&mut app, "setrender worldspace_lod 0").ok);
     assert!(exec(&mut app, "setrender metallic 0").ok);
-    assert!(!app.world().resource::<MetallicGate>().enabled());
+    assert!(
+        !app.world()
+            .resource::<MaterialClampSettings>()
+            .metallic_enabled()
+    );
     assert_eq!(exec(&mut app, "getrender metallic").value["value"], 0);
     assert!(exec(&mut app, "setrender metallic 1").ok);
-    assert!(app.world().resource::<MetallicGate>().enabled());
+    assert!(
+        app.world()
+            .resource::<MaterialClampSettings>()
+            .metallic_enabled()
+    );
     assert!(exec(&mut app, "setrender dielectric_specular 0").ok);
     assert!(
         !app.world()
-            .resource::<super::super::controls::DielectricSpecularGate>()
-            .enabled()
+            .resource::<super::super::controls::MaterialClampSettings>()
+            .dielectric_enabled()
     );
     assert_eq!(
         exec(&mut app, "getrender dielectric_specular").value["value"],
@@ -465,14 +471,14 @@ fn render_settings_validate_boundaries_before_mutation() {
     assert!(exec(&mut app, "setrender dielectric_specular 1").ok);
     assert!(
         app.world()
-            .resource::<super::super::controls::DielectricSpecularGate>()
-            .enabled()
+            .resource::<super::super::controls::MaterialClampSettings>()
+            .dielectric_enabled()
     );
     assert!(exec(&mut app, "setrender roughness_scale 1.75").ok);
     assert_eq!(
         app.world()
-            .resource::<super::super::controls::RoughnessScale>()
-            .scale(),
+            .resource::<super::super::controls::MaterialClampSettings>()
+            .roughness_scale(),
         1.75
     );
     assert_eq!(
