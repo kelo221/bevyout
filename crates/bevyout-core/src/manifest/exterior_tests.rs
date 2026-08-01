@@ -134,7 +134,7 @@ fn environment_prefers_interior_image_space_and_wraps_time() {
 }
 
 #[test]
-fn water_contact_is_bounded_by_authored_swim_depth() {
+fn deeper_water_never_turns_a_submerged_player_dry() {
     let water = PreparedWater {
         form_id: None,
         height: 2.0,
@@ -143,7 +143,7 @@ fn water_contact_is_bounded_by_authored_swim_depth() {
     };
     assert_eq!(resolve_water_contact(Some(&water), 1.5).unwrap().depth, 0.5);
     assert!(resolve_water_contact(Some(&water), 1.5).unwrap().submerged);
-    assert!(!resolve_water_contact(Some(&water), 0.5).unwrap().submerged);
+    assert!(resolve_water_contact(Some(&water), 0.5).unwrap().submerged);
 }
 
 #[test]

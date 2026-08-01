@@ -99,7 +99,7 @@ impl Default for CameraModeState {
     }
 }
 
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Default)]
 pub(crate) struct FpsPlayer {
     yaw: f32,
     pitch: f32,

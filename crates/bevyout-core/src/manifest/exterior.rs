@@ -291,7 +291,10 @@ pub fn resolve_water_contact(
     }
     let depth = (water.height - player_height).max(0.0);
     Some(ExteriorWaterContact {
-        submerged: depth > 0.0 && depth <= water.swim_depth.max(0.0),
+        // `swim_depth` is descriptive prepared metadata, not a maximum
+        // contact depth. A player cannot become dry by moving farther below
+        // the same water surface.
+        submerged: depth > 0.0,
         depth,
         surface_height: water.height,
     })

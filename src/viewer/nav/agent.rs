@@ -444,6 +444,12 @@ const PREFERRED_PATHING_TYPE_INDEX_COST: f32 = 0.5;
 /// #154 feature 4) must get to its far portal point before it counts as
 /// complete. Same value/rationale as `AGENT_TARGET_REACHED_DISTANCE`.
 const MERGE_TRAVERSAL_REACHED_DISTANCE: f32 = 0.5;
+/// Horizontal arrival tolerance for the source-alignment leg of a merge
+/// handoff. Landmass may emit `ReachedAnimationLink3d` before the capsule is
+/// centred on the link's validated source point; aligning within less than
+/// one capsule radius keeps the subsequent crossing on the collision-checked
+/// segment without requiring an exact floating-point point hit.
+const MERGE_SOURCE_ALIGNMENT_DISTANCE: f32 = AGENT_RADIUS * 0.75;
 /// Multiplier applied to a swept merge-portal crossing's straight-line
 /// time-at-desired-speed to get its timeout budget (issue #154 feature 4).
 /// An *absolute wall-clock deadline* rather than ordinary movement's
@@ -606,7 +612,14 @@ struct DoorTraversal {
 /// is in the way.
 #[derive(Component)]
 struct MergeTraversal {
+    /// Validated near-side portal point. A reached animation link can be
+    /// reported while the capsule is still offset from this point, so the
+    /// KCC owns a short alignment leg before it starts the actual crossing.
+    source: Vec3,
     target: Vec3,
+    /// False while moving to `source`; true once the capsule is aligned and
+    /// the KCC is sweeping the validated `source -> target` segment.
+    crossing_started: bool,
     /// Completion tolerance captured from the distance at which the agent
     /// entered the traversal. A short portal can end up closer than the
     /// normal `0.5 m` arrival tolerance while the agent is still on the
@@ -616,7 +629,7 @@ struct MergeTraversal {
     /// Seconds elapsed since this crossing started.
     elapsed: f32,
     /// Absolute wall-clock deadline (seconds): computed once at traversal
-    /// start from the *initial* straight-line distance to `target`, not
+    /// start from the source-alignment distance plus the portal length, not
     /// recomputed per tick. See [`MERGE_TRAVERSAL_TIMEOUT_FACTOR`]'s doc
     /// comment for why this is a fixed deadline rather than a resettable
     /// no-progress counter (`AgentKcc::best_distance`/
@@ -632,6 +645,19 @@ struct MergeTraversal {
     /// route.
     link_kind: usize,
 }
+
+/// One-tick request to make `bevy_landmass` reconsider the agent's complete
+/// input state in its next `FixedPreUpdate` sync. See
+/// [`refresh_landmass_animation_link_input`] for the upstream ordering quirk
+/// this bridges.
+#[derive(Component)]
+struct RefreshLandmassAnimationLinkInput;
+
+/// Door-cost overrides temporarily removed only while Landmass reads an
+/// animation-link transition. `None` preserves the fact that the agent did
+/// not have an override component before the transition.
+#[derive(Component)]
+struct SuspendedLandmassTypeIndexCosts(Option<AgentTypeIndexCostOverrides>);
 
 /// A capture of `AgentTarget3d`'s two meaningful variants (issue #162):
 /// `AgentTarget3d` itself is not `Clone` (`bevy_landmass::AgentTarget`'s
@@ -1231,6 +1257,18 @@ impl Plugin for NavBackendPlugin {
             .add_systems(
                 FixedPreUpdate,
                 sync_player_nav_character.before(LandmassSystems::SyncValues),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                refresh_landmass_animation_link_input
+                    .after(LandmassSystems::SyncExistence)
+                    .before(LandmassSystems::SyncValues),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                restore_landmass_type_index_costs
+                    .after(LandmassSystems::SyncValues)
+                    .before(LandmassSystems::Update),
             )
             .add_systems(
                 FixedPreUpdate,
@@ -3367,7 +3405,13 @@ fn remove_agent_components(entity: &mut EntityWorldMut<'_>) {
         AgentTarget3d,
     )>();
     // Any traversal in flight belongs to the agent, not the actor.
-    entity.remove::<(DoorTraversal, MergeTraversal, PendingMergeRepath)>();
+    entity.remove::<(
+        DoorTraversal,
+        MergeTraversal,
+        PendingMergeRepath,
+        RefreshLandmassAnimationLinkInput,
+        SuspendedLandmassTypeIndexCosts,
+    )>();
     // Nav-owned per-agent AI-facing state (door policy + facing ownership)
     // belongs to the agent too: a released actor opens doors and steers its own
     // facing again.
@@ -4102,6 +4146,17 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
         .get::<AgentTarget3d>(agent_entity)
         .map(describe_target)
         .unwrap_or_else(|| "none".to_string());
+    let merge_traversal = world.get::<MergeTraversal>(agent_entity).map(|traversal| {
+        json!({
+            "source": [traversal.source.x, traversal.source.y, traversal.source.z],
+            "target": [traversal.target.x, traversal.target.y, traversal.target.z],
+            "crossing_started": traversal.crossing_started,
+            "reached_distance": traversal.reached_distance,
+            "elapsed": traversal.elapsed,
+            "timeout": traversal.timeout,
+            "link_kind": traversal.link_kind,
+        })
+    });
     let mut line = format!(
         "nav agent {index} status={} position=({:.2},{:.2},{:.2}) target={} grounded={grounded} stuck={stuck} blocked={collision_blocked}",
         status.as_str(),
@@ -4123,6 +4178,7 @@ fn agent_status(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResu
             "grounded": grounded,
             "stuck": stuck,
             "blocked": collision_blocked,
+            "merge_traversal": merge_traversal,
         }),
         vec![line],
     ))
@@ -4873,6 +4929,60 @@ type MergeTraversalQuery<'w, 's> = Query<
     With<TestNavAgentMarker>,
 >;
 
+fn copied_type_index_cost_overrides(
+    current: &AgentTypeIndexCostOverrides,
+) -> AgentTypeIndexCostOverrides {
+    let mut copied = AgentTypeIndexCostOverrides::default();
+    for (&type_index, &cost) in current.iter() {
+        let inserted = copied.set_type_index_cost(type_index, cost);
+        debug_assert!(inserted, "existing Landmass override must stay positive");
+    }
+    copied
+}
+
+/// Forces Landmass's next input sync to process `UsingAnimationLink` after a
+/// merge-link start or finish. In `bevy_landmass` 0.12.0, an unchanged
+/// `AgentTypeIndexCostOverrides` causes that sync to return before it compares
+/// the animation-link marker. This system temporarily exposes the normal
+/// `None` branch immediately before `SyncValues`; that branch performs the
+/// animation-link comparison without the early return.
+fn refresh_landmass_animation_link_input(world: &mut World) {
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<RefreshLandmassAnimationLinkInput>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        let suspended = world
+            .get::<AgentTypeIndexCostOverrides>(entity)
+            .map(copied_type_index_cost_overrides);
+        world
+            .entity_mut(entity)
+            .remove::<AgentTypeIndexCostOverrides>()
+            .insert(SuspendedLandmassTypeIndexCosts(suspended))
+            .remove::<RefreshLandmassAnimationLinkInput>();
+    }
+}
+
+/// Restores the exact per-agent costs after Landmass has consumed the marker.
+/// The internal Landmass costs are synchronized from the changed component on
+/// the next fixed tick; while the agent is entering or leaving an animation
+/// link, path solving cannot consume a normal polygon step in between.
+fn restore_landmass_type_index_costs(world: &mut World) {
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<SuspendedLandmassTypeIndexCosts>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        let suspended = world
+            .entity_mut(entity)
+            .take::<SuspendedLandmassTypeIndexCosts>()
+            .expect("queried suspended Landmass costs");
+        if let Some(overrides) = suspended.0 {
+            world.entity_mut(entity).insert(overrides);
+        }
+    }
+}
+
 /// Rebuilds an agent's `PermittedAnimationLinks` from its current
 /// `AgentRuntime::quarantined_merge_link_kinds` (issue #162): thin wrapper
 /// over the pure `landmass_graph::permitted_animation_link_kinds` that
@@ -4955,7 +5065,32 @@ fn merge_traversal_system(
 
     for (entity, mut transform, mut kcc, mut traversal, mut runtime, current_target) in &mut agents
     {
-        if traversal.elapsed > 0.0
+        if !traversal.crossing_started
+            && movement_policy::nav_point_reached(
+                transform.translation.to_array(),
+                traversal.source.to_array(),
+                MERGE_SOURCE_ALIGNMENT_DISTANCE,
+                AGENT_HEIGHT,
+            )
+        {
+            traversal.crossing_started = true;
+            // Do not carry a diagonal alignment velocity into the seam. The
+            // next KCC step is authored solely by the source->target leg.
+            kcc.velocity.x = 0.0;
+            kcc.velocity.z = 0.0;
+            info!(
+                "nav agent merge source aligned entity={entity:?} source=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2})",
+                traversal.source.x,
+                traversal.source.y,
+                traversal.source.z,
+                traversal.target.x,
+                traversal.target.y,
+                traversal.target.z,
+            );
+        }
+
+        if traversal.crossing_started
+            && traversal.elapsed > 0.0
             && movement_policy::nav_point_reached(
                 transform.translation.to_array(),
                 traversal.target.to_array(),
@@ -4963,10 +5098,37 @@ fn merge_traversal_system(
                 AGENT_HEIGHT,
             )
         {
+            info!(
+                "nav agent merge complete entity={entity:?} position=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) elapsed={:.2}s",
+                transform.translation.x,
+                transform.translation.y,
+                transform.translation.z,
+                traversal.target.x,
+                traversal.target.y,
+                traversal.target.z,
+                traversal.elapsed,
+            );
             commands
                 .entity(entity)
                 .remove::<MergeTraversal>()
-                .remove::<UsingAnimationLink>();
+                .remove::<UsingAnimationLink>()
+                // Landmass synchronizes this output component in
+                // `FixedPreUpdate`, one phase after our FixedUpdate
+                // completion. Consume the stale marker now so the link
+                // driver cannot restart the same handoff in between.
+                .remove::<ReachedAnimationLink3d>()
+                .insert(RefreshLandmassAnimationLinkInput);
+            // A portal shorter than the agent's reached-link distance can
+            // leave Landmass's old corridor selecting the same link even
+            // after the capsule is on its far endpoint. Clear that corridor
+            // for one solve tick, then restore the real destination from the
+            // far-side position so the route resumes beyond the handoff.
+            if let Some(snapshot) = current_target.and_then(AgentTargetSnapshot::capture) {
+                commands
+                    .entity(entity)
+                    .insert(AgentTarget3d::None)
+                    .insert(PendingMergeRepath { target: snapshot });
+            }
             runtime.active_link = None;
             continue;
         }
@@ -4979,7 +5141,9 @@ fn merge_traversal_system(
             commands
                 .entity(entity)
                 .remove::<MergeTraversal>()
-                .remove::<UsingAnimationLink>();
+                .remove::<UsingAnimationLink>()
+                .remove::<ReachedAnimationLink3d>()
+                .insert(RefreshLandmassAnimationLinkInput);
             runtime.active_link = None;
 
             // Issue #162: per-agent portal quarantine, not a wholesale
@@ -5019,9 +5183,38 @@ fn merge_traversal_system(
                         .map(|actor| actor.reference_form_id),
                     entity,
                 );
+                let stage = if traversal.crossing_started {
+                    "crossing"
+                } else {
+                    "source_alignment"
+                };
+                let waypoint = if traversal.crossing_started {
+                    traversal.target
+                } else {
+                    traversal.source
+                };
+                let to_waypoint = waypoint - transform.translation;
+                let desired = Vec2::new(to_waypoint.x, to_waypoint.z).normalize_or_zero()
+                    * AGENT_DESIRED_SPEED;
+                let contact = world_contact_report(
+                    world,
+                    &mover,
+                    transform.translation,
+                    collision_filter,
+                    desired,
+                );
                 warn!(
-                    "nav agent portal blocked: swept crossing did not reach the far side within {:.1}s",
-                    traversal.timeout
+                    "nav agent portal blocked: stage={stage} timeout={:.1}s source=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) position=({:.2},{:.2},{:.2}) {contact}",
+                    traversal.timeout,
+                    traversal.source.x,
+                    traversal.source.y,
+                    traversal.source.z,
+                    traversal.target.x,
+                    traversal.target.y,
+                    traversal.target.z,
+                    transform.translation.x,
+                    transform.translation.y,
+                    transform.translation.z,
                 );
                 info!(
                     "nav agent portal quarantined {id} link={}",
@@ -5033,7 +5226,12 @@ fn merge_traversal_system(
             continue;
         }
 
-        let to_target = traversal.target - transform.translation;
+        let waypoint = if traversal.crossing_started {
+            traversal.target
+        } else {
+            traversal.source
+        };
+        let to_target = waypoint - transform.translation;
         let horizontal = Vec2::new(to_target.x, to_target.z);
         let desired_horizontal = if horizontal.length() > f32::EPSILON {
             horizontal.normalize() * AGENT_DESIRED_SPEED
@@ -5057,9 +5255,10 @@ fn merge_traversal_system(
     }
 }
 
-/// Issue #162: restores the real `AgentTarget3d` one fixed tick after
-/// `merge_traversal_system`'s timeout branch deliberately blanked it to
-/// `AgentTarget3d::None`.
+/// Restores the real `AgentTarget3d` one solve tick after
+/// `merge_traversal_system` deliberately blanked it to `AgentTarget3d::None`
+/// for either a blocked-link quarantine (issue #162) or a completed short
+/// merge handoff.
 ///
 /// Why the blank tick is needed at all: `landmass`'s own repath decision
 /// (`landmass::agent::does_agent_need_repath`) only recomputes a path when
@@ -5069,13 +5268,16 @@ fn merge_traversal_system(
 /// `PermittedAnimationLinks` does neither -- the just-failed portal step
 /// was already behind the corridor's tracked progress, so the *existing*
 /// path would simply be resumed unchanged and the agent would walk straight
-/// back into the same blocked link. Blanking the target for exactly one
-/// tick forces `RepathResult::ClearPathNoTarget` that tick (observed by
+/// back into the same blocked link. A very short completed link can similarly
+/// stay selected because both endpoints fall inside its reached distance.
+/// Blanking the target for exactly one tick forces
+/// `RepathResult::ClearPathNoTarget` that tick (observed by
 /// `LandmassSystems::Update` in `FixedPreUpdate`, which this system runs
 /// `.after`); restoring it here lets the *next* tick's `Update` see
 /// `current_path: None` plus a real target again, which is
 /// `does_agent_need_repath`'s unconditional `NeedsRepath` case -- a genuine
-/// fresh solve that honours the just-updated quarantine.
+/// fresh solve that honours the just-updated quarantine or starts from the
+/// completed link's far side.
 ///
 /// Skips the restore (but still removes the marker) when `AgentTarget3d` is
 /// no longer `None`: a `tna goto`/`tna travel` issued during the one-tick
@@ -5118,6 +5320,31 @@ fn merge_traversal_reached_distance(initial_distance: f32) -> f32 {
     } else {
         MERGE_TRAVERSAL_REACHED_DISTANCE.min(initial_distance * 0.5)
     }
+}
+
+/// Returns true when the capsule is already on, and has progressed past the
+/// source of, the validated horizontal portal segment. Landmass can emit the
+/// reached-link marker after advancing the agent between two very close
+/// endpoints; sending that capsule back to `source` would reverse it into the
+/// seam instead of completing the handoff.
+fn merge_crossing_already_started(position: Vec3, source: Vec3, target: Vec3) -> bool {
+    if movement_policy::horizontal_distance(position.to_array(), source.to_array())
+        <= MERGE_SOURCE_ALIGNMENT_DISTANCE
+    {
+        return true;
+    }
+    let segment = Vec2::new(target.x - source.x, target.z - source.z);
+    let length_squared = segment.length_squared();
+    if length_squared <= f32::EPSILON {
+        return true;
+    }
+    let relative = Vec2::new(position.x - source.x, position.z - source.z);
+    let progress = relative.dot(segment) / length_squared;
+    if progress <= 0.0 {
+        return false;
+    }
+    let closest = Vec2::new(source.x, source.z) + segment * progress.clamp(0.0, 1.0);
+    closest.distance(Vec2::new(position.x, position.z)) <= AGENT_RADIUS
 }
 
 /// Requests the door `door_form_id` open through the same boundary the
@@ -5450,28 +5677,48 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                     // with the physics KCC (`merge_traversal_system`)
                     // instead of the door lifecycle's scripted lerp -- a
                     // portal whose far side is actually blocked must stop
-                    // the agent for real, not clip it through. `start_point`
-                    // is unused here (unlike a door traversal's fixed lerp
-                    // start): the sweep simply starts from wherever the
-                    // agent's `Transform` actually is this tick. The
-                    // timeout budget is derived from the *actual* current
-                    // position, not `start_point`, for the same reason.
-                    let initial_distance = world
+                    // the agent for real, not clip it through. Landmass can
+                    // report the link while the capsule is still offset from
+                    // `start_point`, so the traversal first aligns to that
+                    // validated source and then sweeps source -> end. The
+                    // fixed timeout covers both legs.
+                    let current_position = world
                         .get::<Transform>(agent_entity)
-                        .map(|transform| {
-                            movement_policy::horizontal_distance(
-                                transform.translation.to_array(),
-                                end_point.to_array(),
-                            )
-                        })
-                        .unwrap_or(0.0);
+                        .map(|transform| transform.translation);
+                    let source_alignment_distance = current_position.map_or(0.0, |position| {
+                        movement_policy::horizontal_distance(
+                            position.to_array(),
+                            start_point.to_array(),
+                        )
+                    });
+                    let crossing_distance = movement_policy::horizontal_distance(
+                        start_point.to_array(),
+                        end_point.to_array(),
+                    );
+                    let total_distance = source_alignment_distance + crossing_distance;
+                    let crossing_started = current_position.is_none_or(|position| {
+                        merge_crossing_already_started(position, start_point, end_point)
+                    });
+                    info!(
+                        "nav agent merge start entity={agent_entity:?} source=({:.2},{:.2},{:.2}) target=({:.2},{:.2},{:.2}) source_distance={source_alignment_distance:.2} crossing_distance={crossing_distance:.2} crossing_started={crossing_started} timeout={:.2}s",
+                        start_point.x,
+                        start_point.y,
+                        start_point.z,
+                        end_point.x,
+                        end_point.y,
+                        end_point.z,
+                        merge_traversal_timeout(total_distance),
+                    );
                     world.entity_mut(agent_entity).insert((
                         UsingAnimationLink,
+                        RefreshLandmassAnimationLinkInput,
                         MergeTraversal {
+                            source: start_point,
                             target: end_point,
-                            reached_distance: merge_traversal_reached_distance(initial_distance),
+                            crossing_started,
+                            reached_distance: merge_traversal_reached_distance(crossing_distance),
                             elapsed: 0.0,
-                            timeout: merge_traversal_timeout(initial_distance),
+                            timeout: merge_traversal_timeout(total_distance),
                             link_kind: kind,
                         },
                     ));

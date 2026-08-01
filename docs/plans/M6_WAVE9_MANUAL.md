@@ -1,5 +1,10 @@
 # M6 wave 9 — Super-Duper Mart ↔ Megaton final gate manual
 
+**Status: future acceptance draft.** This manual is not satisfied by the
+partial M6 PR. Actor crossing, ordinary bidirectional traversal, interior
+travel/return anchors, water and save/reload coverage, repeated-loop memory
+measurements, and agreed final budgets remain unverified.
+
 This is the final human acceptance script for issue #14. Run it only after
 the bounded Wave 7 script is green. Record the machine, GPU, build mode, cache
 state, and every numeric result in the route summary; do not replace a budget

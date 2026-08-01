@@ -1,4 +1,7 @@
 use super::*;
+use crate::viewer::nav::agent::{
+    RefreshLandmassAnimationLinkInput, SuspendedLandmassTypeIndexCosts,
+};
 use bevy::ecs::system::RunSystemOnce;
 
 /// Minimal world holding one bound actor: the components the two
@@ -344,10 +347,24 @@ fn an_unbound_tna_capsule_is_untouched_by_the_binding_systems() {
 fn releasing_a_bound_actor_keeps_the_actor_and_asks_for_idle() {
     let (mut world, entity) = bound_actor_world();
     world.get_mut::<NavBoundActor>(entity).unwrap().locomotion = LocomotionState::Run;
+    world.entity_mut(entity).insert((
+        RefreshLandmassAnimationLinkInput,
+        SuspendedLandmassTypeIndexCosts(None),
+    ));
     release_bound_actor(&mut world, entity);
     assert!(world.get_entity(entity).is_ok(), "the actor must survive");
     assert!(world.get::<NavBoundActor>(entity).is_none());
     assert!(world.get::<AgentKcc>(entity).is_none());
+    assert!(
+        world
+            .get::<RefreshLandmassAnimationLinkInput>(entity)
+            .is_none()
+    );
+    assert!(
+        world
+            .get::<SuspendedLandmassTypeIndexCosts>(entity)
+            .is_none()
+    );
     assert_eq!(requested(&world, entity), Some(ActorAnimationState::Idle));
 }
 

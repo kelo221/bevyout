@@ -1,18 +1,23 @@
 //! Runtime exterior tests live beside the pure policy adapter.
 
+use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::{Indices, Mesh};
-use bevy::prelude::{Vec3, Visibility, World};
+use bevy::prelude::{GlobalTransform, Transform, Vec3, Visibility, World};
 use bevyout_core::manifest::exterior::{
-    ExteriorCoordinatePolicy, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
-    TerrainLod,
+    ExteriorCellLifecycle, ExteriorCellState, ExteriorCoordinatePolicy, ExteriorLoadAction,
+    ExteriorResidencyAction, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
+    PreparedWater, TerrainLod,
 };
 use std::collections::BTreeMap;
 
 use super::{
-    ExteriorObjectLod, ExteriorPresentationStats, clamp_adjacent_terrain_lods,
-    exterior_package_header_has_current_revision, exterior_presentation_json, terrain_center,
-    terrain_mesh_with_stride, terrain_mesh_with_subdivisions, worldspace_lod_distance,
+    ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState, ExteriorWaterSurface,
+    FpsPlayer, apply_action, clamp_adjacent_terrain_lods,
+    exterior_package_header_has_current_revision, exterior_presentation_json, finalize_evictions,
+    mark_collision_ready, terrain_center, terrain_mesh_with_stride, terrain_mesh_with_subdivisions,
+    update_water_state, worldspace_lod_distance,
 };
+use super::{diagnostics, lifecycle};
 
 #[test]
 fn terrain_render_winding_faces_upward() {
@@ -223,4 +228,159 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
         serde_json::Value::Null
     );
     assert_eq!(report["gameplay"]["collision_and_navigation_culled"], false);
+}
+
+#[test]
+fn cancelling_after_package_spawn_uses_the_owned_eviction_teardown() {
+    fn cancel_loaded_cell(
+        mut commands: bevy::prelude::Commands,
+        mut state: bevy::prelude::ResMut<lifecycle::ExteriorStreamState>,
+        tasks: bevy::prelude::Query<&super::loading::ExteriorPackageTask>,
+    ) {
+        apply_action(
+            &mut commands,
+            &mut state,
+            ExteriorResidencyAction {
+                action: ExteriorLoadAction::Cancel,
+                grid: GridCoordinate::new(1, -2),
+                form_id: 0x1234,
+                generation: 1,
+            },
+            &tasks,
+            "",
+        );
+    }
+
+    let mut world = World::new();
+    let root = world.spawn_empty().id();
+    let grid = GridCoordinate::new(1, -2);
+    let mut state = lifecycle::ExteriorStreamState {
+        resident_bytes: 64,
+        ..Default::default()
+    };
+    state.cells.insert(
+        grid,
+        lifecycle::RuntimeCell {
+            state: ExteriorCellState {
+                cell_form_id: 0x1234,
+                grid,
+                lifecycle: ExteriorCellLifecycle::Loading,
+                generation: 1,
+                pinned: false,
+                estimated_bytes: 64,
+                failed_attempts: 0,
+            },
+            root: Some(root),
+            task: None,
+            package: None,
+            collision_ready: false,
+        },
+    );
+    world.insert_resource(state);
+
+    world
+        .run_system_once(cancel_loaded_cell)
+        .expect("cancel system runs");
+    assert_eq!(
+        world.resource::<lifecycle::ExteriorStreamState>().cells[&grid]
+            .state
+            .lifecycle,
+        ExteriorCellLifecycle::Evicting,
+        "a spawned root is owned state and must use the full eviction path"
+    );
+
+    finalize_evictions(&mut world);
+    assert!(
+        world.get_entity(root).is_err(),
+        "the root must be despawned"
+    );
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert!(!state.cells.contains_key(&grid));
+    assert_eq!(state.resident_bytes, 0);
+    assert_eq!(state.cancellations, 1);
+}
+
+#[test]
+fn collision_ready_records_all_spawned_resident_roots() {
+    let mut state = lifecycle::ExteriorStreamState {
+        current_grid: GridCoordinate::new(0, 0),
+        ..Default::default()
+    };
+    for (grid, form_id, root) in [
+        (GridCoordinate::new(0, 0), 0x10, 1_u32),
+        (GridCoordinate::new(1, 0), 0x11, 2_u32),
+    ] {
+        state.cells.insert(
+            grid,
+            lifecycle::RuntimeCell {
+                state: ExteriorCellState {
+                    cell_form_id: form_id,
+                    grid,
+                    lifecycle: ExteriorCellLifecycle::Loading,
+                    generation: 1,
+                    pinned: false,
+                    estimated_bytes: 10,
+                    failed_attempts: 0,
+                },
+                root: Some(bevy::prelude::Entity::from_raw_u32(root).expect("test entity")),
+                task: None,
+                package: None,
+                collision_ready: false,
+            },
+        );
+    }
+
+    mark_collision_ready(&mut state, GridCoordinate::new(0, 0), 0x10);
+    assert_eq!(
+        state.peak_resident_cells, 2,
+        "peak residency counts spawned package roots, including collision-pending roots"
+    );
+}
+
+#[test]
+fn streaming_summary_labels_estimates_and_keeps_unmeasured_memory_null() {
+    let state = lifecycle::ExteriorStreamState {
+        resident_bytes: 256,
+        peak_memory: 512,
+        ..Default::default()
+    };
+
+    let report = diagnostics::status(&state);
+    assert_eq!(report["resident_bytes"], serde_json::Value::Null);
+    assert_eq!(report["peak_memory"], serde_json::Value::Null);
+    assert_eq!(report["ending_memory"], serde_json::Value::Null);
+    assert_eq!(report["memory_measurement"], "unmeasured");
+    assert_eq!(report["resident_package_bytes_estimate"], 256);
+    assert_eq!(report["peak_package_bytes_estimate"], 512);
+}
+
+#[test]
+fn water_contact_ignores_surfaces_in_other_resident_cells() {
+    let mut world = World::new();
+    world.init_resource::<ExteriorWaterState>();
+    world.spawn((
+        FpsPlayer::default(),
+        Transform::from_xyz(10_000.0, -2.0, 10_000.0),
+        GlobalTransform::default(),
+    ));
+    world.spawn((
+        ExteriorWaterSurface {
+            descriptor: PreparedWater {
+                form_id: None,
+                height: 0.0,
+                water_type_form_id: None,
+                swim_depth: 1.0,
+            },
+        },
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        GlobalTransform::default(),
+    ));
+
+    world
+        .run_system_once(update_water_state)
+        .expect("water system runs");
+    assert!(
+        world.resource::<ExteriorWaterState>().contact.is_none(),
+        "a water plane only applies inside its owning cell footprint"
+    );
 }

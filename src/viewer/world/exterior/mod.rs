@@ -524,6 +524,7 @@ fn apply_action(
             );
         }
         ExteriorLoadAction::Cancel => {
+            let collision_owned = state.collision_cells.contains_key(&action.grid);
             if let Some(cell) = state.cells.get_mut(&action.grid) {
                 if let Some(task) = cell.task.take()
                     && tasks.get(task).is_ok()
@@ -531,7 +532,17 @@ fn apply_action(
                     commands.entity(task).despawn();
                 }
                 cell.state.generation = cell.state.generation.saturating_add(1);
-                cell.state.lifecycle = ExteriorCellLifecycle::Unloaded;
+                // A completed package already owns a render root, package
+                // bytes, and potentially collision even though it remains
+                // logically `Loading` until collision attachment finishes.
+                // Route that state through the same ordered teardown as an
+                // eviction; only a task-only cancellation is truly unloaded.
+                cell.state.lifecycle =
+                    if cell.root.is_some() || cell.package.is_some() || collision_owned {
+                        ExteriorCellLifecycle::Evicting
+                    } else {
+                        ExteriorCellLifecycle::Unloaded
+                    };
                 state.cancellations += 1;
             }
         }
@@ -644,6 +655,7 @@ fn mark_collision_ready(state: &mut ExteriorStreamState, grid: GridCoordinate, f
         };
         state.collision_cells.insert(grid, form_id);
         state.ready += 1;
+        state.record_peaks();
         if state.trace {
             info!(
                 "exterior preload ready {:08x} grid={},{} collision_ready=1",
@@ -1457,16 +1469,23 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
 
 fn update_water_state(
     player: Query<&Transform, With<FpsPlayer>>,
-    waters: Query<&ExteriorWaterSurface>,
+    waters: Query<(&ExteriorWaterSurface, &Transform)>,
     mut state: ResMut<ExteriorWaterState>,
 ) {
     let Some(player) = player.iter().next() else {
         state.contact = None;
         return;
     };
+    let half_span = ExteriorCoordinatePolicy::default().cell_span_metres() as f32 * 0.5;
     state.contact = waters
         .iter()
-        .filter_map(|water| resolve_water_contact(Some(&water.descriptor), player.translation.y))
+        .filter(|(_, transform)| {
+            (player.translation.x - transform.translation.x).abs() <= half_span
+                && (player.translation.z - transform.translation.z).abs() <= half_span
+        })
+        .filter_map(|(water, _)| {
+            resolve_water_contact(Some(&water.descriptor), player.translation.y)
+        })
         .max_by(|left, right| left.depth.total_cmp(&right.depth));
 }
 

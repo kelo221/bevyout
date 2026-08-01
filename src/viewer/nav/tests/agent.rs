@@ -511,6 +511,11 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
     );
     world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
 
+    let link = world.spawn_empty().id();
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 1 });
     let target = Vec3::new(2.0, AGENT_HEIGHT / 2.0, 0.0);
     let agent = world
         .spawn((
@@ -525,13 +530,21 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
                 ..default()
             },
             MergeTraversal {
+                source: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 target,
+                crossing_started: true,
                 reached_distance: merge_traversal_reached_distance(2.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(2.0),
                 link_kind: 1,
             },
             UsingAnimationLink,
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                end_point: target,
+            },
+            AgentTarget3d::Point(target),
         ))
         .id();
     world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
@@ -552,7 +565,13 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
         "a clear crossing must complete and remove MergeTraversal"
     );
     assert!(world.get::<UsingAnimationLink>(agent).is_none());
+    assert!(world.get::<ReachedAnimationLink3d>(agent).is_none());
     assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+    assert!(matches!(
+        world.get::<AgentTarget3d>(agent),
+        Some(AgentTarget3d::None)
+    ));
+    assert!(world.get::<PendingMergeRepath>(agent).is_some());
     let position = world.get::<Transform>(agent).unwrap().translation;
     assert!(
         (position.x - target.x).abs() < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
@@ -561,6 +580,116 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
     let kcc = world.get::<AgentKcc>(agent).unwrap();
     assert!(!kcc.stuck, "a clear crossing must never latch stuck");
     assert!(!kcc.collision_blocked);
+
+    // `ReachedAnimationLink3d` is synchronized from Landmass one fixed phase
+    // later. Completion must consume the stale marker now, otherwise the
+    // door-link driver restarts the same merge handoff at its far endpoint.
+    drive_door_link_for_agent(&mut world, agent);
+    assert!(
+        world.get::<MergeTraversal>(agent).is_none(),
+        "a completed merge link must not restart from the stale reached marker"
+    );
+
+    world
+        .run_system_once(resume_pending_merge_repath_system)
+        .expect("repath restore runs");
+    assert_eq!(
+        world.get::<AgentTarget3d>(agent),
+        Some(&AgentTarget3d::Point(target)),
+        "the real route target must resume after the one-tick corridor clear"
+    );
+}
+
+/// A link can be reported reached while the capsule is still offset from the
+/// source portal point. The handoff must first align with that validated
+/// source point before sweeping to the far side; driving straight at the far
+/// point can cut the corner through collision even though the authored
+/// two-segment handoff is clear.
+#[test]
+fn merge_traversal_aligns_with_the_source_portal_before_crossing() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut world = harness_world();
+    world.insert_resource(PhysicsDisabled(false));
+    world.insert_resource(CellPhysicsReadiness::Ready);
+    world.init_resource::<Time>();
+    world
+        .resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+
+    let mut physics_world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+    add_player_compatible_floor(
+        &mut physics_world,
+        boxddd::Vec3::new(1.0, -0.1, 1.0),
+        boxddd::Vec3::new(5.0, 0.1, 5.0),
+    );
+    // Blocks the direct diagonal from the early-reached position to the far
+    // endpoint, while leaving the source-alignment and seam-crossing legs
+    // clear by more than the capsule radius.
+    add_player_compatible_floor(
+        &mut physics_world,
+        boxddd::Vec3::new(1.0, 1.0, 1.0),
+        boxddd::Vec3::new(0.25, 2.0, 0.25),
+    );
+    world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    {
+        let mut nav = world.resource_mut::<NavArchipelagoState>();
+        nav.archipelago = Some(archipelago);
+        nav.merge_link_kind_count = 1;
+        nav.link_kinds.insert(link, LinkKind::Merge { kind: 1 });
+    }
+    let source = Vec3::new(0.0, 0.0, 2.0);
+    let target = Vec3::new(2.0, 0.0, 2.0);
+    let agent = world
+        .spawn((
+            TestNavAgentMarker,
+            AgentKcc {
+                grounded: true,
+                ..default()
+            },
+            Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+            AgentRuntime::default(),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: source,
+                end_point: target,
+            },
+            AgentTarget3d::Point(target),
+        ))
+        .id();
+    world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+    drive_door_link_for_agent(&mut world, agent);
+    assert!(world.get::<MergeTraversal>(agent).is_some());
+
+    for _ in 0..420 {
+        world
+            .run_system_once(merge_traversal_system)
+            .expect("system runs");
+        if world.get::<MergeTraversal>(agent).is_none() {
+            break;
+        }
+    }
+
+    assert!(
+        world.get::<MergeTraversal>(agent).is_none(),
+        "a clear source-aligned crossing must complete"
+    );
+    let kcc = world.get::<AgentKcc>(agent).unwrap();
+    assert!(
+        !kcc.stuck,
+        "the clear staged crossing must not be quarantined"
+    );
+    assert!(!kcc.collision_blocked);
+    let position = world.get::<Transform>(agent).unwrap().translation;
+    assert!(
+        movement_policy::horizontal_distance(position.to_array(), target.to_array())
+            < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
+        "agent should finish on the far side, got {position:?}"
+    );
 }
 
 /// A reached animation link remains attached while the KCC crossing is in
@@ -593,7 +722,9 @@ fn drive_door_link_does_not_restart_an_active_merge_traversal() {
                 end_point: end,
             },
             MergeTraversal {
+                source: start,
                 target: end,
+                crossing_started: true,
                 reached_distance: merge_traversal_reached_distance(0.4),
                 elapsed: 0.25,
                 timeout: merge_traversal_timeout(0.4),
@@ -613,6 +744,84 @@ fn drive_door_link_does_not_restart_an_active_merge_traversal() {
     assert_eq!(
         world.get::<AgentRuntime>(agent).unwrap().active_link,
         Some(LinkKind::Merge { kind: 7 })
+    );
+}
+
+#[test]
+fn drive_merge_link_treats_a_capsule_already_on_the_portal_segment_as_crossing() {
+    let mut world = harness_world();
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 9 });
+
+    let source = Vec3::ZERO;
+    let target = Vec3::new(0.36, 0.0, 0.06);
+    // Mirrors the c49 short seam: Landmass reports the link with the capsule
+    // already most of the way between the two validated endpoints.
+    let agent = world
+        .spawn((
+            AgentRuntime::default(),
+            Transform::from_xyz(0.27, AGENT_HEIGHT / 2.0, 0.04),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: source,
+                end_point: target,
+            },
+        ))
+        .id();
+
+    drive_door_link_for_agent(&mut world, agent);
+
+    assert!(
+        world
+            .get::<MergeTraversal>(agent)
+            .expect("merge traversal")
+            .crossing_started,
+        "a capsule already on the portal segment must continue toward the far side"
+    );
+}
+
+#[test]
+fn merge_link_input_refresh_preserves_costs_and_consumes_its_request() {
+    let mut world = World::new();
+    let mut overrides = AgentTypeIndexCostOverrides::default();
+    assert!(overrides.set_type_index_cost(3, 4.5));
+    let agent = world
+        .spawn((overrides, RefreshLandmassAnimationLinkInput))
+        .id();
+    refresh_landmass_animation_link_input(&mut world);
+
+    assert!(
+        world.get::<AgentTypeIndexCostOverrides>(agent).is_none(),
+        "Landmass must take its non-early-return input branch for the transition"
+    );
+    assert!(
+        world
+            .get::<SuspendedLandmassTypeIndexCosts>(agent)
+            .is_some()
+    );
+    assert!(
+        world
+            .get::<RefreshLandmassAnimationLinkInput>(agent)
+            .is_none(),
+        "the schedule-boundary refresh must run exactly once per transition"
+    );
+
+    restore_landmass_type_index_costs(&mut world);
+
+    let refreshed = world
+        .get::<AgentTypeIndexCostOverrides>(agent)
+        .expect("restored overrides");
+    assert_eq!(refreshed.iter().collect::<Vec<_>>(), vec![(&3, &4.5)]);
+    assert!(
+        world
+            .get::<SuspendedLandmassTypeIndexCosts>(agent)
+            .is_none(),
+        "the cost suspension must last only for Landmass's input system"
     );
 }
 
@@ -689,7 +898,9 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
                 ..default()
             },
             MergeTraversal {
+                source: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 target,
+                crossing_started: true,
                 reached_distance: merge_traversal_reached_distance(5.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(5.0),
@@ -732,6 +943,7 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
         "the traversal must stop, not keep the agent pinned mid-portal indefinitely"
     );
     assert!(world.get::<UsingAnimationLink>(agent).is_none());
+    assert!(world.get::<ReachedAnimationLink3d>(agent).is_none());
     assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
     let position = world.get::<Transform>(agent).unwrap().translation;
     assert!(

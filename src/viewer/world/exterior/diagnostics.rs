@@ -18,6 +18,11 @@ pub(crate) fn status(state: &ExteriorStreamState) -> serde_json::Value {
         };
         counts[index] += 1;
     }
+    let resident_cells = state
+        .cells
+        .values()
+        .filter(|cell| cell.root.is_some())
+        .count();
     json!({
         "initialized": state.initialized,
         "worldspace": state.worldspace_form_id,
@@ -46,9 +51,15 @@ pub(crate) fn status(state: &ExteriorStreamState) -> serde_json::Value {
             .count(),
         "resident_budget": state.resident_budget,
         "byte_budget": state.byte_budget,
-        "resident_bytes": state.resident_bytes,
+        "byte_budget_kind": "estimated_package_serialization",
+        "resident_cells": resident_cells,
+        "resident_bytes": serde_json::Value::Null,
         "peak_resident_cells": state.peak_resident_cells,
-        "peak_memory": state.peak_memory,
+        "peak_memory": serde_json::Value::Null,
+        "ending_memory": serde_json::Value::Null,
+        "memory_measurement": "unmeasured",
+        "resident_package_bytes_estimate": state.resident_bytes,
+        "peak_package_bytes_estimate": state.peak_memory,
     })
 }
 

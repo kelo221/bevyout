@@ -67,9 +67,12 @@ water, actor path, and frozen performance budgets remain explicit checks.
    completions, and a presentation report whose terrain collision remains
    `full_land_mesh`. The updated real-data run reached all six grids with a
    steady resident count of 2–4, `peak_resident_cells=9` while the prefetched
-   safety ring was being built, `peak_memory=2218157`, and 13 requests with 6
-   evictions. This is streaming evidence; Wave 9 still owns the agreed final
-   memory and transition budgets.
+   safety ring was being built, and 13 requests with 6 evictions. Package-size
+   telemetry is reported as `peak_package_bytes_estimate`; it is not process
+   memory. `peak_memory`, `ending_memory`, and `resident_bytes` remain `null`
+   with `memory_measurement="unmeasured"` until a later gate records real
+   process-memory samples. This is streaming evidence; Wave 9 still owns the
+   agreed final memory and transition budgets.
 
 5. Exercise reversal and persistence at a boundary:
 

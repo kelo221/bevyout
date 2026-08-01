@@ -113,20 +113,7 @@ pub(crate) fn poll(
                     cell.collision_ready = false;
                 }
                 state.resident_bytes = state.resident_bytes.saturating_add(estimated_bytes);
-                state.peak_resident_cells = state.peak_resident_cells.max(
-                    state
-                        .cells
-                        .values()
-                        .filter(|cell| {
-                            matches!(
-                                cell.state.lifecycle,
-                                bevyout_core::manifest::exterior::ExteriorCellLifecycle::Ready
-                                    | bevyout_core::manifest::exterior::ExteriorCellLifecycle::Resident
-                            )
-                        })
-                        .count(),
-                );
-                state.peak_memory = state.peak_memory.max(state.resident_bytes);
+                state.record_peaks();
                 if state.trace {
                     info!(
                         "exterior preload generated {:08x} grid={},{} bytes={} awaiting_collision",

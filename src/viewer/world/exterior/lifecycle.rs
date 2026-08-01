@@ -53,4 +53,17 @@ impl ExteriorStreamState {
             cell.state.lifecycle = lifecycle;
         }
     }
+
+    /// Records the high-water marks that the runtime can actually derive.
+    /// A package owns resident entities as soon as its root is spawned, even
+    /// while collision attachment keeps its logical lifecycle at `Loading`.
+    pub(crate) fn record_peaks(&mut self) {
+        let spawned_roots = self
+            .cells
+            .values()
+            .filter(|cell| cell.root.is_some())
+            .count();
+        self.peak_resident_cells = self.peak_resident_cells.max(spawned_roots);
+        self.peak_memory = self.peak_memory.max(self.resident_bytes);
+    }
 }

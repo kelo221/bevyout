@@ -12,19 +12,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
 /// `prepare_single` below; `--all`/`--all-interiors`/`--worldspace`,
-/// `--list-only`, `--retry-failed`, or more than one positional selector
-/// build a lightweight cell catalogue and resolve the batch through
-/// `resolve_selection` (#46).
+/// `--list-only`, `--check-fingerprints`, `--retry-failed`, or more than one
+/// positional selector build a lightweight cell catalogue and resolve the
+/// batch through `resolve_selection` (#46). Fingerprint validation must use
+/// this route even for one cell because the single-cell path prepares it.
 pub fn prepare(args: PrepareArgs) -> Result<()> {
     let mut explicit = args.selectors.clone();
     explicit.extend(args.cell.clone());
 
-    let is_batch = args.list_only
-        || args.all
-        || args.all_interiors
-        || args.worldspace.is_some()
-        || args.retry_failed
-        || explicit.len() > 1;
+    let is_batch = prepare_requires_batch(&args, explicit.len());
 
     if !is_batch {
         let selector_input = explicit
@@ -35,6 +31,16 @@ pub fn prepare(args: PrepareArgs) -> Result<()> {
     }
 
     prepare_batch(args, explicit)
+}
+
+fn prepare_requires_batch(args: &PrepareArgs, explicit_count: usize) -> bool {
+    args.list_only
+        || args.check_fingerprints
+        || args.all
+        || args.all_interiors
+        || args.worldspace.is_some()
+        || args.retry_failed
+        || explicit_count > 1
 }
 
 /// The single-cell CLI path. Builds a one-cell `BatchSession` (issue #47)
