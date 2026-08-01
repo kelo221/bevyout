@@ -47,7 +47,7 @@
 - cargo fmt --check, cargo clippy --all-targets -- -D warnings, and the
   repository test suite pass after integration;
 - the policy outputs are executable through the integrator's feature seam;
-- W3-C remains explicitly blocked by #10 until the M4 gate closes.
+- W3-C / #278 remains explicitly blocked by #10 until the M4 gate closes.
 
 ## Execution model recommendation
 
@@ -57,4 +57,4 @@ Codex runtime: GPT-5.6 Luna, Max reasoning.
 
 - W3-A and W3-B policy lanes landed as commits `a9a68b95` and `f61e0116`.
   The integrator feature seam and manual cover the pure policy outputs;
-  W3-C runtime integration remains blocked by gate #10.
+  W3-C / #278 runtime integration remains blocked by gate #10.

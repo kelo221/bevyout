@@ -136,7 +136,7 @@ without duplicate ECS or persistence authority.
 | --- | --- | --- | --- |
 | Parallel 1 | **W3-A: Define actor residency and canonical handoff policy** | Pure resident-cell/actor ownership policy plus dedicated tests; actor catalog/state contracts only | Deterministic bind, retain, handoff, unload, and restore decisions; exactly one canonical actor record owns state |
 | Parallel 1 | **W3-B: Make resident NAVM topology lifecycle-safe** | `src/viewer/nav/landmass_graph.rs`, focused nav tests, and prepare-side portal fixtures if required | Links appear only when both resident sides are valid and disappear without stale links when either side evicts |
-| Sequential 2 | **W3-C: Integrate gameplay actors with exterior residency** | `src/viewer/ai/autonomous.rs`, `src/viewer/nav/actor_binding.rs`, the required portions of `src/viewer/nav/agent.rs`, exterior activation/eviction adapter, and dedicated tests | One representative actor crosses a resident boundary, survives source eviction/reload, keeps package/animation state, and never exists twice |
+| Sequential 2 | **W3-C / #278: Integrate gameplay actors with exterior residency** | `src/viewer/ai/autonomous.rs`, `src/viewer/nav/actor_binding.rs`, the required portions of `src/viewer/nav/agent.rs`, exterior activation/eviction adapter, and dedicated tests | One representative actor crosses a resident boundary, survives source eviction/reload, keeps package/animation state, and never exists twice |
 
 W3-C consumes W3-A and W3-B. It is the only executor permitted to modify the
 runtime actor/exterior lifecycle seam. Any required `world::swap` change is
