@@ -18,6 +18,7 @@ use bevy::light::{
 };
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::post_process::bloom::{BloomCompositeMode, BloomPrefilter};
+use bevy::post_process::effect_stack::{ChromaticAberration, LensDistortion, Vignette};
 use bevy::render::render_resource::TextureFormat;
 use serde::Deserialize;
 
@@ -444,6 +445,20 @@ pub(crate) fn spawn_prepared_scene(
             yaw: initial_yaw,
             pitch: initial_pitch,
             speed: 8.0,
+        },
+    ));
+    camera.insert((
+        ChromaticAberration {
+            intensity: 0.0,
+            ..default()
+        },
+        LensDistortion {
+            intensity: 0.0,
+            ..default()
+        },
+        Vignette {
+            intensity: 0.0,
+            ..default()
         },
     ));
     if let Some(auto_exposure) = auto_exposure {
@@ -1235,6 +1250,7 @@ pub(crate) fn refresh_environment_for_active_cell(world: &mut World) {
 
 pub(crate) fn refresh_camera_post_processing(world: &mut World, cell: &CellInfo) {
     if !world.contains_resource::<Assets<AutoExposureCompensationCurve>>() {
+        crate::viewer::screen_fx::refresh_base(world, cell);
         return;
     }
 
@@ -1262,6 +1278,7 @@ pub(crate) fn refresh_camera_post_processing(world: &mut World, cell: &CellInfo)
     } else {
         camera.remove::<AutoExposure>();
     }
+    crate::viewer::screen_fx::refresh_base(world, cell);
 }
 
 pub(crate) fn scaled_directional_illuminance(

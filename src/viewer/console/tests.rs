@@ -22,6 +22,9 @@ fn test_app() -> App {
         .insert_resource(super::super::controls::RoughnessScale::default())
         .insert_resource(super::super::controls::ReflectionProbeSettings::default())
         .insert_resource(ImageSpaceBloomOverrides::default())
+        .init_resource::<super::super::screen_fx::ScreenFxRuntime>()
+        .init_resource::<super::super::screen_fx::ScreenFxCatalog>()
+        .init_resource::<Messages<super::super::screen_fx::ScreenFxRequested>>()
         .insert_resource(UnlitMode(false))
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
@@ -205,6 +208,67 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
             .iter_current_update_messages()
             .count(),
         1
+    );
+}
+
+#[test]
+fn screen_fx_commands_report_and_queue_catalog_modifier_lifecycle() {
+    let mut app = test_app();
+    let help = exec(&mut app, "help screenfx");
+    assert!(help.ok);
+    assert!(
+        help.value["signature"]
+            .as_str()
+            .expect("screenfx help signature")
+            .contains("settings")
+    );
+
+    app.world_mut()
+        .resource_mut::<super::super::screen_fx::ScreenFxCatalog>()
+        .modifiers
+        .insert(
+            0x0000_1234,
+            bevyout_core::image_space::ImageSpaceModifier {
+                form_id: 0x0000_1234,
+                editor_id: Some("SyntheticFlash".into()),
+                duration_ms: 250,
+                ..default()
+            },
+        );
+
+    let status = exec(&mut app, "screenfx status");
+    assert!(status.ok);
+    assert_eq!(status.value["schema"], "bevyout.m5.screen_fx");
+    assert_eq!(status.value["catalog_records"], 1);
+
+    let start = exec(&mut app, "screenfx start 1234 7");
+    assert!(start.ok);
+    assert_eq!(start.value["form_id"], "00001234");
+    assert_eq!(start.value["priority"], 7);
+
+    let settings = exec(&mut app, "screenfx settings 0.5 0.25 0 0.75");
+    assert!(settings.ok);
+    assert_eq!(settings.value["screen_blood"], 0.25);
+    assert_eq!(
+        app.world()
+            .resource::<super::super::screen_fx::ScreenFxRuntime>()
+            .policy
+            .settings()
+            .motion_and_distortion,
+        0.75
+    );
+
+    let stop = exec(&mut app, "screenfx stop 1234");
+    assert!(stop.ok);
+    let clear = exec(&mut app, "screenfx clear death");
+    assert!(clear.ok);
+    assert_eq!(clear.value["reason"], "Death");
+    assert_eq!(
+        app.world()
+            .resource::<Messages<super::super::screen_fx::ScreenFxRequested>>()
+            .iter_current_update_messages()
+            .count(),
+        3
     );
 }
 

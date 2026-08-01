@@ -64,6 +64,15 @@ pub struct PreparedSceneManifest {
     pub actor_animation_catalog_revision: Option<String>,
     #[serde(default)]
     pub actor_animation_catalog_hash: Option<String>,
+    /// Content-fingerprinted Fallout 3 IMAD modifier catalogue relative to
+    /// `asset_root`.  Old manifests remain readable but cannot expose
+    /// prepared transient ImageSpace modifiers.
+    #[serde(default)]
+    pub image_space_modifier_catalog_path: Option<String>,
+    #[serde(default)]
+    pub image_space_modifier_catalog_revision: Option<String>,
+    #[serde(default)]
+    pub image_space_modifier_catalog_hash: Option<String>,
     #[serde(default)]
     pub source_plugins: Vec<PreparedPluginSource>,
     pub cell: CellInfo,
