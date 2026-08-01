@@ -25,7 +25,10 @@ fn material_clamp_test_app() -> App {
         .insert_resource(ClampWriteProbe::default())
         .insert_resource(MaterialClampSettings::default())
         .insert_resource(MaterialClampBaselines::default())
-        .add_systems(Update, (apply_material_clamps, probe_material_clamp_writes).chain());
+        .add_systems(
+            Update,
+            (apply_material_clamps, probe_material_clamp_writes).chain(),
+        );
     app
 }
 
@@ -266,7 +269,13 @@ fn material_clamp_baseline_is_dropped_when_its_asset_is_removed() {
 
     clamp_settings(&mut app).set_metallic_enabled(false);
     app.update();
-    assert_eq!(app.world().resource::<MaterialClampBaselines>().store.baseline_count(), 2);
+    assert_eq!(
+        app.world()
+            .resource::<MaterialClampBaselines>()
+            .store
+            .baseline_count(),
+        2
+    );
 
     app.world_mut()
         .resource_mut::<Assets<StandardMaterial>>()
@@ -274,7 +283,10 @@ fn material_clamp_baseline_is_dropped_when_its_asset_is_removed() {
     write_material_event(&mut app, AssetEvent::Removed { id: metal.id() });
     app.update();
     assert_eq!(
-        app.world().resource::<MaterialClampBaselines>().store.baseline_count(),
+        app.world()
+            .resource::<MaterialClampBaselines>()
+            .store
+            .baseline_count(),
         1,
         "the removed material's baseline must be dropped on AssetEvent::Removed"
     );
@@ -284,7 +296,13 @@ fn material_clamp_baseline_is_dropped_when_its_asset_is_removed() {
     app.update();
     let materials = app.world().resource::<Assets<StandardMaterial>>();
     assert_eq!(materials.get(&other).unwrap().metallic, 0.5);
-    assert_eq!(app.world().resource::<MaterialClampBaselines>().store.baseline_count(), 0);
+    assert_eq!(
+        app.world()
+            .resource::<MaterialClampBaselines>()
+            .store
+            .baseline_count(),
+        0
+    );
 }
 
 #[test]

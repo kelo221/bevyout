@@ -1,12 +1,13 @@
 //! Viewer cursor, adjustment, and diagnostic controls.
 
-use bevy::asset::AssetEvent;
+use bevy::asset::{AssetEvent, AssetMut};
 use bevy::ecs::system::NonSendMarker;
 use bevy::input::keyboard::{Key, KeyboardFocusLost};
 use bevy::light::EnvironmentMapLight;
 use bevy::window::{PrimaryWindow, WindowFocused};
 
 use super::ao_policy::AoEligibilityTracker;
+use super::material_clamp_policy;
 
 use super::scene::{
     CellDirectionalLight, DEFAULT_REFLECTION_PROBE_STRENGTH, PREPARED_REFLECTION_PROBE_INTENSITY,
@@ -209,63 +210,40 @@ pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
 
-/// Reversible runtime gate for StandardMaterial metalness.
-///
-/// Disabling the gate snapshots every loaded material's metallic factor and
-/// forces it to zero. Materials that finish loading while disabled are
-/// captured on the next update. Re-enabling restores the exact snapshots.
-#[derive(Resource)]
-pub(crate) struct MetallicGate {
-    enabled: bool,
-    baselines: HashMap<AssetId<StandardMaterial>, f32>,
+/// Combined settings for the viewer's material-clamp policy (issue #269):
+/// metallic gate, dielectric-specular gate, and roughness scale behind one
+/// revision counter. `setrender` writes go through the setters; a write
+/// that actually changes a value bumps the revision, and
+/// `apply_material_clamps` pays exactly one full asset-store pass per
+/// revision change -- every other frame is asset-event-only.
+#[derive(Resource, Default)]
+pub(crate) struct MaterialClampSettings {
+    policy: material_clamp_policy::ClampSettings,
 }
 
-impl Default for MetallicGate {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            baselines: HashMap::new(),
-        }
-    }
-}
-
-impl MetallicGate {
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
+impl MaterialClampSettings {
+    pub(crate) fn metallic_enabled(&self) -> bool {
+        self.policy.metallic_enabled()
     }
 
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-}
-
-/// Reversible runtime gate for the dielectric reflectance term.
-///
-/// `StandardMaterial::reflectance` contributes to dielectric F0 but not the
-/// base-color F0 of pure metals. Disabling this gate therefore isolates
-/// non-metal specular response without destroying authored metallic shading.
-#[derive(Resource)]
-pub(crate) struct DielectricSpecularGate {
-    enabled: bool,
-    baselines: HashMap<AssetId<StandardMaterial>, f32>,
-}
-
-impl Default for DielectricSpecularGate {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            baselines: HashMap::new(),
-        }
-    }
-}
-
-impl DielectricSpecularGate {
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
+    pub(crate) fn dielectric_enabled(&self) -> bool {
+        self.policy.dielectric_enabled()
     }
 
-    pub(crate) fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
+    pub(crate) fn roughness_scale(&self) -> f32 {
+        self.policy.roughness_scale()
+    }
+
+    pub(crate) fn set_metallic_enabled(&mut self, enabled: bool) {
+        self.policy.set_metallic_enabled(enabled);
+    }
+
+    pub(crate) fn set_dielectric_enabled(&mut self, enabled: bool) {
+        self.policy.set_dielectric_enabled(enabled);
+    }
+
+    pub(crate) fn set_roughness_scale(&mut self, scale: f32) {
+        self.policy.set_roughness_scale(scale);
     }
 }
 
@@ -274,33 +252,12 @@ pub(crate) const MAX_ROUGHNESS_SCALE: f32 = 2.0;
 pub(crate) const MIN_REFLECTION_PROBE_STRENGTH: f32 = 0.0;
 pub(crate) const MAX_REFLECTION_PROBE_STRENGTH: f32 = 4096.0;
 
-/// Reversible multiplier over each material's original perceptual roughness.
-///
-/// Baselines remain stable while the scale changes, so repeated console
-/// adjustments never compound. Returning to 1 restores exact authored values.
-#[derive(Resource)]
-pub(crate) struct RoughnessScale {
-    scale: f32,
-    baselines: HashMap<AssetId<StandardMaterial>, f32>,
-}
-
-impl Default for RoughnessScale {
-    fn default() -> Self {
-        Self {
-            scale: 1.0,
-            baselines: HashMap::new(),
-        }
-    }
-}
-
-impl RoughnessScale {
-    pub(crate) fn scale(&self) -> f32 {
-        self.scale
-    }
-
-    pub(crate) fn set_scale(&mut self, scale: f32) {
-        self.scale = scale;
-    }
+/// The viewer's single baseline authority for the material clamps (issue
+/// #269), replacing the three per-gate `HashMap<AssetId<StandardMaterial>,
+/// f32>` stores. Mutated only by `apply_material_clamps`.
+#[derive(Resource, Default)]
+pub(crate) struct MaterialClampBaselines {
+    pub(crate) store: material_clamp_policy::ClampStore<AssetId<StandardMaterial>>,
 }
 
 /// Runtime multiplier over the prepared reflection probe intensity.
@@ -730,133 +687,97 @@ pub(crate) fn apply_unlit_mode(
     }
 }
 
-pub(crate) fn apply_metallic_gate(
-    mut gate: ResMut<MetallicGate>,
+/// One owner for the metallic gate, dielectric-specular gate, and
+/// roughness scale (issue #269): a full pass over the asset store per
+/// settings-revision change plus `AssetEvent`-only processing in between.
+/// The pre-#269 three systems each rescanned the whole asset store on
+/// every engaged frame (with intermediate `Vec` collections) and
+/// serialized on three `ResMut<Assets<StandardMaterial>>` parameters.
+///
+/// Write guards (`target != current` per factor) keep converged materials
+/// free of `AssetEvent::Modified`: the full pass reads via `iter()`
+/// (`AssetsMutIterator` unconditionally queues a `Modified` event for every
+/// dense slot -- iterating it would force a renderer-wide material
+/// re-upload on every settings tweak) and writes only differing materials
+/// through `get_mut`. Events this system emits for its own clamps settle
+/// after one echo frame.
+pub(crate) fn apply_material_clamps(
+    settings: Res<MaterialClampSettings>,
+    mut baselines: ResMut<MaterialClampBaselines>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_events: MessageReader<AssetEvent<StandardMaterial>>,
 ) {
-    if gate.enabled {
-        if gate.baselines.is_empty() {
-            return;
-        }
-        let baselines = std::mem::take(&mut gate.baselines);
-        for (id, baseline) in baselines {
-            let Some(material) = materials.get(id) else {
-                continue;
-            };
-            if material.metallic != baseline
-                && let Some(mut material) = materials.get_mut(id)
-            {
-                material.metallic = baseline;
+    let settings = &settings.policy;
+    let full_pass = baselines.store.needs_full_pass(settings);
+    for event in material_events.read() {
+        match event {
+            // Removals are baseline hygiene in both modes; a full-pass
+            // frame must not resurrect an entry for an already-dead id.
+            AssetEvent::Removed { id } => baselines.store.release(*id),
+            AssetEvent::Added { id } | AssetEvent::Modified { id } if !full_pass => {
+                if !settings.any_engaged() {
+                    continue;
+                }
+                let mut baseline = baselines.store.take(*id);
+                if let Some(mut material) = materials.get_mut(*id) {
+                    let target = material_clamp_policy::decide(
+                        settings,
+                        &mut baseline,
+                        material_factors(&material),
+                    );
+                    apply_factor_targets(&mut material, target);
+                }
+                baselines.store.record(*id, baseline);
             }
+            _ => {}
         }
+    }
+    if !full_pass {
         return;
     }
-
-    let newly_loaded = materials
-        .iter()
-        .filter(|(id, _)| !gate.baselines.contains_key(id))
-        .map(|(id, material)| (id, material.metallic))
-        .collect::<Vec<_>>();
-    gate.baselines.extend(newly_loaded);
-
-    let metallic_ids = materials
-        .iter()
-        .filter(|(_, material)| material.metallic != 0.0)
-        .map(|(id, _)| id)
-        .collect::<Vec<_>>();
-    for id in metallic_ids {
-        if let Some(mut material) = materials.get_mut(id) {
-            material.metallic = 0.0;
+    // One decision pass per material for all three fields at once; only
+    // differing materials are written afterwards.
+    let mut updates = Vec::new();
+    for (id, material) in materials.iter() {
+        let current = material_factors(material);
+        let mut baseline = baselines.store.take(id);
+        let target = material_clamp_policy::decide(settings, &mut baseline, current);
+        baselines.store.record(id, baseline);
+        if target != current {
+            updates.push((id, target));
         }
     }
-}
-
-pub(crate) fn apply_dielectric_specular_gate(
-    mut gate: ResMut<DielectricSpecularGate>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    if gate.enabled {
-        if gate.baselines.is_empty() {
-            return;
-        }
-        let baselines = std::mem::take(&mut gate.baselines);
-        for (id, baseline) in baselines {
-            let Some(material) = materials.get(id) else {
-                continue;
-            };
-            if material.reflectance != baseline
-                && let Some(mut material) = materials.get_mut(id)
-            {
-                material.reflectance = baseline;
-            }
-        }
-        return;
-    }
-
-    let newly_loaded = materials
-        .iter()
-        .filter(|(id, _)| !gate.baselines.contains_key(id))
-        .map(|(id, material)| (id, material.reflectance))
-        .collect::<Vec<_>>();
-    gate.baselines.extend(newly_loaded);
-
-    let reflective_ids = materials
-        .iter()
-        .filter(|(_, material)| material.reflectance != 0.0)
-        .map(|(id, _)| id)
-        .collect::<Vec<_>>();
-    for id in reflective_ids {
-        if let Some(mut material) = materials.get_mut(id) {
-            material.reflectance = 0.0;
-        }
-    }
-}
-
-pub(crate) fn apply_roughness_scale(
-    mut control: ResMut<RoughnessScale>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    if control.scale == 1.0 {
-        if control.baselines.is_empty() {
-            return;
-        }
-        let baselines = std::mem::take(&mut control.baselines);
-        for (id, baseline) in baselines {
-            let Some(material) = materials.get(id) else {
-                continue;
-            };
-            if material.perceptual_roughness != baseline
-                && let Some(mut material) = materials.get_mut(id)
-            {
-                material.perceptual_roughness = baseline;
-            }
-        }
-        return;
-    }
-
-    let newly_loaded = materials
-        .iter()
-        .filter(|(id, _)| !control.baselines.contains_key(id))
-        .map(|(id, material)| (id, material.perceptual_roughness))
-        .collect::<Vec<_>>();
-    control.baselines.extend(newly_loaded);
-
-    let scale = control.scale;
-    let updates = control
-        .baselines
-        .iter()
-        .filter_map(|(id, baseline)| {
-            let target = (baseline * scale).clamp(0.0, 1.0);
-            materials
-                .get(*id)
-                .filter(|material| material.perceptual_roughness != target)
-                .map(|_| (*id, target))
-        })
-        .collect::<Vec<_>>();
     for (id, target) in updates {
         if let Some(mut material) = materials.get_mut(id) {
-            material.perceptual_roughness = target;
+            apply_factor_targets(&mut material, target);
         }
+    }
+    baselines.store.prune_disengaged(settings);
+    baselines.store.mark_applied(settings);
+}
+
+fn material_factors(material: &StandardMaterial) -> material_clamp_policy::MaterialFactors {
+    material_clamp_policy::MaterialFactors {
+        metallic: material.metallic,
+        reflectance: material.reflectance,
+        perceptual_roughness: material.perceptual_roughness,
+    }
+}
+
+/// Writes only differing factors: `AssetMut`'s change notifier fires on
+/// `DerefMut`, so converged materials emit no `AssetEvent::Modified`.
+fn apply_factor_targets(
+    material: &mut AssetMut<'_, StandardMaterial>,
+    target: material_clamp_policy::MaterialFactors,
+) {
+    if material.metallic != target.metallic {
+        material.metallic = target.metallic;
+    }
+    if material.reflectance != target.reflectance {
+        material.reflectance = target.reflectance;
+    }
+    if material.perceptual_roughness != target.perceptual_roughness {
+        material.perceptual_roughness = target.perceptual_roughness;
     }
 }
 

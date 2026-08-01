@@ -322,9 +322,8 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         .insert_resource(VolumetricFogMultiplier(DEFAULT_VOLUMETRIC_FOG_MULTIPLIER))
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
-        .insert_resource(MetallicGate::default())
-        .insert_resource(DielectricSpecularGate::default())
-        .insert_resource(RoughnessScale::default())
+        .init_resource::<MaterialClampSettings>()
+        .init_resource::<MaterialClampBaselines>()
         .insert_resource(ReflectionProbeSettings::default())
         .insert_resource(image_space_emission)
         .insert_resource(ImageSpaceBloomOverrides::default())
@@ -399,9 +398,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
                 apply_horizontal_fov,
                 update_fps_text,
                 apply_unlit_mode,
-                apply_metallic_gate,
-                apply_dielectric_specular_gate,
-                apply_roughness_scale,
+                apply_material_clamps,
                 apply_reflection_probe_settings,
                 configure_glow_cards,
                 configure_fallout_surface_materials,

@@ -139,14 +139,20 @@ impl ClampBaseline {
         self.metallic.is_none() && self.reflectance.is_none() && self.perceptual_roughness.is_none()
     }
 
+    // The three field getters complete the entry's observer surface for
+    // the pure unit spec; the runtime adapter only needs `is_clear`
+    // (they are `#[allow]`-ed here, used from `tests/material_clamp_policy.rs`).
+    #[allow(dead_code)]
     pub(crate) fn metallic(&self) -> Option<f32> {
         self.metallic
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reflectance(&self) -> Option<f32> {
         self.reflectance
     }
 
+    #[allow(dead_code)]
     pub(crate) fn perceptual_roughness(&self) -> Option<f32> {
         self.perceptual_roughness
     }
@@ -301,10 +307,15 @@ where
         });
     }
 
+    // Store observers for the executable spec / pure unit spec; the
+    // runtime adapter drives `release`/`take`/`record`/`prune_disengaged`
+    // and never asks these questions.
+    #[allow(dead_code)]
     pub(crate) fn baseline_count(&self) -> usize {
         self.baselines.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn baseline(&self, id: K) -> Option<&ClampBaseline> {
         self.baselines.get(&id)
     }

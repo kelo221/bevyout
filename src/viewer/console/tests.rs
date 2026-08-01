@@ -446,10 +446,18 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert!(exec(&mut app, "setrender worldspace_lod 0").ok);
     assert!(exec(&mut app, "setrender metallic 0").ok);
-    assert!(!app.world().resource::<MaterialClampSettings>().metallic_enabled());
+    assert!(
+        !app.world()
+            .resource::<MaterialClampSettings>()
+            .metallic_enabled()
+    );
     assert_eq!(exec(&mut app, "getrender metallic").value["value"], 0);
     assert!(exec(&mut app, "setrender metallic 1").ok);
-    assert!(app.world().resource::<MaterialClampSettings>().metallic_enabled());
+    assert!(
+        app.world()
+            .resource::<MaterialClampSettings>()
+            .metallic_enabled()
+    );
     assert!(exec(&mut app, "setrender dielectric_specular 0").ok);
     assert!(
         !app.world()

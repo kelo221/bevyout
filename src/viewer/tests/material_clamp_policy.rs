@@ -8,7 +8,10 @@ fn factors(metallic: f32, reflectance: f32, perceptual_roughness: f32) -> Materi
     }
 }
 
-fn engaged_material(settings: &ClampSettings, current: MaterialFactors) -> (ClampBaseline, MaterialFactors) {
+fn engaged_material(
+    settings: &ClampSettings,
+    current: MaterialFactors,
+) -> (ClampBaseline, MaterialFactors) {
     let mut baseline = ClampBaseline::default();
     let target = decide(settings, &mut baseline, current);
     assert!(
@@ -140,11 +143,7 @@ fn release_drops_the_materials_baseline_entry() {
     let mut store: ClampStore<u32> = ClampStore::default();
     for id in [1u32, 2] {
         let mut baseline = store.take(id);
-        decide(
-            &settings,
-            &mut baseline,
-            factors(0.5 * id as f32, 0.5, 0.5),
-        );
+        decide(&settings, &mut baseline, factors(0.5 * id as f32, 0.5, 0.5));
         store.record(id, baseline);
     }
     assert_eq!(store.baseline_count(), 2);

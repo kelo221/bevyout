@@ -80,6 +80,7 @@ mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
 mod lighting;
+mod material_clamp_policy;
 mod nav;
 mod nav_overlay;
 mod pause_menu;
