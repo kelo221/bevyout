@@ -9,6 +9,10 @@ fn app() -> App {
         .insert_resource(AgentBridgeInfo {
             port: 15_702,
             session_id: "bridge-test".into(),
+            runtime_kind: "viewer",
+            headless: true,
+            physics_enabled: Some(false),
+            capabilities: json!({ "scene_snapshot": 2 }),
         });
     let entity = app
         .world_mut()
@@ -19,6 +23,16 @@ fn app() -> App {
         .register(entity, 1, Some("TestRef"));
     app.update();
     app
+}
+
+#[test]
+fn capabilities_report_bridge_build_and_runtime_contract() {
+    let app = app();
+    let value = bridge_metadata(app.world().resource::<AgentBridgeInfo>());
+    assert_eq!(value["bridge_api_version"], 2);
+    assert_eq!(value["runtime"]["kind"], "viewer");
+    assert_eq!(value["capabilities"]["scene_snapshot"], 2);
+    assert_eq!(value["mutation_policy"], "runtime_only");
 }
 
 #[test]
@@ -48,13 +62,11 @@ fn brp_console_result_matches_direct_executor_shape() {
 fn brp_console_help_exposes_registry_metadata() {
     let app = app();
     let value = console_help(In(None), app.world()).unwrap();
-    assert!(
-        value
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["name"] == "getpos")
-    );
+    assert!(value
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["name"] == "getpos"));
 }
 
 #[test]
@@ -81,11 +93,9 @@ fn schedule_snapshot_reports_initialized_system_metadata() {
     let value =
         schedule_snapshot(In(Some(json!({ "include_systems": true }))), app.world()).unwrap();
     assert!(value["schedule_count"].as_u64().unwrap() > 0);
-    assert!(
-        value["schedules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|schedule| schedule["initialized"] == true)
-    );
+    assert!(value["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|schedule| schedule["initialized"] == true));
 }
