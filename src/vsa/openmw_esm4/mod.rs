@@ -10,6 +10,7 @@ use std::fmt;
 use std::io::{Cursor, Read};
 
 use bevyout_core::form_id::FormIdResolver;
+use bevyout_core::image_space::ImageSpaceModifier;
 use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
 
 use super::manifest::{CellInfo, ImageSpaceInfo};
@@ -551,6 +552,7 @@ pub(crate) struct ParsedPlugin {
     pub(crate) factions: HashMap<u32, FactionRecord>,
     pub(crate) packages: HashMap<u32, PackageRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
+    pub(crate) image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,
     pub(crate) sound_references: HashMap<u32, SoundReferenceRecord>,
     pub(crate) acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,
@@ -777,6 +779,7 @@ impl ParsedContentSet {
             factions: state.factions,
             packages: state.packages,
             image_spaces: state.image_spaces,
+            image_space_modifiers: state.image_space_modifiers,
             sounds: state.sounds,
             sound_references: state.sound_references,
             acoustic_spaces: state.acoustic_spaces,
@@ -810,6 +813,7 @@ pub(crate) struct ParsedState {
     factions: HashMap<u32, FactionRecord>,
     packages: HashMap<u32, PackageRecord>,
     image_spaces: HashMap<u32, ImageSpaceInfo>,
+    image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
     sounds: HashMap<u32, SoundRecord>,
     sound_references: HashMap<u32, SoundReferenceRecord>,
     acoustic_spaces: HashMap<u32, AcousticSpaceRecord>,

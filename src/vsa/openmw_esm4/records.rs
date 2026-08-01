@@ -993,6 +993,367 @@ pub(crate) fn parse_image_space(
     Some(image_space)
 }
 
+/// Decodes the Fallout 3 `IMAD` ImageSpace modifier record.  The fixed DNAM
+/// prefix contains mult/add keyframe counts followed by packed/static effect
+/// fields; named subrecords carry the timed effects and `*IAD` records carry
+/// the HDR/cinematic mult/add curves.  Unknown curve numbers are retained as
+/// a stable diagnostic instead of being guessed as a different effect.
+pub(crate) fn parse_image_space_modifier(
+    subs: &[Subrecord],
+    form_id: u32,
+    resolver: &FormIdResolver,
+) -> ImageSpaceModifier {
+    use bevyout_core::image_space::{
+        ImageSpaceModifierCurveOperation as Operation, ImageSpaceModifierProperty as Property,
+        ImageSpaceModifierValues,
+    };
+
+    let mut modifier = ImageSpaceModifier {
+        form_id,
+        editor_id: sub(subs, "EDID").map(cstring),
+        static_values: ImageSpaceModifierValues::neutral(),
+        ..ImageSpaceModifier::default()
+    };
+    let mut diagnostics = Vec::new();
+
+    if let Some(data) = sub(subs, "DNAM") {
+        if data.len() >= 4 {
+            modifier.flags = u32_at(data, 0).unwrap_or_default();
+        } else if let Some(flags) = data.first() {
+            modifier.flags = u32::from(*flags);
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: DNAM flags truncated to one byte"
+            ));
+        } else {
+            diagnostics.push(format!("IMAD {form_id:08x}: DNAM is empty"));
+        }
+        if let Some(seconds) = f32_at_option(data, 4) {
+            if seconds.is_finite() && seconds >= 0.0 {
+                modifier.duration_ms = (seconds * 1_000.0).round().min(u32::MAX as f32) as u32;
+            } else {
+                diagnostics.push(format!(
+                    "IMAD {form_id:08x}: DNAM duration is not finite and was reset"
+                ));
+            }
+        } else if data.len() >= 4 {
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: DNAM duration is missing; modifier is non-expiring"
+            ));
+        }
+        if data.len() < 244 {
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: DNAM static layout is truncated ({} of 244 bytes)",
+                data.len()
+            ));
+        }
+
+        // The HDR/cinematic uint32 fields at offsets 8..175 are mult/add
+        // keyframe counts, not effect values. The direct effect fields begin
+        // at offset 176. Their file representation is uint32; retain the
+        // authored numeric value as f32 for the Bevy-free policy.
+        let integer_value = |offset: usize, fallback: f32| {
+            u32_at(data, offset)
+                .map(|value| value as f32)
+                .filter(|value| value.is_finite())
+                .unwrap_or(fallback)
+        };
+        modifier.static_values.blur = integer_value(180, 0.0);
+        modifier.static_values.double_vision = integer_value(184, 0.0);
+        modifier.static_values.radial_blur = integer_value(188, 0.0);
+        modifier.static_values.radial_center = [
+            f32_at_option(data, 204)
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.5),
+            f32_at_option(data, 208)
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.5),
+        ];
+        modifier.static_values.radial_ramp_up = integer_value(192, 0.0);
+        modifier.static_values.radial_start = integer_value(196, 0.0);
+        modifier.radial_blur_flags = u32_at(data, 200).unwrap_or_default();
+        modifier.static_values.depth_of_field_strength = integer_value(212, 0.0);
+        modifier.static_values.depth_of_field_distance = integer_value(216, 0.0);
+        modifier.static_values.depth_of_field_range = integer_value(220, 0.0);
+        modifier.depth_of_field_flags = u32_at(data, 224).unwrap_or_default();
+        modifier.static_values.radial_ramp_down = integer_value(228, 0.0);
+        modifier.static_values.radial_down_start = integer_value(232, 0.0);
+        modifier.static_values.motion_blur = integer_value(240, 0.0);
+        if let Some(color) = packed_color_at(data, 176) {
+            modifier.static_values.tint_rgba = color;
+        }
+        if let Some(color) = packed_color_at(data, 236) {
+            modifier.static_values.fade = color[3];
+        }
+    } else {
+        diagnostics.push(format!("IMAD {form_id:08x}: missing DNAM"));
+    }
+
+    let named_scalar_curves = [
+        ("BNAM", Property::Blur),
+        ("VNAM", Property::DoubleVision),
+        ("RNAM", Property::RadialBlur),
+        ("SNAM", Property::RadialRampUp),
+        ("UNAM", Property::RadialStart),
+        ("NAM1", Property::RadialRampDown),
+        ("NAM2", Property::RadialDownStart),
+        ("WNAM", Property::DepthOfFieldStrength),
+        ("XNAM", Property::DepthOfFieldDistance),
+        ("YNAM", Property::DepthOfFieldRange),
+        ("NAM4", Property::MotionBlur),
+    ];
+    for (signature, property) in named_scalar_curves {
+        if let Some(data) = sub(subs, signature) {
+            append_imad_time_curve(
+                &mut modifier.curves,
+                &mut diagnostics,
+                form_id,
+                signature,
+                data,
+                property,
+                Operation::Set,
+                modifier.duration_ms,
+            );
+        }
+    }
+    if let Some(data) = sub(subs, "TNAM") {
+        append_imad_color_curve(
+            &mut modifier.color_keyframes,
+            &mut diagnostics,
+            form_id,
+            "TNAM",
+            data,
+            modifier.duration_ms,
+        );
+    }
+    if let Some(data) = sub(subs, "NAM3") {
+        append_imad_color_curve(
+            &mut modifier.fade_color_keyframes,
+            &mut diagnostics,
+            form_id,
+            "NAM3",
+            data,
+            modifier.duration_ms,
+        );
+    }
+
+    for subrecord in subs {
+        let Some((index, operation)) = imad_curve_operation(&subrecord.signature) else {
+            continue;
+        };
+        let Some(property) = imad_curve_spec(index) else {
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: unsupported IAD curve {index:02x} retained as diagnostic"
+            ));
+            continue;
+        };
+        append_imad_time_curve(
+            &mut modifier.curves,
+            &mut diagnostics,
+            form_id,
+            &subrecord.signature,
+            &subrecord.data,
+            property,
+            operation,
+            modifier.duration_ms,
+        );
+    }
+
+    for signature in ["RDSD", "RDSI"] {
+        if let Some(form_id) = sub_form_id(subs, signature, resolver) {
+            modifier.sound_form_ids.push(form_id);
+        }
+    }
+    modifier.sound_form_ids.sort_unstable();
+    modifier.sound_form_ids.dedup();
+    modifier.curves.sort_by_key(|curve| {
+        (
+            curve.property as u8,
+            curve.operation as u8,
+            curve
+                .keyframes
+                .first()
+                .map_or(0, |keyframe| keyframe.time_ms),
+        )
+    });
+    modifier.diagnostics = diagnostics;
+    modifier
+}
+
+fn packed_color_at(data: &[u8], offset: usize) -> Option<[f32; 4]> {
+    data.get(offset..offset + 4).map(rgba8)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_imad_time_curve(
+    curves: &mut Vec<bevyout_core::image_space::ImageSpaceModifierCurve>,
+    diagnostics: &mut Vec<String>,
+    form_id: u32,
+    signature: &str,
+    data: &[u8],
+    property: bevyout_core::image_space::ImageSpaceModifierProperty,
+    operation: bevyout_core::image_space::ImageSpaceModifierCurveOperation,
+    duration_ms: u32,
+) {
+    if !data.len().is_multiple_of(8) {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} curve has {} trailing byte(s)",
+            data.len() % 8
+        ));
+        return;
+    }
+    let mut keyframes = Vec::new();
+    for chunk in data.chunks_exact(8) {
+        let (Some(time), Some(value)) = (f32_at_option(chunk, 0), f32_at_option(chunk, 4)) else {
+            continue;
+        };
+        if !time.is_finite() || !value.is_finite() || time < 0.0 {
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: {signature} contains a non-finite keyframe"
+            ));
+            continue;
+        }
+        keyframes.push(bevyout_core::image_space::ImageSpaceModifierKeyframe {
+            time_ms: interpolator_time_to_millis(time, duration_ms),
+            value,
+        });
+    }
+    keyframes.sort_by_key(|keyframe| keyframe.time_ms);
+    if keyframes
+        .windows(2)
+        .any(|window| window[0].time_ms == window[1].time_ms)
+    {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} contains duplicate timestamps"
+        ));
+        keyframes.dedup_by_key(|keyframe| keyframe.time_ms);
+    }
+    if keyframes.is_empty() {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} has no finite keyframes"
+        ));
+    } else {
+        curves.push(bevyout_core::image_space::ImageSpaceModifierCurve {
+            property,
+            operation,
+            keyframes,
+        });
+    }
+}
+
+fn append_imad_color_curve(
+    keyframes: &mut Vec<bevyout_core::image_space::ImageSpaceModifierColorKeyframe>,
+    diagnostics: &mut Vec<String>,
+    form_id: u32,
+    signature: &str,
+    data: &[u8],
+    duration_ms: u32,
+) {
+    if !data.len().is_multiple_of(20) {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} color curve has {} trailing byte(s)",
+            data.len() % 20
+        ));
+        return;
+    }
+    for chunk in data.chunks_exact(20) {
+        let Some(time) = f32_at_option(chunk, 0) else {
+            continue;
+        };
+        let (Some(red), Some(green), Some(blue), Some(alpha)) = (
+            f32_at_option(chunk, 4),
+            f32_at_option(chunk, 8),
+            f32_at_option(chunk, 12),
+            f32_at_option(chunk, 16),
+        ) else {
+            continue;
+        };
+        if !time.is_finite()
+            || [red, green, blue, alpha]
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            diagnostics.push(format!(
+                "IMAD {form_id:08x}: {signature} contains a non-finite color keyframe"
+            ));
+            continue;
+        }
+        keyframes.push(bevyout_core::image_space::ImageSpaceModifierColorKeyframe {
+            time_ms: interpolator_time_to_millis(time, duration_ms),
+            rgba: [red, green, blue, alpha],
+        });
+    }
+    keyframes.sort_by_key(|keyframe| keyframe.time_ms);
+    if keyframes
+        .windows(2)
+        .any(|window| window[0].time_ms == window[1].time_ms)
+    {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} contains duplicate timestamps"
+        ));
+        keyframes.dedup_by_key(|keyframe| keyframe.time_ms);
+    }
+    if keyframes.is_empty() {
+        diagnostics.push(format!(
+            "IMAD {form_id:08x}: {signature} has no finite color keyframes"
+        ));
+    }
+}
+
+fn imad_curve_operation(
+    signature: &str,
+) -> Option<(
+    u8,
+    bevyout_core::image_space::ImageSpaceModifierCurveOperation,
+)> {
+    let bytes = signature.as_bytes();
+    if bytes.len() != 4 || &bytes[1..] != b"IAD" {
+        return None;
+    }
+    let raw = bytes[0];
+    if raw.is_ascii_digit() {
+        return Some((
+            raw - b'0',
+            bevyout_core::image_space::ImageSpaceModifierCurveOperation::Multiplier,
+        ));
+    }
+    if raw <= 0x3f {
+        return Some((
+            raw,
+            bevyout_core::image_space::ImageSpaceModifierCurveOperation::Multiplier,
+        ));
+    }
+    if (0x40..=0x54).contains(&raw) {
+        return Some((
+            raw - 0x40,
+            bevyout_core::image_space::ImageSpaceModifierCurveOperation::Additive,
+        ));
+    }
+    None
+}
+
+fn imad_curve_spec(index: u8) -> Option<bevyout_core::image_space::ImageSpaceModifierProperty> {
+    use bevyout_core::image_space::ImageSpaceModifierProperty as Property;
+    Some(match index {
+        0x11 => Property::Saturation,
+        0x12 => Property::Contrast,
+        0x14 => Property::Brightness,
+        _ => return None,
+    })
+}
+
+/// Bethesda stores IMAD interpolator times as normalized progress for the
+/// authored duration. Keep a seconds-style fallback for non-expiring records
+/// and malformed/out-of-range authoring so the prepared representation stays
+/// deterministic instead of overflowing or silently pinning every keyframe.
+fn interpolator_time_to_millis(time: f32, duration_ms: u32) -> u32 {
+    let millis = if duration_ms > 0 && (0.0..=1.0).contains(&time) {
+        time * duration_ms as f32
+    } else {
+        time.max(0.0) * 1_000.0
+    };
+    millis.round().min(u32::MAX as f32) as u32
+}
+
 /// `WRLD` worldspace identity plus parent/climate inheritance fields.
 pub(crate) fn parse_worldspace(
     subs: &[Subrecord],

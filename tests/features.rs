@@ -190,6 +190,13 @@ mod inventory_policy;
 #[allow(dead_code, unused_imports)]
 mod performance_policy;
 
+// `viewer::screen_fx::policy` is the Bevy-free ImageSpace/IMAD lifecycle and
+// composition boundary.  The renderer adapter is intentionally not included
+// in this executable-spec crate.
+#[path = "../src/viewer/screen_fx/policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod screen_fx_policy;
+
 // Hybrid point-shadow composition is intentionally Bevy-free so the
 // executable specification drives the same source-selection policy as the
 // runtime shader contract.
@@ -1052,6 +1059,11 @@ struct BevyoutWorld {
     dialogue_coverage: Option<bevyout_core::dialogue::DialogueCoverageReport>,
     dialogue_repair_guidance: Option<String>,
     dialogue_metadata_valid: Option<bool>,
+
+    // -- image_space.feature (#96) --
+    screen_fx: screen_fx_policy::ScreenFxPolicy,
+    screen_fx_definition: Option<screen_fx_policy::ScreenFxDefinition>,
+    screen_fx_sample: Option<screen_fx_policy::ScreenFxValues>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -14126,4 +14138,238 @@ async fn when_dialogue_bundle_metadata_is_validated(world: &mut BevyoutWorld) {
 #[then("the dialogue bundle metadata is rejected")]
 async fn then_dialogue_bundle_metadata_is_rejected(world: &mut BevyoutWorld) {
     assert_eq!(world.dialogue_metadata_valid, Some(false));
+}
+
+// =======================================================================
+// -- image_space.feature (#96) --
+// Merge-seam addition: appended at the end of the file per
+// docs/plans/README.md's traceability convention.
+// =======================================================================
+
+fn screen_fx_definition_with_values(
+    form_id: u32,
+    duration_ms: u32,
+    values: screen_fx_policy::ScreenFxValues,
+) -> screen_fx_policy::ScreenFxDefinition {
+    screen_fx_policy::ScreenFxDefinition {
+        modifier_form_id: form_id,
+        duration_ms,
+        static_values: values,
+        curves: Vec::new(),
+        color_keyframes: Vec::new(),
+        fade_color_keyframes: Vec::new(),
+    }
+}
+
+#[given(regex = r"^an IMAD blood curve from (\d+) ms at ([\d.]+) to (\d+) ms at ([\d.]+)$")]
+async fn given_imad_blood_curve(
+    world: &mut BevyoutWorld,
+    first_time_ms: u32,
+    first_value: f32,
+    last_time_ms: u32,
+    last_value: f32,
+) {
+    world.screen_fx_definition = Some(screen_fx_policy::ScreenFxDefinition {
+        modifier_form_id: 0x96,
+        duration_ms: last_time_ms,
+        static_values: screen_fx_policy::ScreenFxValues::neutral(),
+        curves: vec![screen_fx_policy::ScreenFxCurve {
+            property: screen_fx_policy::ScreenFxProperty::Blood,
+            operation: screen_fx_policy::ScreenFxCurveOperation::Additive,
+            keyframes: vec![
+                screen_fx_policy::ScreenFxKeyframe {
+                    time_ms: first_time_ms,
+                    value: first_value,
+                },
+                screen_fx_policy::ScreenFxKeyframe {
+                    time_ms: last_time_ms,
+                    value: last_value,
+                },
+            ],
+        }],
+        color_keyframes: Vec::new(),
+        fade_color_keyframes: Vec::new(),
+    });
+}
+
+#[given("a neutral screen effect base")]
+async fn given_neutral_screen_effect_base(world: &mut BevyoutWorld) {
+    world.screen_fx = screen_fx_policy::ScreenFxPolicy::default();
+}
+
+#[given(regex = r"^a screen modifier 0x([0-9A-Fa-f]+) with priority (-?\d+) and blood ([\d.]+)$")]
+async fn given_screen_modifier(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    priority: i32,
+    blood: f32,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("screen modifier FormID");
+    world.screen_fx.start(screen_fx_policy::ScreenFxStart::new(
+        screen_fx_policy::ScreenFxSource::Gameplay,
+        form_id,
+        priority,
+        0,
+        screen_fx_definition_with_values(
+            form_id,
+            1_000,
+            screen_fx_policy::ScreenFxValues {
+                blood,
+                ..screen_fx_policy::ScreenFxValues::neutral()
+            },
+        ),
+    ));
+}
+
+#[given(regex = r"^a screen modifier 0x([0-9A-Fa-f]+) with duration (\d+) ms and blood ([\d.]+)$")]
+async fn given_timed_screen_modifier(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    duration_ms: u32,
+    blood: f32,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("screen modifier FormID");
+    world.screen_fx.start(screen_fx_policy::ScreenFxStart::new(
+        screen_fx_policy::ScreenFxSource::Gameplay,
+        form_id,
+        0,
+        0,
+        screen_fx_definition_with_values(
+            form_id,
+            duration_ms,
+            screen_fx_policy::ScreenFxValues {
+                blood,
+                ..screen_fx_policy::ScreenFxValues::neutral()
+            },
+        ),
+    ));
+}
+
+#[given("screen blood and distortion are disabled")]
+async fn given_screen_blood_and_distortion_disabled(world: &mut BevyoutWorld) {
+    world
+        .screen_fx
+        .set_settings(screen_fx_policy::ScreenFxSettings {
+            overall_intensity: 1.0,
+            screen_blood: 0.0,
+            flashes: 1.0,
+            motion_and_distortion: 0.0,
+        });
+}
+
+#[given(
+    regex = r"^a weapon-hit screen modifier 0x([0-9A-Fa-f]+) with blood ([\d.]+) and double vision ([\d.]+)$"
+)]
+async fn given_weapon_hit_screen_modifier(
+    world: &mut BevyoutWorld,
+    form_id: String,
+    blood: f32,
+    double_vision: f32,
+) {
+    let form_id = u32::from_str_radix(&form_id, 16).expect("screen modifier FormID");
+    world.screen_fx.start(screen_fx_policy::ScreenFxStart::new(
+        screen_fx_policy::ScreenFxSource::WeaponHit,
+        form_id,
+        0,
+        0,
+        screen_fx_definition_with_values(
+            form_id,
+            1_000,
+            screen_fx_policy::ScreenFxValues {
+                blood,
+                double_vision,
+                ..screen_fx_policy::ScreenFxValues::neutral()
+            },
+        ),
+    ));
+}
+
+#[when(regex = r"^the IMAD curve is sampled at (\d+) ms$")]
+async fn when_imad_curve_sampled(world: &mut BevyoutWorld, elapsed_ms: u64) {
+    let definition = world
+        .screen_fx_definition
+        .as_ref()
+        .expect("IMAD definition");
+    world.screen_fx_sample = Some(world.screen_fx.sample(definition, elapsed_ms));
+}
+
+#[when("the same screen modifier is started again with blood 0.75")]
+async fn when_same_screen_modifier_restarted(world: &mut BevyoutWorld) {
+    let form_id = 0x30;
+    world.screen_fx.start(screen_fx_policy::ScreenFxStart::new(
+        screen_fx_policy::ScreenFxSource::Gameplay,
+        form_id,
+        0,
+        0,
+        screen_fx_definition_with_values(
+            form_id,
+            1_000,
+            screen_fx_policy::ScreenFxValues {
+                blood: 0.75,
+                ..screen_fx_policy::ScreenFxValues::neutral()
+            },
+        ),
+    ));
+}
+
+#[when(regex = r"^screen time advances to (\d+) ms$")]
+async fn when_screen_time_advances(world: &mut BevyoutWorld, now_ms: u64) {
+    world.screen_fx.advance_to(now_ms);
+}
+
+#[when("the screen modifiers are composed")]
+async fn when_screen_modifiers_composed(world: &mut BevyoutWorld) {
+    world.screen_fx_sample = Some(world.screen_fx.snapshot());
+}
+
+#[when("screen effects are cleared for a cell transition")]
+async fn when_screen_effects_cleared_for_cell_transition(world: &mut BevyoutWorld) {
+    world
+        .screen_fx
+        .apply(screen_fx_policy::ScreenFxRequest::Clear {
+            reason: screen_fx_policy::ScreenFxClearReason::CellTransition,
+        });
+}
+
+#[then(regex = r"^the sampled screen blood is ([\d.]+)$")]
+async fn then_sampled_screen_blood(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world.screen_fx_sample.expect("screen effect sample").blood;
+    assert!(
+        (actual - expected).abs() < 0.000_1,
+        "actual blood {actual} != {expected}"
+    );
+}
+
+#[then(regex = r"^(\d+) screen modifier is active$")]
+async fn then_screen_modifier_count(world: &mut BevyoutWorld, expected: usize) {
+    assert_eq!(world.screen_fx.active_len(), expected);
+}
+
+#[then(regex = r"^no screen modifier is active$")]
+async fn then_no_screen_modifier_is_active(world: &mut BevyoutWorld) {
+    assert_eq!(world.screen_fx.active_len(), 0);
+}
+
+#[then(regex = r"^the composed screen blood is ([\d.]+)$")]
+async fn then_composed_screen_blood(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .screen_fx_sample
+        .get_or_insert_with(|| world.screen_fx.snapshot())
+        .blood;
+    assert!(
+        (actual - expected).abs() < 0.000_1,
+        "actual blood {actual} != {expected}"
+    );
+}
+
+#[then(regex = r"^the composed double vision is ([\d.]+)$")]
+async fn then_composed_double_vision(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .screen_fx_sample
+        .get_or_insert_with(|| world.screen_fx.snapshot())
+        .double_vision;
+    assert!(
+        (actual - expected).abs() < 0.000_1,
+        "actual double vision {actual} != {expected}"
+    );
 }

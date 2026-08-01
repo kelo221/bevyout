@@ -23,6 +23,7 @@ pub(super) struct WeaponHitQueries<'w, 's> {
 
 pub(super) fn resolve_accepted_shots(
     mut shots: MessageReader<AcceptedWeaponShot>,
+    mut screen_fx: MessageWriter<crate::viewer::screen_fx::ScreenFxRequested>,
     mut raycast: MeshRayCast,
     queries: WeaponHitQueries,
     mut save: ResMut<ActiveSaveState>,
@@ -68,6 +69,7 @@ pub(super) fn resolve_accepted_shots(
         let Some(actor_entity) =
             find_actor_ancestor(*hit_entity, &queries.parents, &queries.actors)
         else {
+            screen_fx.write(crate::viewer::screen_fx::ScreenFxRequested::weapon_hit());
             runtime.last_fire = FireReport {
                 status: FireStatus::WorldHit,
                 shot_index: Some(shot.shot_index),
@@ -101,6 +103,7 @@ pub(super) fn resolve_accepted_shots(
             state,
         ) {
             Ok(ImpactOutcome::Actor(outcome)) => {
+                screen_fx.write(crate::viewer::screen_fx::ScreenFxRequested::weapon_hit());
                 runtime.last_fire = FireReport {
                     status: if outcome.killed {
                         FireStatus::ActorKilled

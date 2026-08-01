@@ -299,6 +299,9 @@ fn minimal_manifest(cell_form_id: u32) -> PreparedSceneManifest {
         actor_animation_catalog_path: None,
         actor_animation_catalog_revision: None,
         actor_animation_catalog_hash: None,
+        image_space_modifier_catalog_path: None,
+        image_space_modifier_catalog_revision: None,
+        image_space_modifier_catalog_hash: None,
         // `PreparedPluginSource` is not re-exported from `crate::vsa`
         // and widening that surface for a test is not worth it; an
         // empty plugin list exercises the same identity plumbing.
