@@ -92,9 +92,21 @@ catalog contains the 10mm Pistol (`0000434f`) and 10mm Round (`00004241`).
    reason and do not advance RNG. `weaponclearjam` transitions the same weapon
    instance back to `jam: none`; the next legal reload/fire can proceed.
 
-6. Save and reload with a partially degraded weapon. Use the project’s normal
-   viewer save command/path for the checkout, then restart the viewer and load
-   that save. Run:
+6. Save and reload with a partially degraded weapon:
+
+   ```text
+   save wave3-condition
+   ```
+
+   Expected: the console reports `.bevyout/saves/wave3-condition.bevyoutsave`
+   was written. Stop the viewer and relaunch the same prepared scene with the
+   save slot:
+
+   ```text
+   cargo run-dev -- view --manifest .bevyout/cache/scenes/00017f37/scene.ron --agent-bridge --agent-port 15702 --save-slot wave3-condition
+   ```
+
+   Then run:
 
    ```text
    combatstate player
@@ -119,6 +131,6 @@ catalog contains the 10mm Pistol (`0000434f`) and 10mm Round (`00004241`).
 - If the viewer’s window is occluded, use `combatstate`, bridge logs, and scene
   snapshots as evidence; do not treat a black captured PNG as a rendering
   failure by itself.
-- Update this script if implementation settles a different exact save/catalog
-  revision or a more deterministic jam-reproduction command, and record that
-  change in `M5_WAVE3_PLAN.md` under “Shipped amendments.”
+- The shipped policy identifiers for this checkout are save format v8, item
+  catalog `openmw-items-v10-combat-condition`, and prepare revision
+  `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.

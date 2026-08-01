@@ -48,9 +48,11 @@ state rather than create a second authority.
 5. Persist only implemented Wave 3 condition, jam, and RNG state. Migrate old
    saves deterministically, reject malformed/non-finite values, and bump every
    affected `*_REVISION` constant. Planned policy identifiers are
-   `m5-combat-v3`, save format v6, and an item-catalog revision based on the
-   current `openmw-items-v9-transfer-audio-defaults`; the implementation must
-   record the exact shipped strings in the amendments below.
+   `m5-combat-v3`, save format v8 (the current branch already uses v7 for
+   world-location persistence), item catalog
+   `openmw-items-v10-combat-condition`, and prepare revision
+   `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`; keep these
+   exact shipped strings synchronized in the amendments below.
 6. Add a deterministic feature trace and dedicated unit tests, then run the
    real prepared Super-Duper Mart acceptance with the actual 10mm Pistol and
    10mm Round FormIDs. Record measured evidence on the issues and in the wave
@@ -105,5 +107,11 @@ state rather than create a second authority.
 
 ## Shipped amendments
 
-None at kickoff. Record exact revision constants, migration notes, and any
-acceptance-driven design changes here rather than rewriting the fixed plan.
+- A1 (implementation): this checkout’s current save format is v7 because M6
+  already owns world-location persistence, so Wave 3 uses save format v8 and a
+  `CRNG` record rather than the roadmap’s stale v6 placeholder.
+- A2 (implementation): the existing prepared `max_condition` field is enough
+  to drive the fixed Wave 3 policy; no new prepared field was needed. Its
+  decoded meaning is nevertheless revision-gated by item catalog
+  `openmw-items-v10-combat-condition` and prepare revision
+  `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.

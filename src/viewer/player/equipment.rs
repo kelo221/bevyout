@@ -148,6 +148,15 @@ impl EquipmentState {
         self.ammo
     }
 
+    /// Mutable item state such as weapon condition is canonicalized by the
+    /// item ledger. Keep this legacy presentation key attached to the same
+    /// equipped base item after that state changes.
+    pub(crate) fn set_weapon_condition(&mut self, condition: Option<u32>) {
+        if let Some((key, ammo_form_id)) = self.weapon {
+            self.weapon = Some((StackKey { condition, ..key }, ammo_form_id));
+        }
+    }
+
     /// F98.2: the query the drop/transfer paths call -- an equipped item
     /// (apparel in any slot, the equipped weapon, or the loaded ammo) cannot
     /// be dropped or transferred while equipped.

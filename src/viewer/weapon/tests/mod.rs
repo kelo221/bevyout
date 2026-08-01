@@ -19,7 +19,7 @@ fn prepared_weapon_prefers_first_person_asset_and_keeps_action_audio() {
         quest_item: false,
         stats: PreparedItemStats::Weapon {
             damage: Some(9),
-            max_condition: None,
+            max_condition: Some(100),
             clip_size: Some(12),
             speed: None,
             reach: None,
@@ -38,6 +38,8 @@ fn prepared_weapon_prefers_first_person_asset_and_keeps_action_audio() {
         Some("assets/first.glb")
     );
     assert_eq!(weapon.damage, 9.0);
+    assert_eq!(weapon.max_condition, Some(100));
+    assert_eq!(weapon.condition_policy().degradation_per_shot(), 1);
     assert_eq!(weapon.fire_sound_2d_form_id, Some(0x201));
 }
 
