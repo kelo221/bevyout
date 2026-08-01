@@ -62,9 +62,9 @@ curl -X POST http://127.0.0.1:15702/ -H "Content-Type: application/json" -d "{\"
 
 ## 3. AO and glow cards behave as before, without per-frame scans (#270)
 
- 1. `setrender ao_strength 0` — expected: baked quick-AO vertex shading
-    lifts toward white on AO'd meshes. `setrender ao_strength 0.5` —
-    partial. `setrender ao_strength 1` — back to authored values exactly.
+ 1. `setrender ao 0` — expected: baked quick-AO vertex shading
+    lifts toward white on AO'd meshes. `setrender ao 0.5` —
+    partial. `setrender ao 1` — back to authored values exactly.
  2. Look at any light-glow geometry while doing steps above — expected: no
     `lightglow*` billboards are ever visible (classification now happens on
     entity events rather than a count sentinel; the remove+add blind spot
