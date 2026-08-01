@@ -211,6 +211,18 @@ mod hybrid_shadow_policy;
 #[allow(dead_code, unused_imports)]
 mod realtime_shadow_policy;
 
+// The AO eligibility tracker and glow-card naming policy (issue #270, PERF
+// wave 1) are Bevy-free for the same reason as `realtime_shadow_policy`:
+// the executable spec drives the same classification policy the runtime
+// adapter in `viewer::controls`/`viewer::scene` consumes.
+#[path = "../src/viewer/ao_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod ao_policy;
+
+#[path = "../src/viewer/glow_card_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod glow_card_policy;
+
 // `interaction::container_policy` (issue #75) is dependency-free too (std
 // only, no Bevy) -- see its module doc comment -- so it is included
 // verbatim here too.
@@ -1076,6 +1088,10 @@ struct BevyoutWorld {
     realtime_shadow_settings_changed: bool,
     realtime_shadow_selection_active: bool,
     realtime_shadow_writes_needed: Option<bool>,
+
+    // -- scene_classification.feature (issue #270, PERF wave 1) --
+    scene_ao_tracker: ao_policy::AoEligibilityTracker<u32, u32>,
+    glow_name_check: Option<bool>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -14418,4 +14434,76 @@ async fn then_realtime_shadow_pass_skipped(world: &mut BevyoutWorld) {
 #[then("the disabled realtime-shadow pass clears candidate state")]
 async fn then_realtime_shadow_pass_cleans(world: &mut BevyoutWorld) {
     assert_eq!(world.realtime_shadow_writes_needed, Some(true));
+}
+
+// ---------------------------------------------------------------------
+// scene_classification.feature (issue #270, PERF wave 1) -- appended
+// section, do not interleave.
+// ---------------------------------------------------------------------
+
+#[when(regex = r#"^the glow card naming policy is asked about \"([^\"]*)\"$"#)]
+async fn when_glow_card_naming_asked(world: &mut BevyoutWorld, name: String) {
+    world.glow_name_check = Some(glow_card_policy::is_glow_card_mesh_name(&name));
+}
+
+#[then("the glow card naming policy reports a glow card")]
+async fn then_glow_card_naming_matches(world: &mut BevyoutWorld) {
+    assert_eq!(world.glow_name_check, Some(true));
+}
+
+#[then("the glow card naming policy does not report a glow card")]
+async fn then_glow_card_naming_rejects(world: &mut BevyoutWorld) {
+    assert_eq!(world.glow_name_check, Some(false));
+}
+
+#[given("a fresh AO eligibility tracker")]
+async fn given_fresh_ao_tracker(world: &mut BevyoutWorld) {
+    world.scene_ao_tracker = ao_policy::AoEligibilityTracker::default();
+}
+
+#[when(regex = r#"^mesh entity (\d+) is discovered with mesh asset (\d+) as (eligible|ineligible)$"#)]
+async fn when_ao_entity_discovered(
+    world: &mut BevyoutWorld,
+    entity: u32,
+    mesh: u32,
+    outcome: String,
+) {
+    world
+        .scene_ao_tracker
+        .discover(entity, mesh, outcome == "eligible");
+}
+
+#[when(regex = r#"^mesh entity (\d+) releases its mesh$"#)]
+async fn when_ao_entity_released(world: &mut BevyoutWorld, entity: u32) {
+    world.scene_ao_tracker.release(entity);
+}
+
+#[when(regex = r#"^mesh asset (\d+) is added to the asset store$"#)]
+async fn when_ao_asset_added(world: &mut BevyoutWorld, mesh: u32) {
+    world.scene_ao_tracker.asset_added(mesh);
+}
+
+#[when(regex = r#"^AO processing resolves mesh asset (\d+)$"#)]
+async fn when_ao_processing_resolves(world: &mut BevyoutWorld, mesh: u32) {
+    world.scene_ao_tracker.resolve_pending(mesh);
+}
+
+#[then(regex = r#"^mesh asset (\d+) is pending for AO processing$"#)]
+async fn then_ao_mesh_pending(world: &mut BevyoutWorld, mesh: u32) {
+    assert!(world.scene_ao_tracker.is_pending(mesh));
+}
+
+#[then(regex = r#"^mesh asset (\d+) is tracked as eligible$"#)]
+async fn then_ao_mesh_eligible(world: &mut BevyoutWorld, mesh: u32) {
+    assert!(world.scene_ao_tracker.is_eligible(mesh));
+}
+
+#[then(regex = r#"^mesh asset (\d+) is not tracked as eligible$"#)]
+async fn then_ao_mesh_not_eligible(world: &mut BevyoutWorld, mesh: u32) {
+    assert!(!world.scene_ao_tracker.is_eligible(mesh));
+}
+
+#[then("the AO tracker has no pending meshes")]
+async fn then_ao_tracker_quiet(world: &mut BevyoutWorld) {
+    assert!(!world.scene_ao_tracker.has_pending());
 }

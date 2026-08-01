@@ -1431,6 +1431,15 @@ pub(crate) fn configure_glow_cards(
 #[derive(Component)]
 pub(crate) struct GlowCard;
 
+/// Issue #270 (PERF wave 1): every mesh entity that has been glow-card
+/// classified carries this marker, so the `configure_glow_cards` query
+/// filters to not-yet-inspected entities without a per-frame count
+/// sentinel or a `Local<HashSet<Entity>>` (markers despawn cleanly with
+/// their entity, closing the remove+add count-coincidence blind spot).
+/// The system-side insertion lands with the implementation commit.
+#[derive(Component)]
+pub(crate) struct GlowCardInspected;
+
 pub(crate) fn is_glow_card_mesh_name(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("lightglow")
 }

@@ -360,3 +360,124 @@ fn an_npc_placement_without_an_asset_spawns_an_actor_root_not_a_corpse_placehold
         "a living actor must not receive the corpse placeholder mesh"
     );
 }
+
+// ---------------------------------------------------------------------
+// Issue #270 (PERF wave 1): glow-card classification is marker-driven
+// (every inspected entity carries `GlowCardInspected`; markers despawn
+// with their entities). The remove+add count-coincidence blind spot of
+// the old `Local::<HashSet<Entity>>`/count-sentinel pair is covered.
+// ---------------------------------------------------------------------
+
+fn glow_card_test_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_systems(Update, configure_glow_cards);
+    app
+}
+
+fn spawn_named_mesh(app: &mut App, name: &str) -> Entity {
+    app.world_mut()
+        .spawn((
+            Transform::default(),
+            Visibility::Visible,
+            Mesh3d(Handle::<Mesh>::default()),
+            GltfMeshName(name.to_string()),
+        ))
+        .id()
+}
+
+/// Change-detection probe placed after `configure_glow_cards`: a frame
+/// with zero hits on these components is provably write-free (Bevy change
+/// detection fires on deref-mut/commands only).
+#[derive(Resource, Default)]
+struct GlowCardWriteProbe {
+    visibility_writes: usize,
+    marker_writes: usize,
+}
+
+fn probe_glow_card_writes(
+    visibilities: Query<Ref<Visibility>>,
+    markers: Query<Ref<GlowCardInspected>>,
+    mut probe: ResMut<GlowCardWriteProbe>,
+) {
+    for visibility in &visibilities {
+        probe.visibility_writes += usize::from(visibility.is_changed());
+    }
+    for marker in &markers {
+        probe.marker_writes += usize::from(marker.is_changed());
+    }
+}
+
+#[test]
+fn glow_card_spawned_during_a_remove_add_pair_is_still_hidden() {
+    let mut app = glow_card_test_app();
+    let lamp = spawn_named_mesh(&mut app, "ShackHangingLight02:51");
+    app.update();
+    assert!(
+        app.world().entity(lamp).contains::<GlowCardInspected>(),
+        "every inspected mesh carries the marker, glow or not"
+    );
+
+    // The #270 blind spot: one mesh despawns and another spawns inside one
+    // tick. The old `last_mesh_count` sentinel saw `1 == 1` and skipped
+    // the pass, leaving the brand-new glow card visible forever.
+    app.world_mut().despawn(lamp);
+    let glow = spawn_named_mesh(&mut app, "LightGlow01:0.001");
+    app.update();
+
+    assert!(app.world().entity(glow).contains::<GlowCardInspected>());
+    assert!(app.world().entity(glow).contains::<GlowCard>());
+    assert!(matches!(
+        app.world().entity(glow).get::<Visibility>(),
+        Some(Visibility::Hidden)
+    ));
+}
+
+#[test]
+fn every_inspected_mesh_gets_a_marker_and_only_glow_cards_are_hidden() {
+    let mut app = glow_card_test_app();
+    let lamp = spawn_named_mesh(&mut app, "ShackHangingLight02:51");
+    let glow = spawn_named_mesh(&mut app, "lightglow01");
+    app.update();
+
+    assert!(app.world().entity(lamp).contains::<GlowCardInspected>());
+    assert!(!app.world().entity(lamp).contains::<GlowCard>());
+    assert!(matches!(
+        app.world().entity(lamp).get::<Visibility>(),
+        Some(Visibility::Visible)
+    ));
+    assert!(app.world().entity(glow).contains::<GlowCardInspected>());
+    assert!(app.world().entity(glow).contains::<GlowCard>());
+    assert!(matches!(
+        app.world().entity(glow).get::<Visibility>(),
+        Some(Visibility::Hidden)
+    ));
+}
+
+#[test]
+fn settled_glow_card_frames_perform_no_writes() {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.init_resource::<GlowCardWriteProbe>();
+    app.add_systems(Update, (configure_glow_cards, probe_glow_card_writes).chain());
+    spawn_named_mesh(&mut app, "ShackHangingLight02:51");
+    spawn_named_mesh(&mut app, "LightGlow01:0.001");
+    // Absorb the classification frame; the guarantee covers steady frames.
+    app.update();
+    app.update();
+    {
+        let mut probe = app.world_mut().resource_mut::<GlowCardWriteProbe>();
+        probe.visibility_writes = 0;
+        probe.marker_writes = 0;
+    }
+
+    for frame in 0..3 {
+        app.update();
+        let probe = app.world().resource::<GlowCardWriteProbe>();
+        assert_eq!(
+            (probe.visibility_writes, probe.marker_writes),
+            (0, 0),
+            "settled frame {frame} wrote glow-card components"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 use super::*;
 use bevy::app::{PreUpdate, Update};
-use bevy::asset::Assets;
+use bevy::asset::{AssetEvent, Assets, RenderAssetUsages};
 use bevy::color::LinearRgba;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::Messages;
@@ -8,6 +8,7 @@ use bevy::input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
 use bevy::input::mouse::MouseButtonInput;
 use bevy::input::{ButtonInput, ButtonState, InputPlugin, InputSystems};
 use bevy::light::EnvironmentMapLight;
+use bevy::mesh::PrimitiveTopology;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::{
     App, ColorToComponents, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window, default,
@@ -740,3 +741,347 @@ fn request_focus_system_is_a_no_op_without_a_click() {
 
     assert!(!app.world().get::<Window>(window).unwrap().focused);
 }
+
+// ---------------------------------------------------------------------
+// Issue #270 (PERF wave 1): scene classification is revision/event-driven.
+// The AO and camera/probe gate tests below pin the semantics the
+// event-driven implementations must preserve, including the remove+add
+// count-coincidence blind spot of the old `AoScanState` sentinel.
+// ---------------------------------------------------------------------
+
+fn vertex_color_mesh(colors: &[[f32; 4]]) -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD,
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        VertexAttributeValues::Float32x4(colors.to_vec()),
+    );
+    mesh
+}
+
+fn ao_placement(quick_ao: bool) -> crate::vsa::PreparedPlacement {
+    crate::vsa::PreparedPlacement {
+        reference_form_id: 0x0002_96D1,
+        base_form_id: 1,
+        asset_path: None,
+        translation: [0.0; 3],
+        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        scale: 1.0,
+        error: None,
+        physics_asset_path: None,
+        physics_source: None,
+        physics_classification: Default::default(),
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "REFR".into(),
+        base_kind: "STAT".into(),
+        editor_id: None,
+        display_name: None,
+        count: 1,
+        semantic: Default::default(),
+        initially_enabled: true,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: if quick_ao {
+            "ao-quick-v1".into()
+        } else {
+            "ao-none".into()
+        },
+    }
+}
+
+fn spawn_quick_ao_mesh(app: &mut App, mesh: &Handle<Mesh>) -> Entity {
+    let root = app
+        .world_mut()
+        .spawn(interaction::PlacementRoot::new(ao_placement(true)))
+        .id();
+    app.world_mut()
+        .spawn((
+            Transform::default(),
+            Mesh3d(mesh.clone()),
+            ChildOf(root),
+        ))
+        .id()
+}
+
+fn spawn_plain_mesh(app: &mut App, mesh: &Handle<Mesh>) -> Entity {
+    app.world_mut()
+        .spawn((Transform::default(), Mesh3d(mesh.clone())))
+        .id()
+}
+
+fn mesh_colors(app: &App, handle: &Handle<Mesh>) -> [f32; 4] {
+    let meshes = app.world().resource::<Assets<Mesh>>();
+    let colors = meshes
+        .get(handle)
+        .expect("test mesh asset")
+        .attribute(Mesh::ATTRIBUTE_COLOR)
+        .expect("test mesh colors");
+    match colors {
+        VertexAttributeValues::Float32x4(values) => values[0],
+        other => panic!("expected float colors, got {other:?}"),
+    }
+}
+
+fn assert_colors_near(actual: [f32; 4], expected: [f32; 4]) {
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "color channel drifted: {actual} vs {expected}"
+        );
+    }
+}
+
+/// Change-detection probe placed after the AO systems: a frame with zero
+/// hits on both resources is provably free of baseline and mesh-store
+/// writes (Bevy change detection fires on deref-mut only).
+#[derive(Resource, Default)]
+struct AoWriteProbe {
+    bases_writes: usize,
+    mesh_store_writes: usize,
+}
+
+fn probe_ao_writes(
+    bases: Res<AoMeshBases>,
+    meshes: Res<Assets<Mesh>>,
+    mut probe: ResMut<AoWriteProbe>,
+) {
+    probe.bases_writes += usize::from(bases.is_changed());
+    probe.mesh_store_writes += usize::from(meshes.is_changed());
+}
+
+fn ao_probe_frame(app: &mut App) -> (usize, usize) {
+    {
+        let mut probe = app.world_mut().resource_mut::<AoWriteProbe>();
+        probe.bases_writes = 0;
+        probe.mesh_store_writes = 0;
+    }
+    app.update();
+    let probe = app.world().resource::<AoWriteProbe>();
+    (probe.bases_writes, probe.mesh_store_writes)
+}
+
+fn ao_test_app(strength: f32) -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(AoStrength(strength))
+        .init_resource::<AoMeshBases>()
+        .init_resource::<AoWriteProbe>()
+        .init_resource::<Assets<Mesh>>()
+        .add_message::<AssetEvent<Mesh>>()
+        .add_systems(Update, (apply_ao_strength, probe_ao_writes).chain());
+    app
+}
+
+#[test]
+fn ao_remove_and_add_in_one_tick_still_scales_the_new_mesh() {
+    let mut app = ao_test_app(0.5);
+    let mesh_a = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[[0.2, 0.4, 0.6, 0.8]]));
+    let entity_a = spawn_quick_ao_mesh(&mut app, &mesh_a);
+    app.update();
+    assert_colors_near(mesh_colors(&app, &mesh_a), [0.6, 0.7, 0.8, 0.8]);
+
+    // The #270 blind spot: one mesh entity despawns and its asset is dropped
+    // while a new mesh entity and asset appear in the SAME tick -- entity
+    // and asset counts are identical across the frame boundary, so the old
+    // count sentinel never fired and the new mesh kept raw colors.
+    app.world_mut().despawn(entity_a);
+    app.world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .remove(mesh_a.id());
+    app.world_mut()
+        .resource_mut::<Messages<AssetEvent<Mesh>>>()
+        .write(AssetEvent::Removed { id: mesh_a.id() });
+    let mesh_b = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[[0.4, 0.2, 0.0, 1.0]]));
+    let _entity_b = spawn_quick_ao_mesh(&mut app, &mesh_b);
+    app.update();
+
+    assert_colors_near(mesh_colors(&app, &mesh_b), [0.7, 0.6, 0.5, 1.0]);
+    assert!(
+        app.world().resource::<AoMeshBases>().values.is_empty(),
+        "the removed mesh's baseline must be dropped on AssetEvent::Removed"
+    );
+}
+
+#[test]
+fn ao_strength_change_rescales_value_exactly_from_baselines() {
+    let mut app = ao_test_app(0.5);
+    let authored = [0.25, 0.5, 0.75, 0.33];
+    let eligible = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[authored]));
+    spawn_quick_ao_mesh(&mut app, &eligible);
+    let plain = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[authored]));
+    spawn_plain_mesh(&mut app, &plain);
+    app.update();
+    app.update();
+
+    let half = |channel: f32| scale_ao_channel(channel, 0.5);
+    assert_colors_near(
+        mesh_colors(&app, &eligible),
+        [half(0.25), half(0.5), half(0.75), 0.33],
+    );
+    // Ineligible meshes are never regenerated -- authored values intact.
+    assert_eq!(mesh_colors(&app, &plain), authored);
+
+    // Strength 0 lifts every baked-darkness channel exactly to 1.0 from
+    // the baseline (alpha passthrough included); a transform compounded on
+    // the half-strength colors could not produce these exact values.
+    app.world_mut().resource_mut::<AoStrength>().0 = 0.0;
+    app.update();
+    assert_eq!(mesh_colors(&app, &eligible), [1.0, 1.0, 1.0, 0.33]);
+
+    app.world_mut().resource_mut::<AoStrength>().0 = 0.9;
+    app.update();
+    let near = |channel: f32| scale_ao_channel(channel, 0.9);
+    assert_colors_near(
+        mesh_colors(&app, &eligible),
+        [near(0.25), near(0.5), near(0.75), 0.33],
+    );
+    assert_eq!(mesh_colors(&app, &plain), authored);
+}
+
+#[test]
+fn ao_baseline_is_dropped_when_its_mesh_asset_is_removed() {
+    let mut app = ao_test_app(0.5);
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[[0.2, 0.4, 0.6, 0.8]]));
+    let _entity = spawn_quick_ao_mesh(&mut app, &mesh);
+    app.update();
+    assert_eq!(app.world().resource::<AoMeshBases>().values.len(), 1);
+
+    app.world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .remove(mesh.id());
+    app.world_mut()
+        .resource_mut::<Messages<AssetEvent<Mesh>>>()
+        .write(AssetEvent::Removed { id: mesh.id() });
+    app.update();
+
+    assert_eq!(app.world().resource::<AoMeshBases>().values.len(), 0);
+}
+
+#[test]
+fn settled_ao_frames_perform_no_mesh_store_writes() {
+    let mut app = ao_test_app(0.5);
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(vertex_color_mesh(&[[0.2, 0.4, 0.6, 0.8]]));
+    let _entity = spawn_quick_ao_mesh(&mut app, &mesh);
+    // Absorb creation ticks; discovery/processing frames are outside the
+    // steady-state guarantee.
+    app.update();
+    app.update();
+
+    for frame in 0..3 {
+        assert_eq!(
+            ao_probe_frame(&mut app),
+            (0, 0),
+            "settled frame {frame} touched meshes or baselines"
+        );
+    }
+}
+
+#[derive(Resource, Default)]
+struct ProjectionWriteProbe {
+    projection_writes: usize,
+}
+
+fn probe_projection_writes(
+    projections: Query<Ref<Projection>, With<Camera3d>>,
+    mut probe: ResMut<ProjectionWriteProbe>,
+) {
+    for projection in &projections {
+        probe.projection_writes += usize::from(projection.is_changed());
+    }
+}
+
+fn fov_test_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .init_resource::<ProjectionWriteProbe>()
+        .add_systems(Update, (apply_horizontal_fov, probe_projection_writes).chain());
+    app
+}
+
+fn spawn_fov_camera(app: &mut App, horizontal_degrees: f32) -> Entity {
+    app.world_mut()
+        .spawn((
+            Camera3d::default(),
+            HorizontalFov(horizontal_degrees),
+            Projection::Perspective(default_perspective_projection()),
+        ))
+        .id()
+}
+
+fn camera_fov(app: &App, camera: Entity) -> f32 {
+    let Projection::Perspective(perspective) = app.world().get::<Projection>(camera).unwrap()
+    else {
+        panic!("test camera uses a perspective projection");
+    };
+    perspective.fov
+}
+
+#[test]
+fn horizontal_fov_tracks_marker_changes_and_writes_nothing_when_settled() {
+    let mut app = fov_test_app();
+    let camera = spawn_fov_camera(&mut app, 90.0);
+    app.update();
+    let aspect = 16.0 / 9.0;
+    assert!(camera_fov(&app, camera) > 0.0);
+
+    app.world_mut().get_mut::<HorizontalFov>(camera).unwrap().0 = 120.0;
+    app.update();
+    assert!(
+        (camera_fov(&app, camera) - horizontal_to_vertical_fov(120.0, aspect)).abs() < 1e-4,
+        "HorizontalFov changes must still drive the projection"
+    );
+
+    // A mutated projection (window resize bumps its change tick) must also
+    // re-trigger the gate even though the marker is unchanged.
+    {
+        let mut projection = app.world_mut().get_mut::<Projection>(camera).unwrap();
+        let Projection::Perspective(perspective) = &mut *projection else {
+            unreachable!();
+        };
+        perspective.fov = 0.01;
+    }
+    app.update();
+    assert!(
+        (camera_fov(&app, camera) - horizontal_to_vertical_fov(120.0, aspect)).abs() < 1e-4,
+        "projection changes must recompute the vertical FOV"
+    );
+
+    // Settled frames write nothing.
+    {
+        let mut probe = app.world_mut().resource_mut::<ProjectionWriteProbe>();
+        probe.projection_writes = 0;
+    }
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world().resource::<ProjectionWriteProbe>().projection_writes,
+        0
+    );
+}
+
