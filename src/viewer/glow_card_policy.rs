@@ -12,7 +12,7 @@
 /// with("lightglow")`). Prefix slicing plus `eq_ignore_ascii_case` keeps
 /// the same semantics -- an ASCII case-insensitive `lightglow` prefix --
 /// without touching the allocator. `str::get` avoids panicking on a
-/// non-UTF8 boundary for short multibyte names.
+/// non-char boundary for short multibyte names.
 pub(crate) fn is_glow_card_mesh_name(name: &str) -> bool {
     const PREFIX: &str = "lightglow";
     name.get(..PREFIX.len())

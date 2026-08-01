@@ -162,7 +162,7 @@ impl ClampBaseline {
 ///
 /// `baseline` is the material's entry in the clamp store (or a fresh,
 /// clear entry for a material seen for the first time). For every engaged
-/// field the pre-clamp value is snapshoted on first contact and the
+/// field the pre-clamp value is snapshotted on first contact and the
 /// clamped target is computed from the snapshot (never from the live,
 /// already-clamped value, so repeated engaged frames and live re-touches
 /// converge instead of compounding). For every disengaged field any stored

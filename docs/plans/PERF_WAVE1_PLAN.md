@@ -74,8 +74,7 @@ table does not cover. Closest discipline is the Claude runtime: this
 orchestrating session plans, merges, and evaluates; executor subagents write
 all production and test code. Executors run as pi subagents on the session
 model (Kimi-K3). Portability note for reruns: Claude runtime — Sonnet for
-
-# 267/#268, Fable for #269/#270; Codex runtime — Sol High throughout
+267/#268, Fable for #269/#270; Codex runtime — Sol High throughout.
 
 ## Sequencing
 
