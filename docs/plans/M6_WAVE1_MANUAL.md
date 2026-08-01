@@ -47,11 +47,28 @@ Mart route gate; that requires the later M6 waves and real Fallout 3 data.
    worldstream status
    worldstream cells
    worldstream trace 1
+   nav exterior
+   nav borders
+   tna spawn
+   environment status
+   lights streamed
    ```
 
    Expected: JSON reports the active worldspace, current grid, lifecycle
-   counters, and package-owned cells. Moving across a prepared-cell boundary
-   requests the next package and never invokes Blender.
+   counters, package-owned cells, and `collision_ready` per cell. `nav
+   exterior`/`nav borders` report the prepared navigation evidence and `tna
+   spawn` creates an exterior agent when the resident graph is ready. Moving
+   across a prepared-cell boundary requests the next package, attaches BoxDDD
+   collision before readiness, and never invokes Blender. The current CLI has
+   no Blender converter flag. `environment status`
+   reports the prepared climate/weather identities and `lights streamed`
+   reports the deterministic local-light budget.
+
+   The terrain package also contains a prepared cell-local albedo generated
+   from LAND layer weights and LTEX/TXST sources. Capture the viewport once;
+   the expected result is textured, upward-facing ground without the former
+   white/black fallback holes. The full bounded route and long-run budgets
+   remain the later M6A/M6 gates.
 
 5. Stop the viewer and repeat the preparation command without
    `--rebuild-assets`.

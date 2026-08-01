@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bevy::prelude::*;
+use serde_json::json;
 
+use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
@@ -43,10 +45,10 @@ pub(crate) fn read_nav_graph(path: &Path) -> anyhow::Result<PreparedNavGraph> {
     ron::de::from_str(&text).with_context(|| format!("invalid nav graph RON: {}", path.display()))
 }
 
-/// Resolve the active cell's prepared navigation graph. Interior cells keep
-/// their existing standalone graph asset; an exterior scene carries the
-/// equivalent tile directly in its prepared cell package. Both paths return
-/// the same runtime-neutral graph contract to `nav::agent`.
+/// Resolve a prepared navigation graph for tooling and interior runtime use.
+/// Exterior packages can be converted to the same DTO for diagnostics, but
+/// `nav::agent` rejects that flattened form until the full NAVM semantics and
+/// resident-cell stitching contract are preserved.
 pub(crate) fn read_nav_graph_for_manifest(
     manifest: &PreparedSceneManifest,
 ) -> anyhow::Result<PreparedNavGraph> {
@@ -57,10 +59,27 @@ pub(crate) fn read_nav_graph_for_manifest(
         .exterior
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no prepared exterior package"))?;
+    read_nav_graph_for_exterior_package(Path::new(&manifest.asset_root), package)
+}
+
+/// Reads the semantic prepared graph owned by one streamed exterior package.
+/// The graph path is relative to the prepared cache root, just like the
+/// manifest-level `PreparedNavGraphSource` path. The flattened fallback is
+/// retained only for old diagnostic packages; callers that need production
+/// navigation must check `PreparedExteriorNavigation::clearance_ready`.
+pub(crate) fn read_nav_graph_for_exterior_package(
+    asset_root: &Path,
+    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
+) -> anyhow::Result<PreparedNavGraph> {
     let navigation = package
         .navigation
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("exterior package has no navigation tile"))?;
+    if let Some(path) = navigation.graph_asset_path.as_deref() {
+        let graph_path =
+            PathBuf::from(asset_root).join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        return read_nav_graph(&graph_path);
+    }
     Ok(crate::vsa::exterior_nav_graph(
         package.cell_form_id,
         navigation.vertices.clone(),
@@ -201,4 +220,41 @@ pub(crate) fn travel_door_destinations(
             _ => None,
         })
         .collect()
+}
+
+/// Visible exterior navigation diagnostics. This deliberately reports the
+/// prepared tile and border evidence without forcing a landmass build, so it
+/// is useful before `tna spawn` and remains safe when a package has no NAVM.
+pub(crate) fn exterior_command(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let manifest = world
+        .get_resource::<crate::viewer::LoadedSceneManifest>()
+        .ok_or_else(|| ConsoleError::new("unavailable", "no prepared scene is loaded"))?;
+    let package = manifest
+        .exterior
+        .as_ref()
+        .ok_or_else(|| ConsoleError::new("not_exterior", "active scene is not exterior"))?;
+    let navigation = package.navigation.as_ref().ok_or_else(|| {
+        ConsoleError::new("no_exterior_nav", "exterior package has no navigation tile")
+    })?;
+    match invocation.args.as_slice() {
+        [command] if command == "exterior" => Ok(ConsoleCommandResult::value(json!({
+            "cell_form_id": package.cell_form_id,
+            "grid": [package.grid.x, package.grid.y],
+            "vertices": navigation.vertices.len(),
+            "triangles": navigation.triangles.len(),
+            "border_portals": navigation.border_portals.len(),
+            "revision": navigation.revision.as_str(),
+        }))),
+        [command] if command == "borders" => Ok(ConsoleCommandResult::value(json!({
+            "cell_form_id": package.cell_form_id,
+            "portals": &navigation.border_portals,
+        }))),
+        _ => Err(ConsoleError::new(
+            "bad_args",
+            "nav expects exterior or borders",
+        )),
+    }
 }

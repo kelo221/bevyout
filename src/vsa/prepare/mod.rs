@@ -40,6 +40,7 @@ mod selectors;
 mod session;
 mod static_shadows;
 mod visual;
+mod worldspace_lod;
 
 pub(crate) use actor_animation::*;
 pub(crate) use actor_animation_cache::*;
@@ -74,6 +75,7 @@ pub(crate) use selectors::*;
 pub(crate) use session::*;
 pub(crate) use static_shadows::*;
 pub(crate) use visual::*;
+pub(crate) use worldspace_lod::*;
 
 mod orchestrator;
 
@@ -81,7 +83,7 @@ pub use orchestrator::prepare;
 
 use super::assets::{
     ActorAnimationClipJob, ActorAnimationPackJob, ActorAnimationPackReport, ActorApparelInput,
-    ActorAssemblyDescriptor, ActorBodyPartInput, AssetJob, AssetJobKind,
+    ActorAssemblyDescriptor, ActorBodyPartInput, AssetConversion, AssetJob, AssetJobKind,
     NATIVE_ACTOR_CONVERTER_REVISION, NATIVE_NIF_CONVERTER_REVISION,
     NATIVE_PREPARED_CONVERTER_REVISION, RootTransformPolicy, actor_animation_pack_fingerprint,
     asset_conversion, audit_glb_visuals, canonical_actor_assembly, content_addressed_glb_name,

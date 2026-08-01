@@ -35,6 +35,15 @@ pub(crate) fn status(state: &ExteriorStreamState) -> serde_json::Value {
         "cancellations": state.cancellations,
         "stale_completions": state.stale_completions,
         "failures": state.failures,
+        "collision_tracked": state.collision_cells.len(),
+        "collision_pending": state
+            .cells
+            .values()
+            .filter(|cell| {
+                cell.state.lifecycle == bevyout_core::manifest::exterior::ExteriorCellLifecycle::Loading
+                    && !cell.collision_ready
+            })
+            .count(),
         "resident_budget": state.resident_budget,
         "byte_budget": state.byte_budget,
         "resident_bytes": state.resident_bytes,
@@ -55,6 +64,7 @@ pub(crate) fn cells(state: &ExteriorStreamState) -> serde_json::Value {
                     "lifecycle": format!("{:?}", cell.state.lifecycle),
                     "generation": cell.state.generation,
                     "bytes": cell.state.estimated_bytes,
+                    "collision_ready": cell.collision_ready,
                 })
             })
             .collect(),

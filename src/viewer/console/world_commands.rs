@@ -28,15 +28,72 @@ impl ConsoleCommandProvider for WorldCommandProvider {
             .mutating(),
             ConsoleCommand::new(
                 "worldstream",
-                "worldstream <status|cells|water|trace 0|1>",
-                "Inspect or trace prepared exterior cell residency.",
+                "worldstream <status|cells|water|presentation|summary|trace 0|1>",
+                "Inspect prepared exterior residency and presentation state.",
                 worldstream,
+            ),
+            ConsoleCommand::new(
+                "worldlocation",
+                "worldlocation",
+                "Report the exact saved player location and its interior/exterior owner.",
+                world_location,
+            ),
+            ConsoleCommand::new(
+                "worldstate",
+                "worldstate <formid>",
+                "Report canonical persisted deltas for one cell or exterior cell FormID.",
+                world_state,
             ),
         ] {
             registry.register(command)?;
         }
         Ok(())
     }
+}
+
+fn world_location(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let location = world
+        .get_resource::<super::super::world::CurrentWorldLocation>()
+        .and_then(|location| location.0.as_ref())
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| ConsoleError::new("serialize", error.to_string()))?
+        .unwrap_or(serde_json::Value::Null);
+    Ok(ConsoleCommandResult::value(json!({
+        "location": location,
+        "cell_key": world
+            .get_resource::<super::super::world::CurrentWorldLocation>()
+            .and_then(|location| location.0.as_ref())
+            .map(bevyout_core::manifest::exterior::WorldLocation::cell_key),
+    })))
+}
+
+fn world_state(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [form_id] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "worldstate expects exactly one FormID",
+        ));
+    };
+    let form_id = parse_item_form_id(form_id)
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "worldstate FormID must be hexadecimal"))?;
+    let cell = world
+        .get_resource::<super::super::world::ActiveSaveState>()
+        .and_then(|state| state.0.cells.get(&form_id));
+    Ok(ConsoleCommandResult::value(json!({
+        "cell_form_id": format!("{form_id:08x}"),
+        "present": cell.is_some(),
+        "references": cell.map_or(0, |cell| cell.references.len()),
+        "dropped_items": cell.map_or(0, |cell| cell.dropped_items.len()),
+        "actors": cell.map_or(0, |cell| cell.actors.len()),
+    })))
 }
 
 fn worldstream(
@@ -84,6 +141,12 @@ fn worldstream(
                 "contact": water.contact,
             })))
         }
+        [command] if command == "presentation" => Ok(ConsoleCommandResult::value(
+            super::super::world::exterior::exterior_presentation_json(world),
+        )),
+        [command] if command == "summary" => {
+            Ok(ConsoleCommandResult::value(exterior_route_summary(world)))
+        }
         [command, value] if command == "trace" && matches!(value.as_str(), "0" | "1") => {
             let enabled = value == "1";
             world
@@ -99,9 +162,62 @@ fn worldstream(
         }
         _ => Err(ConsoleError::new(
             "bad_args",
-            "worldstream expects status, cells, water, or trace 0|1",
+            "worldstream expects status, cells, water, presentation, summary, or trace 0|1",
         )),
     }
+}
+
+fn exterior_route_summary(world: &mut World) -> serde_json::Value {
+    let state = world
+        .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+        .map(super::super::world::exterior::exterior_status_json)
+        .unwrap_or(serde_json::Value::Null);
+    let presentation = super::super::world::exterior::exterior_presentation_json(world);
+    let frame = world
+        .get_resource::<super::super::RenderReportBuffer>()
+        .map(|report| {
+            super::super::diagnostics::summarize_render_samples(report, None, 600, 16.6667)
+        });
+    let runtime = frame
+        .map(|frame| {
+            json!({
+                "frame_ms_p50": frame.p50_ms,
+                "frame_ms_p95": frame.p95_ms,
+                "frame_ms_max": frame.max_ms,
+                "frame_samples": frame.sample_count,
+            })
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "frame_ms_p50": null,
+                "frame_ms_p95": null,
+                "frame_ms_max": null,
+                "frame_samples": 0,
+            })
+        });
+    json!({
+        "conversion": {
+            "selected_pipeline": "native",
+            "assets_built": null,
+            "assets_reused": null,
+            "lossy_assets": null,
+            "cache_bytes": null,
+            "cold_seconds": null,
+            "warm_seconds": null,
+            "runtime_blender_invocations": 0,
+            "offline_measurements_required": true,
+        },
+        "streaming": state,
+        "presentation": presentation,
+        "runtime": {
+            "frame": runtime,
+            "transition_ms_p95": null,
+            "nav_path_ms_p95": null,
+            "visible_lod_transitions": presentation["terrain"]["lod_transitions"],
+            "blender_invocations": 0,
+            "timing_measurements_required": true,
+        },
+    })
 }
 
 pub(super) fn actor_inspect(

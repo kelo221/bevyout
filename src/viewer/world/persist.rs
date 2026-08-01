@@ -167,6 +167,152 @@ pub(crate) fn apply_cell_state(world: &mut World, cell: u32, root: Entity) {
     super::super::world_items::restore_dropped_items(world, cell, root);
 }
 
+/// Applies the saved transform/deletion projection to an exterior package's
+/// dynamic reference roots after their package commands have materialized.
+/// Exterior rendering remains presentation-only; canonical deltas stay in the
+/// same `ActiveSaveState` map used by interior cells.
+pub(crate) fn apply_exterior_cell_state(
+    world: &mut World,
+    cell: u32,
+    root: Entity,
+    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
+) {
+    let deltas = world
+        .get_resource::<ActiveSaveState>()
+        .and_then(|state| state.0.cells.get(&cell))
+        .map(|cell| cell.references.clone())
+        .unwrap_or_default();
+    if deltas.is_empty() {
+        return;
+    }
+    let entities = {
+        let mut query = world.query::<(Entity, &super::exterior::ExteriorReference, &ChildOf)>();
+        query
+            .iter(world)
+            .filter(|(_, _, parent)| parent.parent() == root)
+            .map(|(entity, reference, _)| (entity, reference.reference_form_id))
+            .collect::<Vec<_>>()
+    };
+    for (entity, reference_form_id) in entities {
+        let Some(delta) = deltas.get(&reference_form_id) else {
+            continue;
+        };
+        if delta.deleted {
+            if let Ok(mut entity) = world.get_entity_mut(entity) {
+                entity.insert(Visibility::Hidden);
+            }
+            continue;
+        }
+        if let Some(transform) = delta.transform {
+            world.entity_mut(entity).insert(Transform {
+                translation: Vec3::from_array(transform.translation),
+                rotation: Quat::from_xyzw(
+                    transform.rotation_xyzw[0],
+                    transform.rotation_xyzw[1],
+                    transform.rotation_xyzw[2],
+                    transform.rotation_xyzw[3],
+                ),
+                scale: Vec3::from_array(transform.scale),
+            });
+        }
+    }
+    let dynamic_ids = package
+        .dynamic_objects
+        .iter()
+        .map(|object| object.reference_form_id)
+        .collect::<HashSet<_>>();
+    if deltas.keys().any(|form_id| dynamic_ids.contains(form_id)) {
+        info!("save apply exterior {cell:08x} dynamic references");
+    }
+}
+
+/// Captures all resident exterior dynamic roots before an explicit save.
+/// Eviction uses the single-cell variant below so unload/reload and save use
+/// the same baseline comparison.
+pub(crate) fn capture_exterior_resident_state(world: &mut World) {
+    let residents = world
+        .get_resource::<super::exterior::ExteriorStreamState>()
+        .map(|stream| {
+            stream
+                .cells
+                .values()
+                .filter_map(|cell| {
+                    Some((cell.state.cell_form_id, cell.root?, cell.package.clone()?))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (cell, root, package) in residents {
+        capture_exterior_cell_state(world, cell, root, &package);
+    }
+}
+
+/// Captures mutable transforms for an exterior package's dynamic references
+/// while the package root is still alive. Static presentation is never added
+/// to save state, and a missing asset root is not treated as a deletion.
+pub(crate) fn capture_exterior_cell_state(
+    world: &mut World,
+    cell: u32,
+    root: Entity,
+    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
+) {
+    let live = {
+        let mut query =
+            world.query::<(&super::exterior::ExteriorReference, &ChildOf, &Transform)>();
+        query
+            .iter(world)
+            .filter(|(_, parent, _)| parent.parent() == root)
+            .map(|(reference, _, transform)| (reference.reference_form_id, *transform))
+            .collect::<HashMap<_, _>>()
+    };
+    let mut state = world.get_resource_or_insert_with(ActiveSaveState::default);
+    let cell_state = state.0.cells.entry(cell).or_default();
+    for object in &package.dynamic_objects {
+        if !object.initially_enabled || object.asset_path.is_none() {
+            continue;
+        }
+        let Some(transform) = live.get(&object.reference_form_id) else {
+            continue;
+        };
+        let baseline = SavedTransform {
+            translation: object.position,
+            rotation_xyzw: object.rotation_xyzw,
+            scale: [object.scale; 3],
+        };
+        let current = SavedTransform {
+            translation: transform.translation.to_array(),
+            rotation_xyzw: transform.rotation.to_array(),
+            scale: transform.scale.to_array(),
+        };
+        let changed = baseline
+            .translation
+            .into_iter()
+            .zip(current.translation)
+            .chain(
+                baseline
+                    .rotation_xyzw
+                    .into_iter()
+                    .zip(current.rotation_xyzw),
+            )
+            .chain(baseline.scale.into_iter().zip(current.scale))
+            .any(|(left, right)| (left - right).abs() > 0.0001);
+        let delta = cell_state
+            .references
+            .entry(object.reference_form_id)
+            .or_default();
+        delta.transform = changed.then_some(current);
+        if *delta == PersistentReferenceDelta::default() {
+            cell_state.references.remove(&object.reference_form_id);
+        }
+    }
+    if cell_state.references.is_empty()
+        && cell_state.dropped_items.is_empty()
+        && cell_state.actors.is_empty()
+    {
+        state.0.cells.remove(&cell);
+    }
+}
+
 /// Startup wiring for F60.2/F60.3: applies the (possibly `--save-slot`
 /// loaded) save state to the launch cell, chained after
 /// `spawn_prepared_scene` and before `build_prepared_colliders` so deleted
@@ -748,6 +894,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         anyhow::bail!("no active cell to save");
     };
     capture_cell_state(world, active);
+    capture_exterior_resident_state(world);
 
     let legacy_inventory = world
         .get_resource::<interaction::PlayerInventory>()
@@ -778,6 +925,11 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
     let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() else {
         anyhow::bail!("no prepared scene manifest loaded");
     };
+    let save_cell = world
+        .get_resource::<super::exterior::ExteriorStreamState>()
+        .and_then(|state| state.cells.get(&state.current_grid))
+        .map(|cell| cell.state.cell_form_id)
+        .unwrap_or(active);
     let header = SaveGameHeader {
         content_fingerprint: manifest.source_fingerprint.clone(),
         plugins: manifest
@@ -788,7 +940,7 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
                 fingerprint: plugin.fingerprint.clone(),
             })
             .collect(),
-        current_cell: active,
+        current_cell: save_cell,
         play_time_seconds: world
             .get_resource::<Time>()
             .map(|time| time.elapsed_secs_f64())
@@ -846,6 +998,9 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
             .get_resource::<interaction::CanonicalItemLedger>()
             .map(interaction::CanonicalItemLedger::snapshot),
         dialogue,
+        location: world
+            .get_resource::<super::CurrentWorldLocation>()
+            .and_then(|location| location.0.clone()),
     };
     let save_dir = world
         .get_resource::<SaveDirectory>()

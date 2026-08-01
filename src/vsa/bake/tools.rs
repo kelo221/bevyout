@@ -1,4 +1,4 @@
-//! External Blender and KTX tool discovery helpers.
+//! External KTX tool discovery helpers.
 
 use super::*;
 
@@ -131,7 +131,7 @@ pub(crate) fn relative_asset_path(root: &Path, path: &Path) -> Result<String> {
         .replace('\\', "/"))
 }
 
-pub(crate) fn blender_path(path: &Path) -> String {
+pub(crate) fn job_path(path: &Path) -> String {
     let value = path.to_string_lossy();
     value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
 }

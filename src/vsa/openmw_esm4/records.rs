@@ -802,7 +802,12 @@ pub(crate) fn parse_grid(data: &[u8]) -> Option<(i32, i32)> {
 /// content uses a 33x33 sample grid.  VHGT is accepted in both the compact
 /// synthetic form (one signed base byte plus 1088 signed deltas) and the
 /// Bethesda form with a four-byte height offset followed by row-wise deltas.
-pub(crate) fn parse_land(subs: &[Subrecord], form_id: u32, cell_form_id: u32) -> LandRecord {
+pub(crate) fn parse_land(
+    subs: &[Subrecord],
+    form_id: u32,
+    cell_form_id: u32,
+    resolver: &FormIdResolver,
+) -> LandRecord {
     let count = LandRecord::GRID_SIZE * LandRecord::GRID_SIZE;
     let mut land = LandRecord {
         form_id,
@@ -854,22 +859,59 @@ pub(crate) fn parse_land(subs: &[Subrecord], form_id: u32, cell_form_id: u32) ->
             land.colors.push([sample[0], sample[1], sample[2]]);
         }
     }
-    for texture in subs
-        .iter()
-        .filter(|subrecord| subrecord.signature == "BTXT" || subrecord.signature == "ATXT")
-    {
-        if let Some(form_id) = u32_at(&texture.data, 0) {
-            land.texture_layers.push(form_id);
-            land.texture_assignments.push(LandTextureAssignment {
-                form_id,
-                quadrant: texture.data.get(4).copied().unwrap_or_default(),
-                layer: texture.data.get(5).copied().unwrap_or_default(),
-                base: texture.signature == "BTXT",
-            });
+    for texture in subs.iter().filter(|texture| texture.signature == "VTEX") {
+        for raw_form_id in texture.data.chunks_exact(4) {
+            let form_id = resolver.adjust(u32::from_le_bytes(
+                raw_form_id.try_into().unwrap_or_default(),
+            ));
+            if form_id != 0 && !land.texture_layers.contains(&form_id) {
+                land.texture_layers.push(form_id);
+            }
         }
     }
-    land.texture_layers.sort_unstable();
-    land.texture_layers.dedup();
+    let mut active_assignment = None;
+    for texture in subs {
+        if texture.signature == "BTXT" || texture.signature == "ATXT" {
+            if let Some(form_id) = u32_at(&texture.data, 0) {
+                let form_id = if form_id == 0 {
+                    0
+                } else {
+                    resolver.adjust(form_id)
+                };
+                let layer = if texture.signature == "ATXT" {
+                    u16_at(&texture.data, 6).unwrap_or_default()
+                } else {
+                    0
+                };
+                land.texture_assignments.push(LandTextureAssignment {
+                    form_id,
+                    quadrant: texture.data.get(4).copied().unwrap_or_default(),
+                    layer,
+                    base: texture.signature == "BTXT",
+                    weights: Vec::new(),
+                });
+                active_assignment = Some(land.texture_assignments.len() - 1);
+            } else {
+                active_assignment = None;
+            }
+        } else if texture.signature == "VTXT"
+            && let Some(assignment_index) = active_assignment
+        {
+            for entry in texture.data.chunks_exact(8) {
+                let Some(position) = u16_at(entry, 0) else {
+                    continue;
+                };
+                let Some(opacity) = f32_at_option(entry, 4) else {
+                    continue;
+                };
+                if opacity.is_finite() {
+                    land.texture_assignments[assignment_index]
+                        .weights
+                        .push(LandTextureWeight { position, opacity });
+                }
+            }
+        }
+    }
     land.texture_assignments.sort_by_key(|assignment| {
         (
             assignment.quadrant,
@@ -878,7 +920,17 @@ pub(crate) fn parse_land(subs: &[Subrecord], form_id: u32, cell_form_id: u32) ->
             assignment.form_id,
         )
     });
-    let supported = ["VHGT", "VNML", "VCLR", "BTXT", "ATXT", "LTEX"];
+    for assignment in &land.texture_assignments {
+        // FO3 uses a zero LTEX form in some quadrant slots as an explicit
+        // "no overlay" sentinel. Do not let that placeholder consume one of
+        // the four prepared material channels or fall back to vertex colour.
+        if assignment.form_id != 0 && !land.texture_layers.contains(&assignment.form_id) {
+            land.texture_layers.push(assignment.form_id);
+        }
+    }
+    let supported = [
+        "VHGT", "VNML", "VCLR", "BTXT", "ATXT", "VTXT", "VTEX", "LTEX",
+    ];
     land.diagnostics.extend(
         ignored_signatures(subs, &supported)
             .into_iter()

@@ -6,12 +6,14 @@
 
 mod conversion;
 mod index;
+mod material;
 mod package;
 mod terrain;
 
 pub use conversion::exterior_conversion_report;
 pub(crate) use index::build_worldspace_indexes;
 pub use index::exterior_catalog;
+pub(crate) use material::prepare_terrain_albedo;
 pub(crate) use package::{apply_staged_assets, build_cell_package};
 pub(crate) use terrain::terrain_from_land;
 

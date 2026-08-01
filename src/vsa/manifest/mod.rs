@@ -27,7 +27,7 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 24;
 /// near-linked-reference package resolution without any parse error.
 /// Bumped for M6: `PreparedSceneManifest` now carries the optional exterior
 /// package contract, whose shape must never be silently defaulted on old data.
-pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v13-m6-exterior-terrain";
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v20-m6-worldspace-lod";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v8-light-cards-v1";
 pub(crate) const REFLECTION_PROBE_REVISION: &str =

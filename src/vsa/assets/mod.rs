@@ -25,7 +25,7 @@ use super::paths::{fingerprint, normalize_asset_path};
 use super::physics::read_physics_asset;
 
 /// Native static conversion cache identity.
-pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1";
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1";
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
@@ -35,7 +35,7 @@ pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str = "nifty-fo3-native-actor
 /// clear stale-cache result; new preparation records the native revision below.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-emission-authority-v2-pbr-material-v3-ktx2-uastc-v1+pynifly-v32-normal-y-v1-pbr-material-v3-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1+day-night-profile-v1";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1+actor-assembly-v13-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1+actor-assembly-v13-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,
@@ -237,6 +237,7 @@ pub(crate) fn root_transform_policy(model: &str) -> RootTransformPolicy {
 pub(crate) enum AssetConversion {
     Preserve,
     QuickAo,
+    WorldspaceLod,
 }
 
 impl AssetConversion {
@@ -244,6 +245,7 @@ impl AssetConversion {
         match self {
             Self::Preserve => "ao-none",
             Self::QuickAo => "ao-quick-v1",
+            Self::WorldspaceLod => "lod-skirts-v1",
         }
     }
 }
@@ -288,23 +290,6 @@ pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[
     cache_key.push(0);
     cache_key.extend_from_slice(nif_bytes);
     format!("{}.glb", fingerprint(&cache_key))
-}
-
-pub(crate) fn find_blender(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        if path.exists() {
-            return Ok(path);
-        }
-        bail!("Blender executable does not exist: {}", path.display());
-    }
-    let candidates = [
-        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"),
-        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .context("Blender was not found; pass --blender explicitly")
 }
 
 #[cfg(test)]

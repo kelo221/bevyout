@@ -286,6 +286,14 @@ impl PreparedCollisionWorld {
     pub(crate) fn dynamic_body_of(&self, entity: Entity) -> Option<BodyId> {
         self.dynamic_bodies.get(&entity).copied()
     }
+
+    pub(crate) fn has_cell_colliders(&self, cell: u32) -> bool {
+        self.ledger.is_tracked(cell)
+    }
+
+    pub(crate) fn static_body(&self) -> Option<BodyId> {
+        self.static_body
+    }
 }
 
 #[derive(Resource, Default)]

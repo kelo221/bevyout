@@ -30,7 +30,10 @@ pub use catalog::cells;
 // Issue #51's runtime preloader (`viewer::world`) reads the door-graph
 // connectivity `cells --map` (issue #45) emits at prepare time.
 pub(crate) use cell_map::CellMap;
-pub(crate) use exterior::{apply_staged_assets, build_cell_package, build_worldspace_indexes};
+pub(crate) use exterior::{
+    apply_staged_assets, build_cell_package, build_worldspace_indexes, prepare_terrain_albedo,
+    terrain_from_land,
+};
 pub use exterior::{exterior_catalog, exterior_conversion_report};
 /// Test-only re-export (issue #120): `viewer::scene`'s spawn-path unit tests
 /// construct a `PreparedSemantic::Npc(PreparedActor { .. })` placement to

@@ -1,7 +1,8 @@
 //! Rendering, timing, and capture console commands.
 
 use super::*;
-use crate::viewer::day_night::{DayNightPreview, GameClock, profile_for_cell};
+use crate::viewer::day_night::{DayNightPreview, GameClock, WeatherTransition, profile_for_cell};
+use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
 use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
@@ -72,10 +73,36 @@ impl ConsoleCommandProvider for RenderCommandProvider {
                 environment_status,
             ),
             ConsoleCommand::new(
+                "waterstate",
+                "waterstate",
+                "Report authored water contact, swimming state, and remaining breath.",
+                water_state,
+            ),
+            ConsoleCommand::new(
+                "lights",
+                "lights streamed",
+                "Report streamed exterior local-light ownership and the active deterministic budget.",
+                streamed_lights,
+            ),
+            ConsoleCommand::new(
                 "settime",
                 "settime <0..24>",
                 "Set the Fallout game clock hour.",
                 set_time,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "setweather",
+                "setweather <formid> [seconds]",
+                "Blend to a deterministic prepared-weather identity.",
+                set_weather,
+            )
+            .mutating(),
+            ConsoleCommand::new(
+                "weather",
+                "weather clear",
+                "Clear the console weather override.",
+                clear_weather,
             )
             .mutating(),
             ConsoleCommand::new(
@@ -213,7 +240,7 @@ fn toggle_reflection_probe_debug(
     ))
 }
 
-pub(super) const RENDER_SETTINGS: [&str; 18] = [
+pub(super) const RENDER_SETTINGS: [&str; 19] = [
     "lighting",
     "irradiance",
     "ambient",
@@ -229,6 +256,7 @@ pub(super) const RENDER_SETTINGS: [&str; 18] = [
     "roughness_scale",
     "shadow_samples",
     "realtime_shadows",
+    "worldspace_lod",
     "reflection_probes",
     "reflection_probe_strength",
     "day_night_preview",
@@ -425,6 +453,10 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
         json!(world.resource::<RealtimeShadowSettings>().enabled as u8),
     );
     values.insert(
+        "worldspace_lod".into(),
+        json!(world.resource::<ExteriorWorldspaceLodSettings>().enabled as u8),
+    );
+    values.insert(
         "reflection_probes".into(),
         json!(world.resource::<ReflectionProbeSettings>().enabled() as u8),
     );
@@ -524,6 +556,7 @@ pub(super) fn render_setting_label(setting: &str) -> &'static str {
         "roughness_scale" => "Material roughness scale",
         "shadow_samples" => "Point-shadow samples per pixel",
         "realtime_shadows" => "Realtime point shadows",
+        "worldspace_lod" => "Far worldspace LOD",
         "reflection_probes" => "Prepared reflection probes",
         "reflection_probe_strength" => "Reflection probe strength",
         "day_night_preview" => "Day/night preview",
@@ -607,6 +640,7 @@ pub(super) fn set_render(
         "metallic"
         | "dielectric_specular"
         | "realtime_shadows"
+        | "worldspace_lod"
         | "reflection_probes"
         | "day_night_preview" => value == 0.0 || value == 1.0,
         _ => unreachable!(),
@@ -636,6 +670,11 @@ pub(super) fn set_render(
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
+        }
+        "worldspace_lod" => {
+            world
+                .resource_mut::<ExteriorWorldspaceLodSettings>()
+                .enabled = value == 1.0;
         }
         "reflection_probes" => world
             .resource_mut::<ReflectionProbeSettings>()
@@ -831,28 +870,68 @@ fn environment_status(
     let water = world
         .get_resource::<super::super::world::exterior::ExteriorWaterState>()
         .and_then(|state| state.contact);
+    let streamed = world
+        .get_resource::<super::super::world::exterior::ExteriorStreamState>()
+        .and_then(|state| state.cells.get(&state.current_grid));
+    let exterior_environment = streamed
+        .and_then(|cell| cell.package.as_ref())
+        .map(|package| &package.environment)
+        .or_else(|| {
+            manifest
+                .and_then(|value| value.exterior.as_ref())
+                .map(|value| &value.environment)
+        });
     let clock = *world.resource::<GameClock>();
     let value = json!({
         "hour": clock.hour,
-        "cell_form_id": manifest.map(|value| format!("{:08x}", value.cell.form_id)),
+        "cell_form_id": streamed
+            .map(|cell| format!("{:08x}", cell.state.cell_form_id))
+            .or_else(|| manifest.map(|value| format!("{:08x}", value.cell.form_id))),
         "worldspace_form_id": manifest
             .and_then(|value| value.exterior.as_ref())
             .map(|value| format!("{:08x}", value.worldspace_form_id)),
-        "climate_form_id": manifest
-            .and_then(|value| value.exterior.as_ref())
-            .and_then(|value| value.environment.climate_form_id),
-        "weather_form_id": manifest
-            .and_then(|value| value.exterior.as_ref())
-            .and_then(|value| value.environment.weather_form_id),
-        "image_space_form_id": manifest
-            .and_then(|value| value.exterior.as_ref())
-            .and_then(|value| value.environment.image_space_form_id),
-        "dynamic_lighting_allowed": manifest
-            .and_then(|value| value.exterior.as_ref())
-            .is_some_and(|value| value.environment.dynamic_lighting_allowed),
+        "climate_form_id": exterior_environment.and_then(|value| value.climate_form_id),
+        "weather_form_id": exterior_environment.and_then(|value| value.weather_form_id),
+        "image_space_form_id": exterior_environment.and_then(|value| value.image_space_form_id),
+        "dynamic_lighting_allowed": exterior_environment
+            .is_some_and(|value| value.dynamic_lighting_allowed),
+        "fog_near": exterior_environment.map(|value| value.fog_near),
+        "fog_far": exterior_environment.map(|value| value.fog_far),
         "water": water,
+        "swimming": world
+            .get_resource::<super::super::world::exterior::SwimmingState>(),
+        "weather_transition": world.get_resource::<WeatherTransition>(),
     });
     Ok(ConsoleCommandResult::value(value))
+}
+
+fn water_state(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    let contact = world
+        .get_resource::<super::super::world::exterior::ExteriorWaterState>()
+        .and_then(|state| state.contact);
+    let swimming = world
+        .get_resource::<super::super::world::exterior::SwimmingState>()
+        .copied();
+    Ok(ConsoleCommandResult::new(
+        json!({ "contact": contact, "swimming": swimming }),
+        vec![format!("Water contact={contact:?}; swimming={swimming:?}.")],
+    ))
+}
+
+fn streamed_lights(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.as_slice() != ["streamed"] {
+        return Err(ConsoleError::new("bad_args", "lights expects streamed"));
+    }
+    Ok(ConsoleCommandResult::value(
+        super::super::world::exterior::streamed_lights_json(world),
+    ))
 }
 
 pub(super) fn set_time(
@@ -885,6 +964,68 @@ pub(super) fn set_time(
             ..invocation.clone()
         },
     )
+}
+
+fn set_weather(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if !(1..=2).contains(&invocation.args.len()) {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "setweather expects a FormID and optional transition seconds",
+        ));
+    }
+    let target = parse_item_form_id(&invocation.args[0])
+        .ok_or_else(|| ConsoleError::new("bad_form_id", "weather FormID must be hexadecimal"))?;
+    let duration = invocation.args.get(1).map_or(Ok(5.0), |value| {
+        value
+            .parse::<f32>()
+            .map_err(|_| ConsoleError::new("bad_type", "weather duration must be a number"))
+    })?;
+    if !duration.is_finite() || !(0.0..=3600.0).contains(&duration) {
+        return Err(ConsoleError::new(
+            "out_of_range",
+            "weather duration must be between 0 and 3600 seconds",
+        ));
+    }
+    let source = world
+        .get_resource::<WeatherTransition>()
+        .and_then(|transition| transition.target_weather_form_id)
+        .or_else(|| {
+            world
+                .get_resource::<LoadedSceneManifest>()
+                .and_then(|manifest| manifest.cell.day_night_profile.as_ref())
+                .map(|profile| profile.weather_form_id)
+        });
+    *world.resource_mut::<WeatherTransition>() = WeatherTransition {
+        source_weather_form_id: source,
+        target_weather_form_id: Some(target),
+        elapsed_seconds: 0.0,
+        duration_seconds: duration,
+    };
+    crate::viewer::day_night::apply_day_night_environment(world);
+    Ok(ConsoleCommandResult::new(
+        json!({ "target_weather_form_id": target, "duration_seconds": duration }),
+        vec![format!(
+            "Weather transition to {target:08x} over {duration:.2}s."
+        )],
+    ))
+}
+
+fn clear_weather(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    if invocation.args.as_slice() != ["clear"] {
+        return Err(ConsoleError::new("bad_args", "weather expects clear"));
+    }
+    *world.resource_mut::<WeatherTransition>() = WeatherTransition::default();
+    crate::viewer::day_night::apply_day_night_environment(world);
+    Ok(ConsoleCommandResult::new(
+        json!({ "weather_override": null }),
+        vec!["Weather override cleared.".into()],
+    ))
 }
 
 pub(super) fn set_time_scale(

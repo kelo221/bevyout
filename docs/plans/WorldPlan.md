@@ -38,7 +38,10 @@ The implementation should extend existing seams rather than introduce a second e
 * Put streaming under `src/viewer/world/exterior/`, exposed through one typed plugin added to `ViewerPlugins`.
 * Keep residency, prioritization, cancellation, ownership, and weather-selection decisions in Bevy-free policy modules. Bevy systems should only apply their outputs.
 * Extend the existing day/night policy and `DayNightPlugin`; do not introduce a second clock or environmental-lighting authority. The repository already has a pure time-of-day policy and a runtime day/night system. 
-* Retain the existing interior preparation path. The current native NIF converter is explicitly experimental and leaves established Blender preparation unchanged. 
+* Retain the existing interior preparation path. Native Rust NIF preparation is
+  now the production path for exterior assets and actor animation; the
+  retained `blender_script.py` is a legacy reference/preview artifact, not a
+  required backend.
 * Every serialized shape change must bump its prepared revision. ([GitHub][3])
 * Runtime loading accepts prepared artifacts only. It must not know how to invoke Blender, the native NIF converter, or any external preparation command.
 
@@ -932,14 +935,16 @@ prepared RON/GLB artifacts only. `src/vsa/assets/blender_script.py` is retained
 as a legacy explicitly-requested preview/reference script and documents the
 remaining native gaps at its top.
 
-The current gaps are LAND terrain material/layer fidelity, VWD/distant
-geometry generation, and unsupported or lossy NIF blocks. They are represented
-as deterministic diagnostics. Wave 1 also shipped the revisioned exterior
-index/package contracts, LAND/ROAD ownership fields, native package asset
-staging, deterministic catalog output, and the first generation-safe runtime
-residency loader. Waves 2–9 still own full route acceptance, terrain material
-fidelity, navigation/gameplay continuity, environment transitions, LOD and
-occlusion, and the bounded/final route gates.
+The native terrain material follow-up now resolves the LAND layer stack into a
+revisioned albedo plus optional tangent-space normal/specular map, and the
+runtime supplies the terrain tangent contract. Remaining native gaps include
+VWD/distant geometry generation and unsupported or lossy NIF blocks. They are
+represented as deterministic diagnostics. Wave 1 also shipped the revisioned
+exterior index/package contracts, LAND/ROAD ownership fields, native package
+asset staging, deterministic catalog output, and the first generation-safe
+runtime residency loader. Waves 2–9 still own full route acceptance,
+navigation/gameplay continuity, environment transitions, LOD and occlusion,
+and the bounded/final route gates.
 
 ### M6 wave 1 — real-data empty-world correction
 
@@ -955,6 +960,234 @@ structures. Invalid water-height sentinels are omitted and reported as
 adjacent packages close the first empty-world reproduction without adding an
 OpenMW runtime dependency. A physics-enabled bridge launch held the player at
 `263.314, 158.129, 263.314` on the prepared terrain collider.
+
+The follow-up physics check confirmed that the player controller is
+BoxDDD-authoritative. Exterior LAND is therefore inserted into the existing
+BoxDDD static mesh path at startup, and native static-object physics sidecars
+are loaded and built in the same pass. Real `00000c49` startup reported `117`
+static bodies and `11,740` packed triangles. Streamed packages now attach the
+same terrain/object path before becoming `Ready`/`Resident`, and eviction
+tears down the existing per-cell BoxDDD ledger before removing the package
+root. Portal points are producer-emitted world-space Bevy metres; matching is
+covered for positive and negative non-zero grids.
+
+The visible `nav exterior` diagnostic reports `223` vertices, `279` triangles,
+and `54` border portals for the real package. Prepared navigation now carries
+collision-cleared graph data and resident-cell links; `nav exterior` remains a
+compact diagnostic view, while `tna spawn` succeeds when the graph and cell
+residency are ready.
+
+Acceptance also corrected the streaming handoff ordering: an unready physical
+target is requested immediately, but the last collision-ready logical cell is
+temporarily pinned so its BoxDDD shapes cannot be evicted first. Real logs now
+show `preload generated` -> `preload ready ... collision_ready=1` -> `Activate`
+-> old-cell `Evict` -> `colliders teardown`, and the player remains above the
+destination terrain during the pending interval.
+
+The real-data viewer also corrected the native LAND triangle winding: the
+Bevy-Z row direction had made the terrain's geometric faces point down while
+the prepared normals pointed up. Render, BoxDDD, and prepare-side clearance
+now use the same upward winding. The remaining coarse 33x33 source height
+topology and scalar/vertex-color material were known Wave 1 presentation
+limits. The native material follow-up now resolves the LAND texture stack
+(`VTEX`, `BTXT`/`ATXT`, `VTXT`, `VCLR`, `LTEX`, and `TXST`) into a revisioned 1024²
+cell-local albedo asset, with a live capture confirming that the terrain is
+attached and shaded without the former white/black fallback holes. Near
+presentation now uses deterministic bilinear subdivision of that source
+topology, while full LAND collision remains authoritative; seam-safe
+terrain/distant LOD, VWD geometry, and occlusion remain Wave 8 work.
+
+The save/runtime follow-up added backward-compatible v7 exact world-location
+records, exact-location startup when the selected manifest matches, streamed
+exterior dynamic transform capture/restore, and Wave 6 diagnostics for
+environment, weather, water, and the streamed-light budget. Prepared exterior
+packages now include the selected content set's compact WTHR keyframes, so
+known weather IDs blend their authored sky/ambient/sunlight values; missing
+IDs retain a deterministic fallback diagnostic path. Resident terrain LOD
+uses hysteresis and cardinal-neighbour clamping while leaving gameplay
+collision at the full LAND mesh. These seams still need the bounded real-data
+route acceptance in Wave 7 and the final Super-Duper Mart ↔ Megaton gate in
+Wave 9; this amendment does not mark those gates complete.
+
+### M6 bounded-route preparation and streaming evidence
+
+The real Fallout 3 route strip is now prepared with the native pipeline from
+Super-Duper Mart grid `(4,-5)` through Megaton Main Gate grid `(-1,-5)`:
+`00000c49`, `00000c4a`, `00000c4b`, `00000c4c`, `000010d5`, and `00001245`.
+The prefetched `y=-6` safety ring is prepared as well, so the runtime route
+does not manufacture failures from stale neighboring manifests. A physics-
+enabled bridge run crossed all six grids at authored terrain heights with
+`failed=0`, `stale_completions=0`, a steady resident count of `4` after
+convergence, and successful `tna spawn` at every stop. The prefetch safety ring
+can temporarily raise the measured peak above that steady route count. The
+observed forward run ended at `1,129,295` resident bytes after `13` evictions;
+this is evidence for the bounded streaming seam, not a frozen performance
+budget.
+
+The exterior preparation path now applies its existing failed-native-asset
+fallback before reading physics sidecars. Non-renderable `giantant/skeleton`
+and `marker_radiation` references are retained as explicit diagnostics instead
+of aborting the whole Megaton package.
+
+This evidence does not close Wave 7 or Wave 9: the exact clean-cache/warm-cache
+timings, long-route player input traversal, interior return, water route,
+actor path, ImageSpace captures, and final frame/memory budgets still require
+the dedicated acceptance manuals and a human-run route session.
+
+### M6 — current native terrain and package-availability verification
+
+The native terrain follow-up now emits a revisioned 1024² cell-local albedo,
+plus an optional tangent-space normal map and specular-strength channel from
+the resolved `TXST` source. The source LAND height topology remains authored
+33x33, while near presentation uses deterministic bilinear subdivision and the
+runtime keeps full-resolution LAND collision; the remaining faceted far-field
+appearance is therefore a geometry/LOD limitation, not evidence of inverted
+normals. The focused mesh regression computes a positive geometric Y normal
+for the first flat quad, and the current bridge capture shows the player
+standing on the textured, top-facing surface.
+
+Exterior residency is now a separate 25-cell budget (the intended 5x5
+`uGridsToLoad` footprint). At startup the runtime filters the full worldspace
+index to package files that exist and whose header carries the current package
+revision, so stale v3/v6 cache files are not requested as if they were valid
+neighbors. The real `00000c49` bridge run reports `failed=0`,
+`stale_completions=0`, `resident_budget=25`, `requests=6`, `ready=6`, and
+`peak_resident_cells=1` at startup; the prepared route currently contributes
+14 current-revision packages. This is a cache-availability proof, not the
+final long-route budget gate.
+
+### M6 — cross-cell navigation rebuild guard
+
+The first resident-graph route probe exposed a panic in Landmass `0.9.2`
+(`i_float` converting `NaN` while clipping a boundary). The trigger was an
+animation link with a semantically valid point source portal sharing a node
+with a native terrain boundary link; Landmass's boundary clipping path
+normalized that point even though it was not a boundary link. The viewer
+adapter now gives each animation-link source a finite 1 cm horizontal portal
+while preserving the point destination used for animation-link sampling.
+This is a local compatibility guard until the upstream filtering fix is
+available, and it is covered by the link-spawn regression test.
+
+With the guard, the physics-enabled bridge probe crossed the real route strip
+through grids `(4,-5)`, `(3,-5)`, `(2,-5)`, `(1,-5)`, `(0,-5)`, and `(-1,-5)`
+at authored terrain heights. Every stop kept the bridge alive with
+`failed=0`, `stale_completions=0`, and the 25-cell exterior budget; the final
+probe reported four resident cells. This is stronger route-streaming and
+navigation-rebuild evidence, but it used `player.setpos` to isolate cell
+seams, so it does not close the Wave 7/Wave 9 ordinary-input, reversal,
+interior, water, actor, or performance gates.
+
+### M6 — presentation diagnostics and atomic acceptance teleports
+
+The viewer now exposes `worldstream presentation`. It reports resident terrain
+representation counts and LOD transitions, distance-hidden object roots,
+persistent/distant landmark counts, and separate frustum, distance, and true
+occlusion fields. Bevy's camera `OcclusionCulling` marker is reported as
+engine-enabled, but true per-object occlusion counts remain explicitly
+unmeasured because the target Bevy renderer does not expose a stable public
+counter; presentation therefore falls back conservatively and never removes
+collision, navigation, or persistent simulation.
+
+The Wave 7 manual uses the atomic `tp x y z` command for seam probes so a
+physics tick cannot observe a player after only one axis has changed. This is
+diagnostic isolation only; ordinary keyboard traversal remains required for
+the Wave 7 and Wave 9 gates.
+
+`worldstream summary` now consolidates the live streaming counters, the
+presentation report, and the current frame window in the same shape as the
+Wave 9 route summary. Preparation/cache and transition/path timings remain
+explicit `null` inputs until the corresponding clean/warm and ordinary-input
+acceptance runs record them; the summary marks those offline measurements as
+required instead of presenting placeholders as passing budgets.
+
+### M6 — terrain LOD elevation-center correction and route recheck
+
+The first westward LOD probe exposed a presentation-only distance bug: terrain
+LOD centers used the cell origin's zero elevation instead of the authored LAND
+center vertex around 160–176 m. The viewer now shares the authored terrain
+center with player placement, so the real route no longer collapses to the
+distant mesh merely because the player crossed west of the Mart. The new
+regression covers this elevation reference, while full LAND collision remains
+unchanged.
+
+The fresh bridge run reached grids `(3,-5)`, `(2,-5)`, `(1,-5)`, `(0,-5)`, and
+`(-1,-5)` after the initial `(4,-5)` cell with `failed=0`,
+`stale_completions=0`, successful `tna spawn` at every stop, and terrain LOD
+sets retaining near/middle representations throughout the route. The live
+summary reached `peak_resident_cells=9` and `peak_memory=2218157` while the
+steady resident count stayed at 2–4; it recorded 13 requests and 6 evictions.
+The current frame window was p50 `7.1869 ms`, p95 `9.4428 ms`, max `9.8995 ms`
+over 64 samples against the 16.6667 ms probe budget. This remains diagnostic
+teleport evidence, not closure of the ordinary-input, clean/warm, interior,
+water, actor, or final-loop gates.
+
+The route preparation was also measured in an isolated temporary cache with
+four workers: the clean pass took `131.691 s` and finished `14 done, 0 failed`;
+the warm pass took `8.794 s` with `14` current fingerprints and `0` stale;
+the resulting cache occupied `772183616` bytes across `951` files. Native
+conversion attempted `191` model jobs; three source-authored non-renderable
+models (`creatures/eyebot/skeleton.nif`, `creatures/giantant/skeleton.nif`,
+and `marker_radiation.nif`) remained explicit fallback diagnostics while all
+14 exterior packages completed. These figures are offline evidence and are
+not injected into the live viewer's intentionally-null measurement fields.
+
+### M6 — LAND orientation and true layer-stack verification
+
+The real `00000c49` terrain is not upside down. The native mesh and BoxDDD
+collider use the same counter-clockwise winding; the focused mesh regression
+computes a positive geometric Bevy-Y normal. The source `VNML` samples also
+convert to positive Bevy-Y normals for all 1,089 LAND vertices (minimum
+observed Y component `0.7197` after normalization). The earlier close-up free
+camera images were taken with `tfc` and were therefore not a reliable test of
+surface orientation.
+
+The native material path now preserves the ESM4 LAND texture graph instead of
+collapsing it to four channels. `VTEX` IDs are retained, `BTXT` and `ATXT`
+FormIDs are resolver-adjusted, `ATXT.layerIndex` is read as its authored
+little-endian `u16`, zero BTXT slots use Fallout 3's default wasteland dirt,
+and each quadrant composites its base and ordered `VTXT` alpha maps. The bake
+uses the OpenMW ESM4 sampling density of six texture tiles per quadrant (12
+across one cell) and still produces one self-contained 1024² albedo/normal
+asset for runtime streaming. A synthetic seven-layer fixture and the real
+`00000c49` preparation both pass; the real baked albedo has no fallback white
+holes. Terrain reflectance is bounded to `0.25` so the source normal alpha does
+not make the matte ground read as polished metal.
+
+The apparent low resolution is a separate limitation. Fallout LAND provides
+only a 33x33 height/normal/color grid per 4096-unit cell; the near 129x129
+mesh is bilinear subdivision and cannot invent additional height detail. The
+middle and distant representations are intentionally coarser, and pre-baked
+VWD/distant geometry plus its atlas remains Wave 8 work. This is why the
+far-field screenshot can still look sparse or faceted even though the near
+terrain orientation and material layer composition are now correct.
+
+### M6 — far-worldspace LOD is optional and deferred from the route gate
+
+Native preparation now discovers Fallout 3's Wasteland worldspace LOD archive
+and records 1,608 deterministic descriptors (1,360 terrain tiles and 276
+block/landmark meshes). Terrain tiles use a dedicated native conversion profile
+that removes only the authored vertical/degenerate border-skirt triangles that
+render as detached walls in Bevy; block meshes retain their authored faces.
+The preserved NIF root already contains the tile's worldspace origin, so the
+viewer attaches each imported GLB at identity rather than applying a second
+grid translation. Empty post-trim meshes are dropped before GLTF emission.
+
+The runtime support remains bounded and presentation-only: at most 48 tiles
+are active, at most eight new imports are staged per frame, and terrain bands
+have separate budgets so Level 4 tiles cannot starve the farther bands. It is
+now opt-in with `view`/`render --worldspace-lod` or
+`setrender worldspace_lod 1`; normal launches leave it disabled, while the
+near/middle/distant per-cell terrain LOD and full LAND collision remain on.
+Disabling the setting removes active far tiles without touching residency,
+collision, navigation, or persistent objects.
+
+Real `00000c49` bridge verification launched without the flag and reported
+`worldspace_lod.active=0`; enabling the setting reached the bounded
+`48`-tile set (`40` terrain and `8` blocks), and disabling it returned to zero
+without a crash or stack-overflow diagnostic. This defers far-horizon visual
+polish from the Wave 7/Wave 9 gameplay route gate while preserving a measured
+experimentation path for later hardware/visual review. The separate
+`M6_WAVE8_MANUAL.md` records the opt-in check.
 
 [1]: https://github.com/kelo221/bevyout/issues/13 "[Epic] M6 — Exterior conversion, streaming, and dynamic lighting · Issue #13 · kelo221/bevyout · GitHub"
 [2]: https://github.com/kelo221/bevyout/issues/10 "[Gate] M4 — Actors navigate, schedule, and persist · Issue #10 · kelo221/bevyout · GitHub"

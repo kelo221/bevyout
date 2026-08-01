@@ -94,6 +94,19 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
     let unlit_mode = world.resource::<UnlitMode>().0;
     let lights_disabled = world.resource::<LightsDisabled>().0;
     let physics = world.resource::<player::CollisionRuntimeStats>().clone();
+    let presentation = super::world::exterior::exterior_presentation_json(world);
+    let terrain_near = presentation["terrain"]["near"].as_u64().unwrap_or(0);
+    let terrain_middle = presentation["terrain"]["middle"].as_u64().unwrap_or(0);
+    let terrain_distant = presentation["terrain"]["distant"].as_u64().unwrap_or(0);
+    let terrain_lod_transitions = presentation["terrain"]["lod_transitions"]
+        .as_u64()
+        .unwrap_or(0);
+    let distance_culled = presentation["objects"]["distance_culled"]
+        .as_u64()
+        .unwrap_or(0);
+    let occlusion_enabled = presentation["culling"]["occlusion"]["enabled"]
+        .as_bool()
+        .unwrap_or(false);
 
     let entity_count = {
         let mut query = world.query::<Entity>();
@@ -160,7 +173,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
         .join(";");
 
     let mut csv = String::from(
-        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,reflection_probes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_awake_dynamic_bodies,physics_sleeping_dynamic_bodies,physics_dynamic_transform_updates,physics_cooking_ms,physics_sidecar_bytes\n",
+        "sample,frame_time_ms,fps,entity_count,mesh_entities,hidden_meshes,named_gltf_meshes,point_lights,directional_lights,irradiance_volumes,reflection_probes,cameras,mesh_assets,material_assets,image_assets,manifest_placements,manifest_lights,bloom_intensity,bloom_threshold,bloom_softness,camera_mode,unlit_mode,lights_disabled,physics_disabled,collider_entities,physics_authored_assets,physics_fallback_assets,physics_bodies,physics_shapes,physics_shape_kinds,physics_packed_triangles,physics_filtered_shapes,physics_dynamic_bodies,physics_awake_dynamic_bodies,physics_sleeping_dynamic_bodies,physics_dynamic_transform_updates,physics_cooking_ms,physics_sidecar_bytes,terrain_near,terrain_middle,terrain_distant,terrain_lod_transitions,distance_culled,occlusion_enabled\n",
     );
     for sample in &samples {
         let fps = if sample.frame_time_ms > f64::EPSILON {
@@ -169,7 +182,7 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             0.0
         };
         csv.push_str(&format!(
-            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{}\n",
+            "{},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{},{},{},{},{},{},{}\n",
             sample.sample,
             sample.frame_time_ms,
             fps,
@@ -208,6 +221,12 @@ pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathB
             physics.dynamic_transform_updates,
             physics.cooking_millis,
             physics.sidecar_bytes,
+            terrain_near,
+            terrain_middle,
+            terrain_distant,
+            terrain_lod_transitions,
+            distance_culled,
+            u8::from(occlusion_enabled),
         ));
     }
     fs::write(&report_path, csv)?;

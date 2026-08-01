@@ -25,8 +25,6 @@ struct FalloutConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct ToolsConfig {
-    blender: Option<PathBuf>,
-    irradiance_blender: Option<PathBuf>,
     ktx: Option<PathBuf>,
 }
 
@@ -43,11 +41,16 @@ struct WorldConfig {
     /// preloaded neighbors) may be resident at once before the farthest
     /// (by door-graph distance) is evicted.
     resident_cell_limit: Option<usize>,
+    /// Exterior `uGridsToLoad`-style resident window. A value of 25 permits
+    /// the authored 5x5 active/prefetch ring while the byte budget remains a
+    /// second hard bound. Interior preloading keeps its independent limit.
+    exterior_resident_cell_limit: Option<usize>,
 }
 
 /// Default for `[world] resident_cell_limit` when unset or no config file is
 /// found (F51.4).
 pub(crate) const DEFAULT_RESIDENT_CELL_LIMIT: usize = 4;
+pub(crate) const DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT: usize = 25;
 
 pub fn apply(cli: &mut Cli) -> Result<()> {
     let Some(path) = config_path(cli.config.as_deref()) else {
@@ -76,12 +79,6 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             if args.cache_dir.is_none() {
                 args.cache_dir = config.output.cache_dir.clone();
             }
-            if args.blender.is_none() {
-                args.blender = config.tools.blender;
-            }
-            if args.irradiance_blender.is_none() {
-                args.irradiance_blender = config.tools.irradiance_blender;
-            }
             if args.toktx.is_none() {
                 args.toktx = config.tools.ktx;
             }
@@ -92,9 +89,6 @@ pub fn apply(cli: &mut Cli) -> Result<()> {
             }
             if args.plugin.is_none() {
                 args.plugin = config.fallout3.plugin.clone();
-            }
-            if args.irradiance_blender.is_none() {
-                args.irradiance_blender = config.tools.irradiance_blender.clone();
             }
             if args.toktx.is_none() {
                 args.toktx = config.tools.ktx.clone();
@@ -159,6 +153,13 @@ pub(crate) fn resident_cell_limit() -> usize {
     resident_cell_limit_from_path(config_path(None))
 }
 
+/// Resolves the bounded exterior resident window. The default matches the
+/// Fallout `uGridsToLoad=5` contract (a 5x5 cell window) without changing the
+/// smaller interior preload budget.
+pub(crate) fn exterior_resident_cell_limit() -> usize {
+    exterior_resident_cell_limit_from_path(config_path(None))
+}
+
 fn resident_cell_limit_from_path(path: Option<PathBuf>) -> usize {
     let Some(path) = path else {
         return DEFAULT_RESIDENT_CELL_LIMIT;
@@ -173,6 +174,22 @@ fn resident_cell_limit_from_path(path: Option<PathBuf>) -> usize {
         .world
         .resident_cell_limit
         .unwrap_or(DEFAULT_RESIDENT_CELL_LIMIT)
+}
+
+fn exterior_resident_cell_limit_from_path(path: Option<PathBuf>) -> usize {
+    let Some(path) = path else {
+        return DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT;
+    };
+    let Ok(config) = toml::from_str::<ConfigFile>(&text) else {
+        return DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT;
+    };
+    config
+        .world
+        .exterior_resident_cell_limit
+        .unwrap_or(DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT)
 }
 
 fn config_path(explicit: Option<&Path>) -> Option<PathBuf> {

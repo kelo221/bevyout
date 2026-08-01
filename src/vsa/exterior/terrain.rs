@@ -1,6 +1,6 @@
 use bevyout_core::manifest::exterior::{ExteriorCoordinatePolicy, GridCoordinate, PreparedTerrain};
 
-use super::super::openmw_esm4::LandRecord;
+use super::super::openmw_esm4::{LandRecord, LandTextureAssignment};
 
 pub(crate) fn terrain_from_land(land: &LandRecord, grid: GridCoordinate) -> PreparedTerrain {
     let policy = ExteriorCoordinatePolicy::default();
@@ -42,27 +42,59 @@ pub(crate) fn terrain_from_land(land: &LandRecord, grid: GridCoordinate) -> Prep
         let x = index % LandRecord::GRID_SIZE;
         let y = index / LandRecord::GRID_SIZE;
         let quadrant = (x / 16).min(1) as u8 + ((y / 16).min(1) as u8 * 2);
-        let mut layers = land
-            .texture_assignments
-            .iter()
-            .filter(|assignment| assignment.quadrant == quadrant)
-            .map(|assignment| assignment.form_id)
-            .collect::<Vec<_>>();
-        layers.sort_unstable();
-        layers.dedup();
-        for (channel, form_id) in layers.into_iter().take(4).enumerate() {
-            if land.texture_layers.first().copied() == Some(form_id) {
-                weights[channel] = 255;
-                break;
+        let local_x = (x % 16).min(16) as u8;
+        let local_y = (y % 16).min(16) as u8;
+        let mut values = [0.0_f32; 4];
+        let mut base_channel = None;
+        for (channel, form_id) in land.texture_layers.iter().take(4).enumerate() {
+            let assignments = land.texture_assignments.iter().filter(|assignment| {
+                assignment.quadrant == quadrant && assignment.form_id == *form_id
+            });
+            for assignment in assignments {
+                if assignment.base {
+                    base_channel = Some(channel);
+                    values[channel] = 1.0;
+                } else {
+                    values[channel] =
+                        values[channel].max(sample_assignment_weight(assignment, local_x, local_y));
+                }
             }
-            weights[channel] = 192;
         }
-        let total = weights.iter().map(|value| u16::from(*value)).sum::<u16>();
-        if total > 255 {
-            let scale = 255.0 / f32::from(total);
-            for value in weights.iter_mut() {
-                *value = (f32::from(*value) * scale).round() as u8;
+        let overlay_total = values
+            .iter()
+            .enumerate()
+            .filter(|(channel, _)| Some(*channel) != base_channel)
+            .map(|(_, value)| *value)
+            .sum::<f32>();
+        if let Some(base_channel) = base_channel {
+            if overlay_total > 1.0 {
+                for (channel, value) in values.iter_mut().enumerate() {
+                    if channel != base_channel {
+                        *value /= overlay_total;
+                    }
+                }
+                values[base_channel] = 0.0;
+            } else {
+                values[base_channel] = 1.0 - overlay_total;
             }
+        } else if overlay_total <= f32::EPSILON {
+            values[0] = 1.0;
+        } else {
+            for value in &mut values {
+                *value /= overlay_total;
+            }
+        }
+        for (channel, value) in values.into_iter().enumerate() {
+            weights[channel] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        // Keep the quantized weights normalized. Rounding four channels can
+        // otherwise leave a one-byte seam between independently prepared
+        // cells.
+        let total = weights.iter().map(|value| u16::from(*value)).sum::<u16>();
+        if total != 255 {
+            let correction = 255_i32 - i32::from(total);
+            let first = i32::from(weights[0]) + correction;
+            weights[0] = first.clamp(0, 255) as u8;
         }
     }
     PreparedTerrain {
@@ -73,8 +105,26 @@ pub(crate) fn terrain_from_land(land: &LandRecord, grid: GridCoordinate) -> Prep
         colors,
         blend_weights,
         texture_layers: land.texture_layers.clone(),
+        albedo_asset_path: None,
+        normal_asset_path: None,
         collision_heights,
     }
+}
+
+fn sample_assignment_weight(assignment: &LandTextureAssignment, local_x: u8, local_y: u8) -> f32 {
+    if assignment.weights.is_empty() {
+        return 0.0;
+    }
+    let mut samples = [0.0_f32; 17 * 17];
+    for weight in &assignment.weights {
+        let index = usize::from(weight.position);
+        if index < samples.len() {
+            samples[index] = weight.opacity.clamp(0.0, 1.0);
+        }
+    }
+    let x = usize::from(local_x.min(16));
+    let y = usize::from(local_y.min(16));
+    samples[y * 17 + x]
 }
 
 fn derived_normal(heights: &[f32], x: usize, y: usize) -> [f32; 3] {

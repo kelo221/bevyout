@@ -1,7 +1,7 @@
 //! Runtime lifecycle state. Logical cancellation is generation based so an
 //! uncancellable filesystem task can never resurrect an evicted cell.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::{Entity, Resource};
 use bevyout_core::manifest::exterior::{
@@ -14,6 +14,7 @@ pub(crate) struct RuntimeCell {
     pub(crate) root: Option<Entity>,
     pub(crate) task: Option<Entity>,
     pub(crate) package: Option<ExteriorCellPackage>,
+    pub(crate) collision_ready: bool,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -26,6 +27,8 @@ pub(crate) struct ExteriorStreamState {
     pub(crate) current_grid: GridCoordinate,
     pub(crate) previous_grid: Option<GridCoordinate>,
     pub(crate) cells: BTreeMap<GridCoordinate, RuntimeCell>,
+    pub(crate) collision_cells: BTreeMap<GridCoordinate, u32>,
+    pub(crate) persistence_applied: BTreeSet<GridCoordinate>,
     pub(crate) trace: bool,
     pub(crate) requests: u64,
     pub(crate) ready: u64,

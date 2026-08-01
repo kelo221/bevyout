@@ -148,25 +148,46 @@ fn water_contact_is_bounded_by_authored_swim_depth() {
 
 #[test]
 fn portal_matching_is_symmetric_and_deterministic() {
+    let policy = ExteriorCoordinatePolicy::default();
+    let left_grid = GridCoordinate::new(4, -5);
+    let right_grid = GridCoordinate::new(5, -5);
+    let left_origin = policy.grid_origin(left_grid);
+    let boundary_x = left_origin[0] + policy.cell_span_metres();
     let left = [ExteriorBorderPortal {
-        edge: 1,
-        start: [0.0, 0.0, 0.0],
-        end: [1.0, 0.0, 0.0],
+        edge: 0,
+        start: [boundary_x as f32, 2.0, 1.0],
+        end: [boundary_x as f32, 2.0, 3.0],
         tolerance: 0.01,
     }];
     let right = [ExteriorBorderPortal {
-        edge: 3,
-        start: [-1.0, 0.0, 0.0],
-        end: [0.0, 0.0, 0.0],
+        edge: 1,
+        start: [boundary_x as f32, 2.0, 3.0],
+        end: [boundary_x as f32, 2.0, 1.0],
         tolerance: 0.01,
     }];
     assert_eq!(
-        matching_portals(
-            GridCoordinate::new(0, 0),
-            &left,
-            GridCoordinate::new(1, 0),
-            &right
-        ),
+        matching_portals(left_grid, &left, right_grid, &right),
+        vec![(0, 0)]
+    );
+
+    let lower_grid = GridCoordinate::new(-4, 5);
+    let upper_grid = GridCoordinate::new(-4, 6);
+    let lower_origin = policy.grid_origin(lower_grid);
+    let boundary_z = lower_origin[2] - policy.cell_span_metres();
+    let lower = [ExteriorBorderPortal {
+        edge: 2,
+        start: [(lower_origin[0] + 1.0) as f32, 2.0, boundary_z as f32],
+        end: [(lower_origin[0] + 3.0) as f32, 2.0, boundary_z as f32],
+        tolerance: 0.01,
+    }];
+    let upper = [ExteriorBorderPortal {
+        edge: 3,
+        start: [(lower_origin[0] + 3.0) as f32, 2.0, boundary_z as f32],
+        end: [(lower_origin[0] + 1.0) as f32, 2.0, boundary_z as f32],
+        tolerance: 0.01,
+    }];
+    assert_eq!(
+        matching_portals(lower_grid, &lower, upper_grid, &upper),
         vec![(0, 0)]
     );
 }

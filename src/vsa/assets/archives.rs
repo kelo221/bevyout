@@ -28,11 +28,16 @@ pub(crate) fn resolve_asset(
     archives: &[BsaArchive],
     normalized: &str,
 ) -> Result<Option<Vec<u8>>> {
+    let normalized = normalize_asset_path(normalized);
+    let normalized = normalized
+        .strip_prefix("data/")
+        .unwrap_or(&normalized)
+        .to_owned();
     let candidates = if normalized.starts_with("meshes/") || normalized.starts_with("textures/") {
-        vec![normalized.to_string()]
+        vec![normalized]
     } else {
         vec![
-            normalized.to_string(),
+            normalized.clone(),
             format!("meshes/{normalized}"),
             format!("textures/{normalized}"),
         ]

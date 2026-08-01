@@ -7541,11 +7541,10 @@ async fn given_prepared_merge(
     mesh_b_hex: String,
     triangle_b: u32,
 ) {
-    // Issue #154 widened `MergeInput` with the validated portal interval;
-    // this scenario only exercises `merge_link_descriptors`' mesh/triangle
-    // plumbing (`then_merge_link_descriptor` below checks `mesh_form_id`/
-    // `polygon_index`, not `midpoint`/`distance`), so a zeroed interval is
-    // fine here.
+    // Issue #154 widened `MergeInput` with the validated portal interval.
+    // Keep this legacy mesh/plumbing step on a valid non-zero interval so it
+    // exercises a real runtime link; zero-length intervals are deliberately
+    // rejected because landmass cannot build a finite animation-link bound.
     world
         .nav_adapter_merge_inputs
         .push(landmass_graph::MergeInput {
@@ -7553,8 +7552,8 @@ async fn given_prepared_merge(
             triangle_a,
             mesh_b_form_id: parse_hex(&mesh_b_hex),
             triangle_b,
-            interval_a: [[0.0; 3]; 2],
-            interval_b: [[0.0; 3]; 2],
+            interval_a: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            interval_b: [[3.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
         });
 }
 

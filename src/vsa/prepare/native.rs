@@ -97,6 +97,9 @@ fn convert_native_job(
                         super::super::assets::AssetConversion::QuickAo => {
                             NifConversionMode::QuickAo
                         }
+                        super::super::assets::AssetConversion::WorldspaceLod => {
+                            NifConversionMode::WorldspaceLod
+                        }
                     },
                     root_transform_policy: job.root_transform_policy,
                     allow_lossy: !strict,

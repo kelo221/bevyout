@@ -7,10 +7,12 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
+use bevyout_core::manifest::exterior::PreparedWeatherProfile;
 use bevyout_core::manifest::{CellInfo, PreparedDayNightProfile};
 use bevyout_core::time_of_day::{
     advance_game_hour, interpolate_keyframes, normalize_hour, uses_dynamic_lighting,
 };
+use serde::Serialize;
 
 use super::controls::{AmbientScale, LightingScale};
 use super::scene::{
@@ -50,6 +52,25 @@ impl GameClock {
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DayNightPreview(pub(crate) bool);
 
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Serialize)]
+pub(crate) struct WeatherTransition {
+    pub(crate) source_weather_form_id: Option<u32>,
+    pub(crate) target_weather_form_id: Option<u32>,
+    pub(crate) elapsed_seconds: f32,
+    pub(crate) duration_seconds: f32,
+}
+
+impl Default for WeatherTransition {
+    fn default() -> Self {
+        Self {
+            source_weather_form_id: None,
+            target_weather_form_id: None,
+            elapsed_seconds: 0.0,
+            duration_seconds: 0.0,
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct DayNightRuntime {
     last_cell_form_id: Option<u32>,
@@ -76,11 +97,16 @@ impl Plugin for DayNightPlugin {
             });
         app.insert_resource(clock)
             .insert_resource(DayNightPreview(self.cycle_seconds.is_some()))
+            .init_resource::<WeatherTransition>()
             .init_resource::<DayNightRuntime>()
             .add_systems(Startup, spawn_day_night_text)
             .add_systems(
                 Update,
-                (advance_clock, apply_day_night_environment)
+                (
+                    advance_clock,
+                    advance_weather_transition,
+                    apply_day_night_environment,
+                )
                     .chain()
                     .in_set(ViewerSet::WorldSync),
             )
@@ -99,6 +125,17 @@ fn advance_clock(
 fn advance_clock_by(clock: &mut GameClock, real_delta_seconds: f32, virtual_time_paused: bool) {
     if !virtual_time_paused && clock.timescale > 0.0 {
         clock.hour = advance_game_hour(clock.hour, clock.timescale, real_delta_seconds);
+    }
+}
+
+fn advance_weather_transition(time: Res<Time<Real>>, mut transition: ResMut<WeatherTransition>) {
+    if transition.target_weather_form_id.is_none() || transition.duration_seconds <= 0.0 {
+        return;
+    }
+    transition.elapsed_seconds =
+        (transition.elapsed_seconds + time.delta_secs()).min(transition.duration_seconds);
+    if transition.elapsed_seconds >= transition.duration_seconds {
+        transition.source_weather_form_id = transition.target_weather_form_id;
     }
 }
 
@@ -142,6 +179,7 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
     let preview = world.resource::<DayNightPreview>().0;
     let hour = world.resource::<GameClock>().hour;
     let profile = profile_for_cell(&cell, preview).0.cloned();
+    let weather_transition = *world.resource::<WeatherTransition>();
     let cell_changed = world.resource::<DayNightRuntime>().last_cell_form_id != Some(cell.form_id);
     let preview_changed = world.resource::<DayNightRuntime>().last_preview != preview;
 
@@ -170,6 +208,22 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
 
     let mut ambient = interpolate_keyframes(profile.ambient, profile.timings, hour);
     let mut sunlight = interpolate_keyframes(profile.sunlight, profile.timings, hour);
+    let mut sky_upper = interpolate_keyframes(profile.sky_upper, profile.timings, hour);
+    let mut sky_lower = interpolate_keyframes(profile.sky_lower, profile.timings, hour);
+    apply_weather_transition(
+        &mut ambient,
+        &mut sunlight,
+        &mut sky_upper,
+        &mut sky_lower,
+        weather_transition,
+        hour,
+        weather_transition
+            .source_weather_form_id
+            .and_then(|form_id| weather_profile_for_world(world, form_id)),
+        weather_transition
+            .target_weather_form_id
+            .and_then(|form_id| weather_profile_for_world(world, form_id)),
+    );
     if preview {
         // Debug preview must retain the authored interior's mood. Weather
         // supplies hue and its own relative day/night variation, while the
@@ -214,15 +268,111 @@ pub(crate) fn apply_day_night_environment(world: &mut World) {
         update
     };
     if update_sky {
-        let upper = interpolate_keyframes(profile.sky_upper, profile.timings, hour);
-        let lower = interpolate_keyframes(profile.sky_lower, profile.timings, hour);
-        update_skybox(world, upper, lower);
+        update_skybox(world, sky_upper, sky_lower);
     }
 
     let mut runtime = world.resource_mut::<DayNightRuntime>();
     runtime.last_cell_form_id = Some(cell.form_id);
     runtime.last_preview = preview;
     runtime.dynamic_applied = true;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_weather_transition(
+    ambient: &mut [f32; 4],
+    sunlight: &mut [f32; 4],
+    sky_upper: &mut [f32; 4],
+    sky_lower: &mut [f32; 4],
+    transition: WeatherTransition,
+    hour: f32,
+    source_profile: Option<PreparedWeatherProfile>,
+    target_profile: Option<PreparedWeatherProfile>,
+) {
+    let Some(target) = transition.target_weather_form_id else {
+        return;
+    };
+    let progress = if transition.duration_seconds > 0.0 {
+        (transition.elapsed_seconds / transition.duration_seconds).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let Some(target_profile) = target_profile else {
+        let tint = weather_tint(target);
+        for color in [ambient, sunlight, sky_upper, sky_lower] {
+            for channel in 0..3 {
+                color[channel] = color[channel] * (1.0 - progress) + tint[channel] * progress;
+            }
+        }
+        return;
+    };
+    let source_profile = source_profile.as_ref();
+    let source_ambient = source_profile
+        .map(|profile| interpolate_weather(profile, hour, |profile| profile.ambient))
+        .unwrap_or(*ambient);
+    let source_sunlight = source_profile
+        .map(|profile| interpolate_weather(profile, hour, |profile| profile.sunlight))
+        .unwrap_or(*sunlight);
+    let source_sky_upper = source_profile
+        .map(|profile| interpolate_weather(profile, hour, |profile| profile.sky_upper))
+        .unwrap_or(*sky_upper);
+    let source_sky_lower = source_profile
+        .map(|profile| interpolate_weather(profile, hour, |profile| profile.sky_lower))
+        .unwrap_or(*sky_lower);
+    let target_ambient = interpolate_weather(&target_profile, hour, |profile| profile.ambient);
+    let target_sunlight = interpolate_weather(&target_profile, hour, |profile| profile.sunlight);
+    let target_sky_upper = interpolate_weather(&target_profile, hour, |profile| profile.sky_upper);
+    let target_sky_lower = interpolate_weather(&target_profile, hour, |profile| profile.sky_lower);
+    for (destination, source, target) in [
+        (ambient, source_ambient, target_ambient),
+        (sunlight, source_sunlight, target_sunlight),
+        (sky_upper, source_sky_upper, target_sky_upper),
+        (sky_lower, source_sky_lower, target_sky_lower),
+    ] {
+        for channel in 0..4 {
+            destination[channel] = source[channel] * (1.0 - progress) + target[channel] * progress;
+        }
+    }
+}
+
+fn interpolate_weather(
+    profile: &PreparedWeatherProfile,
+    hour: f32,
+    select: impl Fn(&PreparedWeatherProfile) -> bevyout_core::time_of_day::ColorKeyframes,
+) -> [f32; 4] {
+    bevyout_core::time_of_day::interpolate_keyframes(select(profile), profile.timings, hour)
+}
+
+fn weather_profile_for_world(world: &World, form_id: u32) -> Option<PreparedWeatherProfile> {
+    let streamed = world
+        .get_resource::<super::world::exterior::ExteriorStreamState>()
+        .and_then(|state| state.cells.get(&state.current_grid))
+        .and_then(|cell| cell.package.as_ref())
+        .map(|package| &package.environment);
+    let environment = streamed.or_else(|| {
+        world
+            .get_resource::<LoadedSceneManifest>()
+            .and_then(|manifest| manifest.exterior.as_ref())
+            .map(|package| &package.environment)
+    })?;
+    environment
+        .weather_profiles
+        .iter()
+        .find(|profile| profile.form_id == form_id)
+        .cloned()
+}
+
+fn weather_tint(form_id: u32) -> [f32; 4] {
+    // A hand-authored or stale manifest can still request a weather record
+    // that was not included in its package. Keep that failure deterministic
+    // and visible instead of silently retaining the source weather.
+    let seed = form_id.rotate_left(11) ^ 0x9e37_79b9;
+    let variation = (seed & 0xff) as f32 / 255.0;
+    [
+        0.16 + variation * 0.12,
+        0.20 + variation * 0.13,
+        0.22 + variation * 0.16,
+        1.0,
+    ]
 }
 
 fn update_skybox(world: &mut World, upper: [f32; 4], lower: [f32; 4]) {

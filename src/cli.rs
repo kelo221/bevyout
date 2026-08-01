@@ -111,6 +111,7 @@ pub struct NifConvertArgs {
 pub(crate) enum NifConversionMode {
     Preserve,
     QuickAo,
+    WorldspaceLod,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -307,6 +308,10 @@ pub struct ViewArgs {
     /// Enable the bounded native realtime point-shadow pass at startup.
     #[arg(long)]
     pub(crate) realtime_shadows: bool,
+    /// Enable optional far-worldspace LOD tiles. Near/middle/distant per-cell
+    /// terrain LOD remains enabled without this flag.
+    #[arg(long)]
+    pub(crate) worldspace_lod: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
@@ -390,9 +395,6 @@ pub struct RenderArgs {
     /// Plugin filename used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) plugin: Option<PathBuf>,
-    /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
-    #[arg(long, hide = true)]
-    pub(crate) irradiance_blender: Option<PathBuf>,
     /// KTX-Software executable used if render needs to bake irradiance.
     #[arg(long, hide = true)]
     pub(crate) toktx: Option<PathBuf>,
@@ -408,6 +410,10 @@ pub struct RenderArgs {
     /// Enable the bounded native realtime point-shadow pass at startup.
     #[arg(long)]
     pub(crate) realtime_shadows: bool,
+    /// Enable optional far-worldspace LOD tiles. Near/middle/distant per-cell
+    /// terrain LOD remains enabled without this flag.
+    #[arg(long)]
+    pub(crate) worldspace_lod: bool,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
@@ -451,9 +457,6 @@ pub struct BakeArgs {
     /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Fast Blender preview or Rust CPU irradiance-volume bake.
-    #[arg(long, value_enum, default_value_t = BakeQuality::Irradiance)]
-    pub(crate) quality: BakeQuality,
     /// World-space distance between irradiance probes, in metres.
     #[arg(
         long,
@@ -475,12 +478,6 @@ pub struct BakeArgs {
         value_parser = parse_static_batch_chunk_meters
     )]
     pub(crate) static_batch_chunk_meters: f32,
-    /// Blender executable path, used only by --quality preview.
-    #[arg(long)]
-    pub(crate) blender: Option<PathBuf>,
-    /// Legacy compatibility option; accepted but ignored by the Rust baker.
-    #[arg(long)]
-    pub(crate) irradiance_blender: Option<PathBuf>,
     /// Unified KTX-Software `ktx.exe` path (legacy option name).
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -490,7 +487,7 @@ pub struct BakeArgs {
     /// the legacy no-op it always was.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Keep raw irradiance atlas slices, or Blender preview intermediates.
+    /// Keep raw irradiance atlas slices for inspection after a failed/exporting bake.
     #[arg(long)]
     pub(crate) keep_intermediate: bool,
 }
@@ -528,14 +525,6 @@ pub struct CellsArgs {
     /// With `--map`, write the RON artifact to this path instead of stdout.
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum BakeQuality {
-    /// Fast Eevee lighting preview; does not produce a baked-GI manifest.
-    Preview,
-    /// Bake one deterministic Rust CPU irradiance volume for the cell.
-    Irradiance,
 }
 
 fn parse_static_batch_chunk_meters(value: &str) -> Result<f32, String> {

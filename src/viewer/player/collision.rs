@@ -1,6 +1,6 @@
 //! Prepared and dynamic collision construction.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy::math::Affine3A;
@@ -229,7 +229,7 @@ pub(crate) fn build_prepared_colliders(
     mut commands: Commands,
     physics_disabled: Res<PhysicsDisabled>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
-    physics_assets: Res<PreparedPhysicsAssets>,
+    mut physics_assets: ResMut<PreparedPhysicsAssets>,
     mut state: ResMut<CameraModeState>,
     mut stats: ResMut<CollisionRuntimeStats>,
     mut collision_world: ResMut<PreparedCollisionWorld>,
@@ -261,22 +261,23 @@ pub(crate) fn build_prepared_colliders(
         .iter()
         .map(|(entity, root)| (root.placement().reference_form_id, entity))
         .collect::<HashMap<_, _>>();
-    let mut unknown_layers = HashSet::new();
-    let mut static_marker_spawned = false;
-    if manifest
-        .exterior
-        .as_ref()
-        .is_some_and(|package| package.terrain.is_some())
-    {
-        build_exterior_terrain_collider(
+    let exterior_collision_built = if let Some(package) = manifest.exterior.as_ref() {
+        build_exterior_static_colliders(
             world,
-            manifest.exterior.as_ref().expect("package still borrowed"),
+            &mut commands,
+            package,
+            Path::new(&manifest.asset_root),
+            &mut physics_assets,
             static_body,
             &mut collision_world,
             &mut stats,
-            &mut static_marker_spawned,
-        );
-    }
+            &mut restores,
+        )
+    } else {
+        false
+    };
+    let mut unknown_layers = HashSet::new();
+    let mut static_marker_spawned = exterior_collision_built;
     // The startup path is intentionally all-at-once, but it still needs the
     // same collision ordering as a cell swap: BoxDDD must see every static
     // and keyframed shape before a dynamic body is allowed to simulate.
@@ -378,6 +379,61 @@ pub(crate) fn build_prepared_colliders(
     *cell_physics = CellPhysicsReadiness::BuildingDynamic;
 }
 
+/// Builds the authoritative BoxDDD static collision owned by one exterior
+/// package. This is shared by startup and streamed-cell attachment so a
+/// neighbor cannot be rendered as resident before its gameplay collision has
+/// entered the same ledger.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_exterior_static_colliders(
+    world: &mut boxddd::World,
+    commands: &mut Commands,
+    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
+    asset_root: &Path,
+    physics_assets: &mut PreparedPhysicsAssets,
+    static_body: BodyId,
+    collision_world: &mut PreparedCollisionWorld,
+    stats: &mut CollisionRuntimeStats,
+    restores: &mut super::super::world::PersistRestores,
+) -> bool {
+    let shapes_before = stats.shapes;
+    let mut unknown_layers = HashSet::new();
+    let mut static_marker_spawned = false;
+    build_exterior_terrain_collider(world, package, static_body, collision_world, stats);
+    for object in package
+        .static_objects
+        .iter()
+        .filter(|object| object.initially_enabled)
+    {
+        let Some(path) = object.physics_asset_path.as_ref() else {
+            continue;
+        };
+        if !physics_assets.ensure_sidecar_loaded(path, asset_root) {
+            continue;
+        }
+        let placement = exterior_object_placement(object);
+        build_colliders_for_placement(
+            world,
+            commands,
+            package.cell_form_id,
+            &placement,
+            physics_assets,
+            static_body,
+            &HashMap::new(),
+            collision_world,
+            stats,
+            &mut unknown_layers,
+            &mut static_marker_spawned,
+            false,
+            restores,
+        );
+    }
+    stats.sidecar_bytes = physics_assets.payload_bytes;
+    if stats.shapes > shapes_before && !static_marker_spawned {
+        commands.spawn(PhysicsCollider);
+    }
+    stats.shapes > shapes_before
+}
+
 /// Exterior packages carry terrain collision beside their render samples,
 /// rather than as a model physics sidecar. Feed that prepared mesh through
 /// the same BoxDDD shape path used by interior static placements so the FPS
@@ -388,7 +444,6 @@ fn build_exterior_terrain_collider(
     static_body: BodyId,
     collision_world: &mut PreparedCollisionWorld,
     stats: &mut CollisionRuntimeStats,
-    static_marker_spawned: &mut bool,
 ) {
     let Some(terrain) = package.terrain.as_ref() else {
         return;
@@ -403,7 +458,9 @@ fn build_exterior_terrain_collider(
         for x in 0..width - 1 {
             let i = (y * width + x) as u32;
             let next = i + width as u32;
-            indices.extend_from_slice(&[i, next, i + 1, i + 1, next, next + 1]);
+            // Keep the BoxDDD terrain winding aligned with the render mesh
+            // and the upward LAND normals.
+            indices.extend_from_slice(&[i, i + 1, next, i + 1, next + 1, next]);
         }
     }
     let placement = PreparedPlacement {
@@ -474,15 +531,46 @@ fn build_exterior_terrain_collider(
     stats.shapes += 1;
     stats.packed_triangles += triangles;
     *stats.shape_kinds.entry("triangle_mesh").or_default() += 1;
-    if !*static_marker_spawned {
-        *static_marker_spawned = true;
-    }
     info!(
         "prepared exterior terrain collision {:08x}: {} vertices, {} triangles",
         package.cell_form_id,
         terrain.positions.len(),
         triangles
     );
+}
+
+fn exterior_object_placement(
+    object: &bevyout_core::manifest::exterior::PreparedExteriorObject,
+) -> PreparedPlacement {
+    PreparedPlacement {
+        reference_form_id: object.reference_form_id,
+        base_form_id: object.base_form_id,
+        asset_path: object.asset_path.clone(),
+        translation: object.position,
+        rotation_xyzw: object.rotation_xyzw,
+        scale: object.scale,
+        error: None,
+        physics_asset_path: object.physics_asset_path.clone(),
+        physics_source: None,
+        physics_classification: PreparedPhysicsClassification::Static,
+        step_support: false,
+        mutability: Default::default(),
+        mutability_root_form_id: None,
+        reference_kind: "exterior".into(),
+        base_kind: "exterior".into(),
+        editor_id: None,
+        display_name: None,
+        count: 1,
+        semantic: Default::default(),
+        initially_enabled: object.initially_enabled,
+        enable_parent: None,
+        owner_form_id: None,
+        owner_faction_rank: None,
+        linked_reference_form_id: None,
+        inventory: Vec::new(),
+        audio: Default::default(),
+        ao_mode: "ao-none".into(),
+    }
 }
 
 /// Builds every BoxDDD body/shape for one placement (shared by the startup

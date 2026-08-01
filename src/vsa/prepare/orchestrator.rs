@@ -489,7 +489,8 @@ fn prepare_cell(
     // exterior cells spike memory unnecessarily.
     let all_parsed =
         parse_content_set_all(&plugin_sources).context("failed to parse Fallout content set")?;
-    let exterior_indexes = crate::vsa::build_worldspace_indexes(&all_parsed, &source_fingerprint);
+    let mut exterior_indexes =
+        crate::vsa::build_worldspace_indexes(&all_parsed, &source_fingerprint);
     let mut parsed = all_parsed
         .select(&selector)
         .context("failed to select Fallout content set cell")?;
@@ -596,7 +597,7 @@ fn prepare_cell(
     if !cell.interior {
         let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
         let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
-        let exterior_stage = stage_placements(
+        let mut exterior_stage = stage_placements(
             parsed.references.clone(),
             &parsed.bases,
             &HashMap::new(),
@@ -609,6 +610,53 @@ fn prepare_cell(
             static_converter_revision,
             actor_converter_revision,
         )?;
+        {
+            let _asset_stage_guard = session.asset_stage_lock.lock().unwrap();
+            if let Some(worldspace_form_id) = cell.worldspace_form_id {
+                let cached = session
+                    .worldspace_lod_cache
+                    .lock()
+                    .unwrap()
+                    .get(&worldspace_form_id)
+                    .cloned();
+                let lod_assets = if let Some(cached) = cached {
+                    cached
+                } else {
+                    let index = exterior_indexes
+                        .iter()
+                        .find(|index| index.worldspace_form_id == worldspace_form_id)
+                        .cloned();
+                    let assets = index
+                        .map(|index| {
+                            prepare_worldspace_lod(
+                                &index,
+                                &data_root,
+                                &session.archives,
+                                &staging_dir,
+                                &assets_dir,
+                                args.rebuild_assets,
+                                args.jobs,
+                                args.strict,
+                                output,
+                                &mut diagnostics,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    session
+                        .worldspace_lod_cache
+                        .lock()
+                        .unwrap()
+                        .insert(worldspace_form_id, assets.clone());
+                    assets
+                };
+                for index in &mut exterior_indexes {
+                    if index.worldspace_form_id == worldspace_form_id {
+                        index.worldspace_lod = lod_assets.clone();
+                    }
+                }
+            }
+        }
         let mut failed_native_assets = HashMap::new();
         if !exterior_stage.jobs.is_empty() {
             let batch = run_native_batch(
@@ -620,16 +668,134 @@ fn prepare_cell(
             )
             .context("native exterior asset conversion failed")?;
             output.push(batch.summary().line());
+            for outcome in &batch.outcomes {
+                if outcome.status == NativeJobStatus::Converted {
+                    continue;
+                }
+                output.push(format!(
+                    "native conversion {}: model={} job={} stage={} error={}",
+                    match outcome.status {
+                        NativeJobStatus::Unsupported => "unsupported",
+                        NativeJobStatus::Failed => "failed",
+                        NativeJobStatus::Converted => unreachable!(),
+                    },
+                    outcome.model,
+                    outcome.index,
+                    outcome.stage,
+                    outcome.error.as_deref().unwrap_or("unknown error")
+                ));
+            }
             batch.enforce_strict(args.strict)?;
-            failed_native_assets = batch.failed_outputs(&exterior_stage.jobs);
+            failed_native_assets = batch
+                .failed_outputs(&exterior_stage.jobs)
+                .into_iter()
+                .filter_map(|(path, reason)| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| (PathBuf::from(format!("assets/{name}")), reason))
+                })
+                .collect();
         }
-        let mut package = crate::vsa::build_cell_package(&parsed, &cell, &source_fingerprint)
-            .with_context(|| {
-                format!(
-                    "exterior cell {} is missing a worldspace or XCLC grid",
-                    super::super::manifest::cell_label(&cell)
-                )
-            })?;
+        if !failed_native_assets.is_empty() {
+            for placement in &mut exterior_stage.placements {
+                let Some(asset_path) = placement.asset_path.as_ref() else {
+                    continue;
+                };
+                let Some(reason) = failed_native_assets.get(Path::new(asset_path)) else {
+                    continue;
+                };
+                placement.asset_path = None;
+                placement.physics_asset_path = None;
+                placement.error = Some(reason.clone());
+                placement.step_support = false;
+            }
+        }
+
+        // Exterior NAVM used to be flattened directly into the cell package,
+        // which silently discarded authored adjacency, doors, NVEX targets,
+        // merge records, and the collision-derived clearance verdict. Reuse
+        // the same prepared graph pipeline as interiors before the package is
+        // assembled; the package stores the resulting graph artifact pointer
+        // while retaining its compact flattened buffers for diagnostics.
+        let mut physics_assets = HashMap::new();
+        for placement in &mut exterior_stage.placements {
+            let Some(relative_path) = placement.physics_asset_path.as_ref() else {
+                continue;
+            };
+            if !physics_assets.contains_key(relative_path) {
+                let asset = session.physics_cache.lock().unwrap().get_or_insert_with(
+                    relative_path,
+                    || {
+                        let path = cache_dir
+                            .join(relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                        read_physics_asset(&path)
+                    },
+                )?;
+                physics_assets.insert(relative_path.clone(), asset);
+            }
+            let asset = physics_assets
+                .get(relative_path)
+                .expect("exterior physics asset was inserted above");
+            placement.physics_source = Some(asset.source.clone());
+            placement.physics_classification = classify_placement(&placement.semantic, asset);
+            placement.step_support = retain_static_step_support(
+                placement.step_support,
+                placement.physics_classification,
+            );
+        }
+        let (navigation_source, navigation_clearance_ready, navigation_summaries) =
+            prepare_exterior_navigation(
+                &cache_dir,
+                &scene_dir,
+                cell_id,
+                &mut diagnostics,
+                &parsed.navmeshes,
+                parsed.navigation.as_ref(),
+                &exterior_stage.placements,
+                &physics_assets,
+                cell.grid
+                    .zip(parsed.land.as_ref())
+                    .map(|((x, y), land)| {
+                        crate::vsa::terrain_from_land(
+                            land,
+                            bevyout_core::manifest::exterior::GridCoordinate::new(x, y),
+                        )
+                    })
+                    .as_ref(),
+            )?;
+        output.extend(navigation_summaries);
+
+        let mut package = crate::vsa::build_cell_package(
+            &parsed,
+            &cell,
+            &source_fingerprint,
+            navigation_source.as_ref(),
+            navigation_clearance_ready,
+        )
+        .with_context(|| {
+            format!(
+                "exterior cell {} is missing a worldspace or XCLC grid",
+                super::super::manifest::cell_label(&cell)
+            )
+        })?;
+        if let Some(terrain) = package.terrain.as_mut() {
+            let assignments = parsed
+                .land
+                .as_ref()
+                .map_or(&[][..], |land| land.texture_assignments.as_slice());
+            crate::vsa::prepare_terrain_albedo(
+                terrain,
+                assignments,
+                &parsed.landscape_textures,
+                &parsed.texture_sets,
+                &data_root,
+                &session.archives,
+                &cache_dir,
+                &source_fingerprint,
+                cell_id,
+                &mut diagnostics,
+            )?;
+        }
         crate::vsa::apply_staged_assets(
             &mut package,
             &exterior_stage.placements,
@@ -654,6 +820,7 @@ fn prepare_cell(
             &package_path,
             to_string_pretty(&package, PrettyConfig::default())?,
         )?;
+        let _index_write_guard = session.index_write_lock.lock().unwrap();
         for mut index in exterior_indexes {
             let index_path = cache_dir
                 .join("worldspaces")
@@ -662,6 +829,8 @@ fn prepare_cell(
             if let Some(parent) = index_path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            apply_staged_persistent_assets(&mut index, &exterior_stage.placements);
+            merge_existing_persistent_assets(&index_path, &mut index);
             index.sort_deterministically();
             fs::write(
                 &index_path,
@@ -1414,6 +1583,68 @@ fn prepare_cell(
         manifest_path.display()
     ));
     Ok(())
+}
+
+fn apply_staged_persistent_assets(
+    index: &mut bevyout_core::manifest::exterior::ExteriorWorldspaceIndex,
+    placements: &[PreparedPlacement],
+) {
+    let mut unavailable = Vec::new();
+    for reference in &mut index.persistent_references {
+        let placement = placements
+            .iter()
+            .find(|placement| placement.reference_form_id == reference.reference_form_id);
+        reference.asset_path = placement
+            .and_then(|placement| placement.asset_path.clone())
+            .filter(|path| path.to_ascii_lowercase().ends_with(".glb"));
+        if let Some(error) = placement.and_then(|placement| placement.error.as_deref()) {
+            unavailable.push((reference.reference_form_id, error.to_owned()));
+        }
+    }
+    for (reference_form_id, error) in unavailable {
+        index
+            .diagnostics
+            .push(bevyout_core::manifest::exterior::ExteriorDiagnostic {
+                code: "persistent_asset_unavailable".into(),
+                form_id: Some(reference_form_id),
+                severity: "warning".into(),
+                message: error,
+            });
+    }
+}
+
+fn merge_existing_persistent_assets(
+    index_path: &Path,
+    index: &mut bevyout_core::manifest::exterior::ExteriorWorldspaceIndex,
+) {
+    let Ok(bytes) = fs::read(index_path) else {
+        return;
+    };
+    let Ok(previous) =
+        ron::de::from_bytes::<bevyout_core::manifest::exterior::ExteriorWorldspaceIndex>(&bytes)
+    else {
+        return;
+    };
+    if previous.revision != index.revision
+        || previous.content_fingerprint != index.content_fingerprint
+    {
+        return;
+    }
+    let prepared = previous
+        .persistent_references
+        .into_iter()
+        .filter_map(|reference| {
+            reference
+                .asset_path
+                .filter(|path| path.to_ascii_lowercase().ends_with(".glb"))
+                .map(|path| (reference.reference_form_id, path))
+        })
+        .collect::<HashMap<_, _>>();
+    for reference in &mut index.persistent_references {
+        if reference.asset_path.is_none() {
+            reference.asset_path = prepared.get(&reference.reference_form_id).cloned();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

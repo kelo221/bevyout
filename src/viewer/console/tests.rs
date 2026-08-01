@@ -1,6 +1,7 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
 use crate::viewer::ImageSpaceBloomOverrides;
+use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
 use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
@@ -24,6 +25,7 @@ fn test_app() -> App {
         .insert_resource(UnlitMode(false))
         .insert_resource(LightsDisabled(false))
         .insert_resource(PreparedPointShadowRuntime::default())
+        .insert_resource(ExteriorWorldspaceLodSettings { enabled: false })
         .insert_resource(PointLightShadowSamples::default())
         .insert_resource(BoxdddDebugDrawSettings::default())
         .insert_resource(player::StepDebugSettings::default())
@@ -369,6 +371,18 @@ fn render_settings_validate_boundaries_before_mutation() {
         exec(&mut app, "getrender realtime_shadows").value["value"],
         0
     );
+    assert!(
+        !app.world()
+            .resource::<ExteriorWorldspaceLodSettings>()
+            .enabled
+    );
+    assert!(exec(&mut app, "setrender worldspace_lod 1").ok);
+    assert!(
+        app.world()
+            .resource::<ExteriorWorldspaceLodSettings>()
+            .enabled
+    );
+    assert!(exec(&mut app, "setrender worldspace_lod 0").ok);
     assert!(exec(&mut app, "setrender metallic 0").ok);
     assert!(!app.world().resource::<MetallicGate>().enabled());
     assert_eq!(exec(&mut app, "getrender metallic").value["value"], 0);
@@ -485,7 +499,7 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        18
+        19
     );
     assert!(exec(&mut app, "setrender day_night_preview 1").ok);
     assert_eq!(

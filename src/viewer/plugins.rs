@@ -49,7 +49,9 @@ impl Plugin for ViewerSchedulePlugin {
 /// at the composition root instead of being hidden in global resources.
 pub(crate) struct ViewerPlugins {
     pub(crate) disable_physics: bool,
+    pub(crate) worldspace_lod: bool,
     pub(crate) resident_cell_limit: usize,
+    pub(crate) exterior_resident_cell_limit: usize,
     pub(crate) agent_port: Option<u16>,
     pub(crate) day_night_cycle_seconds: Option<f32>,
 }
@@ -93,23 +95,8 @@ impl PluginGroup for ViewerPlugins {
                 resident_cell_limit: self.resident_cell_limit,
             })
             .add(world::exterior::ExteriorWorldPlugin {
-                resident_cell_limit: self.resident_cell_limit,
-            })
-            .add(interaction::InteractionPlugin)
-            .add(actor::ActorPlugin)
-            .add(actor_state::ActorStatePlugin)
-            .add(weapon::WeaponPlugin)
-            .add(perception::PerceptionPlugin)
-            .add(actor_animation::ActorAnimationPlugin)
-            .add(pipboy::PipBoyPlugin)
-            .add(pipboy_reader::PipBoyReaderPlugin)
-            .add(animation::PlacementAnimationPlugin)
-            .add(console::ViewerConsolePlugin)
-            .add(console_ui::ConsoleUiPlugin)
-            .add(pause_menu::PauseMenuPlugin)
-            .add(cinema::CinemaPlugin)
-            .add(world::WorldPlugin {
-                resident_cell_limit: self.resident_cell_limit,
+                resident_cell_limit: self.exterior_resident_cell_limit,
+                worldspace_lod: self.worldspace_lod,
             })
             .add(world_items::WorldItemsPlugin)
             .add(nav::NavPlugin)

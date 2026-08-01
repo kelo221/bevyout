@@ -276,15 +276,20 @@ use bevy_landmass::{
     AgentTypeIndexCostOverrides, NavMeshHandle, PauseAgent, PermittedAnimationLinks,
     PointSampleDistance3d, TargetReachedCondition, UsingAnimationLink,
 };
+use bevyout_core::manifest::exterior::{
+    ExteriorCellLifecycle, ExteriorCellPackage, GridCoordinate, matching_portals,
+};
 use serde_json::json;
 
 use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
 use crate::viewer::actor::ActorRuntime;
+use crate::vsa::PreparedNavGraph;
 #[cfg(test)]
 use crate::vsa::PreparedSceneManifest;
 
 use super::super::openmw_player::GRAVITY;
 use super::super::player::{CellPhysicsReadiness, PhysicsDisabled};
+use super::super::world::exterior::ExteriorStreamState;
 use super::super::{interaction, player};
 use super::{door_link, landmass_graph, ledger_policy, movement_policy, repath};
 
@@ -790,6 +795,10 @@ struct TravelDoorLink {
 #[derive(Resource, Default)]
 struct NavArchipelagoState {
     cell_form_id: Option<u32>,
+    /// Resident exterior package grids included in the current archipelago.
+    /// A new streamed cell changes this signature and forces the ownership
+    /// set to rebuild before a subsequent navigation command uses it.
+    exterior_resident_grids: Vec<GridCoordinate>,
     archipelago: Option<Entity>,
     /// The landmass `Character3d` mirroring the FPS player (issue #114
     /// added scope, wave 5): a non-agent RVO obstacle agents steer around
@@ -1278,6 +1287,355 @@ fn no_nav_graph_error() -> ConsoleError {
     ConsoleError::new("no_nav_graph", "no nav graph prepared for this cell")
 }
 
+fn exterior_resident_grid_signature(world: &World) -> Vec<GridCoordinate> {
+    let Some(state) = world.get_resource::<ExteriorStreamState>() else {
+        return Vec::new();
+    };
+    state
+        .cells
+        .iter()
+        .filter(|(_, cell)| {
+            cell.collision_ready
+                && matches!(
+                    cell.state.lifecycle,
+                    ExteriorCellLifecycle::Ready | ExteriorCellLifecycle::Resident
+                )
+                && cell.package.is_some()
+        })
+        .map(|(grid, _)| *grid)
+        .collect()
+}
+
+/// Reads every collision-ready resident exterior graph into one landmass
+/// input. The package lifecycle is the ownership authority: a graph is never
+/// admitted while its package is still loading or its BoxDDD collider is not
+/// attached. This also makes a newly resident neighbor visible to the next
+/// `tna` command without rebuilding from only the active manifest.
+fn read_resident_exterior_graph(
+    world: &World,
+) -> Result<(PreparedNavGraph, Vec<(GridCoordinate, ExteriorCellPackage)>), ConsoleError> {
+    let state = world.get_resource::<ExteriorStreamState>().ok_or_else(|| {
+        ConsoleError::new(
+            "exterior_nav_not_ready",
+            "exterior stream is not initialized",
+        )
+    })?;
+    let asset_root = state.asset_root.clone().ok_or_else(|| {
+        ConsoleError::new(
+            "exterior_nav_not_ready",
+            "exterior asset root is unavailable",
+        )
+    })?;
+    let mut residents = state
+        .cells
+        .iter()
+        .filter(|(_, cell)| {
+            cell.collision_ready
+                && matches!(
+                    cell.state.lifecycle,
+                    ExteriorCellLifecycle::Ready | ExteriorCellLifecycle::Resident
+                )
+        })
+        .filter_map(|(grid, cell)| cell.package.clone().map(|package| (*grid, package)))
+        .collect::<Vec<_>>();
+    residents.sort_by_key(|(grid, package)| (*grid, package.cell_form_id));
+    if residents.is_empty() {
+        return Err(ConsoleError::new(
+            "exterior_nav_not_ready",
+            "no collision-ready resident exterior package",
+        ));
+    }
+
+    let mut combined = None;
+    for (_grid, package) in &residents {
+        let Some(navigation) = package.navigation.as_ref() else {
+            return Err(ConsoleError::new(
+                "exterior_nav_not_ready",
+                format!(
+                    "cell {:08x} has no prepared navigation tile",
+                    package.cell_form_id
+                ),
+            ));
+        };
+        if !navigation.clearance_ready || navigation.graph_asset_path.is_none() {
+            return Err(ConsoleError::new(
+                "exterior_nav_not_ready",
+                format!(
+                    "cell {:08x} has no collision-cleared semantic NAVM artifact",
+                    package.cell_form_id
+                ),
+            ));
+        }
+        let graph =
+            super::read_nav_graph_for_exterior_package(&asset_root, package).map_err(|error| {
+                warn!(
+                    "exterior nav graph read failed for cell {:08x}: {error:#}",
+                    package.cell_form_id
+                );
+                ConsoleError::new(
+                    "exterior_nav_not_ready",
+                    format!(
+                        "cell {:08x} graph artifact is unreadable",
+                        package.cell_form_id
+                    ),
+                )
+            })?;
+        if let Some(target) = combined.as_mut() {
+            append_exterior_nav_graph(target, graph);
+        } else {
+            combined = Some(graph);
+        }
+    }
+    let mut combined = combined.ok_or_else(no_nav_graph_error)?;
+    if let Some(current) = state.cells.get(&state.current_grid) {
+        combined.cell_form_id = current.state.cell_form_id;
+    }
+    Ok((combined, residents))
+}
+
+fn append_exterior_nav_graph(target: &mut PreparedNavGraph, source: PreparedNavGraph) {
+    let was_empty = target.meshes.is_empty();
+    if was_empty {
+        target.revision = source.revision.clone();
+        target.bounds = source.bounds;
+        target.counters = source.counters;
+    } else {
+        for axis in 0..3 {
+            target.bounds.min[axis] = target.bounds.min[axis].min(source.bounds.min[axis]);
+            target.bounds.max[axis] = target.bounds.max[axis].max(source.bounds.max[axis]);
+        }
+        macro_rules! add_counter {
+            ($($field:ident),+ $(,)?) => {$(
+                target.counters.$field += source.counters.$field;
+            )+};
+        }
+        add_counter!(
+            meshes,
+            polygons,
+            vertices,
+            doors,
+            external_connections,
+            mesh_merges,
+            mesh_merges_rejected,
+            diagnostics_warning,
+            diagnostics_error,
+            mesh_merges_authored,
+            mesh_merges_geometric,
+            merge_candidates_authored,
+            merge_candidates_geometric,
+            nvex_targets_inside_cell,
+            nvex_targets_outside_cell,
+            nvci_subrecords,
+            nvci_entries,
+            nvci_door_matches,
+            nvci_navmesh_matches,
+            clearance_removed_unsupported,
+            clearance_cut_obstructed,
+            clearance_dropped_unfit,
+            clearance_walkable_total,
+            clearance_collision_triangles,
+            clearance_clipped_polygons,
+            clearance_added_vertices,
+        );
+    }
+    target.meshes.extend(source.meshes);
+    target.diagnostics.extend(source.diagnostics);
+    target.mesh_merges.extend(source.mesh_merges);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExteriorPortalSide {
+    mesh_form_id: u32,
+    triangle_index: u32,
+    interval: [[f32; 3]; 2],
+}
+
+/// Move an exterior seam's animation-link endpoints into the owning cell's
+/// walkable side. Fallout's adjacent NAVM tiles deliberately share the same
+/// world-space border, so leaving a point exactly on that seam lets landmass's
+/// point sampler choose either island (or neither after clearance). The
+/// prepared nav boundary already includes the agent-radius erosion; one
+/// radius is therefore the smallest stable inset that makes both endpoints
+/// unambiguous without changing the authored crossing height.
+const EXTERIOR_PORTAL_LINK_INSET_METRES: f32 = AGENT_RADIUS;
+
+fn exterior_portal_inward_direction(edge: u8) -> Vec3 {
+    match edge {
+        // `navigation_border_portals` uses 0=max X, 1=min X, 2=min Z,
+        // 3=max Z.
+        0 => Vec3::NEG_X,
+        1 => Vec3::X,
+        2 => Vec3::Z,
+        3 => Vec3::NEG_Z,
+        _ => Vec3::ZERO,
+    }
+}
+
+fn inset_exterior_portal_interval(interval: [[f32; 3]; 2], edge: u8) -> [[f32; 3]; 2] {
+    let offset = exterior_portal_inward_direction(edge) * EXTERIOR_PORTAL_LINK_INSET_METRES;
+    [
+        (Vec3::from_array(interval[0]) + offset).to_array(),
+        (Vec3::from_array(interval[1]) + offset).to_array(),
+    ]
+}
+
+/// Converts producer-generated, world-space border portals into ordinary
+/// landmass merge inputs. Matching is restricted to adjacent grid cells and
+/// each side is resolved back to its semantic prepared polygon, so links are
+/// owned by the same resident graph set as their endpoint islands.
+fn exterior_portal_merge_inputs(
+    packages: &[(GridCoordinate, ExteriorCellPackage)],
+    graph: &PreparedNavGraph,
+) -> Vec<landmass_graph::MergeInput> {
+    let mut links = Vec::new();
+    let mut adjacent_pairs = 0_usize;
+    let mut matched_portals = 0_usize;
+    let mut unresolved_left = 0_usize;
+    let mut unresolved_right = 0_usize;
+    for (left_index, (left_grid, left_package)) in packages.iter().enumerate() {
+        for (right_grid, right_package) in packages.iter().skip(left_index + 1) {
+            let adjacent =
+                (left_grid.x - right_grid.x).abs() + (left_grid.y - right_grid.y).abs() == 1;
+            if !adjacent {
+                continue;
+            }
+            adjacent_pairs += 1;
+            let (Some(left_navigation), Some(right_navigation)) = (
+                left_package.navigation.as_ref(),
+                right_package.navigation.as_ref(),
+            ) else {
+                continue;
+            };
+            let portal_matches = matching_portals(
+                *left_grid,
+                &left_navigation.border_portals,
+                *right_grid,
+                &right_navigation.border_portals,
+            );
+            matched_portals += portal_matches.len();
+            for (left_portal_index, right_portal_index) in portal_matches {
+                let Some(left_side) = find_exterior_portal_side(
+                    graph,
+                    &left_navigation.border_portals[left_portal_index],
+                    left_package.cell_form_id,
+                ) else {
+                    unresolved_left += 1;
+                    continue;
+                };
+                let Some(right_side) = find_exterior_portal_side(
+                    graph,
+                    &right_navigation.border_portals[right_portal_index],
+                    right_package.cell_form_id,
+                ) else {
+                    unresolved_right += 1;
+                    continue;
+                };
+                let left_interval = inset_exterior_portal_interval(
+                    left_side.interval,
+                    left_navigation.border_portals[left_portal_index].edge,
+                );
+                let right_interval = inset_exterior_portal_interval(
+                    right_side.interval,
+                    right_navigation.border_portals[right_portal_index].edge,
+                );
+                links.push(landmass_graph::MergeInput {
+                    mesh_a_form_id: left_side.mesh_form_id,
+                    triangle_a: left_side.triangle_index,
+                    mesh_b_form_id: right_side.mesh_form_id,
+                    triangle_b: right_side.triangle_index,
+                    interval_a: left_interval,
+                    interval_b: right_interval,
+                });
+            }
+        }
+    }
+    links.sort_by(|left, right| {
+        left.mesh_a_form_id
+            .cmp(&right.mesh_a_form_id)
+            .then_with(|| left.triangle_a.cmp(&right.triangle_a))
+            .then_with(|| left.mesh_b_form_id.cmp(&right.mesh_b_form_id))
+            .then_with(|| left.triangle_b.cmp(&right.triangle_b))
+            .then_with(|| left.interval_a[0][0].total_cmp(&right.interval_a[0][0]))
+            .then_with(|| left.interval_a[0][1].total_cmp(&right.interval_a[0][1]))
+            .then_with(|| left.interval_a[0][2].total_cmp(&right.interval_a[0][2]))
+    });
+    links.dedup();
+    if adjacent_pairs > 0 {
+        warn!(
+            "exterior nav border candidates adjacent_pairs={} matched_portals={} resolved_links={} unresolved_left={} unresolved_right={}",
+            adjacent_pairs,
+            matched_portals,
+            links.len(),
+            unresolved_left,
+            unresolved_right,
+        );
+    }
+    links
+}
+
+fn find_exterior_portal_side(
+    graph: &PreparedNavGraph,
+    portal: &bevyout_core::manifest::exterior::ExteriorBorderPortal,
+    cell_form_id: u32,
+) -> Option<ExteriorPortalSide> {
+    // Clearance can move non-protected boundary vertices inward by roughly
+    // one agent radius. The producer portal remains the authored/raw edge;
+    // use a bounded matching band here rather than requiring post-clearance
+    // vertices to be bit-identical to that source edge.
+    let tolerance = portal.tolerance.max(0.75);
+    for mesh in &graph.meshes {
+        if mesh.cell_form_id != Some(cell_form_id) {
+            continue;
+        }
+        for polygon in &mesh.polygons {
+            if !polygon.walkable {
+                continue;
+            }
+            for edge in 0..3 {
+                let Some(&a) = mesh.vertices.get(polygon.vertex_indices[edge] as usize) else {
+                    continue;
+                };
+                let Some(&b) = mesh
+                    .vertices
+                    .get(polygon.vertex_indices[(edge + 1) % 3] as usize)
+                else {
+                    continue;
+                };
+                // The source border edge can retain a same-mesh NVTR
+                // neighbor even when it is also an exterior seam. Endpoint
+                // identity is the stronger contract here; requiring
+                // `adjacency == None` would drop valid authored border
+                // portals before the resident-cell matcher can own them.
+                let interval = if points_close(a, portal.start, tolerance)
+                    && points_close(b, portal.end, tolerance)
+                {
+                    Some([a, b])
+                } else if points_close(a, portal.end, tolerance)
+                    && points_close(b, portal.start, tolerance)
+                {
+                    Some([b, a])
+                } else {
+                    None
+                };
+                if let Some(interval) = interval {
+                    return Some(ExteriorPortalSide {
+                        mesh_form_id: mesh.form_id,
+                        triangle_index: polygon.index,
+                        interval,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+fn points_close(left: [f32; 3], right: [f32; 3], tolerance: f32) -> bool {
+    left.into_iter()
+        .zip(right)
+        .all(|(left, right)| (left - right).abs() <= tolerance)
+}
+
 fn teardown_archipelago(world: &mut World) {
     let state = std::mem::take(&mut *world.resource_mut::<NavArchipelagoState>());
     for entity in state
@@ -1297,10 +1655,11 @@ fn teardown_archipelago(world: &mut World) {
 /// islands, and door-link entities for the active cell's prepared nav
 /// graph. Lazy: only called from `tna spawn`, never eagerly per cell swap.
 fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
-    let (current_cell, travel_destinations, mut door_lock_info, door_positions) = {
+    let (current_cell, travel_destinations, mut door_lock_info, door_positions, exterior_mode) = {
         let manifest = world
             .get_resource::<crate::viewer::LoadedSceneManifest>()
             .ok_or_else(no_nav_graph_error)?;
+        let exterior_mode = manifest.exterior.is_some();
         let travel_destinations = super::travel_door_destinations(manifest);
         let mut door_lock_info = HashMap::new();
         let mut door_positions = HashMap::new();
@@ -1329,12 +1688,20 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
             travel_destinations,
             door_lock_info,
             door_positions,
+            exterior_mode,
         )
     };
 
+    let exterior_resident_grids = if exterior_mode {
+        exterior_resident_grid_signature(world)
+    } else {
+        Default::default()
+    };
     let already_current = {
         let state = world.resource::<NavArchipelagoState>();
-        state.cell_form_id == Some(current_cell) && state.archipelago.is_some()
+        state.cell_form_id == Some(current_cell)
+            && state.archipelago.is_some()
+            && (!exterior_mode || state.exterior_resident_grids == exterior_resident_grids)
     };
     if already_current {
         return Ok(());
@@ -1360,16 +1727,58 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(no_nav_graph_error)?;
-    let graph = super::read_nav_graph_for_manifest(manifest).map_err(|error| {
-        warn!("nav graph read failed for cell {current_cell:08x}: {error:#}");
-        no_nav_graph_error()
-    })?;
+    let (graph, exterior_packages) = if exterior_mode {
+        read_resident_exterior_graph(world)?
+    } else {
+        let graph = super::read_nav_graph_for_manifest(manifest).map_err(|error| {
+            warn!("nav graph read failed for cell {current_cell:08x}: {error:#}");
+            no_nav_graph_error()
+        })?;
+        (graph, Vec::new())
+    };
     // Issue #164: capture this cell's lowest prepared geometry Y so the fall
     // guard can derive its kill plane from real per-cell bounds rather than a
     // hard-coded world Y (see `fall_guard`'s module doc).
     world.resource_mut::<NavCellFallBounds>().min_y = Some(graph.bounds.min[1]);
+    if let Some(position) = player_transform_query(world)
+        && (!position.is_finite() || position.y < fall_guard::fall_kill_z(graph.bounds.min[1]))
+    {
+        let kill_z = fall_guard::fall_kill_z(graph.bounds.min[1]);
+        warn!(
+            "nav agent build rejected off-world player position=({:.2},{:.2},{:.2}) kill_z={kill_z:.2}",
+            position.x, position.y, position.z
+        );
+        return Err(ConsoleError::new(
+            "player_off_navmesh",
+            format!(
+                "the FPS player is outside the prepared navigation bounds at ({:.2}, {:.2}, {:.2}); reposition onto prepared terrain before tna spawn",
+                position.x, position.y, position.z
+            ),
+        ));
+    }
     let mesh_inputs = super::mesh_inputs(&graph);
-    let merge_inputs = super::merge_inputs(&graph);
+    let mut merge_inputs = super::merge_inputs(&graph);
+    let mut border_link_keys = BTreeSet::new();
+    if exterior_mode {
+        let border_links = exterior_portal_merge_inputs(&exterior_packages, &graph);
+        let border_link_count = border_links.len();
+        border_link_keys.extend(border_links.iter().map(|link| {
+            (
+                link.mesh_a_form_id,
+                link.triangle_a,
+                link.mesh_b_form_id,
+                link.triangle_b,
+            )
+        }));
+        info!(
+            "exterior nav resident graphs={} border_links={} meshes={} polygons={}",
+            exterior_packages.len(),
+            border_link_count,
+            graph.counters.meshes,
+            graph.counters.clearance_walkable_total,
+        );
+        merge_inputs.extend(border_links);
+    }
     // Issue #155 feature 1: one archipelago-wide door FormID -> type index
     // mapping, computed once before any mesh's conversion (every mesh must
     // agree on the same door's type index -- see `door_type_indices`'s doc
@@ -1459,6 +1868,18 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     // dropping every merge link's connectivity for the session.
     let candidate_merge_descriptors =
         landmass_graph::merge_link_descriptors(&mesh_inputs, &merge_inputs);
+    let candidate_border_count = candidate_merge_descriptors
+        .iter()
+        .filter(|descriptor| {
+            border_link_keys.contains(&(
+                descriptor.side_a.mesh_form_id,
+                descriptor.side_a.polygon_index,
+                descriptor.side_b.mesh_form_id,
+                descriptor.side_b.polygon_index,
+            ))
+        })
+        .count();
+    let candidate_merge_count = candidate_merge_descriptors.len();
     let physics_disabled = world.resource::<PhysicsDisabled>().0;
     let physics_ready = !physics_disabled
         && world
@@ -1507,6 +1928,28 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
     } else {
         candidate_merge_descriptors
     };
+
+    if exterior_mode {
+        let validated_border_count = validated_merge_descriptors
+            .iter()
+            .filter(|descriptor| {
+                border_link_keys.contains(&(
+                    descriptor.side_a.mesh_form_id,
+                    descriptor.side_a.polygon_index,
+                    descriptor.side_b.mesh_form_id,
+                    descriptor.side_b.polygon_index,
+                ))
+            })
+            .count();
+        info!(
+            "exterior nav merge candidates border_inputs={} candidates={} border_candidates={} validated={} validated_border={}",
+            border_link_keys.len(),
+            candidate_merge_count,
+            candidate_border_count,
+            validated_merge_descriptors.len(),
+            validated_border_count,
+        );
+    }
 
     // Issue #162 feature 1: each validated merge candidate gets its own
     // `landmass` animation-link kind (`landmass_graph::merge_link_kind`,
@@ -1643,6 +2086,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
 
     *world.resource_mut::<NavArchipelagoState>() = NavArchipelagoState {
         cell_form_id: Some(current_cell),
+        exterior_resident_grids,
         archipelago: Some(archipelago_entity),
         player_character: Some(player_character),
         islands,
@@ -1659,7 +2103,28 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         door_open,
         merge_link_kind_count,
     };
+    if exterior_mode {
+        retarget_live_exterior_agents(world, archipelago_entity);
+    }
     Ok(())
+}
+
+/// Rebinds agents that survived an exterior resident-set rebuild to the new
+/// archipelago. Their transforms, targets, KCC state, and actor identity stay
+/// untouched; only the landmass ownership reference changes. Cell swaps use
+/// the existing ledger path instead because those agents may need a door
+/// marker or frozen-position restore in a different active manifest.
+fn retarget_live_exterior_agents(world: &mut World, archipelago_entity: Entity) {
+    let mut agents = world
+        .query_filtered::<Entity, With<TestNavAgentMarker>>()
+        .iter(world)
+        .collect::<Vec<_>>();
+    agents.sort_unstable_by_key(|entity| entity.index_u32());
+    for entity in agents {
+        if let Ok(mut agent) = world.get_entity_mut(entity) {
+            agent.insert(ArchipelagoRef3d::new(archipelago_entity));
+        }
+    }
 }
 
 /// Issue #168: applies [`PREFERRED_PATHING_TYPE_INDEX_COST`] as the
@@ -1712,6 +2177,30 @@ fn apply_preferred_pathing_base_cost(
 /// landmass's route cost reflects how far a crossing actually moves the
 /// agent instead of treating every merge seam as equally cheap.
 ///
+/// Landmass 0.9.2 assumes every portal passed through its boundary clipping
+/// path has a non-zero horizontal extent. Point portals are valid animation
+/// links, but a point animation link can share a node with a native boundary
+/// link; Landmass then normalizes that point while building clip polygons and
+/// produces NaNs. Keep the destination as a point for the intended sampling
+/// semantics, while giving the source a tiny finite horizontal portal. This
+/// is deliberately local to the adapter and can be removed once the upstream
+/// Landmass boundary-link filtering fix is available.
+const ANIMATION_LINK_PORTAL_HALF_LENGTH: f32 = 0.005;
+
+fn animation_link_start_edge(from: Vec3, to: Vec3) -> (Vec3, Vec3) {
+    let horizontal = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+    let direction = horizontal.normalize_or_zero();
+    let direction = if direction.length_squared() > 0.0 {
+        direction
+    } else {
+        Vec3::X
+    };
+    (
+        from - direction * ANIMATION_LINK_PORTAL_HALF_LENGTH,
+        from + direction * ANIMATION_LINK_PORTAL_HALF_LENGTH,
+    )
+}
+
 /// `kind` (issue #162 feature 1): every door link passes the reserved `0`
 /// (never quarantined); a merge link passes its own deterministic
 /// `landmass_graph::merge_link_kind`, giving `PermittedAnimationLinks` a
@@ -1730,7 +2219,7 @@ fn spawn_link_pair(
         world
             .spawn(AnimationLink3dBundle {
                 link: AnimationLink3d {
-                    start_edge: (from, from),
+                    start_edge: animation_link_start_edge(from, to),
                     end_edge: (to, to),
                     kind,
                     cost,
@@ -4781,6 +5270,10 @@ fn log_path_latency(
 
 /// Mirrors `nav_overlay::despawn_stale_nav_overlay`'s pattern: the moment
 /// the active cell no longer matches the archipelago's cell, tear it down.
+/// Exterior navigation has one additional ownership boundary: a changed
+/// collision-ready resident set invalidates the old archipelago's tile/link
+/// set even while the active manifest remains the same. Rebuild that set at
+/// the lifecycle boundary, before a later solve can observe an evicted tile.
 /// `PreparedSceneManifest` is optional so this system never panics in a
 /// console-harness test world that never inserted one.
 ///
@@ -4793,22 +5286,42 @@ fn log_path_latency(
 /// the exact door the agent's active route was targeting, otherwise frozen
 /// in place in the departing cell.
 fn despawn_stale_navmesh_archipelago(world: &mut World) {
-    let Some(current_cell) = world
-        .get_resource::<crate::viewer::LoadedSceneManifest>()
-        .map(|manifest| manifest.cell.form_id)
-    else {
+    let Some(manifest) = world.get_resource::<crate::viewer::LoadedSceneManifest>() else {
         return;
     };
-    let Some(source_cell) = world
-        .resource::<NavArchipelagoState>()
-        .cell_form_id
-        .filter(|&cell| cell != current_cell)
-    else {
-        return;
+    let current_cell = manifest.cell.form_id;
+    let exterior_mode = manifest.exterior.is_some();
+    let resident_signature = exterior_mode.then(|| exterior_resident_grid_signature(world));
+    let (source_cell, exterior_resident_set_changed) = {
+        let state = world.resource::<NavArchipelagoState>();
+        let source_cell = state.cell_form_id.filter(|&cell| cell != current_cell);
+        let exterior_resident_set_changed = exterior_mode
+            && state.archipelago.is_some()
+            && state.cell_form_id == Some(current_cell)
+            && resident_signature
+                .as_ref()
+                .is_some_and(|signature| signature != &state.exterior_resident_grids);
+        (source_cell, exterior_resident_set_changed)
     };
-    let used_door = world.resource_mut::<PendingPlayerSwapDoor>().0.take();
-    ledger_departing_agent(world, source_cell, used_door);
+    if source_cell.is_none() && !exterior_resident_set_changed {
+        return;
+    }
+    if let Some(source_cell) = source_cell {
+        let used_door = world.resource_mut::<PendingPlayerSwapDoor>().0.take();
+        ledger_departing_agent(world, source_cell, used_door);
+    } else {
+        info!("exterior nav resident set changed; rebuilding owned islands and border links");
+    }
     teardown_archipelago(world);
+    // Cell swaps restore ledgered agents in the following system. A resident
+    // set change keeps the current entities in place, so rebuild immediately
+    // and retarget their `ArchipelagoRef3d` before the next landmass solve.
+    if exterior_resident_set_changed && let Err(error) = ensure_archipelago(world) {
+        warn!(
+            "exterior nav resident-set rebuild failed: {}",
+            error.message
+        );
+    }
 }
 
 /// The point-target component of `AgentTarget3d`, if any -- an `Entity`

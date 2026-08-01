@@ -11,6 +11,7 @@ use bevyout_core::manifest::exterior::{
 
 use super::{DISTANT_REFERENCE_FLAG, PERSISTENT_REFERENCE_FLAG};
 use crate::vsa::openmw_esm4::ParsedContentSet;
+use crate::vsa::paths::placement_transform;
 
 pub(crate) fn build_worldspace_indexes(
     parsed: &ParsedContentSet,
@@ -29,6 +30,7 @@ pub(crate) fn build_worldspace_indexes(
             coordinate_policy: policy.clone(),
             cells: Vec::new(),
             persistent_references: Vec::new(),
+            worldspace_lod: Vec::new(),
             diagnostics: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -65,11 +67,20 @@ pub(crate) fn build_worldspace_indexes(
         let persistent = references
             .iter()
             .filter(|reference| reference.flags & PERSISTENT_REFERENCE_FLAG != 0)
-            .map(|reference| ExteriorPersistentReference {
-                reference_form_id: reference.form_id,
-                cell_form_id: *cell_form_id,
-                base_form_id: reference.base_form_id,
-                semantic: reference.kind.as_str().into(),
+            .map(|reference| {
+                let (position, rotation_xyzw, scale) = placement_transform(reference);
+                ExteriorPersistentReference {
+                    reference_form_id: reference.form_id,
+                    cell_form_id: *cell_form_id,
+                    base_form_id: reference.base_form_id,
+                    semantic: reference.kind.as_str().into(),
+                    asset_path: parsed.base_model(reference.base_form_id),
+                    position,
+                    rotation_xyzw,
+                    scale,
+                    initially_enabled: reference.initially_enabled,
+                    distant: reference.flags & DISTANT_REFERENCE_FLAG != 0,
+                }
             })
             .collect::<Vec<_>>();
         index.persistent_references.extend(persistent);
@@ -147,6 +158,10 @@ pub fn exterior_catalog(args: ExteriorCatalogArgs) -> Result<()> {
             .iter()
             .map(|cell| cell.road_count)
             .sum::<usize>(),
+    ));
+    output.push_str(&format!(
+        "worldspace lod assets={}\n",
+        index.worldspace_lod.len()
     ));
     for cell in index.cells {
         output.push_str(&format!(

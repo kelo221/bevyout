@@ -31,6 +31,7 @@
 
 use super::*;
 use crate::vsa::audio_assets::load_dialogue_voice_archives;
+use bevyout_core::manifest::exterior::ExteriorWorldspaceLodAsset;
 
 pub(crate) struct BatchSession {
     pub(crate) loaded_plugins: Vec<LoadedPlugin>,
@@ -61,6 +62,14 @@ pub(crate) struct BatchSession {
     /// `staging_dir`, so this lock keeps concurrent cell workers from
     /// observing or overwriting another cell's intermediate files.
     pub(crate) asset_stage_lock: Mutex<()>,
+    /// Worldspace indexes are rewritten by every exterior cell worker. Keep
+    /// the read/merge/write transaction atomic so prepared persistent paths
+    /// accumulate deterministically across a batch.
+    pub(crate) index_write_lock: Mutex<()>,
+    /// Prepared worldspace LOD assets are shared by every cell worker in a
+    /// batch. The first exterior cell for a worldspace stages/converts them;
+    /// later cells reuse the descriptor without repeating archive work.
+    pub(crate) worldspace_lod_cache: Mutex<HashMap<u32, Vec<ExteriorWorldspaceLodAsset>>>,
 }
 
 impl BatchSession {
@@ -137,6 +146,8 @@ impl BatchSession {
             physics_cache: Mutex::new(KeyedBatchCache::default()),
             asset_totals: Mutex::new(BatchAssetTotals::default()),
             asset_stage_lock: Mutex::new(()),
+            index_write_lock: Mutex::new(()),
+            worldspace_lod_cache: Mutex::new(HashMap::new()),
         })
     }
 

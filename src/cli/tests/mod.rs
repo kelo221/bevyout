@@ -232,22 +232,35 @@ fn native_conversion_is_authoritative_and_blender_flags_are_rejected() {
 
 #[test]
 fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
-    let cli = Cli::try_parse_from([
-        "bevyout",
-        "bake",
-        "--manifest",
-        "scene.ron",
-        "--quality",
-        "irradiance",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["bevyout", "bake", "--manifest", "scene.ron"]).unwrap();
     let CommandLine::Bake(args) = cli.command else {
         panic!("expected bake command");
     };
     assert_eq!(args.static_batch_chunk_meters, 64.0);
     assert_eq!(args.irradiance_spacing_meters, 8.0);
     assert_eq!(args.irradiance_samples, 64);
-    assert!(matches!(args.quality, BakeQuality::Irradiance));
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--quality",
+            "preview",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--blender",
+            "blender.exe",
+        ])
+        .is_err()
+    );
 
     for value in ["7.99", "256.01", "NaN", "inf"] {
         assert!(
@@ -306,7 +319,6 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
     };
     assert_eq!(args.selector.as_deref(), Some("SuperDuperMart"));
     assert!(args.manifest.is_none());
-    assert!(matches!(args.quality, BakeQuality::Irradiance));
 
     let cli = Cli::try_parse_from(["bevyout", "bake", "SuperDuperMart", "--force"]).unwrap();
     let CommandLine::Bake(args) = cli.command else {
@@ -320,6 +332,7 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
     };
     assert_eq!(args.selector, "SuperDuperMart");
     assert!(!args.realtime_shadows);
+    assert!(!args.worldspace_lod);
 
     let cli =
         Cli::try_parse_from(["bevyout", "render", "SuperDuperMart", "--realtime-shadows"]).unwrap();
@@ -328,11 +341,19 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
     };
     assert!(args.realtime_shadows);
 
+    let cli =
+        Cli::try_parse_from(["bevyout", "render", "SuperDuperMart", "--worldspace-lod"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert!(args.worldspace_lod);
+
     let cli = Cli::try_parse_from(["bevyout", "view", "--manifest", "scene.ron"]).unwrap();
     let CommandLine::View(args) = cli.command else {
         panic!("expected view command");
     };
     assert!(!args.realtime_shadows);
+    assert!(!args.worldspace_lod);
 
     let cli = Cli::try_parse_from([
         "bevyout",
@@ -346,6 +367,19 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
         panic!("expected view command");
     };
     assert!(args.realtime_shadows);
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "view",
+        "--manifest",
+        "scene.ron",
+        "--worldspace-lod",
+    ])
+    .unwrap();
+    let CommandLine::View(args) = cli.command else {
+        panic!("expected view command");
+    };
+    assert!(args.worldspace_lod);
 
     let cli = Cli::try_parse_from(["bevyout", "prepare", "--cell", "00017f37"]).unwrap();
     let CommandLine::Prepare(args) = cli.command else {

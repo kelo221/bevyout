@@ -413,7 +413,7 @@ fn apply_pack_report(
             fail_clip(
                 clip,
                 "missing_conversion_report",
-                "Blender report omitted this discovered KF clip",
+                "native conversion report omitted this discovered KF clip",
             );
             continue;
         };

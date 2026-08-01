@@ -1,12 +1,14 @@
 use bevyout_core::manifest::CellInfo;
 use bevyout_core::manifest::PreparedPlacement;
 use bevyout_core::manifest::exterior::{
-    EXTERIOR_CELL_PACKAGE_REVISION, EXTERIOR_ENVIRONMENT_REVISION, ExteriorBorderPortal,
-    ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorDiagnostic, GridCoordinate,
-    PreparedExteriorDoorDestination, PreparedExteriorEnvironment, PreparedExteriorLight,
-    PreparedExteriorNavigation, PreparedExteriorObject, PreparedWater,
+    EXTERIOR_CELL_PACKAGE_REVISION, EXTERIOR_ENVIRONMENT_REVISION, EXTERIOR_NAVIGATION_REVISION,
+    ExteriorBorderPortal, ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorDiagnostic,
+    GridCoordinate, PreparedExteriorDoorDestination, PreparedExteriorEnvironment,
+    PreparedExteriorLight, PreparedExteriorNavigation, PreparedExteriorObject, PreparedWater,
+    PreparedWeatherProfile,
 };
 
+use super::super::manifest::PreparedNavGraphSource;
 use super::super::openmw_esm4::{ParsedPlugin, ReferenceKind};
 use super::terrain_from_land;
 use super::{DISTANT_REFERENCE_FLAG, PERSISTENT_REFERENCE_FLAG};
@@ -16,6 +18,8 @@ pub(crate) fn build_cell_package(
     parsed: &ParsedPlugin,
     cell: &CellInfo,
     content_fingerprint: &str,
+    navigation_source: Option<&PreparedNavGraphSource>,
+    navigation_clearance_ready: bool,
 ) -> Option<ExteriorCellPackage> {
     let grid = cell.grid.map(|(x, y)| GridCoordinate::new(x, y))?;
     let worldspace_form_id = cell.worldspace_form_id?;
@@ -107,9 +111,7 @@ pub(crate) fn build_cell_package(
             dynamic: !matches!(reference.kind, ReferenceKind::Object) || base.kind == "DOOR",
             distant: reference.flags & DISTANT_REFERENCE_FLAG != 0,
         };
-        if object.distant {
-            distant_objects.push(object);
-        } else if object.persistent {
+        if object.persistent {
             diagnostics.push(ExteriorDiagnostic {
                 code: "persistent_worldspace_reference".into(),
                 form_id: Some(object.reference_form_id),
@@ -118,6 +120,8 @@ pub(crate) fn build_cell_package(
                     "persistent reference is owned by the worldspace index, not this cell package"
                         .into(),
             });
+        } else if object.distant {
+            distant_objects.push(object);
         } else if object.dynamic {
             dynamic_objects.push(object);
         } else {
@@ -174,9 +178,41 @@ pub(crate) fn build_cell_package(
             lighting.fog_far * crate::vsa::paths::FO3_SCALE
         }),
         dynamic_lighting_allowed: true,
+        weather_profiles: {
+            let timings = cell
+                .day_night_profile
+                .as_ref()
+                .map(|profile| profile.timings)
+                .unwrap_or_default();
+            let mut profiles = parsed
+                .weathers
+                .values()
+                .map(|weather| PreparedWeatherProfile {
+                    form_id: weather.form_id,
+                    editor_id: weather.editor_id.clone(),
+                    timings,
+                    sky_upper: weather.sky_upper,
+                    sky_lower: weather.sky_lower,
+                    ambient: weather.ambient,
+                    sunlight: weather.sunlight,
+                })
+                .collect::<Vec<_>>();
+            profiles.sort_by_key(|profile| profile.form_id);
+            profiles
+        },
     };
     let navigation = (!parsed.navmeshes.is_empty()).then(|| PreparedExteriorNavigation {
-        revision: "exterior-nav-v2".into(),
+        revision: EXTERIOR_NAVIGATION_REVISION.into(),
+        graph_asset_path: navigation_source.map(|source| source.asset_path.clone()),
+        graph_hash: navigation_source.map(|source| source.hash.clone()),
+        mesh_count: navigation_source.map_or(parsed.navmeshes.len(), |source| source.mesh_count),
+        polygon_count: navigation_source.map_or(0, |source| source.polygon_count),
+        vertex_count: navigation_source.map_or(0, |source| source.vertex_count),
+        door_count: navigation_source.map_or(0, |source| source.door_count),
+        external_connection_count: navigation_source
+            .map_or(0, |source| source.external_connection_count),
+        mesh_merge_count: navigation_source.map_or(0, |source| source.mesh_merge_count),
+        clearance_ready: navigation_clearance_ready,
         vertices: parsed
             .navmeshes
             .iter()

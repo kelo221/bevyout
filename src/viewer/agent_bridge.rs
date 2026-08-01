@@ -233,6 +233,7 @@ fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> Brp
         .query_filtered::<Entity, With<DirectionalLight>>()
         .iter(world)
         .count();
+    let presentation = super::world::exterior::exterior_presentation_json(world);
 
     Ok(json!({
         "latest_sample": latest_sample,
@@ -245,6 +246,7 @@ fn performance_snapshot(In(params): In<Option<Value>>, world: &mut World) -> Brp
             "point_lights": point_light_count,
             "directional_lights": directional_light_count,
         },
+        "presentation": presentation,
     }))
 }
 

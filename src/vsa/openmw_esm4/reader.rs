@@ -134,6 +134,43 @@ pub(crate) fn walk_container(
                     state.weathers.remove(&form_id);
                 }
             }
+            "LTEX" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.landscape_textures.remove(&form_id);
+                } else {
+                    state.landscape_textures.insert(
+                        form_id,
+                        LandscapeTextureRecord {
+                            form_id,
+                            editor_id: sub(&subs, "EDID").map(cstring),
+                            texture_set_form_id: sub_form_id(&subs, "TNAM", resolver),
+                            // ICON is only the LTEX editor thumbnail in FO3;
+                            // TXST.TX00 is the authoritative diffuse source.
+                            diffuse_path: sub(&subs, "ICON")
+                                .map(cstring)
+                                .filter(|value| !value.is_empty()),
+                        },
+                    );
+                }
+            }
+            "TXST" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.texture_sets.remove(&form_id);
+                } else {
+                    state.texture_sets.insert(
+                        form_id,
+                        TextureSetRecord {
+                            form_id,
+                            diffuse_path: sub(&subs, "TX00")
+                                .map(cstring)
+                                .filter(|value| !value.is_empty()),
+                            normal_path: sub(&subs, "TX01")
+                                .map(cstring)
+                                .filter(|value| !value.is_empty()),
+                        },
+                    );
+                }
+            }
             "LAND" if context.cell.is_some() => {
                 if flags & RECORD_DELETED != 0 {
                     state.lands.remove(&context.cell.unwrap_or_default());
@@ -141,7 +178,7 @@ pub(crate) fn walk_container(
                     let cell_form_id = context.cell.unwrap_or_default();
                     state.lands.insert(
                         cell_form_id,
-                        (form_id, parse_land(&subs, form_id, cell_form_id)),
+                        (form_id, parse_land(&subs, form_id, cell_form_id, resolver)),
                     );
                 }
             }

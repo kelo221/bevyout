@@ -9,11 +9,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v1";
-pub const EXTERIOR_CELL_PACKAGE_REVISION: &str = "exterior-cell-package-v3";
+pub const EXTERIOR_INDEX_REVISION: &str = "exterior-index-v3-worldspace-lod";
+pub const EXTERIOR_CELL_PACKAGE_REVISION: &str = "exterior-cell-package-v7-terrain-normal-map";
 pub const EXTERIOR_COORDINATE_POLICY_REVISION: &str = "fo3-exterior-coordinates-v1";
-pub const EXTERIOR_LOD_POLICY_REVISION: &str = "exterior-lod-v1";
-pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v1";
+pub const EXTERIOR_LOD_POLICY_REVISION: &str = "exterior-lod-v3-worldspace-assets";
+pub const EXTERIOR_ENVIRONMENT_REVISION: &str = "exterior-environment-v2";
+pub const EXTERIOR_NAVIGATION_REVISION: &str = "exterior-nav-v3";
 
 /// Fallout's exterior grid is 4096 plugin units wide.  Existing bevyout
 /// placement conversion uses 70 plugin units per Bevy metre.
@@ -126,6 +127,11 @@ pub struct ExteriorWorldspaceIndex {
     pub coordinate_policy: ExteriorCoordinatePolicy,
     pub cells: Vec<ExteriorCellIndexEntry>,
     pub persistent_references: Vec<ExteriorPersistentReference>,
+    /// Prepared vanilla worldspace terrain/landmark LOD tiles. These are
+    /// presentation-only and never participate in cell residency, collision,
+    /// navigation, or persistence.
+    #[serde(default)]
+    pub worldspace_lod: Vec<ExteriorWorldspaceLodAsset>,
     pub diagnostics: Vec<ExteriorDiagnostic>,
 }
 
@@ -135,6 +141,14 @@ impl ExteriorWorldspaceIndex {
             .sort_by_key(|cell| (cell.grid, cell.cell_form_id));
         self.persistent_references
             .sort_by_key(|reference| reference.reference_form_id);
+        self.worldspace_lod.sort_by_key(|asset| {
+            (
+                asset.level,
+                asset.grid,
+                asset.blocks,
+                asset.asset_path.clone(),
+            )
+        });
         self.diagnostics.sort_by(|left, right| {
             left.code
                 .cmp(&right.code)
@@ -146,6 +160,19 @@ impl ExteriorWorldspaceIndex {
     pub fn cell_at(&self, grid: GridCoordinate) -> Option<&ExteriorCellIndexEntry> {
         self.cells.iter().find(|cell| cell.grid == grid)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExteriorWorldspaceLodAsset {
+    /// Relative prepared GLB path below the manifest asset root.
+    pub asset_path: String,
+    /// Vanilla terrain LOD tier: 4, 8, 16, or 32 cells per tile.
+    pub level: u8,
+    /// Fallout cell coordinate of the tile's southwest origin.
+    pub grid: GridCoordinate,
+    /// `true` for the separate `landscape/lod/<worldspace>/blocks` landmark
+    /// mesh family; false for the terrain surface family.
+    pub blocks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -161,12 +188,27 @@ pub struct ExteriorCellIndexEntry {
     pub distant_reference_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExteriorPersistentReference {
     pub reference_form_id: u32,
     pub cell_form_id: u32,
     pub base_form_id: u32,
     pub semantic: String,
+    /// Prepared world-space visual data. Persistent references are owned by
+    /// the worldspace index rather than a streaming cell, so their visual
+    /// placement has to survive package eviction too.
+    #[serde(default)]
+    pub asset_path: Option<String>,
+    #[serde(default)]
+    pub position: [f32; 3],
+    #[serde(default)]
+    pub rotation_xyzw: [f32; 4],
+    #[serde(default)]
+    pub scale: f32,
+    #[serde(default)]
+    pub initially_enabled: bool,
+    #[serde(default)]
+    pub distant: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -197,6 +239,15 @@ pub struct PreparedTerrain {
     pub colors: Vec<[u8; 4]>,
     pub blend_weights: Vec<[u8; 4]>,
     pub texture_layers: Vec<u32>,
+    /// Prepared, cell-local albedo produced from LAND layer weights and the
+    /// resolved LTEX diffuse sources.  The runtime only loads this finished
+    /// image; it never resolves Fallout source assets.
+    #[serde(default)]
+    pub albedo_asset_path: Option<String>,
+    /// Prepared, cell-local tangent-space normal map blended from the same
+    /// LAND layer weights. The runtime never resolves TXST source records.
+    #[serde(default)]
+    pub normal_asset_path: Option<String>,
     pub collision_heights: Vec<f32>,
 }
 
@@ -280,9 +331,23 @@ pub struct PreparedExteriorLight {
     pub range: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct PreparedExteriorNavigation {
     pub revision: String,
+    /// The complete prepared graph, including mesh identity, adjacency,
+    /// authored flags, doors, NVEX targets, merge records, and clearance
+    /// verdicts. The flattened buffers below remain a cheap diagnostic view
+    /// for the exterior console, but are not the production navigation input.
+    pub graph_asset_path: Option<String>,
+    pub graph_hash: Option<String>,
+    pub mesh_count: usize,
+    pub polygon_count: usize,
+    pub vertex_count: usize,
+    pub door_count: usize,
+    pub external_connection_count: usize,
+    pub mesh_merge_count: usize,
+    pub clearance_ready: bool,
     pub vertices: Vec<[f32; 3]>,
     pub triangles: Vec<[u32; 3]>,
     pub border_portals: Vec<ExteriorBorderPortal>,
@@ -291,6 +356,8 @@ pub struct PreparedExteriorNavigation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExteriorBorderPortal {
     pub edge: u8,
+    /// World-space Bevy metres. These points already include the owning
+    /// cell's grid origin; they are not local-to-cell coordinates.
     pub start: [f32; 3],
     pub end: [f32; 3],
     pub tolerance: f32,
@@ -306,6 +373,22 @@ pub struct PreparedExteriorEnvironment {
     pub fog_near: f32,
     pub fog_far: f32,
     pub dynamic_lighting_allowed: bool,
+    /// All prepared WTHR records from the selected content set.  Keeping the
+    /// compact keyframes in the package lets runtime weather transitions stay
+    /// data-driven without reopening source plugins or archives.
+    #[serde(default)]
+    pub weather_profiles: Vec<PreparedWeatherProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreparedWeatherProfile {
+    pub form_id: u32,
+    pub editor_id: Option<String>,
+    pub timings: crate::time_of_day::DayNightTimings,
+    pub sky_upper: crate::time_of_day::ColorKeyframes,
+    pub sky_lower: crate::time_of_day::ColorKeyframes,
+    pub ambient: crate::time_of_day::ColorKeyframes,
+    pub sunlight: crate::time_of_day::ColorKeyframes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -501,7 +584,7 @@ pub fn plan_residency(
     }
 }
 
-fn residency_priority(grid: GridCoordinate, input: ExteriorResidencyInput) -> (u8, i32, i32, u32) {
+fn residency_priority(grid: GridCoordinate, input: ExteriorResidencyInput) -> (u8, i32, i32, i32) {
     let dx = grid.x - input.current_grid.x;
     let dy = grid.y - input.current_grid.y;
     let distance = dx.abs().max(dy.abs());
@@ -520,7 +603,7 @@ fn residency_priority(grid: GridCoordinate, input: ExteriorResidencyInput) -> (u
         },
         distance,
         grid.y,
-        grid.x as u32,
+        grid.x,
     )
 }
 
@@ -540,7 +623,11 @@ pub fn select_terrain_lod(
 ) -> TerrainLod {
     let h = hysteresis.max(0.0);
     match previous {
-        Some(TerrainLod::Near) if distance_metres <= near_end + h => TerrainLod::Near,
+        // Keep a nearby tile at its current high-detail representation until
+        // it reaches the far side of the transition band. This prevents a
+        // one-frame downgrade in the middle of a tile's near/middle overlap;
+        // the middle state uses the reciprocal band below.
+        Some(TerrainLod::Near) if distance_metres <= middle_end - h => TerrainLod::Near,
         Some(TerrainLod::Middle)
             if distance_metres > near_end - h && distance_metres <= middle_end + h =>
         {
@@ -685,25 +772,18 @@ pub fn matching_portals(
 }
 
 fn portal_edges_match(
-    left_grid: GridCoordinate,
+    _left_grid: GridCoordinate,
     left: &ExteriorBorderPortal,
-    right_grid: GridCoordinate,
+    _right_grid: GridCoordinate,
     right: &ExteriorBorderPortal,
 ) -> bool {
-    let policy = ExteriorCoordinatePolicy::default();
-    let left_offset = policy.grid_origin(left_grid);
-    let right_offset = policy.grid_origin(right_grid);
-    let translate = |offset: [f64; 3], point: [f32; 3]| {
-        [
-            offset[0] + f64::from(point[0]),
-            offset[1] + f64::from(point[1]),
-            offset[2] + f64::from(point[2]),
-        ]
-    };
-    let l0 = translate(left_offset, left.start);
-    let l1 = translate(left_offset, left.end);
-    let r0 = translate(right_offset, right.start);
-    let r1 = translate(right_offset, right.end);
+    // The package producer emits absolute Bevy coordinates. Translating them
+    // by the grid origin again moves every non-zero cell twice and prevents
+    // both positive and negative grid neighbors from stitching.
+    let l0 = left.start.map(f64::from);
+    let l1 = left.end.map(f64::from);
+    let r0 = right.start.map(f64::from);
+    let r1 = right.end.map(f64::from);
     close_points(l0, r1, f64::from(left.tolerance.max(right.tolerance)))
         && close_points(l1, r0, f64::from(left.tolerance.max(right.tolerance)))
 }

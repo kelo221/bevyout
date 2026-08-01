@@ -521,9 +521,9 @@ fn exterior_graph_bounds(vertices: &[[f32; 3]]) -> PreparedNavAabb {
         .copied()
         .filter(|vertex| vertex.iter().all(|component| component.is_finite()))
     {
-        for axis in 0..3 {
-            bounds.min[axis] = bounds.min[axis].min(vertex[axis]);
-            bounds.max[axis] = bounds.max[axis].max(vertex[axis]);
+        for (axis, value) in vertex.into_iter().enumerate() {
+            bounds.min[axis] = bounds.min[axis].min(value);
+            bounds.max[axis] = bounds.max[axis].max(value);
         }
     }
     if bounds.min.iter().any(|value| !value.is_finite()) {

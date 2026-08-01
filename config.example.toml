@@ -6,12 +6,7 @@ plugin = "Fallout3.esm"
 
 [tools]
 # Optional: omitted values use automatic detection (Windows default install
-# paths, or "magick"/"ktx" on PATH). Automatic detection does not
-# check macOS/Linux install locations for Blender, so set it explicitly there,
-# e.g. "/Applications/Blender.app/Contents/MacOS/Blender" on macOS.
-blender = "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
-# Legacy configs may still contain `irradiance_blender`; it is accepted but
-# ignored because the normal irradiance bake now runs in Rust.
+# paths, or "magick"/"ktx" on PATH).
 # Unified KTX-Software packages prepared D32 point-shadow arrays on a cache
 # miss and packages irradiance atlases during `bake`.
 ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"
@@ -20,8 +15,9 @@ ktx = "C:/Program Files/KTX-Software/bin/ktx.exe"
 cache_dir = ".bevyout/cache"
 
 [world]
-# Runtime cell map and predictive door-graph neighbor preloader (issue #51):
-# how many cells (the active cell plus preloaded door-graph neighbors) may be
-# resident at once before the farthest one by graph distance is evicted.
-# Optional: defaults to 4.
+# Runtime cell map and predictive door-graph neighbor preloader (issue #51).
+# Interior default: 4 resident cells.
 resident_cell_limit = 4
+# Exterior default: 25 resident cells, matching a 5x5 uGrids-style window.
+# The hard byte budget remains active as a second bound.
+exterior_resident_cell_limit = 25

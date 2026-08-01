@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use bevy::math::{Mat4, Quat, Vec3};
+use bevyout_core::manifest::exterior::PreparedTerrain;
 
 use super::super::physics::{PreparedPhysicsAsset, PreparedPhysicsShape, body_blocks_player};
 use super::*;
@@ -118,6 +119,93 @@ pub(crate) fn stage_navmeshes(
     });
     let graph_source = nav_graph_source(artifact.relative_path, artifact.hash, &graph);
     Ok((sources, Some(graph_source), Some(graph), summary))
+}
+
+/// Prepares the complete exterior graph using the same semantic and
+/// collision-derived passes as the interior path.  The exterior package still
+/// keeps its compact flattened buffers for diagnostics, but production
+/// navigation must consume the graph artifact written here so mesh identity,
+/// adjacency, authored flags, doors, NVEX targets, merge records, and
+/// clearance verdicts are not discarded at the package boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_exterior_navigation(
+    cache_dir: &Path,
+    scene_dir: &Path,
+    cell_form_id: u32,
+    diagnostics: &mut Vec<Diagnostic>,
+    navmeshes: &[crate::vsa::openmw_esm4::NavMeshRecord],
+    navigation: Option<&crate::vsa::openmw_esm4::NaviRecord>,
+    placements: &[PreparedPlacement],
+    physics_assets: &HashMap<String, PreparedPhysicsAsset>,
+    terrain: Option<&PreparedTerrain>,
+) -> Result<(Option<PreparedNavGraphSource>, bool, Vec<String>)> {
+    let (_sources, initial_source, mut graph, graph_summary) = stage_navmeshes(
+        cache_dir,
+        scene_dir,
+        cell_form_id,
+        diagnostics,
+        navmeshes,
+        navigation,
+    )?;
+    let Some(graph) = graph.as_mut() else {
+        return Ok((initial_source, false, vec![graph_summary]));
+    };
+
+    let mut collision = cell_static_collision_triangles(placements, physics_assets);
+    if let Some(terrain) = terrain {
+        collision.extend(terrain_collision_triangles(terrain));
+    }
+    let (_clearance_source, clearance_summary) =
+        apply_nav_clearance(cache_dir, cell_form_id, graph, &collision, diagnostics)?;
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: clearance_summary.clone(),
+    });
+
+    let blockers = cell_blocker_volumes(placements, physics_assets);
+    let (source, door_summary) =
+        apply_derived_door_associations(cache_dir, cell_form_id, graph, &blockers, diagnostics)?;
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: door_summary.clone(),
+    });
+    Ok((
+        Some(source),
+        true,
+        vec![graph_summary, clearance_summary, door_summary],
+    ))
+}
+
+fn terrain_collision_triangles(terrain: &PreparedTerrain) -> Vec<CollisionTriangle> {
+    if !terrain.is_well_formed() || terrain.width < 2 || terrain.height < 2 {
+        return Vec::new();
+    }
+    let width = usize::from(terrain.width);
+    let height = usize::from(terrain.height);
+    let mut triangles = Vec::with_capacity((width - 1) * (height - 1) * 2);
+    for row in 0..height - 1 {
+        for column in 0..width - 1 {
+            let top_left = row * width + column;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + width;
+            let bottom_right = bottom_left + 1;
+            triangles.push(CollisionTriangle {
+                vertices: [
+                    terrain.positions[top_left],
+                    terrain.positions[top_right],
+                    terrain.positions[bottom_left],
+                ],
+            });
+            triangles.push(CollisionTriangle {
+                vertices: [
+                    terrain.positions[top_right],
+                    terrain.positions[bottom_right],
+                    terrain.positions[bottom_left],
+                ],
+            });
+        }
+    }
+    triangles
 }
 
 /// Builds the manifest-level `PreparedNavGraphSource` pointer from a written

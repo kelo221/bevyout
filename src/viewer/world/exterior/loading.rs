@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy::tasks::futures::check_ready;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
-use bevyout_core::manifest::exterior::ExteriorCellPackage;
+use bevyout_core::manifest::exterior::{EXTERIOR_CELL_PACKAGE_REVISION, ExteriorCellPackage};
 use std::fs;
 
 use super::lifecycle::ExteriorStreamState;
@@ -78,7 +78,6 @@ pub(crate) fn poll(
             continue;
         };
         commands.entity(task_entity).despawn();
-        let current_grid = state.current_grid;
         let Some(cell) = state.cells.get_mut(&pending.grid) else {
             state.stale_completions += 1;
             continue;
@@ -92,7 +91,7 @@ pub(crate) fn poll(
             continue;
         }
         match result {
-            Ok(package) => {
+            Ok(package) if package.revision == EXTERIOR_CELL_PACKAGE_REVISION => {
                 let root = spawn_package(
                     &mut commands,
                     &asset_server,
@@ -101,17 +100,17 @@ pub(crate) fn poll(
                     &package,
                 );
                 let estimated_bytes = estimate_bytes(&package);
-                let lifecycle = if package.grid == current_grid {
-                    bevyout_core::manifest::exterior::ExteriorCellLifecycle::Resident
-                } else {
-                    bevyout_core::manifest::exterior::ExteriorCellLifecycle::Ready
-                };
                 {
                     cell.root = Some(root);
-                    cell.state.lifecycle = lifecycle;
+                    // Rendering is spawned now, but the package is not
+                    // resident until the BoxDDD ownership system attaches
+                    // its terrain/object collision on the next chained step.
+                    cell.state.lifecycle =
+                        bevyout_core::manifest::exterior::ExteriorCellLifecycle::Loading;
                     cell.state.estimated_bytes = estimated_bytes;
                     cell.package = Some(package);
                     cell.task = None;
+                    cell.collision_ready = false;
                 }
                 state.resident_bytes = state.resident_bytes.saturating_add(estimated_bytes);
                 state.peak_resident_cells = state.peak_resident_cells.max(
@@ -128,13 +127,23 @@ pub(crate) fn poll(
                         .count(),
                 );
                 state.peak_memory = state.peak_memory.max(state.resident_bytes);
-                state.ready += 1;
                 if state.trace {
                     info!(
-                        "exterior preload ready {:08x} grid={},{} bytes={}",
+                        "exterior preload generated {:08x} grid={},{} bytes={} awaiting_collision",
                         pending.form_id, pending.grid.x, pending.grid.y, estimated_bytes
                     );
                 }
+            }
+            Ok(package) => {
+                cell.state.lifecycle =
+                    bevyout_core::manifest::exterior::ExteriorCellLifecycle::Failed;
+                cell.state.failed_attempts = cell.state.failed_attempts.saturating_add(1);
+                cell.task = None;
+                state.failures += 1;
+                warn!(
+                    "exterior package failed {:08x}: stale revision {}, expected {}",
+                    pending.form_id, package.revision, EXTERIOR_CELL_PACKAGE_REVISION
+                );
             }
             Err(error) => {
                 cell.state.lifecycle =

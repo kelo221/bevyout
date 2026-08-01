@@ -19,9 +19,15 @@ fn land_preserves_height_normal_color_and_texture_assignment_shape() {
     let mut vclr = vec![0_u8; 33 * 33 * 3];
     vclr[0] = 12;
     let mut btxt = 0x0000_0101_u32.to_le_bytes().to_vec();
-    btxt.extend_from_slice(&[2, 0]);
+    btxt.extend_from_slice(&[2, 0, 0, 0]);
     let mut atxt = 0x0000_0102_u32.to_le_bytes().to_vec();
-    atxt.extend_from_slice(&[2, 1]);
+    atxt.extend_from_slice(&[2, 99, 1, 0]);
+    let mut vtex = Vec::new();
+    vtex.extend_from_slice(&0x0000_0101_u32.to_le_bytes());
+    vtex.extend_from_slice(&0x0000_0102_u32.to_le_bytes());
+    let mut vtxt = 0_u16.to_le_bytes().to_vec();
+    vtxt.extend_from_slice(&[0, 0]);
+    vtxt.extend_from_slice(&0.75_f32.to_le_bytes());
     let land = parse_land(
         &[
             direct_subrecord("VHGT", heights.split_off(0)),
@@ -29,9 +35,12 @@ fn land_preserves_height_normal_color_and_texture_assignment_shape() {
             direct_subrecord("VCLR", vclr),
             direct_subrecord("BTXT", btxt),
             direct_subrecord("ATXT", atxt),
+            direct_subrecord("VTXT", vtxt),
+            direct_subrecord("VTEX", vtex),
         ],
         0x9000,
         0x9001,
+        &direct_resolver(),
     );
     assert_eq!(land.heights.len(), 33 * 33);
     assert_eq!(land.normals.len(), 33 * 33);
@@ -39,6 +48,11 @@ fn land_preserves_height_normal_color_and_texture_assignment_shape() {
     assert_eq!(land.texture_layers, vec![0x101, 0x102]);
     assert_eq!(land.texture_assignments.len(), 2);
     assert!(land.texture_assignments[0].base);
+    assert_eq!(land.texture_assignments[1].layer, 1);
+    assert_eq!(land.texture_assignments[1].weights.len(), 1);
+    assert_eq!(land.texture_assignments[1].weights[0].position, 0);
+    assert!((land.texture_assignments[1].weights[0].opacity - 0.75).abs() < f32::EPSILON);
+    assert!(!land.diagnostics.iter().any(|value| value == "ignored VTXT"));
 }
 
 #[test]
@@ -51,7 +65,12 @@ fn bethesda_vhgt_decodes_row_deltas_with_eight_unit_height_scale() {
     vhgt[4 + LandRecord::GRID_SIZE] = 3;
     vhgt[5 + LandRecord::GRID_SIZE] = 4;
 
-    let land = parse_land(&[direct_subrecord("VHGT", vhgt)], 0x9000, 0x9001);
+    let land = parse_land(
+        &[direct_subrecord("VHGT", vhgt)],
+        0x9000,
+        0x9001,
+        &direct_resolver(),
+    );
 
     assert_eq!(land.heights[0], 88.0);
     assert_eq!(land.heights[1], 104.0);

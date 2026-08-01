@@ -88,6 +88,7 @@ mod tests {
                 })
                 .collect(),
             persistent_references: Vec::new(),
+            worldspace_lod: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -127,5 +128,40 @@ mod tests {
         });
 
         assert_eq!(index_cells(&index)[&GridCoordinate::new(0, 0)], 1);
+    }
+
+    #[test]
+    fn collision_handoff_pins_old_cell_while_target_is_requested() {
+        let index = index();
+        let states = vec![ExteriorCellState {
+            cell_form_id: 1,
+            grid: GridCoordinate::new(0, 0),
+            lifecycle: bevyout_core::manifest::exterior::ExteriorCellLifecycle::Resident,
+            generation: 1,
+            pinned: true,
+            estimated_bytes: 1,
+            failed_attempts: 0,
+        }];
+        let plan = plan_residency(
+            ExteriorResidencyInput {
+                current_grid: GridCoordinate::new(1, 0),
+                velocity_grid: (1, 0),
+                resident_budget: 2,
+                byte_budget: 1024,
+                near_radius: 1,
+                prefetch_radius: 1,
+                distant_radius: Some(2),
+            },
+            &index_cells(&index),
+            &states,
+        );
+        assert!(plan.actions.iter().any(|action| {
+            action.grid == GridCoordinate::new(1, 0)
+                && action.action == bevyout_core::manifest::exterior::ExteriorLoadAction::Request
+        }));
+        assert!(!plan.actions.iter().any(|action| {
+            action.grid == GridCoordinate::new(0, 0)
+                && action.action == bevyout_core::manifest::exterior::ExteriorLoadAction::Evict
+        }));
     }
 }

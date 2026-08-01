@@ -4,6 +4,37 @@ use super::*;
 use crate::console::ConsoleSessionId;
 use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
 
+#[test]
+fn animation_link_source_portal_keeps_horizontal_extent_for_vertical_travel() {
+    let (start, end) =
+        animation_link_start_edge(Vec3::new(4.0, 10.0, 8.0), Vec3::new(4.0, 12.0, 8.0));
+
+    assert_ne!(start, end);
+    assert!(start.is_finite());
+    assert!(end.is_finite());
+    assert!((end.x - start.x).abs() > 0.0);
+    assert_eq!(end.z, start.z);
+}
+
+#[test]
+fn exterior_portal_link_endpoints_are_inset_into_the_owning_cell() {
+    let interval = [[10.0, 20.0, 30.0], [10.0, 21.0, 32.0]];
+
+    let min_x = inset_exterior_portal_interval(interval, 1);
+    assert_eq!(min_x[0][0], 10.0 + EXTERIOR_PORTAL_LINK_INSET_METRES);
+    assert_eq!(min_x[0][1], interval[0][1]);
+    assert_eq!(min_x[0][2], interval[0][2]);
+
+    let max_x = inset_exterior_portal_interval(interval, 0);
+    assert_eq!(max_x[0][0], 10.0 - EXTERIOR_PORTAL_LINK_INSET_METRES);
+
+    let min_z = inset_exterior_portal_interval(interval, 2);
+    assert_eq!(min_z[0][2], 30.0 + EXTERIOR_PORTAL_LINK_INSET_METRES);
+
+    let max_z = inset_exterior_portal_interval(interval, 3);
+    assert_eq!(max_z[0][2], 30.0 - EXTERIOR_PORTAL_LINK_INSET_METRES);
+}
+
 fn invocation(args: &[&str]) -> ConsoleInvocation {
     ConsoleInvocation {
         request_id: 1,
@@ -1677,6 +1708,13 @@ fn set_door_lock_level_propagates_through_door_availability_system() {
     // (mirroring what `ensure_archipelago`/an earlier unblock would have
     // produced), so locking it has a link to remove.
     let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0, 0);
+    for link_entity in link_entities {
+        let link = world.get::<AnimationLink3d>(link_entity).unwrap();
+        assert_ne!(link.start_edge.0, link.start_edge.1);
+        assert!(link.start_edge.0.is_finite());
+        assert!(link.start_edge.1.is_finite());
+        assert_eq!(link.end_edge.0, link.end_edge.1);
+    }
     {
         let mut state = world.resource_mut::<NavArchipelagoState>();
         state.archipelago = Some(archipelago);

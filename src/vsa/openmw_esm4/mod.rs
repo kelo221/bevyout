@@ -352,12 +352,39 @@ pub(crate) struct LandRecord {
     pub(crate) diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LandTextureAssignment {
     pub(crate) form_id: u32,
     pub(crate) quadrant: u8,
-    pub(crate) layer: u8,
+    /// `ATXT.layerIndex` is a little-endian `u16`; byte 5 in the record is
+    /// padding/unknown data, not the layer number.
+    pub(crate) layer: u16,
     pub(crate) base: bool,
+    pub(crate) weights: Vec<LandTextureWeight>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LandTextureWeight {
+    pub(crate) position: u16,
+    pub(crate) opacity: f32,
+}
+
+/// The focused LTEX/TXST fields needed by the prepared exterior material.
+/// FO3 stores the authoritative diffuse source in TXST.TX00 and the
+/// DirectX tangent-space normal/specular source in TXST.TX01.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LandscapeTextureRecord {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) texture_set_form_id: Option<u32>,
+    pub(crate) diffuse_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TextureSetRecord {
+    pub(crate) form_id: u32,
+    pub(crate) diffuse_path: Option<String>,
+    pub(crate) normal_path: Option<String>,
 }
 
 impl LandRecord {
@@ -590,6 +617,8 @@ pub(crate) struct ParsedPlugin {
     pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
     pub(crate) climates: HashMap<u32, ClimateRecord>,
     pub(crate) weathers: HashMap<u32, WeatherRecord>,
+    pub(crate) landscape_textures: HashMap<u32, LandscapeTextureRecord>,
+    pub(crate) texture_sets: HashMap<u32, TextureSetRecord>,
     pub(crate) worldspaces: HashMap<u32, WorldspaceRecord>,
     pub(crate) land: Option<LandRecord>,
     pub(crate) road_count: usize,
@@ -643,6 +672,13 @@ impl ParsedContentSet {
             .get(&cell_form_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    pub(crate) fn base_model(&self, base_form_id: u32) -> Option<String> {
+        self.state
+            .bases
+            .get(&base_form_id)
+            .and_then(|base| base.model.clone())
     }
 
     pub(crate) fn references_by_cell(&self) -> HashMap<u32, Vec<&ReferenceRecord>> {
@@ -852,6 +888,8 @@ impl ParsedContentSet {
             lighting_templates: state.lighting_templates,
             climates: state.climates,
             weathers: state.weathers,
+            landscape_textures: state.landscape_textures,
+            texture_sets: state.texture_sets,
             worldspaces: state.worldspaces,
             land: state.lands.remove(&target_cell).map(|(_, land)| land),
             road_count: state.road_counts.remove(&target_cell).unwrap_or(0),
@@ -887,6 +925,8 @@ pub(crate) struct ParsedState {
     lighting_templates: HashMap<u32, LightingTemplateRecord>,
     climates: HashMap<u32, ClimateRecord>,
     weathers: HashMap<u32, WeatherRecord>,
+    landscape_textures: HashMap<u32, LandscapeTextureRecord>,
+    texture_sets: HashMap<u32, TextureSetRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
     navigation: Option<NaviRecord>,

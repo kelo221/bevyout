@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::viewer::world::exterior::{ExteriorWaterState, SwimmingState};
+
 const STEP_DEBUG_LOG_INTERVAL: f64 = 0.2;
 const STEP_SUPPORT_FORWARD_OFFSET: f32 = CAPSULE_RADIUS;
 const STEP_SUPPORT_MID_FORWARD_OFFSET: f32 = CAPSULE_RADIUS * 0.5;
@@ -37,6 +39,8 @@ pub(crate) fn apply_player_controls(
     no_clip: Res<PlayerNoClip>,
     cell_physics: Res<CellPhysicsReadiness>,
     mut step_debug: ResMut<StepDebugSettings>,
+    water: Res<ExteriorWaterState>,
+    mut swimming: ResMut<SwimmingState>,
     time: Res<Time<Fixed>>,
     mut context: NonSendMut<BoxdddPhysicsContext>,
     mut players: Query<(
@@ -103,6 +107,14 @@ pub(crate) fn apply_player_controls(
     };
 
     let dt = time.delta_secs();
+    let submerged = water.contact.is_some_and(|contact| contact.submerged);
+    swimming.submerged = submerged;
+    if submerged {
+        swimming.breath_seconds = (swimming.breath_seconds - dt).max(0.0);
+    } else {
+        swimming.breath_seconds =
+            (swimming.breath_seconds + dt * 1.5).min(swimming.max_breath_seconds);
+    }
     let mover = boxddd::Capsule::new(
         [0.0, -(CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS), 0.0],
         [0.0, CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS, 0.0],
@@ -136,7 +148,26 @@ pub(crate) fn apply_player_controls(
     let world_input = yaw * input;
     let ground_target = air_control_motion(world_input, false) * PLAYER_SPEED;
     let mut jumped_this_tick = false;
-    if jump_started && grounded {
+    if submerged {
+        // Swimming is still driven by the same BoxDDD capsule. Only the
+        // movement policy changes: horizontal input is damped, gravity is
+        // replaced by a bounded buoyancy/sink term, and jump/crouch become
+        // surface-relative vertical controls.
+        kcc.velocity.x = ground_target.x * 0.65;
+        kcc.velocity.z = ground_target.z * 0.65;
+        let vertical_input = if jump_pressed {
+            PLAYER_SPEED * 0.45
+        } else if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+            -PLAYER_SPEED * 0.45
+        } else {
+            water
+                .contact
+                .map(|contact| (contact.surface_height - transform.translation.y) * 0.75)
+                .unwrap_or(0.0)
+        };
+        kcc.velocity.y = vertical_input.clamp(-PLAYER_SPEED * 0.45, PLAYER_SPEED * 0.45);
+        grounded = false;
+    } else if jump_started && grounded {
         let (height, direction) = jump_profile(world_input);
         kcc.velocity.y = (2.0 * GRAVITY * height).sqrt();
         if let Some(direction) = direction {
@@ -159,7 +190,9 @@ pub(crate) fn apply_player_controls(
         jumped_this_tick = true;
     }
 
-    if grounded {
+    if submerged {
+        // The submerged branch already chose the complete velocity.
+    } else if grounded {
         kcc.velocity.x = ground_target.x;
         kcc.velocity.z = ground_target.z;
         if kcc.velocity.y < 0.0 {
