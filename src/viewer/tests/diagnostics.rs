@@ -89,4 +89,176 @@ mod debug_info_tests {
             "nav agent 0 status=Idle position=(0.00,0.00,0.00) grounded=true stuck=false blocked=false"
         );
     }
+
+    // -- Issue #268: change-driven debug info HUD ---------------------------
+    //
+    // The pre-#268 exclusive (`&mut World`) system rewrote the HUD `Text`
+    // every single frame, on or off. The new contract: the off line is only
+    // (re)written on a toggle transition, enabled content refreshes on a
+    // bounded 5-10 Hz timer, and no frame may assign `Text` while the
+    // composed string is unchanged. Change detection on the `Text` component
+    // (via a spy system running just after the update system) is the exact
+    // signal a relayout would key off, so it is what these tests count.
+
+    use bevy::time::TimeUpdateStrategy;
+    use std::time::Duration;
+
+    #[derive(Resource, Default)]
+    struct DebugInfoWriteLog(Vec<bool>);
+
+    fn record_debug_info_writes(
+        hud: Query<Ref<Text>, With<DebugInfoHud>>,
+        mut log: ResMut<DebugInfoWriteLog>,
+    ) {
+        let changed = hud.iter().next().is_some_and(|text| text.is_changed());
+        log.0.push(changed);
+    }
+
+    /// Minimal deterministic app: fixed 50 ms frames, no render/UI plugins.
+    fn debug_info_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                50,
+            )))
+            .init_resource::<DebugInfoState>()
+            .init_resource::<DebugInfoWriteLog>()
+            .add_systems(Startup, spawn_debug_info_hud)
+            .add_systems(
+                Update,
+                (update_debug_info_hud, record_debug_info_writes).chain(),
+            );
+        app
+    }
+
+    fn hud_text_now(app: &mut App) -> String {
+        app.world_mut()
+            .query_filtered::<&Text, With<DebugInfoHud>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone()
+    }
+
+    #[test]
+    fn steady_off_state_never_mutates_the_hud_text() {
+        let mut app = debug_info_app();
+        app.update();
+        assert_eq!(hud_text_now(&mut app), DEBUG_INFO_OFF_LINE);
+        app.world_mut()
+            .resource_mut::<DebugInfoWriteLog>()
+            .0
+            .clear();
+
+        for _ in 0..5 {
+            app.update();
+        }
+
+        let log = &app.world().resource::<DebugInfoWriteLog>().0;
+        assert_eq!(log.len(), 5);
+        assert!(
+            log.iter().all(|changed| !changed),
+            "steady off-state frames must not touch the HUD text: {log:?}"
+        );
+        assert_eq!(hud_text_now(&mut app), DEBUG_INFO_OFF_LINE);
+    }
+
+    #[test]
+    fn each_toggle_transition_writes_exactly_once() {
+        let mut app = debug_info_app();
+        app.update();
+        app.world_mut()
+            .resource_mut::<DebugInfoWriteLog>()
+            .0
+            .clear();
+
+        app.world_mut().resource_mut::<DebugInfoState>().enabled = true;
+        app.update();
+        // Settled enabled frames (including timer fires, which compose the
+        // identical string while nothing moves) must not write again.
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<DebugInfoWriteLog>().0,
+            &[true, false, false, false, false],
+            "off->on writes exactly once"
+        );
+        assert!(hud_text_now(&mut app).contains("Debug info: On"));
+
+        app.world_mut().resource_mut::<DebugInfoState>().enabled = false;
+        app.update();
+        app.update();
+        let log = &app.world().resource::<DebugInfoWriteLog>().0;
+        assert_eq!(&log[5..], &[true, false], "on->off writes exactly once");
+        assert_eq!(hud_text_now(&mut app), DEBUG_INFO_OFF_LINE);
+    }
+
+    #[test]
+    fn enabled_refresh_waits_for_the_timer_and_then_coalesces() {
+        let refresh = DEBUG_INFO_REFRESH_INTERVAL;
+        assert!(
+            (Duration::from_millis(100)..=Duration::from_millis(200)).contains(&refresh),
+            "enabled refresh must stay within the 5-10 Hz band (100-200 ms)"
+        );
+
+        let mut app = debug_info_app();
+        app.update();
+        let player = app
+            .world_mut()
+            .spawn((Transform::default(), player::FpsPlayer::default()))
+            .id();
+        app.world_mut().resource_mut::<DebugInfoState>().enabled = true;
+        app.update(); // toggle: writes immediately with the origin position
+        assert!(hud_text_now(&mut app).contains("player pos=(0.00,0.00,0.00)"));
+        app.world_mut()
+            .resource_mut::<DebugInfoWriteLog>()
+            .0
+            .clear();
+
+        // Move the player; pre-timer frames must not touch the HUD (the
+        // 125 ms timer restarted when the toggle ran, and each update ticks
+        // 50 ms, so the first two frames stay below the interval).
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .unwrap()
+            .translation = Vec3::new(1.5, 2.5, 3.5);
+        app.update(); // elapsed 50 ms
+        app.update(); // elapsed 100 ms
+        assert!(
+            !hud_text_now(&mut app).contains("player pos=(1.50,2.50,3.50)"),
+            "no refresh before the timer fires"
+        );
+        assert_eq!(
+            app.world().resource::<DebugInfoWriteLog>().0,
+            &[false, false]
+        );
+
+        app.update(); // elapsed 150 ms >= 125 ms: timer fired, one write
+        assert!(hud_text_now(&mut app).contains("player pos=(1.50,2.50,3.50)"));
+        assert_eq!(
+            app.world().resource::<DebugInfoWriteLog>().0,
+            &[false, false, true]
+        );
+
+        // A second move mid-interval is coalesced into the next timer fire
+        // (the repeating timer wraps with 25 ms carried, so the next fire
+        // lands two frames later).
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .unwrap()
+            .translation = Vec3::new(-4.0, -5.0, -6.0);
+        app.update(); // elapsed 75 ms
+        assert_eq!(
+            app.world().resource::<DebugInfoWriteLog>().0,
+            &[false, false, true, false]
+        );
+        assert!(!hud_text_now(&mut app).contains("player pos=(-4.00,-5.00,-6.00)"));
+        app.update(); // elapsed 125 ms: next fire
+        assert!(hud_text_now(&mut app).contains("player pos=(-4.00,-5.00,-6.00)"));
+        assert_eq!(
+            app.world().resource::<DebugInfoWriteLog>().0,
+            &[false, false, true, false, true]
+        );
+    }
 }
