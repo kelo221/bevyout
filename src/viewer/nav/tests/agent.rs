@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::console::ConsoleSessionId;
+use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
 use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
+use bevyout_core::manifest::exterior::ExteriorBorderPortal;
 
 #[test]
 fn animation_link_source_portal_keeps_horizontal_extent_for_vertical_travel() {
@@ -33,6 +35,86 @@ fn exterior_portal_link_endpoints_are_inset_into_the_owning_cell() {
 
     let max_z = inset_exterior_portal_interval(interval, 3);
     assert_eq!(max_z[0][2], 30.0 - EXTERIOR_PORTAL_LINK_INSET_METRES);
+}
+
+#[test]
+fn exterior_portal_side_selection_is_lowest_residual_and_deterministic() {
+    let graph = PreparedNavGraph {
+        meshes: vec![PreparedNavMesh {
+            form_id: 0x20,
+            cell_form_id: Some(0x10),
+            vertices: vec![
+                [0.6, 0.0, 0.0],
+                [0.6, 0.0, 2.0],
+                [0.6, 1.0, 1.0],
+                [0.02, 0.0, 0.0],
+                [0.02, 0.0, 2.0],
+                [0.02, 1.0, 1.0],
+            ],
+            polygons: vec![
+                PreparedNavPolygon {
+                    index: 7,
+                    vertex_indices: [0, 1, 2],
+                    ..default()
+                },
+                PreparedNavPolygon {
+                    index: 3,
+                    vertex_indices: [3, 4, 5],
+                    ..default()
+                },
+            ],
+            ..default()
+        }],
+        ..default()
+    };
+    let portal = ExteriorBorderPortal {
+        edge: 1,
+        start: [0.0, 0.0, 0.0],
+        end: [0.0, 0.0, 2.0],
+        tolerance: 0.75,
+    };
+
+    let side = find_exterior_portal_side(&graph, &portal, 0x10).expect("matching side");
+    assert_eq!(side.triangle_index, 3);
+    assert_eq!(side.matched_edge, 0);
+    assert!(side.residual < 0.1);
+}
+
+#[test]
+fn exterior_portal_points_stay_inside_selected_triangles_and_source_segments() {
+    let left = ExteriorPortalSide {
+        mesh_form_id: 1,
+        triangle_index: 1,
+        interval: [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]],
+        triangle: [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.6, 0.0, 1.0]],
+        matched_edge: 0,
+        residual: 0.0,
+        border_plane_residual: 0.0,
+    };
+    let right = ExteriorPortalSide {
+        mesh_form_id: 2,
+        triangle_index: 2,
+        interval: [[1.0, 0.0, 0.0], [1.0, 0.0, 2.0]],
+        triangle: [[1.0, 0.0, 0.0], [1.0, 0.0, 2.0], [0.4, 0.0, 1.0]],
+        matched_edge: 0,
+        residual: 0.0,
+        border_plane_residual: 0.0,
+    };
+
+    let (left_point, right_point) =
+        select_exterior_portal_points(&left, 1, &right, 0).expect("safe portal points");
+    assert!(point_in_triangle_xz(left_point, left.triangle));
+    assert!(point_in_triangle_xz(right_point, right.triangle));
+    assert!(source_segment_inside_triangle(
+        left_point,
+        right_point,
+        left.triangle
+    ));
+    assert!(source_segment_inside_triangle(
+        right_point,
+        left_point,
+        right.triangle
+    ));
 }
 
 fn invocation(args: &[&str]) -> ConsoleInvocation {
@@ -986,6 +1068,27 @@ fn the_visual_capsule_is_centred_on_the_agent_parent_not_raised_above_it() {
         Vec3::ZERO,
         "the visual child must be centred on the agent parent (zero local offset) -- \
              the parent transform is already the capsule centre post-#114, not feet level"
+    );
+}
+
+#[test]
+fn debug_agent_animation_links_allow_its_capsule_center_offset() {
+    let mut world = World::new();
+    world.init_resource::<Assets<Mesh>>();
+    world.init_resource::<Assets<StandardMaterial>>();
+    world.init_resource::<NavArchipelagoState>();
+    let archipelago_entity = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago_entity);
+
+    let agent = spawn_test_agent(&mut world, Vec3::new(1.0, 2.0, 3.0));
+    let reached_distance = world
+        .get::<AnimationLinkReachedDistance>(agent)
+        .expect("debug agent carries an explicit link reach distance")
+        .0;
+    assert_eq!(
+        reached_distance,
+        AGENT_HEIGHT * 0.5 + AGENT_RADIUS,
+        "landmass measures animation-link arrival in full 3D while the debug capsule transform is centre-level"
     );
 }
 

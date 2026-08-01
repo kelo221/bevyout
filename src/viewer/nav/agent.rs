@@ -273,8 +273,8 @@ use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::prelude::*;
 use bevy_landmass::{
-    AgentTypeIndexCostOverrides, NavMeshHandle, PauseAgent, PermittedAnimationLinks,
-    PointSampleDistance3d, TargetReachedCondition, UsingAnimationLink,
+    AgentTypeIndexCostOverrides, AnimationLinkReachedDistance, NavMeshHandle, PauseAgent,
+    PermittedAnimationLinks, PointSampleDistance3d, TargetReachedCondition, UsingAnimationLink,
 };
 use bevyout_core::manifest::exterior::{
     ExteriorCellLifecycle, ExteriorCellPackage, GridCoordinate, matching_portals,
@@ -1448,6 +1448,10 @@ struct ExteriorPortalSide {
     mesh_form_id: u32,
     triangle_index: u32,
     interval: [[f32; 3]; 2],
+    triangle: [[f32; 3]; 3],
+    matched_edge: usize,
+    residual: f32,
+    border_plane_residual: f32,
 }
 
 /// Move an exterior seam's animation-link endpoints into the owning cell's
@@ -1458,6 +1462,133 @@ struct ExteriorPortalSide {
 /// radius is therefore the smallest stable inset that makes both endpoints
 /// unambiguous without changing the authored crossing height.
 const EXTERIOR_PORTAL_LINK_INSET_METRES: f32 = AGENT_RADIUS;
+/// Landmass receives a point endpoint, while the source side also receives a
+/// tiny finite segment (`ANIMATION_LINK_PORTAL_HALF_LENGTH`). Keep the final
+/// point far enough inside the selected post-clearance triangle for that
+/// segment to remain attached, without moving the crossing a full agent
+/// radius away from the shared seam.
+const EXTERIOR_PORTAL_MIN_INTERIOR_MARGIN_METRES: f32 = 0.02;
+
+/// `tna` capsules store their Bevy transform at the capsule centre, while
+/// prepared NAVM points (including animation-link portals) are feet-level.
+/// `landmass` measures animation-link arrival in full 3D and otherwise uses
+/// only the agent radius, so its default reach distance cannot bridge that
+/// intentional half-height offset on a shallow portal.
+const TEST_AGENT_ANIMATION_LINK_REACHED_DISTANCE: f32 = AGENT_HEIGHT * 0.5 + AGENT_RADIUS;
+
+fn interval_midpoint(interval: [[f32; 3]; 2]) -> Vec3 {
+    (Vec3::from_array(interval[0]) + Vec3::from_array(interval[1])) * 0.5
+}
+
+fn triangle_centroid(triangle: [[f32; 3]; 3]) -> Vec3 {
+    (Vec3::from_array(triangle[0]) + Vec3::from_array(triangle[1]) + Vec3::from_array(triangle[2]))
+        / 3.0
+}
+
+fn signed_triangle_area_xz(a: Vec3, b: Vec3, point: Vec3) -> f32 {
+    (b.x - a.x) * (point.z - a.z) - (b.z - a.z) * (point.x - a.x)
+}
+
+fn point_in_triangle_xz(point: Vec3, triangle: [[f32; 3]; 3]) -> bool {
+    let vertices = triangle.map(Vec3::from_array);
+    let areas = [
+        signed_triangle_area_xz(vertices[0], vertices[1], point),
+        signed_triangle_area_xz(vertices[1], vertices[2], point),
+        signed_triangle_area_xz(vertices[2], vertices[0], point),
+    ];
+    let has_negative = areas.iter().any(|area| *area < -1e-5);
+    let has_positive = areas.iter().any(|area| *area > 1e-5);
+    !(has_negative && has_positive)
+}
+
+fn point_residual(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left.into_iter()
+        .zip(right)
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0, f32::max)
+}
+
+fn border_plane_residual(
+    interval: [[f32; 3]; 2],
+    portal: &bevyout_core::manifest::exterior::ExteriorBorderPortal,
+) -> f32 {
+    let axis = if portal.edge <= 1 { 0 } else { 2 };
+    let expected = (portal.start[axis] + portal.end[axis]) * 0.5;
+    (interval[0][axis] - expected).abs() + (interval[1][axis] - expected).abs()
+}
+
+fn exterior_portal_point_candidates(side: &ExteriorPortalSide, edge: u8) -> Vec<Vec3> {
+    let raw_midpoint = interval_midpoint(side.interval);
+    let requested_midpoint = interval_midpoint(inset_exterior_portal_interval(side.interval, edge));
+    let centroid = triangle_centroid(side.triangle);
+    let mut candidates = Vec::new();
+
+    // Preserve the authored-radius inset when it is actually inside the
+    // selected polygon. The post-clearance edge already represents the
+    // agent's walkable boundary, so only the invalid cardinal inset falls
+    // back to a smaller centroid-directed point.
+    if point_in_triangle_xz(requested_midpoint, side.triangle)
+        && requested_midpoint.distance(raw_midpoint) >= EXTERIOR_PORTAL_MIN_INTERIOR_MARGIN_METRES
+    {
+        candidates.push(requested_midpoint);
+    }
+
+    let toward_centroid = centroid - raw_midpoint;
+    let centroid_distance = toward_centroid.length();
+    if centroid_distance.is_finite() && centroid_distance > 0.0 {
+        let direction = toward_centroid / centroid_distance;
+        // Increasing margins are deterministic fallbacks for shallow or
+        // diagonally selected border triangles. Every point lies on the
+        // edge-to-centroid segment, so convexity keeps it in the triangle.
+        for margin in [
+            EXTERIOR_PORTAL_MIN_INTERIOR_MARGIN_METRES,
+            0.05,
+            0.1,
+            0.2,
+            0.35,
+            0.5,
+        ] {
+            if margin >= centroid_distance {
+                continue;
+            }
+            let candidate = raw_midpoint + direction * margin;
+            if point_in_triangle_xz(candidate, side.triangle)
+                && !candidates
+                    .iter()
+                    .any(|existing: &Vec3| existing.distance_squared(candidate) < 1e-8)
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+fn source_segment_inside_triangle(from: Vec3, to: Vec3, triangle: [[f32; 3]; 3]) -> bool {
+    let (start, end) = animation_link_start_edge(from, to);
+    point_in_triangle_xz(start, triangle) && point_in_triangle_xz(end, triangle)
+}
+
+fn select_exterior_portal_points(
+    left: &ExteriorPortalSide,
+    left_edge: u8,
+    right: &ExteriorPortalSide,
+    right_edge: u8,
+) -> Option<(Vec3, Vec3)> {
+    let left_candidates = exterior_portal_point_candidates(left, left_edge);
+    let right_candidates = exterior_portal_point_candidates(right, right_edge);
+    left_candidates
+        .iter()
+        .flat_map(|left_point| {
+            right_candidates
+                .iter()
+                .map(move |right_point| (*left_point, *right_point))
+        })
+        .find(|(left_point, right_point)| {
+            source_segment_inside_triangle(*left_point, *right_point, left.triangle)
+                && source_segment_inside_triangle(*right_point, *left_point, right.triangle)
+        })
+}
 
 fn exterior_portal_inward_direction(edge: u8) -> Vec3 {
     match edge {
@@ -1492,6 +1623,7 @@ fn exterior_portal_merge_inputs(
     let mut matched_portals = 0_usize;
     let mut unresolved_left = 0_usize;
     let mut unresolved_right = 0_usize;
+    let mut unsafe_endpoints = 0_usize;
     for (left_index, (left_grid, left_package)) in packages.iter().enumerate() {
         for (right_grid, right_package) in packages.iter().skip(left_index + 1) {
             let adjacent =
@@ -1530,21 +1662,92 @@ fn exterior_portal_merge_inputs(
                     unresolved_right += 1;
                     continue;
                 };
-                let left_interval = inset_exterior_portal_interval(
+                let left_portal = &left_navigation.border_portals[left_portal_index];
+                let right_portal = &right_navigation.border_portals[right_portal_index];
+                let Some((left_point, right_point)) = select_exterior_portal_points(
+                    &left_side,
+                    left_portal.edge,
+                    &right_side,
+                    right_portal.edge,
+                ) else {
+                    unsafe_endpoints += 1;
+                    warn!(
+                        "exterior nav border endpoint rejected cells={:08x}<->{:08x} grids=({},{})->({},{}), meshes={:08x}/{:08x}, triangles={}/{}, matched_edges={}/{}, residuals={:.4}/{:.4}",
+                        left_package.cell_form_id,
+                        right_package.cell_form_id,
+                        left_grid.x,
+                        left_grid.y,
+                        right_grid.x,
+                        right_grid.y,
+                        left_side.mesh_form_id,
+                        right_side.mesh_form_id,
+                        left_side.triangle_index,
+                        right_side.triangle_index,
+                        left_side.matched_edge,
+                        right_side.matched_edge,
+                        left_side.residual,
+                        right_side.residual,
+                    );
+                    continue;
+                };
+                let raw_left = interval_midpoint(left_side.interval);
+                let raw_right = interval_midpoint(right_side.interval);
+                let requested_left = interval_midpoint(inset_exterior_portal_interval(
                     left_side.interval,
-                    left_navigation.border_portals[left_portal_index].edge,
-                );
-                let right_interval = inset_exterior_portal_interval(
+                    left_portal.edge,
+                ));
+                let requested_right = interval_midpoint(inset_exterior_portal_interval(
                     right_side.interval,
-                    right_navigation.border_portals[right_portal_index].edge,
+                    right_portal.edge,
+                ));
+                info!(
+                    "exterior-nav-portal cells={:08x}<->{:08x} grids=({},{})->({},{}), edges={}/{}, meshes={:08x}/{:08x}, triangles={}/{}, matched_edges={}/{}, residuals={:.4}/{:.4}, raw_midpoints=({:.3},{:.3},{:.3})/({:.3},{:.3},{:.3}), inset_midpoints=({:.3},{:.3},{:.3})/({:.3},{:.3},{:.3}), link_points=({:.3},{:.3},{:.3})/({:.3},{:.3},{:.3}), inside_selected=true,true",
+                    left_package.cell_form_id,
+                    right_package.cell_form_id,
+                    left_grid.x,
+                    left_grid.y,
+                    right_grid.x,
+                    right_grid.y,
+                    left_portal.edge,
+                    right_portal.edge,
+                    left_side.mesh_form_id,
+                    right_side.mesh_form_id,
+                    left_side.triangle_index,
+                    right_side.triangle_index,
+                    left_side.matched_edge,
+                    right_side.matched_edge,
+                    left_side.residual,
+                    right_side.residual,
+                    raw_left.x,
+                    raw_left.y,
+                    raw_left.z,
+                    raw_right.x,
+                    raw_right.y,
+                    raw_right.z,
+                    requested_left.x,
+                    requested_left.y,
+                    requested_left.z,
+                    requested_right.x,
+                    requested_right.y,
+                    requested_right.z,
+                    left_point.x,
+                    left_point.y,
+                    left_point.z,
+                    right_point.x,
+                    right_point.y,
+                    right_point.z,
                 );
                 links.push(landmass_graph::MergeInput {
                     mesh_a_form_id: left_side.mesh_form_id,
                     triangle_a: left_side.triangle_index,
                     mesh_b_form_id: right_side.mesh_form_id,
                     triangle_b: right_side.triangle_index,
-                    interval_a: left_interval,
-                    interval_b: right_interval,
+                    // The descriptor consumes the interval midpoint. Keep
+                    // each side as a degenerate interval at the verified
+                    // interior point so no later stage reconstructs the
+                    // invalid cardinally-inset endpoint.
+                    interval_a: [left_point.to_array(), left_point.to_array()],
+                    interval_b: [right_point.to_array(), right_point.to_array()],
                 });
             }
         }
@@ -1562,12 +1765,13 @@ fn exterior_portal_merge_inputs(
     links.dedup();
     if adjacent_pairs > 0 {
         warn!(
-            "exterior nav border candidates adjacent_pairs={} matched_portals={} resolved_links={} unresolved_left={} unresolved_right={}",
+            "exterior nav border candidates adjacent_pairs={} matched_portals={} resolved_links={} unresolved_left={} unresolved_right={} unsafe_endpoints={}",
             adjacent_pairs,
             matched_portals,
             links.len(),
             unresolved_left,
             unresolved_right,
+            unsafe_endpoints,
         );
     }
     links
@@ -1583,6 +1787,7 @@ fn find_exterior_portal_side(
     // use a bounded matching band here rather than requiring post-clearance
     // vertices to be bit-identical to that source edge.
     let tolerance = portal.tolerance.max(0.75);
+    let mut best: Option<ExteriorPortalSide> = None;
     for mesh in &graph.meshes {
         if mesh.cell_form_id != Some(cell_form_id) {
             continue;
@@ -1618,16 +1823,47 @@ fn find_exterior_portal_side(
                     None
                 };
                 if let Some(interval) = interval {
-                    return Some(ExteriorPortalSide {
+                    let Some(triangle) = polygon
+                        .vertex_indices
+                        .into_iter()
+                        .map(|index| mesh.vertices.get(index as usize).copied())
+                        .collect::<Option<Vec<_>>>()
+                        .and_then(|vertices| vertices.try_into().ok())
+                    else {
+                        continue;
+                    };
+                    let candidate = ExteriorPortalSide {
                         mesh_form_id: mesh.form_id,
                         triangle_index: polygon.index,
                         interval,
+                        triangle,
+                        matched_edge: edge,
+                        residual: point_residual(interval[0], portal.start)
+                            + point_residual(interval[1], portal.end),
+                        border_plane_residual: border_plane_residual(interval, portal),
+                    };
+                    let replace = best.as_ref().is_none_or(|current| {
+                        candidate
+                            .residual
+                            .total_cmp(&current.residual)
+                            .then_with(|| {
+                                candidate
+                                    .border_plane_residual
+                                    .total_cmp(&current.border_plane_residual)
+                            })
+                            .then_with(|| candidate.mesh_form_id.cmp(&current.mesh_form_id))
+                            .then_with(|| candidate.triangle_index.cmp(&current.triangle_index))
+                            .then_with(|| candidate.matched_edge.cmp(&current.matched_edge))
+                            .is_lt()
                     });
+                    if replace {
+                        best = Some(candidate);
+                    }
                 }
             }
         }
     }
-    None
+    best
 }
 
 fn points_close(left: [f32; 3], right: [f32; 3], tolerance: f32) -> bool {
@@ -1770,7 +2006,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
                 link.triangle_b,
             )
         }));
-        info!(
+        warn!(
             "exterior nav resident graphs={} border_links={} meshes={} polygons={}",
             exterior_packages.len(),
             border_link_count,
@@ -1880,6 +2116,31 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         })
         .count();
     let candidate_merge_count = candidate_merge_descriptors.len();
+    let candidate_border_pairs = candidate_merge_descriptors
+        .iter()
+        .filter(|descriptor| {
+            border_link_keys.contains(&(
+                descriptor.side_a.mesh_form_id,
+                descriptor.side_a.polygon_index,
+                descriptor.side_b.mesh_form_id,
+                descriptor.side_b.polygon_index,
+            ))
+        })
+        .map(|descriptor| {
+            format!(
+                "{:08x}:{}<->{:08x}:{}@({:.2},{:.2})-({:.2},{:.2})",
+                descriptor.side_a.mesh_form_id,
+                descriptor.side_a.polygon_index,
+                descriptor.side_b.mesh_form_id,
+                descriptor.side_b.polygon_index,
+                descriptor.side_a.midpoint[0],
+                descriptor.side_a.midpoint[2],
+                descriptor.side_b.midpoint[0],
+                descriptor.side_b.midpoint[2],
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let physics_disabled = world.resource::<PhysicsDisabled>().0;
     let physics_ready = !physics_disabled
         && world
@@ -1903,14 +2164,37 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         for descriptor in candidate_merge_descriptors {
             let start = Vec3::from_array(descriptor.side_a.midpoint);
             let end = Vec3::from_array(descriptor.side_b.midpoint);
-            match validate_merge_link_collision(
-                physics_world,
-                &mover,
-                collision_filter,
-                support_filter,
-                start,
-                end,
-            ) {
+            let is_exterior_border = border_link_keys.contains(&(
+                descriptor.side_a.mesh_form_id,
+                descriptor.side_a.polygon_index,
+                descriptor.side_b.mesh_form_id,
+                descriptor.side_b.polygon_index,
+            ));
+            let result = if is_exterior_border {
+                // Adjacent Fallout cells share a terrain border but do not
+                // promise a cooked support triangle at the exact midpoint
+                // between the two inset endpoints. Endpoint support plus
+                // the swept crossing is the meaningful test for this seam;
+                // same-cell merge links retain the stricter midpoint probe.
+                validate_exterior_merge_link_collision(
+                    physics_world,
+                    &mover,
+                    collision_filter,
+                    support_filter,
+                    start,
+                    end,
+                )
+            } else {
+                validate_merge_link_collision(
+                    physics_world,
+                    &mover,
+                    collision_filter,
+                    support_filter,
+                    start,
+                    end,
+                )
+            };
+            match result {
                 Ok(()) => validated.push(descriptor),
                 Err(reason) => {
                     warn!(
@@ -1941,7 +2225,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
                 ))
             })
             .count();
-        info!(
+        warn!(
             "exterior nav merge candidates border_inputs={} candidates={} border_candidates={} validated={} validated_border={}",
             border_link_keys.len(),
             candidate_merge_count,
@@ -1949,6 +2233,7 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
             validated_merge_descriptors.len(),
             validated_border_count,
         );
+        warn!("exterior nav border descriptor pairs={candidate_border_pairs}");
     }
 
     // Issue #162 feature 1: each validated merge candidate gets its own
@@ -1967,7 +2252,24 @@ fn ensure_archipelago(world: &mut World) -> Result<(), ConsoleError> {
         // regardless of how tight a validated portal's overlap ended up.
         let cost = descriptor.distance.max(0.01);
         let kind = landmass_graph::merge_link_kind(index);
-        for link_entity in spawn_link_pair(world, archipelago_entity, start, end, cost, kind) {
+        let is_exterior_border = border_link_keys.contains(&(
+            descriptor.side_a.mesh_form_id,
+            descriptor.side_a.polygon_index,
+            descriptor.side_b.mesh_form_id,
+            descriptor.side_b.polygon_index,
+        ));
+        let link_entities = if is_exterior_border {
+            // Point destinations are retained for same-cell and door links,
+            // where the upstream point-destination workaround avoids a
+            // boundary-clipping NaN. Exterior endpoints have now been
+            // selected inside their named triangles; a tiny finite segment
+            // lets landmass's sample_edge retain that attached polygon
+            // instead of silently dropping a zero-width destination.
+            spawn_exterior_link_pair(world, archipelago_entity, start, end, cost, kind)
+        } else {
+            spawn_link_pair(world, archipelago_entity, start, end, cost, kind)
+        };
+        for link_entity in link_entities {
             link_kinds.insert(link_entity, LinkKind::Merge { kind });
             links.push(link_entity);
         }
@@ -2201,6 +2503,20 @@ fn animation_link_start_edge(from: Vec3, to: Vec3) -> (Vec3, Vec3) {
     )
 }
 
+fn animation_link_end_edge(from: Vec3, to: Vec3) -> (Vec3, Vec3) {
+    let horizontal = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+    let direction = horizontal.normalize_or_zero();
+    let direction = if direction.length_squared() > 0.0 {
+        direction
+    } else {
+        Vec3::X
+    };
+    (
+        to - direction * ANIMATION_LINK_PORTAL_HALF_LENGTH,
+        to + direction * ANIMATION_LINK_PORTAL_HALF_LENGTH,
+    )
+}
+
 /// `kind` (issue #162 feature 1): every door link passes the reserved `0`
 /// (never quarantined); a merge link passes its own deterministic
 /// `landmass_graph::merge_link_kind`, giving `PermittedAnimationLinks` a
@@ -2215,12 +2531,44 @@ fn spawn_link_pair(
     cost: f32,
     kind: usize,
 ) -> [Entity; 2] {
+    spawn_link_pair_with_destination(world, archipelago_entity, start, end, cost, kind, false)
+}
+
+/// Exterior-cell variant of [`spawn_link_pair`]. Both ends are already
+/// guaranteed to be inside their selected post-clearance triangles; keeping a
+/// finite destination portal makes landmass use its edge sampler for this
+/// otherwise geometry-only cross-cell seam. The tiny segment remains local to
+/// the endpoint and does not change the authored crossing.
+fn spawn_exterior_link_pair(
+    world: &mut World,
+    archipelago_entity: Entity,
+    start: Vec3,
+    end: Vec3,
+    cost: f32,
+    kind: usize,
+) -> [Entity; 2] {
+    spawn_link_pair_with_destination(world, archipelago_entity, start, end, cost, kind, true)
+}
+
+fn spawn_link_pair_with_destination(
+    world: &mut World,
+    archipelago_entity: Entity,
+    start: Vec3,
+    end: Vec3,
+    cost: f32,
+    kind: usize,
+    finite_destination: bool,
+) -> [Entity; 2] {
     let mut spawn_one = |from: Vec3, to: Vec3| {
         world
             .spawn(AnimationLink3dBundle {
                 link: AnimationLink3d {
                     start_edge: animation_link_start_edge(from, to),
-                    end_edge: (to, to),
+                    end_edge: if finite_destination {
+                        animation_link_end_edge(from, to)
+                    } else {
+                        (to, to)
+                    },
                     kind,
                     cost,
                     bidirectional: false,
@@ -2308,15 +2656,59 @@ fn validate_merge_link_collision(
     start: Vec3,
     end: Vec3,
 ) -> Result<(), MergeLinkRejection> {
+    validate_merge_link_collision_with_support_probe(
+        world,
+        mover,
+        collision_filter,
+        support_filter,
+        start,
+        end,
+        true,
+    )
+}
+
+/// The adjacent-cell variant of [`validate_merge_link_collision`]. Cell
+/// colliders can legitimately leave the exact shared seam midpoint without a
+/// support hit even when both inset endpoints are supported and the capsule
+/// can cross the seam. Do not weaken same-cell merge validation for that
+/// streaming-boundary artifact.
+fn validate_exterior_merge_link_collision(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    start: Vec3,
+    end: Vec3,
+) -> Result<(), MergeLinkRejection> {
+    validate_merge_link_collision_with_support_probe(
+        world,
+        mover,
+        collision_filter,
+        support_filter,
+        start,
+        end,
+        false,
+    )
+}
+
+fn validate_merge_link_collision_with_support_probe(
+    world: &mut boxddd::World,
+    mover: &boxddd::Capsule,
+    collision_filter: boxddd::QueryFilter,
+    support_filter: boxddd::QueryFilter,
+    start: Vec3,
+    end: Vec3,
+    probe_midpoint: bool,
+) -> Result<(), MergeLinkRejection> {
     let to_capsule_center = Vec3::new(0.0, AGENT_HEIGHT * 0.5, 0.0);
     let start_origin = start + to_capsule_center;
     let end_origin = end + to_capsule_center;
     let mid_origin = start_origin.lerp(end_origin, 0.5);
 
-    for probe in [mid_origin, end_origin] {
+    if probe_midpoint {
         if player::try_step_down(
             world,
-            player::to_box_vec3(probe),
+            player::to_box_vec3(mid_origin),
             mover,
             boxddd::Vec3::ZERO,
             collision_filter,
@@ -2326,6 +2718,18 @@ fn validate_merge_link_collision(
         {
             return Err(MergeLinkRejection::NoGroundSupport);
         }
+    }
+    if player::try_step_down(
+        world,
+        player::to_box_vec3(end_origin),
+        mover,
+        boxddd::Vec3::ZERO,
+        collision_filter,
+        support_filter,
+    )
+    .is_none()
+    {
+        return Err(MergeLinkRejection::NoGroundSupport);
     }
 
     let delta = player::to_box_vec3(end_origin - start_origin);
@@ -2730,6 +3134,7 @@ pub(crate) fn tna_command(
         "spawn" => spawn_agent(world, rest),
         "bind" => bind_agent(world, rest),
         "goto" => goto_agent(world, rest),
+        "path" => path_probe(world, rest),
         "travel" => travel_agent(world, rest),
         "status" => agent_status(world, rest),
         "despawn" => despawn_agent(world, rest),
@@ -2737,14 +3142,14 @@ pub(crate) fn tna_command(
         other => Err(ConsoleError::new(
             "unknown_subcommand",
             format!(
-                "unknown tna subcommand '{other}'; expected spawn, bind, goto, travel, status, despawn, or solverate"
+                "unknown tna subcommand '{other}'; expected spawn, bind, goto, path, travel, status, despawn, or solverate"
             ),
         )),
     }
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn [<index>]|bind [<index>] <actor-reference-formid>|goto [<index>] <x> <y> <z>|goto [<index>] player|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
+    let usage = "usage: tna spawn [<index>]|bind [<index>] <actor-reference-formid>|goto [<index>] <x> <y> <z>|goto [<index>] player|path [<index>] <x> <y> <z>|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
 }
 
@@ -2843,6 +3248,12 @@ fn spawn_test_agent(world: &mut World, position: Vec3) -> Entity {
             // capsule centre (issue #188 introduced the offset for bound
             // actors only, leaving this path bit-for-bit as it was).
             agent_components(archipelago_entity, 0.0),
+            // The debug capsule's transform is centre-level but its nav
+            // points are feet-level; make landmass's full-3D link reach
+            // distance explicit for this centre-based agent only. Bound
+            // actors retain the normal radius-based threshold because their
+            // placement-root transform is feet-level.
+            AnimationLinkReachedDistance(TEST_AGENT_ANIMATION_LINK_REACHED_DISTANCE),
         ))
         .id();
     // Zero offset (issue #114 real-data regression fix, M4 wave 5): the
@@ -3247,6 +3658,96 @@ fn goto_agent(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
     Ok(ConsoleCommandResult::new(
         json!({ "index": index, "target": description }),
         vec![format!("nav agent {index} target set to {description}")],
+    ))
+}
+
+/// `tna path [<index>] <x> <y> <z>` queries the current landmass
+/// archipelago directly, without changing the agent's route. This is a
+/// diagnostic seam for distinguishing a missing animation-link attachment
+/// from movement/physics failure: the returned `PathStep::AnimationLink`
+/// entries are the pathfinder's authoritative off-mesh-link decisions.
+fn path_probe(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (index, target) = match rest {
+        [x, y, z] => (0, parse_goto_point(x, y, z)?),
+        [index, x, y, z] => (parse_agent_index(index)?, parse_goto_point(x, y, z)?),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna path requires [<index>] <x> <y> <z>",
+            ));
+        }
+    };
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
+        return Err(ConsoleError::new(
+            "no_agent",
+            "no test nav agent is spawned at this index; use tna spawn first",
+        ));
+    };
+    let position = world
+        .get::<GlobalTransform>(agent_entity)
+        .map(|transform| transform.translation())
+        .or_else(|| {
+            world
+                .get::<Transform>(agent_entity)
+                .map(|transform| transform.translation)
+        })
+        .ok_or_else(|| ConsoleError::new("agent_unavailable", "nav agent has no transform"))?;
+    let archipelago_entity = world
+        .resource::<NavArchipelagoState>()
+        .archipelago
+        .ok_or_else(|| ConsoleError::new("no_archipelago", "no nav archipelago is active"))?;
+    let archipelago = world
+        .get::<Archipelago3d>(archipelago_entity)
+        .ok_or_else(|| ConsoleError::new("no_archipelago", "no nav archipelago is active"))?;
+    let sample_distance = archipelago
+        .get_agent_options()
+        .point_sample_distance
+        .clone();
+    let start = archipelago
+        .sample_point(position, &sample_distance)
+        .map_err(|error| ConsoleError::new("start_off_navmesh", error.to_string()))?;
+    let end = archipelago
+        .sample_point(target, &sample_distance)
+        .map_err(|error| ConsoleError::new("target_off_navmesh", error.to_string()))?;
+    let permitted = world
+        .get::<PermittedAnimationLinks>(agent_entity)
+        .cloned()
+        .unwrap_or_default();
+    let path = archipelago
+        .find_path(&start, &end, &HashMap::new(), permitted)
+        .map_err(|error| ConsoleError::new("no_path", error.to_string()))?;
+    let steps = path
+        .iter()
+        .map(|step| format!("{step:?}"))
+        .collect::<Vec<_>>();
+    let animation_links = path
+        .iter()
+        .filter(|step| matches!(step, bevy_landmass::PathStep::AnimationLink { .. }))
+        .count();
+    let start_point = start.point();
+    let end_point = end.point();
+    let start_island = format!("{:?}", start.island());
+    let end_island = format!("{:?}", end.island());
+    let line = format!(
+        "nav agent {index} path steps={} animation_links={} samples={} -> {}",
+        steps.len(),
+        animation_links,
+        start_island,
+        end_island
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "index": index,
+            "position": [position.x, position.y, position.z],
+            "target": [target.x, target.y, target.z],
+            "start_sample": [start_point.x, start_point.y, start_point.z],
+            "target_sample": [end_point.x, end_point.y, end_point.z],
+            "start_island": start_island,
+            "end_island": end_island,
+            "steps": steps,
+            "animation_links": animation_links,
+        }),
+        vec![line],
     ))
 }
 
