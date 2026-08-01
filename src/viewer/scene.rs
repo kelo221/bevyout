@@ -1403,19 +1403,14 @@ pub(crate) type GlowCardMeshQuery<'w> = (Entity, &'w GltfMeshName);
 
 pub(crate) fn configure_glow_cards(
     mut commands: Commands,
-    meshes: Query<GlowCardMeshQuery<'_>, (With<Mesh3d>, Without<GlowCard>)>,
-    mut inspected: Local<HashSet<Entity>>,
-    mut last_mesh_count: Local<Option<usize>>,
+    meshes: Query<GlowCardMeshQuery<'_>, (With<Mesh3d>, Without<GlowCardInspected>)>,
 ) {
-    let mesh_count = meshes.iter().count();
-    if *last_mesh_count == Some(mesh_count) {
-        return;
-    }
-    *last_mesh_count = Some(mesh_count);
     for (entity, name) in &meshes {
-        if !inspected.insert(entity) {
-            continue;
-        }
+        // Mark every inspected mesh. Component markers despawn with their
+        // entity, so unlike the old `Local<HashSet<Entity>>`/count-sentinel
+        // pair this can neither leak stale entries nor skip a mesh spawned
+        // while another despawned between frames (issue #270).
+        commands.entity(entity).insert(GlowCardInspected);
         if !is_glow_card_mesh_name(&name.0) {
             continue;
         }
@@ -1431,9 +1426,17 @@ pub(crate) fn configure_glow_cards(
 #[derive(Component)]
 pub(crate) struct GlowCard;
 
-pub(crate) fn is_glow_card_mesh_name(name: &str) -> bool {
-    name.to_ascii_lowercase().starts_with("lightglow")
-}
+/// Issue #270 (PERF wave 1): every mesh entity that has been glow-card
+/// classified carries this marker, so the `configure_glow_cards` query
+/// filters to not-yet-inspected entities without a per-frame count
+/// sentinel or a `Local<HashSet<Entity>>` (markers despawn cleanly with
+/// their entity, closing the remove+add count-coincidence blind spot).
+#[derive(Component)]
+pub(crate) struct GlowCardInspected;
+
+// The naming decision itself lives in the Bevy-free `glow_card_policy`
+// module so the executable spec can drive it verbatim (issue #270).
+pub(crate) use super::glow_card_policy::is_glow_card_mesh_name;
 
 pub(crate) fn scene_focus(manifest: &PreparedSceneManifest) -> Vec3 {
     if let Some(package) = manifest.exterior.as_ref() {

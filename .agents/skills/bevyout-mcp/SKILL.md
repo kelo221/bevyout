@@ -68,4 +68,7 @@ BRP changes are runtime-only: they do not modify prepared manifests, GLB assets,
 or Fallout source data.
 
 The bridge binds to `127.0.0.1`. Do not expose raw BRP to a LAN without adding
-authentication and completing a security review.
+authentication and completing a security review. The MCP server defaults to
+`BEVYOUT_MCP_ACCESS=read_only`; set `BEVYOUT_MCP_ACCESS=runtime_write` for
+console actions and allowlisted runtime ECS writes, or `unrestricted` only for
+explicit local debugging.

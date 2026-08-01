@@ -29,6 +29,10 @@ const MAX_CONFLICT_LIMIT: usize = 1_000;
 struct AgentBridgeInfo {
     port: u16,
     session_id: String,
+    runtime_kind: &'static str,
+    headless: bool,
+    physics_enabled: Option<bool>,
+    capabilities: Value,
 }
 
 pub(crate) struct AgentBridgePlugin {
@@ -73,6 +77,7 @@ fn install(app: &mut App, port: u16) {
 
     let remote = RemotePlugin::default()
         .with_method_main("bevyout.session", session)
+        .with_method_main("bevyout.capabilities", capabilities)
         .with_method_main("bevyout.scene_snapshot", scene_snapshot)
         .with_method_main("bevyout.performance_snapshot", performance_snapshot)
         .with_method_main("bevyout.schedule_snapshot", schedule_snapshot)
@@ -83,8 +88,21 @@ fn install(app: &mut App, port: u16) {
         .with_address(std::net::Ipv4Addr::LOCALHOST)
         .with_port(port);
 
-    app.insert_resource(AgentBridgeInfo { port, session_id })
-        .add_plugins((remote, http));
+    app.insert_resource(bridge_info(
+        port,
+        session_id,
+        "viewer",
+        None,
+        json!({
+            "scene_snapshot": 2,
+            "performance_snapshot": 1,
+            "schedule_snapshot": 1,
+            "viewport_capture": 1,
+            "console": 1,
+            "runtime_write": true,
+        }),
+    ))
+    .add_plugins((remote, http));
     info!("agent bridge enabled on http://127.0.0.1:{port}/ (runtime-only ECS access)");
 }
 
@@ -99,13 +117,20 @@ fn install_ragdoll_lab(app: &mut App, port: u16) {
     );
     let remote = RemotePlugin::default()
         .with_method_main("bevyout.session", session)
+        .with_method_main("bevyout.capabilities", capabilities)
         .with_method_main("bevyout.capture_viewport", capture_viewport)
         .with_method_main("bevyout.ragdoll_lab_probe", ragdoll_lab_probe);
     let http = RemoteHttpPlugin::default()
         .with_address(std::net::Ipv4Addr::LOCALHOST)
         .with_port(port);
-    app.insert_resource(AgentBridgeInfo { port, session_id })
-        .add_plugins((remote, http));
+    app.insert_resource(bridge_info(
+        port,
+        session_id,
+        "ragdoll_lab",
+        None,
+        json!({ "viewport_capture": 1, "ragdoll_lab_probe": 1, "runtime_write": false }),
+    ))
+    .add_plugins((remote, http));
     info!("ragdoll lab agent bridge enabled on http://127.0.0.1:{port}/");
 }
 
@@ -120,15 +145,66 @@ fn install_animation_zoo(app: &mut App, port: u16) {
     );
     let remote = RemotePlugin::default()
         .with_method_main("bevyout.session", session)
+        .with_method_main("bevyout.capabilities", capabilities)
         .with_method_main("bevyout.capture_viewport", capture_viewport)
         .with_method_main("bevyout.animation_zoo_probe", animation_zoo_probe)
         .with_method_main("bevyout.animation_zoo_control", animation_zoo_control);
     let http = RemoteHttpPlugin::default()
         .with_address(std::net::Ipv4Addr::LOCALHOST)
         .with_port(port);
-    app.insert_resource(AgentBridgeInfo { port, session_id })
-        .add_plugins((remote, http));
+    app.insert_resource(bridge_info(
+        port,
+        session_id,
+        "animation_zoo",
+        None,
+        json!({
+            "viewport_capture": 1,
+            "animation_zoo_probe": 1,
+            "animation_zoo_control": 1,
+            "runtime_write": true,
+        }),
+    ))
+    .add_plugins((remote, http));
     info!("animation zoo agent bridge enabled on http://127.0.0.1:{port}/");
+}
+
+fn bridge_info(
+    port: u16,
+    session_id: String,
+    runtime_kind: &'static str,
+    physics_enabled: Option<bool>,
+    capabilities: Value,
+) -> AgentBridgeInfo {
+    AgentBridgeInfo {
+        port,
+        session_id,
+        runtime_kind,
+        headless: false,
+        physics_enabled,
+        capabilities,
+    }
+}
+
+fn bridge_metadata(info: &AgentBridgeInfo) -> Value {
+    json!({
+        "bridge_api_version": 2,
+        "build": {
+            "project_version": env!("CARGO_PKG_VERSION"),
+            "bevy_version": option_env!("BEVY_VERSION").unwrap_or("0.19.0"),
+            "profile": if cfg!(debug_assertions) { "dev" } else { "release" },
+        },
+        "runtime": {
+            "kind": info.runtime_kind,
+            "headless": info.headless,
+            "physics_enabled": info.physics_enabled,
+        },
+        "capabilities": info.capabilities,
+        "mutation_policy": "runtime_only",
+    })
+}
+
+fn capabilities(In(_params): In<Option<Value>>, info: Res<AgentBridgeInfo>) -> BrpResult {
+    Ok(bridge_metadata(&info))
 }
 
 fn animation_zoo_probe(In(_params): In<Option<Value>>, world: &mut World) -> BrpResult {
@@ -398,6 +474,7 @@ fn session(
     info: Res<AgentBridgeInfo>,
     manifest: Res<crate::viewer::LoadedSceneManifest>,
 ) -> BrpResult {
+    let metadata = bridge_metadata(&info);
     Ok(json!({
         "session_id": info.session_id,
         "port": info.port,
@@ -409,6 +486,11 @@ fn session(
         },
         "placement_count": manifest.placements.len(),
         "diagnostic_count": manifest.diagnostics.len(),
+        "bridge_api_version": metadata["bridge_api_version"],
+        "build": metadata["build"],
+        "runtime": metadata["runtime"],
+        "capabilities": metadata["capabilities"],
+        "mutation_policy": metadata["mutation_policy"],
     }))
 }
 
@@ -444,8 +526,14 @@ fn scene_snapshot(
         .unwrap_or(false);
     let role_filter = object.get("role").and_then(Value::as_str);
     let name_filter = object.get("name_contains").and_then(Value::as_str);
+    let include_total = object
+        .get("include_total")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
-    let mut entities = Vec::new();
+    let mut total = 0usize;
+    let mut page = Vec::with_capacity(limit);
+    let mut has_more = false;
     for (
         entity,
         transform,
@@ -478,6 +566,19 @@ fn scene_snapshot(
 
         let name = name.map(Name::as_str);
         if name_filter.is_some_and(|filter| !name.is_some_and(|value| value.contains(filter))) {
+            continue;
+        }
+
+        let matched = total;
+        total += 1;
+        if page.len() >= limit {
+            has_more = true;
+            if !include_total {
+                break;
+            }
+            continue;
+        }
+        if matched < offset {
             continue;
         }
 
@@ -514,21 +615,17 @@ fn scene_snapshot(
                 "initially_enabled": placement.initially_enabled,
             });
         }
-        entities.push(row);
+        page.push(row);
     }
 
-    let total = entities.len();
-    let page = entities
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let next_offset = (offset + page.len() < total).then_some(offset + page.len());
+    let has_more = has_more || include_total && offset + page.len() < total;
+    let next_offset = has_more.then_some(offset + page.len());
     Ok(json!({
         "entities": page,
-        "total": total,
+        "total": include_total.then_some(total),
         "offset": offset,
         "limit": limit,
+        "has_more": has_more,
         "next_offset": next_offset,
     }))
 }

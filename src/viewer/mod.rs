@@ -65,6 +65,7 @@ mod world;
 mod world_items;
 
 mod agent_bridge;
+mod ao_policy;
 mod app;
 mod bindings;
 mod console;
@@ -74,16 +75,19 @@ mod day_night;
 mod diagnostics;
 pub(crate) mod dialogue;
 mod fallout_ui;
+mod glow_card_policy;
 mod hud;
 #[cfg(test)]
 mod hybrid_shadow_policy;
 mod lighting;
+mod material_clamp_policy;
 mod nav;
 mod nav_overlay;
 mod pause_menu;
 mod perception;
 mod performance_policy;
 mod ragdoll_lab;
+mod realtime_shadow_policy;
 mod scene;
 mod screen_fx;
 

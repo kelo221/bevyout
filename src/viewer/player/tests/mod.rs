@@ -1760,3 +1760,200 @@ fn player_debug_text_shows_fallback_without_an_fps_player() {
         .unwrap();
     assert_eq!(text.0, "PLAYER POS --\nLOOK YAW -- | PITCH --");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #268: the collider/step/player diagnostic HUDs must not rewrite
+// their `Text` on frames where nothing they display changed -- zero change
+// detection, zero relayout.
+
+#[derive(Resource, Default)]
+struct HudWriteCounts {
+    collider: usize,
+    step: usize,
+    player: usize,
+}
+
+fn count_hud_writes(
+    collider: Query<Ref<Text>, With<ColliderDebugHud>>,
+    step: Query<Ref<Text>, With<StepDebugHud>>,
+    player: Query<Ref<Text>, With<PlayerDebugHud>>,
+    mut counts: ResMut<HudWriteCounts>,
+) {
+    if collider.iter().next().is_some_and(|text| text.is_changed()) {
+        counts.collider += 1;
+    }
+    if step.iter().next().is_some_and(|text| text.is_changed()) {
+        counts.step += 1;
+    }
+    if player.iter().next().is_some_and(|text| text.is_changed()) {
+        counts.player += 1;
+    }
+}
+
+fn diagnostic_hud_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )))
+        .insert_resource(BoxdddDebugDrawSettings::default())
+        .insert_resource(CollisionRuntimeStats::default())
+        .insert_resource(StepDebugSettings::default())
+        .init_resource::<HudWriteCounts>()
+        .add_systems(
+            Startup,
+            (
+                spawn_collider_debug_hud,
+                spawn_step_debug_hud,
+                spawn_player_debug_hud,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                update_collider_debug_hud,
+                update_step_debug_hud,
+                update_player_debug_hud,
+                count_hud_writes,
+            )
+                .chain(),
+        );
+    app
+}
+
+fn reset_write_counts(app: &mut App) {
+    *app.world_mut().resource_mut::<HudWriteCounts>() = HudWriteCounts::default();
+}
+
+fn hud_text(app: &mut App, marker: HudMarker) -> String {
+    match marker {
+        HudMarker::Collider => app
+            .world_mut()
+            .query_filtered::<&Text, With<ColliderDebugHud>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone(),
+        HudMarker::Step => app
+            .world_mut()
+            .query_filtered::<&Text, With<StepDebugHud>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone(),
+        HudMarker::Player => app
+            .world_mut()
+            .query_filtered::<&Text, With<PlayerDebugHud>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone(),
+    }
+}
+
+enum HudMarker {
+    Collider,
+    Step,
+    Player,
+}
+
+#[test]
+fn diagnostic_huds_do_not_write_while_nothing_changes() {
+    let mut app = diagnostic_hud_app();
+    app.update();
+    reset_write_counts(&mut app);
+
+    for _ in 0..4 {
+        app.update();
+    }
+
+    let counts = app.world().resource::<HudWriteCounts>();
+    assert_eq!(
+        (counts.collider, counts.step, counts.player),
+        (0, 0, 0),
+        "idle frames must leave all three diagnostic HUD texts untouched"
+    );
+    assert!(hud_text(&mut app, HudMarker::Collider).starts_with("Colliders: Off"));
+    assert!(hud_text(&mut app, HudMarker::Step).starts_with("Stair logs: Off"));
+    assert_eq!(
+        hud_text(&mut app, HudMarker::Player),
+        "PLAYER POS --\nLOOK YAW -- | PITCH --"
+    );
+}
+
+#[test]
+fn collider_and_step_huds_write_exactly_once_per_toggle_flip() {
+    let mut app = diagnostic_hud_app();
+    app.update();
+    reset_write_counts(&mut app);
+
+    flip_collider_debug(&mut app.world_mut().resource_mut::<BoxdddDebugDrawSettings>());
+    app.update();
+    assert_eq!(
+        app.world().resource::<HudWriteCounts>().collider,
+        1,
+        "one write per collider toggle"
+    );
+    assert_eq!(app.world().resource::<HudWriteCounts>().step, 0);
+    assert!(hud_text(&mut app, HudMarker::Collider).starts_with("Colliders: On"));
+
+    flip_step_debug(&mut app.world_mut().resource_mut::<StepDebugSettings>());
+    app.update();
+    assert_eq!(app.world().resource::<HudWriteCounts>().collider, 1);
+    assert_eq!(app.world().resource::<HudWriteCounts>().step, 1);
+    assert!(hud_text(&mut app, HudMarker::Step).starts_with("Stair logs: On"));
+
+    app.update();
+    app.update();
+    let counts = app.world().resource::<HudWriteCounts>();
+    assert_eq!(
+        (counts.collider, counts.step),
+        (1, 1),
+        "no further writes once the toggles settle"
+    );
+}
+
+#[test]
+fn player_debug_hud_writes_only_when_the_player_state_changes() {
+    let mut app = diagnostic_hud_app();
+    app.update();
+    reset_write_counts(&mut app);
+
+    let player = app
+        .world_mut()
+        .spawn((Transform::from_xyz(1.0, 2.0, 3.0), FpsPlayer::default()))
+        .id();
+    app.update();
+    assert_eq!(
+        app.world().resource::<HudWriteCounts>().player,
+        1,
+        "spawning the player refreshes the fallback text once"
+    );
+    assert!(hud_text(&mut app, HudMarker::Player).contains("PLAYER POS 1.000, 2.000, 3.000"));
+
+    app.world_mut()
+        .get_mut::<Transform>(player)
+        .unwrap()
+        .translation = Vec3::new(4.0, 5.0, 6.0);
+    app.update();
+    assert_eq!(app.world().resource::<HudWriteCounts>().player, 2);
+    assert!(hud_text(&mut app, HudMarker::Player).contains("PLAYER POS 4.000, 5.000, 6.000"));
+
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world().resource::<HudWriteCounts>().player,
+        2,
+        "unchanged player frames must not write"
+    );
+
+    // A real change that composes the identical string must not write either:
+    // the compare-guard, not only the change gate, owns that guarantee.
+    app.world_mut()
+        .get_mut::<Transform>(player)
+        .unwrap()
+        .translation = Vec3::new(4.0004, 5.0, 6.0);
+    app.update();
+    assert_eq!(app.world().resource::<HudWriteCounts>().player, 2);
+    assert!(hud_text(&mut app, HudMarker::Player).contains("PLAYER POS 4.000, 5.000, 6.000"));
+}

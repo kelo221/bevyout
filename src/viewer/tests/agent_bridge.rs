@@ -9,6 +9,10 @@ fn app() -> App {
         .insert_resource(AgentBridgeInfo {
             port: 15_702,
             session_id: "bridge-test".into(),
+            runtime_kind: "viewer",
+            headless: true,
+            physics_enabled: Some(false),
+            capabilities: json!({ "scene_snapshot": 2 }),
         });
     let entity = app
         .world_mut()
@@ -19,6 +23,16 @@ fn app() -> App {
         .register(entity, 1, Some("TestRef"));
     app.update();
     app
+}
+
+#[test]
+fn capabilities_report_bridge_build_and_runtime_contract() {
+    let app = app();
+    let value = bridge_metadata(app.world().resource::<AgentBridgeInfo>());
+    assert_eq!(value["bridge_api_version"], 2);
+    assert_eq!(value["runtime"]["kind"], "viewer");
+    assert_eq!(value["capabilities"]["scene_snapshot"], 2);
+    assert_eq!(value["mutation_policy"], "runtime_only");
 }
 
 #[test]

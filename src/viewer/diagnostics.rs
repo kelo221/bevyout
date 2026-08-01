@@ -3,6 +3,7 @@
 use super::controls::{LightsDisabled, UnlitMode};
 use super::performance_policy::{FrameProbeSummary, FrameSample, summarize_frame_window};
 use super::*;
+use std::time::Duration;
 
 #[derive(Resource)]
 pub(crate) struct RenderReportPath(pub(crate) PathBuf);
@@ -289,11 +290,15 @@ pub(crate) fn csv_field(value: &str) -> String {
 // `StepDebugHud`: a marker component spawned once under `console::
 // DiagnosticUi` (so `tdt` still folds it into the rest of the diagnostic
 // HUD), a plain toggle `Resource` the console command flips, and an
-// `Update` system that rewrites the `Text` every frame. Unlike those two
-// booleans, this block reports live state (position/cell/agents) so its
-// update system is exclusive (`&mut World`) to reach `player::FpsPlayer`'s
-// `Transform` and `nav::agent::hud_agent_status_lines` without widening
-// either module's public surface just for the HUD.
+// `Update` system that owns its `Text`. Unlike those two booleans, this
+// block reports live state (position/cell/agents); issue #268 therefore
+// made it change-driven and non-exclusive: the off line is written only on
+// toggle transitions, enabled content refreshes on a bounded timer
+// (`DEBUG_INFO_REFRESH_INTERVAL`), and the composed string is only ever
+// assigned when it actually changed. `player::FpsPlayer`'s `Transform` is
+// an ordinary `Query` read and the agent lines come from
+// `nav::agent::HudAgentProjection`, a read-only projection introduced so no
+// module's public surface has to widen for the HUD.
 
 /// Toggled by the `tdi` console command (`viewer::console`). A plain global
 /// resource, so it survives cell swaps untouched -- `world::swap` never
@@ -309,6 +314,11 @@ pub(crate) struct DebugInfoHud;
 
 const DEBUG_INFO_OFF_LINE: &str = "Debug info: Off";
 const DEBUG_INFO_HUD_TOP_PX: f32 = 56.0;
+
+/// Issue #268: enabled-state refresh cadence for the live player/cell/agent
+/// lines. 125 ms = 8 Hz -- inside the required 5-10 Hz band, coarse enough
+/// that HUD relayout noise vanishes from steady-state frame times.
+const DEBUG_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(125);
 
 // Anchor corner note (post-merge fix, real-data smoke test): the existing
 // HUD occupies top-right (`FpsText`) and bottom-right (`ColliderDebugHud`
@@ -340,7 +350,7 @@ pub(crate) fn spawn_debug_info_hud(mut commands: Commands) {
 /// so tests can assert stable lines without spinning up a full `App`): one
 /// line for the toggle state, one for player position, one for the active
 /// cell's identity, then one per live test nav agent (already formatted by
-/// `nav::agent::hud_agent_status_lines`).
+/// `nav::agent::HudAgentProjection`).
 pub(crate) fn format_debug_info_lines(
     player_position: Option<Vec3>,
     active_cell: Option<(u32, Option<&str>, Option<&str>)>,
@@ -366,37 +376,52 @@ pub(crate) fn format_debug_info_lines(
     lines
 }
 
-pub(crate) fn update_debug_info_hud(world: &mut World) {
-    let enabled = world
-        .get_resource::<DebugInfoState>()
-        .is_some_and(|state| state.enabled);
-    let text = if enabled {
-        let player_position = {
-            let mut query = world.query_filtered::<&Transform, With<player::FpsPlayer>>();
-            query
-                .iter(world)
-                .next()
-                .map(|transform| transform.translation)
-        };
-        let active_cell = world
-            .get_resource::<crate::viewer::LoadedSceneManifest>()
-            .map(|manifest| {
-                (
-                    manifest.0.cell.form_id,
-                    manifest.0.cell.editor_id.clone(),
-                    manifest.0.cell.name.clone(),
-                )
-            });
-        let active_cell_refs = active_cell
-            .as_ref()
-            .map(|(form_id, editor_id, name)| (*form_id, editor_id.as_deref(), name.as_deref()));
-        let nav_agent_lines = nav::agent::hud_agent_status_lines(world);
-        format_debug_info_lines(player_position, active_cell_refs, &nav_agent_lines).join("\n")
+/// Issue #268: ordinary (non-exclusive) change-driven update system.
+///
+/// Gates, in order: nothing runs past the two resource reads while the HUD
+/// is steadily off; the off line is written only when `DebugInfoState` was
+/// just toggled; while enabled, composition happens on toggle (immediate)
+/// or when the 8 Hz refresh timer finishes. The final compare-guard means
+/// NO frame assigns `Text` with the string it already holds, which is what
+/// keeps Bevy's text relayout out of steady-state frames.
+pub(crate) fn update_debug_info_hud(
+    state: Res<DebugInfoState>,
+    time: Res<Time>,
+    mut refresh: Local<Option<Timer>>,
+    players: Query<&Transform, With<player::FpsPlayer>>,
+    manifest: Option<Res<crate::viewer::LoadedSceneManifest>>,
+    agents: nav::agent::HudAgentProjection,
+    mut hud_text: Query<&mut Text, With<DebugInfoHud>>,
+) {
+    let toggled = state.is_changed();
+    let text = if state.enabled {
+        let timer = refresh
+            .get_or_insert_with(|| Timer::new(DEBUG_INFO_REFRESH_INTERVAL, TimerMode::Repeating));
+        let due = timer.tick(time.delta()).just_finished();
+        if toggled {
+            // Toggle writes immediately; restart the cadence from here.
+            timer.reset();
+        } else if !due {
+            return;
+        }
+        let player_position = players.iter().next().map(|transform| transform.translation);
+        let active_cell = manifest.as_deref().map(|manifest| {
+            (
+                manifest.0.cell.form_id,
+                manifest.0.cell.editor_id.as_deref(),
+                manifest.0.cell.name.as_deref(),
+            )
+        });
+        format_debug_info_lines(player_position, active_cell, &agents.status_lines()).join("\n")
     } else {
+        if !toggled {
+            return;
+        }
         DEBUG_INFO_OFF_LINE.to_string()
     };
-    let mut query = world.query_filtered::<&mut Text, With<DebugInfoHud>>();
-    if let Some(mut hud_text) = query.iter_mut(world).next() {
+    if let Some(mut hud_text) = hud_text.iter_mut().next()
+        && hud_text.0 != text
+    {
         hud_text.0 = text;
     }
 }

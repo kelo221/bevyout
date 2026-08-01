@@ -434,15 +434,19 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     );
     values.insert(
         "metallic".into(),
-        json!(world.resource::<MetallicGate>().enabled() as u8),
+        json!(world.resource::<MaterialClampSettings>().metallic_enabled() as u8),
     );
     values.insert(
         "dielectric_specular".into(),
-        json!(world.resource::<DielectricSpecularGate>().enabled() as u8),
+        json!(
+            world
+                .resource::<MaterialClampSettings>()
+                .dielectric_enabled() as u8
+        ),
     );
     values.insert(
         "roughness_scale".into(),
-        json!(world.resource::<RoughnessScale>().scale()),
+        json!(world.resource::<MaterialClampSettings>().roughness_scale()),
     );
     values.insert(
         "shadow_samples".into(),
@@ -661,12 +665,14 @@ pub(super) fn set_render(
         "ao" => world.resource_mut::<AoStrength>().0 = value,
         "emission" => world.resource_mut::<EmissionScale>().0 = value,
         "metallic" => world
-            .resource_mut::<MetallicGate>()
-            .set_enabled(value == 1.0),
+            .resource_mut::<MaterialClampSettings>()
+            .set_metallic_enabled(value == 1.0),
         "dielectric_specular" => world
-            .resource_mut::<DielectricSpecularGate>()
-            .set_enabled(value == 1.0),
-        "roughness_scale" => world.resource_mut::<RoughnessScale>().set_scale(value),
+            .resource_mut::<MaterialClampSettings>()
+            .set_dielectric_enabled(value == 1.0),
+        "roughness_scale" => world
+            .resource_mut::<MaterialClampSettings>()
+            .set_roughness_scale(value),
         "shadow_samples" => world.resource_mut::<PointLightShadowSamples>().0 = value as u32,
         "realtime_shadows" => {
             world.resource_mut::<RealtimeShadowSettings>().enabled = value == 1.0;
