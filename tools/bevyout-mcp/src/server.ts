@@ -373,15 +373,15 @@ server.addTool({
 
 		const logs: string[] = [];
 		lastViewerFailure = undefined;
-		const command =
-			process.platform === "win32"
-				? ["cargo", ...args]
-				: ["setsid", "cargo", ...args];
-		const child = Bun.spawn(command, {
+		// Bun's detached option calls setsid() on POSIX (including macOS) and
+		// creates an independent process group on Windows. Do not shell out to
+		// the optional `setsid` utility: macOS does not ship it by default.
+		const child = Bun.spawn(["cargo", ...args], {
 			cwd: repoRoot,
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
+			detached: true,
 		});
 		await progress(context, 1, 4, "viewer_launch: process_started");
 		void readStream(child.stdout, logs);
