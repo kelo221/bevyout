@@ -14,6 +14,7 @@ use super::{
 };
 use crate::vsa::bake::{
     JobLight, JobPlacement, cell_directional_illuminance, find_unified_ktx_tool, is_bake_static,
+    ktx_supports_input_file_lists,
     rust_irradiance::{DirectionalBakeLight, trace_reflection_cubemap},
     rust_scene,
 };
@@ -430,27 +431,36 @@ fn write_cubemap_ktx(
     }
     fs::write(&input_list, listing)?;
     let temporary_output = temporary.join(format!("{stem}.ktx2"));
-    let output = Command::new(ktx)
-        .args([
-            "create",
-            "--raw",
-            "--format",
-            "E5B9G9R9_UFLOAT_PACK32",
-            "--width",
-            &resolution.to_string(),
-            "--height",
-            &resolution.to_string(),
-            "--levels",
-            &levels.len().to_string(),
-            "--cubemap",
-            "--assign-tf",
-            "linear",
-            "--assign-texcoord-origin",
-            "top-left",
-            "--zstd",
-            "3",
-            &format!("@{}", input_list.display()),
-        ])
+    let mut command = Command::new(ktx);
+    command.args([
+        "create",
+        "--raw",
+        "--format",
+        "E5B9G9R9_UFLOAT_PACK32",
+        "--width",
+        &resolution.to_string(),
+        "--height",
+        &resolution.to_string(),
+        "--levels",
+        &levels.len().to_string(),
+        "--cubemap",
+        "--assign-tf",
+        "linear",
+        "--assign-texcoord-origin",
+        "top-left",
+        "--zstd",
+        "3",
+    ]);
+    if ktx_supports_input_file_lists(ktx) {
+        command.arg(format!("@{}", input_list.display()));
+    } else {
+        // KTX 4.x treats @file as one literal input. Keep the response-file
+        // optimization for KTX 5+, but pass each face explicitly to older
+        // unified KTX builds so prepared reflection probes work on the
+        // locally supported toolchain too.
+        command.args(&inputs);
+    }
+    let output = command
         .arg(&temporary_output)
         .output()
         .context("failed to start KTX-Software for reflection probe")?;

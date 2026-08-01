@@ -1955,4 +1955,6 @@ mod actor_support;
 
 mod actors;
 
+mod image_space;
+
 mod navmesh;

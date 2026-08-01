@@ -12,7 +12,7 @@ use crate::app_state::AppStatePlugin;
 use super::{
     actor, actor_animation, actor_state, agent_bridge, ai, animation, audio, bindings, cinema,
     console, console_ui, day_night, dialogue, hud, interaction, nav, pause_menu, perception,
-    pipboy, pipboy_reader, player, weapon, world, world_items,
+    pipboy, pipboy_reader, player, screen_fx, weapon, world, world_items,
 };
 
 /// Cross-slice ordering is intentionally narrow: only user input, interaction
@@ -79,6 +79,7 @@ impl PluginGroup for ViewerPlugins {
             .add(dialogue::DialoguePlugin)
             .add(actor::ActorPlugin)
             .add(actor_state::ActorStatePlugin)
+            .add(screen_fx::ScreenFxPlugin)
             .add(weapon::WeaponPlugin)
             .add(perception::PerceptionPlugin)
             .add(actor_animation::ActorAnimationPlugin)

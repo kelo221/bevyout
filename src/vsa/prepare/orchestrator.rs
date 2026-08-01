@@ -8,6 +8,7 @@ use bevyout_core::actor::{
     select_starting_weapon,
 };
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
+use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Dispatches `prepare`: a single legacy selector goes straight through
@@ -1184,6 +1185,20 @@ fn prepare_cell(
     let actor_animation_catalog_path = Some(actor_animation_catalog_artifact.relative_path);
     let actor_animation_catalog_revision = Some(ACTOR_ANIMATION_CATALOG_REVISION.into());
     let actor_animation_catalog_hash = Some(actor_animation_catalog_artifact.hash);
+    let image_space_modifier_catalog =
+        build_image_space_modifier_catalog(&parsed.image_space_modifiers, &source_fingerprint);
+    let (image_space_modifier_catalog_path, image_space_modifier_catalog_hash) =
+        write_image_space_modifier_catalog(&cache_dir, &image_space_modifier_catalog)?;
+    let image_space_modifier_summary = format!(
+        "ImageSpace modifier catalog: {} records -> {}",
+        image_space_modifier_catalog.modifiers.len(),
+        image_space_modifier_catalog_path
+    );
+    diagnostics.push(Diagnostic {
+        severity: "info".into(),
+        message: image_space_modifier_summary.clone(),
+    });
+    output.push(image_space_modifier_summary);
     let dialogue = prepare_authored_dialogue_bundle(
         &cache_dir,
         cell_id,
@@ -1292,6 +1307,9 @@ fn prepare_cell(
         actor_animation_catalog_path,
         actor_animation_catalog_revision,
         actor_animation_catalog_hash,
+        image_space_modifier_catalog_path: Some(image_space_modifier_catalog_path),
+        image_space_modifier_catalog_revision: Some(IMAGE_SPACE_MODIFIER_CATALOG_REVISION.into()),
+        image_space_modifier_catalog_hash: Some(image_space_modifier_catalog_hash),
         source_plugins,
         cell,
         placements,

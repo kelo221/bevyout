@@ -141,6 +141,16 @@ pub(crate) fn walk_container(
                     state.image_spaces.insert(form_id, image_space);
                 }
             }
+            "IMAD" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.image_space_modifiers.remove(&form_id);
+                } else {
+                    state.image_space_modifiers.insert(
+                        form_id,
+                        parse_image_space_modifier(&subs, form_id, resolver),
+                    );
+                }
+            }
             "SOUN" => {
                 if flags & RECORD_DELETED != 0 {
                     state.sounds.remove(&form_id);

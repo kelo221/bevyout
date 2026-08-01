@@ -85,6 +85,7 @@ mod perception;
 mod performance_policy;
 mod ragdoll_lab;
 mod scene;
+mod screen_fx;
 
 pub use animation_zoo::animation_zoo;
 pub(crate) use app::{RunViewOptions, run_view};
