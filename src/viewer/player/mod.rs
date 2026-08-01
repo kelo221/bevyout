@@ -507,7 +507,12 @@ fn update_collider_debug_hud(
     stats: Res<CollisionRuntimeStats>,
     mut text: Single<&mut Text, With<ColliderDebugHud>>,
 ) {
-    text.0 = format!(
+    // Issue #268: no-op frames must skip the format entirely, and even a
+    // changed input must not relayout the label with an identical string.
+    if !settings.is_changed() && !stats.is_changed() {
+        return;
+    }
+    let composed = format!(
         "Colliders: {} | Dynamic: {} ({} awake / {} sleeping) | Sync: {}",
         if settings.enabled { "On" } else { "Off" },
         stats.dynamic_bodies,
@@ -515,6 +520,9 @@ fn update_collider_debug_hud(
         stats.sleeping_dynamic_bodies,
         stats.dynamic_transform_updates,
     );
+    if text.0 != composed {
+        text.0 = composed;
+    }
 }
 
 #[derive(Component)]
@@ -550,10 +558,17 @@ fn update_step_debug_hud(
     settings: Res<StepDebugSettings>,
     mut text: Single<&mut Text, With<StepDebugHud>>,
 ) {
-    text.0 = format!(
+    // Issue #268: write only when the toggle actually flipped.
+    if !settings.is_changed() {
+        return;
+    }
+    let composed = format!(
         "Stair logs: {}",
         if settings.enabled { "On" } else { "Off" }
     );
+    if text.0 != composed {
+        text.0 = composed;
+    }
 }
 
 #[derive(Component)]
@@ -576,11 +591,27 @@ fn spawn_player_debug_hud(mut commands: Commands) {
 }
 
 fn update_player_debug_hud(
-    players: Query<(&Transform, &FpsPlayer)>,
+    players: Query<(Ref<Transform>, Ref<FpsPlayer>)>,
     mut text: Single<&mut Text, With<PlayerDebugHud>>,
 ) {
+    // Issue #268: a live, untouched player skips formatting entirely, and
+    // the compare-guard keeps changed-but-identically-displayed poses (any
+    // sub-millimetre jitter collapse under the {:.3}/{:.1} precision) from
+    // triggering a relayout.
     let player = players.iter().next();
-    text.0 = player_debug_text(player);
+    if let Some((transform, fps_player)) = &player
+        && !transform.is_changed()
+        && !fps_player.is_changed()
+    {
+        return;
+    }
+    let composed = match player {
+        Some((transform, fps_player)) => player_debug_text(Some((&*transform, &*fps_player))),
+        None => player_debug_text(None),
+    };
+    if text.0 != composed {
+        text.0 = composed;
+    }
 }
 
 fn player_debug_text(player: Option<(&Transform, &FpsPlayer)>) -> String {
