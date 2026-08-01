@@ -33,12 +33,10 @@ fn actor_sidecar_rejects_incomplete_joint_endpoints() {
     };
     asset.joints[0].body_a = 1;
     asset.joints[0].body_b = 2;
-    assert!(
-        validate_actor_physics(&asset)
-            .unwrap_err()
-            .to_string()
-            .contains("1-2")
-    );
+    assert!(validate_actor_physics(&asset)
+        .unwrap_err()
+        .to_string()
+        .contains("1-2"));
 }
 
 #[test]

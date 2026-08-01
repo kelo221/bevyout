@@ -30,27 +30,23 @@ fn view_and_render_validate_day_night_cycle_duration() {
     };
     assert_eq!(args.day_night_cycle_seconds, Some(86_400.0));
 
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "view",
-            "--manifest",
-            "scene.ron",
-            "--day-night-cycle-seconds",
-            "0",
-        ])
-        .is_err()
-    );
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "render",
-            "SuperDuperMart",
-            "--day-night-cycle-seconds",
-            "86401",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "view",
+        "--manifest",
+        "scene.ron",
+        "--day-night-cycle-seconds",
+        "0",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--day-night-cycle-seconds",
+        "86401",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -74,18 +70,16 @@ fn animation_zoo_requires_an_actor_and_validates_bridge_options() {
     assert_eq!(args.agent_port, 15_702);
     assert!(!args.agent_bridge);
     assert!(Cli::try_parse_from(["bevyout", "animation-zoo", "SuperDuperMart"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "animation-zoo",
-            "SuperDuperMart",
-            "--actor",
-            "00041606",
-            "--agent-port",
-            "16000",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "animation-zoo",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+        "--agent-port",
+        "16000",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -127,18 +121,16 @@ fn ragdoll_lab_defaults_to_avian_and_accepts_boxddd_comparison() {
     assert_eq!(args.agent_port, 16_000);
 
     assert!(Cli::try_parse_from(["bevyout", "ragdoll-lab", "SuperDuperMart"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "ragdoll-lab",
-            "SuperDuperMart",
-            "--actor",
-            "00041606",
-            "--agent-port",
-            "16000",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "ragdoll-lab",
+        "SuperDuperMart",
+        "--actor",
+        "00041606",
+        "--agent-port",
+        "16000",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -166,19 +158,17 @@ fn nif_convert_requires_one_source_and_parses_conversion_options() {
     assert!(args.force);
 
     assert!(Cli::try_parse_from(["bevyout", "nif-convert", "--output", "out.glb"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "nif-convert",
-            "--input",
-            "mesh.nif",
-            "--asset",
-            "meshes/mesh.nif",
-            "--output",
-            "out.glb",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "nif-convert",
+        "--input",
+        "mesh.nif",
+        "--asset",
+        "meshes/mesh.nif",
+        "--output",
+        "out.glb",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -208,26 +198,22 @@ fn native_conversion_is_authoritative_and_blender_flags_are_rejected() {
         ActorAnimationConverter::Disabled
     );
 
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "prepare",
-            "SuperDuperMart",
-            "--converter",
-            "unknown",
-        ])
-        .is_err()
-    );
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "prepare",
-            "SuperDuperMart",
-            "--actor-animation-converter",
-            "blender",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "SuperDuperMart",
+        "--converter",
+        "unknown",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "prepare",
+        "SuperDuperMart",
+        "--actor-animation-converter",
+        "blender",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -239,69 +225,59 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     assert_eq!(args.static_batch_chunk_meters, 64.0);
     assert_eq!(args.irradiance_spacing_meters, 8.0);
     assert_eq!(args.irradiance_samples, 64);
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "bake",
-            "--manifest",
-            "scene.ron",
-            "--quality",
-            "preview",
-        ])
-        .is_err()
-    );
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "bake",
-            "--manifest",
-            "scene.ron",
-            "--blender",
-            "blender.exe",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--quality",
+        "preview",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "--manifest",
+        "scene.ron",
+        "--blender",
+        "blender.exe",
+    ])
+    .is_err());
 
     for value in ["7.99", "256.01", "NaN", "inf"] {
-        assert!(
-            Cli::try_parse_from([
-                "bevyout",
-                "bake",
-                "--manifest",
-                "scene.ron",
-                "--static-batch-chunk-meters",
-                value,
-            ])
-            .is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--static-batch-chunk-meters",
+            value,
+        ])
+        .is_err());
     }
 
     for value in ["1.99", "32.01", "NaN", "inf"] {
-        assert!(
-            Cli::try_parse_from([
-                "bevyout",
-                "bake",
-                "--manifest",
-                "scene.ron",
-                "--irradiance-spacing-meters",
-                value,
-            ])
-            .is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--irradiance-spacing-meters",
+            value,
+        ])
+        .is_err());
     }
 
     for value in ["0", "513"] {
-        assert!(
-            Cli::try_parse_from([
-                "bevyout",
-                "bake",
-                "--manifest",
-                "scene.ron",
-                "--irradiance-samples",
-                value,
-            ])
-            .is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "bevyout",
+            "bake",
+            "--manifest",
+            "scene.ron",
+            "--irradiance-samples",
+            value,
+        ])
+        .is_err());
     }
 }
 
@@ -387,16 +363,14 @@ fn accepts_editor_id_selectors_and_legacy_paths() {
     };
     assert_eq!(args.cell.as_deref(), Some("00017f37"));
 
-    assert!(
-        Cli::try_parse_from([
-            "bevyout",
-            "bake",
-            "SuperDuperMart",
-            "--manifest",
-            "scene.ron",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "bevyout",
+        "bake",
+        "SuperDuperMart",
+        "--manifest",
+        "scene.ron",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -536,15 +510,13 @@ fn prepared_shadow_resolution_and_rebuild_contract_parse() {
     assert_eq!(args.toktx.as_deref(), Some(std::path::Path::new("ktx.exe")));
 
     for invalid in ["64", "129", "1024"] {
-        assert!(
-            Cli::try_parse_from([
-                "bevyout",
-                "render",
-                "MegatonPlayerHouse",
-                "--shadow-resolution",
-                invalid,
-            ])
-            .is_err()
-        );
+        assert!(Cli::try_parse_from([
+            "bevyout",
+            "render",
+            "MegatonPlayerHouse",
+            "--shadow-resolution",
+            invalid,
+        ])
+        .is_err());
     }
 }

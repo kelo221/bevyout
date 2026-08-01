@@ -11,11 +11,11 @@ use bevy::light::EnvironmentMapLight;
 use bevy::mesh::PrimitiveTopology;
 use bevy::pbr::StandardMaterial;
 use bevy::prelude::{
-    App, ColorToComponents, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window, default,
+    default, App, ColorToComponents, IntoScheduleConfigs, MinimalPlugins, MouseButton, Window,
 };
 use bevy::window::{PrimaryWindow, WindowFocused};
 
-use crate::viewer::scene::{PREPARED_REFLECTION_PROBE_INTENSITY, PreparedReflectionProbe};
+use crate::viewer::scene::{PreparedReflectionProbe, PREPARED_REFLECTION_PROBE_INTENSITY};
 
 fn material_clamp_test_app() -> App {
     let mut app = App::new();
@@ -694,26 +694,22 @@ fn window_focus_bounce_releases_stuck_keys_without_focus_lost_message() {
             window: Entity::PLACEHOLDER,
         });
     app.update();
-    assert!(
-        app.world()
-            .resource::<ButtonInput<Key>>()
-            .pressed(Key::Super)
-    );
-    assert!(
-        app.world()
-            .resource::<ButtonInput<Key>>()
-            .pressed(Key::Shift)
-    );
-    assert!(
-        app.world()
-            .resource::<ButtonInput<KeyCode>>()
-            .pressed(KeyCode::SuperLeft)
-    );
-    assert!(
-        app.world()
-            .resource::<ButtonInput<KeyCode>>()
-            .pressed(KeyCode::ShiftLeft)
-    );
+    assert!(app
+        .world()
+        .resource::<ButtonInput<Key>>()
+        .pressed(Key::Super));
+    assert!(app
+        .world()
+        .resource::<ButtonInput<Key>>()
+        .pressed(Key::Shift));
+    assert!(app
+        .world()
+        .resource::<ButtonInput<KeyCode>>()
+        .pressed(KeyCode::SuperLeft));
+    assert!(app
+        .world()
+        .resource::<ButtonInput<KeyCode>>()
+        .pressed(KeyCode::ShiftLeft));
 
     // Frame 2: a same-frame focus false->true bounce, with no
     // KeyboardFocusLost and no release KeyboardInput -- the suppressed
