@@ -330,6 +330,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         .insert_resource(ImageSpaceBloomOverrides::default())
         .insert_resource(AuthorizedEmissionMaterials::default())
         .insert_resource(AoMeshBases::default())
+        .insert_resource(AoEligibility::default())
         .insert_resource(RenderReportPath(report_path))
         .insert_resource(RenderReportBuffer::default())
         .insert_resource(LightsDisabled(false))
@@ -393,7 +394,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
             Update,
             (
                 apply_fog_strength,
-                apply_ao_strength,
+                (track_ao_mesh_eligibility, apply_ao_strength).chain(),
                 apply_irradiance_intensity,
                 apply_horizontal_fov,
                 update_fps_text,

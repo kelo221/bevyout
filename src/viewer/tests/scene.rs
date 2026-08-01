@@ -459,7 +459,10 @@ fn settled_glow_card_frames_perform_no_writes() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.init_resource::<GlowCardWriteProbe>();
-    app.add_systems(Update, (configure_glow_cards, probe_glow_card_writes).chain());
+    app.add_systems(
+        Update,
+        (configure_glow_cards, probe_glow_card_writes).chain(),
+    );
     spawn_named_mesh(&mut app, "ShackHangingLight02:51");
     spawn_named_mesh(&mut app, "LightGlow01:0.001");
     // Absorb the classification frame; the guarantee covers steady frames.

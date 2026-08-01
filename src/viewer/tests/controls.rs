@@ -803,11 +803,7 @@ fn spawn_quick_ao_mesh(app: &mut App, mesh: &Handle<Mesh>) -> Entity {
         .spawn(interaction::PlacementRoot::new(ao_placement(true)))
         .id();
     app.world_mut()
-        .spawn((
-            Transform::default(),
-            Mesh3d(mesh.clone()),
-            ChildOf(root),
-        ))
+        .spawn((Transform::default(), Mesh3d(mesh.clone()), ChildOf(root)))
         .id()
 }
 
@@ -846,26 +842,34 @@ fn assert_colors_near(actual: [f32; 4], expected: [f32; 4]) {
 struct AoWriteProbe {
     bases_writes: usize,
     mesh_store_writes: usize,
+    eligibility_writes: usize,
 }
 
 fn probe_ao_writes(
     bases: Res<AoMeshBases>,
     meshes: Res<Assets<Mesh>>,
+    eligibility: Res<AoEligibility>,
     mut probe: ResMut<AoWriteProbe>,
 ) {
     probe.bases_writes += usize::from(bases.is_changed());
     probe.mesh_store_writes += usize::from(meshes.is_changed());
+    probe.eligibility_writes += usize::from(eligibility.is_changed());
 }
 
-fn ao_probe_frame(app: &mut App) -> (usize, usize) {
+fn ao_probe_frame(app: &mut App) -> (usize, usize, usize) {
     {
         let mut probe = app.world_mut().resource_mut::<AoWriteProbe>();
         probe.bases_writes = 0;
         probe.mesh_store_writes = 0;
+        probe.eligibility_writes = 0;
     }
     app.update();
     let probe = app.world().resource::<AoWriteProbe>();
-    (probe.bases_writes, probe.mesh_store_writes)
+    (
+        probe.bases_writes,
+        probe.mesh_store_writes,
+        probe.eligibility_writes,
+    )
 }
 
 fn ao_test_app(strength: f32) -> App {
@@ -873,10 +877,19 @@ fn ao_test_app(strength: f32) -> App {
     app.add_plugins(MinimalPlugins)
         .insert_resource(AoStrength(strength))
         .init_resource::<AoMeshBases>()
+        .init_resource::<AoEligibility>()
         .init_resource::<AoWriteProbe>()
         .init_resource::<Assets<Mesh>>()
         .add_message::<AssetEvent<Mesh>>()
-        .add_systems(Update, (apply_ao_strength, probe_ao_writes).chain());
+        .add_systems(
+            Update,
+            (
+                track_ao_mesh_eligibility,
+                apply_ao_strength,
+                probe_ao_writes,
+            )
+                .chain(),
+        );
     app
 }
 
@@ -910,9 +923,15 @@ fn ao_remove_and_add_in_one_tick_still_scales_the_new_mesh() {
     app.update();
 
     assert_colors_near(mesh_colors(&app, &mesh_b), [0.7, 0.6, 0.5, 1.0]);
+    let bases = &app.world().resource::<AoMeshBases>().values;
     assert!(
-        app.world().resource::<AoMeshBases>().values.is_empty(),
+        !bases.contains_key(&mesh_a.id()),
         "the removed mesh's baseline must be dropped on AssetEvent::Removed"
+    );
+    assert_eq!(
+        bases.len(),
+        1,
+        "only the newly discovered mesh keeps a baseline"
     );
 }
 
@@ -996,7 +1015,7 @@ fn settled_ao_frames_perform_no_mesh_store_writes() {
     for frame in 0..3 {
         assert_eq!(
             ao_probe_frame(&mut app),
-            (0, 0),
+            (0, 0, 0),
             "settled frame {frame} touched meshes or baselines"
         );
     }
@@ -1020,7 +1039,10 @@ fn fov_test_app() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .init_resource::<ProjectionWriteProbe>()
-        .add_systems(Update, (apply_horizontal_fov, probe_projection_writes).chain());
+        .add_systems(
+            Update,
+            (apply_horizontal_fov, probe_projection_writes).chain(),
+        );
     app
 }
 
@@ -1080,8 +1102,9 @@ fn horizontal_fov_tracks_marker_changes_and_writes_nothing_when_settled() {
     app.update();
     app.update();
     assert_eq!(
-        app.world().resource::<ProjectionWriteProbe>().projection_writes,
+        app.world()
+            .resource::<ProjectionWriteProbe>()
+            .projection_writes,
         0
     );
 }
-

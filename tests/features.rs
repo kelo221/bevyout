@@ -14461,7 +14461,9 @@ async fn given_fresh_ao_tracker(world: &mut BevyoutWorld) {
     world.scene_ao_tracker = ao_policy::AoEligibilityTracker::default();
 }
 
-#[when(regex = r#"^mesh entity (\d+) is discovered with mesh asset (\d+) as (eligible|ineligible)$"#)]
+#[when(
+    regex = r#"^mesh entity (\d+) is discovered with mesh asset (\d+) as (eligible|ineligible)$"#
+)]
 async fn when_ao_entity_discovered(
     world: &mut BevyoutWorld,
     entity: u32,

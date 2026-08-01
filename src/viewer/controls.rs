@@ -1,9 +1,12 @@
 //! Viewer cursor, adjustment, and diagnostic controls.
 
+use bevy::asset::AssetEvent;
 use bevy::ecs::system::NonSendMarker;
 use bevy::input::keyboard::{Key, KeyboardFocusLost};
 use bevy::light::EnvironmentMapLight;
 use bevy::window::{PrimaryWindow, WindowFocused};
+
+use super::ao_policy::AoEligibilityTracker;
 
 use super::scene::{
     CellDirectionalLight, DEFAULT_REFLECTION_PROBE_STRENGTH, PREPARED_REFLECTION_PROBE_INTENSITY,
@@ -416,10 +419,16 @@ pub(crate) struct AoMeshBases {
     values: HashMap<AssetId<Mesh>, VertexAttributeValues>,
 }
 
-#[derive(Default)]
-pub(crate) struct AoScanState {
-    last_mesh_entity_count: usize,
-    last_mesh_asset_count: usize,
+/// Cached AO-mesh eligibility state (issue #270, PERF wave 1):
+/// incremented by `track_ao_mesh_eligibility` from entity
+/// added/changed/removed signals and consumed by `apply_ao_strength`, so
+/// quiet frames never scan the mesh query to count it (the old
+/// `AoScanState` count sentinel also missed remove+add pairs with equal
+/// totals). The policy decisions live in the Bevy-free
+/// `viewer::ao_policy` module.
+#[derive(Resource, Default)]
+pub(crate) struct AoEligibility {
+    pub(crate) tracker: AoEligibilityTracker<Entity, AssetId<Mesh>>,
 }
 
 #[derive(Resource)]
@@ -452,7 +461,13 @@ pub(crate) fn default_perspective_projection() -> PerspectiveProjection {
 }
 
 pub(crate) fn apply_horizontal_fov(
-    mut cameras: Query<(&HorizontalFov, &mut Projection), With<Camera3d>>,
+    mut cameras: Query<
+        (&HorizontalFov, &mut Projection),
+        (
+            With<Camera3d>,
+            Or<(Changed<HorizontalFov>, Changed<Projection>)>,
+        ),
+    >,
 ) {
     for (horizontal, mut projection) in &mut cameras {
         let Projection::Perspective(perspective) = &*projection else {
@@ -483,8 +498,12 @@ pub(crate) fn apply_irradiance_intensity(
 
 pub(crate) fn apply_reflection_probe_settings(
     settings: Res<ReflectionProbeSettings>,
+    new_probes: Query<(), Added<PreparedReflectionProbe>>,
     mut probes: Query<&mut EnvironmentMapLight, With<PreparedReflectionProbe>>,
 ) {
+    if !settings.is_changed() && new_probes.is_empty() {
+        return;
+    }
     let target = settings.effective_intensity();
     for mut probe in &mut probes {
         if (probe.intensity - target).abs() > f32::EPSILON {
@@ -493,84 +512,105 @@ pub(crate) fn apply_reflection_probe_settings(
     }
 }
 
+/// The exact `apply_ao_strength` eligibility test, shared by the event
+/// loop below: meshes under a `PlacementRoot::uses_quick_ao` ancestor
+/// (up to 64 hops along `ChildOf`, root-only meshes included).
+fn entity_uses_quick_ao(
+    child_of: Option<&ChildOf>,
+    own_root: Option<&interaction::PlacementRoot>,
+    parents: &Query<&ChildOf>,
+    roots: &Query<&interaction::PlacementRoot>,
+) -> bool {
+    let Some(child_of) = child_of else {
+        return own_root.is_some_and(interaction::PlacementRoot::uses_quick_ao);
+    };
+    let mut entity = child_of.0;
+    for _ in 0..64 {
+        if roots
+            .get(entity)
+            .is_ok_and(interaction::PlacementRoot::uses_quick_ao)
+        {
+            return true;
+        }
+        let Ok(parent) = parents.get(entity) else {
+            break;
+        };
+        entity = parent.0;
+    }
+    false
+}
+
+/// Maintains `AoEligibility` from mesh-entity lifecycle signals instead of
+/// a per-frame count: handle creation/swaps surface through
+/// `Changed<Mesh3d>` discovery, despawn/component-removal through
+/// `RemovedComponents<Mesh3d>`. Quiet frames read zero signals and touch
+/// nothing.
+pub(crate) fn track_ao_mesh_eligibility(
+    mut eligibility: ResMut<AoEligibility>,
+    discovered: Query<
+        (
+            Entity,
+            &Mesh3d,
+            Option<&ChildOf>,
+            Option<&interaction::PlacementRoot>,
+        ),
+        Changed<Mesh3d>,
+    >,
+    parents: Query<&ChildOf>,
+    roots: Query<&interaction::PlacementRoot>,
+    mut removed_meshes: RemovedComponents<Mesh3d>,
+) {
+    for entity in removed_meshes.read() {
+        eligibility.tracker.release(entity);
+    }
+    for (entity, mesh, child_of, own_root) in &discovered {
+        eligibility.tracker.discover(
+            entity,
+            mesh.0.id(),
+            entity_uses_quick_ao(child_of, own_root, &parents, &roots),
+        );
+    }
+}
+
 pub(crate) fn apply_ao_strength(
     strength: Res<AoStrength>,
     mut bases: ResMut<AoMeshBases>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mesh_entities: Query<(
-        &Mesh3d,
-        Option<&ChildOf>,
-        Option<&interaction::PlacementRoot>,
-    )>,
-    parents: Query<&ChildOf>,
-    roots: Query<&interaction::PlacementRoot>,
-    mut scan_state: Local<AoScanState>,
+    mut eligibility: ResMut<AoEligibility>,
+    mut mesh_events: MessageReader<AssetEvent<Mesh>>,
 ) {
-    let mesh_entity_count = mesh_entities.iter().count();
-    let mesh_asset_count = meshes.len();
-    if !strength.is_changed()
-        && scan_state.last_mesh_entity_count == mesh_entity_count
-        && scan_state.last_mesh_asset_count == mesh_asset_count
-    {
+    // Asset-store signals keep the cache honest without a scan: a reload
+    // re-queues still-referenced meshes (their old baseline was captured
+    // from already-scaled colors), a removal drops its stale baseline.
+    for event in mesh_events.read() {
+        match event {
+            AssetEvent::Added { id } => eligibility.tracker.asset_added(*id),
+            AssetEvent::Removed { id } => {
+                bases.values.remove(id);
+            }
+            _ => {}
+        }
+    }
+
+    let strength_changed = strength.is_changed();
+    if !strength_changed && !eligibility.tracker.has_pending() {
         return;
     }
-    scan_state.last_mesh_entity_count = mesh_entity_count;
-    scan_state.last_mesh_asset_count = mesh_asset_count;
 
-    let mut seen = HashSet::new();
-    for (mesh_handle, child_of, own_root) in &mesh_entities {
-        let Some(child_of) = child_of else {
-            if !own_root.is_some_and(interaction::PlacementRoot::uses_quick_ao) {
-                continue;
-            }
-            let id = mesh_handle.0.id();
-            if !seen.insert(id) {
-                continue;
-            }
-            if !strength.is_changed() && bases.values.contains_key(&id) {
-                continue;
-            }
-            let Some(mut mesh) = meshes.get_mut(id) else {
-                continue;
-            };
-            let Ok(colors) = mesh.try_attribute(Mesh::ATTRIBUTE_COLOR) else {
-                continue;
-            };
-            let baseline = bases.values.entry(id).or_insert_with(|| colors.clone());
-            let Ok(colors) = mesh.try_attribute_mut(Mesh::ATTRIBUTE_COLOR) else {
-                continue;
-            };
-            scale_ao_colors(colors, baseline, strength.0);
-            continue;
-        };
-        let mut entity = child_of.0;
-        let mut quick_ao = false;
-        for _ in 0..64 {
-            if roots
-                .get(entity)
-                .is_ok_and(interaction::PlacementRoot::uses_quick_ao)
-            {
-                quick_ao = true;
-                break;
-            }
-            let Ok(parent) = parents.get(entity) else {
-                break;
-            };
-            entity = parent.0;
-        }
-        if !quick_ao {
-            continue;
-        }
-        let id = mesh_handle.0.id();
-        if !seen.insert(id) {
-            continue;
-        }
-        if !strength.is_changed() && bases.values.contains_key(&id) {
+    let mut targets: HashSet<AssetId<Mesh>> = eligibility.tracker.pending_meshes().collect();
+    if strength_changed {
+        targets.extend(eligibility.tracker.eligible_meshes());
+    }
+    for id in targets {
+        if !strength_changed && bases.values.contains_key(&id) {
+            eligibility.tracker.resolve_pending(id);
             continue;
         }
         let Some(mut mesh) = meshes.get_mut(id) else {
+            // Keep queued until the asset load lands.
             continue;
         };
+        eligibility.tracker.resolve_pending(id);
         let Ok(colors) = mesh.try_attribute(Mesh::ATTRIBUTE_COLOR) else {
             continue;
         };
