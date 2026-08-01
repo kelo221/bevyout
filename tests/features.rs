@@ -509,14 +509,19 @@ mod autonomous_gate;
 use assets::AssetConversion;
 use bevyout_core::actor;
 use bevyout_core::actor_animation;
+use bevyout_core::combat::{
+    BASIS_POINT_DENOMINATOR, CombatRngDomain, CombatRngState, MAX_JAM_CHANCE_BASIS_POINTS,
+    WeaponConditionPolicy,
+};
 use bevyout_core::disposition;
 use bevyout_core::faction;
 use bevyout_core::perception;
 use bevyout_core::weapon;
 use cucumber::{World as _, given, then, when};
 use item_transaction::{
-    HolderId, ItemHolderState, ItemInstance, ItemInstanceId, ItemLedger, ItemState,
-    TransactionError, TransactionRequest,
+    CombatTransactionOutcome, CombatTransactionReceipt, HolderId, ItemHolderState, ItemInstance,
+    ItemInstanceId, ItemLedger, ItemLedgerSnapshot, ItemState, TransactionError, TransactionId,
+    TransactionRequest, WeaponReloadRequest,
 };
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
@@ -1090,6 +1095,14 @@ struct BevyoutWorld {
     screen_fx: screen_fx_policy::ScreenFxPolicy,
     screen_fx_definition: Option<screen_fx_policy::ScreenFxDefinition>,
     screen_fx_sample: Option<screen_fx_policy::ScreenFxValues>,
+
+    // -- m5_wave3_condition.feature (#262, #263) --
+    combat_ledger: Option<ItemLedger>,
+    combat_rng: CombatRngState,
+    combat_policy: WeaponConditionPolicy,
+    combat_receipt: Option<Result<CombatTransactionReceipt, TransactionError>>,
+    combat_snapshot_before: Option<ItemLedgerSnapshot>,
+    combat_rng_before: Option<CombatRngState>,
 
     // -- realtime_shadow_policy.feature (issue #267, PERF wave 1) --
     realtime_shadow_settings_changed: bool,
@@ -14403,6 +14416,281 @@ async fn then_composed_double_vision(world: &mut BevyoutWorld, expected: f32) {
         (actual - expected).abs() < 0.000_1,
         "actual double vision {actual} != {expected}"
     );
+}
+// =======================================================================
+// -- m5_wave3_condition.feature (#262, #263) --
+// Pure canonical condition/jam/RNG transactions used by the viewer adapter.
+// =======================================================================
+
+#[given(
+    regex = r"^a canonical combat weapon item (\d+) form ([0-9A-Fa-f]+) with condition (\d+) of (\d+) and (\d+) loaded rounds?$"
+)]
+async fn given_canonical_combat_weapon(
+    world: &mut BevyoutWorld,
+    item_id: u64,
+    form_id: String,
+    condition: u32,
+    max_condition: u32,
+    loaded: u16,
+) {
+    let form_id =
+        u32::from_str_radix(form_id.trim_start_matches("0x"), 16).expect("combat weapon FormID");
+    let mut weapon = ItemInstance::new(
+        ItemInstanceId(item_id),
+        form_id,
+        1,
+        ItemState {
+            condition: Some(condition),
+            ..Default::default()
+        },
+    )
+    .expect("combat weapon instance");
+    weapon.state.combat.magazine.ammo_form_id = Some(0x0000_4241);
+    weapon.state.combat.magazine.loaded = loaded;
+    let mut ledger = ItemLedger::new();
+    ledger
+        .insert_holder(
+            HolderId::Player,
+            ItemHolderState {
+                items: vec![weapon],
+                ..Default::default()
+            },
+        )
+        .expect("combat player holder");
+    ledger
+        .equip(HolderId::Player, ItemInstanceId(item_id))
+        .expect("combat weapon equip");
+    world.combat_ledger = Some(ledger);
+    world.combat_policy = WeaponConditionPolicy::with_degradation(Some(max_condition), 1);
+    world.combat_receipt = None;
+    world.combat_snapshot_before = None;
+    world.combat_rng_before = None;
+}
+
+#[given(regex = r"^combat RNG seed (\d+)$")]
+async fn given_combat_rng_seed(world: &mut BevyoutWorld, seed: u64) {
+    world.combat_rng = CombatRngState::from_seed(seed);
+}
+
+#[given("the canonical combat weapon is jammed for fire")]
+async fn given_canonical_combat_weapon_jammed_for_fire(world: &mut BevyoutWorld) {
+    world
+        .combat_ledger
+        .as_mut()
+        .expect("combat ledger")
+        .holders_mut()
+        .get_mut(&HolderId::Player)
+        .expect("combat player holder")
+        .items[0]
+        .state
+        .combat
+        .jam = Some(bevyout_core::combat::JamReason::Fire);
+}
+
+#[given(regex = r"^the canonical combat weapon has (\d+) reserve rounds?$")]
+async fn given_canonical_combat_reserve(world: &mut BevyoutWorld, count: u32) {
+    let ledger = world.combat_ledger.as_mut().expect("combat ledger");
+    ledger
+        .insert_new_item(HolderId::Player, 0x0000_4241, count, ItemState::default())
+        .expect("combat reserve rounds");
+}
+
+#[when(regex = r"^combat fire transaction (\d+) is (committed|attempted|repeated)$")]
+async fn when_combat_fire_transaction(world: &mut BevyoutWorld, id: u64, _mode: String) {
+    world.combat_snapshot_before = Some(
+        world
+            .combat_ledger
+            .as_ref()
+            .expect("combat ledger")
+            .snapshot(),
+    );
+    world.combat_rng_before = Some(world.combat_rng.clone());
+    let policy = world.combat_policy;
+    let ledger = world.combat_ledger.as_mut().expect("combat ledger");
+    world.combat_receipt = Some(ledger.fire_weapon_with_policy(
+        TransactionId(id),
+        HolderId::Player,
+        ItemInstanceId(1),
+        9.0,
+        policy,
+        &mut world.combat_rng,
+    ));
+}
+
+#[when(regex = r"^a deterministic reload jam transaction (\d+) is committed$")]
+async fn when_deterministic_reload_jam(world: &mut BevyoutWorld, id: u64) {
+    let seed = (0..10_000u64)
+        .find(|seed| {
+            let mut rng = CombatRngState::from_seed(*seed);
+            let draw = rng.draw(CombatRngDomain::ReloadJam).expect("reload draw");
+            draw.value % BASIS_POINT_DENOMINATOR < MAX_JAM_CHANCE_BASIS_POINTS
+        })
+        .expect("reload jam seed");
+    world.combat_rng = CombatRngState::from_seed(seed);
+    let policy = world.combat_policy;
+    let ledger = world.combat_ledger.as_mut().expect("combat ledger");
+    world.combat_receipt = Some(ledger.reload_weapon_with_policy(
+        TransactionId(id),
+        HolderId::Player,
+        ItemInstanceId(1),
+        WeaponReloadRequest {
+            ammo_form_id: 0x0000_4241,
+            capacity: 12,
+            policy,
+        },
+        &mut world.combat_rng,
+    ));
+}
+
+#[when(regex = r"^combat clear-jam transaction (\d+) is committed$")]
+async fn when_combat_clear_jam(world: &mut BevyoutWorld, id: u64) {
+    world.combat_receipt = Some(
+        world
+            .combat_ledger
+            .as_mut()
+            .expect("combat ledger")
+            .clear_weapon_jam_with_id(TransactionId(id), HolderId::Player, ItemInstanceId(1)),
+    );
+}
+
+#[then("combat fire outcome is fired")]
+async fn then_combat_fire_outcome_fired(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .combat_receipt
+            .as_ref()
+            .expect("combat receipt")
+            .as_ref()
+            .unwrap()
+            .outcome,
+        CombatTransactionOutcome::Fired
+    );
+}
+
+#[then(regex = r"^combat condition is (\d+)$")]
+async fn then_combat_condition(world: &mut BevyoutWorld, expected: u32) {
+    let item = world
+        .combat_ledger
+        .as_ref()
+        .expect("combat ledger")
+        .holders()
+        .get(&HolderId::Player)
+        .expect("combat player")
+        .find(ItemInstanceId(1))
+        .expect("combat weapon");
+    assert_eq!(item.state.condition, Some(expected));
+}
+
+#[then(regex = r"^combat damage is (\d+)$")]
+async fn then_combat_damage(world: &mut BevyoutWorld, expected: u32) {
+    assert_eq!(
+        world
+            .combat_receipt
+            .as_ref()
+            .expect("combat receipt")
+            .as_ref()
+            .expect("accepted combat action")
+            .damage_milli,
+        Some(expected * 1_000)
+    );
+}
+
+#[then(regex = r"^combat draw index is (\d+)$")]
+async fn then_combat_draw_index(world: &mut BevyoutWorld, expected: u64) {
+    assert_eq!(world.combat_rng.draw_index, expected);
+}
+
+#[then("combat action is rejected as jammed")]
+async fn then_combat_action_rejected_as_jammed(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.combat_receipt.as_ref().expect("combat receipt"),
+        &Err(TransactionError::Jammed(
+            bevyout_core::combat::JamReason::Fire
+        ))
+    );
+}
+
+#[then("the combat snapshot is unchanged")]
+async fn then_combat_snapshot_unchanged(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .combat_ledger
+            .as_ref()
+            .expect("combat ledger")
+            .snapshot(),
+        world
+            .combat_snapshot_before
+            .as_ref()
+            .expect("pre-action combat snapshot")
+            .clone()
+    );
+    assert_eq!(
+        world.combat_rng,
+        world
+            .combat_rng_before
+            .as_ref()
+            .expect("pre-action combat RNG")
+            .clone()
+    );
+}
+
+#[then("combat reload outcome is jammed")]
+async fn then_combat_reload_outcome_jammed(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .combat_receipt
+            .as_ref()
+            .expect("combat receipt")
+            .as_ref()
+            .unwrap()
+            .outcome,
+        CombatTransactionOutcome::Jammed
+    );
+}
+
+#[then("combat weapon 1 is jammed for reload")]
+async fn then_combat_weapon_jammed_for_reload(world: &mut BevyoutWorld) {
+    let item = world
+        .combat_ledger
+        .as_ref()
+        .expect("combat ledger")
+        .holders()
+        .get(&HolderId::Player)
+        .expect("combat player")
+        .find(ItemInstanceId(1))
+        .expect("combat weapon");
+    assert_eq!(
+        item.state.combat.jam,
+        Some(bevyout_core::combat::JamReason::Reload)
+    );
+}
+
+#[then("combat clear-jam outcome is cleared")]
+async fn then_combat_clear_jam_outcome_cleared(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world
+            .combat_receipt
+            .as_ref()
+            .expect("combat receipt")
+            .as_ref()
+            .unwrap()
+            .outcome,
+        CombatTransactionOutcome::Cleared
+    );
+}
+
+#[then("combat weapon 1 is not jammed")]
+async fn then_combat_weapon_not_jammed(world: &mut BevyoutWorld) {
+    let item = world
+        .combat_ledger
+        .as_ref()
+        .expect("combat ledger")
+        .holders()
+        .get(&HolderId::Player)
+        .expect("combat player")
+        .find(ItemInstanceId(1))
+        .expect("combat weapon");
+    assert_eq!(item.state.combat.jam, None);
 }
 
 // ---------------------------------------------------------------------

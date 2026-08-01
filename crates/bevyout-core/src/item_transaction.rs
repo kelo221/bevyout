@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::combat::ammo::{self, ItemCombatState, ReloadKind};
+use crate::combat::condition::{ConditionError, JamReason, WeaponConditionPolicy};
+use crate::combat::rng::{CombatRngDomain, CombatRngDraw, CombatRngState};
 
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
@@ -204,6 +206,10 @@ impl ItemHolderState {
     pub fn find(&self, id: ItemInstanceId) -> Option<&ItemInstance> {
         self.items.iter().find(|item| item.id == id)
     }
+
+    pub fn find_mut(&mut self, id: ItemInstanceId) -> Option<&mut ItemInstance> {
+        self.items.iter_mut().find(|item| item.id == id)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -224,6 +230,47 @@ pub struct AmmoTransactionReceipt {
     pub kind: ReloadKind,
     pub returned: u16,
     pub consumed: u16,
+    pub loaded: u16,
+    pub holder_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CombatTransactionKind {
+    Fire,
+    Reload,
+    ClearJam,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CombatTransactionOutcome {
+    Fired,
+    Jammed,
+    Reloaded,
+    Cleared,
+    AlreadyClear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeaponReloadRequest {
+    pub ammo_form_id: u32,
+    pub capacity: u16,
+    pub policy: WeaponConditionPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CombatTransactionReceipt {
+    pub id: TransactionId,
+    pub weapon_id: ItemInstanceId,
+    pub kind: CombatTransactionKind,
+    pub outcome: CombatTransactionOutcome,
+    pub condition_before: Option<u32>,
+    pub condition_after: Option<u32>,
+    /// Condition terms are persisted as milli-units so the serialized
+    /// decision is independent of platform float formatting.
+    pub damage_multiplier_milli: Option<u32>,
+    pub damage_milli: Option<u32>,
+    pub jam: Option<JamReason>,
+    pub rng_draw: Option<CombatRngDraw>,
     pub loaded: u16,
     pub holder_revision: u64,
 }
@@ -278,6 +325,9 @@ pub enum TransactionError {
     InvalidMagazine,
     IncompatibleAmmo,
     MutableStack(ItemInstanceId),
+    Jammed(JamReason),
+    InvalidCombatRng,
+    InvalidWeaponCondition,
 }
 
 impl std::fmt::Display for TransactionError {
@@ -294,6 +344,7 @@ pub struct ItemLedger {
     bindings: BTreeMap<HolderId, BindingState>,
     finalized: BTreeMap<TransactionId, TransactionReceipt>,
     ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
+    combat_finalized: BTreeMap<TransactionId, CombatTransactionReceipt>,
     used_transaction_ids: BTreeSet<TransactionId>,
     next_item_id: ItemInstanceId,
     next_transaction_id: TransactionId,
@@ -306,6 +357,8 @@ pub struct ItemLedgerSnapshot {
     pub finalized: BTreeMap<TransactionId, TransactionReceipt>,
     #[serde(default)]
     pub ammo_finalized: BTreeMap<TransactionId, AmmoTransactionReceipt>,
+    #[serde(default)]
+    pub combat_finalized: BTreeMap<TransactionId, CombatTransactionReceipt>,
     pub used_transaction_ids: BTreeSet<TransactionId>,
     pub next_item_id: ItemInstanceId,
     pub next_transaction_id: TransactionId,
@@ -346,6 +399,7 @@ impl ItemLedger {
             bindings: self.bindings.clone(),
             finalized: self.finalized.clone(),
             ammo_finalized: self.ammo_finalized.clone(),
+            combat_finalized: self.combat_finalized.clone(),
             used_transaction_ids: self.used_transaction_ids.clone(),
             next_item_id: self.next_item_id,
             next_transaction_id: self.next_transaction_id,
@@ -380,6 +434,7 @@ impl ItemLedger {
             bindings: snapshot.bindings,
             finalized: snapshot.finalized,
             ammo_finalized: snapshot.ammo_finalized,
+            combat_finalized: snapshot.combat_finalized,
             used_transaction_ids: snapshot.used_transaction_ids,
             next_item_id: snapshot.next_item_id,
             next_transaction_id: snapshot.next_transaction_id,
@@ -607,6 +662,260 @@ impl ItemLedger {
             .map_err(|_| TransactionError::InsufficientItems)?;
         state.revision = state.revision.saturating_add(1);
         Ok(())
+    }
+
+    /// Atomically accepts one fire intent, consumes one loaded round, applies
+    /// condition degradation, and records the deterministic jam draw. The
+    /// affected weapon and a candidate RNG state are staged until every
+    /// validation succeeds, so a rejected intent changes neither authority.
+    pub fn fire_weapon_with_policy(
+        &mut self,
+        id: TransactionId,
+        holder: HolderId,
+        weapon_id: ItemInstanceId,
+        base_damage: f32,
+        policy: WeaponConditionPolicy,
+        rng: &mut CombatRngState,
+    ) -> Result<CombatTransactionReceipt, TransactionError> {
+        if let Some(receipt) = self.combat_finalized.get(&id) {
+            return Ok(receipt.clone());
+        }
+        if self.used_transaction_ids.contains(&id) {
+            return Err(TransactionError::DuplicateTransaction(id));
+        }
+
+        let mut candidate_rng = rng.clone();
+        candidate_rng
+            .validate()
+            .map_err(|_| TransactionError::InvalidCombatRng)?;
+        let (condition_before, magazine) = {
+            let state = self
+                .holders
+                .get(&holder)
+                .ok_or(TransactionError::UnknownHolder(holder))?;
+            let current = state
+                .find(weapon_id)
+                .ok_or(TransactionError::InsufficientItems)?;
+            if current.count != 1 {
+                return Err(TransactionError::MutableStack(weapon_id));
+            }
+            if let Some(reason) = current.state.combat.jam {
+                return Err(TransactionError::Jammed(reason));
+            }
+            let condition_before = current.state.condition;
+            let mut magazine = current.state.combat.magazine;
+            ammo::consume_round(&mut magazine).map_err(|reason| match reason {
+                ammo::FireBlockReason::Empty => TransactionError::InsufficientItems,
+                ammo::FireBlockReason::InvalidMagazine => TransactionError::InvalidMagazine,
+            })?;
+            (condition_before, magazine)
+        };
+        let draw = candidate_rng
+            .draw(CombatRngDomain::FireJam)
+            .map_err(|_| TransactionError::InvalidCombatRng)?;
+        let decision = policy
+            .evaluate_fire(base_damage, condition_before, draw)
+            .map_err(map_condition_error)?;
+
+        let (jam, loaded, holder_revision) = {
+            let state = self
+                .holders
+                .get_mut(&holder)
+                .expect("holder was validated before fire mutation");
+            let weapon = state
+                .find_mut(weapon_id)
+                .expect("weapon was validated before fire mutation");
+            weapon.state.combat.magazine = magazine;
+            if policy.max_condition().is_some() {
+                weapon.state.condition = decision.condition_after;
+            }
+            weapon.state.combat.jam = decision.jammed.then_some(JamReason::Fire);
+            let jam = weapon.state.combat.jam;
+            let loaded = weapon.state.combat.magazine.loaded;
+            state.revision = state.revision.saturating_add(1);
+            (jam, loaded, state.revision)
+        };
+        let outcome = if decision.jammed {
+            CombatTransactionOutcome::Jammed
+        } else {
+            CombatTransactionOutcome::Fired
+        };
+        let receipt = CombatTransactionReceipt {
+            id,
+            weapon_id,
+            kind: CombatTransactionKind::Fire,
+            outcome,
+            condition_before: decision.condition_before,
+            condition_after: if policy.max_condition().is_some() {
+                decision.condition_after
+            } else {
+                condition_before
+            },
+            damage_multiplier_milli: Some(quantize_milli(decision.damage_multiplier)),
+            damage_milli: Some(quantize_milli(decision.damage)),
+            jam,
+            rng_draw: Some(draw),
+            loaded,
+            holder_revision,
+        };
+        self.used_transaction_ids.insert(id);
+        self.next_transaction_id =
+            TransactionId(self.next_transaction_id.0.max(id.0.saturating_add(1)));
+        self.combat_finalized.insert(id, receipt.clone());
+        *rng = candidate_rng;
+        Ok(receipt)
+    }
+
+    /// Atomically performs the existing ammo reload and then evaluates the
+    /// reload jam policy against the same weapon instance. Ammo changes and a
+    /// possible jam commit together; a rejected reload leaves both holders and
+    /// the RNG untouched.
+    pub fn reload_weapon_with_policy(
+        &mut self,
+        id: TransactionId,
+        holder: HolderId,
+        weapon_id: ItemInstanceId,
+        request: WeaponReloadRequest,
+        rng: &mut CombatRngState,
+    ) -> Result<CombatTransactionReceipt, TransactionError> {
+        if let Some(receipt) = self.combat_finalized.get(&id) {
+            return Ok(receipt.clone());
+        }
+        if self.used_transaction_ids.contains(&id) {
+            return Err(TransactionError::DuplicateTransaction(id));
+        }
+        let current = self
+            .holders
+            .get(&holder)
+            .and_then(|state| state.find(weapon_id))
+            .ok_or(TransactionError::InsufficientItems)?;
+        if let Some(reason) = current.state.combat.jam {
+            return Err(TransactionError::Jammed(reason));
+        }
+        if current.count != 1 {
+            return Err(TransactionError::MutableStack(weapon_id));
+        }
+        let condition_before = current.state.condition;
+        let mut candidate = self.clone();
+        let mut candidate_rng = rng.clone();
+        candidate_rng
+            .validate()
+            .map_err(|_| TransactionError::InvalidCombatRng)?;
+        let ammo_receipt = candidate.reload_weapon_with_id(
+            id,
+            holder,
+            weapon_id,
+            request.ammo_form_id,
+            request.capacity,
+        )?;
+        let draw = candidate_rng
+            .draw(CombatRngDomain::ReloadJam)
+            .map_err(|_| TransactionError::InvalidCombatRng)?;
+        let jam_decision = request
+            .policy
+            .evaluate_reload(condition_before, draw)
+            .map_err(map_condition_error)?;
+        let (jam, loaded) = {
+            let weapon = candidate
+                .holders
+                .get_mut(&holder)
+                .and_then(|state| state.find_mut(ammo_receipt.weapon_id))
+                .ok_or(TransactionError::InsufficientItems)?;
+            weapon.state.combat.jam = jam_decision.jammed.then_some(JamReason::Reload);
+            (weapon.state.combat.jam, weapon.state.combat.magazine.loaded)
+        };
+        if jam_decision.jammed {
+            let state = candidate
+                .holders
+                .get_mut(&holder)
+                .expect("holder was validated before reload mutation");
+            state.revision = state.revision.saturating_add(1);
+        }
+        let holder_revision = candidate
+            .holders
+            .get(&holder)
+            .map_or(ammo_receipt.holder_revision, |state| state.revision);
+        let receipt = CombatTransactionReceipt {
+            id,
+            weapon_id: ammo_receipt.weapon_id,
+            kind: CombatTransactionKind::Reload,
+            outcome: if jam_decision.jammed {
+                CombatTransactionOutcome::Jammed
+            } else {
+                CombatTransactionOutcome::Reloaded
+            },
+            condition_before: jam_decision.condition,
+            condition_after: jam_decision.condition,
+            damage_multiplier_milli: None,
+            damage_milli: None,
+            jam,
+            rng_draw: Some(draw),
+            loaded,
+            holder_revision,
+        };
+        candidate.combat_finalized.insert(id, receipt.clone());
+        *self = candidate;
+        *rng = candidate_rng;
+        Ok(receipt)
+    }
+
+    /// Clears the canonical jam on one weapon. This is an idempotent
+    /// transaction and deliberately consumes no combat RNG draw.
+    pub fn clear_weapon_jam_with_id(
+        &mut self,
+        id: TransactionId,
+        holder: HolderId,
+        weapon_id: ItemInstanceId,
+    ) -> Result<CombatTransactionReceipt, TransactionError> {
+        if let Some(receipt) = self.combat_finalized.get(&id) {
+            return Ok(receipt.clone());
+        }
+        if self.used_transaction_ids.contains(&id) {
+            return Err(TransactionError::DuplicateTransaction(id));
+        }
+        let mut candidate = self.clone();
+        let state = candidate
+            .holders
+            .get_mut(&holder)
+            .ok_or(TransactionError::UnknownHolder(holder))?;
+        let weapon = state
+            .items
+            .iter_mut()
+            .find(|item| item.id == weapon_id)
+            .ok_or(TransactionError::InsufficientItems)?;
+        if weapon.count != 1 {
+            return Err(TransactionError::MutableStack(weapon_id));
+        }
+        let condition = weapon.state.condition;
+        let previous_jam = weapon.state.combat.jam;
+        if previous_jam.is_some() {
+            weapon.state.combat.jam = None;
+            state.revision = state.revision.saturating_add(1);
+        }
+        let receipt = CombatTransactionReceipt {
+            id,
+            weapon_id,
+            kind: CombatTransactionKind::ClearJam,
+            outcome: if previous_jam.is_some() {
+                CombatTransactionOutcome::Cleared
+            } else {
+                CombatTransactionOutcome::AlreadyClear
+            },
+            condition_before: condition,
+            condition_after: condition,
+            damage_multiplier_milli: None,
+            damage_milli: None,
+            jam: None,
+            rng_draw: None,
+            loaded: weapon.state.combat.magazine.loaded,
+            holder_revision: state.revision,
+        };
+        candidate.used_transaction_ids.insert(id);
+        candidate.next_transaction_id =
+            TransactionId(candidate.next_transaction_id.0.max(id.0.saturating_add(1)));
+        candidate.combat_finalized.insert(id, receipt.clone());
+        *self = candidate;
+        Ok(receipt)
     }
 
     /// Minimal #95 use seam: an explicit use consumes one unit and is the only
@@ -912,6 +1221,18 @@ impl ItemLedger {
         self.next_item_id = ItemInstanceId(id.0.saturating_add(1));
         id
     }
+}
+
+fn map_condition_error(error: ConditionError) -> TransactionError {
+    match error {
+        ConditionError::InvalidMaximum | ConditionError::InvalidDamage(_) => {
+            TransactionError::InvalidWeaponCondition
+        }
+    }
+}
+
+fn quantize_milli(value: f32) -> u32 {
+    (value * 1_000.0).round().max(0.0) as u32
 }
 
 #[cfg(test)]

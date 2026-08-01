@@ -171,7 +171,8 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     let mut app = test_app();
     app.init_resource::<super::super::weapon::PlayerWeaponRuntime>()
         .add_message::<super::super::weapon::FireWeaponRequested>()
-        .add_message::<super::super::weapon::ReloadWeaponRequested>();
+        .add_message::<super::super::weapon::ReloadWeaponRequested>()
+        .add_message::<super::super::weapon::ClearWeaponJamRequested>();
 
     let state = exec(&mut app, "weaponstate");
     assert!(state.ok);
@@ -183,6 +184,7 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     assert_eq!(ammo.value["available"], true);
     let combat = exec(&mut app, "combatstate");
     assert_eq!(combat.value["capabilities"]["ammo"], true);
+    assert_eq!(combat.value["capabilities"]["condition"], true);
     assert_eq!(combat.value["capabilities"]["vats"], false);
     let vats = exec(&mut app, "vatsstate");
     assert_eq!(vats.value["available"], false);
@@ -193,6 +195,7 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
 
     assert!(exec(&mut app, "weaponfire").ok);
     assert!(exec(&mut app, "weaponreload").ok);
+    assert!(exec(&mut app, "weaponclearjam").ok);
     assert_eq!(
         app.world()
             .resource::<Messages<super::super::weapon::FireWeaponRequested>>()
@@ -203,6 +206,13 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
     assert_eq!(
         app.world()
             .resource::<Messages<super::super::weapon::ReloadWeaponRequested>>()
+            .iter_current_update_messages()
+            .count(),
+        1
+    );
+    assert_eq!(
+        app.world()
+            .resource::<Messages<super::super::weapon::ClearWeaponJamRequested>>()
             .iter_current_update_messages()
             .count(),
         1

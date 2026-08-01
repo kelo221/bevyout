@@ -308,6 +308,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         app.insert_resource(world::ActiveSaveState(save.world));
         app.insert_resource(world::CurrentWorldLocation(save.location.clone()));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
+        app.insert_resource(weapon::CombatRngRuntime(save.combat_rng));
         app.world_mut()
             .resource_mut::<dialogue::DialogueRuntime>()
             .restore_snapshot(save.dialogue);

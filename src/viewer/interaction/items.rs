@@ -100,6 +100,10 @@ impl PlayerEquipment {
         self.0.equipped_ammo()
     }
 
+    pub(crate) fn set_equipped_weapon_condition(&mut self, condition: Option<u32>) {
+        self.0.set_weapon_condition(condition);
+    }
+
     pub(crate) fn toggle(
         &mut self,
         key: StackKey,

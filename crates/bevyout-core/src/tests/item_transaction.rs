@@ -1,4 +1,5 @@
 use super::*;
+use crate::combat::{BASIS_POINT_DENOMINATOR, MAX_JAM_CHANCE_BASIS_POINTS};
 use proptest::prelude::*;
 
 fn state(condition: Option<u32>) -> ItemState {
@@ -520,6 +521,136 @@ fn static_merchant_buy_and_sell_are_atomic_and_use_unit_price() {
     assert_eq!(sell.caps_delta[&HolderId::Player], 10);
     assert_eq!(ledger.holders()[&HolderId::Player].caps, 90);
     assert_eq!(ledger.holders()[&merchant].caps, 60);
+}
+
+#[test]
+fn fire_transaction_degrades_canonical_weapon_and_is_idempotent() {
+    let mut weapon = item(1, 0x434f, 1, Some(100));
+    weapon.state.combat.magazine.ammo_form_id = Some(0x4241);
+    weapon.state.combat.magazine.loaded = 2;
+    let mut ledger = ItemLedger::new();
+    ledger
+        .insert_holder(
+            HolderId::Player,
+            holder(vec![weapon, item(2, 0x4241, 20, None)], 0),
+        )
+        .unwrap();
+    let mut rng = CombatRngState::from_seed(42);
+    let policy = WeaponConditionPolicy::with_degradation(Some(100), 5);
+
+    let first = ledger
+        .fire_weapon_with_policy(
+            TransactionId(20),
+            HolderId::Player,
+            ItemInstanceId(1),
+            10.0,
+            policy,
+            &mut rng,
+        )
+        .unwrap();
+    let second = ledger
+        .fire_weapon_with_policy(
+            TransactionId(20),
+            HolderId::Player,
+            ItemInstanceId(1),
+            10.0,
+            policy,
+            &mut rng,
+        )
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.outcome, CombatTransactionOutcome::Fired);
+    assert_eq!(first.condition_before, Some(100));
+    assert_eq!(first.condition_after, Some(95));
+    assert_eq!(first.damage_milli, Some(10_000));
+    assert_eq!(first.weapon_id, ItemInstanceId(1));
+    assert_eq!(rng.draw_index, 1);
+    let weapon = ledger.holders()[&HolderId::Player]
+        .find(ItemInstanceId(1))
+        .unwrap();
+    assert_eq!(weapon.state.condition, Some(95));
+    assert_eq!(weapon.state.combat.magazine.loaded, 1);
+}
+
+#[test]
+fn rejected_jammed_fire_does_not_advance_rng_or_mutate_snapshot() {
+    let mut weapon = item(1, 0x434f, 1, Some(50));
+    weapon.state.combat.magazine.ammo_form_id = Some(0x4241);
+    weapon.state.combat.magazine.loaded = 1;
+    weapon.state.combat.jam = Some(JamReason::Fire);
+    let mut ledger = ItemLedger::new();
+    ledger
+        .insert_holder(HolderId::Player, holder(vec![weapon], 0))
+        .unwrap();
+    let before = ledger.snapshot();
+    let mut rng = CombatRngState::from_seed(7);
+
+    assert_eq!(
+        ledger.fire_weapon_with_policy(
+            TransactionId(21),
+            HolderId::Player,
+            ItemInstanceId(1),
+            10.0,
+            WeaponConditionPolicy::new(Some(100)),
+            &mut rng,
+        ),
+        Err(TransactionError::Jammed(JamReason::Fire))
+    );
+    assert_eq!(ledger.snapshot(), before);
+    assert_eq!(rng.draw_index, 0);
+}
+
+#[test]
+fn reload_can_jam_and_clear_preserves_instance_identity() {
+    let seed = (0..10_000u64)
+        .find(|seed| {
+            let mut rng = CombatRngState::from_seed(*seed);
+            let draw = rng.draw(CombatRngDomain::ReloadJam).unwrap();
+            draw.value % BASIS_POINT_DENOMINATOR < MAX_JAM_CHANCE_BASIS_POINTS
+        })
+        .expect("a deterministic seed must produce a reload jam draw");
+    let mut ledger = ItemLedger::new();
+    ledger
+        .insert_holder(
+            HolderId::Player,
+            holder(
+                vec![item(1, 0x434f, 1, Some(0)), item(2, 0x4241, 12, None)],
+                0,
+            ),
+        )
+        .unwrap();
+    let mut rng = CombatRngState::from_seed(seed);
+    let jammed = ledger
+        .reload_weapon_with_policy(
+            TransactionId(22),
+            HolderId::Player,
+            ItemInstanceId(1),
+            WeaponReloadRequest {
+                ammo_form_id: 0x4241,
+                capacity: 12,
+                policy: WeaponConditionPolicy::new(Some(100)),
+            },
+            &mut rng,
+        )
+        .unwrap();
+    assert_eq!(jammed.outcome, CombatTransactionOutcome::Jammed);
+    assert_eq!(jammed.jam, Some(JamReason::Reload));
+    assert_eq!(jammed.weapon_id, ItemInstanceId(1));
+    assert_eq!(rng.draw_index, 1);
+    assert_eq!(jammed.holder_revision, 2);
+    assert_eq!(ledger.holders()[&HolderId::Player].revision, 2);
+
+    let cleared = ledger
+        .clear_weapon_jam_with_id(TransactionId(23), HolderId::Player, jammed.weapon_id)
+        .unwrap();
+    assert_eq!(cleared.outcome, CombatTransactionOutcome::Cleared);
+    assert_eq!(cleared.weapon_id, jammed.weapon_id);
+    let weapon = ledger.holders()[&HolderId::Player]
+        .find(jammed.weapon_id)
+        .unwrap();
+    assert_eq!(weapon.state.combat.jam, None);
+    assert_eq!(weapon.state.combat.magazine.loaded, 12);
 }
 
 proptest::proptest! {

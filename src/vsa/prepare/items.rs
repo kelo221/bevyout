@@ -10,8 +10,10 @@ use crate::vsa::openmw_esm4::BaseAudioRecord;
 /// v3 makes `view` reject pre-#98 catalogs instead). Issue #123 fixed
 /// `NOTE.text` decoding (it was always `None`); v4 forces re-`prepare` so
 /// cached catalogs pick up real holotape/note text instead of a stale
-/// `None` that would otherwise deserialize cleanly and hide the fix.
-pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v9-transfer-audio-defaults";
+/// `None` that would otherwise deserialize cleanly and hide the fix. Wave 3
+/// bumps the meaning revision because weapon condition is now consumed by the
+/// canonical combat policy and must not run against a pre-wave catalog.
+pub(crate) const ITEM_CATALOG_REVISION: &str = "openmw-items-v10-combat-condition";
 pub(crate) const DEFAULT_ITEM_TRANSFER_SOUND_EDITOR_ID: &str = "UIMenuOK";
 
 /// Synthetic one-per-base references route every supported item model through

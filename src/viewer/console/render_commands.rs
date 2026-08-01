@@ -1,9 +1,9 @@
 //! Rendering, timing, and capture console commands.
 
 use super::*;
-use crate::viewer::day_night::{profile_for_cell, DayNightPreview, GameClock, WeatherTransition};
+use crate::viewer::day_night::{DayNightPreview, GameClock, WeatherTransition, profile_for_cell};
 use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
-use crate::viewer::{image_space_bloom_values, ImageSpaceBloomOverrides, LoadedSceneManifest};
+use crate::viewer::{ImageSpaceBloomOverrides, LoadedSceneManifest, image_space_bloom_values};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 
 pub(super) struct RenderCommandProvider;
@@ -438,9 +438,11 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     );
     values.insert(
         "dielectric_specular".into(),
-        json!(world
-            .resource::<MaterialClampSettings>()
-            .dielectric_enabled() as u8),
+        json!(
+            world
+                .resource::<MaterialClampSettings>()
+                .dielectric_enabled() as u8
+        ),
     );
     values.insert(
         "roughness_scale".into(),
@@ -468,9 +470,11 @@ pub(super) fn render_values(world: &mut World) -> Result<Map<String, Value>, Con
     );
     values.insert(
         "day_night_preview".into(),
-        json!(world
-            .get_resource::<DayNightPreview>()
-            .is_some_and(|preview| preview.0) as u8),
+        json!(
+            world
+                .get_resource::<DayNightPreview>()
+                .is_some_and(|preview| preview.0) as u8
+        ),
     );
     Ok(values)
 }

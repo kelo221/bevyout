@@ -14,11 +14,8 @@ fn built_catalogs_carry_the_pinned_revision() {
         &HashMap::new(),
         "abc",
     );
-    assert_eq!(catalog.revision, "openmw-items-v9-transfer-audio-defaults");
-    assert_eq!(
-        ITEM_CATALOG_REVISION,
-        "openmw-items-v9-transfer-audio-defaults"
-    );
+    assert_eq!(catalog.revision, "openmw-items-v10-combat-condition");
+    assert_eq!(ITEM_CATALOG_REVISION, "openmw-items-v10-combat-condition");
 }
 
 #[test]
