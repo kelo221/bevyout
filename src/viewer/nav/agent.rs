@@ -607,6 +607,12 @@ struct DoorTraversal {
 #[derive(Component)]
 struct MergeTraversal {
     target: Vec3,
+    /// Completion tolerance captured from the distance at which the agent
+    /// entered the traversal. A short portal can end up closer than the
+    /// normal `0.5 m` arrival tolerance while the agent is still on the
+    /// source side; using the fixed tolerance would complete that crossing
+    /// before the KCC gets a chance to move it.
+    reached_distance: f32,
     /// Seconds elapsed since this crossing started.
     elapsed: f32,
     /// Absolute wall-clock deadline (seconds): computed once at traversal
@@ -3135,6 +3141,7 @@ pub(crate) fn tna_command(
         "bind" => bind_agent(world, rest),
         "goto" => goto_agent(world, rest),
         "path" => path_probe(world, rest),
+        "probe" => animation_link_probe(world, rest),
         "travel" => travel_agent(world, rest),
         "status" => agent_status(world, rest),
         "despawn" => despawn_agent(world, rest),
@@ -3142,14 +3149,14 @@ pub(crate) fn tna_command(
         other => Err(ConsoleError::new(
             "unknown_subcommand",
             format!(
-                "unknown tna subcommand '{other}'; expected spawn, bind, goto, path, travel, status, despawn, or solverate"
+                "unknown tna subcommand '{other}'; expected spawn, bind, goto, path, probe, travel, status, despawn, or solverate"
             ),
         )),
     }
 }
 
 fn usage_reply() -> ConsoleCommandResult {
-    let usage = "usage: tna spawn [<index>]|bind [<index>] <actor-reference-formid>|goto [<index>] <x> <y> <z>|goto [<index>] player|path [<index>] <x> <y> <z>|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
+    let usage = "usage: tna spawn [<index>]|bind [<index>] <actor-reference-formid>|goto [<index>] <x> <y> <z>|goto [<index>] player|path [<index>] <x> <y> <z>|probe [<index>] <sx> <sy> <sz> <ex> <ey> <ez>|travel [<index>] <door-formid>|status [<index>]|despawn [<index>]|solverate [<n>]";
     ConsoleCommandResult::new(json!({ "usage": usage }), vec![usage.to_string()])
 }
 
@@ -3746,6 +3753,181 @@ fn path_probe(world: &mut World, rest: &[String]) -> Result<ConsoleCommandResult
             "end_island": end_island,
             "steps": steps,
             "animation_links": animation_links,
+        }),
+        vec![line],
+    ))
+}
+
+struct AnimationLinkDebugCapture {
+    link_entity: Entity,
+    agent_entity: Entity,
+    installed: bool,
+    in_corridor: bool,
+    next_step: bool,
+}
+
+impl bevy_landmass::debug::DebugDrawer<ThreeD> for AnimationLinkDebugCapture {
+    fn add_point(&mut self, _point_type: bevy_landmass::debug::PointType, _point: Vec3) {}
+
+    fn add_line(&mut self, line_type: bevy_landmass::debug::LineType, _line: [Vec3; 2]) {
+        match line_type {
+            bevy_landmass::debug::LineType::AnimationLinkConnection(link)
+                if link == self.link_entity =>
+            {
+                self.installed = true
+            }
+            bevy_landmass::debug::LineType::CorridorAnimationLink {
+                agent,
+                animation_link,
+            } if agent == self.agent_entity && animation_link == self.link_entity => {
+                self.in_corridor = true;
+            }
+            bevy_landmass::debug::LineType::PathAnimationLink {
+                agent,
+                animation_link,
+            } if agent == self.agent_entity && animation_link == self.link_entity => {
+                self.next_step = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn add_triangle(
+        &mut self,
+        _triangle_type: bevy_landmass::debug::TriangleType,
+        _triangle: [Vec3; 3],
+    ) {
+    }
+}
+
+fn animation_link_probe(
+    world: &mut World,
+    rest: &[String],
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let (index, start, end) = match rest {
+        [sx, sy, sz, ex, ey, ez] => (
+            0,
+            parse_goto_point(sx, sy, sz)?,
+            parse_goto_point(ex, ey, ez)?,
+        ),
+        [index, sx, sy, sz, ex, ey, ez] => (
+            parse_agent_index(index)?,
+            parse_goto_point(sx, sy, sz)?,
+            parse_goto_point(ex, ey, ez)?,
+        ),
+        _ => {
+            return Err(ConsoleError::new(
+                "bad_arity",
+                "tna probe requires [<index>] <sx> <sy> <sz> <ex> <ey> <ez>",
+            ));
+        }
+    };
+    let Some(agent_entity) = world.resource::<TestNavAgentState>().get(index) else {
+        return Err(ConsoleError::new(
+            "no_agent",
+            "no test nav agent is spawned at this index; use tna spawn first",
+        ));
+    };
+    let archipelago_entity = world
+        .resource::<NavArchipelagoState>()
+        .archipelago
+        .ok_or_else(|| ConsoleError::new("no_archipelago", "no nav archipelago is active"))?;
+    let link_entity = world
+        .resource::<NavArchipelagoState>()
+        .links
+        .iter()
+        .copied()
+        .find(|&entity| {
+            world
+                .get::<AnimationLink3d>(entity)
+                .is_some_and(|link| {
+                    let link_start = (link.start_edge.0 + link.start_edge.1) * 0.5;
+                    let link_end = (link.end_edge.0 + link.end_edge.1) * 0.5;
+                    link_start.distance(start) <= 0.05 && link_end.distance(end) <= 0.05
+                })
+        })
+        .ok_or_else(|| {
+            ConsoleError::new(
+                "link_not_found",
+                format!(
+                    "no directional animation link matches ({:.3},{:.3},{:.3}) -> ({:.3},{:.3},{:.3})",
+                    start.x, start.y, start.z, end.x, end.y, end.z
+                ),
+            )
+        })?;
+    let archipelago = world
+        .get::<Archipelago3d>(archipelago_entity)
+        .ok_or_else(|| ConsoleError::new("no_archipelago", "no nav archipelago is active"))?;
+    let landmass_state = world
+        .get::<AgentState>(agent_entity)
+        .copied()
+        .unwrap_or_default();
+    let reach_distance = world
+        .get::<AnimationLinkReachedDistance>(agent_entity)
+        .map(|distance| distance.0);
+    let using_animation_link = world.get::<UsingAnimationLink>(agent_entity).is_some();
+    let reached_animation_link = world
+        .get::<ReachedAnimationLink3d>(agent_entity)
+        .map(|link| format!("{:?}", link.link_entity));
+    let desired_velocity = world
+        .get::<AgentDesiredVelocity3d>(agent_entity)
+        .map(|velocity| velocity.velocity())
+        .unwrap_or_default();
+    let (door_link_state, active_link) = world
+        .get::<AgentRuntime>(agent_entity)
+        .map(|runtime| (runtime.door_link, runtime.active_link))
+        .unwrap_or_default();
+    let link_kind = world
+        .resource::<NavArchipelagoState>()
+        .link_kinds
+        .get(&link_entity)
+        .map(|kind| format!("{kind:?}"));
+    let merge_traversal = world.get::<MergeTraversal>(agent_entity).is_some();
+    let pause_agent = world.get::<PauseAgent>(agent_entity).is_some();
+    let mut capture = AnimationLinkDebugCapture {
+        link_entity,
+        agent_entity,
+        installed: false,
+        in_corridor: false,
+        next_step: false,
+    };
+    bevy_landmass::debug::draw_archipelago_debug(archipelago, &mut capture)
+        .map_err(|error| ConsoleError::new("nav_data_dirty", error.to_string()))?;
+    let line = format!(
+        "merge-probe link={link_entity:?} kind={link_kind:?} installed={} in_corridor={} next_step={} state={landmass_state:?} reach_distance={:?} using={} reached={:?} door={door_link_state:?} active={active_link:?} merge_traversal={merge_traversal} paused={pause_agent} desired=({:.2},{:.2},{:.2})",
+        capture.installed,
+        capture.in_corridor,
+        capture.next_step,
+        reach_distance,
+        using_animation_link,
+        reached_animation_link,
+        desired_velocity.x,
+        desired_velocity.y,
+        desired_velocity.z,
+    );
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "index": index,
+            "link_entity": format!("{link_entity:?}"),
+            "link_kind": link_kind,
+            "start": [start.x, start.y, start.z],
+            "end": [end.x, end.y, end.z],
+            "installed": capture.installed,
+            "in_corridor": capture.in_corridor,
+            "next_step": capture.next_step,
+            "landmass_state": format!("{landmass_state:?}"),
+            "reach_distance": reach_distance,
+            "using_animation_link": using_animation_link,
+            "reached_animation_link": reached_animation_link,
+            "door_link_state": format!("{door_link_state:?}"),
+            "active_link": active_link.map(|link| format!("{link:?}")),
+            "merge_traversal": merge_traversal,
+            "pause_agent": pause_agent,
+            "desired_velocity": [
+                desired_velocity.x,
+                desired_velocity.y,
+                desired_velocity.z,
+            ],
         }),
         vec![line],
     ))
@@ -4774,12 +4956,14 @@ fn merge_traversal_system(
 
     for (entity, mut transform, mut kcc, mut traversal, mut runtime, current_target) in &mut agents
     {
-        if movement_policy::nav_point_reached(
-            transform.translation.to_array(),
-            traversal.target.to_array(),
-            MERGE_TRAVERSAL_REACHED_DISTANCE,
-            AGENT_HEIGHT,
-        ) {
+        if traversal.elapsed > 0.0
+            && movement_policy::nav_point_reached(
+                transform.translation.to_array(),
+                traversal.target.to_array(),
+                traversal.reached_distance,
+                AGENT_HEIGHT,
+            )
+        {
             commands
                 .entity(entity)
                 .remove::<MergeTraversal>()
@@ -4921,6 +5105,20 @@ fn resume_pending_merge_repath_system(
 fn merge_traversal_timeout(initial_distance: f32) -> f32 {
     (initial_distance.max(0.0) / AGENT_DESIRED_SPEED) * MERGE_TRAVERSAL_TIMEOUT_FACTOR
         + MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS
+}
+
+/// Keeps a short merge portal from satisfying the normal arrival tolerance
+/// while the agent is still at its source endpoint. The tolerance remains the
+/// normal `0.5 m` for ordinary links, but for a short link it is at most half
+/// the distance measured when the crossing starts, guaranteeing at least one
+/// real KCC movement step before completion. An exact zero-distance crossing
+/// is already at its destination and keeps the ordinary tolerance.
+fn merge_traversal_reached_distance(initial_distance: f32) -> f32 {
+    if initial_distance <= f32::EPSILON {
+        MERGE_TRAVERSAL_REACHED_DISTANCE
+    } else {
+        MERGE_TRAVERSAL_REACHED_DISTANCE.min(initial_distance * 0.5)
+    }
 }
 
 /// Requests the door `door_form_id` open through the same boundary the
@@ -5263,6 +5461,7 @@ fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity) {
                         UsingAnimationLink,
                         MergeTraversal {
                             target: end_point,
+                            reached_distance: merge_traversal_reached_distance(initial_distance),
                             elapsed: 0.0,
                             timeout: merge_traversal_timeout(initial_distance),
                             link_kind: kind,

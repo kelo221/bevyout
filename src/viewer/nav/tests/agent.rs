@@ -526,6 +526,7 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
             },
             MergeTraversal {
                 target,
+                reached_distance: merge_traversal_reached_distance(2.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(2.0),
                 link_kind: 1,
@@ -636,6 +637,7 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
             },
             MergeTraversal {
                 target,
+                reached_distance: merge_traversal_reached_distance(5.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(5.0),
                 link_kind: 2,
