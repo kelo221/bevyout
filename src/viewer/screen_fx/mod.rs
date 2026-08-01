@@ -203,7 +203,7 @@ fn clear_screen_fx_on_exit(
     overlays: Query<Entity, With<ScreenFxOverlay>>,
 ) {
     runtime.policy.apply(policy::ScreenFxRequest::Clear {
-        reason: policy::ScreenFxClearReason::SaveLoad,
+        reason: policy::ScreenFxClearReason::Teardown,
     });
     runtime.active_cell_form_id = None;
     runtime.last_camera_mode = None;

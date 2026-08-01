@@ -212,6 +212,15 @@ fn weapon_commands_expose_state_and_queue_normal_action_requests() {
 #[test]
 fn screen_fx_commands_report_and_queue_catalog_modifier_lifecycle() {
     let mut app = test_app();
+    let help = exec(&mut app, "help screenfx");
+    assert!(help.ok);
+    assert!(
+        help.value["signature"]
+            .as_str()
+            .expect("screenfx help signature")
+            .contains("settings")
+    );
+
     app.world_mut()
         .resource_mut::<super::super::screen_fx::ScreenFxCatalog>()
         .modifiers

@@ -15,7 +15,7 @@ impl ConsoleCommandProvider for ScreenFxCommandProvider {
         registry.register(
             ConsoleCommand::new(
                 "screenfx",
-                "screenfx [status|start|stop|clear] [form-id] [priority]",
+                "screenfx status | start <form-id> [priority] | stop <form-id> | clear [reason] | settings <overall> <blood> <flashes> <motion-distortion>",
                 "Inspect, start, stop, or clear prepared IMAD screen feedback.",
                 screen_fx,
             )
