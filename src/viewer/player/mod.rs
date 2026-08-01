@@ -22,7 +22,8 @@ use crate::app_state::{AppState, GameplayModal};
 use crate::console::{ConsoleSessionStore, RefRegistry};
 use crate::vsa::{
     PreparedPhysicsAsset, PreparedPhysicsBody, PreparedPhysicsClassification, PreparedPhysicsShape,
-    PreparedPhysicsSource, PreparedSceneManifest, body_blocks_player, read_physics_asset,
+    PreparedPhysicsSource, PreparedPlacement, PreparedSceneManifest, body_blocks_player,
+    read_physics_asset,
 };
 
 use super::FlyCamera;
@@ -98,7 +99,7 @@ impl Default for CameraModeState {
     }
 }
 
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Default)]
 pub(crate) struct FpsPlayer {
     yaw: f32,
     pitch: f32,
@@ -284,6 +285,14 @@ impl PreparedCollisionWorld {
     /// (velocity snapshot) and apply (live-body restore) paths.
     pub(crate) fn dynamic_body_of(&self, entity: Entity) -> Option<BodyId> {
         self.dynamic_bodies.get(&entity).copied()
+    }
+
+    pub(crate) fn has_cell_colliders(&self, cell: u32) -> bool {
+        self.ledger.is_tracked(cell)
+    }
+
+    pub(crate) fn static_body(&self) -> Option<BodyId> {
+        self.static_body
     }
 }
 

@@ -41,6 +41,7 @@ mod selectors;
 mod session;
 mod static_shadows;
 mod visual;
+mod worldspace_lod;
 
 pub(crate) use actor_animation::*;
 pub(crate) use actor_animation_cache::*;
@@ -76,20 +77,20 @@ pub(crate) use selectors::*;
 pub(crate) use session::*;
 pub(crate) use static_shadows::*;
 pub(crate) use visual::*;
+pub(crate) use worldspace_lod::*;
 
 mod orchestrator;
 
 pub use orchestrator::prepare;
 
 use super::assets::{
-    ACTOR_CONVERTER_REVISION, ActorAnimationClipJob, ActorAnimationPackJob,
-    ActorAnimationPackReport, ActorApparelInput, ActorAssemblyDescriptor, ActorBodyPartInput,
-    AssetJobKind, BlenderAssetJob, NATIVE_ACTOR_CONVERTER_REVISION, NATIVE_NIF_CONVERTER_REVISION,
-    NATIVE_PREPARED_CONVERTER_REVISION, NIF_CONVERTER_REVISION, PREPARED_CONVERTER_REVISION,
-    RootTransformPolicy, actor_animation_pack_fingerprint, asset_conversion, audit_glb_visuals,
-    canonical_actor_assembly, content_addressed_glb_name, convert_staged_textures, find_blender,
-    load_archives, read_actor_animation_report, read_glb_animation_sound_cues, resolve_asset,
-    root_transform_policy, run_actor_animation_batch, run_blender_batch,
+    ActorAnimationClipJob, ActorAnimationPackJob, ActorAnimationPackReport, ActorApparelInput,
+    ActorAssemblyDescriptor, ActorBodyPartInput, AssetConversion, AssetJob, AssetJobKind,
+    NATIVE_ACTOR_CONVERTER_REVISION, NATIVE_NIF_CONVERTER_REVISION,
+    NATIVE_PREPARED_CONVERTER_REVISION, RootTransformPolicy, actor_animation_pack_fingerprint,
+    asset_conversion, audit_glb_visuals, canonical_actor_assembly, content_addressed_glb_name,
+    convert_staged_textures, load_archives, read_actor_animation_report,
+    read_glb_animation_sound_cues, resolve_asset, root_transform_policy,
     run_native_actor_animation_batch, stage_textures, validate_actor_animation_glb,
     validate_actor_glb, validate_asset_cache_pair, validate_glb_images,
 };
@@ -118,12 +119,14 @@ use super::physics::{
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedPhysicsAsset, classify_placement, dynamic_proxy_bounds,
     dynamic_rejection_reason, physics_sidecar_name, read_physics_asset,
 };
+#[cfg(test)]
+pub(crate) use super::plugin::parse_content_set;
 use super::plugin::{
     ActorBaseConfig, BaseRecord, ParsedPlugin, PluginSource, RECORD_DELETED, RECORD_DISABLED,
     RecipeItemRecord, RecipeRecord, ReferenceKind, ReferenceRecord, SoundRecord,
-    SoundReferenceRecord, parse_content_set, read_master_names,
+    SoundReferenceRecord, parse_content_set_all, read_master_names,
 };
-use crate::cli::{PrepareArgs, PrepareConverter};
+use crate::cli::PrepareArgs;
 
 fn prepared_lighting(lighting: LightingData) -> PreparedCellLighting {
     PreparedCellLighting {

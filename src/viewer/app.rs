@@ -3,6 +3,7 @@ use super::*;
 pub(crate) struct RunViewOptions {
     pub(crate) disable_physics: bool,
     pub(crate) realtime_shadows: bool,
+    pub(crate) worldspace_lod: bool,
     pub(crate) trace_seconds: Option<f32>,
     pub(crate) day_night_cycle_seconds: Option<f32>,
     pub(crate) agent_port: Option<u16>,
@@ -14,6 +15,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     let RunViewOptions {
         disable_physics,
         realtime_shadows,
+        worldspace_lod,
         trace_seconds,
         day_night_cycle_seconds,
         agent_port,
@@ -161,14 +163,17 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
     app.insert_resource(actor_animation_catalogs);
     app.insert_resource(screen_fx_catalog);
     // F51.4: `[world] resident_cell_limit` in `.bevyout/config.toml` (or the
-    // user config); `view`'s CLI args have no `--config` override plumbed
-    // through yet, so the typed group carries the discovered value into the
-    // world plugin and defaults to 4 when no config file is found.
+    // user config) remains the conservative interior graph-preload budget.
+    // `[world]` limits are intentionally separate: interior preloading keeps
+    // its conservative graph budget while exterior streaming defaults to the
+    // authored 5x5 uGrids-style window.
     app.add_plugins(plugins::ViewerPlugins {
         disable_physics,
         resident_cell_limit: crate::config::resident_cell_limit(),
+        exterior_resident_cell_limit: crate::config::exterior_resident_cell_limit(),
         agent_port,
         day_night_cycle_seconds,
+        worldspace_lod,
     });
     app.insert_resource(LoadingTarget::NewGame {
         manifest: manifest_path.clone(),
@@ -301,6 +306,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         app.insert_resource(canonical);
         app.insert_resource(world_items::NextRuntimeItemId(save.next_runtime_item_id));
         app.insert_resource(world::ActiveSaveState(save.world));
+        app.insert_resource(world::CurrentWorldLocation(save.location.clone()));
         app.insert_resource(world::PlaythroughSeed(save.rng_state));
         app.world_mut()
             .resource_mut::<dialogue::DialogueRuntime>()

@@ -90,6 +90,23 @@ fn a_default_polygon_is_walkable() {
 }
 
 #[test]
+fn exterior_runtime_graph_keeps_one_tile_and_drops_invalid_triangles() {
+    let graph = exterior_nav_graph(
+        0x1234,
+        vec![[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0]],
+        vec![[0, 1, 2], [0, 2, 9]],
+    );
+    assert_eq!(graph.cell_form_id, 0x1234);
+    assert_eq!(graph.meshes.len(), 1);
+    assert_eq!(graph.meshes[0].form_id, 0x1234);
+    assert_eq!(graph.meshes[0].vertices.len(), 3);
+    assert_eq!(graph.meshes[0].polygons.len(), 1);
+    assert_eq!(graph.counters.polygons, 1);
+    assert_eq!(graph.bounds.min, [0.0, 1.0, 0.0]);
+    assert_eq!(graph.bounds.max, [1.0, 1.0, 1.0]);
+}
+
+#[test]
 fn converts_a_known_vertex_to_bevy_metres() {
     let mut mesh = mesh(1);
     mesh.vertices.push(NavGraphVertexInput {

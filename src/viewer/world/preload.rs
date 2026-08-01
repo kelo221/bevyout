@@ -605,6 +605,7 @@ mod issue_199_tests {
             mutability_summary: Default::default(),
             leveled_lists: Default::default(),
             dialogue: None,
+            exterior: None,
         }
     }
 

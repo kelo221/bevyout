@@ -85,6 +85,7 @@ fn minimal_manifest(
         mutability_summary: Default::default(),
         leveled_lists: Default::default(),
         dialogue: None,
+        exterior: None,
     }
 }
 

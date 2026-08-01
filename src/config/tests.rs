@@ -38,8 +38,6 @@ const SAMPLE_CONFIG: &str = r#"
     plugin = "config-plugin.esm"
 
     [tools]
-    blender = "/config/blender"
-    irradiance_blender = "/config/irradiance-blender"
     ktx = "/config/ktx"
 
     [output]
@@ -69,7 +67,6 @@ fn prepare_cli_value_wins_and_none_is_filled_from_config() {
     // None is filled from config.
     assert_eq!(args.plugin.as_deref(), Some(Path::new("config-plugin.esm")));
     assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
-    assert_eq!(args.blender.as_deref(), Some(Path::new("/config/blender")));
 }
 
 #[test]
@@ -82,8 +79,6 @@ fn bake_cli_value_wins_and_none_is_filled_from_config() {
         "scene.ron",
         "--config",
         config.path().to_str().unwrap(),
-        "--blender",
-        "/cli/blender",
     ])
     .unwrap();
 
@@ -92,14 +87,8 @@ fn bake_cli_value_wins_and_none_is_filled_from_config() {
     let CommandLine::Bake(args) = &cli.command else {
         panic!("expected bake command");
     };
-    // CLI-provided value is not overwritten.
-    assert_eq!(args.blender.as_deref(), Some(Path::new("/cli/blender")));
     // None is filled from config.
     assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
-    assert_eq!(
-        args.irradiance_blender.as_deref(),
-        Some(Path::new("/config/irradiance-blender"))
-    );
     assert_eq!(args.toktx.as_deref(), Some(Path::new("/config/ktx")));
 }
 
@@ -126,11 +115,6 @@ fn render_cli_value_wins_and_none_is_filled_from_config() {
     assert_eq!(args.game_root.as_deref(), Some(Path::new("/cli/game-root")));
     // None is filled from config.
     assert_eq!(args.plugin.as_deref(), Some(Path::new("config-plugin.esm")));
-    assert_eq!(args.blender.as_deref(), Some(Path::new("/config/blender")));
-    assert_eq!(
-        args.irradiance_blender.as_deref(),
-        Some(Path::new("/config/irradiance-blender"))
-    );
     assert_eq!(args.toktx.as_deref(), Some(Path::new("/config/ktx")));
     assert_eq!(args.cache_dir.as_deref(), Some(Path::new("/config/cache")));
 }
@@ -291,6 +275,28 @@ fn resident_cell_limit_defaults_when_config_path_does_not_exist() {
     assert_eq!(
         resident_cell_limit_from_path(Some(nonexistent)),
         DEFAULT_RESIDENT_CELL_LIMIT
+    );
+}
+
+#[test]
+fn exterior_resident_cell_limit_reads_the_configured_value() {
+    let config = TempConfigFile::new(
+        r#"
+        [world]
+        exterior_resident_cell_limit = 9
+        "#,
+    );
+    assert_eq!(
+        exterior_resident_cell_limit_from_path(Some(config.path().to_path_buf())),
+        9
+    );
+}
+
+#[test]
+fn exterior_resident_cell_limit_defaults_to_five_by_five() {
+    assert_eq!(
+        exterior_resident_cell_limit_from_path(None),
+        DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT
     );
 }
 

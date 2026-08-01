@@ -1,3 +1,14 @@
+# Legacy Blender compatibility/preview script.
+#
+# Native Rust NIF preparation is now the authoritative production path. This
+# file is retained only for explicitly requested legacy preview or comparison
+# work and is not invoked by exterior preparation or runtime streaming.
+# Remaining native gaps belong to the M6 package pipeline: LAND terrain
+# material/layer fidelity, VWD/distant geometry generation, and any NIF block
+# that the native report records as unsupported or lossy. Keep those gaps
+# visible in the native conversion report instead of silently routing through
+# Blender.
+
 import bmesh, bpy, gzip, json, math, os, re, sys
 from mathutils import Matrix, Vector
 

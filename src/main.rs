@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use bevyout::{
-    Cli, CommandLine, animation_zoo, apply, bake, cells, nif_convert, prepare, ragdoll_lab, render,
-    report, script, view,
+    Cli, CommandLine, animation_zoo, apply, bake, cells, exterior_catalog,
+    exterior_conversion_report, nif_convert, prepare, ragdoll_lab, render, report, script, view,
 };
 
 fn main() -> Result<()> {
@@ -20,5 +20,7 @@ fn main() -> Result<()> {
         CommandLine::Cells(args) => cells(args),
         CommandLine::Script(args) => script(args),
         CommandLine::NifConvert(args) => nif_convert(args),
+        CommandLine::ExteriorConversionReport(args) => exterior_conversion_report(args),
+        CommandLine::ExteriorCatalog(args) => exterior_catalog(args),
     }
 }

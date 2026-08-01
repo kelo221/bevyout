@@ -2,7 +2,120 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::console::ConsoleSessionId;
+use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
 use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
+use bevyout_core::manifest::exterior::ExteriorBorderPortal;
+
+#[test]
+fn animation_link_source_portal_keeps_horizontal_extent_for_vertical_travel() {
+    let (start, end) =
+        animation_link_start_edge(Vec3::new(4.0, 10.0, 8.0), Vec3::new(4.0, 12.0, 8.0));
+
+    assert_ne!(start, end);
+    assert!(start.is_finite());
+    assert!(end.is_finite());
+    assert!((end.x - start.x).abs() > 0.0);
+    assert_eq!(end.z, start.z);
+}
+
+#[test]
+fn exterior_portal_link_endpoints_are_inset_into_the_owning_cell() {
+    let interval = [[10.0, 20.0, 30.0], [10.0, 21.0, 32.0]];
+
+    let min_x = inset_exterior_portal_interval(interval, 1);
+    assert_eq!(min_x[0][0], 10.0 + EXTERIOR_PORTAL_LINK_INSET_METRES);
+    assert_eq!(min_x[0][1], interval[0][1]);
+    assert_eq!(min_x[0][2], interval[0][2]);
+
+    let max_x = inset_exterior_portal_interval(interval, 0);
+    assert_eq!(max_x[0][0], 10.0 - EXTERIOR_PORTAL_LINK_INSET_METRES);
+
+    let min_z = inset_exterior_portal_interval(interval, 2);
+    assert_eq!(min_z[0][2], 30.0 + EXTERIOR_PORTAL_LINK_INSET_METRES);
+
+    let max_z = inset_exterior_portal_interval(interval, 3);
+    assert_eq!(max_z[0][2], 30.0 - EXTERIOR_PORTAL_LINK_INSET_METRES);
+}
+
+#[test]
+fn exterior_portal_side_selection_is_lowest_residual_and_deterministic() {
+    let graph = PreparedNavGraph {
+        meshes: vec![PreparedNavMesh {
+            form_id: 0x20,
+            cell_form_id: Some(0x10),
+            vertices: vec![
+                [0.6, 0.0, 0.0],
+                [0.6, 0.0, 2.0],
+                [0.6, 1.0, 1.0],
+                [0.02, 0.0, 0.0],
+                [0.02, 0.0, 2.0],
+                [0.02, 1.0, 1.0],
+            ],
+            polygons: vec![
+                PreparedNavPolygon {
+                    index: 7,
+                    vertex_indices: [0, 1, 2],
+                    ..default()
+                },
+                PreparedNavPolygon {
+                    index: 3,
+                    vertex_indices: [3, 4, 5],
+                    ..default()
+                },
+            ],
+            ..default()
+        }],
+        ..default()
+    };
+    let portal = ExteriorBorderPortal {
+        edge: 1,
+        start: [0.0, 0.0, 0.0],
+        end: [0.0, 0.0, 2.0],
+        tolerance: 0.75,
+    };
+
+    let side = find_exterior_portal_side(&graph, &portal, 0x10).expect("matching side");
+    assert_eq!(side.triangle_index, 3);
+    assert_eq!(side.matched_edge, 0);
+    assert!(side.residual < 0.1);
+}
+
+#[test]
+fn exterior_portal_points_stay_inside_selected_triangles_and_source_segments() {
+    let left = ExteriorPortalSide {
+        mesh_form_id: 1,
+        triangle_index: 1,
+        interval: [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]],
+        triangle: [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.6, 0.0, 1.0]],
+        matched_edge: 0,
+        residual: 0.0,
+        border_plane_residual: 0.0,
+    };
+    let right = ExteriorPortalSide {
+        mesh_form_id: 2,
+        triangle_index: 2,
+        interval: [[1.0, 0.0, 0.0], [1.0, 0.0, 2.0]],
+        triangle: [[1.0, 0.0, 0.0], [1.0, 0.0, 2.0], [0.4, 0.0, 1.0]],
+        matched_edge: 0,
+        residual: 0.0,
+        border_plane_residual: 0.0,
+    };
+
+    let (left_point, right_point) =
+        select_exterior_portal_points(&left, 1, &right, 0).expect("safe portal points");
+    assert!(point_in_triangle_xz(left_point, left.triangle));
+    assert!(point_in_triangle_xz(right_point, right.triangle));
+    assert!(source_segment_inside_triangle(
+        left_point,
+        right_point,
+        left.triangle
+    ));
+    assert!(source_segment_inside_triangle(
+        right_point,
+        left_point,
+        right.triangle
+    ));
+}
 
 fn invocation(args: &[&str]) -> ConsoleInvocation {
     ConsoleInvocation {
@@ -398,6 +511,11 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
     );
     world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
 
+    let link = world.spawn_empty().id();
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 1 });
     let target = Vec3::new(2.0, AGENT_HEIGHT / 2.0, 0.0);
     let agent = world
         .spawn((
@@ -412,12 +530,21 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
                 ..default()
             },
             MergeTraversal {
+                source: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 target,
+                crossing_started: true,
+                reached_distance: merge_traversal_reached_distance(2.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(2.0),
                 link_kind: 1,
             },
             UsingAnimationLink,
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
+                end_point: target,
+            },
+            AgentTarget3d::Point(target),
         ))
         .id();
     world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
@@ -438,7 +565,13 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
         "a clear crossing must complete and remove MergeTraversal"
     );
     assert!(world.get::<UsingAnimationLink>(agent).is_none());
+    assert!(world.get::<ReachedAnimationLink3d>(agent).is_none());
     assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
+    assert!(matches!(
+        world.get::<AgentTarget3d>(agent),
+        Some(AgentTarget3d::None)
+    ));
+    assert!(world.get::<PendingMergeRepath>(agent).is_some());
     let position = world.get::<Transform>(agent).unwrap().translation;
     assert!(
         (position.x - target.x).abs() < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
@@ -447,6 +580,249 @@ fn merge_traversal_system_sweeps_the_agent_to_the_far_portal_point() {
     let kcc = world.get::<AgentKcc>(agent).unwrap();
     assert!(!kcc.stuck, "a clear crossing must never latch stuck");
     assert!(!kcc.collision_blocked);
+
+    // `ReachedAnimationLink3d` is synchronized from Landmass one fixed phase
+    // later. Completion must consume the stale marker now, otherwise the
+    // door-link driver restarts the same merge handoff at its far endpoint.
+    drive_door_link_for_agent(&mut world, agent);
+    assert!(
+        world.get::<MergeTraversal>(agent).is_none(),
+        "a completed merge link must not restart from the stale reached marker"
+    );
+
+    world
+        .run_system_once(resume_pending_merge_repath_system)
+        .expect("repath restore runs");
+    assert_eq!(
+        world.get::<AgentTarget3d>(agent),
+        Some(&AgentTarget3d::Point(target)),
+        "the real route target must resume after the one-tick corridor clear"
+    );
+}
+
+/// A link can be reported reached while the capsule is still offset from the
+/// source portal point. The handoff must first align with that validated
+/// source point before sweeping to the far side; driving straight at the far
+/// point can cut the corner through collision even though the authored
+/// two-segment handoff is clear.
+#[test]
+fn merge_traversal_aligns_with_the_source_portal_before_crossing() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut world = harness_world();
+    world.insert_resource(PhysicsDisabled(false));
+    world.insert_resource(CellPhysicsReadiness::Ready);
+    world.init_resource::<Time>();
+    world
+        .resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+
+    let mut physics_world = boxddd::World::new(boxddd::WorldDef::default()).expect("BoxDDD world");
+    add_player_compatible_floor(
+        &mut physics_world,
+        boxddd::Vec3::new(1.0, -0.1, 1.0),
+        boxddd::Vec3::new(5.0, 0.1, 5.0),
+    );
+    // Blocks the direct diagonal from the early-reached position to the far
+    // endpoint, while leaving the source-alignment and seam-crossing legs
+    // clear by more than the capsule radius.
+    add_player_compatible_floor(
+        &mut physics_world,
+        boxddd::Vec3::new(1.0, 1.0, 1.0),
+        boxddd::Vec3::new(0.25, 2.0, 0.25),
+    );
+    world.insert_non_send(BoxdddPhysicsContext::from_world(physics_world));
+
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    {
+        let mut nav = world.resource_mut::<NavArchipelagoState>();
+        nav.archipelago = Some(archipelago);
+        nav.merge_link_kind_count = 1;
+        nav.link_kinds.insert(link, LinkKind::Merge { kind: 1 });
+    }
+    let source = Vec3::new(0.0, 0.0, 2.0);
+    let target = Vec3::new(2.0, 0.0, 2.0);
+    let agent = world
+        .spawn((
+            TestNavAgentMarker,
+            AgentKcc {
+                grounded: true,
+                ..default()
+            },
+            Transform::from_xyz(0.0, AGENT_HEIGHT / 2.0, 0.0),
+            AgentRuntime::default(),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: source,
+                end_point: target,
+            },
+            AgentTarget3d::Point(target),
+        ))
+        .id();
+    world.resource_mut::<TestNavAgentState>().entities[0] = Some(agent);
+
+    drive_door_link_for_agent(&mut world, agent);
+    assert!(world.get::<MergeTraversal>(agent).is_some());
+
+    for _ in 0..420 {
+        world
+            .run_system_once(merge_traversal_system)
+            .expect("system runs");
+        if world.get::<MergeTraversal>(agent).is_none() {
+            break;
+        }
+    }
+
+    assert!(
+        world.get::<MergeTraversal>(agent).is_none(),
+        "a clear source-aligned crossing must complete"
+    );
+    let kcc = world.get::<AgentKcc>(agent).unwrap();
+    assert!(
+        !kcc.stuck,
+        "the clear staged crossing must not be quarantined"
+    );
+    assert!(!kcc.collision_blocked);
+    let position = world.get::<Transform>(agent).unwrap().translation;
+    assert!(
+        movement_policy::horizontal_distance(position.to_array(), target.to_array())
+            < MERGE_TRAVERSAL_REACHED_DISTANCE + 0.1,
+        "agent should finish on the far side, got {position:?}"
+    );
+}
+
+/// A reached animation link remains attached while the KCC crossing is in
+/// flight. The link system runs before `merge_traversal_system`, so calling
+/// it again must leave the elapsed traversal untouched instead of restarting
+/// the short portal every fixed tick.
+#[test]
+fn drive_door_link_does_not_restart_an_active_merge_traversal() {
+    let mut world = harness_world();
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 7 });
+
+    let start = Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0);
+    let end = Vec3::new(0.4, AGENT_HEIGHT / 2.0, 0.0);
+    let agent = world
+        .spawn((
+            AgentRuntime {
+                active_link: Some(LinkKind::Merge { kind: 7 }),
+                ..default()
+            },
+            Transform::from_translation(start),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: start,
+                end_point: end,
+            },
+            MergeTraversal {
+                source: start,
+                target: end,
+                crossing_started: true,
+                reached_distance: merge_traversal_reached_distance(0.4),
+                elapsed: 0.25,
+                timeout: merge_traversal_timeout(0.4),
+                link_kind: 7,
+            },
+            UsingAnimationLink,
+        ))
+        .id();
+
+    drive_door_link_for_agent(&mut world, agent);
+
+    let traversal = world
+        .get::<MergeTraversal>(agent)
+        .expect("an active merge traversal must remain in flight");
+    assert_eq!(traversal.elapsed, 0.25);
+    assert_eq!(traversal.target, end);
+    assert_eq!(
+        world.get::<AgentRuntime>(agent).unwrap().active_link,
+        Some(LinkKind::Merge { kind: 7 })
+    );
+}
+
+#[test]
+fn drive_merge_link_treats_a_capsule_already_on_the_portal_segment_as_crossing() {
+    let mut world = harness_world();
+    let archipelago = world.spawn_empty().id();
+    let link = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago);
+    world
+        .resource_mut::<NavArchipelagoState>()
+        .link_kinds
+        .insert(link, LinkKind::Merge { kind: 9 });
+
+    let source = Vec3::ZERO;
+    let target = Vec3::new(0.36, 0.0, 0.06);
+    // Mirrors the c49 short seam: Landmass reports the link with the capsule
+    // already most of the way between the two validated endpoints.
+    let agent = world
+        .spawn((
+            AgentRuntime::default(),
+            Transform::from_xyz(0.27, AGENT_HEIGHT / 2.0, 0.04),
+            ReachedAnimationLink3d {
+                link_entity: link,
+                start_point: source,
+                end_point: target,
+            },
+        ))
+        .id();
+
+    drive_door_link_for_agent(&mut world, agent);
+
+    assert!(
+        world
+            .get::<MergeTraversal>(agent)
+            .expect("merge traversal")
+            .crossing_started,
+        "a capsule already on the portal segment must continue toward the far side"
+    );
+}
+
+#[test]
+fn merge_link_input_refresh_preserves_costs_and_consumes_its_request() {
+    let mut world = World::new();
+    let mut overrides = AgentTypeIndexCostOverrides::default();
+    assert!(overrides.set_type_index_cost(3, 4.5));
+    let agent = world
+        .spawn((overrides, RefreshLandmassAnimationLinkInput))
+        .id();
+    refresh_landmass_animation_link_input(&mut world);
+
+    assert!(
+        world.get::<AgentTypeIndexCostOverrides>(agent).is_none(),
+        "Landmass must take its non-early-return input branch for the transition"
+    );
+    assert!(
+        world
+            .get::<SuspendedLandmassTypeIndexCosts>(agent)
+            .is_some()
+    );
+    assert!(
+        world
+            .get::<RefreshLandmassAnimationLinkInput>(agent)
+            .is_none(),
+        "the schedule-boundary refresh must run exactly once per transition"
+    );
+
+    restore_landmass_type_index_costs(&mut world);
+
+    let refreshed = world
+        .get::<AgentTypeIndexCostOverrides>(agent)
+        .expect("restored overrides");
+    assert_eq!(refreshed.iter().collect::<Vec<_>>(), vec![(&3, &4.5)]);
+    assert!(
+        world
+            .get::<SuspendedLandmassTypeIndexCosts>(agent)
+            .is_none(),
+        "the cost suspension must last only for Landmass's input system"
+    );
 }
 
 /// Issue #154 feature 4 / issue #162: a merge-portal crossing whose far
@@ -522,7 +898,10 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
                 ..default()
             },
             MergeTraversal {
+                source: Vec3::new(0.0, AGENT_HEIGHT / 2.0, 0.0),
                 target,
+                crossing_started: true,
+                reached_distance: merge_traversal_reached_distance(5.0),
                 elapsed: 0.0,
                 timeout: merge_traversal_timeout(5.0),
                 link_kind: 2,
@@ -564,6 +943,7 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
         "the traversal must stop, not keep the agent pinned mid-portal indefinitely"
     );
     assert!(world.get::<UsingAnimationLink>(agent).is_none());
+    assert!(world.get::<ReachedAnimationLink3d>(agent).is_none());
     assert_eq!(world.get::<AgentRuntime>(agent).unwrap().active_link, None);
     let position = world.get::<Transform>(agent).unwrap().translation;
     assert!(
@@ -955,6 +1335,27 @@ fn the_visual_capsule_is_centred_on_the_agent_parent_not_raised_above_it() {
         Vec3::ZERO,
         "the visual child must be centred on the agent parent (zero local offset) -- \
              the parent transform is already the capsule centre post-#114, not feet level"
+    );
+}
+
+#[test]
+fn debug_agent_animation_links_allow_its_capsule_center_offset() {
+    let mut world = World::new();
+    world.init_resource::<Assets<Mesh>>();
+    world.init_resource::<Assets<StandardMaterial>>();
+    world.init_resource::<NavArchipelagoState>();
+    let archipelago_entity = world.spawn_empty().id();
+    world.resource_mut::<NavArchipelagoState>().archipelago = Some(archipelago_entity);
+
+    let agent = spawn_test_agent(&mut world, Vec3::new(1.0, 2.0, 3.0));
+    let reached_distance = world
+        .get::<AnimationLinkReachedDistance>(agent)
+        .expect("debug agent carries an explicit link reach distance")
+        .0;
+    assert_eq!(
+        reached_distance,
+        AGENT_HEIGHT * 0.5 + AGENT_RADIUS,
+        "landmass measures animation-link arrival in full 3D while the debug capsule transform is centre-level"
     );
 }
 
@@ -1677,6 +2078,13 @@ fn set_door_lock_level_propagates_through_door_availability_system() {
     // (mirroring what `ensure_archipelago`/an earlier unblock would have
     // produced), so locking it has a link to remove.
     let link_entities = spawn_link_pair(&mut world, archipelago, Vec3::ZERO, Vec3::X, 1.0, 0);
+    for link_entity in link_entities {
+        let link = world.get::<AnimationLink3d>(link_entity).unwrap();
+        assert_ne!(link.start_edge.0, link.start_edge.1);
+        assert!(link.start_edge.0.is_finite());
+        assert!(link.start_edge.1.is_finite());
+        assert_eq!(link.end_edge.0, link.end_edge.1);
+    }
     {
         let mut state = world.resource_mut::<NavArchipelagoState>();
         state.archipelago = Some(archipelago);
@@ -2674,6 +3082,7 @@ fn minimal_manifest(cell_form_id: u32) -> PreparedSceneManifest {
         mutability_summary: Default::default(),
         leveled_lists: Default::default(),
         dialogue: None,
+        exterior: None,
     }
 }
 

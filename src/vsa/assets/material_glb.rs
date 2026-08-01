@@ -5,20 +5,6 @@ use super::*;
 const DIFFUSE_PATH_EXTRA: &str = "bevyout_diffuse_texture_path";
 const ROUGHNESS_EXTRA: &str = "bevyout_perceptual_roughness";
 
-pub(crate) fn apply_material_policy_to_glb_file(path: &Path) -> Result<()> {
-    let bytes = fs::read(path).with_context(|| format!("reading GLB {}", path.display()))?;
-    let table = MetallicMaterialTable::built_in().map_err(anyhow::Error::msg)?;
-    let patched = patch_glb_material_policy(&bytes, &table)?;
-    let temporary = path.with_extension(format!("material-{}.tmp.glb", std::process::id()));
-    fs::write(&temporary, patched)
-        .with_context(|| format!("writing material-patched GLB {}", temporary.display()))?;
-    if let Err(error) = atomic_replace(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
-}
-
 pub(crate) fn patch_glb_material_policy(
     bytes: &[u8],
     table: &MetallicMaterialTable,

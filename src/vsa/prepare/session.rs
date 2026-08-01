@@ -24,13 +24,14 @@
 //! longer `&mut`, so several worker threads can hold it at once). The
 //! session's only fields any cell ever mutates -- `physics_cache` and
 //! `asset_totals` -- are wrapped in `Mutex` so that still compiles and
-//! stays correct under concurrent access; `blender_lock` is a new field
+//! stays correct under concurrent access; `asset_stage_lock` is a new field
 //! with no counterpart before #48, guarding the one part of `prepare_cell`
 //! that is not provably safe to run for two cells at once (see its use in
 //! `orchestrator.rs`).
 
 use super::*;
 use crate::vsa::audio_assets::load_dialogue_voice_archives;
+use bevyout_core::manifest::exterior::ExteriorWorldspaceLodAsset;
 
 pub(crate) struct BatchSession {
     pub(crate) loaded_plugins: Vec<LoadedPlugin>,
@@ -57,12 +58,18 @@ pub(crate) struct BatchSession {
     pub(crate) asset_totals: Mutex<BatchAssetTotals>,
     /// Serializes the one part of `prepare_cell` this issue did not judge
     /// provably safe to run concurrently: staging/converting textures and
-    /// running Blender both touch the whole shared `staging_dir` (a fixed
-    /// `blender_jobs.ron` filename, and `convert_staged_textures` walking
-    /// every `.dds` under the directory rather than just the current
-    /// cell's). See the long comment at that call site in `orchestrator.rs`
-    /// for the full argument (F48.4).
-    pub(crate) blender_lock: Mutex<()>,
+    /// Native conversion and texture staging both touch the whole shared
+    /// `staging_dir`, so this lock keeps concurrent cell workers from
+    /// observing or overwriting another cell's intermediate files.
+    pub(crate) asset_stage_lock: Mutex<()>,
+    /// Worldspace indexes are rewritten by every exterior cell worker. Keep
+    /// the read/merge/write transaction atomic so prepared persistent paths
+    /// accumulate deterministically across a batch.
+    pub(crate) index_write_lock: Mutex<()>,
+    /// Prepared worldspace LOD assets are shared by every cell worker in a
+    /// batch. The first exterior cell for a worldspace stages/converts them;
+    /// later cells reuse the descriptor without repeating archive work.
+    pub(crate) worldspace_lod_cache: Mutex<HashMap<u32, Vec<ExteriorWorldspaceLodAsset>>>,
 }
 
 impl BatchSession {
@@ -138,7 +145,9 @@ impl BatchSession {
             footstep_diagnostics,
             physics_cache: Mutex::new(KeyedBatchCache::default()),
             asset_totals: Mutex::new(BatchAssetTotals::default()),
-            blender_lock: Mutex::new(()),
+            asset_stage_lock: Mutex::new(()),
+            index_write_lock: Mutex::new(()),
+            worldspace_lod_cache: Mutex::new(HashMap::new()),
         })
     }
 

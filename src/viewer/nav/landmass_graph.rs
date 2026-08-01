@@ -955,6 +955,12 @@ fn point_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// constant's owning module pulls in `bevy::prelude::*`. Same local-copy
 /// precedent as `nav::agent::AGENT_RADIUS`.
 const MERGE_PORTAL_STEP_HEIGHT: f32 = 34.0 / 69.991_25;
+/// Landmass animation links need a non-zero traversal interval. Adjacent
+/// exterior cells can legitimately share the exact same border edge, so a
+/// producer portal pair with coincident midpoints is a seam marker, not a
+/// valid off-mesh link; feeding it through produces NaN bounds in landmass's
+/// spatial adapter.
+const MIN_MERGE_PORTAL_DISTANCE: f32 = 0.05;
 
 /// Resolves each `MergeInput` into a world-space link, using its own
 /// already-validated portal-interval midpoints (issue #154 feature 3) --
@@ -1006,6 +1012,18 @@ pub(crate) fn merge_link_descriptors(
         }
         let midpoint_a = interval_midpoint(merge.interval_a);
         let midpoint_b = interval_midpoint(merge.interval_b);
+        let distance = point_distance(midpoint_a, midpoint_b);
+        if !distance.is_finite() || distance < MIN_MERGE_PORTAL_DISTANCE {
+            tracing::warn!(
+                "nav merge portal mesh {:08x} triangle {} <-> mesh {:08x} triangle {}: skipped, non-positive traversal distance {:.6} m",
+                merge.mesh_a_form_id,
+                merge.triangle_a,
+                merge.mesh_b_form_id,
+                merge.triangle_b,
+                distance,
+            );
+            continue;
+        }
         descriptors.push(MergeLinkDescriptor {
             side_a: DoorLinkSide {
                 mesh_form_id: merge.mesh_a_form_id,
@@ -1017,7 +1035,7 @@ pub(crate) fn merge_link_descriptors(
                 polygon_index: merge.triangle_b,
                 midpoint: midpoint_b,
             },
-            distance: point_distance(midpoint_a, midpoint_b),
+            distance,
         });
     }
     descriptors

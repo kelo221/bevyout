@@ -21,7 +21,7 @@ impl NativeBatchResult {
         summarize_native_jobs(&self.outcomes)
     }
 
-    pub(crate) fn failed_outputs(&self, jobs: &[BlenderAssetJob]) -> HashMap<PathBuf, String> {
+    pub(crate) fn failed_outputs(&self, jobs: &[AssetJob]) -> HashMap<PathBuf, String> {
         self.outcomes
             .iter()
             .filter(|outcome| outcome.status != NativeJobStatus::Converted)
@@ -53,7 +53,7 @@ impl NativeBatchResult {
 }
 
 pub(crate) fn run_native_batch(
-    jobs: &[BlenderAssetJob],
+    jobs: &[AssetJob],
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     requested_workers: Option<usize>,
@@ -75,7 +75,7 @@ pub(crate) fn run_native_batch(
 
 fn convert_native_job(
     index: usize,
-    job: &BlenderAssetJob,
+    job: &AssetJob,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     strict: bool,
@@ -96,6 +96,9 @@ fn convert_native_job(
                         }
                         super::super::assets::AssetConversion::QuickAo => {
                             NifConversionMode::QuickAo
+                        }
+                        super::super::assets::AssetConversion::WorldspaceLod => {
+                            NifConversionMode::WorldspaceLod
                         }
                     },
                     root_transform_policy: job.root_transform_policy,
@@ -145,7 +148,7 @@ fn convert_native_job(
 }
 
 fn convert_native_actor(
-    job: &BlenderAssetJob,
+    job: &AssetJob,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     strict: bool,
@@ -347,7 +350,7 @@ fn native_error_stage(message: &str) -> &'static str {
     }
 }
 
-fn remove_failed_native_outputs(job: &BlenderAssetJob) {
+fn remove_failed_native_outputs(job: &AssetJob) {
     for path in [&job.output, &job.physics_output] {
         if path.is_file() {
             let _ = fs::remove_file(path);
@@ -369,7 +372,7 @@ fn remove_failed_native_outputs(job: &BlenderAssetJob) {
     }
 }
 
-fn reject_duplicate_native_outputs(jobs: &[BlenderAssetJob]) -> Result<()> {
+fn reject_duplicate_native_outputs(jobs: &[AssetJob]) -> Result<()> {
     let mut outputs = HashSet::new();
     for job in jobs {
         for path in [&job.output, &job.physics_output] {

@@ -46,6 +46,29 @@ pub enum CommandLine {
     /// Experimentally convert one FO3/FNV NIF 20.2.0.7 asset to a self-contained GLB.
     #[command(name = "nif-convert")]
     NifConvert(NifConvertArgs),
+    /// Summarize native exterior conversion artifacts from a deterministic corpus.
+    #[command(name = "exterior-conversion-report")]
+    ExteriorConversionReport(ExteriorConversionReportArgs),
+    /// Print a prepared exterior worldspace index in stable catalog form.
+    #[command(name = "exterior-catalog")]
+    ExteriorCatalog(ExteriorCatalogArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct ExteriorConversionReportArgs {
+    /// JSON corpus describing source assets and native conversion outputs.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) corpus: PathBuf,
+    /// Write the normalized native report here instead of stdout.
+    #[arg(long, value_name = "FILE.json")]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct ExteriorCatalogArgs {
+    /// Prepared `worldspaces/<formid>/index.ron` file.
+    #[arg(long, value_name = "INDEX.ron")]
+    pub(crate) index: PathBuf,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -88,12 +111,7 @@ pub struct NifConvertArgs {
 pub(crate) enum NifConversionMode {
     Preserve,
     QuickAo,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrepareConverter {
-    Blender,
-    Native,
+    WorldspaceLod,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -101,7 +119,6 @@ pub(crate) enum ActorAnimationConverter {
     Disabled,
     #[default]
     Native,
-    Blender,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,31 +136,11 @@ impl std::fmt::Display for RagdollLabBackend {
     }
 }
 
-impl Default for PrepareConverter {
-    fn default() -> Self {
-        match crate::converter_policy::resolve_converter_backend(None) {
-            crate::converter_policy::ConverterBackend::Native => Self::Native,
-            crate::converter_policy::ConverterBackend::Blender => Self::Blender,
-        }
-    }
-}
-
-impl std::fmt::Display for PrepareConverter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let backend = match self {
-            Self::Blender => crate::converter_policy::ConverterBackend::Blender,
-            Self::Native => crate::converter_policy::ConverterBackend::Native,
-        };
-        formatter.write_str(backend.as_str())
-    }
-}
-
 impl std::fmt::Display for ActorAnimationConverter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let backend = match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
             Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
-            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         };
         formatter.write_str(backend.as_str())
     }
@@ -154,7 +151,6 @@ impl ActorAnimationConverter {
         match self {
             Self::Disabled => crate::converter_policy::ActorAnimationBackend::Disabled,
             Self::Native => crate::converter_policy::ActorAnimationBackend::Native,
-            Self::Blender => crate::converter_policy::ActorAnimationBackend::Blender,
         }
     }
 }
@@ -209,7 +205,7 @@ pub struct PrepareArgs {
     #[arg(long, value_name = "WORLDSPACE")]
     pub(crate) worldspace: Option<String>,
     /// Print the resolved cell selection (`formid<TAB>editor_id` per line,
-    /// sorted) and exit before any extraction or Blender work.
+    /// sorted) and exit before any extraction or conversion work.
     #[arg(long, conflicts_with = "check_fingerprints")]
     pub(crate) list_only: bool,
     /// Report-only: validate each selected cell's recorded plugin/converter/
@@ -227,14 +223,8 @@ pub struct PrepareArgs {
     /// Legacy hexadecimal cell FormID input.
     #[arg(long, hide = true, conflicts_with = "selectors")]
     pub(crate) cell: Option<String>,
-    /// Blender executable path.
-    #[arg(long)]
-    pub(crate) blender: Option<PathBuf>,
-    /// NIF-to-GLB backend. Native is the default; use `blender` for compatibility.
-    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
-    pub(crate) converter: PrepareConverter,
     /// External-KF clip-pack backend. Disabled by default; select `native` to
-    /// decode KF files with Nifty or `blender` for the NIFTools comparison path.
+    /// decode KF files with Nifty.
     #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
     pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
@@ -318,6 +308,10 @@ pub struct ViewArgs {
     /// Enable the bounded native realtime point-shadow pass at startup.
     #[arg(long)]
     pub(crate) realtime_shadows: bool,
+    /// Enable optional far-worldspace LOD tiles. Near/middle/distant per-cell
+    /// terrain LOD remains enabled without this flag.
+    #[arg(long)]
+    pub(crate) worldspace_lod: bool,
     /// Exit after this many seconds; useful for bounded trace captures.
     #[arg(long)]
     pub(crate) trace_seconds: Option<f32>,
@@ -401,15 +395,6 @@ pub struct RenderArgs {
     /// Plugin filename used if render needs to prepare the cell.
     #[arg(long, hide = true)]
     pub(crate) plugin: Option<PathBuf>,
-    /// Blender executable used if render needs to prepare the cell.
-    #[arg(long, hide = true)]
-    pub(crate) blender: Option<PathBuf>,
-    /// NIF-to-GLB backend used if render needs to prepare or refresh the cell.
-    #[arg(long, value_enum, default_value_t = PrepareConverter::default())]
-    pub(crate) converter: PrepareConverter,
-    /// Legacy compatibility option; Rust irradiance baking does not invoke Blender.
-    #[arg(long, hide = true)]
-    pub(crate) irradiance_blender: Option<PathBuf>,
     /// KTX-Software executable used if render needs to bake irradiance.
     #[arg(long, hide = true)]
     pub(crate) toktx: Option<PathBuf>,
@@ -425,6 +410,10 @@ pub struct RenderArgs {
     /// Enable the bounded native realtime point-shadow pass at startup.
     #[arg(long)]
     pub(crate) realtime_shadows: bool,
+    /// Enable optional far-worldspace LOD tiles. Near/middle/distant per-cell
+    /// terrain LOD remains enabled without this flag.
+    #[arg(long)]
+    pub(crate) worldspace_lod: bool,
     /// Prepared scene cache directory; defaults to .bevyout/cache.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
@@ -468,9 +457,6 @@ pub struct BakeArgs {
     /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Fast Blender preview or Rust CPU irradiance-volume bake.
-    #[arg(long, value_enum, default_value_t = BakeQuality::Irradiance)]
-    pub(crate) quality: BakeQuality,
     /// World-space distance between irradiance probes, in metres.
     #[arg(
         long,
@@ -492,12 +478,6 @@ pub struct BakeArgs {
         value_parser = parse_static_batch_chunk_meters
     )]
     pub(crate) static_batch_chunk_meters: f32,
-    /// Blender executable path, used only by --quality preview.
-    #[arg(long)]
-    pub(crate) blender: Option<PathBuf>,
-    /// Legacy compatibility option; accepted but ignored by the Rust baker.
-    #[arg(long)]
-    pub(crate) irradiance_blender: Option<PathBuf>,
     /// Unified KTX-Software `ktx.exe` path (legacy option name).
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,
@@ -507,7 +487,7 @@ pub struct BakeArgs {
     /// the legacy no-op it always was.
     #[arg(long)]
     pub(crate) force: bool,
-    /// Keep raw irradiance atlas slices, or Blender preview intermediates.
+    /// Keep raw irradiance atlas slices for inspection after a failed/exporting bake.
     #[arg(long)]
     pub(crate) keep_intermediate: bool,
 }
@@ -545,14 +525,6 @@ pub struct CellsArgs {
     /// With `--map`, write the RON artifact to this path instead of stdout.
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum BakeQuality {
-    /// Fast Eevee lighting preview; does not produce a baked-GI manifest.
-    Preview,
-    /// Bake one deterministic Rust CPU irradiance volume for the cell.
-    Irradiance,
 }
 
 fn parse_static_batch_chunk_meters(value: &str) -> Result<f32, String> {

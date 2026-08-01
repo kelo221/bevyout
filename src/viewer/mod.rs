@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::app_state::{
     AppState, GameplayModal, LoadingTarget, auto_advance_from_boot, auto_advance_from_loading,
 };
-use crate::cli::{BakeArgs, BakeQuality, PrepareArgs, RenderArgs, ViewArgs};
+use crate::cli::{BakeArgs, PrepareArgs, RenderArgs, ViewArgs};
 #[cfg(test)]
 use crate::vsa::PREPARED_CONVERTER_REVISION;
 use crate::vsa::{
@@ -113,6 +113,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
         RunViewOptions {
             disable_physics: args.disable_physics,
             realtime_shadows: args.realtime_shadows,
+            worldspace_lod: args.worldspace_lod,
             trace_seconds: args.trace_seconds,
             day_night_cycle_seconds: args.day_night_cycle_seconds,
             agent_port: args.agent_bridge.then_some(args.agent_port),
@@ -221,6 +222,7 @@ pub fn render(args: RenderArgs) -> Result<()> {
         RunViewOptions {
             disable_physics: args.disable_physics,
             realtime_shadows: args.realtime_shadows,
+            worldspace_lod: args.worldspace_lod,
             trace_seconds: args.trace_seconds,
             day_night_cycle_seconds: args.day_night_cycle_seconds,
             agent_port: args.agent_bridge.then_some(args.agent_port),
@@ -375,8 +377,6 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         game_root: args.game_root.clone(),
         plugin: args.plugin.clone(),
         cell: None,
-        blender: args.blender.clone(),
-        converter: args.converter,
         actor_animation_converter: crate::cli::ActorAnimationConverter::Disabled,
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
@@ -403,12 +403,9 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
         all_interiors: false,
         retry_failed: false,
         cache_dir: Some(cache_dir.to_path_buf()),
-        quality: BakeQuality::Irradiance,
         irradiance_spacing_meters: 8.0,
         irradiance_samples: 64,
         static_batch_chunk_meters: 64.0,
-        blender: args.blender.clone(),
-        irradiance_blender: args.irradiance_blender.clone(),
         toktx: args.toktx.clone(),
         force: false,
         keep_intermediate: false,

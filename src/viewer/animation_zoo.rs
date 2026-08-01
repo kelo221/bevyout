@@ -81,7 +81,7 @@ pub fn animation_zoo(args: AnimationZooArgs) -> Result<()> {
             .next()
             .unwrap_or("no compatible clip pack was prepared");
         format!(
-            "actor animation set has no clip pack: {reason}; rerun prepare with --actor-animation-converter native (or blender for comparison)"
+            "actor animation set has no clip pack: {reason}; rerun prepare with --actor-animation-converter native"
         )
     })?;
     require_file(&asset_root.join(&appearance_path), "actor appearance GLB")?;

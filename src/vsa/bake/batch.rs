@@ -17,9 +17,9 @@
 //! fingerprint, so a plugin-chain change discards recorded bake statuses
 //! exactly as it discards prepare's (F48.1).
 //!
-//! Cells run sequentially: each bake is a full headless Blender run that
-//! saturates the machine on its own, unlike prepare's parse/stage phases,
-//! so there is no `--jobs` worker pool here.
+//! Cells run sequentially: each bake performs a full CPU scene composition
+//! and irradiance pass that saturates the machine on its own, unlike
+//! prepare's parse/stage phases, so there is no `--jobs` worker pool here.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -98,12 +98,6 @@ pub(crate) fn bake_batch(args: BakeArgs) -> Result<()> {
     if args.selector.is_some() || args.manifest.is_some() {
         bail!("--all-interiors/--retry-failed cannot be combined with a selector or --manifest");
     }
-    if matches!(args.quality, BakeQuality::Preview) {
-        bail!(
-            "batch bake requires --quality irradiance; Eevee previews record no bake metadata to resume from"
-        );
-    }
-
     let cache_dir = absolutize(
         args.cache_dir
             .as_deref()

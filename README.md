@@ -20,10 +20,10 @@ Softworks.
 - **A licensed copy of Fallout 3 GOTY**, for `Fallout3.esm` and its BSAs. The
   game data is not redistributed here; point `game_root` at your installation
   in `.bevyout/config.toml`.
-- **[Blender](https://www.blender.org/download/)** 5.2 with the
-  **[Blender Niftools Addon](https://github.com/niftools/blender_niftools_addon)**
-  installed and enabled (`io_scene_niftools`). Blender is used by `prepare`
-  and by the optional `bake --quality preview` path.
+- No Blender installation is required. Native Rust NIF conversion and the Rust
+  irradiance baker are the supported production paths. The old
+  `src/vsa/assets/blender_script.py` remains only as an annotated historical
+  comparison/reference script and is never invoked by preparation or runtime.
 - **[ImageMagick](https://imagemagick.org/script/download.php)** (`magick` on
   `PATH`, or the default Windows install path). It converts staged DDS
   textures to PNG during `prepare`; preparation can continue without it, but
@@ -36,10 +36,7 @@ Softworks.
 
 On Windows, these tools are auto-detected at their default install locations.
 Otherwise put them on `PATH` or set `[tools]` in
-[`config.example.toml`](config.example.toml). macOS and Linux users should set
-the Blender path explicitly. The legacy `irradiance_blender` option is accepted
-for configuration and CLI compatibility but is ignored by the Rust irradiance
-baker.
+[`config.example.toml`](config.example.toml).
 
 Without a project-local `.bevyout/config.toml`, a user-level config is also
 read from `%APPDATA%\bevyout\config.toml` on Windows, or
@@ -56,12 +53,6 @@ statically relinked on each iteration:
 cargo run-dev -- prepare SuperDuperMart
 cargo run-dev -- bake SuperDuperMart
 cargo run-dev -- render SuperDuperMart
-```
-
-For a fast Blender preview that leaves the prepared manifest unchanged:
-
-```powershell
-cargo run-dev -- bake SuperDuperMart --quality preview
 ```
 
 The equivalent direct command is `cargo run --features bevy/dynamic_linking`.
@@ -89,12 +80,11 @@ pose and rebuild it. Add `--agent-bridge` to expose
 
 ### Isolated animation zoo
 
-Keep native scene conversion and explicitly prepare the Blender/NIFTools KF
-compatibility pack, then cycle every compatible external KF on one actor
-without loading the gameplay viewer:
+Prepare the native KF clip pack, then cycle every compatible external KF on one
+actor without loading the gameplay viewer:
 
 ```powershell
-cargo run-dev -- prepare SuperDuperMart --converter native --actor-animation-converter blender
+cargo run-dev -- prepare SuperDuperMart --actor-animation-converter native
 cargo run-dev -- animation-zoo SuperDuperMart --actor 00041606
 ```
 
@@ -104,8 +94,8 @@ restart, looping, and playback-speed controls. `--agent-bridge` exposes
 
 ### Experimental native NIF conversion
 
-The OS-agnostic Rust converter is available as an experimental, standalone
-command for FO3/FNV NIF `20.2.0.7` assets. It emits a self-contained GLB,
+The OS-agnostic Rust converter is the supported standalone command for
+FO3/FNV NIF `20.2.0.7` assets. It emits a self-contained GLB,
 including supported controller-sequence animations, and can also emit the
 authored Havok collision sidecar used by the prepared-physics schema:
 
@@ -120,14 +110,15 @@ cargo run-dev -- nif-convert `
 
 Use `--input <file.nif>` for a direct filesystem input, `--allow-lossy` for
 actor/skinned assets whose ragdoll conversion is not yet in scope, and
-`--force` to replace outputs. The established `prepare` path continues to use
-the existing Blender/NIFTools routing until this experiment reaches parity.
+`--force` to replace outputs. Unsupported native blocks are reported in the
+conversion report; they do not route through Blender.
 
 ## Current scope
 
-The current slice supports interior-cell preparation and rendering, cached
-NIF-to-GLB conversion, deterministic Rust irradiance baking, prepared static
-point shadows, first-person movement and physics, staged audio, and an initial
+The current slice supports interior and exterior-cell preparation and
+rendering, cached native NIF-to-GLB conversion, LAND terrain packages,
+deterministic Rust irradiance baking, prepared static point shadows, first-person
+movement and physics, staged audio, and an initial
 pickup/container/door/activator interaction path.
 
 Exterior LAND and worldspace streaming, NPC assembly and AI, runtime NAVM

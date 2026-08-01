@@ -99,7 +99,7 @@ pub(crate) fn audit_prepared_visuals(
         }
         // glTF may split or deduplicate vertices at attribute seams, so vertex
         // totals are diagnostic only. Triangle totals remain stable across the
-        // NIF -> Blender -> glTF conversion and detect dropped geometry.
+        // native NIF -> glTF conversion and detect dropped geometry.
         if audit.renderable_triangles != source_triangles {
             issues.push(issue_for_asset(
                 "visual_topology_mismatch",

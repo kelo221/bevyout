@@ -378,12 +378,49 @@ pub(crate) fn spawn_prepared_scene(
     fog_strength: Res<FogStrength>,
     mut references: ResMut<crate::console::RefRegistry>,
     mut resident_cells: ResMut<ResidentCells>,
+    saved_location: Option<Res<super::world::CurrentWorldLocation>>,
 ) {
     let focus = scene_focus(&manifest);
-    let initial_camera_position =
-        transition_camera_position(&manifest).unwrap_or_else(|| focus + Vec3::new(0.0, 4.0, 12.0));
-    let initial_camera_transform =
-        Transform::from_translation(initial_camera_position).looking_at(focus, Vec3::Y);
+    let saved_location = saved_location.as_deref().and_then(|location| {
+        location.0.as_ref().and_then(|location| match location {
+            bevyout_core::manifest::exterior::WorldLocation::Exterior(location)
+                if manifest.exterior.as_ref().is_some_and(|exterior| {
+                    exterior.worldspace_form_id == location.worldspace_form_id
+                }) =>
+            {
+                Some((location.position, location.rotation_xyzw))
+            }
+            bevyout_core::manifest::exterior::WorldLocation::Interior(location)
+                if manifest.cell.form_id == location.cell_form_id =>
+            {
+                Some((location.position, location.rotation_xyzw))
+            }
+            _ => None,
+        })
+    });
+    let initial_camera_transform = saved_location
+        .map(|(position, rotation_xyzw)| {
+            Transform::from_translation(
+                Vec3::from_array(position)
+                    + Vec3::Y
+                        * (crate::viewer::player::EYE_HEIGHT
+                            - crate::viewer::player::CAPSULE_HEIGHT * 0.5),
+            )
+            .with_rotation(Quat::from_xyzw(
+                rotation_xyzw[0],
+                rotation_xyzw[1],
+                rotation_xyzw[2],
+                rotation_xyzw[3],
+            ))
+        })
+        .or_else(|| {
+            transition_camera_position(&manifest)
+                .map(|position| Transform::from_translation(position).looking_at(focus, Vec3::Y))
+        })
+        .unwrap_or_else(|| {
+            Transform::from_translation(focus + Vec3::new(0.0, 4.0, 12.0))
+                .looking_at(focus, Vec3::Y)
+        });
     let (initial_yaw, initial_pitch, _) = initial_camera_transform.rotation.to_euler(EulerRot::YXZ);
     let cell_lighting = effective_lighting(&manifest.cell);
     let (color_grading, auto_exposure) =
@@ -1399,6 +1436,24 @@ pub(crate) fn is_glow_card_mesh_name(name: &str) -> bool {
 }
 
 pub(crate) fn scene_focus(manifest: &PreparedSceneManifest) -> Vec3 {
+    if let Some(package) = manifest.exterior.as_ref() {
+        if let Some(terrain) = package
+            .terrain
+            .as_ref()
+            .filter(|terrain| terrain.is_well_formed())
+        {
+            let width = usize::from(terrain.width);
+            let center = terrain.positions[(usize::from(terrain.height) / 2) * width + width / 2];
+            return Vec3::from_array(center);
+        }
+        let span = bevyout_core::manifest::exterior::ExteriorCoordinatePolicy::default()
+            .cell_span_metres() as f32;
+        return Vec3::new(
+            package.origin[0] + span * 0.5,
+            package.origin[1],
+            package.origin[2] - span * 0.5,
+        );
+    }
     let mut minimum = Vec3::splat(f32::INFINITY);
     let mut maximum = Vec3::splat(f32::NEG_INFINITY);
     let mut found = false;

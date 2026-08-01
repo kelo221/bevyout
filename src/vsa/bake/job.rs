@@ -16,12 +16,8 @@ pub(crate) fn cell_directional_illuminance(lighting: &PreparedCellLighting) -> f
 pub(crate) struct BakeJob {
     pub(crate) asset_root: String,
     pub(crate) output_scene: String,
-    pub(crate) preview_output: String,
-    pub(crate) result_json: String,
-    pub(crate) irradiance_blend: String,
     pub(crate) irradiance_spacing_meters: f32,
     pub(crate) irradiance_samples: u32,
-    pub(crate) preview_only: bool,
     pub(crate) static_batch_chunk_meters: f32,
     pub(crate) emission_scale: f32,
     pub(crate) ambient_rgba: [f32; 4],

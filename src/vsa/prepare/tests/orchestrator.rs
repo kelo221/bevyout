@@ -1,4 +1,13 @@
 use super::*;
+use clap::Parser;
+
+#[test]
+fn fingerprint_check_always_uses_the_report_only_batch_path() {
+    let args = PrepareArgs::try_parse_from(["prepare", "00000c49", "--check-fingerprints"])
+        .expect("valid prepare arguments");
+
+    assert!(prepare_requires_batch(&args, 1));
+}
 
 #[test]
 fn dialogue_voice_discovery_is_automatic_without_the_legacy_flag() {

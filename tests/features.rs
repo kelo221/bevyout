@@ -5919,7 +5919,7 @@ async fn then_actor_visual_inputs_are(world: &mut BevyoutWorld, expected: String
 
 #[then(regex = r#"^the actor converter profile is \"([^\"]*)\"$"#)]
 async fn then_actor_converter_profile_is(_world: &mut BevyoutWorld, expected: String) {
-    assert_eq!(assets::ACTOR_CONVERTER_REVISION, expected);
+    assert_eq!(assets::NATIVE_ACTOR_CONVERTER_REVISION, expected);
 }
 
 #[given(regex = r#"^actor gear record kinds \"([^\"]*)\"$"#)]
@@ -7553,11 +7553,10 @@ async fn given_prepared_merge(
     mesh_b_hex: String,
     triangle_b: u32,
 ) {
-    // Issue #154 widened `MergeInput` with the validated portal interval;
-    // this scenario only exercises `merge_link_descriptors`' mesh/triangle
-    // plumbing (`then_merge_link_descriptor` below checks `mesh_form_id`/
-    // `polygon_index`, not `midpoint`/`distance`), so a zeroed interval is
-    // fine here.
+    // Issue #154 widened `MergeInput` with the validated portal interval.
+    // Keep this legacy mesh/plumbing step on a valid non-zero interval so it
+    // exercises a real runtime link; zero-length intervals are deliberately
+    // rejected because landmass cannot build a finite animation-link bound.
     world
         .nav_adapter_merge_inputs
         .push(landmass_graph::MergeInput {
@@ -7565,8 +7564,8 @@ async fn given_prepared_merge(
             triangle_a,
             mesh_b_form_id: parse_hex(&mesh_b_hex),
             triangle_b,
-            interval_a: [[0.0; 3]; 2],
-            interval_b: [[0.0; 3]; 2],
+            interval_a: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            interval_b: [[3.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
         });
 }
 
@@ -8319,7 +8318,6 @@ async fn when_converter_is_resolved(world: &mut BevyoutWorld) {
 async fn when_converter_is_explicitly_requested(world: &mut BevyoutWorld, converter: String) {
     world.requested_converter = Some(match converter.as_str() {
         "native" => converter_policy::ConverterBackend::Native,
-        "blender" => converter_policy::ConverterBackend::Blender,
         other => panic!("unknown converter {other:?}"),
     });
     world.resolved_converter = Some(converter_policy::resolve_converter_backend(
@@ -8545,7 +8543,7 @@ async fn then_actor_joint_source_is(world: &mut BevyoutWorld, expected: String) 
 
 #[then("Blender ragdoll bodies and constraints use stable NIF source identities")]
 async fn then_blender_ragdoll_uses_stable_source_identity(_world: &mut BevyoutWorld) {
-    let script = assets::blender_conversion_script();
+    let script = assets::legacy_blender_preview_script();
     assert!(script.contains("bevyout_nif_body_block"));
     assert!(script.contains("body_a_key"));
     assert!(script.contains("body_b_key"));
@@ -8585,7 +8583,7 @@ async fn then_actor_sidecar_rejects_duplicate_body_ids(world: &mut BevyoutWorld)
 
 #[then("non-ragdoll actor skin weights collapse to their nearest authored body ancestor")]
 async fn then_actor_skin_weights_follow_authored_ragdoll(_world: &mut BevyoutWorld) {
-    let script = assets::blender_conversion_script();
+    let script = assets::legacy_blender_preview_script();
     assert!(script.contains("actor_ragdoll_weight_target"));
     assert!(script.contains("collapse_actor_ragdoll_weights"));
     assert!(script.contains("target_group.add([vertex.index], weight, 'ADD')"));
@@ -9757,7 +9755,6 @@ async fn given_actor_animation_converter(world: &mut BevyoutWorld, converter: St
     world.requested_actor_animation_converter = Some(match converter.as_str() {
         "disabled" => converter_policy::ActorAnimationBackend::Disabled,
         "native" => converter_policy::ActorAnimationBackend::Native,
-        "blender" => converter_policy::ActorAnimationBackend::Blender,
         other => panic!("unknown actor animation converter {other:?}"),
     });
 }
@@ -9820,21 +9817,14 @@ async fn then_selected_actor_animation_converter(world: &mut BevyoutWorld, expec
     );
 }
 
-#[then("actor animation preparation requires Blender")]
-async fn then_actor_animation_preparation_requires_blender(world: &mut BevyoutWorld) {
-    assert!(converter_policy::actor_animation_backend_requires_blender(
-        world
-            .resolved_actor_animation_converter
-            .expect("actor animation converter must be resolved")
-    ));
-}
-
 #[then("actor animation preparation does not require Blender")]
 async fn then_actor_animation_preparation_does_not_require_blender(world: &mut BevyoutWorld) {
-    assert!(!converter_policy::actor_animation_backend_requires_blender(
+    assert!(matches!(
         world
             .resolved_actor_animation_converter
-            .expect("actor animation converter must be resolved")
+            .expect("actor animation converter must be resolved"),
+        converter_policy::ActorAnimationBackend::Disabled
+            | converter_policy::ActorAnimationBackend::Native
     ));
 }
 

@@ -18,12 +18,13 @@ use crate::item_transaction::{
 };
 use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackageCheckpoint};
 use bevyout_core::dialogue::DialogueSnapshot;
+use bevyout_core::manifest::exterior::WorldLocation;
 
 mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 6;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 7;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,10 @@ pub struct SaveGame {
     pub canonical: Option<ItemLedgerSnapshot>,
     /// Boundary-only narrative state; no Yarn VM or Bevy entity is saved.
     pub dialogue: DialogueSnapshot,
+    /// Exact player location, including exterior worldspace or interior cell.
+    /// Format v7 writers emit this as a separate WLOC record; older saves
+    /// decode with `None` and continue using their header cell fallback.
+    pub location: Option<WorldLocation>,
 }
 
 impl PartialEq for SaveGame {
@@ -52,6 +57,7 @@ impl PartialEq for SaveGame {
             && self.next_runtime_item_id == other.next_runtime_item_id
             && self.rng_state == other.rng_state
             && self.dialogue == other.dialogue
+            && self.location == other.location
             && canonical_for_compare(self) == canonical_for_compare(other)
     }
 }
@@ -70,6 +76,7 @@ impl Default for SaveGame {
             rng_state: 0,
             canonical: None,
             dialogue: DialogueSnapshot::default(),
+            location: None,
         }
     }
 }
@@ -266,6 +273,17 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
                 .as_bytes(),
         )?;
     }
+    if save.header.format_version >= 7
+        && let Some(location) = &save.location
+    {
+        write_record(
+            &mut bytes,
+            tag("WLOC"),
+            ron::ser::to_string(location)
+                .context("encoding player world location")?
+                .as_bytes(),
+        )?;
+    }
     for (cell_form_id, cell) in &save.world.cells {
         let mut payload = Vec::new();
         write_subrecord(&mut payload, tag("FORM"), &cell_form_id.to_le_bytes())?;
@@ -315,6 +333,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut saw_next_runtime_item = false;
     let mut saw_canonical = false;
     let mut saw_dialogue = false;
+    let mut saw_location = false;
     let mut checksum = None;
     let mut checksum_offset = None;
     let mut offset = 0usize;
@@ -386,6 +405,19 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                     save.dialogue = ron::de::from_bytes(&record.payload)
                         .context("decoding dialogue snapshot")?;
                     saw_dialogue = true;
+                }
+                record_tag if *record_tag == tag("WLOC") => {
+                    if saw_location {
+                        bail!("save contains duplicate WLOC records");
+                    }
+                    if !saw_header || save.header.format_version < 7 {
+                        bail!("WLOC is only valid in save format v7 or newer");
+                    }
+                    save.location = Some(
+                        ron::de::from_bytes(&record.payload)
+                            .context("decoding player world location")?,
+                    );
+                    saw_location = true;
                 }
                 record_tag if *record_tag == tag("CSTA") => {
                     let cell_form_id = decode_cell_state(&record.payload)?;
@@ -1478,6 +1510,9 @@ fn validate_save(save: &SaveGame) -> Result<()> {
             .any(|cell| !cell.actors.is_empty())
     {
         bail!("actor state is not valid before save format v4");
+    }
+    if save.header.format_version < 7 && save.location.is_some() {
+        bail!("player world location is not valid before save format v7");
     }
     Ok(())
 }

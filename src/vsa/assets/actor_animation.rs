@@ -75,10 +75,6 @@ pub(crate) struct ActorAnimationPackReport {
     pub(crate) pack_error: Option<String>,
 }
 
-pub(crate) fn actor_animation_conversion_script() -> &'static str {
-    include_str!("actor_animation_script.py")
-}
-
 /// Content identity for one reusable clip pack. The key deliberately includes
 /// the exact skeleton and KF bytes, normalized source paths, stable clip names,
 /// and converter policy revision.
@@ -104,53 +100,6 @@ pub(crate) fn actor_animation_pack_fingerprint(
         hasher.update(bytes);
     }
     format!("{:x}", hasher.finalize())
-}
-
-pub(crate) fn run_actor_animation_batch(
-    blender: &Path,
-    jobs: &[ActorAnimationPackJob],
-    staging_dir: &Path,
-) -> Result<()> {
-    if jobs.is_empty() {
-        return Ok(());
-    }
-    let job_identity = fingerprint(&serde_json::to_vec(jobs)?);
-    let workspace = staging_dir.join("actor_animations");
-    fs::create_dir_all(&workspace)?;
-    let job_file = workspace.join(format!("jobs-{job_identity}.json"));
-    let script_file = workspace.join(format!("script-{job_identity}.py"));
-    fs::write(&job_file, serde_json::to_vec(jobs)?)?;
-    fs::write(&script_file, actor_animation_conversion_script())?;
-    let result = Command::new(blender)
-        .arg("--background")
-        .arg("--factory-startup")
-        .arg("--python")
-        .arg(&script_file)
-        .arg("--")
-        .arg(&job_file)
-        .output();
-    let _ = fs::remove_file(&script_file);
-    let _ = fs::remove_file(&job_file);
-    let result = result?;
-    if !result.status.success() {
-        let stdout_tail = output_tail(&result.stdout, 120);
-        let stderr_tail = output_tail(&result.stderr, 120);
-        bail!(
-            "actor animation Blender conversion exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
-            result.status,
-            stdout_tail,
-            stderr_tail
-        );
-    }
-    for job in jobs {
-        if !job.report.is_file() {
-            bail!(
-                "actor animation Blender conversion did not create report {}",
-                job.report.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Builds an animation-only GLB directly from the native FO3 parser. External
@@ -1148,18 +1097,6 @@ impl<'a> NativeByteReader<'a> {
     fn skip(&mut self, length: usize, field: &str) -> Result<()> {
         self.take(length, field).map(|_| ())
     }
-}
-
-fn output_tail(bytes: &[u8], count: usize) -> String {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .rev()
-        .take(count)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub(crate) fn read_actor_animation_report(path: &Path) -> Result<ActorAnimationPackReport> {

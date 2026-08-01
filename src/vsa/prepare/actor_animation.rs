@@ -12,8 +12,6 @@ pub(crate) const ACTOR_ANIMATION_CATALOG_REVISION: &str =
     "actor-animations-v3-normalized-runtime-contract";
 pub(crate) const ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION: &str =
     "nifty-native-kf-clip-pack-v5-bspline-evaluation-source-metadata";
-pub(crate) const ACTOR_ANIMATION_BLENDER_CONVERTER_REVISION: &str =
-    "niftools-external-kf-clip-pack-v6-source-metadata";
 
 pub(crate) const fn actor_animation_converter_revision(
     backend: crate::converter_policy::ActorAnimationBackend,
@@ -21,9 +19,6 @@ pub(crate) const fn actor_animation_converter_revision(
     match backend {
         crate::converter_policy::ActorAnimationBackend::Native => {
             ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION
-        }
-        crate::converter_policy::ActorAnimationBackend::Blender => {
-            ACTOR_ANIMATION_BLENDER_CONVERTER_REVISION
         }
         crate::converter_policy::ActorAnimationBackend::Disabled => "disabled",
     }
@@ -46,7 +41,6 @@ pub(crate) struct ActorAnimationConversionSummary {
 pub(crate) struct ActorAnimationConversionContext<'a> {
     pub(crate) converter: crate::converter_policy::ActorAnimationBackend,
     pub(crate) converter_revision: &'static str,
-    pub(crate) blender: Option<&'a Path>,
     pub(crate) data_root: &'a Path,
     pub(crate) archives: &'a [crate::vsa::bsa::BsaArchive],
     pub(crate) staging_dir: &'a Path,
@@ -242,7 +236,7 @@ fn fail_clip(clip: &mut PreparedActorAnimationClip, code: &str, message: impl In
 }
 
 fn mark_conversion_not_requested(catalog: &mut PreparedActorAnimationCatalog) {
-    let message = "external KF clip-pack conversion was not requested; rerun prepare with --actor-animation-converter blender";
+    let message = "external KF clip-pack conversion was not requested; rerun prepare with --actor-animation-converter native";
     catalog.diagnostics.push(animation_diagnostic(
         "info",
         "conversion_not_requested",
@@ -419,7 +413,7 @@ fn apply_pack_report(
             fail_clip(
                 clip,
                 "missing_conversion_report",
-                "Blender report omitted this discovered KF clip",
+                "native conversion report omitted this discovered KF clip",
             );
             continue;
         };
@@ -546,15 +540,6 @@ pub(crate) fn convert_actor_animation_catalog(
         match context.converter {
             crate::converter_policy::ActorAnimationBackend::Native => {
                 run_native_actor_animation_batch(&jobs)?;
-            }
-            crate::converter_policy::ActorAnimationBackend::Blender => {
-                run_actor_animation_batch(
-                    context
-                        .blender
-                        .context("Blender backend was selected but no executable was resolved")?,
-                    &jobs,
-                    context.staging_dir,
-                )?;
             }
             crate::converter_policy::ActorAnimationBackend::Disabled => unreachable!(),
         }

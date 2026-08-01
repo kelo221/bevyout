@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 mod actor_animation;
 mod archives;
-mod blender;
 mod cache;
 mod material_glb;
 mod material_policy;
@@ -14,11 +13,9 @@ mod textures;
 
 pub(crate) use actor_animation::*;
 pub(crate) use archives::*;
-pub(crate) use blender::*;
 pub(crate) use cache::*;
 pub(crate) use material_glb::*;
 pub(crate) use material_policy::*;
-use std::process::Command;
 pub(crate) use texture_ktx::*;
 pub(crate) use textures::*;
 
@@ -27,28 +24,18 @@ use super::manifest::Diagnostic;
 use super::paths::{fingerprint, normalize_asset_path};
 use super::physics::read_physics_asset;
 
-/// Bump this whenever the embedded NIFTools conversion/filtering changes.
-/// It is part of the content-addressed GLB name so stale conversions cannot
-/// silently survive a converter fix.
-pub(crate) const NIF_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-pbr-material-v3-ktx2-uastc-v1";
-
-/// Native static conversion cache identity. Keep independent from Blender so
-/// the two backends can coexist in one asset cache without false hits.
-pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1";
+/// Native static conversion cache identity.
+pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1";
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
 pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str = "nifty-fo3-native-actor-assembly-v13-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-0dfd052";
 
-/// Actor assemblies use PyNifly independently of the general NIFTools path.
-/// Keep this revision separate so actor fixes do not invalidate static GLBs.
-pub(crate) const ACTOR_CONVERTER_REVISION: &str = "pynifly-v32-normal-y-v1-pbr-material-v3-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1";
-
-/// Prepared scenes record both conversion paths. Changing either one makes a
-/// completed cell stale while each asset family retains its own cache key.
+/// Legacy prepared-scene revision retained only so old manifests can produce a
+/// clear stale-cache result; new preparation records the native revision below.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-emission-authority-v2-pbr-material-v3-ktx2-uastc-v1+pynifly-v32-normal-y-v1-pbr-material-v3-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1+day-night-profile-v1";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1+actor-assembly-v13-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1+actor-assembly-v13-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,
@@ -250,6 +237,7 @@ pub(crate) fn root_transform_policy(model: &str) -> RootTransformPolicy {
 pub(crate) enum AssetConversion {
     Preserve,
     QuickAo,
+    WorldspaceLod,
 }
 
 impl AssetConversion {
@@ -257,6 +245,7 @@ impl AssetConversion {
         match self {
             Self::Preserve => "ao-none",
             Self::QuickAo => "ao-quick-v1",
+            Self::WorldspaceLod => "lod-skirts-v1",
         }
     }
 }
@@ -270,7 +259,7 @@ pub(crate) fn asset_conversion(static_asset: bool) -> AssetConversion {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BlenderAssetJob {
+pub(crate) struct AssetJob {
     pub(crate) kind: AssetJobKind,
     pub(crate) input: PathBuf,
     pub(crate) output: PathBuf,
@@ -278,6 +267,15 @@ pub(crate) struct BlenderAssetJob {
     pub(crate) model: String,
     pub(crate) conversion: AssetConversion,
     pub(crate) root_transform_policy: RootTransformPolicy,
+}
+
+/// Returns the retained legacy Blender preview/reference script for tests and
+/// explicitly requested offline comparison tooling. Production preparation is
+/// native-only and never calls this function.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn legacy_blender_preview_script() -> &'static str {
+    include_str!("blender_script.py")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,23 +290,6 @@ pub(crate) fn content_addressed_glb_name(converter_revision: &str, nif_bytes: &[
     cache_key.push(0);
     cache_key.extend_from_slice(nif_bytes);
     format!("{}.glb", fingerprint(&cache_key))
-}
-
-pub(crate) fn find_blender(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        if path.exists() {
-            return Ok(path);
-        }
-        bail!("Blender executable does not exist: {}", path.display());
-    }
-    let candidates = [
-        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"),
-        PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .context("Blender was not found; pass --blender explicitly")
 }
 
 #[cfg(test)]

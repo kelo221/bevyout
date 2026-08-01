@@ -1,5 +1,6 @@
 use super::*;
 use bevyout_core::manifest::PreparedDayNightProfileSource;
+use bevyout_core::manifest::exterior::PreparedWeatherProfile;
 use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
 
 fn profile() -> PreparedDayNightProfile {
@@ -10,7 +11,10 @@ fn profile() -> PreparedDayNightProfile {
         weather_editor_id: Some("Clear".into()),
         timings: DayNightTimings::default(),
         sky_upper: ColorKeyframes::default(),
-        sky_lower: ColorKeyframes::default(),
+        sky_lower: ColorKeyframes {
+            day: [1.0, 0.0, 0.0, 1.0],
+            ..ColorKeyframes::default()
+        },
         ambient: ColorKeyframes::default(),
         sunlight: ColorKeyframes::default(),
         source: PreparedDayNightProfileSource::Authoritative,
@@ -98,6 +102,75 @@ fn preview_does_not_invent_directional_strength_for_a_cell_without_it() {
         [1.0, 0.8, 0.6, 0.0],
     );
     assert_eq!(sunlight[..3], [0.0; 3]);
+}
+
+#[test]
+fn prepared_weather_transition_blends_target_keyframes() {
+    let source = PreparedWeatherProfile {
+        form_id: 1,
+        editor_id: Some("Source".into()),
+        timings: DayNightTimings::default(),
+        sky_upper: ColorKeyframes {
+            day: [1.0, 0.0, 0.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        sky_lower: ColorKeyframes {
+            day: [1.0, 0.0, 0.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        ambient: ColorKeyframes {
+            day: [1.0, 0.0, 0.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        sunlight: ColorKeyframes {
+            day: [1.0, 0.0, 0.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+    };
+    let target = PreparedWeatherProfile {
+        form_id: 2,
+        editor_id: Some("Target".into()),
+        timings: DayNightTimings::default(),
+        sky_upper: ColorKeyframes {
+            day: [0.0, 0.0, 1.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        sky_lower: ColorKeyframes {
+            day: [0.0, 0.0, 1.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        ambient: ColorKeyframes {
+            day: [0.0, 0.0, 1.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+        sunlight: ColorKeyframes {
+            day: [0.0, 0.0, 1.0, 1.0],
+            ..ColorKeyframes::default()
+        },
+    };
+    let mut ambient = [1.0, 0.0, 0.0, 1.0];
+    let mut sunlight = ambient;
+    let mut sky_upper = ambient;
+    let mut sky_lower = ambient;
+    apply_weather_transition(
+        &mut ambient,
+        &mut sunlight,
+        &mut sky_upper,
+        &mut sky_lower,
+        WeatherTransition {
+            source_weather_form_id: Some(1),
+            target_weather_form_id: Some(2),
+            elapsed_seconds: 5.0,
+            duration_seconds: 10.0,
+        },
+        12.0,
+        Some(source),
+        Some(target),
+    );
+    assert_eq!(ambient, [0.5, 0.0, 0.5, 1.0]);
+    assert_eq!(sunlight, ambient);
+    assert_eq!(sky_upper, ambient);
+    assert_eq!(sky_lower, ambient);
 }
 
 #[test]

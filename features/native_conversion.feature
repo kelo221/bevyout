@@ -1,11 +1,11 @@
 Feature: Bounded native NIF conversion batches
 
-  Scenario: Native conversion is the default and Blender remains an explicit option
+  Scenario: Native conversion is the only production option
     Given no NIF converter was explicitly requested
     When the preparation converter is resolved
     Then the resolved preparation converter is "native"
-    When the "blender" NIF converter is explicitly requested
-    Then the resolved preparation converter is "blender"
+    When the "native" NIF converter is explicitly requested
+    Then the resolved preparation converter is "native"
 
   Scenario: Native unlit materials are accepted by the Rust bake
     Given a native GLB requires extensions "KHR_materials_unlit"

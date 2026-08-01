@@ -22,9 +22,9 @@ pub(crate) use job::*;
 pub(crate) use plan::*;
 pub(crate) use tools::*;
 
-use crate::cli::{BakeArgs, BakeQuality};
+use crate::cli::BakeArgs;
 
-use super::assets::{SUPPORTED_PREPARED_CONVERTER_REVISIONS, find_blender};
+use super::assets::SUPPORTED_PREPARED_CONVERTER_REVISIONS;
 use super::manifest::{
     CURRENT_BAKE_REVISION, CURRENT_MANIFEST_SCHEMA_VERSION, PreparedCellLighting,
     PreparedIrradianceVolume, PreparedPhysicsClassification, PreparedPlacement,
@@ -96,9 +96,6 @@ pub(crate) struct BakeOutputs {
     pub(crate) asset_root: PathBuf,
     pub(crate) output_dir: PathBuf,
     pub(crate) output_scene: PathBuf,
-    pub(crate) preview_output: PathBuf,
-    pub(crate) result_json: PathBuf,
-    pub(crate) irradiance_blend: PathBuf,
     pub(crate) irradiance_raw: PathBuf,
     pub(crate) job_file: PathBuf,
 }
@@ -112,9 +109,6 @@ pub(crate) fn bake_outputs(manifest: &PreparedSceneManifest) -> Result<BakeOutpu
         .join("baked");
     Ok(BakeOutputs {
         output_scene: output_dir.join("scene.glb"),
-        preview_output: output_dir.join("preview.png"),
-        result_json: output_dir.join("result.json"),
-        irradiance_blend: output_dir.join("irradiance.blend"),
         irradiance_raw: output_dir.join("irradiance.raw"),
         job_file: output_dir.join("job.json"),
         asset_root,
@@ -122,7 +116,7 @@ pub(crate) fn bake_outputs(manifest: &PreparedSceneManifest) -> Result<BakeOutpu
     })
 }
 
-/// Assembles the Blender job for one prepared cell. Pure over its inputs:
+/// Assembles the deterministic Rust bake job for one prepared cell. Pure over its inputs:
 /// the same manifest, bake arguments, and output paths always produce the
 /// same job, which is what makes `bake_job_fingerprint` a meaningful
 /// validity key for the batch skip check (F62.1).
@@ -142,14 +136,10 @@ pub(crate) fn build_bake_job(
                 ..Default::default()
             });
     BakeJob {
-        asset_root: blender_path(&outputs.asset_root),
-        output_scene: blender_path(&outputs.output_scene),
-        preview_output: blender_path(&outputs.preview_output),
-        result_json: blender_path(&outputs.result_json),
-        irradiance_blend: blender_path(&outputs.irradiance_blend),
+        asset_root: job_path(&outputs.asset_root),
+        output_scene: job_path(&outputs.output_scene),
         irradiance_spacing_meters: args.irradiance_spacing_meters,
         irradiance_samples: args.irradiance_samples,
-        preview_only: matches!(args.quality, BakeQuality::Preview),
         static_batch_chunk_meters: args.static_batch_chunk_meters,
         // Runtime glow maps are intentionally much brighter than their physical
         // bake contribution so they remain visible under Bloom in the viewer.
@@ -201,7 +191,7 @@ pub(crate) fn build_bake_job(
 /// The job-parameter fingerprint recorded as `PreparedBake.source_fingerprint`
 /// after a successful bake, and recomputed by the batch skip check to decide
 /// whether a recorded bake is still valid (F62.1): the prepared manifest's
-/// own `source_fingerprint` plus the serialized Blender job, so both a
+/// own `source_fingerprint` plus the serialized Rust bake job, so both a
 /// re-prepared cell and changed bake parameters invalidate a recorded bake.
 pub(crate) fn bake_job_fingerprint(
     manifest: &PreparedSceneManifest,
@@ -219,16 +209,7 @@ pub(crate) fn bake_job_fingerprint(
 pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()> {
     let mut manifest = load_prepared_manifest(manifest_path)?;
 
-    let blender = if matches!(args.quality, BakeQuality::Preview) {
-        Some(find_blender(args.blender.clone())?)
-    } else {
-        None
-    };
-    let ktx_tool = if matches!(args.quality, BakeQuality::Irradiance) {
-        Some(find_irradiance_ktx_tool(args.toktx.clone())?)
-    } else {
-        None
-    };
+    let ktx_tool = find_irradiance_ktx_tool(args.toktx.clone())?;
     let outputs = bake_outputs(&manifest)?;
     // Calling bake is itself the user's request to regenerate this output.
     // Keep reading the legacy --force flag for existing scripts, but do not
@@ -240,9 +221,6 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         asset_root,
         output_dir,
         output_scene,
-        preview_output,
-        result_json,
-        irradiance_blend,
         irradiance_raw,
         job_file,
     } = &outputs;
@@ -250,41 +228,8 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     exclude_animated_static_assets(asset_root, &mut job)?;
     fs::write(job_file, serde_json::to_vec_pretty(&job)?)?;
 
-    let script_file = output_dir.join("blender_bake.py");
-    fs::write(&script_file, include_str!("../blender_bake.py"))?;
-    if matches!(args.quality, BakeQuality::Preview) {
-        let _ = fs::remove_file(preview_output);
-    } else {
-        for path in [output_scene, irradiance_blend, result_json] {
-            let _ = fs::remove_file(path);
-        }
-    }
-    if matches!(args.quality, BakeQuality::Preview) {
-        let blender_status = Command::new(blender.expect("preview resolves Blender"))
-            .arg("--background")
-            .arg("--factory-startup")
-            .arg("--python")
-            .arg(&script_file)
-            .arg("--")
-            .arg(job_file)
-            .current_dir(asset_root)
-            .status()
-            .context("failed to start Blender")?;
-        if !blender_status.success() {
-            bail!("Blender bake failed with {blender_status}");
-        }
-        if !preview_output.exists() {
-            bail!(
-                "Blender reported success but did not create the preview image {}",
-                preview_output.display()
-            );
-        }
-        if !args.keep_intermediate {
-            let _ = fs::remove_file(job_file);
-            let _ = fs::remove_file(&script_file);
-        }
-        println!("Eevee preview rendered -> {}", preview_output.display());
-        return Ok(());
+    if output_scene.exists() {
+        fs::remove_file(output_scene)?;
     }
 
     let started = Instant::now();
@@ -319,7 +264,6 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         args.irradiance_samples,
         irradiance_raw,
     )?;
-    let ktx_tool = ktx_tool.expect("irradiance bake always resolves a KTX tool");
     let mut ktx_command = Command::new(&ktx_tool.path);
     match ktx_tool.kind {
         KtxToolKind::LegacyToktx => {
@@ -440,9 +384,6 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         }
         let _ = fs::remove_file(irradiance_raw);
         let _ = fs::remove_file(job_file);
-        let _ = fs::remove_file(&script_file);
-        let _ = fs::remove_file(result_json);
-        let _ = fs::remove_file(irradiance_blend);
     }
     println!(
         "baked {} in {:.2}s: Rust irradiance {:?}, {} nonzero face voxels, max {:.3}, {} primary rays -> {}",

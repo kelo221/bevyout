@@ -140,6 +140,7 @@ fn sample_save() -> SaveGame {
         rng_state: 0x0123_4567_89ab_cdef,
         canonical: None,
         dialogue: Default::default(),
+        location: None,
     }
 }
 
@@ -150,6 +151,20 @@ fn round_trip_is_deterministic() {
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);
     assert_eq!(decode_save(&first).unwrap(), save);
+}
+
+#[test]
+fn v7_round_trip_preserves_exact_world_location() {
+    let mut save = sample_save();
+    save.location = Some(bevyout_core::manifest::exterior::WorldLocation::Exterior(
+        bevyout_core::manifest::exterior::WorldLocationExterior {
+            worldspace_form_id: 0x0001_51e3,
+            position: [12.0, 3.5, -8.0],
+            rotation_xyzw: [0.0, 0.707, 0.0, 0.707],
+        },
+    ));
+    let bytes = encode_save(&save).unwrap();
+    assert_eq!(decode_save(&bytes).unwrap(), save);
 }
 
 #[test]
@@ -250,9 +265,9 @@ fn version_three_save_round_trips_equipment_and_hotkeys() {
 }
 
 #[test]
-fn version_six_actor_item_and_dialogue_state_round_trip_deterministically() {
+fn version_seven_actor_item_dialogue_and_location_state_round_trip_deterministically() {
     let save = sample_save();
-    assert_eq!(save.header.format_version, 6);
+    assert_eq!(save.header.format_version, 7);
     let first = encode_save(&save).unwrap();
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);

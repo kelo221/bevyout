@@ -338,6 +338,65 @@ pub(crate) struct WeatherRecord {
     pub(crate) sunlight: ColorKeyframes,
 }
 
+/// Prepared source data from one exterior `LAND` record.  The parser keeps
+/// this compact, source-shaped representation; terrain mesh generation lives
+/// in the exterior preparation slice.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LandRecord {
+    pub(crate) form_id: u32,
+    pub(crate) cell_form_id: u32,
+    pub(crate) heights: Vec<f32>,
+    pub(crate) normals: Vec<[i8; 3]>,
+    pub(crate) colors: Vec<[u8; 3]>,
+    pub(crate) texture_layers: Vec<u32>,
+    pub(crate) texture_assignments: Vec<LandTextureAssignment>,
+    pub(crate) diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LandTextureAssignment {
+    pub(crate) form_id: u32,
+    pub(crate) quadrant: u8,
+    /// `ATXT.layerIndex` is a little-endian `u16`; byte 5 in the record is
+    /// padding/unknown data, not the layer number.
+    pub(crate) layer: u16,
+    pub(crate) base: bool,
+    pub(crate) weights: Vec<LandTextureWeight>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LandTextureWeight {
+    pub(crate) position: u16,
+    pub(crate) opacity: f32,
+}
+
+/// The focused LTEX/TXST fields needed by the prepared exterior material.
+/// FO3 stores the authoritative diffuse source in TXST.TX00 and the
+/// DirectX tangent-space normal/specular source in TXST.TX01.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LandscapeTextureRecord {
+    pub(crate) form_id: u32,
+    pub(crate) editor_id: Option<String>,
+    pub(crate) texture_set_form_id: Option<u32>,
+    pub(crate) diffuse_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TextureSetRecord {
+    pub(crate) form_id: u32,
+    pub(crate) diffuse_path: Option<String>,
+    pub(crate) normal_path: Option<String>,
+}
+
+impl LandRecord {
+    pub(crate) const GRID_SIZE: usize = 33;
+
+    pub(crate) fn is_complete(&self) -> bool {
+        let count = Self::GRID_SIZE * Self::GRID_SIZE;
+        self.heights.len() == count
+    }
+}
+
 /// A directed door edge in the content-set-wide connectivity graph produced
 /// by `ParsedContentSet::door_edges` (issue #45, F45.3): one per resolvable
 /// `XTEL` teleport, independent of which single cell is being prepared.
@@ -560,7 +619,11 @@ pub(crate) struct ParsedPlugin {
     pub(crate) lighting_templates: HashMap<u32, LightingTemplateRecord>,
     pub(crate) climates: HashMap<u32, ClimateRecord>,
     pub(crate) weathers: HashMap<u32, WeatherRecord>,
+    pub(crate) landscape_textures: HashMap<u32, LandscapeTextureRecord>,
+    pub(crate) texture_sets: HashMap<u32, TextureSetRecord>,
     pub(crate) worldspaces: HashMap<u32, WorldspaceRecord>,
+    pub(crate) land: Option<LandRecord>,
+    pub(crate) road_count: usize,
     pub(crate) references: Vec<ReferenceRecord>,
     pub(crate) navmeshes: Vec<NavMeshRecord>,
     /// Content-set-wide `NAVI` singleton (issue #111, M4 wave 2):
@@ -601,6 +664,47 @@ impl ParsedContentSet {
         self.state.worldspaces.iter()
     }
 
+    pub(crate) fn land_for_cell(&self, cell_form_id: u32) -> Option<&LandRecord> {
+        self.state.lands.get(&cell_form_id).map(|(_, land)| land)
+    }
+
+    pub(crate) fn road_count_for_cell(&self, cell_form_id: u32) -> usize {
+        self.state
+            .road_counts
+            .get(&cell_form_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn base_model(&self, base_form_id: u32) -> Option<String> {
+        self.state
+            .bases
+            .get(&base_form_id)
+            .and_then(|base| base.model.clone())
+    }
+
+    pub(crate) fn references_by_cell(&self) -> HashMap<u32, Vec<&ReferenceRecord>> {
+        let mut grouped = HashMap::<u32, Vec<&ReferenceRecord>>::new();
+        for reference in self.state.references.values() {
+            grouped
+                .entry(reference.parent_cell_form_id)
+                .or_default()
+                .push(reference);
+        }
+        for references in grouped.values_mut() {
+            references.sort_by_key(|reference| reference.form_id);
+        }
+        grouped
+    }
+
+    pub(crate) fn navmesh_counts_by_cell(&self) -> HashMap<u32, usize> {
+        let mut counts = HashMap::<u32, usize>::new();
+        for (cell_form_id, _) in self.state.navmeshes.values() {
+            *counts.entry(*cell_form_id).or_default() += 1;
+        }
+        counts
+    }
+
     /// Content-set-wide door connectivity graph (issue #45, F45.3):
     /// generalises the per-cell `XTEL` resolution in `select` below to walk
     /// every reference with a door+teleport in the whole loaded content set,
@@ -634,7 +738,7 @@ impl ParsedContentSet {
         (edges, unresolved)
     }
 
-    fn select(self, selector: &CellSelector) -> Result<ParsedPlugin> {
+    pub(crate) fn select(self, selector: &CellSelector) -> Result<ParsedPlugin> {
         let mut state = self.state;
         let target_cell = match selector {
             CellSelector::FormId(form_id) => *form_id,
@@ -787,7 +891,11 @@ impl ParsedContentSet {
             lighting_templates: state.lighting_templates,
             climates: state.climates,
             weathers: state.weathers,
+            landscape_textures: state.landscape_textures,
+            texture_sets: state.texture_sets,
             worldspaces: state.worldspaces,
+            land: state.lands.remove(&target_cell).map(|(_, land)| land),
+            road_count: state.road_counts.remove(&target_cell).unwrap_or(0),
             references,
             navmeshes,
             navigation: state.navigation,
@@ -821,6 +929,8 @@ pub(crate) struct ParsedState {
     lighting_templates: HashMap<u32, LightingTemplateRecord>,
     climates: HashMap<u32, ClimateRecord>,
     weathers: HashMap<u32, WeatherRecord>,
+    landscape_textures: HashMap<u32, LandscapeTextureRecord>,
+    texture_sets: HashMap<u32, TextureSetRecord>,
     references: HashMap<u32, ReferenceRecord>,
     navmeshes: HashMap<u32, (u32, NavMeshRecord)>,
     navigation: Option<NaviRecord>,
@@ -829,6 +939,8 @@ pub(crate) struct ParsedState {
     cell_winning_plugins: HashMap<u32, String>,
     cell_provenance: HashMap<u32, Vec<String>>,
     worldspaces: HashMap<u32, WorldspaceRecord>,
+    lands: HashMap<u32, (u32, LandRecord)>,
+    road_counts: HashMap<u32, usize>,
     recipe_diagnostics: Vec<String>,
     actor_support_diagnostics: Vec<String>,
     navigation_diagnostics: Vec<String>,
@@ -862,6 +974,7 @@ impl fmt::Display for SubrecordParseError {
 
 impl std::error::Error for SubrecordParseError {}
 
+#[cfg(test)]
 pub(crate) fn parse_content_set(
     sources: &[PluginSource<'_>],
     selector: &CellSelector,

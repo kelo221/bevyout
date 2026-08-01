@@ -8,7 +8,9 @@ fn viewer_group_installs_feature_plugins_and_forwards_configuration() {
     app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default()))
         .add_plugins(ViewerPlugins {
             disable_physics: true,
+            worldspace_lod: false,
             resident_cell_limit: 7,
+            exterior_resident_cell_limit: 25,
             agent_port: None,
             day_night_cycle_seconds: None,
         });

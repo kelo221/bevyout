@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn segmented_shape_suffix_uses_the_largest_valid_segment_table() {
+    let mut payload = vec![0xa5; 93];
+    payload.extend_from_slice(&16_u32.to_le_bytes());
+    payload.extend(std::iter::repeat_n(0xc3, 16 * 9));
+    assert_eq!(segmented_shape_suffix_len(&payload), Some(148));
+}
+
+#[test]
 fn native_normal_conversion_separates_normal_from_shared_specular_source() {
     let source_path = "textures/shared_payload.dds".to_string();
     let mut source = Cursor::new(Vec::new());

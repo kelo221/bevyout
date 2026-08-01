@@ -344,6 +344,7 @@ fn current_schema_mutability_and_static_shadows_round_trip_through_ron() {
         },
         leveled_lists: BTreeMap::new(),
         dialogue: None,
+        exterior: None,
     };
 
     assert_eq!(manifest.schema_version, CURRENT_MANIFEST_SCHEMA_VERSION);
@@ -586,6 +587,7 @@ fn leveled_lists_with_nested_entries_round_trip_through_ron() {
         image_space_modifier_catalog_revision: None,
         image_space_modifier_catalog_hash: None,
         dialogue: None,
+        exterior: None,
     };
 
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default()).unwrap();

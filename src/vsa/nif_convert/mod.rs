@@ -1,8 +1,14 @@
-//! Experimental native FO3/FNV NIF-to-GLB vertical slice.
+//! Production native FO3/FNV NIF-to-GLB conversion.
 //!
 //! This owns its CLI input resolution, focused NIF conversion, texture
-//! resolution, reports, and output writes. The established Blender conversion
-//! route used by `prepare` intentionally remains unchanged.
+//! resolution, reports, and output writes. The production preparation path no
+//! longer selects Blender. Remaining limitations are deliberately reported by
+//! the native converter: VWD/distant geometry generation and NIF blocks that
+//! are unsupported or lossy. Fallout's segmented terrain LOD shape carries a
+//! segment table that is not needed for its render geometry; the converter
+//! normalizes that table under the explicit lossy policy so the vanilla LOD
+//! assets remain usable. Exterior packages own terrain, distant references,
+//! and navigation; the converter is not invoked by the runtime viewer.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -147,6 +153,205 @@ pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct NifLayout {
+    block_type_names: Vec<String>,
+    block_type_indices: Vec<u16>,
+    block_sizes: Vec<u32>,
+    block_sizes_start: usize,
+    block_sizes_end: usize,
+    payload_start: usize,
+    payload_end: usize,
+}
+
+/// Strip only the Bethesda segment table appended to FO3's
+/// `BSSegmentedTriShape` payload. Nifty already parses the shared
+/// `NiTriShape` geometry prefix; the table is a render-irrelevant partition
+/// hint used by the original renderer. Keeping this normalization here makes
+/// the compatibility policy explicit and leaves the pinned dependency
+/// untouched.
+fn normalize_segmented_shape_tables(bytes: &[u8]) -> Result<(Option<Vec<u8>>, Vec<usize>)> {
+    let Some(layout) = parse_nif_layout(bytes) else {
+        return Ok((None, Vec::new()));
+    };
+    let mut new_sizes = layout.block_sizes.clone();
+    let mut normalized_blocks = Vec::new();
+    let mut payload_offset = layout.payload_start;
+    for (index, size) in layout.block_sizes.iter().enumerate() {
+        let size = usize::try_from(*size).context("NIF block size does not fit usize")?;
+        let end = payload_offset
+            .checked_add(size)
+            .context("NIF block payload offset overflows")?;
+        let type_index = usize::from(layout.block_type_indices[index]);
+        if layout
+            .block_type_names
+            .get(type_index)
+            .is_some_and(|name| name == "BSSegmentedTriShape")
+            && let Some(suffix_len) = segmented_shape_suffix_len(&bytes[payload_offset..end])
+        {
+            new_sizes[index] = u32::try_from(size - suffix_len)
+                .context("normalized NIF block size does not fit u32")?;
+            normalized_blocks.push(index);
+        }
+        payload_offset = end;
+    }
+    if normalized_blocks.is_empty() {
+        return Ok((None, normalized_blocks));
+    }
+
+    let removed_bytes = layout
+        .block_sizes
+        .iter()
+        .zip(&new_sizes)
+        .map(|(old, new)| usize::try_from(old.saturating_sub(*new)).unwrap_or(0))
+        .sum::<usize>();
+    let mut normalized = Vec::with_capacity(bytes.len().saturating_sub(removed_bytes));
+    normalized.extend_from_slice(&bytes[..layout.block_sizes_start]);
+    for size in &new_sizes {
+        normalized.extend_from_slice(&size.to_le_bytes());
+    }
+    normalized.extend_from_slice(&bytes[layout.block_sizes_end..layout.payload_start]);
+    let mut payload_offset = layout.payload_start;
+    for (index, size) in layout.block_sizes.iter().enumerate() {
+        let old_size = usize::try_from(*size).context("NIF block size does not fit usize")?;
+        let new_size = usize::try_from(new_sizes[index])
+            .context("normalized NIF block size does not fit usize")?;
+        normalized.extend_from_slice(&bytes[payload_offset..payload_offset + new_size]);
+        payload_offset += old_size;
+    }
+    normalized.extend_from_slice(&bytes[layout.payload_end..]);
+    Ok((Some(normalized), normalized_blocks))
+}
+
+fn parse_nif_layout(bytes: &[u8]) -> Option<NifLayout> {
+    const HEADER: &[u8] = b"Gamebryo File Format, Version 20.2.0.7";
+    let line_end = bytes.iter().position(|byte| *byte == b'\n')?;
+    if bytes.get(..line_end)? != HEADER {
+        return None;
+    }
+    let mut offset = line_end + 1;
+    if read_u32(bytes, &mut offset)? != nif::fo3::FILE_VERSION
+        || read_u8(bytes, &mut offset)? != 1
+        || read_u32(bytes, &mut offset)? != nif::fo3::USER_VERSION
+    {
+        return None;
+    }
+    let block_count = usize::try_from(read_u32(bytes, &mut offset)?).ok()?;
+    if block_count > 1_000_000 {
+        return None;
+    }
+    let _bethesda_version = read_u32(bytes, &mut offset)?;
+    for _ in 0..3 {
+        skip_short_string(bytes, &mut offset)?;
+    }
+    let type_count = usize::from(read_u16(bytes, &mut offset)?);
+    let mut block_type_names = Vec::with_capacity(type_count);
+    for _ in 0..type_count {
+        block_type_names.push(read_sized_string(bytes, &mut offset)?);
+    }
+    let mut block_type_indices = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        block_type_indices.push(read_u16(bytes, &mut offset)?);
+    }
+    let block_sizes_start = offset;
+    let mut block_sizes = Vec::with_capacity(block_count);
+    let mut payload_length = 0usize;
+    for _ in 0..block_count {
+        let size = read_u32(bytes, &mut offset)?;
+        payload_length = payload_length.checked_add(usize::try_from(size).ok()?)?;
+        block_sizes.push(size);
+    }
+    let block_sizes_end = offset;
+    let string_count = usize::try_from(read_u32(bytes, &mut offset)?).ok()?;
+    let _maximum_string_length = read_u32(bytes, &mut offset)?;
+    for _ in 0..string_count {
+        skip_sized_string(bytes, &mut offset)?;
+    }
+    let group_count = usize::try_from(read_u32(bytes, &mut offset)?).ok()?;
+    let groups_bytes = group_count.checked_mul(4)?;
+    offset = offset.checked_add(groups_bytes)?;
+    if offset > bytes.len() {
+        return None;
+    }
+    let payload_start = offset;
+    let payload_end = payload_start.checked_add(payload_length)?;
+    if payload_end.checked_add(4)? > bytes.len() {
+        return None;
+    }
+    let root_count = u32::from_le_bytes(bytes[payload_end..payload_end + 4].try_into().ok()?);
+    let footer_end = payload_end
+        .checked_add(4)?
+        .checked_add(usize::try_from(root_count).ok()?.checked_mul(4)?)?;
+    (footer_end == bytes.len()).then_some(NifLayout {
+        block_type_names,
+        block_type_indices,
+        block_sizes,
+        block_sizes_start,
+        block_sizes_end,
+        payload_start,
+        payload_end,
+    })
+}
+
+fn segmented_shape_suffix_len(payload: &[u8]) -> Option<usize> {
+    let mut best = None;
+    for start in 80..payload.len().saturating_sub(12) {
+        let count = u32::from_le_bytes(payload.get(start..start + 4)?.try_into().ok()?);
+        if count == 0 || count > 1_000_000 {
+            continue;
+        }
+        let suffix_len = 4usize.checked_add(usize::try_from(count).ok()?.checked_mul(9)?)?;
+        if suffix_len == payload.len() - start
+            && best.is_none_or(|(best_count, _)| count > best_count)
+        {
+            best = Some((count, suffix_len));
+        }
+    }
+    best.map(|(_, suffix_len)| suffix_len)
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> Option<u8> {
+    let value = *bytes.get(*offset)?;
+    *offset += 1;
+    Some(value)
+}
+
+fn read_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let value = u16::from_le_bytes(bytes.get(*offset..end)?.try_into().ok()?);
+    *offset = end;
+    Some(value)
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let value = u32::from_le_bytes(bytes.get(*offset..end)?.try_into().ok()?);
+    *offset = end;
+    Some(value)
+}
+
+fn skip_short_string(bytes: &[u8], offset: &mut usize) -> Option<()> {
+    let length = usize::from(read_u8(bytes, offset)?);
+    let end = offset.checked_add(length)?;
+    bytes.get(*offset..end)?;
+    *offset = end;
+    Some(())
+}
+
+fn skip_sized_string(bytes: &[u8], offset: &mut usize) -> Option<()> {
+    let length = usize::try_from(read_u32(bytes, offset)?).ok()?;
+    let end = offset.checked_add(length)?;
+    bytes.get(*offset..end)?;
+    *offset = end;
+    Some(())
+}
+
+fn read_sized_string(bytes: &[u8], offset: &mut usize) -> Option<String> {
+    let start = *offset;
+    skip_sized_string(bytes, offset)?;
+    Some(String::from_utf8_lossy(bytes.get(start + 4..*offset)?).into_owned())
+}
+
 pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConversionResult> {
     ensure_output_available(request.output, request.force)?;
     if let Some(path) = request.report {
@@ -157,7 +362,22 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
     }
 
     let mut lines = vec![format!("nif-convert: input {}", request.source_name)];
-    let document = nif::fo3::parse(request.nif_bytes).context("parsing FO3/FNV NIF 20.2.0.7")?;
+    let (normalized_bytes, normalized_blocks) =
+        normalize_segmented_shape_tables(request.nif_bytes)?;
+    if !normalized_blocks.is_empty() {
+        if !request.allow_lossy {
+            bail!(
+                "strict conversion rejected {} BSSegmentedTriShape segment table(s) (pass --allow-lossy to omit render-irrelevant segment metadata)",
+                normalized_blocks.len()
+            );
+        }
+        lines.push(format!(
+            "nif-convert: normalized BSSegmentedTriShape blocks={} (segment metadata omitted)",
+            normalized_blocks.len()
+        ));
+    }
+    let parse_bytes = normalized_bytes.as_deref().unwrap_or(request.nif_bytes);
+    let document = nif::fo3::parse(parse_bytes).context("parsing FO3/FNV NIF 20.2.0.7")?;
     lines.push(format!(
         "nif-convert: parsed version=20.2.0.7 bethesda={} blocks={}",
         document.header.bethesda.version,
@@ -180,7 +400,12 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
         root.transform.rotation = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         root.transform.scale = 1.0;
     }
-    apply_conversion_mode(&mut scene, request.conversion);
+    let removed_lod_skirt_triangles = apply_conversion_mode(&mut scene, request.conversion);
+    if removed_lod_skirt_triangles > 0 {
+        lines.push(format!(
+            "nif-convert: removed worldspace LOD skirt triangles={removed_lod_skirt_triangles}"
+        ));
+    }
     lines.push(format!(
         "nif-convert: scene meshes={} vertices={} triangles={}",
         scene.statistics.source_meshes,
@@ -291,7 +516,7 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
     };
 
     let missing_textures = output.missing_textures.clone();
-    let lossy_scene_issues = scene.issues.len();
+    let lossy_scene_issues = scene.issues.len() + normalized_blocks.len();
     let report_bytes = if request.report.is_some() {
         let report = ConversionReport {
             converter: super::assets::material_policy_identity(NATIVE_NIF_REPORT_REVISION),
@@ -328,6 +553,11 @@ pub(crate) fn convert_nif(request: NifConversionRequest<'_>) -> Result<NifConver
                     block_type: issue.type_name,
                     message: issue.message,
                 })
+                .chain(normalized_blocks.iter().map(|block| ReportIssue {
+                    block: *block,
+                    block_type: "BSSegmentedTriShape".into(),
+                    message: "render-irrelevant segment metadata omitted by native compatibility normalizer".into(),
+                }))
                 .collect(),
             physics,
             physics_output: request
@@ -717,16 +947,72 @@ fn prepare_native_normal_textures(
     Ok(())
 }
 
-fn apply_conversion_mode(scene: &mut nif::fo3::Scene, mode: NifConversionMode) {
-    if mode != NifConversionMode::QuickAo {
-        return;
+fn apply_conversion_mode(scene: &mut nif::fo3::Scene, mode: NifConversionMode) -> usize {
+    match mode {
+        NifConversionMode::Preserve => 0,
+        NifConversionMode::QuickAo => {
+            for mesh in scene.nodes.iter_mut().filter_map(|node| node.mesh.as_mut()) {
+                for color in &mut mesh.colors {
+                    let ao =
+                        (color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722).clamp(0.0, 1.0);
+                    *color = [ao, ao, ao, color[3]];
+                }
+            }
+            0
+        }
+        NifConversionMode::WorldspaceLod => strip_worldspace_lod_skirts(scene),
     }
-    for mesh in scene.nodes.iter_mut().filter_map(|node| node.mesh.as_mut()) {
-        for color in &mut mesh.colors {
-            let ao = (color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722).clamp(0.0, 1.0);
-            *color = [ao, ao, ao, color[3]];
+}
+
+/// FO3's worldspace LOD tiles carry deep border skirts so the original
+/// renderer can hide seams in its horizon pass. In the prepared Bevy scene
+/// those skirts are visible as walls and cut-out panels because there is no
+/// equivalent terrain-horizon clip. Remove only vertical/degenerate faces
+/// (zero source-XY area) and triangles whose source-Z span exceeds a
+/// conservative 2,048 plugin units; ordinary sloped terrain facets remain
+/// intact.
+fn strip_worldspace_lod_skirts(scene: &mut nif::fo3::Scene) -> usize {
+    const MAX_TERRAIN_FACET_HEIGHT: f32 = 2_048.0;
+    let mut removed = 0usize;
+    for node in &mut scene.nodes {
+        let Some(mesh) = node.mesh.as_mut() else {
+            continue;
+        };
+        let mut retained = Vec::with_capacity(mesh.indices.len());
+        for triangle in mesh.indices.chunks(3) {
+            if triangle.len() != 3 {
+                retained.extend_from_slice(triangle);
+                continue;
+            }
+            let &[a_index, b_index, c_index] = triangle else {
+                unreachable!("triangle length checked above");
+            };
+            let [a, b, c] = [
+                mesh.positions[a_index as usize],
+                mesh.positions[b_index as usize],
+                mesh.positions[c_index as usize],
+            ];
+            let horizontal_area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            let minimum = a[2].min(b[2]).min(c[2]);
+            let maximum = a[2].max(b[2]).max(c[2]);
+            if horizontal_area.abs() <= 1.0 || maximum - minimum > MAX_TERRAIN_FACET_HEIGHT {
+                removed += 1;
+            } else {
+                retained.extend_from_slice(triangle);
+            }
+        }
+        mesh.indices = retained;
+        if mesh.indices.is_empty() {
+            let mesh = node.mesh.take().expect("mesh was present above");
+            scene.statistics.source_meshes = scene.statistics.source_meshes.saturating_sub(1);
+            scene.statistics.source_vertices = scene
+                .statistics
+                .source_vertices
+                .saturating_sub(mesh.positions.len());
         }
     }
+    scene.statistics.source_triangles = scene.statistics.source_triangles.saturating_sub(removed);
+    removed
 }
 
 fn nif_transform_is_identity(transform: nif::fo3::Transform) -> bool {
@@ -815,6 +1101,7 @@ fn conversion_name(mode: NifConversionMode) -> &'static str {
     match mode {
         NifConversionMode::Preserve => "preserve",
         NifConversionMode::QuickAo => "quick-ao",
+        NifConversionMode::WorldspaceLod => "worldspace-lod",
     }
 }
 

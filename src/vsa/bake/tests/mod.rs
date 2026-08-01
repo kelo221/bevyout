@@ -241,14 +241,14 @@ fn relative_asset_path_requires_the_path_to_be_inside_root() {
 }
 
 #[test]
-fn blender_path_strips_extended_length_prefix_only() {
+fn job_path_strips_extended_length_prefix_only() {
     assert_eq!(
-        blender_path(Path::new(r"\\?\C:\cache\assets\scene.glb")),
+        job_path(Path::new(r"\\?\C:\cache\assets\scene.glb")),
         r"C:\cache\assets\scene.glb"
     );
     // Paths without the prefix pass through unchanged.
     assert_eq!(
-        blender_path(Path::new(r"C:\cache\assets\scene.glb")),
+        job_path(Path::new(r"C:\cache\assets\scene.glb")),
         r"C:\cache\assets\scene.glb"
     );
 }
