@@ -137,6 +137,19 @@ mod report_schema;
 #[allow(dead_code, unused_imports)]
 mod policy;
 
+// M6 wave 2's exterior lifecycle and diagnostics seams are included here so
+// the executable specification drives the same generation-aware planner and
+// process-memory report used by the viewer. The diagnostics adapter expects
+// its sibling lifecycle module at the crate root, matching the production
+// `viewer::world::exterior` layout.
+#[path = "../src/viewer/world/exterior/lifecycle.rs"]
+#[allow(dead_code, unused_imports)]
+mod lifecycle;
+
+#[path = "../src/viewer/world/exterior/diagnostics.rs"]
+#[allow(dead_code, unused_imports)]
+mod exterior_diagnostics;
+
 // `world::swap_policy` (issue #52) is likewise dependency-free (std only, no
 // Bevy) -- see its module doc comment -- so it is included verbatim too.
 #[path = "../src/viewer/world/swap_policy.rs"]
@@ -675,6 +688,16 @@ struct BevyoutWorld {
     // -- performance_probe.feature --
     performance_samples: Vec<performance_policy::FrameSample>,
     performance_summary: Option<performance_policy::FrameProbeSummary>,
+
+    // -- m6_wave2_exterior.feature --
+    m6_exterior_index:
+        std::collections::BTreeMap<bevyout_core::manifest::exterior::GridCoordinate, u32>,
+    m6_exterior_states: Vec<bevyout_core::manifest::exterior::ExteriorCellState>,
+    m6_exterior_input: Option<bevyout_core::manifest::exterior::ExteriorResidencyInput>,
+    m6_exterior_plan: Option<bevyout_core::manifest::exterior::ExteriorResidencyPlan>,
+    m6_exterior_memory_state: Option<lifecycle::ExteriorStreamState>,
+    m6_exterior_memory: Option<exterior_diagnostics::ProcessMemoryDiagnostics>,
+    m6_exterior_memory_report: Option<serde_json::Value>,
 
     // -- leveled_lists.feature (issue #74) --
     leveled_lists: std::collections::BTreeMap<u32, leveled::PreparedLeveledList>,
@@ -14689,4 +14712,191 @@ async fn then_steady_clamp_frame_performs_no_full_pass(world: &mut BevyoutWorld)
 #[then("the steady clamp frame needed no full material pass")]
 async fn then_steady_clamp_frame_needed_no_full_pass(world: &mut BevyoutWorld) {
     assert_eq!(world.clamp_full_pass_ran, Some(false));
+}
+
+// ---------------------------------------------------------------------
+// m6_wave2_exterior.feature -- generation-aware reversal and process memory.
+// ---------------------------------------------------------------------
+
+#[given(regex = r"^the exterior index contains cell 0x([0-9a-fA-F]+) at grid \((-?\d+),(-?\d+)\)$")]
+async fn given_m6_exterior_index_cell(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    x: String,
+    y: String,
+) {
+    let grid = bevyout_core::manifest::exterior::GridCoordinate::new(
+        x.parse().expect("exterior grid x must be an integer"),
+        y.parse().expect("exterior grid y must be an integer"),
+    );
+    world.m6_exterior_index.insert(grid, parse_hex(&form_hex));
+}
+
+#[given(
+    regex = r"^the exterior stream is at grid \((-?\d+),(-?\d+)\) moving toward \((-?\d+),(-?\d+)\)$"
+)]
+async fn given_m6_exterior_stream_direction(
+    world: &mut BevyoutWorld,
+    x: String,
+    y: String,
+    velocity_x: String,
+    velocity_y: String,
+) {
+    world.m6_exterior_input = Some(bevyout_core::manifest::exterior::ExteriorResidencyInput {
+        current_grid: bevyout_core::manifest::exterior::GridCoordinate::new(
+            x.parse().expect("exterior current x must be an integer"),
+            y.parse().expect("exterior current y must be an integer"),
+        ),
+        velocity_grid: (
+            velocity_x
+                .parse()
+                .expect("exterior velocity x must be an integer"),
+            velocity_y
+                .parse()
+                .expect("exterior velocity y must be an integer"),
+        ),
+        resident_budget: 4,
+        byte_budget: u64::MAX,
+        near_radius: 1,
+        prefetch_radius: 1,
+        distant_radius: None,
+    });
+}
+
+#[given(
+    regex = r"^exterior cell 0x([0-9a-fA-F]+) at grid \((-?\d+),(-?\d+)\) is Evicting at generation (\d+)$"
+)]
+async fn given_m6_exterior_evicting_cell(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    x: String,
+    y: String,
+    generation: u64,
+) {
+    world
+        .m6_exterior_states
+        .push(bevyout_core::manifest::exterior::ExteriorCellState {
+            cell_form_id: parse_hex(&form_hex),
+            grid: bevyout_core::manifest::exterior::GridCoordinate::new(
+                x.parse().expect("exterior cell x must be an integer"),
+                y.parse().expect("exterior cell y must be an integer"),
+            ),
+            lifecycle: bevyout_core::manifest::exterior::ExteriorCellLifecycle::Evicting,
+            generation,
+            pinned: false,
+            estimated_bytes: 1_024,
+            failed_attempts: 0,
+        });
+}
+
+#[when("the exterior residency plan is computed")]
+async fn when_m6_exterior_plan_computed(world: &mut BevyoutWorld) {
+    let input = world
+        .m6_exterior_input
+        .expect("exterior stream input must be configured");
+    world.m6_exterior_plan = Some(bevyout_core::manifest::exterior::plan_residency(
+        input,
+        &world.m6_exterior_index,
+        &world.m6_exterior_states,
+    ));
+}
+
+#[then(regex = r"^the exterior plan cancels cell 0x([0-9a-fA-F]+) at generation (\d+)$")]
+async fn then_m6_exterior_plan_cancels(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    generation: u64,
+) {
+    let form_id = parse_hex(&form_hex);
+    let action = world
+        .m6_exterior_plan
+        .as_ref()
+        .expect("exterior residency plan must be computed")
+        .actions
+        .iter()
+        .find(|action| action.form_id == form_id)
+        .unwrap_or_else(|| panic!("no exterior action was emitted for {form_hex}"));
+    assert_eq!(
+        action.action,
+        bevyout_core::manifest::exterior::ExteriorLoadAction::Cancel
+    );
+    assert_eq!(action.generation, generation);
+}
+
+#[given(regex = r#"^an exterior process-memory trace with samples "([^"]+)"$"#)]
+async fn given_m6_exterior_memory_trace(world: &mut BevyoutWorld, samples: String) {
+    let mut memory = exterior_diagnostics::ProcessMemoryDiagnostics::supported_for_tests();
+    memory.begin_trace();
+    for sample in samples.split(',') {
+        memory.record_sample(
+            sample
+                .parse()
+                .expect("process-memory samples must be unsigned integers"),
+        );
+    }
+    memory.finish_trace();
+    world.m6_exterior_memory = Some(memory);
+}
+
+#[given(regex = r"^the exterior package estimates are resident (\d+) and peak (\d+)$")]
+async fn given_m6_exterior_package_estimates(world: &mut BevyoutWorld, resident: u64, peak: u64) {
+    world.m6_exterior_memory_state = Some(lifecycle::ExteriorStreamState {
+        resident_bytes: resident,
+        peak_memory: peak,
+        ..Default::default()
+    });
+}
+
+#[when("the exterior process-memory report is rendered")]
+async fn when_m6_exterior_memory_report_rendered(world: &mut BevyoutWorld) {
+    let state = world
+        .m6_exterior_memory_state
+        .as_ref()
+        .expect("exterior package estimates must be configured");
+    let memory = world
+        .m6_exterior_memory
+        .as_ref()
+        .expect("exterior memory trace must be configured");
+    world.m6_exterior_memory_report = Some(exterior_diagnostics::status_with_memory(state, memory));
+}
+
+#[then(regex = r#"^the exterior report identifies process memory as "([^"]+)"$"#)]
+async fn then_m6_exterior_report_measurement(world: &mut BevyoutWorld, expected: String) {
+    let report = world
+        .m6_exterior_memory_report
+        .as_ref()
+        .expect("exterior memory report must be rendered");
+    assert_eq!(
+        report["memory_measurement"].as_str(),
+        Some(expected.as_str())
+    );
+}
+
+#[then(regex = r"^exterior process memory is resident (\d+), peak (\d+), ending (\d+)$")]
+async fn then_m6_exterior_process_memory(
+    world: &mut BevyoutWorld,
+    resident: u64,
+    peak: u64,
+    ending: u64,
+) {
+    let report = world
+        .m6_exterior_memory_report
+        .as_ref()
+        .expect("exterior memory report must be rendered");
+    assert_eq!(report["resident_bytes"].as_u64(), Some(resident));
+    assert_eq!(report["peak_memory"].as_u64(), Some(peak));
+    assert_eq!(report["ending_memory"].as_u64(), Some(ending));
+}
+
+#[then(regex = r"^exterior package estimates remain resident (\d+) and peak (\d+)$")]
+async fn then_m6_exterior_package_estimates(world: &mut BevyoutWorld, resident: u64, peak: u64) {
+    let report = world
+        .m6_exterior_memory_report
+        .as_ref()
+        .expect("exterior memory report must be rendered");
+    assert_eq!(
+        report["resident_package_bytes_estimate"].as_u64(),
+        Some(resident)
+    );
+    assert_eq!(report["peak_package_bytes_estimate"].as_u64(), Some(peak));
 }
