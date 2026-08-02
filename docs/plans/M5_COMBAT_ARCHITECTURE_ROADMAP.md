@@ -9,7 +9,7 @@ functional weapon slice and canonical-ammunition foundation landed.
 | --- | --- | --- | --- |
 | 1 | Functional modular 10mm pistol | Shipped in #239 | Sol X-High |
 | 2 | Canonical ammunition, magazines, reloads, loadout, save v5, inspection | Shipped in #248 | Sol X-High |
-| 3 | Condition, degradation, jams, deterministic combat RNG | Planned | Sol X-High |
+| 3 | Condition, degradation, jams, deterministic combat RNG | Shipped in #271 | Sol X-High |
 | 4 | Spread, range, hitscan/projectile delivery, ADS accuracy | Planned | Sol X-High |
 | 5 | Armor, DR/DT mitigation, armor condition | Planned | Sol X-High |
 | 6 | Hit locations, limb health, crippling, dismemberment | Planned | Sol X-High |

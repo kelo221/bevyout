@@ -655,7 +655,12 @@ pub(crate) fn start_package(
         }
         markers
             .into_iter()
-            .map(|marker| Waypoint::at(marker.position))
+            .map(|marker| {
+                Waypoint::patrol_marker(
+                    marker.position,
+                    resolution::point_orientation_yaw(&context, &marker),
+                )
+            })
             .collect()
     } else {
         let resolved = resolve_family_point(entry, &context, false)?;

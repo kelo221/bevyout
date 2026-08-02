@@ -186,23 +186,108 @@ fn patrol_waits_and_idles_at_a_marker_before_advancing() {
     ];
     let mut driver = FamilyDriver::new(PackageFamily::Patrol, markers, 0.5);
     driver.tick(&obs([-1.0, 0.0, 0.0], false), 0.1); // route to 0
-    // Arrive: begins the wait, idling in place, NOT advancing yet.
+    // Arrive: stops the route and begins the wait, NOT advancing yet.
     let step = driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+    assert_eq!(step.request, Some(FamilyRequest::Stop));
+    assert_eq!(step.signal, LifecycleSignal::Continue);
+    assert_eq!(driver.step_label(), "waiting");
+    assert_eq!(driver.marker_index(), 0);
+    // Still waiting mid-window, now holding idle.
+    let step = driver.tick(&obs([0.0, 0.0, 0.0], true), 1.0);
     assert_eq!(
         step.request,
         Some(FamilyRequest::Play(FamilyAnimation::Idle))
     );
-    assert_eq!(step.signal, LifecycleSignal::Continue);
-    assert_eq!(driver.step_label(), "waiting");
-    assert_eq!(driver.marker_index(), 0);
-    // Still waiting mid-window.
-    let step = driver.tick(&obs([0.0, 0.0, 0.0], true), 1.0);
     assert_eq!(step.signal, LifecycleSignal::Continue);
     assert_eq!(driver.marker_index(), 0);
     // Wait elapses -> advance to marker 1.
     let step = driver.tick(&obs([0.0, 0.0, 0.0], true), 1.5);
     assert_eq!(step.signal, LifecycleSignal::AdvanceStep);
     assert_eq!(driver.marker_index(), 1);
+}
+
+#[test]
+fn patrol_does_not_advance_repeatedly_while_still_at_a_short_departed_marker() {
+    let markers = vec![
+        Waypoint::at([0.0, 0.0, 0.0]),
+        Waypoint::at([1.4575, 0.0, 0.0]),
+    ];
+    let mut driver = FamilyDriver::new(PackageFamily::Patrol, markers, 1.5);
+
+    driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+    assert_eq!(driver.marker_index(), 1);
+
+    for _ in 0..20 {
+        let step = driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+        assert_ne!(step.signal, LifecycleSignal::AdvanceStep);
+    }
+    assert_eq!(driver.marker_index(), 1);
+}
+
+#[test]
+fn patrol_resumes_after_the_actor_leaves_the_departed_marker() {
+    let markers = vec![
+        Waypoint::at([0.0, 0.0, 0.0]),
+        Waypoint::at([10.0, 0.0, 0.0]),
+    ];
+    let mut driver = FamilyDriver::new(PackageFamily::Patrol, markers, 1.5);
+
+    driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+    let stationary = driver.tick(&obs([0.1, 0.0, 0.0], false), 0.1);
+    assert_ne!(stationary.signal, LifecycleSignal::AdvanceStep);
+
+    let arrived = driver.tick(&obs([10.0, 0.0, 0.0], true), 0.1);
+    assert_eq!(arrived.signal, LifecycleSignal::AdvanceStep);
+    assert_eq!(driver.marker_index(), 0);
+}
+
+#[test]
+fn patrol_marker_stops_then_idles_and_preserves_authored_heading() {
+    let markers = vec![
+        Waypoint::patrol_marker([0.0, 0.0, 0.0], Some(1.25)),
+        Waypoint::patrol_marker([10.0, 0.0, 0.0], None),
+    ];
+    assert_eq!(markers[0].wait_seconds, PATROL_MARKER_DWELL_SECONDS);
+
+    let mut driver = FamilyDriver::new(PackageFamily::Patrol, markers, DEFAULT_ARRIVAL_TOLERANCE);
+    driver.tick(&obs([-5.0, 0.0, 0.0], false), 0.1);
+
+    let stop = driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+    assert_eq!(stop.request, Some(FamilyRequest::Stop));
+    assert_eq!(driver.step_label(), "waiting");
+    assert_eq!(driver.current_orientation_yaw(), Some(1.25));
+
+    let idle = driver.tick(&obs([0.0, 0.0, 0.0], true), 2.0);
+    assert_eq!(
+        idle.request,
+        Some(FamilyRequest::Play(FamilyAnimation::Idle))
+    );
+    assert_eq!(driver.current_orientation_yaw(), Some(1.25));
+
+    let depart = driver.tick(&obs([0.0, 0.0, 0.0], true), 1.1);
+    assert_eq!(depart.signal, LifecycleSignal::AdvanceStep);
+    assert_eq!(depart.request, Some(FamilyRequest::Route([10.0, 0.0, 0.0])));
+}
+
+#[test]
+fn default_arrival_tolerance_reaches_the_real_short_patrol_leg() {
+    const LEG: f32 = 1.4575;
+    let markers = vec![
+        Waypoint::patrol_marker([0.0, 0.0, 0.0], None),
+        Waypoint::patrol_marker([LEG, 0.0, 0.0], None),
+    ];
+    let mut driver = FamilyDriver::new(PackageFamily::Patrol, markers, DEFAULT_ARRIVAL_TOLERANCE);
+
+    // Finish the first marker's dwell.
+    driver.tick(&obs([0.0, 0.0, 0.0], true), 0.1);
+    driver.tick(&obs([0.0, 0.0, 0.0], true), PATROL_MARKER_DWELL_SECONDS);
+    assert_eq!(driver.marker_index(), 1);
+
+    // At the far authored marker, the departure gate is satisfied because the
+    // 1.4575m leg is longer than the 0.75m tolerance.
+    let step = driver.tick(&obs([LEG, 0.0, 0.0], true), 0.1);
+    assert_eq!(step.signal, LifecycleSignal::Continue);
+    assert_eq!(driver.step_label(), "waiting");
 }
 
 #[test]
