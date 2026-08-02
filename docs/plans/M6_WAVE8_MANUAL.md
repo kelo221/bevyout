@@ -30,6 +30,31 @@ per-frame import ceiling remains the code-level `8` spawn cap in
 `src/viewer/world/exterior/mod.rs`; this report does not claim a separate
 per-frame import counter.
 
+## Current v21 W8-C diagnostics — 2026-08-02
+
+The same v21 manifest was also run with the new presentation diagnostics. The
+default-off snapshot had one active camera and reported the authoritative Bevy
+CPU visibility list as `585` candidate meshes, `110` visible meshes, and `475`
+CPU-visibility culled meshes. The optional GPU occlusion component was enabled
+on that camera, but its count remained explicitly `measured=false` and
+`culled=null`; the report does not infer GPU occlusion from `Visibility`.
+
+After `setrender worldspace_lod 1` and an 8-second settle, the report showed
+`active=48`, `terrain=40`, `blocks=8`, levels `4=24`, `8=12`, `16=8`, and
+`32=4`. It recorded `catalog_duplicate_instances=0` and
+`active_duplicate_instances=0`, `asset_loads_staged_total=48`,
+`peak_asset_loads_staged_per_frame=8`, and the explicit cap `8`. The settled
+snapshot had `655` candidate meshes, `134` visible meshes, and `521` CPU
+visibility culled meshes. Disabling the layer returned to `active=0` with
+`despawns_total=48` and `selection_transitions=96`; terrain, full-land
+collision, and gameplay ownership remained unchanged.
+
+A 120-sample performance snapshot after the toggle-back measured average
+frame time `7.7676 ms`, p50 `7.593 ms`, p95 `8.7887 ms`, max `10.2409 ms`, and
+`over_budget_count=0` against `16.6667 ms`. These are current Windows/dev
+diagnostics, not the final W8 visual gate: GPU occlusion remains unmeasured,
+and a human still must inspect crack, duplicate, and visible pop-in behavior.
+
 1. Prepare the real Mart cell and its worldspace index:
 
    ```text

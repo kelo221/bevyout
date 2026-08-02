@@ -1,22 +1,27 @@
 //! Runtime exterior tests live beside the pure policy adapter.
 
+use bevy::camera::visibility::VisibleEntities;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::{Indices, Mesh};
-use bevy::prelude::{GlobalTransform, Resource, Transform, Vec3, Visibility, World};
+use bevy::prelude::{
+    Camera3d, GlobalTransform, Mesh3d, Resource, Transform, Vec3, Visibility, World,
+};
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevyout_core::manifest::exterior::{
     ExteriorCellLifecycle, ExteriorCellState, ExteriorCoordinatePolicy, ExteriorLoadAction,
     ExteriorResidencyAction, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
     PreparedWater, TerrainLod,
 };
+use std::any::TypeId;
 use std::collections::BTreeMap;
 
 use super::{
     ExteriorCellRoot, ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState,
-    ExteriorWaterSurface, FpsPlayer, apply_action, clamp_adjacent_terrain_lods,
-    exterior_package_header_has_current_revision, exterior_presentation_json, finalize_evictions,
-    mark_collision_ready, terrain_center, terrain_mesh_with_stride, terrain_mesh_with_subdivisions,
-    update_water_state, worldspace_lod_distance,
+    ExteriorWaterSurface, ExteriorWorldspaceLodCatalog, ExteriorWorldspaceLodVisual, FpsPlayer,
+    apply_action, clamp_adjacent_terrain_lods, exterior_package_header_has_current_revision,
+    exterior_presentation_json, finalize_evictions, mark_collision_ready, terrain_center,
+    terrain_mesh_with_stride, terrain_mesh_with_subdivisions, update_water_state,
+    worldspace_lod_distance,
 };
 use super::{diagnostics, lifecycle};
 
@@ -213,6 +218,7 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
     let mut world = World::new();
     world.insert_resource(ExteriorPresentationStats {
         terrain_lod_transitions: 4,
+        ..Default::default()
     });
     world.spawn((
         ExteriorObjectLod {
@@ -243,12 +249,73 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
     assert_eq!(report["terrain"]["lod_transitions"], 4);
     assert_eq!(report["objects"]["distance_culled"], 1);
     assert_eq!(report["culling"]["distance"]["culled"], 1);
+    assert_eq!(report["culling"]["frustum"]["measured"], false);
     assert_eq!(report["culling"]["occlusion"]["measured"], false);
     assert_eq!(
         report["culling"]["occlusion"]["culled"],
         serde_json::Value::Null
     );
     assert_eq!(report["gameplay"]["collision_and_navigation_culled"], false);
+}
+
+#[test]
+fn presentation_diagnostics_reports_cpu_visibility_and_lod_identity_counters() {
+    let mut world = World::new();
+    let visible_mesh = world.spawn(Mesh3d::default()).id();
+    world.spawn(Mesh3d::default());
+    let mut visible_entities = VisibleEntities::default();
+    visible_entities
+        .get_mut(TypeId::of::<Mesh3d>())
+        .push(visible_mesh);
+    world.spawn((Camera3d::default(), visible_entities));
+
+    let duplicate_key = ExteriorWorldspaceLodVisual {
+        level: 4,
+        grid: GridCoordinate::new(4, -5),
+        blocks: false,
+    };
+    world.spawn(duplicate_key);
+    world.spawn(duplicate_key);
+    world.insert_resource(ExteriorWorldspaceLodCatalog {
+        descriptors: vec![
+            ExteriorWorldspaceLodAsset {
+                asset_path: "assets/near-a.glb".into(),
+                level: 4,
+                grid: GridCoordinate::new(4, -5),
+                blocks: false,
+            },
+            ExteriorWorldspaceLodAsset {
+                asset_path: "assets/near-b.glb".into(),
+                level: 4,
+                grid: GridCoordinate::new(4, -5),
+                blocks: false,
+            },
+        ],
+        ..Default::default()
+    });
+    world.insert_resource(ExteriorPresentationStats {
+        worldspace_lod_asset_loads_staged_total: 10,
+        worldspace_lod_asset_loads_staged_last_frame: 3,
+        worldspace_lod_peak_asset_loads_staged_per_frame: 8,
+        worldspace_lod_despawns_total: 2,
+        ..Default::default()
+    });
+
+    let report = exterior_presentation_json(&mut world);
+    assert_eq!(report["culling"]["frustum"]["measured"], true);
+    assert_eq!(report["culling"]["frustum"]["candidate_meshes"], 2);
+    assert_eq!(report["culling"]["frustum"]["visible_meshes"], 1);
+    assert_eq!(report["culling"]["frustum"]["culled"], 1);
+    assert_eq!(report["worldspace_lod"]["catalog_duplicate_instances"], 1);
+    assert_eq!(report["worldspace_lod"]["active_duplicate_instances"], 1);
+    assert_eq!(report["worldspace_lod"]["asset_loads_staged_total"], 10);
+    assert_eq!(report["worldspace_lod"]["asset_loads_staged_last_frame"], 3);
+    assert_eq!(
+        report["worldspace_lod"]["peak_asset_loads_staged_per_frame"],
+        8
+    );
+    assert_eq!(report["worldspace_lod"]["despawns_total"], 2);
+    assert_eq!(report["worldspace_lod"]["selection_transitions"], 12);
 }
 
 #[test]

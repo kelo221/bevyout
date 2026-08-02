@@ -9,6 +9,7 @@ mod lifecycle;
 mod loading;
 mod policy;
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,6 +17,7 @@ use std::path::Path;
 
 use avian3d::prelude::Collider;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::VisibleEntities;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
@@ -151,6 +153,11 @@ struct ExteriorObjectLod {
 #[derive(Resource, Debug, Default, Clone, Copy, Serialize)]
 pub(crate) struct ExteriorPresentationStats {
     pub(crate) terrain_lod_transitions: u64,
+    pub(crate) object_lod_transitions: u64,
+    pub(crate) worldspace_lod_asset_loads_staged_total: u64,
+    pub(crate) worldspace_lod_asset_loads_staged_last_frame: u64,
+    pub(crate) worldspace_lod_peak_asset_loads_staged_per_frame: u64,
+    pub(crate) worldspace_lod_despawns_total: u64,
 }
 
 const TERRAIN_SKIRT_DEPTH: f32 = 8.0;
@@ -1424,11 +1431,13 @@ pub(crate) fn streamed_lights_json(world: &mut World) -> serde_json::Value {
 }
 
 /// Return the presentation state that can be measured without confusing it
-/// with gameplay residency. Bevy owns frustum and occlusion decisions inside
-/// the renderer, so their counters are intentionally reported as unavailable
-/// until the target Bevy version exposes a stable per-view result. The
-/// distance-cull count remains useful and conservative: hidden presentation
-/// roots never remove collision, navigation, or persistent simulation.
+/// with gameplay residency. Bevy's main-world `VisibleEntities` list is the
+/// authoritative CPU visibility result for each active camera, so the report
+/// can expose its mesh counts. GPU occlusion remains intentionally unmeasured:
+/// the render-world/GPU path does not expose a stable count to this console
+/// snapshot. The distance-cull count remains useful and conservative: hidden
+/// presentation roots never remove collision, navigation, or persistent
+/// simulation.
 pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value {
     let mut terrain_counts = [0usize; 3];
     let mut terrain_grids = Vec::new();
@@ -1481,18 +1490,52 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
         )>()
         .iter(world)
         .count();
-    let frustum_cameras = world
-        .query_filtered::<Entity, With<Camera3d>>()
+    let mut frustum_visible_meshes = HashSet::new();
+    let mut frustum_cameras = 0usize;
+    {
+        let mut query = world.query_filtered::<(&Camera, &VisibleEntities), With<Camera3d>>();
+        for (camera, visible_entities) in query.iter(world) {
+            if !camera.is_active {
+                continue;
+            }
+            frustum_cameras += 1;
+            frustum_visible_meshes.extend(visible_entities.iter(TypeId::of::<Mesh3d>()).copied());
+        }
+    }
+    let frustum_candidate_meshes = world
+        .query_filtered::<Entity, With<Mesh3d>>()
         .iter(world)
         .count();
+    let frustum_measured = frustum_cameras > 0;
+    let frustum_visible_meshes = frustum_measured.then_some(frustum_visible_meshes.len());
+    let frustum_culled_meshes =
+        frustum_visible_meshes.map(|visible| frustum_candidate_meshes.saturating_sub(visible));
     let stats = world
         .get_resource::<ExteriorPresentationStats>()
         .copied()
+        .unwrap_or_default();
+    let catalog_duplicate_instances = world
+        .get_resource::<ExteriorWorldspaceLodCatalog>()
+        .map(|catalog| {
+            let mut seen = HashSet::new();
+            catalog
+                .descriptors
+                .iter()
+                .map(|descriptor| ExteriorWorldspaceLodVisual {
+                    level: descriptor.level,
+                    grid: descriptor.grid,
+                    blocks: descriptor.blocks,
+                })
+                .filter(|key| !seen.insert(*key))
+                .count()
+        })
         .unwrap_or_default();
     let mut worldspace_lod_active = 0usize;
     let mut worldspace_lod_terrain = 0usize;
     let mut worldspace_lod_blocks = 0usize;
     let mut worldspace_lod_levels = BTreeMap::<u8, usize>::new();
+    let mut active_worldspace_lod_keys = HashSet::new();
+    let mut active_duplicate_instances = 0usize;
     {
         let mut query = world.query::<&ExteriorWorldspaceLodVisual>();
         for lod in query.iter(world) {
@@ -1503,6 +1546,9 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
                 worldspace_lod_terrain += 1;
             }
             *worldspace_lod_levels.entry(lod.level).or_default() += 1;
+            if !active_worldspace_lod_keys.insert(*lod) {
+                active_duplicate_instances += 1;
+            }
         }
     }
 
@@ -1523,19 +1569,33 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
             "distance_culled": distance_culled,
             "distant": object_distant,
             "persistent": object_persistent,
+            "lod_transitions": stats.object_lod_transitions,
         },
         "worldspace_lod": {
             "active": worldspace_lod_active,
             "terrain": worldspace_lod_terrain,
             "blocks": worldspace_lod_blocks,
             "levels": worldspace_lod_levels,
+            "catalog_duplicate_instances": catalog_duplicate_instances,
+            "active_duplicate_instances": active_duplicate_instances,
+            "asset_loads_staged_total": stats.worldspace_lod_asset_loads_staged_total,
+            "asset_loads_staged_last_frame": stats.worldspace_lod_asset_loads_staged_last_frame,
+            "peak_asset_loads_staged_per_frame": stats
+                .worldspace_lod_peak_asset_loads_staged_per_frame,
+            "asset_loads_staged_per_frame_cap": WORLDSPACE_LOD_MAX_SPAWN_PER_FRAME,
+            "despawns_total": stats.worldspace_lod_despawns_total,
+            "selection_transitions": stats
+                .worldspace_lod_asset_loads_staged_total
+                .saturating_add(stats.worldspace_lod_despawns_total),
             "presentation_only": true,
         },
         "culling": {
             "frustum": {
                 "cameras": frustum_cameras,
-                "measured": false,
-                "culled": serde_json::Value::Null,
+                "measured": frustum_measured,
+                "candidate_meshes": frustum_candidate_meshes,
+                "visible_meshes": frustum_visible_meshes,
+                "culled": frustum_culled_meshes,
             },
             "distance": {
                 "measured": true,
@@ -1652,6 +1712,7 @@ fn clamp_adjacent_terrain_lods(selected_by_grid: &mut BTreeMap<GridCoordinate, T
 
 fn update_exterior_object_lod(
     player: Query<&Transform, With<FpsPlayer>>,
+    mut presentation: ResMut<ExteriorPresentationStats>,
     mut objects: Query<(&Transform, &mut ExteriorObjectLod, &mut Visibility)>,
 ) {
     let Some(player) = player.iter().next() else {
@@ -1661,6 +1722,7 @@ fn update_exterior_object_lod(
         // Distant records are the worldspace's explicit landmark
         // representation. Cell-owned objects are culled before the next
         // streaming ring would normally make them relevant.
+        let was_visible = lod.visible;
         if lod.persistent || lod.distant {
             lod.visible = true;
         } else {
@@ -1671,6 +1733,10 @@ fn update_exterior_object_lod(
                 distance <= 320.0
             };
         }
+        if was_visible != lod.visible {
+            presentation.object_lod_transitions =
+                presentation.object_lod_transitions.saturating_add(1);
+        }
         *visibility = if lod.visible {
             Visibility::Inherited
         } else {
@@ -1679,19 +1745,26 @@ fn update_exterior_object_lod(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_worldspace_lod(
     mut commands: Commands,
     catalog: Res<ExteriorWorldspaceLodCatalog>,
     settings: Res<ExteriorWorldspaceLodSettings>,
+    mut presentation: ResMut<ExteriorPresentationStats>,
     asset_server: Res<AssetServer>,
     player: Query<&Transform, With<FpsPlayer>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     active: Query<(Entity, &ExteriorWorldspaceLodVisual)>,
 ) {
+    presentation.worldspace_lod_asset_loads_staged_last_frame = 0;
     if !settings.enabled {
+        let despawns = active.iter().count() as u64;
         for (entity, _) in &active {
             commands.entity(entity).despawn();
         }
+        presentation.worldspace_lod_despawns_total = presentation
+            .worldspace_lod_despawns_total
+            .saturating_add(despawns);
         return;
     }
     let Some(root) = catalog.root else {
@@ -1748,12 +1821,14 @@ fn update_worldspace_lod(
     }
     debug_assert!(desired.len() <= WORLDSPACE_LOD_MAX_ACTIVE);
     let active_keys = active.iter().map(|(_, key)| *key).collect::<HashSet<_>>();
+    let mut despawned = 0u64;
     for (entity, key) in &active {
         if !desired
             .iter()
             .any(|(desired_key, _, _)| *desired_key == *key)
         {
             commands.entity(entity).despawn();
+            despawned = despawned.saturating_add(1);
         }
     }
     let mut spawned = 0;
@@ -1778,6 +1853,17 @@ fn update_worldspace_lod(
         ));
         spawned += 1;
     }
+    let spawned = spawned as u64;
+    presentation.worldspace_lod_asset_loads_staged_total = presentation
+        .worldspace_lod_asset_loads_staged_total
+        .saturating_add(spawned);
+    presentation.worldspace_lod_asset_loads_staged_last_frame = spawned;
+    presentation.worldspace_lod_peak_asset_loads_staged_per_frame = presentation
+        .worldspace_lod_peak_asset_loads_staged_per_frame
+        .max(spawned);
+    presentation.worldspace_lod_despawns_total = presentation
+        .worldspace_lod_despawns_total
+        .saturating_add(despawned);
 }
 
 fn worldspace_lod_distance(
