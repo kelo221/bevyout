@@ -34,10 +34,11 @@ per-frame import counter.
 
 The same v21 manifest was also run with the new presentation diagnostics. The
 default-off snapshot had one active camera and reported the authoritative Bevy
-CPU visibility list as `585` candidate meshes, `110` visible meshes, and `475`
-CPU-visibility culled meshes. The optional GPU occlusion component was enabled
-on that camera, but its count remained explicitly `measured=false` and
-`culled=null`; the report does not infer GPU occlusion from `Visibility`.
+CPU visibility list (`culling.frustum.method=active_camera_visible_entities_cpu`)
+as `585` candidate meshes, `110` visible meshes, and `475` CPU-visibility
+culled meshes. The optional GPU occlusion component was enabled on that camera,
+but its count remained explicitly `measured=false` and `culled=null`; the report
+does not infer GPU occlusion from `Visibility`.
 
 After `setrender worldspace_lod 1` and an 8-second settle, the report showed
 `active=48`, `terrain=40`, `blocks=8`, levels `4=24`, `8=12`, `16=8`, and

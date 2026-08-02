@@ -249,6 +249,10 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
     assert_eq!(report["terrain"]["lod_transitions"], 4);
     assert_eq!(report["objects"]["distance_culled"], 1);
     assert_eq!(report["culling"]["distance"]["culled"], 1);
+    assert_eq!(
+        report["culling"]["frustum"]["method"],
+        "active_camera_visible_entities_cpu"
+    );
     assert_eq!(report["culling"]["frustum"]["measured"], false);
     assert_eq!(report["culling"]["occlusion"]["measured"], false);
     assert_eq!(
@@ -302,6 +306,10 @@ fn presentation_diagnostics_reports_cpu_visibility_and_lod_identity_counters() {
     });
 
     let report = exterior_presentation_json(&mut world);
+    assert_eq!(
+        report["culling"]["frustum"]["method"],
+        "active_camera_visible_entities_cpu"
+    );
     assert_eq!(report["culling"]["frustum"]["measured"], true);
     assert_eq!(report["culling"]["frustum"]["candidate_meshes"], 2);
     assert_eq!(report["culling"]["frustum"]["visible_meshes"], 1);

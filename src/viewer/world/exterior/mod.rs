@@ -1591,6 +1591,7 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
         },
         "culling": {
             "frustum": {
+                "method": "active_camera_visible_entities_cpu",
                 "cameras": frustum_cameras,
                 "measured": frustum_measured,
                 "candidate_meshes": frustum_candidate_meshes,
