@@ -124,8 +124,17 @@ current `(4,-5)` cell remained resident and `stale_completions=0`. The package
 was restored and the viewer stopped; the expected failure is not part of the
 clean-loop counts.
 
+The frozen W7 clean-preparation command was also attempted with the exact 14
+selectors, explicit current config, native conversion, and `--jobs 1` in a
+new disposable cache. After the ten-minute command timeout the resumable job
+manifest still listed every job as `Pending`, although the cache had reached
+5,171 files and `1,013,366,580` bytes. The run was stopped and the partial
+ignored cache was preserved only for diagnosis; it has no clean elapsed-time,
+completion, warm-run, or threshold value and must not be reused as acceptance
+evidence.
+
 This remains partial acceptance evidence because all crossings used
 deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
-travel/save, and final budget sign-off were not run. Issues #274 and #275
-remain open; no W2, #87, or final M6 completion claim is made from these
+travel/save, and final budget sign-off were not run. Issues #274, #275, and
+#285 remain open; no W2, #87, or final M6 completion claim is made from these
 measurements.
