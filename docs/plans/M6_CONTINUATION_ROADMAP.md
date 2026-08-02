@@ -39,7 +39,10 @@ estimated-package, 64-light, and 16.6667 ms reporting values; the historical M2
 `<=33 ms` swap bar is not an M6 threshold. Strict clippy, `cargo test`,
 `cargo check-dev`, and `prepare --help` pass; repository-wide `cargo fmt --check`
 still reports only the known unrelated baseline drift. No W2, #285, #87, or
-final M6 closure claim is made.
+final M6 closure claim is made. A current-v21 W8 presentation probe also
+verified default-off worldspace LOD, the opt-in `48`-tile bound (`40` terrain,
+`8` blocks), `presentation_only=true`, full-land collision, and clean toggle
+back to zero active far tiles; the W8 manual records the transcript.
 
 ## Execution model recommendation
 
