@@ -1804,21 +1804,7 @@ fn update_worldspace_lod(
             .then_with(|| left.blocks.cmp(&right.blocks))
             .then_with(|| left.asset_path.cmp(&right.asset_path))
     });
-    let mut desired = candidates
-        .iter()
-        .copied()
-        .filter(|(_, descriptor, _)| descriptor.blocks)
-        .take(WORLDSPACE_LOD_BLOCK_BUDGET)
-        .collect::<Vec<_>>();
-    for (level, budget) in WORLDSPACE_LOD_TERRAIN_BUDGETS {
-        desired.extend(
-            candidates
-                .iter()
-                .copied()
-                .filter(|(_, descriptor, _)| !descriptor.blocks && descriptor.level == level)
-                .take(budget),
-        );
-    }
+    let desired = select_unique_worldspace_lod_candidates(&candidates);
     debug_assert!(desired.len() <= WORLDSPACE_LOD_MAX_ACTIVE);
     let active_keys = active.iter().map(|(_, key)| *key).collect::<HashSet<_>>();
     let mut despawned = 0u64;
@@ -1864,6 +1850,51 @@ fn update_worldspace_lod(
     presentation.worldspace_lod_despawns_total = presentation
         .worldspace_lod_despawns_total
         .saturating_add(despawned);
+}
+
+fn select_unique_worldspace_lod_candidates<'a>(
+    candidates: &[(
+        ExteriorWorldspaceLodVisual,
+        &'a ExteriorWorldspaceLodAsset,
+        f32,
+    )],
+) -> Vec<(
+    ExteriorWorldspaceLodVisual,
+    &'a ExteriorWorldspaceLodAsset,
+    f32,
+)> {
+    let mut selected_keys = HashSet::new();
+    let mut desired = Vec::new();
+    for candidate in candidates
+        .iter()
+        .copied()
+        .filter(|(_, descriptor, _)| descriptor.blocks)
+    {
+        if selected_keys.insert(candidate.0) {
+            desired.push(candidate);
+            if desired.len() == WORLDSPACE_LOD_BLOCK_BUDGET {
+                break;
+            }
+        }
+    }
+    for (level, budget) in WORLDSPACE_LOD_TERRAIN_BUDGETS {
+        let mut selected_for_level = 0;
+        for candidate in candidates
+            .iter()
+            .copied()
+            .filter(|(_, descriptor, _)| !descriptor.blocks && descriptor.level == level)
+        {
+            if !selected_keys.insert(candidate.0) {
+                continue;
+            }
+            desired.push(candidate);
+            selected_for_level += 1;
+            if selected_for_level == budget {
+                break;
+            }
+        }
+    }
+    desired
 }
 
 fn worldspace_lod_distance(

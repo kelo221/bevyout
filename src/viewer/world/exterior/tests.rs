@@ -19,9 +19,9 @@ use super::{
     ExteriorCellRoot, ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState,
     ExteriorWaterSurface, ExteriorWorldspaceLodCatalog, ExteriorWorldspaceLodVisual, FpsPlayer,
     apply_action, clamp_adjacent_terrain_lods, exterior_package_header_has_current_revision,
-    exterior_presentation_json, finalize_evictions, mark_collision_ready, terrain_center,
-    terrain_mesh_with_stride, terrain_mesh_with_subdivisions, update_water_state,
-    worldspace_lod_distance,
+    exterior_presentation_json, finalize_evictions, mark_collision_ready,
+    select_unique_worldspace_lod_candidates, terrain_center, terrain_mesh_with_stride,
+    terrain_mesh_with_subdivisions, update_water_state, worldspace_lod_distance,
 };
 use super::{diagnostics, lifecycle};
 
@@ -316,6 +316,67 @@ fn presentation_diagnostics_reports_cpu_visibility_and_lod_identity_counters() {
     );
     assert_eq!(report["worldspace_lod"]["despawns_total"], 2);
     assert_eq!(report["worldspace_lod"]["selection_transitions"], 12);
+}
+
+#[test]
+fn worldspace_lod_selection_suppresses_duplicate_visual_identities() {
+    let assets = [
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-a.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-duplicate.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-b.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(5, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/block-a.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: true,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/block-duplicate.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: true,
+        },
+    ];
+    let candidates = assets
+        .iter()
+        .map(|asset| {
+            (
+                super::ExteriorWorldspaceLodVisual {
+                    level: asset.level,
+                    grid: asset.grid,
+                    blocks: asset.blocks,
+                },
+                asset,
+                1.0,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let selected = select_unique_worldspace_lod_candidates(&candidates);
+    assert_eq!(selected.len(), 3);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|(key, _, _)| *key)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
 }
 
 #[test]

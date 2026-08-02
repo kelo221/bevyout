@@ -49,7 +49,9 @@ identity counts. On the current v21 cache it measured `585/110/475` meshes
 default-off, `655/134/521` with the bounded 48-tile opt-in, zero duplicate
 identities, a peak staged-load count of `8`, and `7.7676 ms` average / `8.7887
 ms` p95 / `10.2409 ms` max over 120 samples. GPU occlusion remains explicitly
-unmeasured, so this is diagnostic progress rather than W8 or epic closure.
+unmeasured. Runtime selection also now suppresses duplicate `(level, grid,
+blocks)` identities before applying the bounded budgets, with a focused test;
+this is diagnostic/runtime progress rather than W8 or epic closure.
 
 ## Execution model recommendation
 
