@@ -139,6 +139,18 @@ resumable manifest had only `1/14` jobs marked `Done` at
 `1,309,667,625` bytes across `5,419` files. That alternate-throughput attempt
 is likewise not a clean or warm result and supplies no threshold.
 
+An ordinary-input diagnostic was attempted against the same prepared
+`00000c49` manifest in a fresh bridge viewer. The selected viewer window
+accepted `Escape` (the pause menu opened and closed), but the available local
+keyboard surface emitted W taps rather than a held `ButtonInput<KeyCode>` state:
+one tap, repeated taps, and a focused-window retry left the player at
+`(263.323120,159.345642,275.312469)` and the active grid at `(4,-5)`. A
+temporary `tcl` no-clip probe produced the same no-displacement result and was
+reverted before shutdown. No ordinary boundary, reversal, loop, or performance
+measurement is claimed from this diagnostic; a true held-input pass remains
+`not_yet_sampled` and requires a supported input-hold path or human keyboard
+control.
+
 This remains partial acceptance evidence because all crossings used
 deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
 travel/save, and final budget sign-off were not run. Issues #274, #275, and
