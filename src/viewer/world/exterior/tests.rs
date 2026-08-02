@@ -1,23 +1,49 @@
 //! Runtime exterior tests live beside the pure policy adapter.
 
+use bevy::camera::visibility::VisibleEntities;
 use bevy::ecs::system::RunSystemOnce;
 use bevy::mesh::{Indices, Mesh};
-use bevy::prelude::{GlobalTransform, Transform, Vec3, Visibility, World};
+use bevy::prelude::{
+    Camera3d, GlobalTransform, Mesh3d, Resource, Transform, Vec3, Visibility, World,
+};
+use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevyout_core::manifest::exterior::{
     ExteriorCellLifecycle, ExteriorCellState, ExteriorCoordinatePolicy, ExteriorLoadAction,
     ExteriorResidencyAction, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
     PreparedWater, TerrainLod,
 };
+use std::any::TypeId;
 use std::collections::BTreeMap;
 
 use super::{
-    ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState, ExteriorWaterSurface,
-    FpsPlayer, apply_action, clamp_adjacent_terrain_lods,
-    exterior_package_header_has_current_revision, exterior_presentation_json, finalize_evictions,
-    mark_collision_ready, terrain_center, terrain_mesh_with_stride, terrain_mesh_with_subdivisions,
-    update_water_state, worldspace_lod_distance,
+    ExteriorCellRoot, ExteriorObjectLod, ExteriorPresentationStats, ExteriorWaterState,
+    ExteriorWaterSurface, ExteriorWorldspaceLodCatalog, ExteriorWorldspaceLodVisual, FpsPlayer,
+    apply_action, clamp_adjacent_terrain_lods, exterior_package_header_has_current_revision,
+    exterior_presentation_json, finalize_evictions, mark_collision_ready,
+    select_unique_worldspace_lod_candidates, terrain_center, terrain_mesh_with_stride,
+    terrain_mesh_with_subdivisions, update_water_state, worldspace_lod_distance,
 };
 use super::{diagnostics, lifecycle};
+
+#[derive(Resource)]
+struct TestAction(ExteriorResidencyAction);
+
+fn apply_test_action(
+    mut commands: bevy::prelude::Commands,
+    mut state: bevy::prelude::ResMut<lifecycle::ExteriorStreamState>,
+    tasks: bevy::prelude::Query<&super::loading::ExteriorPackageTask>,
+    action: bevy::prelude::Res<TestAction>,
+) {
+    apply_action(&mut commands, &mut state, action.0.clone(), &tasks, "");
+}
+
+fn run_test_action(world: &mut World, action: ExteriorResidencyAction) {
+    world.insert_resource(TestAction(action));
+    world
+        .run_system_once(apply_test_action)
+        .expect("exterior action system runs");
+    world.flush();
+}
 
 #[test]
 fn terrain_render_winding_faces_upward() {
@@ -192,6 +218,7 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
     let mut world = World::new();
     world.insert_resource(ExteriorPresentationStats {
         terrain_lod_transitions: 4,
+        ..Default::default()
     });
     world.spawn((
         ExteriorObjectLod {
@@ -222,12 +249,142 @@ fn presentation_diagnostics_keep_distance_culling_separate_from_occlusion() {
     assert_eq!(report["terrain"]["lod_transitions"], 4);
     assert_eq!(report["objects"]["distance_culled"], 1);
     assert_eq!(report["culling"]["distance"]["culled"], 1);
+    assert_eq!(
+        report["culling"]["frustum"]["method"],
+        "active_camera_visible_entities_cpu"
+    );
+    assert_eq!(report["culling"]["frustum"]["measured"], false);
     assert_eq!(report["culling"]["occlusion"]["measured"], false);
     assert_eq!(
         report["culling"]["occlusion"]["culled"],
         serde_json::Value::Null
     );
     assert_eq!(report["gameplay"]["collision_and_navigation_culled"], false);
+}
+
+#[test]
+fn presentation_diagnostics_reports_cpu_visibility_and_lod_identity_counters() {
+    let mut world = World::new();
+    let visible_mesh = world.spawn(Mesh3d::default()).id();
+    world.spawn(Mesh3d::default());
+    let mut visible_entities = VisibleEntities::default();
+    visible_entities
+        .get_mut(TypeId::of::<Mesh3d>())
+        .push(visible_mesh);
+    world.spawn((Camera3d::default(), visible_entities));
+
+    let duplicate_key = ExteriorWorldspaceLodVisual {
+        level: 4,
+        grid: GridCoordinate::new(4, -5),
+        blocks: false,
+    };
+    world.spawn(duplicate_key);
+    world.spawn(duplicate_key);
+    world.insert_resource(ExteriorWorldspaceLodCatalog {
+        descriptors: vec![
+            ExteriorWorldspaceLodAsset {
+                asset_path: "assets/near-a.glb".into(),
+                level: 4,
+                grid: GridCoordinate::new(4, -5),
+                blocks: false,
+            },
+            ExteriorWorldspaceLodAsset {
+                asset_path: "assets/near-b.glb".into(),
+                level: 4,
+                grid: GridCoordinate::new(4, -5),
+                blocks: false,
+            },
+        ],
+        ..Default::default()
+    });
+    world.insert_resource(ExteriorPresentationStats {
+        worldspace_lod_asset_loads_staged_total: 10,
+        worldspace_lod_asset_loads_staged_last_frame: 3,
+        worldspace_lod_peak_asset_loads_staged_per_frame: 8,
+        worldspace_lod_despawns_total: 2,
+        ..Default::default()
+    });
+
+    let report = exterior_presentation_json(&mut world);
+    assert_eq!(
+        report["culling"]["frustum"]["method"],
+        "active_camera_visible_entities_cpu"
+    );
+    assert_eq!(report["culling"]["frustum"]["measured"], true);
+    assert_eq!(report["culling"]["frustum"]["candidate_meshes"], 2);
+    assert_eq!(report["culling"]["frustum"]["visible_meshes"], 1);
+    assert_eq!(report["culling"]["frustum"]["culled"], 1);
+    assert_eq!(report["worldspace_lod"]["catalog_duplicate_instances"], 1);
+    assert_eq!(report["worldspace_lod"]["active_duplicate_instances"], 1);
+    assert_eq!(report["worldspace_lod"]["asset_loads_staged_total"], 10);
+    assert_eq!(report["worldspace_lod"]["asset_loads_staged_last_frame"], 3);
+    assert_eq!(
+        report["worldspace_lod"]["peak_asset_loads_staged_per_frame"],
+        8
+    );
+    assert_eq!(report["worldspace_lod"]["despawns_total"], 2);
+    assert_eq!(report["worldspace_lod"]["selection_transitions"], 12);
+}
+
+#[test]
+fn worldspace_lod_selection_suppresses_duplicate_visual_identities() {
+    let assets = [
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-a.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-duplicate.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/terrain-b.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(5, -5),
+            blocks: false,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/block-a.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: true,
+        },
+        ExteriorWorldspaceLodAsset {
+            asset_path: "assets/block-duplicate.glb".into(),
+            level: 4,
+            grid: GridCoordinate::new(4, -5),
+            blocks: true,
+        },
+    ];
+    let candidates = assets
+        .iter()
+        .map(|asset| {
+            (
+                super::ExteriorWorldspaceLodVisual {
+                    level: asset.level,
+                    grid: asset.grid,
+                    blocks: asset.blocks,
+                },
+                asset,
+                1.0,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let selected = select_unique_worldspace_lod_candidates(&candidates);
+    assert_eq!(selected.len(), 3);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|(key, _, _)| *key)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
 }
 
 #[test]
@@ -274,6 +431,7 @@ fn cancelling_after_package_spawn_uses_the_owned_eviction_teardown() {
             task: None,
             package: None,
             collision_ready: false,
+            eviction_restore: None,
         },
     );
     world.insert_resource(state);
@@ -298,6 +456,118 @@ fn cancelling_after_package_spawn_uses_the_owned_eviction_teardown() {
     assert!(!state.cells.contains_key(&grid));
     assert_eq!(state.resident_bytes, 0);
     assert_eq!(state.cancellations, 1);
+}
+
+#[test]
+fn invalid_evictions_are_counted_without_tearing_down_unowned_cells() {
+    let mut world = World::new();
+    let grid = GridCoordinate::new(7, -3);
+    world.insert_resource(lifecycle::ExteriorStreamState::default());
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x7777,
+            generation: 1,
+        },
+    );
+
+    let unloaded = lifecycle::RuntimeCell {
+        state: ExteriorCellState {
+            cell_form_id: 0x7777,
+            grid,
+            lifecycle: ExteriorCellLifecycle::Unloaded,
+            generation: 1,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+        root: None,
+        task: None,
+        package: None,
+        collision_ready: false,
+        eviction_restore: None,
+    };
+    world
+        .resource_mut::<lifecycle::ExteriorStreamState>()
+        .cells
+        .insert(grid, unloaded);
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x7777,
+            generation: 1,
+        },
+    );
+
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert_eq!(state.invalid_unload_count, 2);
+    assert_eq!(
+        state.cells[&grid].state.lifecycle,
+        ExteriorCellLifecycle::Unloaded
+    );
+}
+
+#[test]
+fn cancellation_reversal_keeps_a_collision_pending_root_owned() {
+    let mut world = World::new();
+    let grid = GridCoordinate::new(2, -1);
+    let root = world.spawn(ExteriorCellRoot { form_id: 0x2233 }).id();
+    let mut state = lifecycle::ExteriorStreamState {
+        resident_bytes: 32,
+        ..Default::default()
+    };
+    state.cells.insert(
+        grid,
+        lifecycle::RuntimeCell {
+            state: ExteriorCellState {
+                cell_form_id: 0x2233,
+                grid,
+                lifecycle: ExteriorCellLifecycle::Loading,
+                generation: 4,
+                pinned: false,
+                estimated_bytes: 32,
+                failed_attempts: 0,
+            },
+            root: Some(root),
+            task: None,
+            package: None,
+            collision_ready: false,
+            eviction_restore: None,
+        },
+    );
+    world.insert_resource(state);
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Cancel,
+            grid,
+            form_id: 0x2233,
+            generation: 4,
+        },
+    );
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Cancel,
+            grid,
+            form_id: 0x2233,
+            generation: 5,
+        },
+    );
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert_eq!(
+        state.cells[&grid].state.lifecycle,
+        ExteriorCellLifecycle::Loading
+    );
+    assert_eq!(state.cells[&grid].root, Some(root));
+    assert_eq!(state.cells[&grid].state.generation, 5);
 }
 
 #[test]
@@ -326,15 +596,148 @@ fn collision_ready_records_all_spawned_resident_roots() {
                 task: None,
                 package: None,
                 collision_ready: false,
+                eviction_restore: None,
             },
         );
     }
 
-    mark_collision_ready(&mut state, GridCoordinate::new(0, 0), 0x10);
+    mark_collision_ready(&mut state, GridCoordinate::new(0, 0), 0x10, 2);
+    assert!(
+        state.collision_cells.is_empty(),
+        "a stale collision completion must not claim the grid"
+    );
+    mark_collision_ready(&mut state, GridCoordinate::new(0, 0), 0x10, 1);
     assert_eq!(
         state.peak_resident_cells, 2,
         "peak residency counts spawned package roots, including collision-pending roots"
     );
+}
+
+#[test]
+fn stale_activation_cannot_resurrect_an_eviction_and_reversal_keeps_one_root() {
+    let mut world = World::new();
+    let grid = GridCoordinate::new(1, 0);
+    let root = world.spawn(ExteriorCellRoot { form_id: 0x1234 }).id();
+    let mut state = lifecycle::ExteriorStreamState {
+        current_grid: grid,
+        ..Default::default()
+    };
+    state.cells.insert(
+        grid,
+        lifecycle::RuntimeCell {
+            state: ExteriorCellState {
+                cell_form_id: 0x1234,
+                grid,
+                lifecycle: ExteriorCellLifecycle::Resident,
+                generation: 1,
+                pinned: false,
+                estimated_bytes: 64,
+                failed_attempts: 0,
+            },
+            root: Some(root),
+            task: None,
+            package: None,
+            collision_ready: false,
+            eviction_restore: None,
+        },
+    );
+    world.insert_resource(state);
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x1234,
+            generation: 1,
+        },
+    );
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Activate,
+            grid,
+            form_id: 0x1234,
+            generation: 1,
+        },
+    );
+    assert_eq!(
+        world.resource::<lifecycle::ExteriorStreamState>().cells[&grid]
+            .state
+            .lifecycle,
+        ExteriorCellLifecycle::Evicting,
+        "an activation from before eviction must be stale"
+    );
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Cancel,
+            grid,
+            form_id: 0x1234,
+            generation: 2,
+        },
+    );
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert_eq!(
+        state.cells[&grid].state.lifecycle,
+        ExteriorCellLifecycle::Resident
+    );
+    assert_eq!(state.cells[&grid].root, Some(root));
+    let mut roots = world.query::<&ExteriorCellRoot>();
+    assert_eq!(roots.iter(&world).count(), 1);
+}
+
+#[test]
+fn final_eviction_tears_down_collision_ownership_before_removing_cell_state() {
+    let mut world = World::new();
+    let grid = GridCoordinate::new(-2, 3);
+    let root = world.spawn(ExteriorCellRoot { form_id: 0x4321 }).id();
+    let mut state = lifecycle::ExteriorStreamState {
+        resident_bytes: 64,
+        ..Default::default()
+    };
+    state.cells.insert(
+        grid,
+        lifecycle::RuntimeCell {
+            state: ExteriorCellState {
+                cell_form_id: 0x4321,
+                grid,
+                lifecycle: ExteriorCellLifecycle::Resident,
+                generation: 1,
+                pinned: false,
+                estimated_bytes: 64,
+                failed_attempts: 0,
+            },
+            root: Some(root),
+            task: None,
+            package: None,
+            collision_ready: true,
+            eviction_restore: None,
+        },
+    );
+    state.collision_cells.insert(grid, 0x4321);
+    world.insert_resource(state);
+    world.insert_resource(crate::viewer::player::PreparedCollisionWorld::default());
+    world.insert_resource(crate::viewer::player::PendingColliderBuild::default());
+    world.insert_non_send(BoxdddPhysicsContext::disabled());
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x4321,
+            generation: 1,
+        },
+    );
+    finalize_evictions(&mut world);
+
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert!(!state.cells.contains_key(&grid));
+    assert!(!state.collision_cells.contains_key(&grid));
+    assert_eq!(state.resident_bytes, 0);
+    assert!(world.get_entity(root).is_err());
 }
 
 #[test]

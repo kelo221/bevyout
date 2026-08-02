@@ -262,3 +262,113 @@ mod debug_info_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod convergence_report_tests {
+    use super::*;
+
+    const EXPECTED_DOMAINS: [&str; 8] = [
+        "streaming_lifecycle",
+        "actor_navigation",
+        "travel_save",
+        "environment",
+        "presentation",
+        "cache_preparation",
+        "frame_timing",
+        "process_memory",
+    ];
+
+    fn domain<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        report["domains"]
+            .as_array()
+            .expect("report has an ordered domains array")
+            .iter()
+            .find(|domain| domain["name"] == name)
+            .unwrap_or_else(|| panic!("report has domain {name}"))
+    }
+
+    #[test]
+    fn empty_report_has_stable_domain_order_and_bytes() {
+        let mut first_world = World::new();
+        let mut second_world = World::new();
+
+        let first = convergence_report(&mut first_world);
+        let second = convergence_report(&mut second_world);
+
+        let names = first["domains"]
+            .as_array()
+            .expect("report has domains")
+            .iter()
+            .map(|domain| domain["name"].as_str().expect("domain name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, EXPECTED_DOMAINS);
+        assert_eq!(
+            serde_json::to_string(&first).expect("first report serializes"),
+            serde_json::to_string(&second).expect("second report serializes")
+        );
+    }
+
+    #[test]
+    fn unrun_domains_keep_status_separate_from_value() {
+        let mut world = World::new();
+        let report = convergence_report(&mut world);
+
+        assert_eq!(report["schema"], "m6-convergence-v1");
+        for name in [
+            "streaming_lifecycle",
+            "actor_navigation",
+            "travel_save",
+            "environment",
+            "cache_preparation",
+        ] {
+            let domain = domain(&report, name);
+            assert_eq!(domain["status"], "not_run", "domain={name}");
+            assert_eq!(domain["value"], serde_json::Value::Null, "domain={name}");
+        }
+
+        let frame = domain(&report, "frame_timing");
+        assert_eq!(frame["status"], "not_run");
+        assert_eq!(frame["value"], serde_json::Value::Null);
+
+        let memory = domain(&report, "process_memory");
+        assert_eq!(memory["status"], "not_run");
+        assert_eq!(memory["value"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn streaming_summary_projection_keeps_existing_live_surfaces() {
+        let mut world = World::new();
+        world.insert_resource(super::super::super::world::exterior::ExteriorStreamState {
+            initialized: true,
+            worldspace_form_id: Some(0x3c),
+            resident_budget: 25,
+            ..Default::default()
+        });
+
+        let report = convergence_report(&mut world);
+
+        assert_eq!(report["streaming"]["initialized"], true);
+        assert_eq!(report["streaming"]["worldspace"], 0x3c);
+        assert_eq!(
+            report["presentation"]["terrain"]["collision"],
+            "full_land_mesh"
+        );
+        assert_eq!(domain(&report, "streaming_lifecycle")["status"], "measured");
+        assert_eq!(domain(&report, "presentation")["status"], "measured");
+        let expected_memory_status = match report["streaming"]["memory_measurement_status"].as_str()
+        {
+            Some("supported") => "measured",
+            Some("not_yet_sampled") => "not_yet_sampled",
+            Some("unsupported") => "unsupported",
+            _ => "not_run",
+        };
+        assert_eq!(
+            domain(&report, "process_memory")["status"],
+            expected_memory_status
+        );
+        assert_eq!(
+            domain(&report, "process_memory")["method"],
+            report["streaming"]["memory_measurement_method"]
+        );
+    }
+}

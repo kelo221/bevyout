@@ -8,7 +8,7 @@ use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
 use bevyout_core::manifest::exterior::PreparedWeatherProfile;
-use bevyout_core::manifest::{CellInfo, PreparedDayNightProfile};
+use bevyout_core::manifest::{CellInfo, PreparedDayNightProfile, PreparedDayNightProfileSource};
 use bevyout_core::time_of_day::{
     advance_game_hour, interpolate_keyframes, normalize_hour, uses_dynamic_lighting,
 };
@@ -129,12 +129,33 @@ fn advance_clock_by(clock: &mut GameClock, real_delta_seconds: f32, virtual_time
 }
 
 fn advance_weather_transition(time: Res<Time<Real>>, mut transition: ResMut<WeatherTransition>) {
-    if transition.target_weather_form_id.is_none() || transition.duration_seconds <= 0.0 {
+    if transition.target_weather_form_id.is_none() {
         return;
     }
-    transition.elapsed_seconds =
-        (transition.elapsed_seconds + time.delta_secs()).min(transition.duration_seconds);
-    if transition.elapsed_seconds >= transition.duration_seconds {
+
+    let duration = transition.duration_seconds;
+    if !duration.is_finite() || duration <= 0.0 {
+        if duration.is_nan() || duration <= 0.0 {
+            transition.elapsed_seconds = 0.0;
+            transition.source_weather_form_id = transition.target_weather_form_id;
+        }
+        return;
+    }
+
+    let elapsed = if transition.elapsed_seconds.is_finite() {
+        transition.elapsed_seconds.max(0.0)
+    } else if transition.elapsed_seconds.is_sign_positive() {
+        duration
+    } else {
+        0.0
+    };
+    let delta = if time.delta_secs().is_finite() {
+        time.delta_secs().max(0.0)
+    } else {
+        0.0
+    };
+    transition.elapsed_seconds = (elapsed + delta).min(duration);
+    if transition.elapsed_seconds >= duration {
         transition.source_weather_form_id = transition.target_weather_form_id;
     }
 }
@@ -150,11 +171,10 @@ pub(crate) fn profile_for_cell(
             .or(cell.day_night_preview_profile.as_ref());
         (
             profile,
-            if profile.is_some() {
-                "PREVIEW"
-            } else {
-                "STATIC"
-            },
+            profile.map_or("STATIC", |profile| match profile.source {
+                PreparedDayNightProfileSource::Authoritative => "PREVIEW_AUTHORITATIVE",
+                PreparedDayNightProfileSource::PreviewFallback => "PREVIEW_FALLBACK",
+            }),
         )
     } else if uses_dynamic_lighting(cell.interior, cell.behave_like_exterior, false) {
         let profile = cell.day_night_profile.as_ref();
@@ -291,18 +311,22 @@ fn apply_weather_transition(
     let Some(target) = transition.target_weather_form_id else {
         return;
     };
-    let progress = if transition.duration_seconds > 0.0 {
-        (transition.elapsed_seconds / transition.duration_seconds).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
+    let progress =
+        weather_transition_progress(transition.elapsed_seconds, transition.duration_seconds);
     let Some(target_profile) = target_profile else {
         let tint = weather_tint(target);
-        for color in [ambient, sunlight, sky_upper, sky_lower] {
+        for color in [
+            &mut *ambient,
+            &mut *sunlight,
+            &mut *sky_upper,
+            &mut *sky_lower,
+        ] {
             for channel in 0..3 {
-                color[channel] = color[channel] * (1.0 - progress) + tint[channel] * progress;
+                color[channel] = finite_or_zero(color[channel]) * (1.0 - progress)
+                    + finite_or_zero(tint[channel]) * progress;
             }
         }
+        sanitize_colors(ambient, sunlight, sky_upper, sky_lower);
         return;
     };
     let source_profile = source_profile.as_ref();
@@ -323,13 +347,48 @@ fn apply_weather_transition(
     let target_sky_upper = interpolate_weather(&target_profile, hour, |profile| profile.sky_upper);
     let target_sky_lower = interpolate_weather(&target_profile, hour, |profile| profile.sky_lower);
     for (destination, source, target) in [
-        (ambient, source_ambient, target_ambient),
-        (sunlight, source_sunlight, target_sunlight),
-        (sky_upper, source_sky_upper, target_sky_upper),
-        (sky_lower, source_sky_lower, target_sky_lower),
+        (&mut *ambient, source_ambient, target_ambient),
+        (&mut *sunlight, source_sunlight, target_sunlight),
+        (&mut *sky_upper, source_sky_upper, target_sky_upper),
+        (&mut *sky_lower, source_sky_lower, target_sky_lower),
     ] {
         for channel in 0..4 {
-            destination[channel] = source[channel] * (1.0 - progress) + target[channel] * progress;
+            destination[channel] = finite_or_zero(source[channel]) * (1.0 - progress)
+                + finite_or_zero(target[channel]) * progress;
+        }
+    }
+    sanitize_colors(ambient, sunlight, sky_upper, sky_lower);
+}
+
+fn weather_transition_progress(elapsed_seconds: f32, duration_seconds: f32) -> f32 {
+    if duration_seconds.is_nan() || duration_seconds <= 0.0 {
+        return 1.0;
+    }
+    if duration_seconds.is_infinite() {
+        return 0.0;
+    }
+    if elapsed_seconds.is_nan() || elapsed_seconds <= 0.0 {
+        return 0.0;
+    }
+    if elapsed_seconds.is_infinite() {
+        return 1.0;
+    }
+    (elapsed_seconds / duration_seconds).clamp(0.0, 1.0)
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn sanitize_colors(
+    ambient: &mut [f32; 4],
+    sunlight: &mut [f32; 4],
+    sky_upper: &mut [f32; 4],
+    sky_lower: &mut [f32; 4],
+) {
+    for color in [ambient, sunlight, sky_upper, sky_lower] {
+        for channel in color {
+            *channel = finite_or_zero(*channel);
         }
     }
 }
@@ -453,21 +512,27 @@ fn preview_weather_color(
 ) -> [f32; 4] {
     let day_luminance = relative_luminance(weather_day);
     let authored_luminance = relative_luminance(authored_cell);
-    let scale = if day_luminance > f32::EPSILON {
-        authored_luminance / day_luminance
+    let scale = if day_luminance.is_finite()
+        && authored_luminance.is_finite()
+        && day_luminance > f32::EPSILON
+    {
+        finite_or_zero(authored_luminance / day_luminance).max(0.0)
     } else {
         0.0
     };
-    [
-        weather[0] * scale,
-        weather[1] * scale,
-        weather[2] * scale,
-        weather[3],
-    ]
+    [0, 1, 2, 3].map(|channel| {
+        if channel == 3 {
+            finite_or_zero(weather[channel])
+        } else {
+            finite_or_zero(weather[channel] * scale)
+        }
+    })
 }
 
 fn relative_luminance(color: [f32; 4]) -> f32 {
-    color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
+    finite_or_zero(color[0]) * 0.2126
+        + finite_or_zero(color[1]) * 0.7152
+        + finite_or_zero(color[2]) * 0.0722
 }
 
 fn spawn_day_night_text(mut commands: Commands) {

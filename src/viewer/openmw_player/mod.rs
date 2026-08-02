@@ -7,6 +7,22 @@
 
 use bevy::prelude::*;
 
+// These policy modules are deliberately wired before their W4-C runtime
+// adapter exists; keep their deferred adapter surface warning-free for the
+// current wave.
+#[allow(dead_code)]
+mod breath;
+#[allow(dead_code)]
+mod water;
+
+#[allow(unused_imports)]
+pub(crate) use breath::{
+    BREATH_DRAIN_PER_SECOND, BREATH_RECOVERY_PER_SECOND, BreathConsequence, BreathUpdate,
+    advance_breath,
+};
+#[allow(unused_imports)]
+pub(crate) use water::{WaterPhase, WaterPolicyResult, WaterTransition, resolve_water_policy};
+
 pub(crate) const GRAVITY: f32 = 8.96;
 pub(crate) const AIR_CONTROL_FACTOR: f32 = 0.5;
 pub(crate) const STATIONARY_JUMP_HEIGHT: f32 = 1.2;
@@ -69,12 +85,6 @@ impl LocomotionState {
         self.phase = LocomotionPhase::Rising;
     }
 
-    pub(crate) fn next_landing_variant(&mut self) -> usize {
-        let variant = self.landing_index;
-        self.landing_index = self.landing_index.wrapping_add(1);
-        variant
-    }
-
     pub(crate) fn update(
         &mut self,
         position: Vec3,
@@ -100,13 +110,15 @@ impl LocomotionState {
         }
 
         let landing_distance = self.fall_distance;
-        let should_emit_landing = self.was_airborne
-            && (self.jump_active || landing_distance >= MIN_LANDING_SOUND_DISTANCE);
-        let impact = should_emit_landing.then_some(LandingImpact {
-            distance: landing_distance,
-            hard: landing_distance >= HARD_LANDING_DISTANCE,
-            variant: self.next_landing_variant(),
-        });
+        let impact = landing_impact(
+            self.was_airborne,
+            self.jump_active,
+            landing_distance,
+            self.landing_index,
+        );
+        if impact.is_some() {
+            self.landing_index = self.landing_index.wrapping_add(1);
+        }
         if self.was_airborne {
             self.jump_active = false;
         }
@@ -115,6 +127,27 @@ impl LocomotionState {
         self.fall_distance = 0.0;
         impact
     }
+}
+
+pub(crate) fn landing_impact(
+    was_airborne: bool,
+    jump_active: bool,
+    fall_distance: f32,
+    variant: usize,
+) -> Option<LandingImpact> {
+    let distance = if fall_distance.is_finite() {
+        fall_distance.max(0.0)
+    } else {
+        0.0
+    };
+    if !was_airborne || (!jump_active && distance < MIN_LANDING_SOUND_DISTANCE) {
+        return None;
+    }
+    Some(LandingImpact {
+        distance,
+        hard: distance >= HARD_LANDING_DISTANCE,
+        variant,
+    })
 }
 
 pub(crate) fn has_directional_input(input: Vec3) -> bool {

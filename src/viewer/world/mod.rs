@@ -124,19 +124,38 @@ fn update_current_world_location(
     else {
         return;
     };
-    let position = position.to_array();
-    let rotation_xyzw = rotation.to_array();
-    location.0 = if let Some(exterior) = manifest.exterior.as_ref() {
-        Some(WorldLocation::Exterior(WorldLocationExterior {
-            worldspace_form_id: exterior.worldspace_form_id,
-            position,
-            rotation_xyzw,
-        }))
-    } else {
-        Some(WorldLocation::Interior(WorldLocationInterior {
-            cell_form_id: manifest.cell.form_id,
-            position,
-            rotation_xyzw,
-        }))
-    };
+    location.0 = Some(project_current_world_location(
+        manifest
+            .exterior
+            .as_ref()
+            .map(|exterior| exterior.worldspace_form_id),
+        manifest.cell.form_id,
+        position.to_array(),
+        rotation.to_array(),
+    ));
 }
+
+fn project_current_world_location(
+    worldspace_form_id: Option<u32>,
+    cell_form_id: u32,
+    position: [f32; 3],
+    rotation_xyzw: [f32; 4],
+) -> WorldLocation {
+    if let Some(worldspace_form_id) = worldspace_form_id {
+        WorldLocation::Exterior(WorldLocationExterior {
+            worldspace_form_id,
+            position,
+            rotation_xyzw,
+        })
+    } else {
+        WorldLocation::Interior(WorldLocationInterior {
+            cell_form_id,
+            position,
+            rotation_xyzw,
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/location.rs"]
+mod location_tests;

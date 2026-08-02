@@ -798,7 +798,10 @@ pub struct PreparedDoor {
 pub struct PreparedDoorDestination {
     pub door_reference_form_id: u32,
     pub cell_form_id: u32,
+    /// Authored arrival translation in Bevy coordinates. Runtime capsule or
+    /// camera offsets are applied by the viewer adapter, never serialized here.
     pub translation: [f32; 3],
+    /// Authored arrival rotation, preserved without normalization.
     pub rotation_xyzw: [f32; 4],
 }
 

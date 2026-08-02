@@ -69,6 +69,7 @@ fn normal_reprepare_recovers_existing_authored_dialogue_and_voice() {
 #[cfg(test)]
 mod day_night_profile_tests {
     use super::*;
+    use crate::vsa::openmw_esm4::CellMetadata;
     use bevyout_core::time_of_day::{ColorKeyframes, DayNightTimings};
 
     fn colors(value: f32) -> ColorKeyframes {
@@ -89,6 +90,54 @@ mod day_night_profile_tests {
             ambient: colors(0.3),
             sunlight: colors(0.4),
         }
+    }
+
+    fn climate(form_id: u32, weather_form_id: u32) -> ClimateRecord {
+        ClimateRecord {
+            form_id,
+            editor_id: Some(format!("Climate{form_id:08x}")),
+            weather_entries: vec![
+                super::super::super::super::openmw_esm4::ClimateWeatherEntry {
+                    weather_form_id,
+                    chance: 100,
+                },
+            ],
+            timings: DayNightTimings::default(),
+        }
+    }
+
+    fn subrecord(signature: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut result = signature.to_vec();
+        result.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        result.extend_from_slice(data);
+        result
+    }
+
+    fn record(signature: &[u8; 4], form_id: u32, data: &[u8]) -> Vec<u8> {
+        let mut result = signature.to_vec();
+        result.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        result.extend_from_slice(&0_u32.to_le_bytes());
+        result.extend_from_slice(&form_id.to_le_bytes());
+        result.extend_from_slice(&[0; 8]);
+        result.extend_from_slice(data);
+        result
+    }
+
+    fn cell_metadata(climate_form_id: Option<u32>) -> Option<CellMetadata> {
+        let mut bytes = record(b"TES4", 0, &[]);
+        let data = climate_form_id
+            .map(|form_id| subrecord(b"XCCM", &form_id.to_le_bytes()))
+            .unwrap_or_default();
+        bytes.extend(record(b"CELL", 1, &data));
+        parse_content_set(
+            &[PluginSource {
+                name: "EnvironmentTests.esm",
+                bytes: &bytes,
+            }],
+            &parse_cell_selector("1").unwrap(),
+        )
+        .expect("synthetic CELL climate metadata must parse")
+        .cell_metadata
     }
 
     fn cell(worldspace_form_id: Option<u32>) -> super::super::super::super::manifest::CellInfo {
@@ -161,6 +210,75 @@ mod day_night_profile_tests {
 
         let profile = resolve_authoritative_day_night_profile(&cell(Some(0x01)), &parsed).unwrap();
         assert_eq!(profile.weather_form_id, 0x20);
+    }
+
+    #[test]
+    fn authoritative_climate_precedence_is_cell_then_worldspace_then_parent() {
+        let mut parsed = ParsedPlugin::default();
+        for (weather_form_id, editor_id) in [
+            (0x20, "CellWeather"),
+            (0x30, "WorldWeather"),
+            (0x40, "ParentWeather"),
+        ] {
+            parsed
+                .weathers
+                .insert(weather_form_id, weather(weather_form_id, editor_id));
+        }
+        parsed.climates.insert(0x10, climate(0x10, 0x20));
+        parsed.climates.insert(0x11, climate(0x11, 0x30));
+        parsed.climates.insert(0x12, climate(0x12, 0x40));
+        parsed.worldspaces.insert(
+            0x01,
+            WorldspaceRecord {
+                form_id: 0x01,
+                editor_id: None,
+                name: None,
+                parent_form_id: Some(0x02),
+                parent_flags: WorldspaceRecord::USE_PARENT_CLIMATE,
+                climate_form_id: Some(0x11),
+            },
+        );
+        parsed.worldspaces.insert(
+            0x02,
+            WorldspaceRecord {
+                form_id: 0x02,
+                editor_id: None,
+                name: None,
+                parent_form_id: None,
+                parent_flags: 0,
+                climate_form_id: Some(0x12),
+            },
+        );
+
+        parsed.cell_metadata = cell_metadata(Some(0x10));
+        let profile = resolve_authoritative_day_night_profile(&cell(Some(0x01)), &parsed).unwrap();
+        assert_eq!(profile.climate_form_id, Some(0x10));
+        assert_eq!(profile.weather_form_id, 0x20);
+
+        parsed.cell_metadata = cell_metadata(None);
+        let profile = resolve_authoritative_day_night_profile(&cell(Some(0x01)), &parsed).unwrap();
+        assert_eq!(profile.climate_form_id, Some(0x12));
+        assert_eq!(profile.weather_form_id, 0x40);
+
+        parsed.worldspaces.get_mut(&0x01).unwrap().parent_flags = 0;
+        let profile = resolve_authoritative_day_night_profile(&cell(Some(0x01)), &parsed).unwrap();
+        assert_eq!(profile.climate_form_id, Some(0x11));
+        assert_eq!(profile.weather_form_id, 0x30);
+    }
+
+    #[test]
+    fn authoritative_profile_is_absent_for_missing_climate_or_weather_records() {
+        let mut parsed = ParsedPlugin {
+            cell_metadata: cell_metadata(Some(0x404)),
+            ..ParsedPlugin::default()
+        };
+        assert!(resolve_authoritative_day_night_profile(&cell(None), &parsed).is_none());
+
+        parsed.cell_metadata = cell_metadata(Some(0x10));
+        parsed.climates.insert(0x10, climate(0x10, 0x505));
+        assert!(resolve_authoritative_day_night_profile(&cell(None), &parsed).is_none());
+
+        assert!(resolve_preview_day_night_profile(&ParsedPlugin::default()).is_none());
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod lifecycle;
 mod loading;
 mod policy;
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,14 +17,15 @@ use std::path::Path;
 
 use avian3d::prelude::Collider;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::VisibleEntities;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy_boxddd::prelude::BoxdddPhysicsContext;
 use bevyout_core::manifest::exterior::{
     EXTERIOR_CELL_PACKAGE_REVISION, EXTERIOR_INDEX_REVISION, ExteriorCellLifecycle,
-    ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorLoadAction, ExteriorWaterContact,
-    ExteriorWorldspaceIndex, ExteriorWorldspaceLodAsset, GridCoordinate, PreparedTerrain,
-    PreparedWater, TerrainLod, resolve_water_contact, select_terrain_lod,
+    ExteriorCellPackage, ExteriorCoordinatePolicy, ExteriorLoadAction, ExteriorResidencyAction,
+    ExteriorWaterContact, ExteriorWorldspaceIndex, ExteriorWorldspaceLodAsset, GridCoordinate,
+    PreparedTerrain, PreparedWater, TerrainLod, resolve_water_contact, select_terrain_lod,
 };
 use serde::Serialize;
 
@@ -151,6 +153,11 @@ struct ExteriorObjectLod {
 #[derive(Resource, Debug, Default, Clone, Copy, Serialize)]
 pub(crate) struct ExteriorPresentationStats {
     pub(crate) terrain_lod_transitions: u64,
+    pub(crate) object_lod_transitions: u64,
+    pub(crate) worldspace_lod_asset_loads_staged_total: u64,
+    pub(crate) worldspace_lod_asset_loads_staged_last_frame: u64,
+    pub(crate) worldspace_lod_peak_asset_loads_staged_per_frame: u64,
+    pub(crate) worldspace_lod_despawns_total: u64,
 }
 
 const TERRAIN_SKIRT_DEPTH: f32 = 8.0;
@@ -333,6 +340,7 @@ fn initialize(
             task: None,
             package: Some(package),
             collision_ready,
+            eviction_restore: None,
         },
     );
     if collision_ready {
@@ -485,7 +493,7 @@ fn update_residency(
 fn apply_action(
     commands: &mut Commands,
     state: &mut ExteriorStreamState,
-    action: bevyout_core::manifest::exterior::ExteriorResidencyAction,
+    action: ExteriorResidencyAction,
     tasks: &Query<&loading::ExteriorPackageTask>,
     _asset_root: &str,
 ) {
@@ -497,25 +505,51 @@ fn apply_action(
     }
     match action.action {
         ExteriorLoadAction::Request => {
-            state
-                .cells
-                .entry(action.grid)
-                .or_insert_with(|| lifecycle::RuntimeCell {
-                    state: bevyout_core::manifest::exterior::ExteriorCellState {
-                        cell_form_id: action.form_id,
-                        grid: action.grid,
-                        lifecycle: ExteriorCellLifecycle::Queued,
-                        generation: action.generation,
-                        pinned: false,
-                        estimated_bytes: 0,
-                        failed_attempts: 0,
+            let collision_owned = state.collision_cells.contains_key(&action.grid);
+            let can_request = match state.cells.get(&action.grid) {
+                None => action.generation == 1 && !collision_owned,
+                Some(cell) => {
+                    cell.state.cell_form_id == action.form_id
+                        && cell.state.lifecycle == ExteriorCellLifecycle::Unloaded
+                        && cell.state.generation.saturating_add(1) == action.generation
+                        && cell.task.is_none()
+                        && !cell.owns_runtime_state(collision_owned)
+                }
+            };
+            if !can_request {
+                return;
+            }
+            if let Some(cell) = state.cells.get_mut(&action.grid) {
+                state.resident_bytes = state
+                    .resident_bytes
+                    .saturating_sub(cell.state.estimated_bytes);
+                cell.state.generation = action.generation;
+                cell.state.lifecycle = ExteriorCellLifecycle::Queued;
+                cell.state.estimated_bytes = 0;
+                cell.collision_ready = false;
+                cell.eviction_restore = None;
+            } else {
+                state.cells.insert(
+                    action.grid,
+                    lifecycle::RuntimeCell {
+                        state: bevyout_core::manifest::exterior::ExteriorCellState {
+                            cell_form_id: action.form_id,
+                            grid: action.grid,
+                            lifecycle: ExteriorCellLifecycle::Queued,
+                            generation: action.generation,
+                            pinned: false,
+                            estimated_bytes: 0,
+                            failed_attempts: 0,
+                        },
+                        root: None,
+                        task: None,
+                        package: None,
+                        collision_ready: false,
+                        eviction_restore: None,
                     },
-                    root: None,
-                    task: None,
-                    package: None,
-                    collision_ready: false,
-                });
-            loading::request(
+                );
+            }
+            let _ = loading::request(
                 commands,
                 state,
                 action.grid,
@@ -525,42 +559,96 @@ fn apply_action(
         }
         ExteriorLoadAction::Cancel => {
             let collision_owned = state.collision_cells.contains_key(&action.grid);
+            let current_grid = state.current_grid;
             if let Some(cell) = state.cells.get_mut(&action.grid) {
-                if let Some(task) = cell.task.take()
-                    && tasks.get(task).is_ok()
-                {
-                    commands.entity(task).despawn();
+                if !action_matches_cell(cell, &action) {
+                    return;
                 }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Evicting {
+                    cell.cancel_eviction(current_grid, collision_owned);
+                    return;
+                }
+                if !matches!(
+                    cell.state.lifecycle,
+                    ExteriorCellLifecycle::Queued
+                        | ExteriorCellLifecycle::Loading
+                        | ExteriorCellLifecycle::Ready
+                        | ExteriorCellLifecycle::Resident
+                ) {
+                    return;
+                }
+                despawn_package_task(commands, tasks, cell);
                 cell.state.generation = cell.state.generation.saturating_add(1);
-                // A completed package already owns a render root, package
-                // bytes, and potentially collision even though it remains
-                // logically `Loading` until collision attachment finishes.
-                // Route that state through the same ordered teardown as an
-                // eviction; only a task-only cancellation is truly unloaded.
-                cell.state.lifecycle =
-                    if cell.root.is_some() || cell.package.is_some() || collision_owned {
-                        ExteriorCellLifecycle::Evicting
-                    } else {
-                        ExteriorCellLifecycle::Unloaded
-                    };
+                if cell.owns_runtime_state(collision_owned) {
+                    cell.eviction_restore = Some(cell.state.lifecycle);
+                    cell.state.lifecycle = ExteriorCellLifecycle::Evicting;
+                } else {
+                    cell.state.lifecycle = ExteriorCellLifecycle::Unloaded;
+                    cell.eviction_restore = None;
+                    state.resident_bytes = state
+                        .resident_bytes
+                        .saturating_sub(cell.state.estimated_bytes);
+                    cell.state.estimated_bytes = 0;
+                }
                 state.cancellations += 1;
             }
         }
         ExteriorLoadAction::Evict => {
+            let mut invalid = false;
             if let Some(cell) = state.cells.get_mut(&action.grid) {
-                cell.state.lifecycle = ExteriorCellLifecycle::Evicting;
-                cell.state.generation = cell.state.generation.saturating_add(1);
-                if let Some(task) = cell.task.take()
-                    && tasks.get(task).is_ok()
+                let collision_owned = state.collision_cells.contains_key(&action.grid);
+                if !action_matches_cell(cell, &action)
+                    || !cell.owns_runtime_state(collision_owned)
+                    || !cell.begin_eviction()
                 {
-                    commands.entity(task).despawn();
+                    invalid = true;
+                } else {
+                    despawn_package_task(commands, tasks, cell);
                 }
+            } else {
+                invalid = true;
+            }
+            if invalid {
+                state.invalid_unload_count = state.invalid_unload_count.saturating_add(1);
             }
         }
         ExteriorLoadAction::Activate => {
-            state.set_lifecycle(action.grid, ExteriorCellLifecycle::Resident);
+            let collision_owned = state
+                .collision_cells
+                .get(&action.grid)
+                .is_some_and(|form_id| *form_id == action.form_id);
+            if let Some(cell) = state.cells.get_mut(&action.grid) {
+                if !action_matches_cell(cell, &action) {
+                    return;
+                }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Resident {
+                    return;
+                }
+                if cell.state.lifecycle == ExteriorCellLifecycle::Ready
+                    && cell.collision_ready
+                    && collision_owned
+                {
+                    cell.state.lifecycle = ExteriorCellLifecycle::Resident;
+                }
+            }
         }
         ExteriorLoadAction::RaisePriority | ExteriorLoadAction::Deactivate => {}
+    }
+}
+
+fn action_matches_cell(cell: &lifecycle::RuntimeCell, action: &ExteriorResidencyAction) -> bool {
+    cell.state.cell_form_id == action.form_id && cell.state.generation == action.generation
+}
+
+fn despawn_package_task(
+    commands: &mut Commands,
+    tasks: &Query<&loading::ExteriorPackageTask>,
+    cell: &mut lifecycle::RuntimeCell,
+) {
+    if let Some(task) = cell.task.take()
+        && tasks.get(task).is_ok()
+    {
+        commands.entity(task).despawn();
     }
 }
 
@@ -584,15 +672,21 @@ fn attach_streamed_colliders(
                 && cell.package.is_some()
                 && !cell.collision_ready
         })
-        .map(|(grid, cell)| (*grid, cell.package.clone().expect("package checked above")))
+        .map(|(grid, cell)| {
+            (
+                *grid,
+                cell.state.generation,
+                cell.package.clone().expect("package checked above"),
+            )
+        })
         .collect::<Vec<_>>();
     if pending.is_empty() {
         return;
     }
 
     if physics_disabled.0 {
-        for (grid, package) in pending {
-            mark_collision_ready(&mut state, grid, package.cell_form_id);
+        for (grid, generation, package) in pending {
+            mark_collision_ready(&mut state, grid, package.cell_form_id, generation);
         }
         return;
     }
@@ -605,7 +699,7 @@ fn attach_streamed_colliders(
     let asset_root = state.asset_root.clone().unwrap_or_default();
     let mut changed_static_tree = false;
     let mut completed = Vec::with_capacity(pending.len());
-    for (grid, package) in pending {
+    for (grid, generation, package) in pending {
         if !collision_world.has_cell_colliders(package.cell_form_id) {
             changed_static_tree |= super::super::player::build_exterior_static_colliders(
                 boxddd_world,
@@ -630,21 +724,34 @@ fn attach_streamed_colliders(
         if collision_expected && !collision_world.has_cell_colliders(package.cell_form_id) {
             continue;
         }
-        completed.push((grid, package.cell_form_id));
+        completed.push((grid, package.cell_form_id, generation));
     }
     if changed_static_tree && let Err(error) = boxddd_world.try_rebuild_static_tree() {
         warn!("streamed exterior static tree rebuild returned error: {error:?}");
         return;
     }
-    for (grid, form_id) in completed {
-        mark_collision_ready(&mut state, grid, form_id);
+    for (grid, form_id, generation) in completed {
+        mark_collision_ready(&mut state, grid, form_id, generation);
     }
 }
 
-fn mark_collision_ready(state: &mut ExteriorStreamState, grid: GridCoordinate, form_id: u32) {
+fn mark_collision_ready(
+    state: &mut ExteriorStreamState,
+    grid: GridCoordinate,
+    form_id: u32,
+    generation: u64,
+) {
     let current = state.current_grid;
+    let collision_owner = state.collision_cells.get(&grid).copied();
     if let Some(cell) = state.cells.get_mut(&grid) {
-        if cell.state.lifecycle != ExteriorCellLifecycle::Loading {
+        if cell.state.generation != generation
+            || cell.state.cell_form_id != form_id
+            || cell.state.lifecycle != ExteriorCellLifecycle::Loading
+            || cell.task.is_some()
+            || cell.root.is_none()
+            || cell.collision_ready
+            || collision_owner.is_some_and(|owner| owner != form_id)
+        {
             return;
         }
         cell.collision_ready = true;
@@ -751,6 +858,7 @@ fn finalize_evictions(world: &mut World) {
             state.evictions += 1;
             state.persistence_applied.remove(grid);
         } else {
+            state.invalid_unload_count = state.invalid_unload_count.saturating_add(1);
             warn!("exterior eviction lost cell {:08x}", form_id);
         }
     }
@@ -1334,11 +1442,13 @@ pub(crate) fn streamed_lights_json(world: &mut World) -> serde_json::Value {
 }
 
 /// Return the presentation state that can be measured without confusing it
-/// with gameplay residency. Bevy owns frustum and occlusion decisions inside
-/// the renderer, so their counters are intentionally reported as unavailable
-/// until the target Bevy version exposes a stable per-view result. The
-/// distance-cull count remains useful and conservative: hidden presentation
-/// roots never remove collision, navigation, or persistent simulation.
+/// with gameplay residency. Bevy's main-world `VisibleEntities` list is the
+/// authoritative CPU visibility result for each active camera, so the report
+/// can expose its mesh counts. GPU occlusion remains intentionally unmeasured:
+/// the render-world/GPU path does not expose a stable count to this console
+/// snapshot. The distance-cull count remains useful and conservative: hidden
+/// presentation roots never remove collision, navigation, or persistent
+/// simulation.
 pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value {
     let mut terrain_counts = [0usize; 3];
     let mut terrain_grids = Vec::new();
@@ -1391,18 +1501,52 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
         )>()
         .iter(world)
         .count();
-    let frustum_cameras = world
-        .query_filtered::<Entity, With<Camera3d>>()
+    let mut frustum_visible_meshes = HashSet::new();
+    let mut frustum_cameras = 0usize;
+    {
+        let mut query = world.query_filtered::<(&Camera, &VisibleEntities), With<Camera3d>>();
+        for (camera, visible_entities) in query.iter(world) {
+            if !camera.is_active {
+                continue;
+            }
+            frustum_cameras += 1;
+            frustum_visible_meshes.extend(visible_entities.iter(TypeId::of::<Mesh3d>()).copied());
+        }
+    }
+    let frustum_candidate_meshes = world
+        .query_filtered::<Entity, With<Mesh3d>>()
         .iter(world)
         .count();
+    let frustum_measured = frustum_cameras > 0;
+    let frustum_visible_meshes = frustum_measured.then_some(frustum_visible_meshes.len());
+    let frustum_culled_meshes =
+        frustum_visible_meshes.map(|visible| frustum_candidate_meshes.saturating_sub(visible));
     let stats = world
         .get_resource::<ExteriorPresentationStats>()
         .copied()
+        .unwrap_or_default();
+    let catalog_duplicate_instances = world
+        .get_resource::<ExteriorWorldspaceLodCatalog>()
+        .map(|catalog| {
+            let mut seen = HashSet::new();
+            catalog
+                .descriptors
+                .iter()
+                .map(|descriptor| ExteriorWorldspaceLodVisual {
+                    level: descriptor.level,
+                    grid: descriptor.grid,
+                    blocks: descriptor.blocks,
+                })
+                .filter(|key| !seen.insert(*key))
+                .count()
+        })
         .unwrap_or_default();
     let mut worldspace_lod_active = 0usize;
     let mut worldspace_lod_terrain = 0usize;
     let mut worldspace_lod_blocks = 0usize;
     let mut worldspace_lod_levels = BTreeMap::<u8, usize>::new();
+    let mut active_worldspace_lod_keys = HashSet::new();
+    let mut active_duplicate_instances = 0usize;
     {
         let mut query = world.query::<&ExteriorWorldspaceLodVisual>();
         for lod in query.iter(world) {
@@ -1413,6 +1557,9 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
                 worldspace_lod_terrain += 1;
             }
             *worldspace_lod_levels.entry(lod.level).or_default() += 1;
+            if !active_worldspace_lod_keys.insert(*lod) {
+                active_duplicate_instances += 1;
+            }
         }
     }
 
@@ -1433,19 +1580,34 @@ pub(crate) fn exterior_presentation_json(world: &mut World) -> serde_json::Value
             "distance_culled": distance_culled,
             "distant": object_distant,
             "persistent": object_persistent,
+            "lod_transitions": stats.object_lod_transitions,
         },
         "worldspace_lod": {
             "active": worldspace_lod_active,
             "terrain": worldspace_lod_terrain,
             "blocks": worldspace_lod_blocks,
             "levels": worldspace_lod_levels,
+            "catalog_duplicate_instances": catalog_duplicate_instances,
+            "active_duplicate_instances": active_duplicate_instances,
+            "asset_loads_staged_total": stats.worldspace_lod_asset_loads_staged_total,
+            "asset_loads_staged_last_frame": stats.worldspace_lod_asset_loads_staged_last_frame,
+            "peak_asset_loads_staged_per_frame": stats
+                .worldspace_lod_peak_asset_loads_staged_per_frame,
+            "asset_loads_staged_per_frame_cap": WORLDSPACE_LOD_MAX_SPAWN_PER_FRAME,
+            "despawns_total": stats.worldspace_lod_despawns_total,
+            "selection_transitions": stats
+                .worldspace_lod_asset_loads_staged_total
+                .saturating_add(stats.worldspace_lod_despawns_total),
             "presentation_only": true,
         },
         "culling": {
             "frustum": {
+                "method": "active_camera_visible_entities_cpu",
                 "cameras": frustum_cameras,
-                "measured": false,
-                "culled": serde_json::Value::Null,
+                "measured": frustum_measured,
+                "candidate_meshes": frustum_candidate_meshes,
+                "visible_meshes": frustum_visible_meshes,
+                "culled": frustum_culled_meshes,
             },
             "distance": {
                 "measured": true,
@@ -1562,6 +1724,7 @@ fn clamp_adjacent_terrain_lods(selected_by_grid: &mut BTreeMap<GridCoordinate, T
 
 fn update_exterior_object_lod(
     player: Query<&Transform, With<FpsPlayer>>,
+    mut presentation: ResMut<ExteriorPresentationStats>,
     mut objects: Query<(&Transform, &mut ExteriorObjectLod, &mut Visibility)>,
 ) {
     let Some(player) = player.iter().next() else {
@@ -1571,6 +1734,7 @@ fn update_exterior_object_lod(
         // Distant records are the worldspace's explicit landmark
         // representation. Cell-owned objects are culled before the next
         // streaming ring would normally make them relevant.
+        let was_visible = lod.visible;
         if lod.persistent || lod.distant {
             lod.visible = true;
         } else {
@@ -1581,6 +1745,10 @@ fn update_exterior_object_lod(
                 distance <= 320.0
             };
         }
+        if was_visible != lod.visible {
+            presentation.object_lod_transitions =
+                presentation.object_lod_transitions.saturating_add(1);
+        }
         *visibility = if lod.visible {
             Visibility::Inherited
         } else {
@@ -1589,19 +1757,26 @@ fn update_exterior_object_lod(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_worldspace_lod(
     mut commands: Commands,
     catalog: Res<ExteriorWorldspaceLodCatalog>,
     settings: Res<ExteriorWorldspaceLodSettings>,
+    mut presentation: ResMut<ExteriorPresentationStats>,
     asset_server: Res<AssetServer>,
     player: Query<&Transform, With<FpsPlayer>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     active: Query<(Entity, &ExteriorWorldspaceLodVisual)>,
 ) {
+    presentation.worldspace_lod_asset_loads_staged_last_frame = 0;
     if !settings.enabled {
+        let despawns = active.iter().count() as u64;
         for (entity, _) in &active {
             commands.entity(entity).despawn();
         }
+        presentation.worldspace_lod_despawns_total = presentation
+            .worldspace_lod_despawns_total
+            .saturating_add(despawns);
         return;
     }
     let Some(root) = catalog.root else {
@@ -1641,29 +1816,17 @@ fn update_worldspace_lod(
             .then_with(|| left.blocks.cmp(&right.blocks))
             .then_with(|| left.asset_path.cmp(&right.asset_path))
     });
-    let mut desired = candidates
-        .iter()
-        .copied()
-        .filter(|(_, descriptor, _)| descriptor.blocks)
-        .take(WORLDSPACE_LOD_BLOCK_BUDGET)
-        .collect::<Vec<_>>();
-    for (level, budget) in WORLDSPACE_LOD_TERRAIN_BUDGETS {
-        desired.extend(
-            candidates
-                .iter()
-                .copied()
-                .filter(|(_, descriptor, _)| !descriptor.blocks && descriptor.level == level)
-                .take(budget),
-        );
-    }
+    let desired = select_unique_worldspace_lod_candidates(&candidates);
     debug_assert!(desired.len() <= WORLDSPACE_LOD_MAX_ACTIVE);
     let active_keys = active.iter().map(|(_, key)| *key).collect::<HashSet<_>>();
+    let mut despawned = 0u64;
     for (entity, key) in &active {
         if !desired
             .iter()
             .any(|(desired_key, _, _)| *desired_key == *key)
         {
             commands.entity(entity).despawn();
+            despawned = despawned.saturating_add(1);
         }
     }
     let mut spawned = 0;
@@ -1688,6 +1851,62 @@ fn update_worldspace_lod(
         ));
         spawned += 1;
     }
+    let spawned = spawned as u64;
+    presentation.worldspace_lod_asset_loads_staged_total = presentation
+        .worldspace_lod_asset_loads_staged_total
+        .saturating_add(spawned);
+    presentation.worldspace_lod_asset_loads_staged_last_frame = spawned;
+    presentation.worldspace_lod_peak_asset_loads_staged_per_frame = presentation
+        .worldspace_lod_peak_asset_loads_staged_per_frame
+        .max(spawned);
+    presentation.worldspace_lod_despawns_total = presentation
+        .worldspace_lod_despawns_total
+        .saturating_add(despawned);
+}
+
+fn select_unique_worldspace_lod_candidates<'a>(
+    candidates: &[(
+        ExteriorWorldspaceLodVisual,
+        &'a ExteriorWorldspaceLodAsset,
+        f32,
+    )],
+) -> Vec<(
+    ExteriorWorldspaceLodVisual,
+    &'a ExteriorWorldspaceLodAsset,
+    f32,
+)> {
+    let mut selected_keys = HashSet::new();
+    let mut desired = Vec::new();
+    for candidate in candidates
+        .iter()
+        .copied()
+        .filter(|(_, descriptor, _)| descriptor.blocks)
+    {
+        if selected_keys.insert(candidate.0) {
+            desired.push(candidate);
+            if desired.len() == WORLDSPACE_LOD_BLOCK_BUDGET {
+                break;
+            }
+        }
+    }
+    for (level, budget) in WORLDSPACE_LOD_TERRAIN_BUDGETS {
+        let mut selected_for_level = 0;
+        for candidate in candidates
+            .iter()
+            .copied()
+            .filter(|(_, descriptor, _)| !descriptor.blocks && descriptor.level == level)
+        {
+            if !selected_keys.insert(candidate.0) {
+                continue;
+            }
+            desired.push(candidate);
+            selected_for_level += 1;
+            if selected_for_level == budget {
+                break;
+            }
+        }
+    }
+    desired
 }
 
 fn worldspace_lod_distance(

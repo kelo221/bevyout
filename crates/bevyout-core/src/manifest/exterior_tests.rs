@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{PreparedDoorDestination, PreparedSemantic};
 
 #[test]
 fn positive_and_negative_grid_origins_round_trip() {
@@ -70,6 +71,137 @@ fn residency_prefers_current_and_cancels_stale_loads() {
 }
 
 #[test]
+fn residency_cancels_queued_and_loading_cells_outside_the_ring() {
+    let indexed = BTreeMap::from([
+        (GridCoordinate::new(0, 0), 1),
+        (GridCoordinate::new(1, 0), 2),
+        (GridCoordinate::new(2, 0), 3),
+    ]);
+    let states = vec![
+        ExteriorCellState {
+            cell_form_id: 2,
+            grid: GridCoordinate::new(1, 0),
+            lifecycle: ExteriorCellLifecycle::Queued,
+            generation: 4,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+        ExteriorCellState {
+            cell_form_id: 3,
+            grid: GridCoordinate::new(2, 0),
+            lifecycle: ExteriorCellLifecycle::Loading,
+            generation: 7,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+    ];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(0, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 0,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions
+            .iter()
+            .filter(|action| action.action == ExteriorLoadAction::Cancel)
+            .map(|action| (action.grid, action.generation))
+            .collect::<Vec<_>>(),
+        vec![
+            (GridCoordinate::new(1, 0), 4),
+            (GridCoordinate::new(2, 0), 7),
+        ]
+    );
+}
+
+#[test]
+fn residency_reverses_an_eviction_when_the_cell_returns_to_the_ring() {
+    let indexed = BTreeMap::from([(GridCoordinate::new(1, 0), 2)]);
+    let states = vec![ExteriorCellState {
+        cell_form_id: 2,
+        grid: GridCoordinate::new(1, 0),
+        lifecycle: ExteriorCellLifecycle::Evicting,
+        generation: 9,
+        pinned: false,
+        estimated_bytes: 32,
+        failed_attempts: 0,
+    }];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(1, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 32,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions,
+        vec![ExteriorResidencyAction {
+            form_id: 2,
+            grid: GridCoordinate::new(1, 0),
+            action: ExteriorLoadAction::Cancel,
+            generation: 9,
+        }]
+    );
+}
+
+#[test]
+fn residency_requests_a_new_generation_after_a_cancelled_load() {
+    let indexed = BTreeMap::from([(GridCoordinate::new(0, 0), 1)]);
+    let states = vec![ExteriorCellState {
+        cell_form_id: 1,
+        grid: GridCoordinate::new(0, 0),
+        lifecycle: ExteriorCellLifecycle::Unloaded,
+        generation: 12,
+        pinned: false,
+        estimated_bytes: 0,
+        failed_attempts: 0,
+    }];
+
+    let plan = plan_residency(
+        ExteriorResidencyInput {
+            current_grid: GridCoordinate::new(0, 0),
+            velocity_grid: (0, 0),
+            resident_budget: 1,
+            byte_budget: 0,
+            near_radius: 0,
+            prefetch_radius: 0,
+            distant_radius: None,
+        },
+        &indexed,
+        &states,
+    );
+
+    assert_eq!(
+        plan.actions,
+        vec![ExteriorResidencyAction {
+            form_id: 1,
+            grid: GridCoordinate::new(0, 0),
+            action: ExteriorLoadAction::Request,
+            generation: 13,
+        }]
+    );
+}
+
+#[test]
 fn pinned_cells_are_not_evicted_when_the_player_grid_changes() {
     let mut indexed = BTreeMap::new();
     indexed.insert(GridCoordinate::new(0, 0), 1);
@@ -110,6 +242,67 @@ fn terrain_lod_hysteresis_and_neighbor_clamp_are_bounded() {
     assert_eq!(
         clamp_lod_delta(TerrainLod::Near, TerrainLod::Distant),
         (TerrainLod::Near, TerrainLod::Middle)
+    );
+}
+
+#[test]
+fn terrain_lod_selection_covers_base_bands_and_hysteresis_boundaries() {
+    let cases = [
+        (None, 50.0, TerrainLod::Near),
+        (None, 51.0, TerrainLod::Middle),
+        (None, 150.0, TerrainLod::Middle),
+        (None, 151.0, TerrainLod::Distant),
+        (Some(TerrainLod::Near), 140.0, TerrainLod::Near),
+        (Some(TerrainLod::Near), 141.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 40.0, TerrainLod::Near),
+        (Some(TerrainLod::Middle), 41.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 160.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 161.0, TerrainLod::Distant),
+        (Some(TerrainLod::Distant), 140.0, TerrainLod::Middle),
+        (Some(TerrainLod::Distant), 141.0, TerrainLod::Distant),
+        (Some(TerrainLod::Near), 50.0, TerrainLod::Near),
+    ];
+
+    for (previous, distance, expected) in cases {
+        assert_eq!(
+            select_terrain_lod(distance, previous, 50.0, 150.0, 10.0),
+            expected,
+            "distance={distance}, previous={previous:?}"
+        );
+    }
+
+    assert_eq!(
+        select_terrain_lod(50.0, Some(TerrainLod::Near), 50.0, 150.0, -10.0),
+        TerrainLod::Near,
+        "negative hysteresis must be treated as zero"
+    );
+}
+
+#[test]
+fn clamp_lod_delta_preserves_adjacent_pairs_and_clamps_both_directions() {
+    let lods = [TerrainLod::Near, TerrainLod::Middle, TerrainLod::Distant];
+    let rank = |lod| -> i8 {
+        match lod {
+            TerrainLod::Near => 0,
+            TerrainLod::Middle => 1,
+            TerrainLod::Distant => 2,
+        }
+    };
+
+    for left in lods {
+        for right in lods {
+            let result = clamp_lod_delta(left, right);
+            let difference = (rank(result.0) - rank(result.1)).abs();
+            assert!(difference <= 1, "result={result:?}");
+            if (rank(left) - rank(right)).abs() <= 1 {
+                assert_eq!(result, (left, right));
+            }
+        }
+    }
+
+    assert_eq!(
+        clamp_lod_delta(TerrainLod::Distant, TerrainLod::Near),
+        (TerrainLod::Middle, TerrainLod::Near)
     );
 }
 
@@ -189,5 +382,96 @@ fn portal_matching_is_symmetric_and_deterministic() {
     assert_eq!(
         matching_portals(lower_grid, &lower, upper_grid, &upper),
         vec![(0, 0)]
+    );
+}
+
+#[test]
+fn world_location_variants_keep_distinct_identity_and_exact_authored_pose() {
+    let exterior = WorldLocation::Exterior(WorldLocationExterior {
+        worldspace_form_id: 0x0001_51e3,
+        position: [12.345678, 3.500001, -8.125004],
+        rotation_xyzw: [0.1234567, -0.7070001, 0.2222222, 0.6543211],
+    });
+    let interior = WorldLocation::Interior(WorldLocationInterior {
+        cell_form_id: 0x0002_0001,
+        position: [-4.125003, 7.750002, 0.000007],
+        rotation_xyzw: [-0.3333333, 0.4444444, -0.5555555, 0.6666666],
+    });
+
+    assert_eq!(exterior.cell_key(), 0x0001_51e3);
+    assert_eq!(interior.cell_key(), 0x0002_0001);
+    assert!(matches!(exterior, WorldLocation::Exterior(_)));
+    assert!(matches!(interior, WorldLocation::Interior(_)));
+    assert!(exterior.is_well_formed());
+    assert!(interior.is_well_formed());
+}
+
+#[test]
+fn malformed_world_location_is_not_well_formed() {
+    assert!(
+        !WorldLocation::Exterior(WorldLocationExterior {
+            worldspace_form_id: 0,
+            position: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        })
+        .is_well_formed()
+    );
+    assert!(
+        !WorldLocation::Interior(WorldLocationInterior {
+            cell_form_id: 1,
+            position: [f32::INFINITY, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        })
+        .is_well_formed()
+    );
+    assert!(
+        !WorldLocation::Interior(WorldLocationInterior {
+            cell_form_id: 1,
+            position: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 0.0],
+        })
+        .is_well_formed()
+    );
+}
+
+#[test]
+fn prepared_door_destinations_preserve_authored_arrival_pose() {
+    let interior_destination = PreparedDoorDestination {
+        door_reference_form_id: 0x10,
+        cell_form_id: 0x20,
+        translation: [12.345678, 3.500001, -8.125004],
+        rotation_xyzw: [0.1234567, -0.7070001, 0.2222222, 0.6543211],
+    };
+    let exterior_destination = PreparedExteriorDoorDestination {
+        door_reference_form_id: 0x30,
+        cell_form_id: 0x40,
+        position: [-4.125003, 7.750002, 0.000007],
+        rotation_xyzw: [-0.3333333, 0.4444444, -0.5555555, 0.6666666],
+    };
+
+    let placement = PreparedSemantic::Door(crate::manifest::PreparedDoor {
+        lock_level: None,
+        key_form_id: None,
+        trapped: false,
+        destination: Some(interior_destination.clone()),
+    });
+    let decoded: PreparedSemantic =
+        ron::de::from_str(&ron::ser::to_string(&placement).unwrap()).unwrap();
+    assert_eq!(decoded, placement);
+    assert_eq!(
+        interior_destination.translation,
+        [12.345678, 3.500001, -8.125004]
+    );
+    assert_eq!(
+        interior_destination.rotation_xyzw,
+        [0.1234567, -0.7070001, 0.2222222, 0.6543211]
+    );
+    assert_eq!(
+        exterior_destination.position,
+        [-4.125003, 7.750002, 0.000007]
+    );
+    assert_eq!(
+        exterior_destination.rotation_xyzw,
+        [-0.3333333, 0.4444444, -0.5555555, 0.6666666]
     );
 }
