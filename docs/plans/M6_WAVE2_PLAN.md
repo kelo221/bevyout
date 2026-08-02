@@ -109,8 +109,23 @@ frame sample had p50 `6.3027 ms`, p95 `7.7809 ms`, max `93.0192 ms`, and four
 over-budget samples; the cooldown-only window was separately recorded and is
 not substituted for the route result.
 
-This is partial evidence only: the run used deterministic `tp` probes rather
-than ordinary keyboard traversal, did not execute the missing-package
-cancellation protocol or five complete out-and-back loops, and did not run
-actor/travel/save acceptance. Issues #274 and #275 remain open; no W2, #87, or
-final M6 completion claim is made from this measurement.
+The follow-up deterministic probe completed five out-and-back loops. Every
+loop returned to `(4,-5)` with no step failure; the clean-loop endpoint was
+`requests=71`, `evictions=65`, `resident_cells=7`, `failed=0`,
+`cancellations=0`, and `stale_completions=0`. That trace measured a process
+memory peak of `1,598,648,320` bytes and ending sample `1,319,567,360` bytes;
+the cooldown frame window was p50 `7.1569 ms`, p95 `7.9774 ms`, max
+`9.0933 ms`, with zero samples over the existing 16.6667 ms report budget.
+
+The reversible missing-package probe then removed the already-indexed
+`00000c4c.ron` package, crossed toward grid `(1,-5)`, and observed the target
+entry as `lifecycle=Failed`, `collision_ready=false`, `failed=1`, while the
+current `(4,-5)` cell remained resident and `stale_completions=0`. The package
+was restored and the viewer stopped; the expected failure is not part of the
+clean-loop counts.
+
+This remains partial acceptance evidence because all crossings used
+deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
+travel/save, and final budget sign-off were not run. Issues #274 and #275
+remain open; no W2, #87, or final M6 completion claim is made from these
+measurements.
