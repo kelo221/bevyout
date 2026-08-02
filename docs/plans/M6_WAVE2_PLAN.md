@@ -181,8 +181,23 @@ over the `16.6667 ms` reporting budget. These are deterministic bridge/teleport
 diagnostics only; they provide a closed memory window but do not replace the
 ordinary focused-input route required by W7.
 
-This remains partial acceptance evidence because all crossings used
-deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
-travel/save, and final budget sign-off were not run. Issues #274, #275, and
-#285 remain open; no W2, #87, or final M6 completion claim is made from these
-measurements.
+### Held-input boundary diagnostic — 2026-08-02
+
+A fresh route viewer also exercised the real player physics and streaming
+handoff through the reflected message path. Starting at `x=240.0` in grid
+`(4,-5)`, a five-second `KeyA` `Pressed` lease moved the player to
+`x=228.2097` in grid `(3,-5)`; the matching `Released` and
+`KeyboardFocusLost` cleanup stopped it. A five-second `KeyD` lease then moved
+the player back to `x=249.3505` in `(4,-5)`, followed by the same cleanup. The
+closed trace ended with `requests=8`, `evictions=2`, `resident_cells=7`,
+`peak_resident_cells=9`, `failed=0`, `cancellations=0`, and
+`stale_completions=0`; six memory samples measured peak
+`1,313,513,472` bytes and ending `1,294,901,248` bytes. This proves a
+synthetic held-input physics/cell-boundary handoff, but remains distinct from
+focused physical OS-keyboard acceptance and does not satisfy the W7 route gate.
+
+This remains partial acceptance evidence because the five-loop route used
+deterministic `tp` probes and the held-input run covered only one boundary in
+each direction, not the full ordinary route. Actor, travel/save, and final
+budget sign-off were not run. Issues #274, #275, and #285 remain open; no W2,
+#87, or final M6 completion claim is made from these measurements.

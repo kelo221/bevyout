@@ -29,7 +29,11 @@ returned to `(4,-5)`, the final counters were `requests=149`, `evictions=143`,
 `failed=0/cancellations=0/stale_completions=0`; the closed trace recorded a
 process-memory peak of `1,860,186,112` bytes and ending sample
 `1,857,990,656` bytes. This is still synthetic deterministic-input evidence,
-not ordinary OS-keyboard acceptance. W6-C provenance is recorded in `M6_WAVE6_PLAN.md`
+not ordinary OS-keyboard acceptance. A separate held-input boundary diagnostic
+crossed `(4,-5)` to `(3,-5)` with `KeyA` and returned with `KeyD`, using the
+real player physics and ending with `failed=0/cancellations=0/stale_completions=0`.
+This is synthetic held-input evidence only. W6-C provenance is recorded in
+`M6_WAVE6_PLAN.md`
 (commit `9181c691`), including the source of the configured 25-cell, 128 MiB
 estimated-package, 64-light, and 16.6667 ms reporting values; the historical M2
 `<=33 ms` swap bar is not an M6 threshold. Strict clippy, `cargo test`,

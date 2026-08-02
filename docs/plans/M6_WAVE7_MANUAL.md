@@ -279,6 +279,14 @@ OS-input acceptance. The measured ordinary pass still requires a focused OS
 keyboard with keys held long enough for fixed ticks to advance; otherwise keep
 ordinary-input fields as `not_yet_sampled`.
 
+A second fresh diagnostic started at `x=240.0` in `(4,-5)`, held `KeyA` for
+five seconds, and crossed to `(3,-5)` at `x=228.2097`; after release and focus
+cleanup, a five-second `KeyD` hold returned to `(4,-5)` at `x=249.3505`. The
+closed trace recorded `requests=8`, `evictions=2`, `resident_cells=7`,
+`peak_resident_cells=9`, and zero failures/cancellations/stale completions.
+This is useful synthetic physics-handoff evidence, but it remains
+`synthetic_input_measured` and does not replace focused physical OS input.
+
 1. At `(4,-5)`, record the baseline, then move through the remaining five
    route cells in this exact order. After each command, wait for the cell to
    become collision-ready and record `worldstream status`,
