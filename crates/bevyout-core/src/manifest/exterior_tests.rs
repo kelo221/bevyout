@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{PreparedDoorDestination, PreparedSemantic};
 
 #[test]
 fn positive_and_negative_grid_origins_round_trip() {
@@ -320,5 +321,96 @@ fn portal_matching_is_symmetric_and_deterministic() {
     assert_eq!(
         matching_portals(lower_grid, &lower, upper_grid, &upper),
         vec![(0, 0)]
+    );
+}
+
+#[test]
+fn world_location_variants_keep_distinct_identity_and_exact_authored_pose() {
+    let exterior = WorldLocation::Exterior(WorldLocationExterior {
+        worldspace_form_id: 0x0001_51e3,
+        position: [12.345678, 3.500001, -8.125004],
+        rotation_xyzw: [0.1234567, -0.7070001, 0.2222222, 0.6543211],
+    });
+    let interior = WorldLocation::Interior(WorldLocationInterior {
+        cell_form_id: 0x0002_0001,
+        position: [-4.125003, 7.750002, 0.000007],
+        rotation_xyzw: [-0.3333333, 0.4444444, -0.5555555, 0.6666666],
+    });
+
+    assert_eq!(exterior.cell_key(), 0x0001_51e3);
+    assert_eq!(interior.cell_key(), 0x0002_0001);
+    assert!(matches!(exterior, WorldLocation::Exterior(_)));
+    assert!(matches!(interior, WorldLocation::Interior(_)));
+    assert!(exterior.is_well_formed());
+    assert!(interior.is_well_formed());
+}
+
+#[test]
+fn malformed_world_location_is_not_well_formed() {
+    assert!(
+        !WorldLocation::Exterior(WorldLocationExterior {
+            worldspace_form_id: 0,
+            position: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        })
+        .is_well_formed()
+    );
+    assert!(
+        !WorldLocation::Interior(WorldLocationInterior {
+            cell_form_id: 1,
+            position: [f32::INFINITY, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        })
+        .is_well_formed()
+    );
+    assert!(
+        !WorldLocation::Interior(WorldLocationInterior {
+            cell_form_id: 1,
+            position: [0.0, 0.0, 0.0],
+            rotation_xyzw: [0.0, 0.0, 0.0, 0.0],
+        })
+        .is_well_formed()
+    );
+}
+
+#[test]
+fn prepared_door_destinations_preserve_authored_arrival_pose() {
+    let interior_destination = PreparedDoorDestination {
+        door_reference_form_id: 0x10,
+        cell_form_id: 0x20,
+        translation: [12.345678, 3.500001, -8.125004],
+        rotation_xyzw: [0.1234567, -0.7070001, 0.2222222, 0.6543211],
+    };
+    let exterior_destination = PreparedExteriorDoorDestination {
+        door_reference_form_id: 0x30,
+        cell_form_id: 0x40,
+        position: [-4.125003, 7.750002, 0.000007],
+        rotation_xyzw: [-0.3333333, 0.4444444, -0.5555555, 0.6666666],
+    };
+
+    let placement = PreparedSemantic::Door(crate::manifest::PreparedDoor {
+        lock_level: None,
+        key_form_id: None,
+        trapped: false,
+        destination: Some(interior_destination.clone()),
+    });
+    let decoded: PreparedSemantic =
+        ron::de::from_str(&ron::ser::to_string(&placement).unwrap()).unwrap();
+    assert_eq!(decoded, placement);
+    assert_eq!(
+        interior_destination.translation,
+        [12.345678, 3.500001, -8.125004]
+    );
+    assert_eq!(
+        interior_destination.rotation_xyzw,
+        [0.1234567, -0.7070001, 0.2222222, 0.6543211]
+    );
+    assert_eq!(
+        exterior_destination.position,
+        [-4.125003, 7.750002, 0.000007]
+    );
+    assert_eq!(
+        exterior_destination.rotation_xyzw,
+        [-0.3333333, 0.4444444, -0.5555555, 0.6666666]
     );
 }

@@ -322,7 +322,10 @@ pub struct PreparedExteriorObject {
 pub struct PreparedExteriorDoorDestination {
     pub door_reference_form_id: u32,
     pub cell_form_id: u32,
+    /// Authored arrival translation in Bevy coordinates. Runtime capsule or
+    /// camera offsets are applied by the viewer adapter, never serialized here.
     pub position: [f32; 3],
+    /// Authored arrival rotation, preserved without normalization.
     pub rotation_xyzw: [f32; 4],
 }
 
@@ -740,14 +743,20 @@ pub fn resolve_environment(input: EnvironmentInput) -> EnvironmentSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorldLocationExterior {
     pub worldspace_form_id: u32,
+    /// Authored arrival translation in Bevy coordinates. Runtime capsule or
+    /// camera offsets are applied by the viewer adapter, never serialized here.
     pub position: [f32; 3],
+    /// Authored arrival rotation, preserved without normalization.
     pub rotation_xyzw: [f32; 4],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorldLocationInterior {
     pub cell_form_id: u32,
+    /// Authored arrival translation in Bevy coordinates. Runtime capsule or
+    /// camera offsets are applied by the viewer adapter, never serialized here.
     pub position: [f32; 3],
+    /// Authored arrival rotation, preserved without normalization.
     pub rotation_xyzw: [f32; 4],
 }
 
@@ -764,6 +773,34 @@ impl WorldLocation {
             Self::Exterior(value) => value.worldspace_form_id,
         }
     }
+
+    /// WLOC is intentionally a small exact contract: one non-zero identity
+    /// key and finite authored translation/rotation values. The quaternion is
+    /// not normalized so a save/load round trip cannot change authored data.
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Interior(value) => {
+                value.cell_form_id != 0
+                    && finite_values(&value.position)
+                    && finite_values(&value.rotation_xyzw)
+                    && non_zero_values(&value.rotation_xyzw)
+            }
+            Self::Exterior(value) => {
+                value.worldspace_form_id != 0
+                    && finite_values(&value.position)
+                    && finite_values(&value.rotation_xyzw)
+                    && non_zero_values(&value.rotation_xyzw)
+            }
+        }
+    }
+}
+
+fn finite_values<const N: usize>(values: &[f32; N]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn non_zero_values<const N: usize>(values: &[f32; N]) -> bool {
+    values.iter().any(|value| *value != 0.0)
 }
 
 /// Deterministic pairwise portal matching used by exterior NAVM stitching.

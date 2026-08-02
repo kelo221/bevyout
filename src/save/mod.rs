@@ -45,7 +45,8 @@ pub struct SaveGame {
     pub dialogue: DialogueSnapshot,
     /// Exact player location, including exterior worldspace or interior cell.
     /// Format v7 writers emit this as a separate WLOC record; older saves
-    /// decode with `None` and continue using their header cell fallback.
+    /// decode with `None` and expose only the identity-only header-cell
+    /// fallback through [`SaveGame::legacy_location_fallback_cell`].
     pub location: Option<WorldLocation>,
 }
 
@@ -586,6 +587,14 @@ fn migrate_legacy(save: &SaveGame) -> Result<ItemLedgerSnapshot> {
 }
 
 impl SaveGame {
+    /// Returns the legacy header-cell fallback only when no exact WLOC was
+    /// serialized. This is an identity-only migration seam: it deliberately
+    /// carries no authored position or rotation and must not be treated as an
+    /// exact travel anchor.
+    pub fn legacy_location_fallback_cell(&self) -> Option<u32> {
+        self.location.is_none().then_some(self.header.current_cell)
+    }
+
     pub fn ensure_compatible(
         &self,
         content_fingerprint: &str,
@@ -1514,6 +1523,11 @@ fn validate_save(save: &SaveGame) -> Result<()> {
     if save.header.format_version < 7 && save.location.is_some() {
         bail!("player world location is not valid before save format v7");
     }
+    if let Some(location) = &save.location
+        && !location.is_well_formed()
+    {
+        bail!("invalid player world location");
+    }
     Ok(())
 }
 
@@ -1764,3 +1778,7 @@ impl<K: Ord, V> InsertChecked<K, V> for BTreeMap<K, V> {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/location.rs"]
+mod location_tests;
