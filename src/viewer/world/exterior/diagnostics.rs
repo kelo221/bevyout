@@ -201,6 +201,37 @@ fn status_value(state: &ExteriorStreamState, memory: ProcessMemoryReport) -> Val
         .values()
         .filter(|cell| cell.root.is_some())
         .count();
+    let process_memory_sample = if memory.status == ProcessMemoryStatus::Supported {
+        json!({
+            "resident_bytes": memory.current_bytes,
+            "peak_bytes": memory.peak_bytes,
+            "ending_bytes": memory.ending_bytes,
+        })
+    } else {
+        Value::Null
+    };
+    let process_memory_value = json!({
+        "status": memory.status.as_str(),
+        "value": process_memory_sample,
+        "method": if memory.status == ProcessMemoryStatus::Unsupported {
+            "unsupported"
+        } else {
+            PROCESS_MEMORY_METHOD
+        },
+        "metric": PROCESS_MEMORY_METRIC,
+        "platform": std::env::consts::OS,
+        "sample_count": memory.sample_count,
+        "trace_active": memory.trace_active,
+    });
+    let package_estimate_value = json!({
+        "status": "estimated",
+        "kind": "estimated_package_serialization",
+        "value": {
+            "resident_bytes": state.resident_bytes,
+            "peak_bytes": state.peak_memory,
+            "budget_bytes": state.byte_budget,
+        },
+    });
     json!({
         "initialized": state.initialized,
         "worldspace": state.worldspace_form_id,
@@ -252,6 +283,8 @@ fn status_value(state: &ExteriorStreamState, memory: ProcessMemoryReport) -> Val
         "memory_trace_active": memory.trace_active,
         "resident_package_bytes_estimate": state.resident_bytes,
         "peak_package_bytes_estimate": state.peak_memory,
+        "process_memory": process_memory_value,
+        "package_estimate": package_estimate_value,
     })
 }
 

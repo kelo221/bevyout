@@ -73,6 +73,465 @@ pub(crate) fn summarize_render_samples(
     summarize_frame_window(&samples, after_sample, latest_limit, budget_ms)
 }
 
+const CONVERGENCE_REPORT_SCHEMA: &str = "m6-convergence-v1";
+const CONVERGENCE_FRAME_BUDGET_MS: f64 = 16.6667;
+
+#[derive(Clone, Copy)]
+enum ReportStatus {
+    Measured,
+    NotYetSampled,
+    Unsupported,
+    NotRun,
+}
+
+impl ReportStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::NotYetSampled => "not_yet_sampled",
+            Self::Unsupported => "unsupported",
+            Self::NotRun => "not_run",
+        }
+    }
+}
+
+fn report_domain(name: &str, status: ReportStatus, value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "status": status.as_str(),
+        "value": value,
+    })
+}
+
+/// Project the existing runtime diagnostics into the deterministic report
+/// consumed by the M6 convergence protocol. This function only reads existing
+/// authorities; route, preparation, and timing measurements that have not run
+/// remain explicit status/value pairs instead of being represented by a
+/// fabricated zero.
+pub(crate) fn convergence_report(world: &mut World) -> serde_json::Value {
+    let has_streaming = world
+        .get_resource::<super::world::exterior::ExteriorStreamState>()
+        .is_some();
+    let streaming = if has_streaming {
+        super::world::exterior::exterior_status_json(&mut *world)
+    } else {
+        serde_json::Value::Null
+    };
+    let presentation = super::world::exterior::exterior_presentation_json(world);
+    let actor_navigation = actor_navigation_domain(world);
+    let travel_save = travel_save_domain(world);
+    let environment = environment_domain(world);
+    let cache_preparation = cache_preparation_domain(world);
+    let (frame_timing, legacy_frame) = frame_timing_domain(world);
+    let process_memory = process_memory_domain(&streaming, has_streaming);
+
+    let conversion = serde_json::json!({
+        "selected_pipeline": "native",
+        "assets_built": null,
+        "assets_reused": null,
+        "lossy_assets": null,
+        "cache_bytes": null,
+        "cold_seconds": null,
+        "warm_seconds": null,
+        "runtime_blender_invocations": null,
+        "measurement_status": "not_run",
+        "offline_measurements_required": true,
+    });
+    let runtime = serde_json::json!({
+        "frame": legacy_frame,
+        "transition_ms_p95": null,
+        "transition_ms_p95_status": "not_run",
+        "nav_path_ms_p95": null,
+        "nav_path_ms_p95_status": "not_run",
+        "visible_lod_transitions": presentation["terrain"]["lod_transitions"],
+        "timing_measurements_required": true,
+    });
+
+    serde_json::json!({
+        "schema": CONVERGENCE_REPORT_SCHEMA,
+        "status": "partial",
+        "gate_87_claimed": false,
+        "domains": [
+            streaming_domain(&streaming, has_streaming),
+            actor_navigation,
+            travel_save,
+            environment,
+            report_domain(
+                "presentation",
+                if has_streaming {
+                    ReportStatus::Measured
+                } else {
+                    ReportStatus::NotRun
+                },
+                if has_streaming {
+                    presentation.clone()
+                } else {
+                    serde_json::Value::Null
+                },
+            ),
+            cache_preparation,
+            frame_timing,
+            process_memory,
+        ],
+        "conversion": conversion,
+        "streaming": streaming,
+        "presentation": presentation,
+        "runtime": runtime,
+    })
+}
+
+fn streaming_domain(streaming: &serde_json::Value, has_streaming: bool) -> serde_json::Value {
+    report_domain(
+        "streaming_lifecycle",
+        if has_streaming {
+            ReportStatus::Measured
+        } else {
+            ReportStatus::NotRun
+        },
+        if has_streaming {
+            streaming.clone()
+        } else {
+            serde_json::Value::Null
+        },
+    )
+}
+
+fn actor_navigation_domain(world: &mut World) -> serde_json::Value {
+    let Some(manifest) = world.get_resource::<LoadedSceneManifest>() else {
+        return report_domain(
+            "actor_navigation",
+            ReportStatus::NotRun,
+            serde_json::Value::Null,
+        );
+    };
+
+    let prepared_actor_count = manifest
+        .placements
+        .iter()
+        .filter(|placement| super::actor::is_actor_semantic(&placement.semantic))
+        .count();
+    let prepared_navigation = manifest
+        .exterior
+        .as_ref()
+        .and_then(|package| package.navigation.as_ref())
+        .map(|navigation| {
+            serde_json::json!({
+                "revision": navigation.revision,
+                "mesh_count": navigation.mesh_count,
+                "polygon_count": navigation.polygon_count,
+                "vertex_count": navigation.vertex_count,
+                "door_count": navigation.door_count,
+                "external_connection_count": navigation.external_connection_count,
+                "mesh_merge_count": navigation.mesh_merge_count,
+                "clearance_ready": navigation.clearance_ready,
+                "border_portals": navigation.border_portals.len(),
+            })
+        })
+        .or_else(|| {
+            manifest.nav_graph.as_ref().map(|graph| {
+                serde_json::json!({
+                    "revision": graph.revision,
+                    "mesh_count": graph.mesh_count,
+                    "polygon_count": graph.polygon_count,
+                    "asset_path": graph.asset_path,
+                })
+            })
+        });
+    let runtime_actor_count = {
+        let mut query = world.query_filtered::<Entity, With<super::actor::ActorRuntime>>();
+        query.iter(world).count()
+    };
+    let runtime_diagnostic_count = {
+        let mut query = world.query::<&super::actor::ActorRuntimeState>();
+        query
+            .iter(world)
+            .map(|state| state.diagnostics.len())
+            .sum::<usize>()
+    };
+
+    report_domain(
+        "actor_navigation",
+        ReportStatus::NotRun,
+        serde_json::json!({
+            "prepared_actor_count": prepared_actor_count,
+            "runtime_actor_count": runtime_actor_count,
+            "runtime_diagnostic_count": runtime_diagnostic_count,
+            "prepared_navigation": prepared_navigation,
+            "route_measurement": {
+                "status": "not_run",
+                "value": null,
+            },
+        }),
+    )
+}
+
+fn travel_save_domain(world: &World) -> serde_json::Value {
+    let current_location = world
+        .get_resource::<super::world::CurrentWorldLocation>()
+        .and_then(|location| location.0.as_ref())
+        .and_then(|location| serde_json::to_value(location).ok());
+    let persisted = world
+        .get_resource::<super::world::ActiveSaveState>()
+        .map(|state| {
+            let references = state
+                .0
+                .cells
+                .values()
+                .map(|cell| cell.references.len())
+                .sum::<usize>();
+            let dropped_items = state
+                .0
+                .cells
+                .values()
+                .map(|cell| cell.dropped_items.len())
+                .sum::<usize>();
+            let actors = state
+                .0
+                .cells
+                .values()
+                .map(|cell| cell.actors.len())
+                .sum::<usize>();
+            serde_json::json!({
+                "cells": state.0.cells.len(),
+                "references": references,
+                "dropped_items": dropped_items,
+                "actors": actors,
+            })
+        });
+
+    if current_location.is_none() && persisted.is_none() {
+        return report_domain("travel_save", ReportStatus::NotRun, serde_json::Value::Null);
+    }
+
+    report_domain(
+        "travel_save",
+        ReportStatus::NotRun,
+        serde_json::json!({
+            "runtime_snapshot": {
+                "status": "measured",
+                "value": {
+                    "current_location": current_location,
+                    "persisted_state": persisted,
+                },
+            },
+            "travel_save_measurement": {
+                "status": "not_run",
+                "value": null,
+            },
+        }),
+    )
+}
+
+fn environment_domain(world: &World) -> serde_json::Value {
+    let manifest = world.get_resource::<LoadedSceneManifest>();
+    let streamed = world
+        .get_resource::<super::world::exterior::ExteriorStreamState>()
+        .and_then(|state| state.cells.get(&state.current_grid));
+    let exterior_environment = streamed
+        .and_then(|cell| cell.package.as_ref())
+        .map(|package| &package.environment)
+        .or_else(|| manifest.and_then(|value| value.exterior.as_ref().map(|e| &e.environment)));
+    let clock = world.get_resource::<super::day_night::GameClock>().copied();
+    let transition = world
+        .get_resource::<super::day_night::WeatherTransition>()
+        .copied();
+    let water = world
+        .get_resource::<super::world::exterior::ExteriorWaterState>()
+        .and_then(|state| state.contact);
+    let swimming = world
+        .get_resource::<super::world::exterior::SwimmingState>()
+        .copied();
+
+    if clock.is_none()
+        && transition.is_none()
+        && exterior_environment.is_none()
+        && water.is_none()
+        && swimming.is_none()
+    {
+        return report_domain("environment", ReportStatus::NotRun, serde_json::Value::Null);
+    }
+
+    report_domain(
+        "environment",
+        ReportStatus::Measured,
+        serde_json::json!({
+            "hour": clock.map(|clock| clock.hour),
+            "timescale": clock.map(|clock| clock.timescale),
+            "cell_form_id": streamed
+                .map(|cell| format!("{:08x}", cell.state.cell_form_id))
+                .or_else(|| manifest.map(|value| format!("{:08x}", value.cell.form_id))),
+            "worldspace_form_id": manifest
+                .and_then(|value| value.exterior.as_ref())
+                .map(|value| format!("{:08x}", value.worldspace_form_id)),
+            "climate_form_id": exterior_environment.and_then(|value| value.climate_form_id),
+            "weather_form_id": exterior_environment.and_then(|value| value.weather_form_id),
+            "image_space_form_id": exterior_environment.and_then(|value| value.image_space_form_id),
+            "dynamic_lighting_allowed": exterior_environment
+                .map(|value| value.dynamic_lighting_allowed),
+            "fog_near": exterior_environment.map(|value| value.fog_near),
+            "fog_far": exterior_environment.map(|value| value.fog_far),
+            "water": water,
+            "swimming": swimming,
+            "weather_transition": transition,
+        }),
+    )
+}
+
+fn cache_preparation_domain(world: &mut World) -> serde_json::Value {
+    let manifest = world.get_resource::<LoadedSceneManifest>().map(|manifest| {
+        serde_json::json!({
+            "cell_form_id": format!("{:08x}", manifest.cell.form_id),
+            "schema_version": manifest.schema_version,
+            "prepare_revision": manifest.prepare_revision,
+            "converter_revision": manifest.converter_revision,
+            "physics_schema_version": manifest.physics_schema_version,
+            "source_fingerprint": manifest.source_fingerprint,
+            "placements": manifest.placements.len(),
+            "lights": manifest.lights.len(),
+            "nav_graph_present": manifest.nav_graph.is_some()
+                || manifest
+                    .exterior
+                    .as_ref()
+                    .and_then(|package| package.navigation.as_ref())
+                    .is_some(),
+            "static_point_shadows_present": manifest.static_point_shadows.is_some(),
+        })
+    });
+    let shadow_runtime_present = world
+        .get_resource::<super::lighting::PreparedPointShadowRuntime>()
+        .is_some();
+    let shadow = shadow_runtime_present.then(|| super::lighting::shadow_cache_status(world));
+    let preparation_measurements = serde_json::json!({
+        "status": "not_run",
+        "value": null,
+        "required": [
+            "assets_built",
+            "assets_reused",
+            "lossy_assets",
+            "cache_bytes",
+            "cold_seconds",
+            "warm_seconds",
+        ],
+    });
+
+    if manifest.is_none() && shadow.is_none() {
+        return report_domain(
+            "cache_preparation",
+            ReportStatus::NotRun,
+            serde_json::Value::Null,
+        );
+    }
+
+    report_domain(
+        "cache_preparation",
+        if shadow
+            .as_ref()
+            .and_then(|shadow| shadow["artifact_present"].as_bool())
+            .unwrap_or(false)
+        {
+            ReportStatus::Measured
+        } else {
+            ReportStatus::NotYetSampled
+        },
+        serde_json::json!({
+            "prepared_manifest": manifest,
+            "runtime_shadow_cache": shadow,
+            "preparation_measurements": preparation_measurements,
+        }),
+    )
+}
+
+fn frame_timing_domain(world: &World) -> (serde_json::Value, serde_json::Value) {
+    let Some(report) = world.get_resource::<RenderReportBuffer>() else {
+        return (
+            report_domain(
+                "frame_timing",
+                ReportStatus::NotRun,
+                serde_json::Value::Null,
+            ),
+            serde_json::json!({
+                "frame_ms_p50": null,
+                "frame_ms_p95": null,
+                "frame_ms_max": null,
+                "frame_samples": 0,
+            }),
+        );
+    };
+    let summary = summarize_render_samples(
+        report,
+        None,
+        RENDER_REPORT_HISTORY,
+        CONVERGENCE_FRAME_BUDGET_MS,
+    );
+    let value = serde_json::to_value(&summary).expect("frame summary is JSON serializable");
+    let legacy = serde_json::json!({
+        "frame_ms_p50": summary.p50_ms,
+        "frame_ms_p95": summary.p95_ms,
+        "frame_ms_max": summary.max_ms,
+        "frame_samples": summary.sample_count,
+    });
+    (
+        report_domain(
+            "frame_timing",
+            if summary.sample_count == 0 {
+                ReportStatus::NotYetSampled
+            } else {
+                ReportStatus::Measured
+            },
+            value,
+        ),
+        legacy,
+    )
+}
+
+fn process_memory_domain(streaming: &serde_json::Value, has_streaming: bool) -> serde_json::Value {
+    if !has_streaming {
+        return report_domain(
+            "process_memory",
+            ReportStatus::NotRun,
+            serde_json::Value::Null,
+        );
+    }
+    let status = match streaming["memory_measurement_status"].as_str() {
+        Some("supported") => ReportStatus::Measured,
+        Some("not_yet_sampled") => ReportStatus::NotYetSampled,
+        Some("unsupported") => ReportStatus::Unsupported,
+        _ => ReportStatus::NotRun,
+    };
+    let value = (matches!(status, ReportStatus::Measured)).then(|| {
+        serde_json::json!({
+            "resident_bytes": streaming["resident_bytes"],
+            "peak_bytes": streaming["peak_memory"],
+            "ending_bytes": streaming["ending_memory"],
+        })
+    });
+    let value = value.unwrap_or(serde_json::Value::Null);
+    let mut domain = report_domain("process_memory", status, value);
+    if let serde_json::Value::Object(fields) = &mut domain {
+        fields.insert(
+            "method".into(),
+            streaming["memory_measurement_method"].clone(),
+        );
+        fields.insert(
+            "metric".into(),
+            streaming["memory_measurement_metric"].clone(),
+        );
+        fields.insert(
+            "platform".into(),
+            streaming["memory_measurement_platform"].clone(),
+        );
+        fields.insert(
+            "sample_count".into(),
+            streaming["memory_sample_count"].clone(),
+        );
+        fields.insert(
+            "trace_active".into(),
+            streaming["memory_trace_active"].clone(),
+        );
+    }
+    domain
+}
+
 pub(crate) fn save_render_report_now(world: &mut World) -> std::io::Result<PathBuf> {
     let report_path = world.resource::<RenderReportPath>().0.clone();
     let samples = world

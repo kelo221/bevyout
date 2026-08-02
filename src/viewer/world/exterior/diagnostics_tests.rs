@@ -20,6 +20,8 @@ fn supported_memory_stays_not_yet_sampled_until_a_real_sample_is_recorded() {
     assert_eq!(report["resident_bytes"], serde_json::Value::Null);
     assert_eq!(report["peak_memory"], serde_json::Value::Null);
     assert_eq!(report["ending_memory"], serde_json::Value::Null);
+    assert_eq!(report["process_memory"]["status"], "not_yet_sampled");
+    assert_eq!(report["process_memory"]["value"], serde_json::Value::Null);
 }
 
 #[test]
@@ -36,6 +38,8 @@ fn unsupported_memory_is_explicit_and_unmeasured() {
     assert_eq!(report["resident_bytes"], serde_json::Value::Null);
     assert_eq!(report["peak_memory"], serde_json::Value::Null);
     assert_eq!(report["ending_memory"], serde_json::Value::Null);
+    assert_eq!(report["process_memory"]["status"], "unsupported");
+    assert_eq!(report["process_memory"]["value"], serde_json::Value::Null);
 }
 
 #[test]
@@ -56,6 +60,10 @@ fn process_memory_tracks_current_peak_and_ending_samples() {
     assert_eq!(report["memory_sample_count"], 3);
     assert_eq!(report["memory_measurement"], "process_resident_set");
     assert_eq!(report["memory_measurement_status"], "supported");
+    assert_eq!(report["process_memory"]["status"], "supported");
+    assert_eq!(report["process_memory"]["value"]["resident_bytes"], 2_048);
+    assert_eq!(report["process_memory"]["value"]["peak_bytes"], 4_096);
+    assert_eq!(report["process_memory"]["value"]["ending_bytes"], 2_048);
 }
 
 #[test]
@@ -74,6 +82,36 @@ fn package_estimates_never_populate_process_memory_fields() {
     assert_eq!(report["resident_bytes"], serde_json::Value::Null);
     assert_eq!(report["peak_memory"], serde_json::Value::Null);
     assert_eq!(report["ending_memory"], serde_json::Value::Null);
+    assert_eq!(report["process_memory"]["status"], "not_yet_sampled");
+    assert_eq!(report["process_memory"]["value"], serde_json::Value::Null);
+}
+
+#[test]
+fn nested_memory_projection_keeps_process_and_package_values_separate() {
+    let state = ExteriorStreamState {
+        resident_bytes: 256,
+        peak_memory: 512,
+        ..Default::default()
+    };
+    let mut memory = ProcessMemoryDiagnostics::supported_for_tests();
+    memory.record_sample(2_048);
+
+    let report = status_with_memory(&state, &memory);
+
+    assert_eq!(report["process_memory"]["status"], "supported");
+    assert_eq!(report["process_memory"]["value"]["resident_bytes"], 2_048);
+    assert_eq!(report["process_memory"]["value"]["peak_bytes"], 2_048);
+    assert_eq!(
+        report["process_memory"]["value"]["ending_bytes"],
+        serde_json::Value::Null
+    );
+    assert_eq!(report["package_estimate"]["status"], "estimated");
+    assert_eq!(report["package_estimate"]["value"]["resident_bytes"], 256);
+    assert_eq!(report["package_estimate"]["value"]["peak_bytes"], 512);
+    assert_eq!(
+        report["package_estimate"]["kind"],
+        "estimated_package_serialization"
+    );
 }
 
 #[test]
