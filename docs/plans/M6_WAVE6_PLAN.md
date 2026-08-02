@@ -162,9 +162,32 @@ as current clean/warm thresholds or completion proof.
 | Package accounting | `resident_package_bytes_estimate <= 134,217,728` bytes | Configured estimate bound | Record clean/warm cache and package results separately from process memory |
 | Streamed local lights | `active_lights <= 64` configured cap | Configured only | Runtime route must record measured light peak and ownership teardown |
 | Clean lifecycle | `stale_completions=0`, `failed=0`, `cancellations=0`, one root/collision owner per grid | Deterministic `tp` evidence plus one synthetic held-input boundary handoff; clean route only | Ordinary traversal, reversal, and repeated loops; the missing-package probe is an expected negative path with `failed=1` |
-| Invalid unloads | `invalid_unload_count` is reported for rejected `Evict` actions or a final teardown that cannot find its cell; expected stale completions remain separate | Report field and focused rejected-eviction coverage; no route-grade sample yet | Record `invalid_unload_count` for the clean ordinary route and loops; keep the deliberate missing-package `failed=1` probe separate |
+| Invalid unloads | `invalid_unload_count` is reported for rejected `Evict` actions or a final teardown that cannot find its cell; expected stale completions remain separate | Report field, focused rejected-eviction coverage, and a deterministic five-loop `tp` sample with `invalid_unload_count=0`; no ordinary-input route-grade sample yet | Record `invalid_unload_count` for the clean ordinary route and loops; keep the deliberate missing-package `failed=1` probe separate |
 | Frame time | `16.6667 ms` convergence report budget | Reporting counter, not an accepted route threshold | Ordinary-input steady, 1% low, and worst-transition samples |
 | Preparation | Frozen jobs=1 clean run: `288.3 s`, `14 done`, `0 failed`; identical warm rerun: `8.9 s`, `14 cells valid`, `0 stale`; cache `5,773` files / `1,697,002,779` bytes | Measured on Windows/dev/native, current commit `f600328b` | Preserve the exact clean/warm/check transcript in the W7 run record; older timeout attempts remain diagnostic only |
 | Ready/transition latency | No ordinary-input request-to-ready or transition sample | Not measured | Record p50/p95/worst and collision-ready timing |
-| Process memory | Explicit deterministic `worldstream trace 1/0` run measured 14 samples, peak `1,860,186,112` bytes, ending `1,857,990,656` bytes | Partial measurement; no threshold frozen | Ordinary five-loop peak, ending sample, and plateau rule |
+| Process memory | Prior explicit trace measured 14 samples, peak `1,860,186,112` bytes, ending `1,857,990,656` bytes; latest closed five-loop trace measured 8 samples, peak `1,389,645,824` bytes, ending `1,389,551,616` bytes | Partial deterministic measurement; no threshold frozen | Ordinary five-loop peak, ending sample, and plateau rule |
 | Actor/path, travel/save, water, and environment isolation | Route actor is identity-only; route is dry; door/water fixtures are separate | Dependency-held / not run | #10/W3-C, W4-C, and W5-C runtime integration |
+
+### Latest deterministic route diagnostic — 2026-08-02
+
+The current commit `8bb7f244` was launched from the prepared v21 native cache
+at `.bevyout/m6-w6c-route-clean-20260802` with `--disable-physics` and bridge
+port `15757`. The exact W7 `tp` out-and-back sequence was repeated five times
+without resetting the viewer or cache. Each row is cumulative and was captured
+after the loop returned to `(4,-5)`:
+
+| Loop | Requests | Evictions | Resident cells | Peak resident cells | Failed | Cancellations | Stale completions | Invalid unloads | RSS peak (bytes) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 19 | 13 | 7 | 11 | 0 | 0 | 0 | 0 | 1,295,007,744 |
+| 2 | 32 | 26 | 7 | 11 | 0 | 0 | 0 | 0 | 1,334,054,912 |
+| 3 | 45 | 39 | 7 | 11 | 0 | 0 | 0 | 0 | 1,335,885,824 |
+| 4 | 58 | 52 | 7 | 11 | 0 | 0 | 0 | 0 | 1,374,535,680 |
+| 5 | 71 | 65 | 7 | 11 | 0 | 0 | 0 | 0 | 1,389,547,520 |
+
+The closed trace summary recorded RSS peak `1,389,645,824` bytes, ending RSS
+`1,389,551,616` bytes, and `8` samples. This is deterministic streaming and
+lifecycle evidence only: `--disable-physics` means it does not prove
+collision-ready handoff, ordinary OS-input traversal, frame budgets, actor
+navigation, travel, water, or save/reload. Those fields remain open in the W7
+manual.

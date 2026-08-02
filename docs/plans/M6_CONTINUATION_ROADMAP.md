@@ -22,17 +22,20 @@ runtime-write BRP `world.write_message` can send a reflected
 fixed-update controller, and clear it with the matching `Released` message plus
 `KeyboardFocusLost`. This is a bridge-input diagnostic lane, not physical
 OS-keyboard acceptance; ordinary traversal, reversal, and loop measurements
-remain `not_yet_sampled`. A follow-up explicit `worldstream trace 1/0` BRP
-diagnostic completed five deterministic `tp` out-and-back loops: every loop
-returned to `(4,-5)`, the final counters were `requests=149`, `evictions=143`,
-`resident_cells=7`, `peak_resident_cells=11`, and
-`failed=0/cancellations=0/stale_completions=0`; the closed trace recorded a
-process-memory peak of `1,860,186,112` bytes and ending sample
-`1,857,990,656` bytes. This is still synthetic deterministic-input evidence,
-not ordinary OS-keyboard acceptance. A separate held-input boundary diagnostic
-crossed `(4,-5)` to `(3,-5)` with `KeyA` and returned with `KeyD`, using the
-real player physics and ending with `failed=0/cancellations=0/stale_completions=0`.
-This is synthetic held-input evidence only. W6-C provenance is recorded in
+remain `not_yet_sampled`. A current-commit v21 viewer (`8bb7f244`) with the
+native prepared cache and `--disable-physics` completed five explicit
+`worldstream trace 1/0` deterministic `tp` out-and-back loops. Every loop
+returned to `(4,-5)`; the cumulative rows were `loop 1: requests=19/evictions=13`,
+`loop 2: 32/26`, `loop 3: 45/39`, `loop 4: 58/52`, and `loop 5: 71/65`,
+with `resident_cells=7` and `peak_resident_cells=11`. The closed trace
+recorded `failed=0`, `cancellations=0`, `stale_completions=0`,
+`invalid_unload_count=0`, process-memory peak `1,389,645,824` bytes, ending
+sample `1,389,551,616` bytes, and `8` samples. This is streaming/lifecycle
+evidence from deterministic input, not collision-ready or ordinary OS-keyboard
+acceptance. A separate held-input boundary diagnostic crossed `(4,-5)` to
+`(3,-5)` with `KeyA` and returned with `KeyD`, using the real player physics
+and ending with `failed=0/cancellations=0/stale_completions=0`. This is
+synthetic held-input evidence only. W6-C provenance is recorded in
 `M6_WAVE6_PLAN.md`
 (commit `9181c691`), including the source of the configured 25-cell, 128 MiB
 estimated-package, 64-light, and 16.6667 ms reporting values; the historical M2
@@ -53,6 +56,33 @@ ms` p95 / `10.2409 ms` max over 120 samples. GPU occlusion remains explicitly
 unmeasured. Runtime selection also now suppresses duplicate `(level, grid,
 blocks)` identities before applying the bounded budgets, with a focused test;
 this is diagnostic/runtime progress rather than W8 or epic closure.
+
+### Partial PR checkpoint — W8-C presentation diagnostics
+
+The current branch is allowed to ship as a bounded partial PR once the
+W8-C diagnostic/runtime slice is internally consistent. This is an integration
+checkpoint, not a claim that W8, gate #87, epic #13, or final gate #14 has
+passed.
+
+The partial PR may include the presentation diagnostics, duplicate visual
+identity suppression, invalid-unload reporting, their focused tests, and the
+updated W8/W9 acceptance manuals. Its review evidence must include the current
+v21 real-data transcript, the paired non-black viewport captures, the
+`585/110/475` and `655/134/521` CPU-visibility measurements, zero duplicate
+identity counts, the staged-load peak of `8`, and the 120-sample frame-time
+snapshot. The PR description must state that GPU occlusion, ordinary OS-input
+route acceptance, actor integration, and the downstream M6 gates remain open.
+
+Before opening this partial PR, the branch must be clean, the focused tests,
+`cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo check-dev` must pass, and the branch must be reconciled with current
+`master` (including the M5 combat commit). The known unrelated repository-wide
+`cargo fmt --check` baseline drift may remain documented, but no new format
+failure may be introduced.
+
+After this checkpoint is merged, continue with W2/W6 acceptance and the
+dependency-held W3-C, W4-C, and W5-C runtime work; do not treat the partial PR
+as satisfying #285, #87, #13, or #14.
 
 ## Execution model recommendation
 

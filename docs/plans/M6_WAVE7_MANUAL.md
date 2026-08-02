@@ -387,6 +387,30 @@ issue #285 and must be agreed and recorded before the gate run, alongside
 machine/build/cache metadata. Package-byte estimates remain separate from
 process memory, and a missing measurement is not a zero.
 
+### Deterministic streaming diagnostic — 2026-08-02
+
+The current commit `8bb7f244` was launched with the prepared v21 native cache
+`.bevyout/m6-w6c-route-clean-20260802`, bridge port `15757`, and
+`--disable-physics`. The exact `tp` sequence above was repeated five times
+without resetting the viewer or cache. This is a synthetic streaming/lifecycle
+probe, not the ordinary-input gate and not collision-ready evidence. Each row
+is cumulative and was captured after returning to `(4,-5)`:
+
+| Loop | Requests | Evictions | Resident | Peak resident | Failed | Cancelled | Stale | Invalid unload | RSS peak (bytes) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 19 | 13 | 7 | 11 | 0 | 0 | 0 | 0 | 1,295,007,744 |
+| 2 | 32 | 26 | 7 | 11 | 0 | 0 | 0 | 0 | 1,334,054,912 |
+| 3 | 45 | 39 | 7 | 11 | 0 | 0 | 0 | 0 | 1,335,885,824 |
+| 4 | 58 | 52 | 7 | 11 | 0 | 0 | 0 | 0 | 1,374,535,680 |
+| 5 | 71 | 65 | 7 | 11 | 0 | 0 | 0 | 0 | 1,389,547,520 |
+
+The closed trace recorded RSS peak `1,389,645,824` bytes, ending RSS
+`1,389,551,616` bytes, and `8` samples. The missing-package negative path is
+separate; it is not included in these clean-loop counters. Ordinary OS-input
+traversal, collision-ready timing, frame budgets, actor/path, travel/save,
+water, and post-loop plateau acceptance remain `not_yet_sampled` or
+dependency-held.
+
 ## Failure and dependency status
 
 - Actor source fixture and runtime actor/navigation crossing: `not_run`, held
@@ -395,10 +419,9 @@ process memory, and a missing measurement is not a zero.
   and not live-accepted until W4-C.
 - Route water: dry in all 14 selected cells; water entry/exit uses separate
   fixture `00001262` and is `not_run` until W4-C.
-- Ordinary-input traversal, rapid reversal, five-loop process-memory samples,
-  and numeric budgets: an explicit-trace deterministic `tp` diagnostic now has
-  five clean out-and-back loops and closed process-memory peak/ending samples;
-  the negative-path missing-package probe also exists, but gate-grade
-  ordinary-input measurements are `not_yet_sampled` until the corresponding
-  runtime gate is run.
+- Ordinary-input traversal, rapid reversal, and numeric budgets remain
+  `not_yet_sampled`; the explicit-trace deterministic `tp` diagnostic now has
+  five clean out-and-back loops and closed process-memory peak/ending samples
+  recorded above. The negative-path missing-package probe remains separate and
+  is not part of the clean-loop counters.
 - Gate #87 and final M6 acceptance: not claimed by this manual.
