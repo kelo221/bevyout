@@ -56,6 +56,13 @@ source paths cannot stage two visual roots for one identity. The focused
 that policy; the current real cache also reported zero catalog and active
 duplicates.
 
+A paired Windows viewport capture at the same player pose rendered non-black
+images in both modes. The opt-in image showed the distant worldspace horizon
+behind the local scene; default-off removed that optional horizon while the
+local player/terrain view remained in place. No duplicate visual root was
+apparent at this pose. This is qualitative single-pose sanity evidence only,
+not the full route crack/pop-in acceptance gate.
+
 A 120-sample performance snapshot after the toggle-back measured average
 frame time `7.7676 ms`, p50 `7.593 ms`, p95 `8.7887 ms`, max `10.2409 ms`, and
 `over_budget_count=0` against `16.6667 ms`. These are current Windows/dev
