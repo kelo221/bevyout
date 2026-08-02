@@ -16,16 +16,19 @@ and final route gate #14 respectively.
 ### Current checkpoint — 2026-08-02
 
 The current v21 native preflight validates all 14 frozen selectors with
-`0 stale` fingerprints. Deterministic BRP route and negative-path diagnostics
-are recorded, but ordinary traversal, reversal, and loop measurements remain
-`not_yet_sampled`: the local bridge can tap keys but has no supported way to
-sustain a held `ButtonInput<KeyCode>` state. W6-C provenance is recorded in
-`M6_WAVE6_PLAN.md` (commit `9181c691`), including the source of the configured
-25-cell, 128 MiB estimated-package, 64-light, and 16.6667 ms reporting values;
-the historical M2 `<=33 ms` swap bar is not an M6 threshold. Strict clippy,
-`cargo test`, `cargo check-dev`, and `prepare --help` pass; repository-wide
-`cargo fmt --check` still reports only the known unrelated baseline drift. No
-W2, #285, #87, or final M6 closure claim is made.
+`0 stale` fingerprints. A supported synthetic input path is now live-validated:
+runtime-write BRP `world.write_message` can send a reflected
+`bevy_input::keyboard::KeyboardInput` `Pressed` message, sustain the existing
+fixed-update controller, and clear it with the matching `Released` message plus
+`KeyboardFocusLost`. This is a bridge-input diagnostic lane, not physical
+OS-keyboard acceptance; ordinary traversal, reversal, and loop measurements
+remain `not_yet_sampled`. W6-C provenance is recorded in `M6_WAVE6_PLAN.md`
+(commit `9181c691`), including the source of the configured 25-cell, 128 MiB
+estimated-package, 64-light, and 16.6667 ms reporting values; the historical M2
+`<=33 ms` swap bar is not an M6 threshold. Strict clippy, `cargo test`,
+`cargo check-dev`, and `prepare --help` pass; repository-wide `cargo fmt --check`
+still reports only the known unrelated baseline drift. No W2, #285, #87, or
+final M6 closure claim is made.
 
 ## Execution model recommendation
 

@@ -96,6 +96,26 @@ invocations for both runs.
    viewer/runtime; preparation may invoke the native converter on a clean
    cache. Record the actual values for the clean and warm rows separately.
 
+### Recorded v21 native preflight — 2026-08-02
+
+The frozen command was run from the main checkout against
+`C:\Users\V\Projects\Rust\bevyout\.bevyout\m6-w6c-route-clean-20260802` on
+Windows/dev/native with `--jobs 1` at commit `f600328b`:
+
+- clean elapsed: `288.3 s`; completion: `14 done, 0 failed`;
+- warm elapsed: `8.9 s`; completion skipped all 14 valid cells;
+- report-only check: `14 cells valid, 0 stale`;
+- final cache: `5,773` files, `1,697,002,779` bytes;
+- final deterministic batch line: `assets reused 0, built 0, rebuilt 0`,
+  `physics reads 305`, `physics hits 153`.
+
+The clean run also reported native LOD reuse (`sources=1608`,
+`reused=1608`, `converted=0`, `failed=0`, `assets=1608`) and two recoverable
+non-renderable source-NIF diagnostics in route cells. They did not fail a
+selected cell. These are the current preparation measurements; the older
+timed-out jobs=1/jobs=4 attempts and PR #261's historical four-worker figures
+remain diagnostic only.
+
 ## Exact fixture boundaries
 
 ### Actor and navigation
@@ -224,12 +244,40 @@ The deterministic boundary probe below avoids a physics tick starting below
 the next authored slope. It proves streaming/collision handoff only; it is
 not ordinary keyboard traversal and does not prove actor navigation.
 
-Automation boundary: the local BRP bridge exposes runtime/console diagnostics
-but does not synthesize a held `ButtonInput<KeyCode>` state for the player. A
-tool-level W/A/S/D tap, even when sent to the focused viewer, is diagnostic
-input only and must not be counted as ordinary traversal. The measured pass
-requires a focused OS keyboard with keys held long enough for fixed ticks to
-advance; otherwise record the ordinary-input fields as `not_yet_sampled`.
+Automation boundary: there is no high-level console command for holding a
+movement key, and a tool-level W/A/S/D tap is diagnostic input only. The raw
+runtime-write BRP surface does, however, expose Bevy's reflected keyboard
+message path for a separate synthetic-input diagnostic. Query the primary
+`bevy_window::window::Window` entity, then use the MCP `brp_call` wrapper (or
+the equivalent raw bridge JSON-RPC request) with these parameters. Replace the
+placeholder with the numeric `u64` entity returned by the query:
+
+```json
+{
+  "method": "world.write_message",
+  "params": {
+    "message": "bevy_input::keyboard::KeyboardInput",
+    "value": {
+      "key_code": "KeyA",
+      "logical_key": {"Character": "a"},
+      "state": "Pressed",
+      "repeat": false,
+      "text": null,
+      "window": "<primary-window-entity>"
+    }
+  }
+}
+```
+
+Keep the `Pressed` lease active while sampling lightweight position/status
+commands. End every lease with the same payload using `"state": "Released"`
+and then write `bevy_input::keyboard::KeyboardFocusLost` with a null value as
+cleanup. A fresh v21 viewer held `KeyA` for five seconds and moved the real
+player from `x=263.3230` to `x=254.7199`; the matching release/focus-loss pair
+stopped movement. Record this as `synthetic_input_measured`, never as ordinary
+OS-input acceptance. The measured ordinary pass still requires a focused OS
+keyboard with keys held long enough for fixed ticks to advance; otherwise keep
+ordinary-input fields as `not_yet_sampled`.
 
 1. At `(4,-5)`, record the baseline, then move through the remaining five
    route cells in this exact order. After each command, wait for the cell to

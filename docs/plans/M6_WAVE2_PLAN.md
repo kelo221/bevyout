@@ -151,6 +151,20 @@ measurement is claimed from this diagnostic; a true held-input pass remains
 `not_yet_sampled` and requires a supported input-hold path or human keyboard
 control.
 
+### Reflected BRP held-input diagnostic — 2026-08-02
+
+A fresh viewer session validated the existing runtime-write BRP path without
+adding a new input system. After querying the primary window entity,
+`world.write_message` accepted a reflected
+`bevy_input::keyboard::KeyboardInput` with `KeyA`/`Pressed`; the real
+`FixedUpdate` player controller moved the player from `x=263.3230` to
+`x=254.7199` during a five-second hold. The matching `Released` message and a
+`bevy_input::keyboard::KeyboardFocusLost` cleanup stopped movement at the same
+position. This proves a supported synthetic bridge-input diagnostic path and
+provides a way to measure lifecycle behavior while avoiding tap-only input.
+It does not prove focused physical OS-keyboard traversal, so ordinary route,
+reversal, loop, and gate-grade performance fields remain `not_yet_sampled`.
+
 This remains partial acceptance evidence because all crossings used
 deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
 travel/save, and final budget sign-off were not run. Issues #274, #275, and
