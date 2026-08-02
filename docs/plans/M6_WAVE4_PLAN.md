@@ -77,4 +77,18 @@ Codex runtime: **GPT-5.6 Luna, Max reasoning**.
 
 ## Shipped amendments
 
-- Pending W4-A/W4-B executor results and review.
+- W4-A / #279 landed as `2090ff56` after cherry-pick. It preserves the
+  existing `WorldLocation`/`SaveGame.location` schema, adds finite/non-zero
+  WLOC validation, exposes an identity-only legacy header-cell fallback, and
+  adds exact exterior/interior, prepared-door, save, and live-projection tests.
+- W4-B / #280 landed as `16fe6145` after cherry-pick. It adds pure water phase
+  and entry/exit classification, breath drain/recovery/exhaustion results, and
+  a shared landing-impact policy while leaving runtime movement for W4-C.
+- Post-merge evidence on `M6-OutCell`: `cargo test` passed 1,652 Rust tests
+  plus 633 Cucumber scenarios (3,130 steps); clippy with `-D warnings`,
+  `cargo check-dev`, `cargo run-dev -- prepare --help`, and targeted rustfmt
+  passed. Global `cargo fmt --all -- --check` remains red only on the known
+  pre-existing unrelated drift in `src/cli/tests/mod.rs` and existing viewer
+  test/console files.
+- W4-C runtime travel, streamed persistence, water/breath movement wiring, and
+  real-terrain acceptance remain pending.
