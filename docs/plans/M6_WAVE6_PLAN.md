@@ -126,3 +126,19 @@ current tree provides grounded provenance for 25 exterior resident cells,
 to measured acceptance thresholds. #285 must record the remaining preparation,
 ready/transition, frame, process-memory, path, and gameplay dependency fields,
 or mark each one with the exact run that will supply it.
+
+#### Pre-sign-off matrix
+
+This is the current evidence boundary for #285; it is not a W7 pass report.
+
+| Measure | Current value or invariant | Status | Required proof before W7 |
+| --- | --- | --- | --- |
+| Exterior residency | `resident_cells <= 25` configured ceiling | Configured only | Ordinary bidirectional route must remain within the ceiling |
+| Package accounting | `resident_package_bytes_estimate <= 134,217,728` bytes | Configured estimate bound | Record clean/warm cache and package results separately from process memory |
+| Streamed local lights | `active_lights <= 64` configured cap | Configured only | Runtime route must record measured light peak and ownership teardown |
+| Clean lifecycle | `stale_completions=0`, `failed=0`, `cancellations=0`, one root/collision owner per grid | Deterministic `tp` evidence; clean route only | Ordinary traversal, reversal, and repeated loops; the missing-package probe is an expected negative path with `failed=1` |
+| Frame time | `16.6667 ms` convergence report budget | Reporting counter, not an accepted route threshold | Ordinary-input steady, 1% low, and worst-transition samples |
+| Preparation | Exact jobs=1 run timed out at 604 s; diagnostic jobs=4 run timed out at 304 s; neither emitted a completion line | Not measured | Complete the frozen clean run, identical warm run, and fingerprint check |
+| Ready/transition latency | No ordinary-input request-to-ready or transition sample | Not measured | Record p50/p95/worst and collision-ready timing |
+| Process memory | Real `tp` samples exist, but no peak/plateau threshold is frozen | Partial measurement | Ordinary five-loop peak, ending sample, and plateau rule |
+| Actor/path, travel/save, water, and environment isolation | Route actor is identity-only; route is dry; door/water fixtures are separate | Dependency-held / not run | #10/W3-C, W4-C, and W5-C runtime integration |
