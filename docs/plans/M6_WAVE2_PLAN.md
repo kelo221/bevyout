@@ -133,6 +133,12 @@ ignored cache was preserved only for diagnosis; it has no clean elapsed-time,
 completion, warm-run, or threshold value and must not be reused as acceptance
 evidence.
 
+A separate diagnostic rerun with the same selectors and native converter at
+`--jobs 4` also timed out after five minutes without a completion line. Its
+resumable manifest had only `1/14` jobs marked `Done` at
+`1,309,667,625` bytes across `5,419` files. That alternate-throughput attempt
+is likewise not a clean or warm result and supplies no threshold.
+
 This remains partial acceptance evidence because all crossings used
 deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
 travel/save, and final budget sign-off were not run. Issues #274, #275, and

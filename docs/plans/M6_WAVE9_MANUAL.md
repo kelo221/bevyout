@@ -1,8 +1,9 @@
 # M6 wave 9 — Super-Duper Mart ↔ Megaton final gate manual
 
-**Status: future acceptance draft.** W6-B now freezes the current-data route
-selectors and protocol in [M6_WAVE7_MANUAL.md](M6_WAVE7_MANUAL.md), but this
-manual is not satisfied by the partial M6 PR. Actor crossing, ordinary
+**Status: future acceptance draft.** Merged foundation PR #261 and W6-B now
+freeze the current-data route selectors and protocol in
+[M6_WAVE7_MANUAL.md](M6_WAVE7_MANUAL.md), but this manual is not satisfied by
+the foundation alone. Actor crossing, ordinary
 bidirectional traversal, interior travel/return anchors, water and save/reload
 coverage, repeated-loop memory measurements, and agreed final budgets remain
 unverified. The route is dry; the water fixture is separate, and the current

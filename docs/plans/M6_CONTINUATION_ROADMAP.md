@@ -348,14 +348,16 @@ Then run the wave's representative `cargo run-dev` command and live BRP/MCP
 manual. Record measured output on each child issue and on #13. No wave closes
 from unit/feature coverage alone when its exit criterion requires real data.
 
-## Required issue housekeeping before wave 2
+## Continuation issue housekeeping
 
-- Update #13 to say PR #261 is merged and replace its obsolete pre-merge gate
-  with this continuation sequence.
-- Remove the #13/#14 closure cycle: #13 closes after W8 and #87; #14 is the
-  downstream final milestone gate.
-- State explicitly that W3 runtime integration and W7 are blocked by #10.
-- Mark the current W7 manual as a partial draft until W6 freezes the complete
-  #87 matrix.
-- Reconcile #13's distant/VWD wording with the required/default versus optional
-  far-worldspace split in W8.
+The post-#261 housekeeping is complete and must remain synchronized with the
+live issue state:
+
+- #13 identifies merged PR #261 and this continuation sequence; it closes only
+  after W8 and #87, while #14 remains the downstream final milestone gate.
+- #10 remains the explicit blocker for W3 runtime actor integration; W7 also
+  waits for the W2/W4/W5 evidence and W6-C threshold matrix.
+- `M6_WAVE7_MANUAL.md` is a frozen acceptance protocol, not gate-complete
+  evidence; W6-C/#285 owns the pre-W7 numeric decision.
+- #13's distant/VWD wording keeps the required/default seam-safe route split
+  separate from optional far-worldspace presentation work in W8.

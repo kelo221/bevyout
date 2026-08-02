@@ -332,7 +332,8 @@ process memory, and a missing measurement is not a zero.
   and not live-accepted until W4-C.
 - Route water: dry in all 14 selected cells; water entry/exit uses separate
   fixture `00001262` and is `not_run` until W4-C.
-- Ordinary traversal, rapid reversal, five-loop process-memory samples, and
-  numeric budgets: protocol frozen, measurements `not_yet_sampled` until the
-  corresponding runtime gate is run.
+- Ordinary-input traversal, rapid reversal, five-loop process-memory samples,
+  and numeric budgets: deterministic `tp` probes and a negative-path
+  missing-package probe exist, but gate-grade ordinary-input measurements are
+  `not_yet_sampled` until the corresponding runtime gate is run.
 - Gate #87 and final M6 acceptance: not claimed by this manual.
