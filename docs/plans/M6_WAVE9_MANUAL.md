@@ -11,7 +11,8 @@ actor/door boundaries remain dependency-held.
 This is the final human acceptance script for issue #14. Run it only after
 the bounded Wave 7 script is green. Record the machine, GPU, build mode, cache
 state, and every numeric result in the route summary; do not replace a budget
-with a visual judgement.
+with a visual judgement. The pre-W7 threshold matrix is tracked in child issue
+#285 and must be recorded before this final route is accepted.
 
 1. Use the exact 14-selector list, current native pipeline, and clean/warm
    preparation matrix from Wave 7. For a standalone run, use an empty

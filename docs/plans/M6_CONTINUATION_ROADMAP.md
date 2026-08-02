@@ -207,11 +207,13 @@ claim the gate.
 | --- | --- | --- |
 | **W6-A: Consolidate M6 diagnostics and measurement export** | Existing diagnostics/report modules and focused tests; no lifecycle behavior changes | One deterministic report joins traversal, lifecycle, actor/nav, travel/save, environment, presentation, cache, timing, and process-memory evidence with no mandatory `null` metric |
 | **W6-B: Freeze bounded-route fixtures and acceptance protocol** | `docs/plans/M6_WAVE7_MANUAL.md`, synthetic test fixtures, command transcript shape | Exact route/cells, actor, door, water point, save points, weather IDs, build mode, hardware metadata, clean/warm matrix, loop count, and expected outputs are fixed |
+| **W6-C: Freeze numeric route acceptance thresholds** (#285) | Orchestrator-owned threshold matrix, provenance, and dependency-held fields; no lifecycle implementation | Numeric limits are recorded for the W7 fields, with configured/reporting defaults kept distinct from measured acceptance and blocked gameplay fields named explicitly |
 
-After both land, the orchestrator runs one preflight. Every nontrivial failure
-becomes a narrowly scoped child bug under #13 assigned to one owner. Bugs that
-touch the exterior lifecycle, travel/save seam, or scene integration merge
-sequentially; do not hide implementation work inside the gate issue.
+After W6-A and W6-B land, the orchestrator runs one preflight. W6-C records the
+threshold decision before W7. Every nontrivial failure becomes a narrowly
+scoped child bug under #13 assigned to one owner. Bugs that touch the exterior
+lifecycle, travel/save seam, or scene integration merge sequentially; do not
+hide implementation work inside the gate issue.
 
 ### Budget protocol
 
@@ -226,6 +228,13 @@ Freeze numeric limits before W7 for:
 
 Each value records machine, build profile, sample window, route, and whether the
 run was clean or warm. W8 may require a later final-route rebaseline.
+
+The current tree already exposes configured or reporting values for the
+exterior resident window (25 cells), estimated package-byte bound
+(134,217,728 bytes), active streamed-light default (64), and convergence frame
+report budget (16.6667 ms). These are provenance for W6-C, not automatic
+measured gate results. Process RSS/working-set, package estimates, and runtime
+transition/path measurements remain separate fields.
 
 ### Exit criterion
 

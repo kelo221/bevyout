@@ -9,6 +9,7 @@ not close gate #87. The real-data dependency is explicit.
 | --- | --- | --- | --- |
 | W6-A | Integrated | Deterministic convergence-report projection over existing viewer/exterior diagnostics and focused tests | Lifecycle, actor/nav, travel, scene, environment, and presentation behavior |
 | W6-B | Integrated — protocol freeze | Freeze `M6_WAVE7_MANUAL.md` and `M6_WAVE9_MANUAL.md`, exact route fixtures, command transcript, clean/warm matrix, and numeric budget recording | Live route acceptance, numeric threshold sign-off, and actor/door/water runtime integration remain deferred |
+| W6-C (#285) | Open — pre-W7 orchestrator follow-up | Freeze numeric route thresholds with provenance; keep configured/reporting limits, package estimates, process memory, and measured acceptance distinct | Requires the agreed matrix and the runtime/clean-warm evidence that supplies dependency-held fields; does not close #87 |
 
 W6-A must not turn `null`, package byte estimates, or unrun measurements into
 claims. Each report domain needs a stable availability/status value and a clear
@@ -25,6 +26,7 @@ preflight provided exact actor, door, water, weather, and save-point identities.
 | --- | --- | --- | --- |
 | Parallel preparation | W6-A | Existing diagnostics/report modules, the `worldstream summary` projection, and dedicated tests named in `M6_WAVE6_PROMPT.md` | Repeated identical inputs produce byte-identical output; all eight evidence domains are present with explicit status; estimates never populate real-memory fields |
 | Integrated | W6-B | `docs/plans/M6_WAVE7_MANUAL.md`, `docs/plans/M6_WAVE9_MANUAL.md`, and command transcript shape | Exact route matrix and numeric-budget recording protocol are frozen; runtime evidence and threshold sign-off remain deferred |
+| Pre-W7 orchestrator follow-up | #285 (W6-C) | Threshold matrix and provenance in the M6 plan/manuals and parent issue | Numeric limits are recorded before W7; missing actor/travel/scene/path values remain explicitly dependency-held rather than fabricated |
 
 ## Tests-first order for W6-A
 
@@ -56,8 +58,9 @@ The repository currently has known unrelated full-format drift in
 Changed-file rustfmt must still pass; those baseline files remain outside this
 lane.
 
-No gate #87, W7, or final M6 acceptance claim is valid until W6-B is frozen and
-the orchestrator runs the current-data preflight plus the real route matrix.
+No gate #87, W7, or final M6 acceptance claim is valid until W6-B is frozen,
+#285 records the numeric threshold matrix, and the orchestrator runs the
+current-data preflight plus the real route matrix.
 
 ## Shipped amendments
 
@@ -111,4 +114,15 @@ W6-B is integrated on `M6-OutCell`:
   worktree limitation rather than current-data evidence.
 - The manuals record numeric fields and required metadata but intentionally do
   not fabricate final thresholds. Numeric sign-off and runtime measurements
-  remain pre-W7 orchestrator work. No gate #87 or final M6 claim is made.
+  remain pre-W7 orchestrator work tracked by #285. No gate #87 or final M6
+  claim is made.
+
+### W6-C threshold sign-off follow-up — 2026-08-02
+
+Issue #285 is the assigned, linked child for the pre-W7 numeric decision. The
+current tree provides grounded provenance for 25 exterior resident cells,
+134,217,728 estimated package bytes, 64 active streamed local lights, and a
+16.6667 ms convergence report budget. Those values are not silently promoted
+to measured acceptance thresholds. #285 must record the remaining preparation,
+ready/transition, frame, process-memory, path, and gameplay dependency fields,
+or mark each one with the exact run that will supply it.

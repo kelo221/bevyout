@@ -319,10 +319,10 @@ value is unavailable:
   `water_status`, `door_status`, `worldspace`, `climate`, `weather`, and
   `save_reload_status`.
 
-No numeric budget is fabricated here. Thresholds must be agreed and recorded
-before the gate run, alongside machine/build/cache metadata. Package-byte
-estimates remain separate from process memory, and a missing measurement is
-not a zero.
+No numeric budget is fabricated here. Threshold sign-off is tracked by child
+issue #285 and must be agreed and recorded before the gate run, alongside
+machine/build/cache metadata. Package-byte estimates remain separate from
+process memory, and a missing measurement is not a zero.
 
 ## Failure and dependency status
 
