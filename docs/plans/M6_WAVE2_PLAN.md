@@ -74,4 +74,43 @@ evidence.
 
 ## Shipped amendments
 
-None yet.
+### Implementation integrated — 2026-08-01
+
+The W2-A/W2-B implementation and executable coverage are integrated on
+`M6-OutCell`:
+
+- W2-A commit: `95e42a92` (`Measure exterior process memory diagnostics`).
+- W2-B commit: `370b1456` (`Harden exterior lifecycle reversal`).
+- Integrator/docs commit: `edf504a0` (`M6 wave 2: add roadmap and executable exterior coverage`).
+
+The repository gates for the integrated lanes passed as recorded in the parent
+epic. Real current-data route evidence remains a separate acceptance step.
+
+### Current v21 route evidence — 2026-08-02
+
+The current Fallout v21 data/config preflight is green:
+
+- The exact 14-cell selector list resolves with `--list-only`.
+- Native `--check-fingerprints` reports `14 cells valid, 0 stale`.
+- Prepared revision is `prepare-v21-m6-worldspace-lod-imad-screen-fx`.
+- The Windows process-resident-set sampler reports method
+  `sysinfo_process_resident_set`, platform `windows`, and real current/peak/
+  ending samples, separate from package estimates.
+
+A bounded local BRP run crossed the deterministic route in both directions
+with ten-plus `tp` crossings and a final re-anchor to `(4,-5)`. The route
+window observed `requests=22`, `evictions=16`, `resident_cells=7` at the final
+anchor, `stale_completions=0`, `failed=0`, and `cancellations=0`; the final
+cell list contained seven unique collision-ready entries. The sampled process
+memory peak was `1,523,015,680` bytes and ending sample
+`1,522,896,896` bytes, while the peak package estimate was `3,696,696` bytes
+against the separate `134,217,728`-byte estimate budget. The route-window
+frame sample had p50 `6.3027 ms`, p95 `7.7809 ms`, max `93.0192 ms`, and four
+over-budget samples; the cooldown-only window was separately recorded and is
+not substituted for the route result.
+
+This is partial evidence only: the run used deterministic `tp` probes rather
+than ordinary keyboard traversal, did not execute the missing-package
+cancellation protocol or five complete out-and-back loops, and did not run
+actor/travel/save acceptance. Issues #274 and #275 remain open; no W2, #87, or
+final M6 completion claim is made from this measurement.
