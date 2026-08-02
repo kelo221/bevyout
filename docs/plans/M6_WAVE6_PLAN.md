@@ -131,6 +131,24 @@ or mark each one with the exact run that will supply it.
 
 This is the current evidence boundary for #285; it is not a W7 pass report.
 
+Configured/reporting provenance is explicit in the current tree: the exterior
+resident default `25` is `DEFAULT_EXTERIOR_RESIDENT_CELL_LIMIT` in
+`src/config.rs` and is passed into `ExteriorStreamBudget` by
+`src/viewer/world/exterior/mod.rs`; the `134,217,728` byte value is that
+plugin's `128 * 1024 * 1024` estimated-package budget; the `64` streamed-light
+default is `DEFAULT_EXTERIOR_LOCAL_LIGHT_BUDGET` in
+`crates/bevyout-core/src/local_light_policy.rs` and the exterior presentation
+budget's matching default; and `16.6667 ms` is the convergence-report counter
+in `src/viewer/diagnostics.rs`. The W7 manual is the collection path for
+runtime values and records machine, build, cache, route, and clean/warm
+metadata alongside them.
+
+The older M2 `<=33 ms` swap bar and Vault101 measurements in
+`docs/plans/M2_WAVE2_PLAN.md` and `docs/plans/M2_WAVE3_PLAN.md` are historical
+evidence for that M2 route only. They are not promoted to an M6 v21 threshold:
+the M6 matrix requires ordinary-input samples and a separately agreed
+transition budget before any frame number can become a pass/fail criterion.
+
 | Measure | Current value or invariant | Status | Required proof before W7 |
 | --- | --- | --- | --- |
 | Exterior residency | `resident_cells <= 25` configured ceiling | Configured only | Ordinary bidirectional route must remain within the ceiling |
