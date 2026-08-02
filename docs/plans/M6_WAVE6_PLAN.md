@@ -149,6 +149,13 @@ evidence for that M2 route only. They are not promoted to an M6 v21 threshold:
 the M6 matrix requires ordinary-input samples and a separately agreed
 transition budget before any frame number can become a pass/fail criterion.
 
+For the same reason, the older four-worker preparation figures in the M6
+appendix of `docs/plans/WorldPlan.md` (clean `131.691 s`, warm `8.794 s`, and
+`772183616` cache bytes from PR #261) are historical offline evidence, not the
+frozen W6 one-worker protocol. The current one-worker and four-worker attempts
+are recorded as timed-out diagnostics, so those older values must not be reused
+as current clean/warm thresholds or completion proof.
+
 | Measure | Current value or invariant | Status | Required proof before W7 |
 | --- | --- | --- | --- |
 | Exterior residency | `resident_cells <= 25` configured ceiling | Configured only | Ordinary bidirectional route must remain within the ceiling |
