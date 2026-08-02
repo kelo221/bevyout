@@ -224,6 +224,13 @@ The deterministic boundary probe below avoids a physics tick starting below
 the next authored slope. It proves streaming/collision handoff only; it is
 not ordinary keyboard traversal and does not prove actor navigation.
 
+Automation boundary: the local BRP bridge exposes runtime/console diagnostics
+but does not synthesize a held `ButtonInput<KeyCode>` state for the player. A
+tool-level W/A/S/D tap, even when sent to the focused viewer, is diagnostic
+input only and must not be counted as ordinary traversal. The measured pass
+requires a focused OS keyboard with keys held long enough for fixed ticks to
+advance; otherwise record the ordinary-input fields as `not_yet_sampled`.
+
 1. At `(4,-5)`, record the baseline, then move through the remaining five
    route cells in this exact order. After each command, wait for the cell to
    become collision-ready and record `worldstream status`,
