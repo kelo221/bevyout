@@ -165,6 +165,22 @@ provides a way to measure lifecycle behavior while avoiding tap-only input.
 It does not prove focused physical OS-keyboard traversal, so ordinary route,
 reversal, loop, and gate-grade performance fields remain `not_yet_sampled`.
 
+### Explicit trace loop diagnostic — 2026-08-02
+
+The same clean current-data viewer was rerun with an explicit
+`worldstream trace 1` before the route and `worldstream trace 0` after a
+two-second cooldown. Five deterministic `tp` out-and-back loops completed
+without resetting the viewer or cache. Each loop returned to `(4,-5)`; the
+cumulative final counters were `requests=149`, `evictions=143`,
+`resident_cells=7`, and `peak_resident_cells=11`, with
+`failed=0`, `cancellations=0`, and `stale_completions=0`. The closed trace
+contained 14 process-memory samples, with peak
+`1,860,186,112` bytes and ending `1,857,990,656` bytes. The final convergence
+projection reported frame p95 `10.0086 ms`, max `11.0126 ms`, and zero samples
+over the `16.6667 ms` reporting budget. These are deterministic bridge/teleport
+diagnostics only; they provide a closed memory window but do not replace the
+ordinary focused-input route required by W7.
+
 This remains partial acceptance evidence because all crossings used
 deterministic `tp` probes rather than ordinary keyboard traversal, and actor,
 travel/save, and final budget sign-off were not run. Issues #274, #275, and

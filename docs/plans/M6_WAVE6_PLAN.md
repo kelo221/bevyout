@@ -165,5 +165,5 @@ as current clean/warm thresholds or completion proof.
 | Frame time | `16.6667 ms` convergence report budget | Reporting counter, not an accepted route threshold | Ordinary-input steady, 1% low, and worst-transition samples |
 | Preparation | Frozen jobs=1 clean run: `288.3 s`, `14 done`, `0 failed`; identical warm rerun: `8.9 s`, `14 cells valid`, `0 stale`; cache `5,773` files / `1,697,002,779` bytes | Measured on Windows/dev/native, current commit `f600328b` | Preserve the exact clean/warm/check transcript in the W7 run record; older timeout attempts remain diagnostic only |
 | Ready/transition latency | No ordinary-input request-to-ready or transition sample | Not measured | Record p50/p95/worst and collision-ready timing |
-| Process memory | Real `tp` samples exist, but no peak/plateau threshold is frozen | Partial measurement | Ordinary five-loop peak, ending sample, and plateau rule |
+| Process memory | Explicit deterministic `worldstream trace 1/0` run measured 14 samples, peak `1,860,186,112` bytes, ending `1,857,990,656` bytes | Partial measurement; no threshold frozen | Ordinary five-loop peak, ending sample, and plateau rule |
 | Actor/path, travel/save, water, and environment isolation | Route actor is identity-only; route is dry; door/water fixtures are separate | Dependency-held / not run | #10/W3-C, W4-C, and W5-C runtime integration |
