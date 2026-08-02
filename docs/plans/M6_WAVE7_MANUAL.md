@@ -1,54 +1,233 @@
 # M6 wave 7 — bounded exterior route manual
 
-This manual exercises the real six-cell Super-Duper Mart to Megaton strip and
-its prefetched safety ring. It proves package preparation, collision-ready
-streaming, bounded residency, and the visible exterior navigation surface. It
-does not by itself close the final gate: the long-route walk, interior return,
-water, actor path, and frozen performance budgets remain explicit checks.
+This manual freezes the current-data six-cell Super-Duper Mart to Megaton
+protocol and its safety ring. It is an acceptance script, not a claim that
+gate #87 has passed. The route data is current v21 Fallout 3 data; actor
+crossing, a live persistent door, a route water crossing, repeated-loop
+budgets, and the final gate remain explicitly unverified below.
 
-1. Prepare the route and safety ring from the configured Fallout 3 install:
+## Frozen current-data baseline
 
-   ```text
-   cargo run-dev -- prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --jobs 1 --force
+Run the commands from the configured source checkout. The authoritative
+current-data inputs are:
+
+- Config: `C:\Users\V\Projects\Rust\bevyout\.bevyout\config.toml`.
+- Source plugin: `C:\Program Files (x86)\Steam\steamapps\common\Fallout 3 goty\Data\Fallout3.esm`.
+- Prepared revision: `prepare-v21-m6-worldspace-lod-imad-screen-fx`.
+- Source plugin fingerprint: `d9fb0a33af495ddb43992b96ea74f2741b123fefdb1fcdcea28096f7649b0d06`.
+- Prepared manifest/content fingerprint: `24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0`.
+- Current native route selectors, exactly as selected for the preflight:
+
+  ```text
+  00000c49 00000c4a 00000c4b 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed 00000c4c
+  ```
+
+The six-cell traversal order is `00000c49` → `00000c4a` → `00000c4b` →
+`00000c4c` → `000010d5` → `00001245`. The other eight selectors are the
+current safety-ring cells. Selector order does not change the sorted
+`--list-only` output.
+
+The authoritative current-data preflight was run in the main checkout with
+the configured native pipeline and returned `14 cells valid, 0 stale`; native
+preparation completed 14/14. Reproduce that preflight before an acceptance
+run. `--check-fingerprints` is report-only. An isolated worktree can instead
+report `0 valid, 14 stale` because ignored `.bevyout` cache/config state is
+not shared between worktrees; that is an isolated-worktree limitation, not a
+current-data route result. Do not fabricate a local cache copy or reuse stale
+fixture values.
+
+```text
+cargo run-dev -- prepare --help
+cargo run-dev -- prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --list-only
+cargo run-dev -- prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --check-fingerprints
+```
+
+Expected `--list-only` output contains all 14 selectors, sorted by FormID,
+including `00000c49 SuperDuperMartExterior`, `000010ec MegatonTown`, and
+`00001245 MegatonMainGate`. Expected fingerprint output is 14 `valid` lines
+and the summary `14 cells valid, 0 stale` in the main checkout.
+
+## Clean and warm preparation recording
+
+Do not delete the evidence cache to create a clean run. Use a disposable,
+explicit cache directory and record the machine, GPU, OS, build profile,
+converter setting, source fingerprint, cache path, elapsed seconds, cache
+bytes, assets built/reused, recoverable diagnostics, and native converter
+invocations for both runs.
+
+1. From `C:\Users\V\Projects\Rust\bevyout`, select an explicit disposable
+   cache and make it empty. The target below is derived data only:
+
+   ```powershell
+   $cleanCache = 'C:\Users\V\Projects\Rust\bevyout\.bevyout\m6-route-clean-cache'
+   if (Test-Path -LiteralPath $cleanCache) { Remove-Item -LiteralPath $cleanCache -Recurse -Force }
+   New-Item -ItemType Directory -Force -Path $cleanCache | Out-Null
    ```
 
-   Expected: every selected cell prints `prepared exterior` and the command
-   ends with `14 done, 0 failed`. The two non-renderable references in the
-   Megaton package may appear as native conversion diagnostics; they must not
-   abort preparation or leave a missing physics sidecar reference.
-
-2. Launch the Mart scene with physics and the bridge:
+2. Run the clean preparation once with the exact 14-selector list, native
+   conversion, and one worker. Record the deterministic completion line,
+   elapsed time, cache bytes, and build/reuse counters:
 
    ```text
-   cargo run-dev -- view --manifest .bevyout/cache/scenes/00000c49/scene.ron --agent-bridge --agent-port 15726 --trace-seconds 180
+   cargo run-dev -- --config C:\Users\V\Projects\Rust\bevyout\.bevyout\config.toml prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --cache-dir $cleanCache --actor-animation-converter native --jobs 1
    ```
 
-   Do not pass `--worldspace-lod` for the route gate. Far-worldspace tiles
-   are optional presentation polish; the route uses the native per-cell
-   near/middle/distant terrain LOD and full LAND collision.
+   Expected: all 14 selected cells complete without an unassigned failure;
+   the recorded result must include the actual `done/failed` line, not a
+   budget inferred from package estimates.
 
-3. In the console, run:
+3. Run the identical command again without `--force` and record the warm
+   elapsed time, cache bytes, assets reused/built, diagnostics, and converter
+   invocation count. This is the warm preparation measurement, not the
+   report-only check:
+
+   ```text
+   cargo run-dev -- --config C:\Users\V\Projects\Rust\bevyout\.bevyout\config.toml prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --cache-dir $cleanCache --actor-animation-converter native --jobs 1
+   ```
+
+   Then run the report-only check against the same cache:
+
+   ```text
+   cargo run-dev -- --config C:\Users\V\Projects\Rust\bevyout\.bevyout\config.toml prepare 00000c49 00000c4a 00000c4b 00000c4c 000010d5 00001245 00000c67 00000c68 00000c69 00000c6a 00000c6b 000010eb 000010ec 000010ed --cache-dir $cleanCache --actor-animation-converter native --jobs 1 --check-fingerprints
+   ```
+
+   Expected: the warm run skips already-valid work and the check returns 14
+   valid, 0 stale. A converter invocation count of zero applies only to the
+   viewer/runtime; preparation may invoke the native converter on a clean
+   cache. Record the actual values for the clean and warm rows separately.
+
+## Exact fixture boundaries
+
+### Actor and navigation
+
+The current source actor fixture is in route cell `00000c67`:
+
+- reference `000638e8`;
+- base `0001cf73` (`CrEyebotEnclave`);
+- source `MODL`: `Creatures\\Eyebot\\Skeleton.nif`.
+
+The prepared dynamic identity is reference `407784`, base `118643`, but this
+prepared route has no actor asset or actor catalog. Therefore actor binding,
+cross-cell pathing, unload/reload continuity, and runtime actor navigation are
+`not_run`, blocked by the existing #10/W3 dependency. A disposable `tna`
+capsule, if used for a nav-surface smoke check, is not evidence for this
+source actor and must not be reported as actor acceptance.
+
+### Water
+
+All 14 selected route/safety-ring cells have no actual water FormID or water
+surface. In particular, the sentinel height in `000010ec` is not water and
+must not be used as a route water crossing.
+
+Use this separate current-data water fixture when the water/runtime lane is
+ready:
+
+- cell `00001262`, `PotomacMirelurkNest02`, grid `(3,-2)`;
+- raw `XCWT` `0007e421`;
+- raw `XCLW` `10750.0`;
+- prepared water form `0007e421`;
+- prepared water height `153.57143`.
+
+This is a separate prepared water fixture, not a claim that the six-cell
+route contains water. Water entry/exit and breath acceptance are `not_run`
+until the W4-C runtime integration is available. If the fixture is prepared
+for that later run, use its own manifest and record `waterstate`; do not
+append it to the six-cell route selector list or claim route water evidence.
+
+### Door
+
+The 14 selected route/safety-ring cells contain zero DOOR references and zero
+door edges. Do not invent a route door. The only frozen door boundary is this
+source-only fallback:
+
+- persistent source cell `00002db4`;
+- reference `00003b24`, base `00019496` (`MegatonMainGate01`);
+- EDID `MegatonExteriorGateRef`;
+- authored `XTEL` target `00003b2c` in cell `00000a96`;
+- authored arrival position `(-3037.3999,-22132.5332,13000.5234)`;
+- authored arrival rotation `(0.0,-0.0,-3.0297887)`;
+- source transform `(-3008.5171,-21976.3535,12971.8740)`;
+- source rotation `(0.0,-0.0,0.1090063)`.
+
+This fallback is source-only. It cannot be live-accepted until W4-C makes
+the persistent door executable and integrates its travel/save behavior. Do
+not run or report `activate` on this fallback as a route-door result.
+
+### Environment and weather
+
+Freeze the environment identities from current data:
+
+- worldspace `0000003c` (`Wasteland`);
+- climate `00017907` (`WastelandClimate`);
+- current weather `00064609` (`WastelandClear`).
+
+Use the current weather ID in every transcript; do not reuse an older weather
+value:
+
+```text
+environment status
+settime 18
+setweather 00064609 0
+environment status
+weather clear
+```
+
+Record the resolved worldspace, climate, weather, time, and any transition
+status. Environment output is not a substitute for water, actor, door, or
+frame-budget evidence.
+
+## Route launch and baseline
+
+1. Launch the prepared Mart manifest with physics and the bridge. Do not pass
+   `--worldspace-lod`; far-worldspace tiles are optional presentation polish
+   and are not part of this gameplay route:
+
+   ```text
+   cargo run-dev -- view --manifest C:\Users\V\Projects\Rust\bevyout\.bevyout\cache\scenes\00000c49\scene.ron --agent-bridge --agent-port 15726 --trace-seconds 900
+   ```
+
+2. Capture these baseline commands before moving:
 
    ```text
    worldstream status
    worldstream cells
    nav exterior
-   tna spawn
+   nav borders
    environment status
    lights streamed
+   waterstate
    worldstream presentation
    worldstream summary
    ```
 
-   Expected: the active grid is `(4,-5)`, the ready safety cells have
-   `collision_ready=true`, `failed=0`, and `tna spawn` succeeds. `nav
-   exterior` reports revision `exterior-nav-v3`; the Mart package currently
-   reports 223 vertices, 279 triangles, and 54 border portals.
+   Record the active grid, request/ready/eviction counters, collision-ready
+   state, failures, cancellations, stale completions, resident roots,
+   colliders, streamed lights, package-byte estimate, and the explicit status
+   of each unavailable diagnostic. `peak_package_bytes_estimate` is not
+   process memory. Actor crossing, persistent-door execution, route water,
+   and numeric performance budgets remain unrun at this point.
 
-4. Exercise the six real grids. Because the cells are on a steep authored
-   slope, set the approximate authored height before moving across each cell;
-   otherwise a physics-enabled player can legitimately start below the next
-   cell's ground:
+## Six-cell traversal and reversal
+
+The route cells and grids are:
+
+| Order | Grid | Cell | Role |
+| --- | --- | --- | --- |
+| 0 | `(4,-5)` | `00000c49` | Super-Duper Mart start |
+| 1 | `(3,-5)` | `00000c4a` | route cell |
+| 2 | `(2,-5)` | `00000c4b` | route cell |
+| 3 | `(1,-5)` | `00000c4c` | route cell |
+| 4 | `(0,-5)` | `000010d5` | route center |
+| 5 | `(-1,-5)` | `00001245` | Megaton Main Gate end |
+
+The deterministic boundary probe below avoids a physics tick starting below
+the next authored slope. It proves streaming/collision handoff only; it is
+not ordinary keyboard traversal and does not prove actor navigation.
+
+1. At `(4,-5)`, record the baseline, then move through the remaining five
+   route cells in this exact order. After each command, wait for the cell to
+   become collision-ready and record `worldstream status`,
+   `worldstream presentation`, and `worldstream summary`:
 
    ```text
    tp 180 177 275.31
@@ -58,53 +237,102 @@ water, actor path, and frozen performance budgets remain explicit checks.
    tp -50 181 275.31
    ```
 
-   `tp` writes all three axes atomically, avoiding a physics tick between
-   separate axis changes. After each move, wait for `worldstream status`,
-   then run `worldstream presentation`, `tna despawn`, and `tna spawn`.
-   Expected grids are, in order, `(3,-5)`, `(2,-5)`,
-   `(1,-5)`, `(0,-5)`, and `(-1,-5)`; every stop should report `failed=0`,
-   successful agent spawn, resident count no greater than 4, no stale
-   completions, and a presentation report whose terrain collision remains
-   `full_land_mesh`. The updated real-data run reached all six grids with a
-   steady resident count of 2–4, `peak_resident_cells=9` while the prefetched
-   safety ring was being built, and 13 requests with 6 evictions. Package-size
-   telemetry is reported as `peak_package_bytes_estimate`; it is not process
-   memory. `peak_memory`, `ending_memory`, and `resident_bytes` remain `null`
-   with `memory_measurement="unmeasured"` until a later gate records real
-   process-memory samples. This is streaming evidence; Wave 9 still owns the
-   agreed final memory and transition budgets.
+   Expected grids are `(3,-5)`, `(2,-5)`, `(1,-5)`, `(0,-5)`, and
+   `(-1,-5)`. At every stop, the current cell remains collision-ready, no
+   selected cell fails, stale completions remain zero for a passing run, and
+   terrain presentation remains `full_land_mesh`. Record actual counts;
+   do not reuse an earlier package or memory number.
 
-5. Exercise reversal and persistence at a boundary:
+2. Reverse from Megaton to the Mart using the exact reverse sequence:
 
    ```text
-   player.setpos y 194
-   player.setpos x 1
-   save m6-boundary
-   worldlocation
+   tp 10 194 275.31
+   tp 60 197 275.31
+   tp 120 187 275.31
+   tp 180 177 275.31
    ```
 
-   Expected: the save succeeds and `worldlocation` reports exterior worldspace
-   `0000003c` with the exact player position. Restart with
-   `--save-slot m6-boundary`; the player must return to the same grid/position.
+   Record the same fields at each boundary. A valid reversal has no duplicate
+   cell root, no stale completion resurrecting an evicted generation, no
+   premature collision teardown, and no residual cell-owned entities after
+   an eviction. This probe is not a substitute for the later ordinary-input
+   route pass.
 
-6. Exercise environment and water diagnostics at the active exterior cell:
+3. Repeat the out-and-back route with ordinary movement input when the W7
+   runtime dependencies are available. Do not use `tp` during that measured
+   pass. At each boundary record request-to-ready time, collision-ready time,
+   transition frame time, active grid, resident count, root/collider/light
+   counts, failures, cancellations, stale completions, and the return-anchor
+   result. If a deterministic `tp` re-anchor is needed because the physics
+   start is below the steep authored slope, mark that traversal discontinuity
+   and do not count it as uninterrupted ordinary traversal.
 
-   ```text
-   environment status
-   settime 18
-   setweather 00015425 0
-   environment status
-   waterstate
-   worldstream presentation
-   weather clear
-   ```
+## Synthetic save/reload checkpoint
 
-   Expected: the environment response changes source weather/time identities
-   deterministically, and `waterstate` remains an explicit contact/breath
-   report rather than being inferred from rendered pixels.
+Create the one frozen command-created checkpoint at the route center:
 
-7. Deliberately remove or rename one neighboring prepared package and repeat
-   one boundary crossing. Expected: the current collision-ready cell remains
-   playable, the failure appears in `worldstream status`, and no stale
-   completion resurrects the missing cell. Restore the package before the
-   final route run.
+```text
+player.setpos x 1
+player.setpos y 193.98508
+player.setpos z 275.31247
+save m6-route-center
+worldlocation
+```
+
+Expected WLOC evidence is worldspace `0000003c`, position
+`(1.0,193.98508,275.31247)`, identity rotation, and the current prepared
+manifest fingerprint `24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0`.
+Restart the exact manifest with `--save-slot m6-route-center`, run
+`worldlocation`, and compare those fields exactly.
+
+The save is synthetic runtime evidence created by commands. The binary under
+the ignored `.bevyout/saves` directory must not be committed and is not
+authored Fallout source. A successful synthetic save/reload does not close
+the persistent-door or W4-C travel gate.
+
+## Five-loop recording protocol and numeric fields
+
+After the baseline and one rapid reversal at a boundary, perform five
+complete out-and-back loops from `(4,-5)` to `(-1,-5)` and back using ordinary
+movement input. Number them `loop=1` through `loop=5`; do not reset the
+cache, process, or viewer between loops. Record one row after each loop and
+one row for the final post-loop cooldown.
+
+Each row must contain the following fields, with units and a clear
+`measured`, `not_yet_sampled`, `not_run`, or `unsupported` status where a
+value is unavailable:
+
+- run metadata: machine, OS, GPU, build profile, commit, route direction,
+  loop number, start/end grid, cache state, and sample window;
+- preparation: `clean_prepare_s`, `warm_prepare_s`, `cache_bytes`,
+  `assets_built`, `assets_reused`, `native_converter_invocations`, and
+  `no_op_rebuild_s`;
+- streaming: `ready_p50_ms`, `ready_p95_ms`, `transition_p50_ms`,
+  `transition_p95_ms`, `transition_worst_ms`, `resident_cells_peak`,
+  `resident_roots_peak`, `colliders_peak`, `lights_peak`,
+  `stale_completions`, `failed`, and `cancelled`;
+- process/frame measurements: `steady_frame_ms`, `frame_p01_ms`,
+  `frame_max_ms`, `process_memory_peak_mb`, `process_memory_ending_mb`,
+  and `post_loop_memory_plateau_mb`;
+- gameplay/dependency fields: `actor_path_ms`, `actor_status`,
+  `actor_stuck`, `actor_blocked`, `return_anchor_error_m`,
+  `water_status`, `door_status`, `worldspace`, `climate`, `weather`, and
+  `save_reload_status`.
+
+No numeric budget is fabricated here. Thresholds must be agreed and recorded
+before the gate run, alongside machine/build/cache metadata. Package-byte
+estimates remain separate from process memory, and a missing measurement is
+not a zero.
+
+## Failure and dependency status
+
+- Actor source fixture and runtime actor/navigation crossing: `not_run`, held
+  by #10/W3; no actor asset/catalog is present in the prepared route.
+- Route door: zero route DOOR refs/edges; the Megaton fallback is source-only
+  and not live-accepted until W4-C.
+- Route water: dry in all 14 selected cells; water entry/exit uses separate
+  fixture `00001262` and is `not_run` until W4-C.
+- Ordinary traversal, rapid reversal, five-loop process-memory samples, and
+  numeric budgets: protocol frozen, measurements `not_yet_sampled` until the
+  corresponding runtime gate is run.
+- Gate #87 and final M6 acceptance: not claimed by this manual.
