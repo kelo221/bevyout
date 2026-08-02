@@ -594,12 +594,22 @@ fn apply_action(
             }
         }
         ExteriorLoadAction::Evict => {
+            let mut invalid = false;
             if let Some(cell) = state.cells.get_mut(&action.grid) {
-                if !action_matches_cell(cell, &action) {
-                    return;
+                let collision_owned = state.collision_cells.contains_key(&action.grid);
+                if !action_matches_cell(cell, &action)
+                    || !cell.owns_runtime_state(collision_owned)
+                    || !cell.begin_eviction()
+                {
+                    invalid = true;
+                } else {
+                    despawn_package_task(commands, tasks, cell);
                 }
-                cell.begin_eviction();
-                despawn_package_task(commands, tasks, cell);
+            } else {
+                invalid = true;
+            }
+            if invalid {
+                state.invalid_unload_count = state.invalid_unload_count.saturating_add(1);
             }
         }
         ExteriorLoadAction::Activate => {
@@ -848,6 +858,7 @@ fn finalize_evictions(world: &mut World) {
             state.evictions += 1;
             state.persistence_applied.remove(grid);
         } else {
+            state.invalid_unload_count = state.invalid_unload_count.saturating_add(1);
             warn!("exterior eviction lost cell {:08x}", form_id);
         }
     }

@@ -373,7 +373,7 @@ value is unavailable:
 - streaming: `ready_p50_ms`, `ready_p95_ms`, `transition_p50_ms`,
   `transition_p95_ms`, `transition_worst_ms`, `resident_cells_peak`,
   `resident_roots_peak`, `colliders_peak`, `lights_peak`,
-  `stale_completions`, `failed`, and `cancelled`;
+  `stale_completions`, `failed`, `cancelled`, and `invalid_unload_count`;
 - process/frame measurements: `steady_frame_ms`, `frame_p01_ms`,
   `frame_max_ms`, `process_memory_peak_mb`, `process_memory_ending_mb`,
   and `post_loop_memory_plateau_mb`;

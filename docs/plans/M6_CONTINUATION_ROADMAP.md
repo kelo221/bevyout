@@ -43,9 +43,10 @@ final M6 closure claim is made. A current-v21 W8 presentation probe also
 verified default-off worldspace LOD, the opt-in `48`-tile bound (`40` terrain,
 `8` blocks), `presentation_only=true`, full-land collision, and clean toggle
 back to zero active far tiles; the W8 manual records the transcript.
-The follow-up W8-C probe now records Bevy's active-camera CPU visibility list,
-worldspace asset-load staging/peak counters, and catalog/active duplicate
-identity counts. On the current v21 cache it measured `585/110/475` meshes
+The follow-up W8-C probe now records Bevy's active-camera CPU visibility list
+(`culling.frustum.method=active_camera_visible_entities_cpu`), worldspace
+asset-load staging/peak counters, and catalog/active duplicate identity counts.
+On the current v21 cache it measured `585/110/475` meshes
 default-off, `655/134/521` with the bounded 48-tile opt-in, zero duplicate
 identities, a peak staged-load count of `8`, and `7.7676 ms` average / `8.7887
 ms` p95 / `10.2409 ms` max over 120 samples. GPU occlusion remains explicitly

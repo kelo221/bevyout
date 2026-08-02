@@ -71,6 +71,7 @@ fn package_estimates_never_populate_process_memory_fields() {
     let state = ExteriorStreamState {
         resident_bytes: 256,
         peak_memory: 512,
+        invalid_unload_count: 3,
         ..Default::default()
     };
     let memory = ProcessMemoryDiagnostics::supported_for_tests();
@@ -82,6 +83,7 @@ fn package_estimates_never_populate_process_memory_fields() {
     assert_eq!(report["resident_bytes"], serde_json::Value::Null);
     assert_eq!(report["peak_memory"], serde_json::Value::Null);
     assert_eq!(report["ending_memory"], serde_json::Value::Null);
+    assert_eq!(report["invalid_unload_count"], 3);
     assert_eq!(report["process_memory"]["status"], "not_yet_sampled");
     assert_eq!(report["process_memory"]["value"], serde_json::Value::Null);
 }

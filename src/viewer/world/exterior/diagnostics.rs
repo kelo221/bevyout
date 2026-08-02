@@ -249,6 +249,7 @@ fn status_value(state: &ExteriorStreamState, memory: ProcessMemoryReport) -> Val
         "cancellations": state.cancellations,
         "stale_completions": state.stale_completions,
         "failures": state.failures,
+        "invalid_unload_count": state.invalid_unload_count,
         "collision_tracked": state.collision_cells.len(),
         "collision_pending": state
             .cells

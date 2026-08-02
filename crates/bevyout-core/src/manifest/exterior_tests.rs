@@ -246,6 +246,67 @@ fn terrain_lod_hysteresis_and_neighbor_clamp_are_bounded() {
 }
 
 #[test]
+fn terrain_lod_selection_covers_base_bands_and_hysteresis_boundaries() {
+    let cases = [
+        (None, 50.0, TerrainLod::Near),
+        (None, 51.0, TerrainLod::Middle),
+        (None, 150.0, TerrainLod::Middle),
+        (None, 151.0, TerrainLod::Distant),
+        (Some(TerrainLod::Near), 140.0, TerrainLod::Near),
+        (Some(TerrainLod::Near), 141.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 40.0, TerrainLod::Near),
+        (Some(TerrainLod::Middle), 41.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 160.0, TerrainLod::Middle),
+        (Some(TerrainLod::Middle), 161.0, TerrainLod::Distant),
+        (Some(TerrainLod::Distant), 140.0, TerrainLod::Middle),
+        (Some(TerrainLod::Distant), 141.0, TerrainLod::Distant),
+        (Some(TerrainLod::Near), 50.0, TerrainLod::Near),
+    ];
+
+    for (previous, distance, expected) in cases {
+        assert_eq!(
+            select_terrain_lod(distance, previous, 50.0, 150.0, 10.0),
+            expected,
+            "distance={distance}, previous={previous:?}"
+        );
+    }
+
+    assert_eq!(
+        select_terrain_lod(50.0, Some(TerrainLod::Near), 50.0, 150.0, -10.0),
+        TerrainLod::Near,
+        "negative hysteresis must be treated as zero"
+    );
+}
+
+#[test]
+fn clamp_lod_delta_preserves_adjacent_pairs_and_clamps_both_directions() {
+    let lods = [TerrainLod::Near, TerrainLod::Middle, TerrainLod::Distant];
+    let rank = |lod| -> i8 {
+        match lod {
+            TerrainLod::Near => 0,
+            TerrainLod::Middle => 1,
+            TerrainLod::Distant => 2,
+        }
+    };
+
+    for left in lods {
+        for right in lods {
+            let result = clamp_lod_delta(left, right);
+            let difference = (rank(result.0) - rank(result.1)).abs();
+            assert!(difference <= 1, "result={result:?}");
+            if (rank(left) - rank(right)).abs() <= 1 {
+                assert_eq!(result, (left, right));
+            }
+        }
+    }
+
+    assert_eq!(
+        clamp_lod_delta(TerrainLod::Distant, TerrainLod::Near),
+        (TerrainLod::Middle, TerrainLod::Near)
+    );
+}
+
+#[test]
 fn environment_prefers_interior_image_space_and_wraps_time() {
     let result = resolve_environment(EnvironmentInput {
         interior: true,

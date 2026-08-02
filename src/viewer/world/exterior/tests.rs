@@ -459,6 +459,61 @@ fn cancelling_after_package_spawn_uses_the_owned_eviction_teardown() {
 }
 
 #[test]
+fn invalid_evictions_are_counted_without_tearing_down_unowned_cells() {
+    let mut world = World::new();
+    let grid = GridCoordinate::new(7, -3);
+    world.insert_resource(lifecycle::ExteriorStreamState::default());
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x7777,
+            generation: 1,
+        },
+    );
+
+    let unloaded = lifecycle::RuntimeCell {
+        state: ExteriorCellState {
+            cell_form_id: 0x7777,
+            grid,
+            lifecycle: ExteriorCellLifecycle::Unloaded,
+            generation: 1,
+            pinned: false,
+            estimated_bytes: 0,
+            failed_attempts: 0,
+        },
+        root: None,
+        task: None,
+        package: None,
+        collision_ready: false,
+        eviction_restore: None,
+    };
+    world
+        .resource_mut::<lifecycle::ExteriorStreamState>()
+        .cells
+        .insert(grid, unloaded);
+
+    run_test_action(
+        &mut world,
+        ExteriorResidencyAction {
+            action: ExteriorLoadAction::Evict,
+            grid,
+            form_id: 0x7777,
+            generation: 1,
+        },
+    );
+
+    let state = world.resource::<lifecycle::ExteriorStreamState>();
+    assert_eq!(state.invalid_unload_count, 2);
+    assert_eq!(
+        state.cells[&grid].state.lifecycle,
+        ExteriorCellLifecycle::Unloaded
+    );
+}
+
+#[test]
 fn cancellation_reversal_keeps_a_collision_pending_root_owned() {
     let mut world = World::new();
     let grid = GridCoordinate::new(2, -1);

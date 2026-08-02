@@ -76,7 +76,8 @@ with a visual judgement. The pre-W7 threshold matrix is tracked in child issue
    `player.setpos` for this measured step. At each grid boundary record the
    active grid, request-to-ready and transition latency, resident count,
    collision-ready state, failed count, cancellations, stale completions,
-   root/collider/light counts, and return-anchor result. The exact route is:
+   invalid unload count, root/collider/light counts, and return-anchor result.
+   The exact route is:
 
    ```text
    (4,-5) 00000c49 Super-Duper Mart
@@ -151,8 +152,8 @@ with a visual judgement. The pre-W7 threshold matrix is tracked in child issue
    timings remain required inputs. The final report must include cold/warm
    preparation, p50/p95 ready and transition times, peak residents/memory,
    ending memory, frame median/p95/max, nav latency, visible LOD transitions,
-   failed/cancelled/stale counts, converter count, actor/door/water status,
-   and the exact save/reload checkpoint result.
+   failed/cancelled/stale/invalid-unload counts, converter count,
+   actor/door/water status, and the exact save/reload checkpoint result.
 
 9. Only declare the final gate complete when #10/W3 actor integration, W4-C
    travel/water/door integration, all route steps, both cache modes, the five

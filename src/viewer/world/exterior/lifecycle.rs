@@ -97,6 +97,9 @@ pub(crate) struct ExteriorStreamState {
     pub(crate) cancellations: u64,
     pub(crate) stale_completions: u64,
     pub(crate) failures: u64,
+    /// Rejected or otherwise invalid unload attempts. Expected stale task
+    /// completions are tracked separately and do not increment this counter.
+    pub(crate) invalid_unload_count: u64,
     pub(crate) resident_budget: usize,
     pub(crate) byte_budget: u64,
     pub(crate) resident_bytes: u64,
