@@ -30,16 +30,34 @@ pub(crate) fn request(
     grid: bevyout_core::manifest::exterior::GridCoordinate,
     form_id: u32,
     generation: u64,
-) {
+) -> bool {
+    let collision_owned = state.collision_cells.contains_key(&grid);
+    let Some(cell) = state.cells.get(&grid) else {
+        return false;
+    };
+    if cell.state.cell_form_id != form_id
+        || cell.state.generation != generation
+        || cell.state.lifecycle != bevyout_core::manifest::exterior::ExteriorCellLifecycle::Queued
+        || cell.task.is_some()
+        || cell.root.is_some()
+        || cell.package.is_some()
+        || cell.collision_ready
+        || collision_owned
+    {
+        return false;
+    }
     let Some(asset_root) = state.asset_root.clone() else {
-        return;
+        return false;
     };
     let Some(index) = state.index.as_ref() else {
-        return;
+        return false;
     };
     let Some(entry) = index.cell_at(grid) else {
-        return;
+        return false;
     };
+    if entry.cell_form_id != form_id {
+        return false;
+    }
     let path = asset_root.join(
         entry
             .package_path
@@ -70,6 +88,7 @@ pub(crate) fn request(
             form_id, grid.x, grid.y, generation
         );
     }
+    true
 }
 
 pub(crate) fn poll(
@@ -85,20 +104,39 @@ pub(crate) fn poll(
             continue;
         };
         commands.entity(task_entity).despawn();
+        let pending_is_current = state
+            .cells
+            .get(&pending.grid)
+            .is_some_and(|cell| cell.task == Some(task_entity));
+        let collision_owned = state.collision_cells.contains_key(&pending.grid);
         let Some(cell) = state.cells.get_mut(&pending.grid) else {
             state.stale_completions += 1;
             continue;
         };
-        if cell.state.generation != pending.generation
+        if !pending_is_current
+            || cell.state.generation != pending.generation
             || cell.state.cell_form_id != pending.form_id
             || cell.state.lifecycle
                 != bevyout_core::manifest::exterior::ExteriorCellLifecycle::Loading
         {
+            if pending_is_current {
+                cell.task = None;
+            }
+            state.stale_completions += 1;
+            continue;
+        }
+        if cell.root.is_some() || cell.package.is_some() || cell.collision_ready || collision_owned
+        {
+            cell.task = None;
             state.stale_completions += 1;
             continue;
         }
         match result {
-            Ok(loaded) if loaded.package.revision == EXTERIOR_CELL_PACKAGE_REVISION => {
+            Ok(loaded)
+                if loaded.package.revision == EXTERIOR_CELL_PACKAGE_REVISION
+                    && loaded.package.cell_form_id == pending.form_id
+                    && loaded.package.grid == pending.grid =>
+            {
                 let package = loaded.package;
                 let estimated_bytes = loaded.serialized_bytes;
                 let root = spawn_package(
@@ -108,6 +146,7 @@ pub(crate) fn poll(
                     &mut materials,
                     &package,
                 );
+                let previous_bytes = cell.state.estimated_bytes;
                 {
                     cell.root = Some(root);
                     // Rendering is spawned now, but the package is not
@@ -119,8 +158,12 @@ pub(crate) fn poll(
                     cell.package = Some(package);
                     cell.task = None;
                     cell.collision_ready = false;
+                    cell.eviction_restore = None;
                 }
-                state.resident_bytes = state.resident_bytes.saturating_add(estimated_bytes);
+                state.resident_bytes = state
+                    .resident_bytes
+                    .saturating_sub(previous_bytes)
+                    .saturating_add(estimated_bytes);
                 state.record_peaks();
                 if state.trace {
                     info!(
@@ -129,11 +172,29 @@ pub(crate) fn poll(
                     );
                 }
             }
+            Ok(loaded)
+                if loaded.package.revision == EXTERIOR_CELL_PACKAGE_REVISION
+                    && (loaded.package.cell_form_id != pending.form_id
+                        || loaded.package.grid != pending.grid) =>
+            {
+                cell.state.lifecycle =
+                    bevyout_core::manifest::exterior::ExteriorCellLifecycle::Failed;
+                cell.state.failed_attempts = cell.state.failed_attempts.saturating_add(1);
+                cell.task = None;
+                cell.eviction_restore = None;
+                state.stale_completions += 1;
+                state.failures += 1;
+                warn!(
+                    "exterior package failed {:08x}: ownership mismatch for grid={},{}",
+                    pending.form_id, pending.grid.x, pending.grid.y
+                );
+            }
             Ok(loaded) => {
                 cell.state.lifecycle =
                     bevyout_core::manifest::exterior::ExteriorCellLifecycle::Failed;
                 cell.state.failed_attempts = cell.state.failed_attempts.saturating_add(1);
                 cell.task = None;
+                cell.eviction_restore = None;
                 state.failures += 1;
                 warn!(
                     "exterior package failed {:08x}: stale revision {}, expected {}",
@@ -145,6 +206,7 @@ pub(crate) fn poll(
                     bevyout_core::manifest::exterior::ExteriorCellLifecycle::Failed;
                 cell.state.failed_attempts = cell.state.failed_attempts.saturating_add(1);
                 cell.task = None;
+                cell.eviction_restore = None;
                 state.failures += 1;
                 warn!("exterior package failed {:08x}: {error}", pending.form_id);
             }

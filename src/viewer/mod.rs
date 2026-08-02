@@ -47,6 +47,7 @@ pub(crate) struct LoadedSceneManifest(pub(crate) PreparedSceneManifest);
 
 mod actor;
 mod actor_animation;
+pub(crate) mod actor_residency;
 mod actor_state;
 mod ai;
 mod animation;

@@ -102,23 +102,31 @@ fn worldstream(
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     match invocation.args.as_slice() {
         [] => {
-            let state = world
+            if world
                 .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-                .ok_or_else(|| {
-                    ConsoleError::new("unavailable", "exterior streaming is not installed")
-                })?;
+                .is_none()
+            {
+                return Err(ConsoleError::new(
+                    "unavailable",
+                    "exterior streaming is not installed",
+                ));
+            }
             Ok(ConsoleCommandResult::value(
-                super::super::world::exterior::exterior_status_json(state),
+                super::super::world::exterior::exterior_status_json(world),
             ))
         }
         [command] if command == "status" => {
-            let state = world
+            if world
                 .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-                .ok_or_else(|| {
-                    ConsoleError::new("unavailable", "exterior streaming is not installed")
-                })?;
+                .is_none()
+            {
+                return Err(ConsoleError::new(
+                    "unavailable",
+                    "exterior streaming is not installed",
+                ));
+            }
             Ok(ConsoleCommandResult::value(
-                super::super::world::exterior::exterior_status_json(state),
+                super::super::world::exterior::exterior_status_json(world),
             ))
         }
         [command] if command == "cells" => {
@@ -152,8 +160,12 @@ fn worldstream(
             world
                 .resource_mut::<super::super::world::exterior::ExteriorStreamState>()
                 .trace = enabled;
+            let streaming = super::super::world::exterior::exterior_status_json(world);
             Ok(ConsoleCommandResult::new(
-                serde_json::json!({ "trace": enabled }),
+                serde_json::json!({
+                    "trace": enabled,
+                    "streaming": streaming,
+                }),
                 vec![format!(
                     "exterior stream trace {}",
                     if enabled { "on" } else { "off" }
@@ -168,56 +180,7 @@ fn worldstream(
 }
 
 fn exterior_route_summary(world: &mut World) -> serde_json::Value {
-    let state = world
-        .get_resource::<super::super::world::exterior::ExteriorStreamState>()
-        .map(super::super::world::exterior::exterior_status_json)
-        .unwrap_or(serde_json::Value::Null);
-    let presentation = super::super::world::exterior::exterior_presentation_json(world);
-    let frame = world
-        .get_resource::<super::super::RenderReportBuffer>()
-        .map(|report| {
-            super::super::diagnostics::summarize_render_samples(report, None, 600, 16.6667)
-        });
-    let runtime = frame
-        .map(|frame| {
-            json!({
-                "frame_ms_p50": frame.p50_ms,
-                "frame_ms_p95": frame.p95_ms,
-                "frame_ms_max": frame.max_ms,
-                "frame_samples": frame.sample_count,
-            })
-        })
-        .unwrap_or_else(|| {
-            json!({
-                "frame_ms_p50": null,
-                "frame_ms_p95": null,
-                "frame_ms_max": null,
-                "frame_samples": 0,
-            })
-        });
-    json!({
-        "conversion": {
-            "selected_pipeline": "native",
-            "assets_built": null,
-            "assets_reused": null,
-            "lossy_assets": null,
-            "cache_bytes": null,
-            "cold_seconds": null,
-            "warm_seconds": null,
-            "runtime_blender_invocations": 0,
-            "offline_measurements_required": true,
-        },
-        "streaming": state,
-        "presentation": presentation,
-        "runtime": {
-            "frame": runtime,
-            "transition_ms_p95": null,
-            "nav_path_ms_p95": null,
-            "visible_lod_transitions": presentation["terrain"]["lod_transitions"],
-            "blender_invocations": 0,
-            "timing_measurements_required": true,
-        },
-    })
+    super::super::diagnostics::convergence_report(world)
 }
 
 pub(super) fn actor_inspect(

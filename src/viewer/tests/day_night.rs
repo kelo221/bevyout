@@ -178,12 +178,48 @@ fn ordinary_interior_restores_static_when_preview_is_disabled() {
     let ordinary = cell(false);
     assert_eq!(profile_for_cell(&ordinary, false).1, "STATIC");
     assert!(profile_for_cell(&ordinary, false).0.is_none());
-    assert_eq!(profile_for_cell(&ordinary, true).1, "PREVIEW");
+    assert_eq!(profile_for_cell(&ordinary, true).1, "PREVIEW_AUTHORITATIVE");
     assert!(profile_for_cell(&ordinary, true).0.is_some());
 
     let exterior_like = cell(true);
     assert_eq!(profile_for_cell(&exterior_like, false).1, "FAITHFUL");
     assert!(profile_for_cell(&exterior_like, false).0.is_some());
+}
+
+#[test]
+fn preview_labels_a_missing_authoritative_profile_as_fallback() {
+    let mut fallback = cell(false);
+    fallback.day_night_profile = None;
+    fallback.day_night_preview_profile = Some(PreparedDayNightProfile {
+        source: PreparedDayNightProfileSource::PreviewFallback,
+        ..profile()
+    });
+
+    let (selected, mode) = profile_for_cell(&fallback, true);
+    assert!(selected.is_some());
+    assert_eq!(mode, "PREVIEW_FALLBACK");
+}
+
+#[test]
+fn weather_transition_progress_is_bounded_for_degenerate_inputs() {
+    for (elapsed, duration, expected) in [
+        (-1.0, 10.0, 0.0),
+        (0.0, 10.0, 0.0),
+        (5.0, 10.0, 0.5),
+        (15.0, 10.0, 1.0),
+        (5.0, 0.0, 1.0),
+        (5.0, -1.0, 1.0),
+        (f32::NAN, 10.0, 0.0),
+        (f32::INFINITY, 10.0, 1.0),
+        (f32::NEG_INFINITY, 10.0, 0.0),
+        (5.0, f32::NAN, 1.0),
+        (5.0, f32::INFINITY, 0.0),
+    ] {
+        let progress = weather_transition_progress(elapsed, duration);
+        assert!(progress.is_finite());
+        assert!((0.0..=1.0).contains(&progress));
+        assert_eq!(progress, expected);
+    }
 }
 
 #[test]

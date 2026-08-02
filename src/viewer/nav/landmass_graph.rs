@@ -1041,6 +1041,229 @@ pub(crate) fn merge_link_descriptors(
     descriptors
 }
 
+// W3-C is blocked by gate #10. Keep this pure policy lane available for the
+// runtime adapter without hiding dead-code warnings in the rest of the graph.
+#[allow(dead_code)]
+mod resident_topology_policy {
+    use super::{
+        BTreeMap, BTreeSet, MergeInput, MergeLinkDescriptor, MeshInput, merge_link_descriptors,
+    };
+
+    // ---------------------------------------------------------------------
+    // Resident exterior NAVM topology (M6 W3-B)
+    // ---------------------------------------------------------------------
+
+    /// Stable identity for one loaded generation of an exterior cell's NAVM.
+    ///
+    /// The generation is part of the identity on purpose: a portal produced for
+    /// an evicted package must not become valid merely because a package for the
+    /// same cell FormID is loaded again. The runtime owner supplies the generation
+    /// it already uses for package lifecycle decisions; this module only applies
+    /// the exact-match policy.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub(crate) struct ResidentNavCellKey {
+        pub(crate) cell_form_id: u32,
+        pub(crate) generation: u64,
+    }
+
+    /// Lifecycle state needed by the pure resident-topology policy.
+    ///
+    /// `Valid` deliberately carries navigation readiness separately from package
+    /// validity. A loaded package with a missing, failed, or still-cooking NAVM is
+    /// not a valid endpoint for a cross-cell link. The other states cover the
+    /// lifecycle windows where a stale link must be absent even if an older graph
+    /// still exists in memory.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub(crate) enum ResidentNavState {
+        Missing,
+        Loading,
+        Failed,
+        Evicting,
+        Valid { navigation_ready: bool },
+    }
+
+    impl ResidentNavState {
+        pub(crate) const fn is_navigation_ready(self) -> bool {
+            matches!(
+                self,
+                Self::Valid {
+                    navigation_ready: true,
+                }
+            )
+        }
+    }
+
+    /// One resident side that may own a NAVM island in the current topology.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct ResidentNavCell {
+        pub(crate) key: ResidentNavCellKey,
+        pub(crate) state: ResidentNavState,
+    }
+
+    /// A prepared or runtime-resolved portal candidate between two resident cell
+    /// generations. Its geometry stays in the existing [`MergeInput`] shape so
+    /// the ordinary merge-link validation remains the single graph authority.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct ResidentPortal {
+        pub(crate) side_a: ResidentNavCellKey,
+        pub(crate) side_b: ResidentNavCellKey,
+        pub(crate) merge: MergeInput,
+    }
+
+    /// A geometrically resolved portal whose two sides are both present in the
+    /// same valid resident topology snapshot.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) struct ResidentMergeLink {
+        pub(crate) side_a: ResidentNavCellKey,
+        pub(crate) side_b: ResidentNavCellKey,
+        pub(crate) descriptor: MergeLinkDescriptor,
+    }
+
+    /// Pure description of one current landmass archipelago. It contains only
+    /// resident NAVM identities and links; Bevy `Entity` ownership remains in the
+    /// runtime adapter. Replacing this value on every rebuild makes eviction a
+    /// removal from the topology rather than an incremental mutation that can
+    /// retain a stale link.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub(crate) struct ResidentArchipelago {
+        pub(crate) resident_cells: Vec<ResidentNavCellKey>,
+        pub(crate) merge_links: Vec<ResidentMergeLink>,
+    }
+
+    /// Lifecycle-owned resident NAVM topology snapshot.
+    #[derive(Debug, Clone, Default, PartialEq)]
+    pub(crate) struct ResidentNavTopology {
+        pub(crate) archipelago: Option<ResidentArchipelago>,
+    }
+
+    impl ResidentNavTopology {
+        /// Replaces the current topology from the current resident set.
+        ///
+        /// The operation is intentionally rebuild-based: an evicted side, a
+        /// failed NAVM, or an old package generation cannot leave behind an old
+        /// archipelago/link record because no previous state is consulted. Input
+        /// order is normalized by the pure helpers below, so a reload produces
+        /// the same snapshot for the same resident generations and portals.
+        pub(crate) fn rebuild(
+            &mut self,
+            residents: &[ResidentNavCell],
+            meshes: &[MeshInput],
+            portals: &[ResidentPortal],
+        ) {
+            let resident_cells = ready_resident_cell_keys(residents);
+            let merge_links = resident_merge_link_descriptors(meshes, residents, portals);
+            self.archipelago = (!resident_cells.is_empty()).then_some(ResidentArchipelago {
+                resident_cells,
+                merge_links,
+            });
+        }
+    }
+
+    /// Resolves only cross-cell portals whose two exact resident generations are
+    /// valid and navigation-ready. Missing or stale graph geometry is still
+    /// rejected by [`merge_link_descriptors`], preserving the existing portal
+    /// validation and distance rules.
+    pub(crate) fn resident_merge_link_descriptors(
+        meshes: &[MeshInput],
+        residents: &[ResidentNavCell],
+        portals: &[ResidentPortal],
+    ) -> Vec<ResidentMergeLink> {
+        let ready_cells = ready_resident_cell_keys(residents)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut links = Vec::new();
+
+        for portal in portals {
+            if portal.side_a == portal.side_b
+                || !ready_cells.contains(&portal.side_a)
+                || !ready_cells.contains(&portal.side_b)
+            {
+                continue;
+            }
+            let Some(descriptor) =
+                merge_link_descriptors(meshes, std::slice::from_ref(&portal.merge))
+                    .into_iter()
+                    .next()
+            else {
+                continue;
+            };
+            let mut link = ResidentMergeLink {
+                side_a: portal.side_a,
+                side_b: portal.side_b,
+                descriptor,
+            };
+            // Canonicalize the two cell sides so an opposite discovery direction
+            // (for example after a reload's package iteration order changes)
+            // cannot change the resulting topology or link kind assignment.
+            if link.side_b < link.side_a {
+                std::mem::swap(&mut link.side_a, &mut link.side_b);
+                std::mem::swap(&mut link.descriptor.side_a, &mut link.descriptor.side_b);
+            }
+            links.push(link);
+        }
+
+        links.sort_by_key(resident_merge_link_sort_key);
+        links.dedup();
+        links
+    }
+
+    fn ready_resident_cell_keys(residents: &[ResidentNavCell]) -> Vec<ResidentNavCellKey> {
+        // If duplicate lifecycle observations for one generation disagree, the
+        // conservative result is not ready. This prevents a stale "valid" copy
+        // from reviving a link while another owner is evicting the same key.
+        let mut readiness = BTreeMap::<ResidentNavCellKey, bool>::new();
+        for resident in residents {
+            let ready = resident.state.is_navigation_ready();
+            readiness
+                .entry(resident.key)
+                .and_modify(|current| *current &= ready)
+                .or_insert(ready);
+        }
+        readiness
+            .into_iter()
+            .filter_map(|(key, ready)| ready.then_some(key))
+            .collect()
+    }
+
+    fn resident_merge_link_sort_key(
+        link: &ResidentMergeLink,
+    ) -> (
+        ResidentNavCellKey,
+        ResidentNavCellKey,
+        u32,
+        u32,
+        u32,
+        u32,
+        [u32; 3],
+        [u32; 3],
+        u32,
+    ) {
+        (
+            link.side_a,
+            link.side_b,
+            link.descriptor.side_a.mesh_form_id,
+            link.descriptor.side_a.polygon_index,
+            link.descriptor.side_b.mesh_form_id,
+            link.descriptor.side_b.polygon_index,
+            link.descriptor
+                .side_a
+                .midpoint
+                .map(|coordinate| coordinate.to_bits()),
+            link.descriptor
+                .side_b
+                .midpoint
+                .map(|coordinate| coordinate.to_bits()),
+            link.descriptor.distance.to_bits(),
+        )
+    }
+}
+
+#[allow(dead_code, unused_imports)]
+pub(crate) use resident_topology_policy::{
+    ResidentArchipelago, ResidentMergeLink, ResidentNavCell, ResidentNavCellKey, ResidentNavState,
+    ResidentNavTopology, ResidentPortal, resident_merge_link_descriptors,
+};
+
 // ---------------------------------------------------------------------
 // Agent-state mapping
 // ---------------------------------------------------------------------

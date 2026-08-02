@@ -106,3 +106,30 @@ fn collision_handoff_pins_old_cell_while_target_is_requested() {
             && action.action == bevyout_core::manifest::exterior::ExteriorLoadAction::Evict
     }));
 }
+
+#[test]
+fn desired_plan_cancels_eviction_when_a_target_reverses() {
+    let index = index();
+    let grid = GridCoordinate::new(1, 0);
+    let states = vec![ExteriorCellState {
+        cell_form_id: 2,
+        grid,
+        lifecycle: bevyout_core::manifest::exterior::ExteriorCellLifecycle::Evicting,
+        generation: 6,
+        pinned: false,
+        estimated_bytes: 1,
+        failed_attempts: 0,
+    }];
+
+    let plan = desired_plan(&index, grid, (0, 0), &states, 1, 1024);
+
+    assert_eq!(
+        plan.actions,
+        vec![bevyout_core::manifest::exterior::ExteriorResidencyAction {
+            form_id: 2,
+            grid,
+            action: bevyout_core::manifest::exterior::ExteriorLoadAction::Cancel,
+            generation: 6,
+        }]
+    );
+}
