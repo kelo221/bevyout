@@ -13,6 +13,20 @@ sequenced behind their documented runtime dependencies. Waves 7, 8, and 9
 retain their existing meanings and manuals: bounded gate #87, LOD/presentation,
 and final route gate #14 respectively.
 
+### Current checkpoint — 2026-08-02
+
+The current v21 native preflight validates all 14 frozen selectors with
+`0 stale` fingerprints. Deterministic BRP route and negative-path diagnostics
+are recorded, but ordinary traversal, reversal, and loop measurements remain
+`not_yet_sampled`: the local bridge can tap keys but has no supported way to
+sustain a held `ButtonInput<KeyCode>` state. W6-C provenance is recorded in
+`M6_WAVE6_PLAN.md` (commit `9181c691`), including the source of the configured
+25-cell, 128 MiB estimated-package, 64-light, and 16.6667 ms reporting values;
+the historical M2 `<=33 ms` swap bar is not an M6 threshold. Strict clippy,
+`cargo test`, `cargo check-dev`, and `prepare --help` pass; repository-wide
+`cargo fmt --check` still reports only the known unrelated baseline drift. No
+W2, #285, #87, or final M6 closure claim is made.
+
 ## Execution model recommendation
 
 Use **Sol X-High** in the Codex runtime. M6 still crosses asynchronous Bevy
