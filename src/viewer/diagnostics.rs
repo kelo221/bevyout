@@ -144,6 +144,8 @@ pub(crate) fn convergence_report(world: &mut World) -> serde_json::Value {
         "nav_path_ms_p95": null,
         "nav_path_ms_p95_status": "not_run",
         "visible_lod_transitions": presentation["terrain"]["lod_transitions"],
+        "blender_invocations": null,
+        "blender_invocations_status": "not_run",
         "timing_measurements_required": true,
     });
 

@@ -7,7 +7,7 @@ not close gate #87. The real-data dependency is explicit.
 
 | Lane | Status | Authority and scope | Deferred |
 | --- | --- | --- | --- |
-| W6-A | Dispatched | Deterministic convergence-report projection over existing viewer/exterior diagnostics and focused tests | Lifecycle, actor/nav, travel, scene, environment, and presentation behavior |
+| W6-A | Integrated | Deterministic convergence-report projection over existing viewer/exterior diagnostics and focused tests | Lifecycle, actor/nav, travel, scene, environment, and presentation behavior |
 | W6-B | Held for current-data preflight | Freeze `M6_WAVE7_MANUAL.md`, exact route fixtures, command transcript, clean/warm matrix, and numeric budget recording | Cannot choose actor/door/water/save fixtures from stale or missing Fallout data |
 
 W6-A must not turn `null`, package byte estimates, or unrun measurements into
@@ -62,4 +62,28 @@ the orchestrator runs the current-data preflight plus the real route matrix.
 
 ## Shipped amendments
 
-_Wave kickoff; W6-A dispatched, W6-B held pending current v21 route data._
+### W6-A shipped — 2026-08-02
+
+W6-A is integrated on `M6-OutCell`:
+
+- Executor commit: `40318fba` (`M6 W6-A: add convergence report projection`)
+- Integration commit: `4be8a5cf` (`M6 W6-A: add convergence report projection`)
+- Follow-up report-shape compatibility adjustment retains the legacy
+  `runtime.blender_invocations` field as explicit `null` with a `not_run`
+  status; no fabricated invocation count is reported.
+- `worldstream summary` now projects one deterministic `m6-convergence-v1`
+  report with ordered streaming/lifecycle, actor/navigation, travel/save,
+  environment, presentation, cache/preparation, frame-timing, and process-
+  memory domains. Each domain carries an explicit status and value; process
+  memory remains separate from package-byte estimates.
+- Dedicated diagnostics tests cover byte-identical repeated reports, status /
+  value separation, measured/unsupported/not-yet-sampled/not-run states, and
+  the existing streaming/presentation surfaces.
+- Validation passed: targeted rustfmt and diff check, `cargo check-dev`,
+  `cargo clippy --all-targets -- -D warnings`, full `cargo test` (1,660 Rust
+  tests plus 633 Cucumber scenarios / 3,130 steps), and
+  `cargo run-dev -- prepare --help`.
+
+W6-B remains held pending a current Fallout v21 data/config preflight for exact
+actor, door, water, weather, and save-point fixtures. W6-A does not claim gate
+#87, W7, or final M6 acceptance.
