@@ -17,6 +17,7 @@ use crate::item_transaction::{
     TransactionId,
 };
 use bevyout_core::actor_state::{ActorInstanceState, ActorLifeState, ActorPackageCheckpoint};
+use bevyout_core::combat::rng::CombatRngState;
 use bevyout_core::dialogue::DialogueSnapshot;
 use bevyout_core::manifest::exterior::WorldLocation;
 
@@ -24,7 +25,7 @@ mod openmw;
 
 use openmw::{read_records, read_subrecords, tag, write_record, write_subrecord};
 
-pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 7;
+pub const CURRENT_SAVE_FORMAT_VERSION: u32 = 8;
 pub const MIN_SUPPORTED_SAVE_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,10 @@ pub struct SaveGame {
     pub player: Option<PlayerState>,
     pub next_runtime_item_id: u64,
     pub rng_state: u64,
+    /// Versioned combat-only PRNG state. `rng_state` remains the playthrough
+    /// seed used by noncombat legacy systems; combat draw progression is
+    /// persisted independently from format v8 onward.
+    pub combat_rng: CombatRngState,
     /// Canonical M3 item-holder state. `None` is retained for v1/v2 callers;
     /// decoding or encoding a legacy save deterministically migrates it.
     pub canonical: Option<ItemLedgerSnapshot>,
@@ -57,6 +62,7 @@ impl PartialEq for SaveGame {
             && self.player == other.player
             && self.next_runtime_item_id == other.next_runtime_item_id
             && self.rng_state == other.rng_state
+            && self.combat_rng == other.combat_rng
             && self.dialogue == other.dialogue
             && self.location == other.location
             && canonical_for_compare(self) == canonical_for_compare(other)
@@ -75,6 +81,7 @@ impl Default for SaveGame {
             player: None,
             next_runtime_item_id: 1,
             rng_state: 0,
+            combat_rng: CombatRngState::default(),
             canonical: None,
             dialogue: DialogueSnapshot::default(),
             location: None,
@@ -321,6 +328,15 @@ pub fn encode_save(save: &SaveGame) -> Result<Vec<u8>> {
         }
     }
     write_record(&mut bytes, tag("RAND"), &save.rng_state.to_le_bytes())?;
+    if save.header.format_version >= 8 {
+        write_record(
+            &mut bytes,
+            tag("CRNG"),
+            ron::ser::to_string(&save.combat_rng)
+                .context("encoding combat RNG state")?
+                .as_bytes(),
+        )?;
+    }
     let checksum: [u8; 32] = Sha256::digest(&bytes).into();
     write_record(&mut bytes, tag("CHKS"), &checksum)?;
     Ok(bytes)
@@ -331,6 +347,7 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     let mut save = SaveGame::default();
     let mut saw_header = false;
     let mut saw_rng = false;
+    let mut saw_combat_rng = false;
     let mut saw_next_runtime_item = false;
     let mut saw_canonical = false;
     let mut saw_dialogue = false;
@@ -487,6 +504,17 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
                     );
                     saw_rng = true;
                 }
+                record_tag if *record_tag == tag("CRNG") => {
+                    if saw_combat_rng {
+                        bail!("save contains duplicate CRNG records");
+                    }
+                    if !saw_header || save.header.format_version < 8 {
+                        bail!("CRNG is only valid in save format v8 or newer");
+                    }
+                    save.combat_rng = ron::de::from_bytes(&record.payload)
+                        .context("decoding combat RNG state")?;
+                    saw_combat_rng = true;
+                }
                 _ => {}
             }
         }
@@ -507,6 +535,12 @@ pub fn decode_save(bytes: &[u8]) -> Result<SaveGame> {
     }
     if !saw_rng {
         bail!("save is missing its RAND state");
+    }
+    if save.header.format_version >= 8 && !saw_combat_rng {
+        bail!("save format v8 is missing CRNG");
+    }
+    if save.header.format_version < 8 {
+        save.combat_rng = CombatRngState::from_seed(save.rng_state);
     }
     if save.header.format_version >= 2 && !saw_next_runtime_item {
         bail!("save format v2 is missing NITM");
@@ -1429,6 +1463,9 @@ fn validate_save(save: &SaveGame) -> Result<()> {
     if save.next_runtime_item_id == 0 {
         bail!("next runtime item id must be non-zero");
     }
+    save.combat_rng
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid combat RNG state: {error}"))?;
     if save.dialogue.schema_version != bevyout_core::dialogue::DIALOGUE_SNAPSHOT_SCHEMA_VERSION {
         bail!(
             "unsupported dialogue snapshot schema version {}",

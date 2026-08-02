@@ -62,11 +62,13 @@ fn brp_console_result_matches_direct_executor_shape() {
 fn brp_console_help_exposes_registry_metadata() {
     let app = app();
     let value = console_help(In(None), app.world()).unwrap();
-    assert!(value
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["name"] == "getpos"));
+    assert!(
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "getpos")
+    );
 }
 
 #[test]
@@ -93,9 +95,11 @@ fn schedule_snapshot_reports_initialized_system_metadata() {
     let value =
         schedule_snapshot(In(Some(json!({ "include_systems": true }))), app.world()).unwrap();
     assert!(value["schedule_count"].as_u64().unwrap() > 0);
-    assert!(value["schedules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|schedule| schedule["initialized"] == true));
+    assert!(
+        value["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|schedule| schedule["initialized"] == true)
+    );
 }

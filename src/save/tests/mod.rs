@@ -138,6 +138,7 @@ fn sample_save() -> SaveGame {
         }),
         next_runtime_item_id: 6,
         rng_state: 0x0123_4567_89ab_cdef,
+        combat_rng: bevyout_core::combat::CombatRngState::from_seed(0x0123_4567_89ab_cdef),
         canonical: None,
         dialogue: Default::default(),
         location: None,
@@ -154,7 +155,7 @@ fn round_trip_is_deterministic() {
 }
 
 #[test]
-fn v7_round_trip_preserves_exact_world_location() {
+fn v8_round_trip_preserves_exact_world_location() {
     let mut save = sample_save();
     save.location = Some(bevyout_core::manifest::exterior::WorldLocation::Exterior(
         bevyout_core::manifest::exterior::WorldLocationExterior {
@@ -265,9 +266,9 @@ fn version_three_save_round_trips_equipment_and_hotkeys() {
 }
 
 #[test]
-fn version_seven_actor_item_dialogue_and_location_state_round_trip_deterministically() {
+fn version_eight_actor_item_dialogue_location_and_combat_rng_round_trip_deterministically() {
     let save = sample_save();
-    assert_eq!(save.header.format_version, 7);
+    assert_eq!(save.header.format_version, 8);
     let first = encode_save(&save).unwrap();
     let second = encode_save(&save).unwrap();
     assert_eq!(first, second);
@@ -276,6 +277,22 @@ fn version_seven_actor_item_dialogue_and_location_state_round_trip_deterministic
     let actor = &decoded.world.cells[&0x0001_51e3].actors[&0x0004_1600];
     assert_eq!(actor.life_state, ActorLifeState::Alive);
     assert_eq!(actor.package.unwrap().procedure_index, 3);
+}
+
+#[test]
+fn version_seven_migrates_combat_rng_from_the_playthrough_seed() {
+    let mut save = sample_save();
+    save.header.format_version = 7;
+    save.combat_rng = bevyout_core::combat::CombatRngState {
+        revision: bevyout_core::combat::COMBAT_RNG_REVISION.into(),
+        seed: 99,
+        draw_index: 12,
+    };
+    let decoded = decode_save(&encode_save(&save).unwrap()).unwrap();
+    assert_eq!(
+        decoded.combat_rng,
+        bevyout_core::combat::CombatRngState::from_seed(save.rng_state)
+    );
 }
 
 #[test]
@@ -694,6 +711,7 @@ fn canonical_v3_round_trip_preserves_ids_conditions_and_opaque_state() {
     .unwrap();
     item.state.combat.magazine.ammo_form_id = Some(0x0000_4241);
     item.state.combat.magazine.loaded = 7;
+    item.state.combat.jam = Some(bevyout_core::combat::JamReason::Reload);
     let mut holders = BTreeMap::new();
     holders.insert(
         HolderId::Player,

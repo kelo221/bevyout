@@ -3,7 +3,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, Ra
 use bevy::prelude::*;
 
 use bevyout_core::weapon::{
-    ImpactEvidence, ImpactOutcome, impact_is_in_range, resolve_actor_impact,
+    ImpactEvidence, ImpactOutcome, WeaponDefinition, impact_is_in_range, resolve_actor_impact,
 };
 
 use super::{AcceptedWeaponShot, FireReport, FireStatus, PlayerWeaponRuntime};
@@ -57,7 +57,8 @@ pub(super) fn resolve_accepted_shots(
         let evidence = ImpactEvidence {
             distance_meters: hit.distance,
         };
-        if !impact_is_in_range(shot.weapon.definition(), evidence) {
+        let weapon_definition = WeaponDefinition::new(shot.damage, shot.weapon.range_meters);
+        if !impact_is_in_range(weapon_definition, evidence) {
             runtime.last_fire = FireReport {
                 status: FireStatus::Miss,
                 shot_index: Some(shot.shot_index),
@@ -95,12 +96,7 @@ pub(super) fn resolve_accepted_shots(
             };
             continue;
         };
-        match resolve_actor_impact(
-            shot.weapon.definition(),
-            evidence,
-            &projected.definition,
-            state,
-        ) {
+        match resolve_actor_impact(weapon_definition, evidence, &projected.definition, state) {
             Ok(ImpactOutcome::Actor(outcome)) => {
                 screen_fx.write(crate::viewer::screen_fx::ScreenFxRequested::weapon_hit());
                 runtime.last_fire = FireReport {

@@ -10,8 +10,8 @@ use super::ao_policy::AoEligibilityTracker;
 use super::material_clamp_policy;
 
 use super::scene::{
-    CellDirectionalLight, PreparedReflectionProbe, DEFAULT_REFLECTION_PROBE_STRENGTH,
-    PREPARED_REFLECTION_PROBE_INTENSITY,
+    CellDirectionalLight, DEFAULT_REFLECTION_PROBE_STRENGTH, PREPARED_REFLECTION_PROBE_INTENSITY,
+    PreparedReflectionProbe,
 };
 use super::*;
 

@@ -1,12 +1,15 @@
-//! Player-weapon inspection and MCP action controls (M5 wave 1).
+//! Player-weapon inspection and MCP action controls (M5 wave 3).
 
-use bevyout_core::item_transaction::HolderId;
+use bevyout_core::combat::{COMBAT_POLICY_REVISION, COMBAT_RNG_REVISION, CombatRngDomain};
+use bevyout_core::item_transaction::{CombatTransactionKind, CombatTransactionOutcome, HolderId};
 use bevyout_core::weapon::{ReloadDecision, WeaponAction};
 
 use super::*;
-use crate::viewer::weapon::{FireWeaponRequested, PlayerWeaponRuntime, ReloadWeaponRequested};
+use crate::viewer::weapon::{
+    ClearWeaponJamRequested, FireWeaponRequested, PlayerWeaponRuntime, ReloadWeaponRequested,
+};
 
-const COMBAT_INSPECTION_SCHEMA_VERSION: u32 = 1;
+const COMBAT_INSPECTION_SCHEMA_VERSION: u32 = 2;
 
 pub(super) struct WeaponCommandProvider;
 
@@ -57,6 +60,13 @@ impl ConsoleCommandProvider for WeaponCommandProvider {
                 weapon_reload,
             )
             .mutating(),
+            ConsoleCommand::new(
+                "weaponclearjam",
+                "weaponclearjam",
+                "Clear the canonical jam on the equipped player weapon.",
+                weapon_clear_jam,
+            )
+            .mutating(),
         ] {
             registry.register(command)?;
         }
@@ -85,10 +95,10 @@ fn unavailable(command: &str, planned_wave: u32) -> ConsoleCommandResult {
         "schema": "bevyout.m5.inspect",
         "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
         "command": command,
-        "wave": 2,
+        "wave": 3,
         "available": false,
         "reason": format!("planned_wave_{planned_wave}"),
-        "policy_revision": "m5-combat-v2",
+        "policy_revision": COMBAT_POLICY_REVISION,
         "diagnostics": [],
     }))
 }
@@ -126,10 +136,10 @@ fn ammo_state(
         "schema": "bevyout.m5.inspect",
         "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
         "command": "ammostate",
-        "wave": 2,
+        "wave": 3,
         "available": true,
         "subject": {"reference_form_id": "player"},
-        "policy_revision": "m5-combat-v2",
+        "policy_revision": COMBAT_POLICY_REVISION,
         "state": {
             "weapon_instance_id": weapon_id.map(|id| id.0),
             "weapon_form_id": weapon.map(|item| format!("{:08x}", item.base_form_id)),
@@ -147,24 +157,39 @@ fn combat_state(
 ) -> Result<ConsoleCommandResult, ConsoleError> {
     player_subject(invocation)?;
     let ammo = ammo_state(world, invocation)?.value;
+    let (weapon_instance_id, condition, max_condition, jam) = weapon_combat_state(world);
     Ok(ConsoleCommandResult::value(json!({
         "schema": "bevyout.m5.inspect",
         "schema_version": COMBAT_INSPECTION_SCHEMA_VERSION,
         "command": "combatstate",
-        "wave": 2,
+        "wave": 3,
         "available": true,
         "subject": {"reference_form_id": "player"},
         "capabilities": {
             "ammo": true,
-            "condition": false,
+            "condition": true,
             "ballistics": false,
             "armor": false,
             "limbs": false,
             "vats": false,
             "ai": false,
         },
-        "policy_revision": "m5-combat-v2",
-        "state": {"ammo": ammo["state"].clone()},
+        "policy_revision": COMBAT_POLICY_REVISION,
+        "state": {
+            "ammo": ammo["state"].clone(),
+            "weapon_instance_id": weapon_instance_id,
+            "condition": condition,
+            "max_condition": max_condition,
+            "jam": jam,
+            "rng": weapon_rng_state(world),
+            "last_decision": world
+                .get_resource::<PlayerWeaponRuntime>()
+                .and_then(|runtime| runtime.last_combat.as_ref())
+                .map(combat_receipt_json),
+            "blocked_reason": world
+                .get_resource::<PlayerWeaponRuntime>()
+                .and_then(|runtime| runtime.last_combat_block.as_deref()),
+        },
         "diagnostics": [],
     })))
 }
@@ -255,6 +280,111 @@ fn weapon_reload(
         json!({"queued": true}),
         vec!["weaponreload queued".into()],
     ))
+}
+
+fn weapon_clear_jam(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    no_args(invocation)?;
+    world.write_message(ClearWeaponJamRequested);
+    Ok(ConsoleCommandResult::new(
+        json!({"queued": true}),
+        vec!["weaponclearjam queued".into()],
+    ))
+}
+
+fn weapon_combat_state(world: &World) -> (Option<u64>, Option<u32>, Option<u32>, Option<String>) {
+    let canonical = world.get_resource::<crate::viewer::interaction::CanonicalItemLedger>();
+    let Some(canonical) = canonical else {
+        return (None, None, None, None);
+    };
+    let holder = canonical.ledger.holders().get(&HolderId::Player);
+    let weapon_id = canonical
+        .ledger
+        .bindings()
+        .get(&HolderId::Player)
+        .and_then(|binding| binding.equipped);
+    let item = weapon_id.and_then(|id| holder.and_then(|state| state.find(id)));
+    let max_condition = world
+        .get_resource::<PlayerWeaponRuntime>()
+        .and_then(|runtime| runtime.equipped.as_ref())
+        .and_then(|weapon| weapon.max_condition);
+    (
+        weapon_id.map(|id| id.0),
+        item.and_then(|item| item.state.condition),
+        max_condition,
+        item.and_then(|item| item.state.combat.jam)
+            .map(|reason| reason.label().into()),
+    )
+}
+
+fn weapon_rng_state(world: &World) -> serde_json::Value {
+    world
+        .get_resource::<super::super::weapon::CombatRngRuntime>()
+        .map_or_else(
+            || {
+                json!({
+                    "revision": COMBAT_RNG_REVISION,
+                    "draw_index": 0,
+                })
+            },
+            |rng| {
+                json!({
+                    "revision": &rng.0.revision,
+                    "seed": rng.0.seed,
+                    "draw_index": rng.0.draw_index,
+                })
+            },
+        )
+}
+
+fn combat_receipt_json(
+    receipt: &bevyout_core::item_transaction::CombatTransactionReceipt,
+) -> serde_json::Value {
+    json!({
+        "id": receipt.id.0,
+        "weapon_instance_id": receipt.weapon_id.0,
+        "kind": combat_transaction_kind_label(receipt.kind),
+        "outcome": combat_transaction_outcome_label(receipt.outcome),
+        "condition_before": receipt.condition_before,
+        "condition_after": receipt.condition_after,
+        "damage_multiplier": receipt.damage_multiplier_milli.map(|value| value as f32 / 1000.0),
+        "damage": receipt.damage_milli.map(|value| value as f32 / 1000.0),
+        "jam": receipt.jam.map(|reason| reason.label()),
+        "rng_draw": receipt.rng_draw.map(|draw| json!({
+            "domain": combat_rng_domain_label(draw.domain),
+            "index": draw.index,
+            "value": draw.value,
+        })),
+        "loaded": receipt.loaded,
+        "holder_revision": receipt.holder_revision,
+    })
+}
+
+const fn combat_transaction_kind_label(kind: CombatTransactionKind) -> &'static str {
+    match kind {
+        CombatTransactionKind::Fire => "fire",
+        CombatTransactionKind::Reload => "reload",
+        CombatTransactionKind::ClearJam => "clearjam",
+    }
+}
+
+const fn combat_transaction_outcome_label(outcome: CombatTransactionOutcome) -> &'static str {
+    match outcome {
+        CombatTransactionOutcome::Fired => "fired",
+        CombatTransactionOutcome::Jammed => "jammed",
+        CombatTransactionOutcome::Reloaded => "reloaded",
+        CombatTransactionOutcome::Cleared => "cleared",
+        CombatTransactionOutcome::AlreadyClear => "alreadyclear",
+    }
+}
+
+const fn combat_rng_domain_label(domain: CombatRngDomain) -> &'static str {
+    match domain {
+        CombatRngDomain::FireJam => "firejam",
+        CombatRngDomain::ReloadJam => "reloadjam",
+    }
 }
 
 const fn action_label(action: WeaponAction) -> &'static str {

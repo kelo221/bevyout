@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::condition::JamReason;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MagazineState {
     pub ammo_form_id: Option<u32>,
@@ -20,6 +22,8 @@ impl MagazineState {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ItemCombatState {
     pub magazine: MagazineState,
+    #[serde(default)]
+    pub jam: Option<JamReason>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -38,7 +38,7 @@ use crate::vsa::PreparedInventoryEntry;
 use crate::vsa::PreparedSemantic;
 use crate::vsa::{PreparedPlacement, PreparedSceneManifest, is_bake_static};
 
-use super::super::{actor, animation, interaction, player};
+use super::super::{actor, animation, interaction, player, weapon};
 use super::persist_policy;
 use super::preload::{ActiveCell, ResidentCells};
 
@@ -993,6 +993,10 @@ pub(crate) fn write_save_slot(world: &mut World, slot: &str) -> anyhow::Result<P
         rng_state: world
             .get_resource::<PlaythroughSeed>()
             .map(|seed| seed.0)
+            .unwrap_or_default(),
+        combat_rng: world
+            .get_resource::<weapon::CombatRngRuntime>()
+            .map(|rng| rng.0.clone())
             .unwrap_or_default(),
         canonical: world
             .get_resource::<interaction::CanonicalItemLedger>()
