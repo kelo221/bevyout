@@ -77,4 +77,26 @@ actor acceptance remain independent pending gates.
 
 ## Shipped amendments
 
-_Wave kickoff; no implementation commits integrated yet._
+### A1 — policy lanes integrated
+
+- W5-A #281 was implemented by executor commit `6d5c755a` and integrated on
+  `M6-OutCell` as `d965c7e9`. It hardens the existing pure time-of-day policy
+  against non-finite clock/keyframe inputs, makes weather-transition progress
+  bounded for degenerate values, and labels preview profiles as authoritative
+  or fallback without adding a second environment authority. Dedicated tests
+  cover the cell → worldspace → parent-climate chain and missing records.
+- W5-B #282 was implemented by executor commit `921be5a7` and integrated as
+  `9c826c4d`. The new pure `local_light_policy` retains worldspace/cell/grid
+  ownership, ranks valid candidates by deterministic distance/FormID/owner
+  order, enforces a fixed budget, and rejects invalid presentation inputs.
+  It does not change `PreparedExteriorLight`, prepared revisions, or Bevy
+  runtime systems; W5-C will consume the policy later.
+- Post-merge evidence on `M6-OutCell`: `cargo test` passed 1,656 Rust tests
+  plus 83 features / 633 scenarios / 3,130 steps; `cargo clippy
+  --all-targets -- -D warnings`, `cargo check-dev`, and `cargo run-dev --
+  prepare --help` passed; changed-file rustfmt and `git diff --check` passed.
+  `cargo fmt --all -- --check` remains red only on the six pre-existing
+  unrelated files recorded in the wave plan.
+- No W5-C runtime integration or real-data environment/light acceptance is
+  claimed. W4-C, W2 current-v21 route evidence, and W3 runtime actor
+  acceptance remain pending.
