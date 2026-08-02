@@ -43,11 +43,16 @@ impl Default for ColorKeyframes {
 }
 
 pub fn normalize_hour(hour: f32) -> f32 {
+    if !hour.is_finite() {
+        return 0.0;
+    }
     hour.rem_euclid(HOURS_PER_DAY)
 }
 
 pub fn advance_game_hour(current_hour: f32, timescale: f32, real_delta_seconds: f32) -> f32 {
-    normalize_hour(current_hour + timescale.max(0.0) * real_delta_seconds.max(0.0) / 3600.0)
+    let timescale = finite_nonnegative(timescale);
+    let real_delta_seconds = finite_nonnegative(real_delta_seconds);
+    normalize_hour(normalize_hour(current_hour) + timescale * real_delta_seconds / 3600.0)
 }
 
 pub fn uses_dynamic_lighting(
@@ -76,6 +81,7 @@ pub fn interpolate_keyframes(
     timings: DayNightTimings,
     hour: f32,
 ) -> [f32; 4] {
+    let keyframes = finite_keyframes(keyframes);
     let hour = normalize_hour(hour);
     if let Some(progress) =
         cyclic_window_progress(hour, timings.sunrise_begin_hour, timings.sunrise_end_hour)
@@ -114,7 +120,40 @@ fn midpoint_lerp(begin: [f32; 4], midpoint: [f32; 4], end: [f32; 4], progress: f
 }
 
 fn lerp_rgba(from: [f32; 4], to: [f32; 4], amount: f32) -> [f32; 4] {
-    std::array::from_fn(|index| from[index] + (to[index] - from[index]) * amount)
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    std::array::from_fn(|index| {
+        finite_or_zero(from[index])
+            + (finite_or_zero(to[index]) - finite_or_zero(from[index])) * amount
+    })
+}
+
+fn finite_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn finite_color(color: [f32; 4]) -> [f32; 4] {
+    std::array::from_fn(|index| finite_or_zero(color[index]))
+}
+
+fn finite_keyframes(keyframes: ColorKeyframes) -> ColorKeyframes {
+    ColorKeyframes {
+        sunrise: finite_color(keyframes.sunrise),
+        day: finite_color(keyframes.day),
+        sunset: finite_color(keyframes.sunset),
+        night: finite_color(keyframes.night),
+    }
 }
 
 #[cfg(test)]
