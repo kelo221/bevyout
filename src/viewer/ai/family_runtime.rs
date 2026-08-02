@@ -34,10 +34,10 @@ use crate::viewer::actor_animation::request_actor_animation;
 use crate::viewer::interaction;
 use crate::viewer::nav::agent;
 
-/// Default arrival tolerance (metres) a family treats a waypoint as reached
-/// within, even before the nav agent's own reached-target latch. Loose enough
-/// that a KCC stopped a step short of the exact point still counts as arrived.
-pub(crate) const DEFAULT_ARRIVAL_TOLERANCE: f32 = 1.5;
+/// Compatibility re-export for the Bevy adapter and console callers. The
+/// policy lives in the pure family module so feature tests exercise the same
+/// value as runtime package drivers.
+pub(crate) use super::families::DEFAULT_ARRIVAL_TOLERANCE;
 
 /// The set of interaction points currently occupied by an eat/sleep package,
 /// so a second actor's family does not claim furniture already in use
@@ -356,6 +356,17 @@ impl Plugin for AiPackagePlugin {
 /// the second pass's `position`/`entity` overwrite the first's for any
 /// reference that is actually spawned, which is the live position that
 /// matters once the actor has moved.
+///
+/// The authored placement yaw is retained for patrol-marker dwell poses. The
+/// same `EulerRot::YXZ` convention is used by nav-facing code and by the
+/// runtime pose writer, so pitch/roll are intentionally discarded here.
+fn placement_yaw(rotation_xyzw: [f32; 4]) -> f32 {
+    Quat::from_array(rotation_xyzw)
+        .normalize()
+        .to_euler(EulerRot::YXZ)
+        .0
+}
+
 pub(crate) fn build_resolution_context(
     world: &mut World,
     actor_reference_form_id: u32,
@@ -378,6 +389,7 @@ pub(crate) fn build_resolution_context(
                 position: placement.translation,
                 entity: None,
                 linked_reference: placement.linked_reference_form_id,
+                orientation_yaw: Some(placement_yaw(placement.rotation_xyzw)),
             };
             if placement.reference_form_id == actor_reference_form_id {
                 actor_position = placement.translation;
@@ -411,6 +423,7 @@ pub(crate) fn build_resolution_context(
                 position,
                 entity: Some(entity.to_bits()),
                 linked_reference: placement.linked_reference_form_id,
+                orientation_yaw: Some(transform.rotation.to_euler(EulerRot::YXZ).0),
             },
         );
         if placement.reference_form_id == actor_reference_form_id {

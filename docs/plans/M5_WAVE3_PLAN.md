@@ -115,3 +115,10 @@ state rather than create a second authority.
   decoded meaning is nevertheless revision-gated by item catalog
   `openmw-items-v10-combat-condition` and prepare revision
   `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.
+
+- A3 (shipped): PR #271 merged Wave 3 on 2026-08-01 and closed #262, #263,
+  #266, and #265. The merged verification is recorded in the PR and manual:
+  repository gates passed; the real `00017f37` prepare completed; and the
+  live bridge demonstrated condition degradation, a fire jam, idempotent jam
+  clearing with stable item identity, and save/load restoration of condition
+  and combat RNG state.

@@ -8,6 +8,7 @@ fn reference(reference_form_id: u32, base: u32, position: [f32; 3]) -> ResolvedR
         position,
         entity: Some(u64::from(reference_form_id)),
         linked_reference: None,
+        orientation_yaw: None,
     }
 }
 
@@ -45,8 +46,18 @@ fn near_reference_resolves_to_that_references_position_and_entity() {
     let resolved = resolve_location(&location(0, Some(0x20), 7), &context).unwrap();
     assert_eq!(resolved.position, [3.0, 4.0, 5.0]);
     assert_eq!(resolved.entity, Some(0x20));
-    assert_eq!(resolved.radius, 7.0);
+    assert!((resolved.radius - 7.0 / 70.0).abs() < f32::EPSILON);
     assert_eq!(resolved.source, ResolutionSource::Reference(0x20));
+}
+
+#[test]
+fn package_location_radius_scales_native_units_once_and_clamps_non_positive_values() {
+    let context = context_with(vec![]);
+    let resolved = resolve_location(&location(2, None, 1024), &context).unwrap();
+    assert!((resolved.radius - 1024.0 / 70.0).abs() < 1e-6);
+
+    let negative = resolve_location(&location(2, None, -4), &context).unwrap();
+    assert_eq!(negative.radius, 0.0);
 }
 
 #[test]
@@ -151,8 +162,31 @@ fn specific_reference_target_resolves() {
     };
     let resolved = resolve_target(&target, &context).unwrap();
     assert_eq!(resolved.position, [1.0, 1.0, 1.0]);
-    assert_eq!(resolved.radius, 5.0);
+    assert!((resolved.radius - 5.0 / 70.0).abs() < f32::EPSILON);
     assert_eq!(resolved.source, ResolutionSource::Reference(0x40));
+}
+
+#[test]
+fn package_target_distance_scales_native_units_once_and_clamps_non_positive_values() {
+    let context = context_with(vec![reference(0x40, 0xCC, [1.0, 1.0, 1.0])]);
+    let target = PackageTarget {
+        target_type: 0,
+        form_id: Some(0x40),
+        raw_value: 0x40,
+        count_or_distance: 1024,
+    };
+    let resolved = resolve_target(&target, &context).unwrap();
+    assert!((resolved.radius - 1024.0 / 70.0).abs() < 1e-6);
+
+    let negative = resolve_target(
+        &PackageTarget {
+            count_or_distance: -4,
+            ..target
+        },
+        &context,
+    )
+    .unwrap();
+    assert_eq!(negative.radius, 0.0);
 }
 
 #[test]
@@ -263,6 +297,24 @@ fn linked_reference_chain_terminates_cleanly_on_a_broken_or_missing_link() {
     let points = linked_reference_chain(&dangling_context, 0x10);
     assert_eq!(points.len(), 1);
     assert_eq!(points[0].position, [5.0, 5.0, 5.0]);
+}
+
+#[test]
+fn linked_reference_point_preserves_authored_marker_heading() {
+    let context = context_with(vec![ResolvedReference {
+        orientation_yaw: Some(2.5),
+        ..linked_marker(0x10, [1.0, 2.0, 3.0], None)
+    }]);
+    let points = linked_reference_chain(&context, 0x10);
+    assert_eq!(point_orientation_yaw(&context, &points[0]), Some(2.5));
+
+    let non_marker = ResolvedPoint {
+        position: [0.0; 3],
+        entity: None,
+        radius: 0.0,
+        source: ResolutionSource::ActorPosition,
+    };
+    assert_eq!(point_orientation_yaw(&context, &non_marker), None);
 }
 
 #[test]

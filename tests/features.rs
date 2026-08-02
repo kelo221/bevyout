@@ -12467,6 +12467,7 @@ async fn given_resolvable_reference(
             position: [x, y, z],
             entity: Some(u64::from(reference_form_id)),
             linked_reference: None,
+            orientation_yaw: None,
         },
     );
     world
@@ -12557,7 +12558,7 @@ async fn then_location_resolves_via(world: &mut BevyoutWorld, label: String) {
 
 #[then(regex = r"^the target radius is ([\d.]+)$")]
 async fn then_target_radius_is(world: &mut BevyoutWorld, radius: f32) {
-    assert_eq!(ai_res_point(world).radius, radius);
+    assert!((ai_res_point(world).radius - radius).abs() < 1e-5);
 }
 
 #[then(regex = r#"^the location is unresolved with diagnostic containing "([^"]*)"$"#)]
@@ -15015,7 +15016,117 @@ async fn then_steady_clamp_frame_performs_no_full_pass(world: &mut BevyoutWorld)
 async fn then_steady_clamp_frame_needed_no_full_pass(world: &mut BevyoutWorld) {
     assert_eq!(world.clamp_full_pass_ran, Some(false));
 }
+// =======================================================================
+// -- M4 gate wave: #222/#231/#242 ----------------------------------------
+// Appended merge-seam steps for the pure resolver and patrol regressions.
+// =======================================================================
 
+#[then(regex = r"^the location radius is ([\d.]+)$")]
+async fn then_location_radius_is(world: &mut BevyoutWorld, radius: f32) {
+    assert!((ai_res_point(world).radius - radius).abs() < 1e-5);
+}
+
+#[given(
+    regex = r"^a patrol family over markers \(([^)]*)\) then \(([^)]*)\) then \(([^)]*)\) with tolerance ([0-9.]+)$"
+)]
+async fn given_short_tolerance_patrol_family(
+    world: &mut BevyoutWorld,
+    a: String,
+    b: String,
+    c: String,
+    tolerance: String,
+) {
+    let markers = [pf_parse_point(&a), pf_parse_point(&b), pf_parse_point(&c)];
+    let tolerance: f32 = tolerance.parse().expect("tolerance");
+    world.pf_markers = markers.to_vec();
+    let waypoints = markers
+        .iter()
+        .map(|position| ai_families::Waypoint::at(*position))
+        .collect();
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Patrol,
+        waypoints,
+        tolerance,
+    ));
+}
+
+#[given(
+    regex = r"^a patrol family with default marker dwell over markers \(([^)]*)\) then \(([^)]*)\) then \(([^)]*)\)$"
+)]
+async fn given_default_dwell_patrol_family(
+    world: &mut BevyoutWorld,
+    a: String,
+    b: String,
+    c: String,
+) {
+    let markers = [pf_parse_point(&a), pf_parse_point(&b), pf_parse_point(&c)];
+    world.pf_markers = markers.to_vec();
+    let waypoints = markers
+        .iter()
+        .map(|position| ai_families::Waypoint::patrol_marker(*position, None))
+        .collect();
+    world.pf_driver = Some(ai_families::FamilyDriver::new(
+        ai_families::PackageFamily::Patrol,
+        waypoints,
+        ai_families::DEFAULT_ARRIVAL_TOLERANCE,
+    ));
+}
+
+#[when(regex = r"^the actor remains at patrol marker ([0-9]+) for (\d+) ticks$")]
+async fn when_actor_remains_at_patrol_marker(world: &mut BevyoutWorld, index: usize, ticks: usize) {
+    let position = world.pf_markers[index];
+    for _ in 0..ticks {
+        pf_tick(world, position, true);
+    }
+}
+
+#[when(regex = r"^the patrol family ticks ([\d.]+) seconds at patrol marker ([0-9]+)$")]
+async fn when_patrol_family_ticks_at_marker(world: &mut BevyoutWorld, seconds: f32, index: usize) {
+    let position = world.pf_markers[index];
+    let observation = ai_families::FamilyObservation::new(position, true, false);
+    let step = pf_driver(world).tick(&observation, seconds);
+    world.pf_step = Some(step);
+}
+
+#[then(regex = r"^the family remains at patrol marker ([0-9]+)$")]
+async fn then_family_remains_at_patrol_marker(world: &mut BevyoutWorld, index: usize) {
+    assert_eq!(pf_driver(world).marker_index(), index);
+    assert_ne!(
+        pf_step(world).signal,
+        ai_families::LifecycleSignal::AdvanceStep,
+        "stationary patrol must not advance repeatedly"
+    );
+}
+
+#[then(regex = r"^the family stops at patrol marker ([0-9]+) for its dwell$")]
+async fn then_family_stops_at_patrol_marker(world: &mut BevyoutWorld, index: usize) {
+    assert_eq!(pf_driver(world).marker_index(), index);
+    assert_eq!(pf_driver(world).step_label(), "waiting");
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Stop)
+    );
+    assert_eq!(
+        pf_step(world).signal,
+        ai_families::LifecycleSignal::Continue
+    );
+}
+
+#[then(regex = r"^the family holds idle at patrol marker ([0-9]+)$")]
+async fn then_family_holds_idle_at_patrol_marker(world: &mut BevyoutWorld, index: usize) {
+    assert_eq!(pf_driver(world).marker_index(), index);
+    assert_eq!(pf_driver(world).step_label(), "waiting");
+    assert_eq!(
+        pf_step(world).request,
+        Some(ai_families::FamilyRequest::Play(
+            ai_families::FamilyAnimation::Idle
+        ))
+    );
+    assert_eq!(
+        pf_step(world).signal,
+        ai_families::LifecycleSignal::Continue
+    );
+}
 // ---------------------------------------------------------------------
 // m6_wave2_exterior.feature -- generation-aware reversal and process memory.
 // ---------------------------------------------------------------------

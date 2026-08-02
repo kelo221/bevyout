@@ -35,6 +35,17 @@ use std::collections::HashSet;
 /// brief calls for -- so a transient off-mesh blip does not abandon the route.
 const MAX_ROUTE_REISSUES: u32 = 3;
 
+/// Default family arrival tolerance in metres. It is deliberately only a
+/// little wider than nav's 0.5m reached-target distance: it catches a KCC
+/// stopping just short without making a short authored patrol leg appear
+/// complete before the actor has actually travelled it.
+pub const DEFAULT_ARRIVAL_TOLERANCE: f32 = 0.75;
+
+/// Default idle dwell for a patrol marker. Fallout 3's per-reference patrol
+/// wait field is not decoded or present in `PreparedPlacement`, so this
+/// explicit runtime policy keeps the actor visibly stopped at each marker.
+pub const PATROL_MARKER_DWELL_SECONDS: f32 = 3.0;
+
 /// The seven package families this driver drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageFamily {
@@ -199,6 +210,17 @@ impl Waypoint {
             position,
             wait_seconds: 0.0,
             orientation_yaw: None,
+            interaction_point: None,
+        }
+    }
+
+    /// Builds a patrol marker with its default dwell and authored heading.
+    #[must_use]
+    pub fn patrol_marker(position: [f32; 3], orientation_yaw: Option<f32>) -> Self {
+        Self {
+            position,
+            wait_seconds: PATROL_MARKER_DWELL_SECONDS,
+            orientation_yaw,
             interaction_point: None,
         }
     }
@@ -394,6 +416,10 @@ pub struct FamilyDriver {
     /// Bevy adapter can log the specific blocking door and the console can
     /// report it.
     blocked_door: Option<u32>,
+    /// The marker most recently departed. A patrol cannot accept the next
+    /// arrival until the actor has moved outside the previous marker's
+    /// tolerance, preventing short chains from advancing every tick.
+    departed_marker: Option<[f32; 3]>,
 }
 
 impl FamilyDriver {
@@ -424,6 +450,7 @@ impl FamilyDriver {
             follow: None,
             wander: None,
             blocked_door: None,
+            departed_marker: None,
         }
     }
 
@@ -574,6 +601,13 @@ impl FamilyDriver {
                 <= self.arrival_tolerance * self.arrival_tolerance
     }
 
+    fn has_left_departed_marker(&self, obs: &FamilyObservation) -> bool {
+        self.departed_marker.is_none_or(|anchor| {
+            distance_squared(obs.actor_position, anchor)
+                > self.arrival_tolerance * self.arrival_tolerance
+        })
+    }
+
     /// Emits a `Route` only when the destination changed (idempotent otherwise).
     fn ensure_route(&mut self, target: [f32; 3]) -> Option<FamilyRequest> {
         if self.routed_target == Some(target) {
@@ -626,16 +660,16 @@ impl FamilyDriver {
                 LifecycleSignal::Continue,
             );
         }
-        if self.arrived(obs, target) {
+        if self.has_left_departed_marker(obs) && self.arrived(obs, target) {
             let wait = self.waypoints[self.index].wait_seconds;
             if wait > 0.0 {
                 self.waiting = true;
                 self.wait_remaining = wait;
                 self.progress = Progress::Waiting;
-                return FamilyStep::new(
-                    self.ensure_play(FamilyAnimation::Idle),
-                    LifecycleSignal::Continue,
-                );
+                // Clear navigation before requesting the idle pose. The
+                // adapter applies at most one request per tick, so the idle
+                // is emitted on the following tick.
+                return FamilyStep::new(Some(FamilyRequest::Stop), LifecycleSignal::Continue);
             }
             return self.advance_marker();
         }
@@ -650,6 +684,7 @@ impl FamilyDriver {
             self.progress = Progress::Done;
             return FamilyStep::new(None, LifecycleSignal::Complete);
         }
+        self.departed_marker = Some(self.waypoints[self.index].position);
         self.index = (self.index + 1) % self.waypoints.len();
         self.routed_target = None;
         self.last_play = None;

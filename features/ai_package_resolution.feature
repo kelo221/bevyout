@@ -36,7 +36,20 @@ Feature: AI package location and target resolution
     And a package target of type 0 referencing 0x00000040 distance 5
     When the package target is resolved
     Then the target resolves to 1.0 1.0 1.0
-    And the target radius is 5.0
+    And the target radius is 0.07142857
+
+  Scenario: A native Sandbox radius resolves to metres exactly once
+    Given the resolving actor is at 0.0 0.0 0.0
+    And a package location of type 2 referencing 0x00000000 radius 1024
+    When the package location is resolved
+    Then the location radius is 14.628571
+
+  Scenario: A native target distance resolves to metres exactly once
+    Given a resolvable reference 0x00000040 of base 0x000000CC at 1.0 1.0 1.0
+    And a package target of type 0 referencing 0x00000040 distance 1024
+    When the package target is resolved
+    Then the target resolves to 1.0 1.0 1.0
+    And the target radius is 14.628571
 
   Scenario: An object-id target picks the nearest instance of the base
     Given the resolving actor is at 0.0 0.0 0.0

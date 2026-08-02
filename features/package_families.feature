@@ -19,6 +19,22 @@ Feature: AI package families (#196 Travel/Patrol, #197 Idle/Eat/Sleep)
     When the actor arrives at patrol marker 2
     Then the family advances to patrol marker 0
 
+  Scenario: A short patrol leg does not advance while the actor is stationary
+    Given a patrol family over markers (0,0,0) then (1.4575,0,0) then (10,0,0) with tolerance 1.5
+    When the actor arrives at patrol marker 0
+    Then the family advances to patrol marker 1
+    When the actor remains at patrol marker 0 for 20 ticks
+    Then the family remains at patrol marker 1
+
+  Scenario: A patrol stops and idles at a marker before departing
+    Given a patrol family with default marker dwell over markers (0,0,0) then (10,0,0) then (10,0,10)
+    When the actor arrives at patrol marker 0
+    Then the family stops at patrol marker 0 for its dwell
+    When the patrol family ticks 2.0 seconds at patrol marker 0
+    Then the family holds idle at patrol marker 0
+    When the patrol family ticks 1.1 seconds at patrol marker 0
+    Then the family advances to patrol marker 1
+
   Scenario: Idle routes to its location then plays the idle animation
     Given an idle family at (5, 0, 0) with tolerance 0.5
     When the actor is at (0, 0, 0) still en route

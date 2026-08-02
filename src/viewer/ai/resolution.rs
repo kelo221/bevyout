@@ -20,6 +20,16 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Fallout 3 package distances use the same native-unit basis as placements.
+/// Keep this pure runtime conversion local so the resolver remains std-only;
+/// positions have already crossed the prepare boundary, while PLDT/PTDT
+/// distances have not.
+const FO3_SCALE: f32 = 1.0 / 70.0;
+
+fn native_distance_to_metres(value: i32) -> f32 {
+    value.max(0) as f32 * FO3_SCALE
+}
+
 /// Plain mirror of `PackageLocationInput` (`PLDT`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PackageLocation {
@@ -51,6 +61,10 @@ pub struct ResolvedReference {
     /// carried through so the patrol marker chain-walk can hop from one
     /// resolved marker to the next without a second lookup pass.
     pub linked_reference: Option<u32>,
+    /// This reference's authored facing yaw in radians (issue #242), when the
+    /// runtime adapter has rotation data for it. Patrol markers use this while
+    /// holding their dwell pose; other references may leave it `None`.
+    pub orientation_yaw: Option<f32>,
 }
 
 /// The runtime snapshot resolution reads. All fields are plain data the Bevy
@@ -110,7 +124,8 @@ impl ResolutionSource {
 pub struct ResolvedPoint {
     pub position: [f32; 3],
     pub entity: Option<u64>,
-    /// The `PLDT` radius, or a `PTDT` distance -- always non-negative.
+    /// The `PLDT` radius, or a `PTDT` distance, in Bevy metres -- always
+    /// non-negative.
     pub radius: f32,
     pub source: ResolutionSource,
 }
@@ -183,7 +198,7 @@ fn reference_point(
 /// Resolves a `PLDT` location. `location_type` follows fopdoc's Fallout3 PACK
 /// page (0 Near Reference .. 7 At Package Location).
 pub fn resolve_location(location: &PackageLocation, context: &ResolutionContext) -> Resolution {
-    let radius = (location.radius.max(0)) as f32;
+    let radius = native_distance_to_metres(location.radius);
     match location.location_type {
         // Near Reference.
         0 => {
@@ -292,7 +307,7 @@ pub fn resolve_location(location: &PackageLocation, context: &ResolutionContext)
 /// Resolves a `PTDT` target. `target_type` follows fopdoc's Fallout3 PACK page
 /// (0 Specific Reference, 1 Object ID, 2 Object Type, 3 Linked/Follow).
 pub fn resolve_target(target: &PackageTarget, context: &ResolutionContext) -> Resolution {
-    let radius = (target.count_or_distance.max(0)) as f32;
+    let radius = native_distance_to_metres(target.count_or_distance);
     match target.target_type {
         // Specific Reference.
         0 => {
@@ -388,6 +403,17 @@ pub fn linked_reference_chain(context: &ResolutionContext, start: u32) -> Vec<Re
         current = reference.linked_reference;
     }
     points
+}
+
+/// Returns the authored facing yaw for a point produced by a linked-reference
+/// patrol chain. Keeping this lookup separate leaves `ResolvedPoint` usable by
+/// every location/target family without adding marker-only presentation data.
+#[must_use]
+pub fn point_orientation_yaw(context: &ResolutionContext, point: &ResolvedPoint) -> Option<f32> {
+    let ResolutionSource::LinkedReference(form_id) = point.source else {
+        return None;
+    };
+    context.references.get(&form_id)?.orientation_yaw
 }
 
 /// Resolves a package's location/target into a world point for a family,
