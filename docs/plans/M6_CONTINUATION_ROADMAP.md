@@ -6,9 +6,12 @@ rewrite the original proposal in [WorldPlan.md](WorldPlan.md): PR #261 shipped
 parts of its original waves 1 through 8 in one foundation PR, so this document
 rebaselines the remaining work into executable waves 2 through 9.
 
-The next implementation wave is **M6 wave 2**. Waves 7, 8, and 9 retain their
-existing meanings and manuals: bounded gate #87, LOD/presentation, and final
-route gate #14 respectively.
+The W2 implementation and the W3-A/B, W4-A/B, W5-A/B, and W6-A/B preparation
+lanes are now integrated. The active continuation work is W2 real-data
+acceptance plus W6-C numeric-threshold sign-off; W3-C, W4-C, and W5-C remain
+sequenced behind their documented runtime dependencies. Waves 7, 8, and 9
+retain their existing meanings and manuals: bounded gate #87, LOD/presentation,
+and final route gate #14 respectively.
 
 ## Execution model recommendation
 
