@@ -607,6 +607,19 @@ fn actor_animation_cache_readiness(
                 "actor animation set is missing for actor animation mapping".into(),
             );
         };
+        if mapping.kind == PreparedActorAnimationKind::Creature
+            && !set.clips.iter().any(|clip| {
+                clip.status
+                    == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+            })
+        {
+            // Creature coverage is not yet universal (for example the
+            // Protectron set can be mapped but have no compatible native KF
+            // clips). Do not make an otherwise repairable humanoid cache
+            // unlaunchable; the actor runtime will retain its normal static
+            // fallback diagnostics for this unsupported set.
+            continue;
+        }
         if let Some(reason) =
             actor_animation_set_repair_reason(set, mapping.kind, female, &asset_root)
         {
