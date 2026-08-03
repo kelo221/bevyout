@@ -180,6 +180,12 @@ mod animation_policy;
 #[allow(dead_code, unused_imports)]
 mod actor_animation_policy;
 
+// Lane D idle authority/selection is pure std/serde-only and is included
+// verbatim so the executable feature suite drives the runtime policy seam.
+#[path = "../src/viewer/actor_animation/idle_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod actor_idle_policy;
+
 #[path = "../src/vsa/bake/policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod bake_policy;
@@ -1174,6 +1180,19 @@ struct BevyoutWorld {
     authored_idle_conversion_set_count: usize,
     authored_idle_conversion_clip_count: usize,
     authored_idle_revision: Option<String>,
+
+    // -- actor_animation_gameflow.feature Lane D idle runtime/policy seam --
+    idle_lifecycle: actor_idle_policy::IdleLifecycleFacts,
+    idle_package: Option<actor_idle_policy::IdlePackageContext>,
+    idle_global_definitions: Vec<actor_animation::PreparedActorIdleDefinition>,
+    idle_selected: Option<actor_idle_policy::IdleSelection>,
+    idle_decision: Option<actor_idle_policy::IdleDecision>,
+    idle_authority: actor_idle_policy::IdleAuthority,
+    idle_same_epoch_selection: Option<(
+        actor_idle_policy::IdleDecision,
+        actor_idle_policy::IdleDecision,
+    )>,
+    idle_loop_count: Option<u8>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -16438,5 +16457,519 @@ async fn then_lane_c_revision(world: &mut BevyoutWorld, expected: String) {
     assert_eq!(
         world.authored_idle_revision.as_deref(),
         Some(expected.as_str())
+    );
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_gameflow.feature Lane D idle authority/selection seam.
+// ---------------------------------------------------------------------
+
+#[derive(Default)]
+struct FeatureIdleConditions {
+    unsupported: bool,
+    false_condition: bool,
+}
+
+impl actor_idle_policy::IdleConditionEvaluator for FeatureIdleConditions {
+    fn evaluate(
+        &self,
+        conditions: &[Vec<u8>],
+        _random_percent: u8,
+        _facts: &actor_idle_policy::IdleRuntimeFacts,
+    ) -> actor_idle_policy::IdleConditionOutcome {
+        if self.unsupported && !conditions.is_empty() {
+            actor_idle_policy::IdleConditionOutcome::Unevaluable
+        } else if self.false_condition && !conditions.is_empty() {
+            actor_idle_policy::IdleConditionOutcome::False
+        } else {
+            actor_idle_policy::IdleConditionOutcome::True
+        }
+    }
+}
+
+fn feature_idle_definition(form_id: u32) -> actor_animation::PreparedActorIdleDefinition {
+    actor_animation::PreparedActorIdleDefinition {
+        form_id,
+        clip_name: Some(format!("idle_{form_id:08x}")),
+        group_section_raw: actor_idle_policy::SPECIAL_IDLE_GROUP,
+        group_section: actor_idle_policy::SPECIAL_IDLE_GROUP,
+        ..Default::default()
+    }
+}
+
+fn feature_idle_evaluator(world: &BevyoutWorld) -> FeatureIdleConditions {
+    FeatureIdleConditions {
+        unsupported: world
+            .idle_global_definitions
+            .iter()
+            .any(|definition| definition.conditions == vec![vec![0xff]]),
+        false_condition: world
+            .idle_global_definitions
+            .iter()
+            .any(|definition| definition.conditions == vec![vec![0xfe]]),
+    }
+}
+
+fn feature_idle_select(
+    world: &mut BevyoutWorld,
+    now_seconds: f32,
+    trigger: actor_idle_policy::IdleEvaluationTrigger,
+) {
+    let evaluator = feature_idle_evaluator(world);
+    world.idle_decision = Some(world.idle_authority.select(
+        0x0000_1234,
+        now_seconds,
+        world.idle_lifecycle,
+        &actor_idle_policy::IdleRuntimeFacts::default(),
+        world.idle_package.as_ref(),
+        &world.idle_global_definitions,
+        trigger,
+        &evaluator,
+    ));
+    if let Some(actor_idle_policy::IdleDecision::Selected(selection)) = &world.idle_decision {
+        world.idle_selected = Some(selection.clone());
+    }
+}
+
+#[given("a stationary alive loaded actor with no equipment transition")]
+async fn given_idle_stationary_actor(world: &mut BevyoutWorld) {
+    world.idle_lifecycle = actor_idle_policy::IdleLifecycleFacts {
+        alive: true,
+        loaded: true,
+        ..Default::default()
+    };
+}
+
+#[given("the actor lifecycle is moving, dead, ragdolled, unloaded, or equipment-transitioning")]
+async fn given_idle_invalid_lifecycle(world: &mut BevyoutWorld) {
+    world.idle_lifecycle.moving = true;
+    world.idle_lifecycle.alive = false;
+    world.idle_lifecycle.ragdolled = true;
+    world.idle_lifecycle.loaded = false;
+    world.idle_lifecycle.equipment_transition = true;
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+}
+
+#[when("special idle eligibility is evaluated")]
+async fn when_idle_eligibility(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[then(regex = r#"^special idle selection is rejected with reason \"([^\"]*)\"$"#)]
+async fn then_idle_rejected(world: &mut BevyoutWorld, expected: String) {
+    let actual = match &world.idle_decision {
+        Some(actor_idle_policy::IdleDecision::Rejected(reason)) => *reason,
+        other => panic!("expected idle rejection, got {other:?}"),
+    };
+    if expected == "invalid_lifecycle" {
+        assert!(matches!(
+            actual,
+            actor_idle_policy::IdleRejectionReason::Moving
+                | actor_idle_policy::IdleRejectionReason::Dead
+                | actor_idle_policy::IdleRejectionReason::Ragdolled
+                | actor_idle_policy::IdleRejectionReason::Unloaded
+                | actor_idle_policy::IdleRejectionReason::EquipmentTransition
+        ));
+    } else {
+        assert_eq!(
+            actual,
+            actor_idle_policy::IdleRejectionReason::from_label(&expected)
+                .unwrap_or_else(|| panic!("unknown idle rejection {expected}")),
+        );
+    }
+}
+
+#[then(regex = r#"^the second special idle selection is rejected with reason \"([^\"]*)\"$"#)]
+async fn then_second_idle_rejected(world: &mut BevyoutWorld, expected: String) {
+    then_idle_rejected(world, expected).await;
+}
+
+#[given(regex = r#"^an active package with No idle anims and a global authored idle$"#)]
+async fn given_idle_no_idle_package(world: &mut BevyoutWorld) {
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: actor_idle_policy::NO_IDLE_ANIMS_FLAG,
+        collection: None,
+    });
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+}
+
+#[when("automatic special idle selection is evaluated")]
+async fn when_automatic_idle_selection(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given(
+    regex = r#"^an active package idle collection \"([^\"]*)\" and a global authored idle \"([^\"]*)\"$"#
+)]
+async fn given_idle_package_over_global(
+    world: &mut BevyoutWorld,
+    package_id: String,
+    global_id: String,
+) {
+    let package_id = parse_hex(package_id.trim_start_matches("0x"));
+    let global_id = parse_hex(global_id.trim_start_matches("0x"));
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG,
+            timer_seconds: 0.0,
+            animation_form_ids: vec![package_id],
+        }),
+    });
+    world.idle_global_definitions = vec![
+        feature_idle_definition(package_id),
+        feature_idle_definition(global_id),
+    ];
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[then(regex = r#"^the selected special idle is \"([^\"]*)\" from source \"([^\"]*)\"$"#)]
+async fn then_idle_selected(world: &mut BevyoutWorld, form_id: String, source: String) {
+    let selected = world.idle_selected.as_ref().expect("selected idle");
+    assert_eq!(
+        selected.form_id,
+        parse_hex(form_id.trim_start_matches("0x"))
+    );
+    assert_eq!(selected.source.label(), source);
+}
+
+#[given(regex = r#"^a sequence do-once package idle collection \"([^\"]*)\"$"#)]
+async fn given_idle_sequence_collection(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG | actor_idle_policy::DO_ONCE_FLAG,
+            timer_seconds: 0.0,
+            animation_form_ids: ids.clone(),
+        }),
+    });
+    world.idle_global_definitions = ids.into_iter().map(feature_idle_definition).collect();
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[when("the package idle collection is evaluated twice")]
+async fn when_idle_collection_twice(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    let first = world.idle_selected.clone().expect("first idle");
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    let second = world.idle_selected.clone().expect("second idle");
+    world.idle_same_epoch_selection = Some((
+        actor_idle_policy::IdleDecision::Selected(first),
+        actor_idle_policy::IdleDecision::Selected(second),
+    ));
+}
+
+#[then(regex = r#"^the selected special idles are \"([^\"]*)\"$"#)]
+async fn then_idle_collection_values(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world.idle_same_epoch_selection.as_ref() {
+        Some((
+            actor_idle_policy::IdleDecision::Selected(first),
+            actor_idle_policy::IdleDecision::Selected(second),
+        )) => {
+            format!("0x{:08x},0x{:08x}", first.form_id, second.form_id)
+        }
+        other => panic!("expected two idle selections, got {other:?}"),
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("the package idle collection is exhausted")]
+async fn then_idle_collection_exhausted(world: &mut BevyoutWorld) {
+    assert!(world.idle_authority.do_once_exhausted);
+}
+
+#[given(regex = r#"^a random package idle collection \"([^\"]*)\"$"#)]
+async fn given_idle_random_collection(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: 0,
+            timer_seconds: 0.0,
+            animation_form_ids: ids.clone(),
+        }),
+    });
+    world.idle_global_definitions = ids.into_iter().map(feature_idle_definition).collect();
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[when("the same package idle selection is evaluated twice with the same epoch")]
+async fn when_idle_random_same_epoch(world: &mut BevyoutWorld) {
+    let evaluator = feature_idle_evaluator(world);
+    let package = world.idle_package.clone();
+    let definitions = world.idle_global_definitions.clone();
+    let mut left = actor_idle_policy::IdleAuthority::default();
+    let mut right = actor_idle_policy::IdleAuthority::default();
+    left.selection_epoch = 7;
+    right.selection_epoch = 7;
+    let left_result = left.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        package.as_ref(),
+        &definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    let right_result = right.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        package.as_ref(),
+        &definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    world.idle_same_epoch_selection = Some((left_result, right_result));
+}
+
+#[then("the random package idle selections match")]
+async fn then_idle_random_match(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.idle_same_epoch_selection.as_ref().unwrap().0,
+        world.idle_same_epoch_selection.as_ref().unwrap().1
+    );
+}
+
+#[given(regex = r"^an active package idle timer of ([\d.]+) seconds$")]
+async fn given_idle_timer(world: &mut BevyoutWorld, seconds: f32) {
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG,
+            timer_seconds: seconds,
+            animation_form_ids: vec![1],
+        }),
+    });
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, seconds, true);
+}
+
+#[when(regex = r"^package idle selection is evaluated at ([\d.]+) seconds$")]
+async fn when_idle_at_time(world: &mut BevyoutWorld, seconds: f32) {
+    feature_idle_select(
+        world,
+        seconds,
+        actor_idle_policy::IdleEvaluationTrigger::PackageTimer,
+    );
+}
+
+#[then("package idle selection is eligible")]
+async fn then_idle_package_eligible(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.idle_decision,
+        Some(actor_idle_policy::IdleDecision::Selected(_))
+    ));
+}
+
+#[given(
+    regex = r#"^a global authored idle tree with parent conditions and siblings \"([^\"]*)\"$"#
+)]
+async fn given_idle_global_tree(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    let mut parent = feature_idle_definition(0x10);
+    parent.clip_name = None;
+    let mut first = feature_idle_definition(ids[0]);
+    first.parent_form_id = Some(parent.form_id);
+    first.conditions = vec![vec![0xfe]];
+    let mut second = feature_idle_definition(ids[1]);
+    second.parent_form_id = Some(parent.form_id);
+    second.previous_sibling_form_id = Some(first.form_id);
+    world.idle_global_definitions = vec![second, parent, first];
+}
+
+#[when("global special idle selection is evaluated")]
+async fn when_idle_global(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given("a global authored idle with an unsupported CTDA condition")]
+async fn given_idle_unsupported_condition(world: &mut BevyoutWorld) {
+    let mut definition = feature_idle_definition(1);
+    definition.conditions = vec![vec![0xff]];
+    world.idle_global_definitions = vec![definition];
+}
+
+#[given(regex = r"^a global authored idle with a (\d+) second replay delay$")]
+async fn given_idle_replay_delay(world: &mut BevyoutWorld, seconds: i16) {
+    let mut definition = feature_idle_definition(1);
+    definition.replay_delay_seconds = seconds;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("global special idle selection is evaluated twice immediately")]
+async fn when_idle_global_twice(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given(regex = r"^an authored special idle with loop bounds (\d+) and (\d+)$")]
+async fn given_idle_loop_bounds(world: &mut BevyoutWorld, min: u8, max: u8) {
+    let mut definition = feature_idle_definition(1);
+    definition.loop_min = min;
+    definition.loop_max = max;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("the special idle loop count is selected")]
+async fn when_idle_loop_count(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    world.idle_loop_count = world
+        .idle_selected
+        .as_ref()
+        .map(|selection| selection.loop_count);
+}
+
+#[then(regex = r"^the loop count is between (\d+) and (\d+) inclusive$")]
+async fn then_idle_loop_range(world: &mut BevyoutWorld, min: u8, max: u8) {
+    assert!((min..=max).contains(&world.idle_loop_count.expect("loop count")));
+}
+
+#[given(regex = r"^an authored idle with group section (\d+)$")]
+async fn given_idle_group(world: &mut BevyoutWorld, group: u8) {
+    let mut definition = feature_idle_definition(1);
+    definition.group_section = group;
+    definition.group_section_raw = group;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("forced special idle validation is evaluated")]
+async fn when_idle_forced_validation(world: &mut BevyoutWorld) {
+    let evaluator = FeatureIdleConditions::default();
+    world.idle_decision = Some(world.idle_authority.force_select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        &world.idle_global_definitions,
+        1,
+        &evaluator,
+    ));
+}
+
+#[given("a forced authored idle with a false condition and active cooldown")]
+async fn given_forced_idle(world: &mut BevyoutWorld) {
+    let mut definition = feature_idle_definition(1);
+    definition.conditions = vec![vec![0xfe]];
+    definition.replay_delay_seconds = 20;
+    world.idle_global_definitions = vec![definition];
+    world.idle_authority.replay_cooldowns.insert(1, 20.0);
+}
+
+#[when("forced special idle selection is evaluated")]
+async fn when_forced_idle(world: &mut BevyoutWorld) {
+    let evaluator = FeatureIdleConditions::default();
+    world.idle_decision = Some(world.idle_authority.force_select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        &world.idle_global_definitions,
+        1,
+        &evaluator,
+    ));
+    if let Some(actor_idle_policy::IdleDecision::Selected(selection)) = &world.idle_decision {
+        world.idle_selected = Some(selection.clone());
+    }
+}
+
+#[then(regex = r#"^the selected special idle source is \"([^\"]*)\"$"#)]
+async fn then_idle_source(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.idle_selected.as_ref().unwrap().source.label(),
+        expected
+    );
+}
+
+#[given("a special idle is playing for a stationary actor")]
+async fn given_playing_idle(world: &mut BevyoutWorld) {
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+    let evaluator = FeatureIdleConditions::default();
+    let decision = world.idle_authority.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        None,
+        &world.idle_global_definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    assert!(matches!(
+        decision,
+        actor_idle_policy::IdleDecision::Selected(_)
+    ));
+}
+
+#[when("special idle playback completes or movement begins")]
+async fn when_idle_interrupted(world: &mut BevyoutWorld) {
+    world
+        .idle_authority
+        .stop(Some(actor_idle_policy::IdleRejectionReason::Moving));
+}
+
+#[then("base locomotion resumes without a static state")]
+async fn then_idle_base_resumes(world: &mut BevyoutWorld) {
+    assert!(world.idle_authority.current_idle_form_id.is_none());
+    assert_eq!(
+        world.idle_authority.source,
+        actor_idle_policy::IdleSource::IdleManager
     );
 }

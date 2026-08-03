@@ -2424,3 +2424,15 @@ fn showpackages_requires_a_loaded_cell_manifest() {
         "cell_unavailable"
     );
 }
+
+#[test]
+fn playidle_is_registered_and_rejects_unknown_actor_deterministically() {
+    let mut app = test_app();
+    let help = exec(&mut app, "help playidle");
+    assert!(help.ok);
+    assert_eq!(help.value["mutating"], true);
+    assert_eq!(
+        error_code(&exec(&mut app, "playidle 00000010 00000001")),
+        "unknown_actor"
+    );
+}

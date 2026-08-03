@@ -31,8 +31,14 @@ use super::{
     PreparedSceneManifest, fingerprint,
 };
 
+pub(crate) mod idle_policy;
 pub(crate) mod policy;
 
+use idle_policy::{
+    IdleAuthority, IdleConditionEvaluator, IdleConditionOutcome, IdleDecision,
+    IdleEvaluationTrigger, IdleLifecycleFacts, IdlePackageCollection, IdlePackageContext,
+    IdleRejectionReason, IdleSource,
+};
 use policy::{
     ActorAnimationContext, ActorAnimationState, resolve_clip, should_advance_playback,
     should_repeat, state_after_completion, weapon_animation_prefix,
@@ -109,6 +115,39 @@ impl ActorAnimationCatalogs {
             .values()
             .any(|catalog| catalog.animation_sets.iter().any(|set| set.id == set_id))
     }
+
+    fn actor_catalog(
+        &self,
+        reference_form_id: u32,
+        base_form_id: u32,
+    ) -> Option<(u32, Arc<PreparedActorAnimationCatalog>)> {
+        self.0.iter().find_map(|(cell, catalog)| {
+            catalog
+                .actor_mappings
+                .iter()
+                .any(|mapping| {
+                    mapping.reference_form_id == reference_form_id
+                        || (mapping.reference_form_id == 0 && mapping.base_form_id == base_form_id)
+                })
+                .then(|| (*cell, Arc::clone(catalog)))
+        })
+    }
+
+    fn idle_definition(
+        &self,
+        reference_form_id: u32,
+        base_form_id: u32,
+        idle_form_id: u32,
+    ) -> Option<bevyout_core::actor_animation::PreparedActorIdleDefinition> {
+        self.actor_catalog(reference_form_id, base_form_id)
+            .and_then(|(_, catalog)| {
+                catalog
+                    .idle_definitions
+                    .iter()
+                    .find(|definition| definition.form_id == idle_form_id)
+                    .cloned()
+            })
+    }
 }
 
 /// Reads and validates a manifest-linked actor catalog. An absent link is a
@@ -177,12 +216,21 @@ struct ResolvedAnimationSet {
     clips: HashMap<String, ResolvedClip>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SpecialIdlePlayback {
+    form_id: u32,
+    loops_remaining: u8,
+    source: IdleSource,
+}
+
 #[derive(Resource, Default)]
 struct AnimationSetCache(HashMap<String, CachedAnimationSet>);
 
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct ActorAnimationIntent {
     pub(crate) requested: Option<ActorAnimationState>,
+    pub(crate) requested_idle: Option<u32>,
+    pub(crate) forced_idle: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +267,9 @@ pub(crate) struct ActorAnimationRuntime {
     automatic_state: ActorAnimationState,
     movement_hold_remaining: f32,
     diagnostic: Option<String>,
+    idle_authority: IdleAuthority,
+    special_idle: Option<SpecialIdlePlayback>,
+    was_stationary: bool,
 }
 
 impl ActorAnimationRuntime {
@@ -249,9 +300,151 @@ impl ActorAnimationRuntime {
     pub(crate) fn root_motion_policy(&self) -> PreparedActorAnimationRootMotionPolicy {
         self.selected_root_motion
     }
+
+    pub(crate) fn idle_authority(&self) -> &IdleAuthority {
+        &self.idle_authority
+    }
+
+    pub(crate) fn special_idle_form_id(&self) -> Option<u32> {
+        self.special_idle.map(|idle| idle.form_id)
+    }
+
+    pub(crate) fn special_idle_source(&self) -> Option<IdleSource> {
+        self.special_idle.map(|idle| idle.source)
+    }
+
+    pub(crate) fn forced_idle_lifecycle_ready(&self) -> bool {
+        self.phase == RuntimePhase::Playing
+            && self.automatic_state == ActorAnimationState::Idle
+            && self.movement_hold_remaining <= f32::EPSILON
+    }
 }
 
 /// Narrow gameplay API for scripted/AI systems and the console adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdleRequestError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+pub(crate) fn request_forced_idle(
+    world: &mut World,
+    entity: Entity,
+    idle_form_id: u32,
+) -> std::result::Result<u32, IdleRequestError> {
+    let actor = world
+        .get::<ActorRuntime>(entity)
+        .ok_or_else(|| IdleRequestError {
+            code: "unknown_actor",
+            message: "reference is not a known projected actor".into(),
+        })?;
+    let reference_form_id = actor.reference_form_id;
+    let base_form_id = actor.base_form_id;
+    let definition = world
+        .get_resource::<ActorAnimationCatalogs>()
+        .and_then(|catalogs| {
+            catalogs.idle_definition(reference_form_id, base_form_id, idle_form_id)
+        })
+        .ok_or_else(|| IdleRequestError {
+            code: "unknown_idle",
+            message: format!(
+                "prepared IDLE {idle_form_id:08x} is unknown for actor {reference_form_id:08x}"
+            ),
+        })?;
+    if !matches!(
+        definition.group_section,
+        idle_policy::SPECIAL_IDLE_GROUP | idle_policy::WHOLE_BODY_GROUP
+    ) {
+        return Err(IdleRequestError {
+            code: "unsupported_group",
+            message: format!(
+                "IDLE {idle_form_id:08x} group section {} is unsupported; only 7 and 20 are available",
+                definition.group_section
+            ),
+        });
+    }
+    let runtime = world
+        .get::<ActorAnimationRuntime>(entity)
+        .ok_or_else(|| IdleRequestError {
+            code: "unavailable_clip",
+            message: "actor animation controller is not ready".into(),
+        })?;
+    let active = world
+        .get_resource::<ActiveCell>()
+        .is_none_or(|active| active.0 == runtime.cell_form_id);
+    let visible = world
+        .get::<InheritedVisibility>(entity)
+        .is_none_or(|visibility| visibility.get());
+    let alive = world
+        .get::<super::actor_state::ActorStateRuntime>(entity)
+        .is_none_or(|state| state.life_state == bevyout_core::actor_state::ActorLifeState::Alive);
+    let ragdolled = world
+        .get::<super::player::RagdollToggle>(entity)
+        .is_some_and(|toggle| toggle.0);
+    if !active || !visible || !alive || ragdolled || !runtime.forced_idle_lifecycle_ready() {
+        return Err(IdleRequestError {
+            code: "invalid_lifecycle",
+            message: format!(
+                "actor {reference_form_id:08x} must be stationary, alive, loaded, visible, and not ragdolled"
+            ),
+        });
+    }
+    let bound_indices = runtime
+        .retarget_targets
+        .iter()
+        .map(|target| target.source_index)
+        .collect::<Vec<_>>();
+    let cache = world
+        .get_resource::<AnimationSetCache>()
+        .and_then(|cache| cache.0.get(runtime.set_id()))
+        .and_then(|cached| cached.resolved.as_ref())
+        .ok_or_else(|| IdleRequestError {
+            code: "unavailable_clip",
+            message: format!(
+                "IDLE {idle_form_id:08x} clip is not Ready in the loaded animation set"
+            ),
+        })?;
+    let clip_name = definition
+        .clip_name
+        .as_deref()
+        .ok_or_else(|| IdleRequestError {
+            code: "unavailable_clip",
+            message: format!("IDLE {idle_form_id:08x} has no prepared clip"),
+        })?;
+    let Some(clip) = cache.clips.get(&clip_name.to_ascii_lowercase()) else {
+        return Err(IdleRequestError {
+            code: "unavailable_clip",
+            message: format!("IDLE {idle_form_id:08x} clip {clip_name} is unavailable"),
+        });
+    };
+    if clip.catalog.status != bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+    {
+        return Err(IdleRequestError {
+            code: "unavailable_clip",
+            message: format!("IDLE {idle_form_id:08x} clip {clip_name} is not Ready"),
+        });
+    }
+    let missing = missing_required_targets(&clip.catalog.required_targets, cache, bound_indices);
+    if !missing.is_empty() {
+        return Err(IdleRequestError {
+            code: "unavailable_clip",
+            message: format!(
+                "IDLE {idle_form_id:08x} clip {clip_name} is incompatible with the bound actor targets"
+            ),
+        });
+    }
+    let mut intent = world
+        .get_mut::<ActorAnimationIntent>(entity)
+        .ok_or_else(|| IdleRequestError {
+            code: "unavailable_clip",
+            message: "actor animation intent is unavailable".into(),
+        })?;
+    intent.requested_idle = Some(idle_form_id);
+    intent.forced_idle = true;
+    intent.requested = None;
+    Ok(reference_form_id)
+}
+
 pub(crate) fn request_actor_animation(
     world: &mut World,
     entity: Entity,
@@ -261,7 +454,79 @@ pub(crate) fn request_actor_animation(
         bail!("entity has no gameplay actor animation controller");
     };
     intent.requested = Some(state);
+    intent.requested_idle = None;
+    intent.forced_idle = false;
     Ok(())
+}
+
+struct RuntimeIdleConditions;
+
+struct RuntimeIdleConditionFunctions<'a> {
+    facts: &'a idle_policy::IdleRuntimeFacts,
+    random_percent: u8,
+}
+
+impl super::ai::selection::ConditionFunctions for RuntimeIdleConditionFunctions<'_> {
+    fn evaluate(&self, function_index: u16, param1: u32, _param2: u32) -> Option<f32> {
+        match function_index {
+            101 => Some(f32::from(u8::from(self.facts.weapon_out))),
+            71 => Some(f32::from(u8::from(self.facts.factions.contains(&param1)))),
+            77 => Some(f32::from(self.random_percent)),
+            182 => Some(f32::from(u8::from(
+                self.facts.equipped_item_form_ids.contains(&param1),
+            ))),
+            451 => Some(f32::from(u8::from(
+                self.facts.last_idle_played == Some(param1),
+            ))),
+            _ => None,
+        }
+    }
+}
+
+impl IdleConditionEvaluator for RuntimeIdleConditions {
+    fn evaluate(
+        &self,
+        conditions: &[Vec<u8>],
+        random_percent: u8,
+        facts: &idle_policy::IdleRuntimeFacts,
+    ) -> IdleConditionOutcome {
+        let functions = RuntimeIdleConditionFunctions {
+            facts,
+            random_percent,
+        };
+        match super::ai::selection::evaluate_conditions(conditions, &functions) {
+            super::ai::selection::ConditionOutcome::True => IdleConditionOutcome::True,
+            super::ai::selection::ConditionOutcome::False => IdleConditionOutcome::False,
+            super::ai::selection::ConditionOutcome::Unevaluable => {
+                IdleConditionOutcome::Unevaluable
+            }
+        }
+    }
+}
+
+fn package_idle_context(
+    controller: Option<&super::ai::family_runtime::ActorPackageController>,
+    cache: &super::ai::catalog_cache::PackageCatalogCache,
+) -> Option<IdlePackageContext> {
+    let package_form_id = controller?.selected_form_id;
+    let entry = cache.packages.as_ref().and_then(|(_, catalog)| {
+        catalog
+            .packages
+            .iter()
+            .find(|entry| entry.form_id == package_form_id)
+    })?;
+    Some(IdlePackageContext {
+        form_id: package_form_id,
+        general_flags: entry.general_flags,
+        collection: entry
+            .idle_collection
+            .as_ref()
+            .map(|collection| IdlePackageCollection {
+                flags: collection.flags,
+                timer_seconds: collection.timer_seconds,
+                animation_form_ids: collection.animation_form_ids.clone(),
+            }),
+    })
 }
 
 fn register_gameplay_actors(
@@ -317,6 +582,9 @@ fn register_gameplay_actors(
                         "actor skeleton does not match animation set {}",
                         set.skeleton_path
                     )),
+                    idle_authority: IdleAuthority::default(),
+                    special_idle: None,
+                    was_stationary: false,
                 },
             ));
             continue;
@@ -347,6 +615,9 @@ fn register_gameplay_actors(
                     automatic_state: ActorAnimationState::Idle,
                     movement_hold_remaining: 0.0,
                     diagnostic: Some("prepared animation set has no clip pack".into()),
+                    idle_authority: IdleAuthority::default(),
+                    special_idle: None,
+                    was_stationary: false,
                 },
             ));
             continue;
@@ -386,6 +657,9 @@ fn register_gameplay_actors(
                 automatic_state: ActorAnimationState::Idle,
                 movement_hold_remaining: 0.0,
                 diagnostic: None,
+                idle_authority: IdleAuthority::default(),
+                special_idle: None,
+                was_stationary: false,
             },
         ));
     }
@@ -664,21 +938,40 @@ fn bind_gameplay_actors(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn select_gameplay_animation(
     time: Res<Time>,
     item_catalog: Res<PreparedItemCatalog>,
     cache: Res<AnimationSetCache>,
+    catalogs: Res<ActorAnimationCatalogs>,
+    package_cache: Option<Res<super::ai::catalog_cache::PackageCatalogCache>>,
     active_cell: Option<Res<ActiveCell>>,
     mut actors: Query<(
         &GlobalTransform,
         &InheritedVisibility,
+        &ActorRuntime,
         &ActorRuntimeState,
+        Option<&super::actor_state::ActorStateRuntime>,
+        Option<&super::player::RagdollToggle>,
+        Option<&super::ai::family_runtime::ActorPackageController>,
         &mut ActorAnimationRuntime,
-        &ActorAnimationIntent,
+        &mut ActorAnimationIntent,
     )>,
 ) {
     let dt = time.delta_secs().max(f32::EPSILON);
-    for (global, visibility, actor_state, mut runtime, intent) in &mut actors {
+    let now_seconds = time.elapsed_secs();
+    for (
+        global,
+        visibility,
+        actor,
+        actor_state,
+        actor_lifecycle,
+        ragdoll,
+        package_controller,
+        mut runtime,
+        mut intent,
+    ) in &mut actors
+    {
         if runtime.phase != RuntimePhase::Playing {
             continue;
         }
@@ -717,13 +1010,185 @@ fn select_gameplay_animation(
                     ActorAnimationState::Idle
                 };
             }
-        };
-        if !should_advance_playback(
-            active_cell
+        }
+        let stationary = runtime.automatic_state == ActorAnimationState::Idle
+            && runtime.movement_hold_remaining <= f32::EPSILON;
+        let active = active_cell
+            .as_ref()
+            .is_some_and(|active| active.0 == runtime.cell_form_id);
+        let loaded = should_advance_playback(active, visibility.get());
+        let package = package_cache
+            .as_ref()
+            .and_then(|cache| package_idle_context(package_controller, cache));
+        let previous_package = runtime.idle_authority.active_package_form_id;
+        runtime.idle_authority.on_package_entry(
+            package.as_ref().map(|package| package.form_id),
+            now_seconds,
+            package
                 .as_ref()
-                .is_some_and(|active| active.0 == runtime.cell_form_id),
-            visibility.get(),
-        ) {
+                .and_then(|package| package.collection.as_ref())
+                .map_or(0.0, |collection| collection.timer_seconds),
+            stationary,
+        );
+        if stationary && !runtime.was_stationary {
+            runtime
+                .idle_authority
+                .on_stationary_entry(true, now_seconds);
+        } else if !stationary {
+            runtime
+                .idle_authority
+                .on_stationary_entry(false, now_seconds);
+        }
+        if previous_package != runtime.idle_authority.active_package_form_id
+            && runtime.special_idle.is_some()
+        {
+            runtime
+                .idle_authority
+                .stop(Some(IdleRejectionReason::PackageTransition));
+            runtime.special_idle = None;
+            runtime.selected_clip = None;
+            runtime.started_clip = None;
+            runtime.previous_clip = None;
+            info!(
+                "actor-idle stop {:08x} reason=package_transition",
+                actor.reference_form_id
+            );
+        }
+        runtime.was_stationary = stationary;
+        let lifecycle = IdleLifecycleFacts {
+            moving: !stationary,
+            alive: actor_lifecycle.is_none_or(|state| {
+                state.life_state == bevyout_core::actor_state::ActorLifeState::Alive
+            }),
+            ragdolled: ragdoll.is_some_and(|toggle| toggle.0),
+            loaded,
+            equipment_transition: intent.requested.is_some_and(|state| {
+                matches!(
+                    state,
+                    ActorAnimationState::Equip | ActorAnimationState::Unequip
+                )
+            }) || matches!(
+                runtime.current_state,
+                ActorAnimationState::Equip | ActorAnimationState::Unequip
+            ),
+        };
+        if !lifecycle.special_idle_eligible() {
+            if runtime.special_idle.is_some() {
+                info!(
+                    "actor-idle stop {:08x} reason={}",
+                    actor.reference_form_id,
+                    lifecycle.rejection().label()
+                );
+                runtime.special_idle = None;
+                runtime.idle_authority.stop(Some(lifecycle.rejection()));
+                runtime.selected_clip = None;
+                runtime.started_clip = None;
+                runtime.previous_clip = None;
+                runtime.current_state = runtime.automatic_state;
+            }
+            intent.requested_idle = None;
+        }
+        let Some(cached) = cache.0.get(&runtime.set_id) else {
+            continue;
+        };
+        let Some(set) = cached.resolved.as_ref() else {
+            continue;
+        };
+        let definitions = catalogs
+            .actor_catalog(actor.reference_form_id, actor.base_form_id)
+            .map(|(_, catalog)| catalog.idle_definitions.clone())
+            .unwrap_or_default();
+        let mut idle_facts = idle_policy::IdleRuntimeFacts {
+            weapon_out: actor_state.bound_item_form_id.is_some(),
+            last_idle_played: runtime.idle_authority.last_idle_form_id,
+            ..idle_policy::IdleRuntimeFacts::default()
+        };
+        if let Some(state) = actor_lifecycle {
+            idle_facts.factions = state
+                .definition
+                .factions
+                .iter()
+                .map(|membership| membership.faction_form_id)
+                .collect();
+        }
+        if let Some(item) = actor_state.bound_item_form_id {
+            idle_facts.equipped_item_form_ids.insert(item);
+        }
+        let evaluator = RuntimeIdleConditions;
+        if let Some(idle_form_id) = intent.requested_idle.take() {
+            let decision = runtime.idle_authority.force_select(
+                actor.reference_form_id,
+                now_seconds,
+                lifecycle,
+                &idle_facts,
+                &definitions,
+                idle_form_id,
+                &evaluator,
+            );
+            if install_special_idle(&mut runtime, set, &definitions, decision) {
+                info!(
+                    "actor-idle select/play {:08x} source=forced idle={idle_form_id:08x}",
+                    actor.reference_form_id
+                );
+                continue;
+            }
+            runtime.diagnostic = Some(format!(
+                "actor-idle reject {}",
+                runtime
+                    .idle_authority
+                    .last_rejection
+                    .map_or("unknown", IdleRejectionReason::label)
+            ));
+        }
+        if stationary
+            && runtime.special_idle.is_none()
+            && intent.requested.is_none()
+            && runtime.current_state == ActorAnimationState::Idle
+            && runtime.selected_clip.is_some()
+        {
+            let due = now_seconds + f32::EPSILON
+                >= runtime.idle_authority.next_eligible_evaluation_seconds;
+            if due {
+                let decision = runtime.idle_authority.select(
+                    actor.reference_form_id,
+                    now_seconds,
+                    lifecycle,
+                    &idle_facts,
+                    package.as_ref(),
+                    &definitions,
+                    if package
+                        .as_ref()
+                        .and_then(|package| package.collection.as_ref())
+                        .is_some()
+                    {
+                        IdleEvaluationTrigger::PackageTimer
+                    } else {
+                        IdleEvaluationTrigger::BaseIdleLoop
+                    },
+                    &evaluator,
+                );
+                if let idle_policy::IdleDecision::Selected(selection) = &decision {
+                    info!(
+                        "actor-idle select {:08x} source={} idle={:08x}",
+                        actor.reference_form_id,
+                        selection.source.label(),
+                        selection.form_id
+                    );
+                }
+                if install_special_idle(&mut runtime, set, &definitions, decision) {
+                    info!(
+                        "actor-idle play {:08x} idle={:08x}",
+                        actor.reference_form_id,
+                        runtime
+                            .idle_authority
+                            .current_idle_form_id
+                            .unwrap_or_default()
+                    );
+                    continue;
+                }
+            }
+        }
+        if !should_advance_playback(active, visibility.get()) {
             continue;
         }
         if intent.requested.is_none()
@@ -736,9 +1201,6 @@ fn select_gameplay_animation(
         if requested == runtime.current_state && runtime.selected_clip.is_some() {
             continue;
         }
-        let Some(cached) = cache.0.get(&runtime.set_id) else {
-            continue;
-        };
         let weapon_prefix = actor_state
             .bound_item_form_id
             .and_then(|form_id| {
@@ -759,9 +1221,6 @@ fn select_gameplay_animation(
         };
         let Some(mut selection) = resolve_clip(&cached.definition.clips, context, requested) else {
             runtime.diagnostic = Some(format!("no ready clip for {}", requested.label()));
-            continue;
-        };
-        let Some(set) = cached.resolved.as_ref() else {
             continue;
         };
         let selected_definition = cached
@@ -807,6 +1266,23 @@ fn select_gameplay_animation(
         runtime.current_state = requested;
         runtime.selected_clip = Some(selection.clip_name.clone());
         runtime.selected_loop_mode = selection.loop_mode;
+        if requested == ActorAnimationState::Idle
+            && package
+                .as_ref()
+                .and_then(|package| package.collection.as_ref())
+                .is_none()
+        {
+            let base_loop_seconds = cached
+                .definition
+                .clips
+                .iter()
+                .find(|clip| clip.name == selection.clip_name)
+                .and_then(|clip| clip.duration_seconds)
+                .unwrap_or(1.0);
+            runtime
+                .idle_authority
+                .schedule_evaluation_after(now_seconds, base_loop_seconds);
+        }
         runtime.selected_root_motion = selection.root_motion_policy;
         runtime.diagnostic = target_diagnostic.or_else(|| {
             selection
@@ -814,6 +1290,105 @@ fn select_gameplay_animation(
                 .map(|state| format!("{} fell back to {}", state.label(), selection.clip_name))
         });
     }
+}
+
+fn install_special_idle(
+    runtime: &mut ActorAnimationRuntime,
+    set: &ResolvedAnimationSet,
+    definitions: &[bevyout_core::actor_animation::PreparedActorIdleDefinition],
+    decision: IdleDecision,
+) -> bool {
+    let IdleDecision::Selected(selection) = decision else {
+        return false;
+    };
+    let Some(definition) = definitions
+        .iter()
+        .find(|definition| definition.form_id == selection.form_id)
+    else {
+        runtime
+            .idle_authority
+            .stop(Some(IdleRejectionReason::MissingIdle));
+        return false;
+    };
+    let Some(clip_name) = definition.clip_name.as_deref() else {
+        runtime
+            .idle_authority
+            .stop(Some(IdleRejectionReason::MissingClip));
+        return false;
+    };
+    let Some(clip) = set.clips.get(&clip_name.to_ascii_lowercase()) else {
+        runtime
+            .idle_authority
+            .stop(Some(IdleRejectionReason::MissingClip));
+        return false;
+    };
+    runtime.current_state = ActorAnimationState::Idle;
+    runtime.selected_clip = Some(clip_name.to_owned());
+    runtime.selected_loop_mode = PreparedActorAnimationLoopMode::Clamp;
+    runtime.selected_root_motion = clip.catalog.root_motion_policy;
+    runtime.special_idle = Some(SpecialIdlePlayback {
+        form_id: selection.form_id,
+        loops_remaining: selection.loop_count.max(1),
+        source: selection.source,
+    });
+    runtime.diagnostic = selection
+        .diagnostic
+        .map(|reason| format!("idle diagnostic {}", reason.label()));
+    true
+}
+
+fn start_base_idle_after_special(
+    player: &mut AnimationPlayer,
+    transitions: &mut AnimationTransitions,
+    runtime: &mut ActorAnimationRuntime,
+    clips: &[PreparedActorAnimationClip],
+    set: &ResolvedAnimationSet,
+    active: bool,
+) {
+    let Some(selection) = resolve_clip(
+        clips,
+        ActorAnimationContext {
+            kind: runtime.kind,
+            female: runtime.female,
+            weapon_prefix: None,
+        },
+        ActorAnimationState::Idle,
+    ) else {
+        return;
+    };
+    let Some(clip) = set.clips.get(&selection.clip_name.to_ascii_lowercase()) else {
+        return;
+    };
+    runtime.current_state = ActorAnimationState::Idle;
+    runtime.selected_clip = Some(selection.clip_name.clone());
+    runtime.selected_loop_mode = selection.loop_mode;
+    runtime.selected_root_motion = selection.root_motion_policy;
+    runtime.previous_clip = runtime.started_clip.take();
+    runtime.transition_elapsed = if runtime.previous_clip.is_some() {
+        0.0
+    } else {
+        TRANSITION_SECONDS
+    };
+    let playback = transitions.play(
+        player,
+        clip.node,
+        Duration::from_secs_f32(TRANSITION_SECONDS),
+    );
+    playback.set_repeat(
+        if should_repeat(ActorAnimationState::Idle, clip.catalog.loop_mode) {
+            RepeatAnimation::Forever
+        } else {
+            RepeatAnimation::Never
+        },
+    );
+    if !active {
+        playback.pause();
+    }
+    runtime.started_clip = Some(selection.clip_name.clone());
+    info!(
+        "actor-animation play state=idle clip={} set={}",
+        clip.catalog.name, runtime.set_id
+    );
 }
 
 fn drive_gameplay_animation(
@@ -851,6 +1426,7 @@ fn drive_gameplay_animation(
             runtime.diagnostic = Some(format!("resolved clip {name} is absent from pack"));
             continue;
         };
+        let mut resume_base_idle = false;
         if runtime.started_clip.as_deref() == Some(name.as_str())
             && let Some(animation) = player.animation_mut(clip.node)
         {
@@ -865,16 +1441,48 @@ fn drive_gameplay_animation(
                 animation.pause();
             }
             if animation.is_finished() {
-                let completed = runtime.current_state;
-                let next = state_after_completion(completed);
-                if next != completed {
-                    runtime.current_state = next;
+                if let Some(special) = runtime.special_idle.as_mut() {
+                    if special.loops_remaining > 1 {
+                        special.loops_remaining -= 1;
+                        animation.seek_to(0.0);
+                        continue;
+                    }
+                    let form_id = special.form_id;
+                    runtime.special_idle = None;
+                    runtime.idle_authority.stop(None);
                     runtime.selected_clip = None;
                     runtime.started_clip = None;
                     runtime.previous_clip = None;
                     runtime.transition_elapsed = TRANSITION_SECONDS;
+                    runtime.current_state = ActorAnimationState::Idle;
                     intent.requested = None;
+                    resume_base_idle = true;
+                    info!(
+                        "actor-idle stop {:08x} reason=complete idle={form_id:08x}",
+                        runtime.idle_authority.last_idle_form_id.unwrap_or_default()
+                    );
+                } else {
+                    let completed = runtime.current_state;
+                    let next = state_after_completion(completed);
+                    if next != completed {
+                        runtime.current_state = next;
+                        runtime.selected_clip = None;
+                        runtime.started_clip = None;
+                        runtime.previous_clip = None;
+                        runtime.transition_elapsed = TRANSITION_SECONDS;
+                        intent.requested = None;
+                    }
                 }
+            }
+            if resume_base_idle {
+                start_base_idle_after_special(
+                    &mut player,
+                    &mut transitions,
+                    &mut runtime,
+                    &cached.definition.clips,
+                    set,
+                    active,
+                );
             }
             continue;
         }
@@ -889,13 +1497,13 @@ fn drive_gameplay_animation(
             clip.node,
             Duration::from_secs_f32(TRANSITION_SECONDS),
         );
-        playback.set_repeat(
-            if should_repeat(runtime.current_state, clip.catalog.loop_mode) {
-                RepeatAnimation::Forever
-            } else {
-                RepeatAnimation::Never
-            },
-        );
+        playback.set_repeat(if runtime.special_idle.is_some() {
+            RepeatAnimation::Never
+        } else if should_repeat(runtime.current_state, clip.catalog.loop_mode) {
+            RepeatAnimation::Forever
+        } else {
+            RepeatAnimation::Never
+        });
         if !active {
             playback.pause();
         }
@@ -1193,3 +1801,11 @@ fn shortest_angle(value: f32) -> f32 {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/idle_policy.rs"]
+mod idle_policy_tests;
+
+#[cfg(test)]
+#[path = "tests/runtime.rs"]
+mod runtime_tests;
