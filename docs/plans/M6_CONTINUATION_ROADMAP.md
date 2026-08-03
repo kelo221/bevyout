@@ -450,3 +450,30 @@ RSS). This remains partial acceptance: the environment could not provide a
 literal human frontmost keyboard run, the live cancellation counter remained
 zero, and actor/travel/save/budget gates are outside this wave. Issues #274,
 #275, and parent #13 remain open; #10 still blocks #278.
+
+### Current-master preparation checkpoint — 2026-08-03
+
+The post-#288 master commit `e139af26` was checked with the frozen 14-selector
+native preparation command in the new ignored cache
+`.bevyout/m6-w2-overnight-master-20260803`:
+
+- clean: `14 done, 0 failed`, native shared assets `1608/1608`, real
+  `873.20s`, with `physics reads 305` and `physics hits 153`;
+- warm: `14 cells valid, 0 stale`, all 14 completed cells skipped, real
+  `9.40s`;
+- fingerprints: `14 cells valid, 0 stale`, real `5.46s`;
+- source fingerprint: `24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0`;
+- prepare revision: `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.
+
+The clean run emitted three recoverable non-renderable NIF diagnostics
+(`creatures/eyebot/skeleton.nif`, `creatures/giantant/skeleton.nif`, and
+`marker_radiation.nif`) while all selected cells completed. This checkpoint
+only validates current-master preparation and cache fingerprints. It does not
+change the W2 acceptance boundary: focused human-keyboard evidence and a live
+rapid-cancellation sample are still missing, so #274/#275 and #13 remain open.
+
+Live GitHub state must also be kept distinct from gate evidence: #285 is
+currently closed, while its latest evidence comment says numeric threshold
+sign-off remains open. Reconcile that issue/document state before W7 and do
+not tick W6-C or #87 from the closure state alone. #10 remains open and blocks
+#278 as directed.

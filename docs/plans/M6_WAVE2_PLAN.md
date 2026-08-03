@@ -285,3 +285,32 @@ counter because prepared tasks completed before the rapid reversal window;
 therefore cancellation remains test-demonstrated rather than live-count
 demonstrated in this pass. Issues #274 and #275 remain open, the #13 Wave 2
 checklist remains unticked, and #10 continues to block #278.
+
+### Current-master preparation preflight — 2026-08-03
+
+After PR #288 merged, the exact 14-selector native preparation command was
+rerun from `master` at commit `e139af26` in a new ignored cache:
+`.bevyout/m6-w2-overnight-master-20260803`. The prepared scene reports source
+fingerprint
+`24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0` and
+prepare revision `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.
+
+- clean preparation: `14 done, 0 failed`, native shared assets `1608/1608`
+  successful, `/usr/bin/time` real `873.20s`;
+- clean batch counters: `assets reused 0, built 0, rebuilt 0`, physics reads
+  `305`, physics hits `153`;
+- warm repeat: `14 cells valid, 0 stale`, all 14 completed cells skipped,
+  `0 done, 0 failed`, real `9.40s`;
+- report-only fingerprint check: `14 cells valid, 0 stale`, real `5.46s`.
+
+The clean pass recorded three recoverable non-renderable NIF diagnostics:
+`creatures/eyebot/skeleton.nif`, `creatures/giantant/skeleton.nif`, and
+`marker_radiation.nif`. They did not fail a selected cell and do not expand
+this acceptance task into actor integration; #10 still blocks #278.
+
+This is preparation and cache-validity evidence only. It does not provide the
+missing focused human-keyboard route or a live nonzero cancellation sample,
+so #274 and #275 remain open and the #13 Wave 2 checklist remains unticked.
+The live #285 issue is closed, but its latest evidence comment states that
+numeric threshold sign-off remains open; no W6-C or W7 completion is inferred
+from that issue state.

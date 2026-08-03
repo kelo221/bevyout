@@ -1,19 +1,18 @@
 # M6 continuation — next-agent handoff
 
-Updated: 2026-08-02
+Updated: 2026-08-03
 Issue: [#13 — M6 Exterior conversion, streaming, and dynamic lighting](https://github.com/kelo221/bevyout/issues/13)
 
 ## Purpose and boundary
 
-This is a continuation checkpoint, not an M6 completion report. The current
-branch contains the bounded W8-C presentation-diagnostics slice and the
-documentation needed to interpret it. W2 acceptance, W6-C threshold sign-off,
+This is a continuation checkpoint, not an M6 completion report. Current
+`master` includes merged PR #288, which added the native macOS process-memory
+adapter and its acceptance evidence. W2 acceptance, W6-C threshold sign-off,
 the dependency-held runtime waves, gate #87, and final gate #14 are still open.
 
-The user asked to stop the PR work and leave a durable local handoff. Do not
-wait on, merge, amend, or otherwise manage PR #286 as part of resuming from
-this document. Re-check its state only when the user explicitly returns to
-the PR workflow.
+The earlier instruction to stop PR work around #286 is historical; #286 and
+#288 are now merged. The current handoff records the post-#288 preparation
+checkpoint and the exact remaining acceptance blockers.
 
 ## Start here
 
@@ -26,15 +25,16 @@ Read these in order:
    [issue #285](https://github.com/kelo221/bevyout/issues/285), and the dependency
    issues before making any acceptance claim.
 
-At handoff, the branch is `M6-OutCell` at:
+The prior handoff branch was `M6-OutCell` at:
 
 ```text
 f4f0bc8f72fb2c1db85b7093757294684a793862
 Merge remote-tracking branch 'origin/master' into M6-OutCell
 ```
 
-`origin/master` is an ancestor of this commit, including the M5 combat commit.
-The base worktree was clean before this handoff file was created. Inspect
+`origin/master` was an ancestor of that historical handoff, including the M5
+combat commit. The current-master baseline for this checkpoint is `e139af26`
+(`fix(m6): use native macOS exterior memory sampling (#288)`). Inspect
 `git status --short --branch` before changing anything.
 
 ## What is verified
@@ -83,6 +83,17 @@ of collision-ready travel, ordinary OS keyboard input, actor navigation,
 reversal, save/return, water traversal, or an accepted memory plateau. The
 sample used `--disable-physics` deliberately.
 
+### Current-master preparation checkpoint
+
+The post-#288 master preflight is recorded in
+[`M6_WAVE2_PLAN.md`](M6_WAVE2_PLAN.md) and
+[`M6_CONTINUATION_ROADMAP.md`](M6_CONTINUATION_ROADMAP.md). It used cache
+`.bevyout/m6-w2-overnight-master-20260803` and recorded clean `14 done, 0
+failed` in `873.20s`, warm `14 cells valid, 0 stale` in `9.40s`, and a
+report-only fingerprint check of `14 cells valid, 0 stale` in `5.46s`.
+This is preparation evidence only; it does not satisfy the W2 human-input or
+live-cancellation rows.
+
 ### W8-v21 presentation diagnostics
 
 The current v21 evidence is:
@@ -123,7 +134,7 @@ do not recreate that comment.
 | Area | Current state | Required proof before calling it accepted |
 | --- | --- | --- |
 | W2 | Implementation is present; deterministic `tp` trace exists | Focused ordinary OS-input route, collision-ready travel, reversal, repeated loops, cancellation/stale behavior, and a defensible process-memory plateau |
-| W6-C / #285 | Instrumentation and configured values exist; numeric sign-off is open | Agreed measured thresholds with provenance, repeated on a cool machine, separating package estimates from process RSS and separating configured limits from observations |
+| W6-C / #285 | Live issue is closed, but its latest evidence says numeric sign-off is still open | Reconcile the issue/document state and record agreed measured thresholds with provenance, separating package estimates from process RSS and configured limits from observations |
 | W3-C / #278 | Dependency-held | Resolve or explicitly re-evaluate the #10 dependency before runtime work; do not mark complete from preparation-only evidence |
 | W4-C | Pending | Runtime implementation and real-data acceptance described by the W4 plan |
 | W5-C | Pending | Runtime implementation and real-data acceptance described by the W5 plan |
@@ -225,14 +236,16 @@ not prove the operating-system input route.
 
 ## Suggested continuation order
 
-1. Inspect `git status`, the current v21 cache/fingerprints, and the live issue
-   states before relying on any numbers in this document.
+1. Inspect `git status`, the current-master cache/fingerprints, and the live
+   issue states before relying on any numbers in this document. The latest
+   preparation checkpoint is recorded in the W2 plan and roadmap.
 2. Finish W2 acceptance with focused ordinary OS input and physics enabled. If
    the environment cannot provide reliable physical-input evidence, record the
    blocker instead of substituting BRP events or `tp`.
-3. Turn W6-C into an explicit measurement decision: define the threshold,
-   capture repeatable provenance, separate RSS/package/configuration values,
-   and update #285 only with evidence.
+3. Reconcile the closed #285 issue with its latest comment, which says
+   threshold sign-off remains open. Record an explicit W6-C measurement
+   decision with repeatable provenance, separating RSS/package/configuration
+   values, before executing W7; do not tick the gate from the issue state alone.
 4. Re-evaluate the #10 dependency, then execute W3-C, W4-C, and W5-C in the
    order required by their plans. Keep each runtime change tied to its
    acceptance script and issue.
