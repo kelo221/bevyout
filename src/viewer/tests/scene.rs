@@ -132,7 +132,7 @@ fn fallout_material_extra_accepts_native_object_and_blender_json_string() {
 }
 
 #[test]
-fn fallout_surface_classification_uses_flags_for_shader_type_one_assets() {
+fn fallout_surface_classification_uses_authored_types_and_flags() {
     let hair = parse_fallout_material_extra(
         &serde_json::json!({
             "bevyout_fallout_material": {
@@ -147,6 +147,22 @@ fn fallout_surface_classification_uses_flags_for_shader_type_one_assets() {
         fallout_surface_kind(&hair, Some("NoHat")),
         FALLOUT_SURFACE_HAIR
     );
+
+    for (shader_type, expected) in [
+        (FALLOUT_SHADER_TYPE_HAIR_TINT, FALLOUT_SURFACE_HAIR),
+        (FALLOUT_SHADER_TYPE_SKIN_TINT, FALLOUT_SURFACE_SKIN),
+    ] {
+        let material = parse_fallout_material_extra(
+            &serde_json::json!({
+                "bevyout_fallout_material": {
+                    "shader_type": shader_type
+                }
+            })
+            .to_string(),
+        )
+        .expect("typed surface extras");
+        assert_eq!(fallout_surface_kind(&material, None), expected);
+    }
 
     let eye = parse_fallout_material_extra(
         &serde_json::json!({
@@ -171,6 +187,48 @@ fn fallout_surface_classification_uses_flags_for_shader_type_one_assets() {
         FALLOUT_SURFACE_EYE,
         "source flag remains authoritative when a mesh name is unavailable"
     );
+}
+
+#[test]
+fn fallout_surface_configuration_bounds_skin_and_hair_specular_response() {
+    let mut app = test_app();
+    app.add_systems(Update, configure_fallout_surface_materials);
+
+    let mut handles = Vec::new();
+    for shader_type in [FALLOUT_SHADER_TYPE_HAIR_TINT, FALLOUT_SHADER_TYPE_SKIN_TINT] {
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                perceptual_roughness: 0.1,
+                reflectance: 0.5,
+                ..default()
+            });
+        app.world_mut().spawn((
+            Mesh3d::default(),
+            MeshMaterial3d(handle.clone()),
+            GltfMaterialExtras {
+                value: serde_json::json!({
+                    "bevyout_fallout_material": { "shader_type": shader_type }
+                })
+                .to_string(),
+            },
+        ));
+        handles.push(handle);
+    }
+
+    app.update();
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    let hair = materials.get(&handles[0]).expect("hair material");
+    assert_eq!(hair.fallout_surface_kind, FALLOUT_SURFACE_HAIR);
+    assert_eq!(hair.perceptual_roughness, FALLOUT_HAIR_MIN_ROUGHNESS);
+    assert_eq!(hair.reflectance, FALLOUT_HAIR_REFLECTANCE);
+    assert_eq!(hair.anisotropy_strength, FALLOUT_HAIR_ANISOTROPY_STRENGTH);
+
+    let skin = materials.get(&handles[1]).expect("skin material");
+    assert_eq!(skin.fallout_surface_kind, FALLOUT_SURFACE_SKIN);
+    assert_eq!(skin.perceptual_roughness, FALLOUT_SKIN_MIN_ROUGHNESS);
+    assert_eq!(skin.reflectance, FALLOUT_SKIN_REFLECTANCE);
 }
 
 #[test]

@@ -16,13 +16,17 @@ const DIFFUSE_WRAP_AMOUNT: f32 = 0.3;
 const FALLOUT_SURFACE_STANDARD: u32 = 0u;
 const FALLOUT_SURFACE_HAIR: u32 = 1u;
 const FALLOUT_SURFACE_EYE: u32 = 2u;
+const FALLOUT_SURFACE_SKIN: u32 = 3u;
 
 // Kajiya–Kay controls. These remain deliberately fixed until visual review
 // establishes a need for material-level tuning.
 const FALLOUT_HAIR_PRIMARY_SHIFT: f32 = 0.08;
 const FALLOUT_HAIR_SECONDARY_SHIFT: f32 = -0.08;
-const FALLOUT_HAIR_PRIMARY_EXPONENT: f32 = 96.0;
-const FALLOUT_HAIR_SECONDARY_EXPONENT: f32 = 28.0;
+const FALLOUT_HAIR_PRIMARY_EXPONENT: f32 = 72.0;
+const FALLOUT_HAIR_SECONDARY_EXPONENT: f32 = 24.0;
+const FALLOUT_HAIR_PRIMARY_STRENGTH: f32 = 0.18;
+const FALLOUT_HAIR_SECONDARY_STRENGTH: f32 = 0.10;
+const FALLOUT_SKIN_SPECULAR_STRENGTH: f32 = 0.55;
 
 // From the Filament design doc
 // https://google.github.io/filament/Filament.md.html#table_symbols
@@ -565,11 +569,16 @@ fn fallout_hair_specular(
     );
     let fresnel_term = fresnel(vec3<f32>(0.04), (*derived_input).LdotH);
 
-    // The primary lobe is neutral white. The secondary lobe takes a subdued
-    // tint from the hair albedo so dark hair does not produce a flat white cap.
-    let primary_color = vec3<f32>(0.65) + 0.35 * fresnel_term;
-    let secondary_color = (*input).diffuse_color * (0.16 + 0.12 * fresnel_term);
-    return (primary_color * primary + secondary_color * secondary) * specular_intensity;
+    // Tint both lobes from the authored hair color and keep a small neutral
+    // Fresnel component. This preserves a readable strand response without
+    // turning a large patch of hair into a white, wet-looking cap.
+    let hair_tint = max((*input).diffuse_color, vec3<f32>(0.02));
+    let primary_color = mix(hair_tint, vec3<f32>(1.0), 0.18 * fresnel_term);
+    let secondary_color = hair_tint * (0.7 + 0.3 * fresnel_term);
+    return (
+        primary_color * primary * FALLOUT_HAIR_PRIMARY_STRENGTH
+        + secondary_color * secondary * FALLOUT_HAIR_SECONDARY_STRENGTH
+    ) * specular_intensity;
 }
 
 #endif  // STANDARD_MATERIAL_ANISOTROPY
@@ -590,6 +599,10 @@ fn fallout_surface_specular(
     }
     if (*input).surface_kind == FALLOUT_SURFACE_EYE {
         return fallout_eye_specular(input, derived_input, roughness, specular_intensity);
+    }
+    if (*input).surface_kind == FALLOUT_SURFACE_SKIN {
+        return specular(input, derived_input, roughness, specular_intensity)
+            * FALLOUT_SKIN_SPECULAR_STRENGTH;
     }
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
