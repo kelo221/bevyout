@@ -78,6 +78,21 @@ fn keeps_texture_paths_with_spaces() {
 }
 
 #[test]
+fn resolves_loose_assets_case_insensitively_on_case_sensitive_hosts() {
+    let root = std::env::temp_dir().join(format!("bevyout-loose-case-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let nested = root.join("Meshes").join("Characters");
+    fs::create_dir_all(&nested).unwrap();
+    let path = nested.join("HeadFemale.NIF");
+    fs::write(&path, b"synthetic facegen head").unwrap();
+
+    let resolved = resolve_asset(&root, &[], "meshes/characters/headfemale.nif").unwrap();
+    assert_eq!(resolved.as_deref(), Some(&b"synthetic facegen head"[..]));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn content_addressed_glb_names_are_stable_and_revision_sensitive() {
     let first = content_addressed_glb_name("converter-v1", b"nif-bytes");
     assert_eq!(

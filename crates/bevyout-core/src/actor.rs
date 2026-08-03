@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::facegen::FaceGenResolved;
+
 /// FO3 biped slot used by authored hair meshes.
 pub const BIPED_SLOT_HAIR: u32 = 1 << 1;
 /// FO3 biped slot used by hats that replace authored hair meshes.
@@ -381,6 +383,16 @@ pub struct ActorAssemblyBlueprint {
     pub eye_form_id: Option<u32>,
     #[serde(default)]
     pub eye_texture_path: Option<String>,
+    /// Resolved static FaceGen coefficients used by the selected head
+    /// assembly.  Runtime actor state does not mutate this value.
+    #[serde(default)]
+    pub facegen: Option<FaceGenResolved>,
+    /// Stable identity of the selected head, EGM/EGT companions, raw
+    /// coefficients, and reconstruction algorithm.
+    #[serde(default)]
+    pub facegen_reconstruction_fingerprint: Option<String>,
+    #[serde(default)]
+    pub facegen_diagnostics: Vec<crate::facegen::FaceGenDiagnostic>,
     #[serde(default)]
     pub equipped_weapon: Option<AssembledWeapon>,
     #[serde(default)]
@@ -406,6 +418,9 @@ impl Default for ActorAssemblyBlueprint {
             apparel: Vec::new(),
             eye_form_id: None,
             eye_texture_path: None,
+            facegen: None,
+            facegen_reconstruction_fingerprint: None,
+            facegen_diagnostics: Vec::new(),
             equipped_weapon: None,
             fallback: ActorFallbackDecision::default(),
         }

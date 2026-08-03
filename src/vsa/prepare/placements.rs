@@ -710,6 +710,7 @@ pub(crate) fn stage_placements(
                         .filter_map(|path| staged_paths.get(&normalize_asset_path(path)).cloned())
                         .collect(),
                     eye_texture: actor.eye_texture.clone(),
+                    facegen: actor.facegen.clone(),
                 };
                 fs::write(&assembly_path, serde_json::to_string(&staged)?)?;
                 assembly_path

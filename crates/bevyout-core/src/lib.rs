@@ -11,6 +11,7 @@ pub mod combat;
 pub mod content;
 pub mod dialogue;
 pub mod disposition;
+pub mod facegen;
 pub mod faction;
 pub mod form_id;
 pub mod geometry;

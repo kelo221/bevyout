@@ -17,6 +17,7 @@ mod cache;
 mod container_audio;
 mod container_audio_policy;
 mod dialogue_discovery;
+mod facegen;
 mod fingerprints;
 mod imad;
 mod image_space;
@@ -54,6 +55,7 @@ pub(crate) use cache::*;
 pub(crate) use container_audio::*;
 pub(crate) use container_audio_policy::*;
 pub(crate) use dialogue_discovery::*;
+pub(crate) use facegen::*;
 pub(crate) use fingerprints::*;
 pub(crate) use imad::*;
 pub(crate) use image_space::*;
@@ -85,8 +87,8 @@ pub use orchestrator::prepare;
 
 use super::assets::{
     ActorAnimationClipJob, ActorAnimationPackJob, ActorAnimationPackReport, ActorApparelInput,
-    ActorAssemblyDescriptor, ActorBodyPartInput, AssetConversion, AssetJob, AssetJobKind,
-    NATIVE_ACTOR_CONVERTER_REVISION, NATIVE_NIF_CONVERTER_REVISION,
+    ActorAssemblyDescriptor, ActorBodyPartInput, ActorFaceGenDescriptor, AssetConversion, AssetJob,
+    AssetJobKind, NATIVE_ACTOR_CONVERTER_REVISION, NATIVE_NIF_CONVERTER_REVISION,
     NATIVE_PREPARED_CONVERTER_REVISION, RootTransformPolicy, actor_animation_pack_fingerprint,
     asset_conversion, audit_glb_visuals, canonical_actor_assembly, content_addressed_glb_name,
     convert_staged_textures, load_archives, read_actor_animation_report,

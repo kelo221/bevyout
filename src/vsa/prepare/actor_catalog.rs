@@ -32,6 +32,7 @@ use bevyout_core::actor_state::{
     ActorDefinition, ActorFactionMembership as RuntimeFactionMembership, ActorSkill, ActorValue,
     SpecialAttribute,
 };
+use bevyout_core::facegen::{FaceGenDiagnostic, FaceGenRaw, FaceGenResolved, resolve_facegen};
 use bevyout_core::faction::{
     FactionRelation as CoreFactionRelation, FactionRelationTable, GroupCombatReaction,
     PreparedFaction,
@@ -45,7 +46,7 @@ use super::super::paths::fingerprint;
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`RECIPE_CATALOG_REVISION`
 /// precedent (a stale cached `actors.ron` would otherwise deserialize
 /// silently with defaulted fields).
-pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v7-faction-relation-table";
+pub(crate) const ACTOR_CATALOG_REVISION: &str = "openmw-actors-v8-facegen-faction-relation-table";
 
 /// Maximum number of concrete `NPC_`/`CREA` nodes in one `TPLT` chain,
 /// including the starting actor itself (`build_chain` checks `nodes.len()`
@@ -128,9 +129,12 @@ pub(crate) struct ActorTraits {
     pub(crate) eyes_form_id: Option<u32>,
     pub(crate) head_part_form_ids: Vec<u32>,
     pub(crate) voice_form_id: Option<u32>,
-    /// Whether any `FGGS`/`FGGA`/`FGTS` FaceGen bytes were present on the
-    /// source record. The bytes themselves are opaque per task A/B and are
-    /// not carried into the catalog; only their presence is tracked.
+    /// Raw `FGGS`/`FGGA`/`FGTS` bytes from the source record.  They remain
+    /// byte-identical through template resolution so the native preparation
+    /// cache can include the authored source identity.
+    pub(crate) facegen: FaceGenRaw,
+    /// Compatibility presence bit retained for old catalog readers. New
+    /// consumers use `facegen` and the resolved/diagnostic fields below.
     pub(crate) facegen_present: bool,
 }
 
@@ -320,6 +324,8 @@ pub(crate) struct ActorCatalogInputs {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RaceModifierInput {
     pub(crate) skill_modifiers: BTreeMap<ActorValue, f32>,
+    pub(crate) facegen_male: FaceGenRaw,
+    pub(crate) facegen_female: FaceGenRaw,
     pub(crate) diagnostics: Vec<String>,
 }
 
@@ -364,6 +370,14 @@ pub(crate) struct ActorBlueprint {
     pub(crate) head_part_form_ids: Vec<u32>,
     #[serde(default)]
     pub(crate) facegen_present: bool,
+    /// Resolved race defaults plus actor/template traits.  `None` means no
+    /// FaceGen component was authored; malformed authored bytes are reported
+    /// in `facegen_diagnostics` and deliberately do not produce a partial
+    /// result.
+    #[serde(default)]
+    pub(crate) facegen: Option<FaceGenResolved>,
+    #[serde(default)]
+    pub(crate) facegen_diagnostics: Vec<FaceGenDiagnostic>,
     pub(crate) voice_form_id: Option<u32>,
     #[serde(default)]
     pub(crate) creature_base_scale: Option<f32>,
@@ -1153,6 +1167,23 @@ fn build_blueprint(
             diagnostics.extend(modifiers.diagnostics.iter().cloned());
             modifiers.skill_modifiers.clone()
         });
+    let race_facegen = traits
+        .race_form_id
+        .and_then(|race| inputs.race_modifiers.get(&race))
+        .map(|modifiers| {
+            if traits.female {
+                &modifiers.facegen_female
+            } else {
+                &modifiers.facegen_male
+            }
+        });
+    let (facegen, facegen_diagnostics) = match resolve_facegen(&traits.facegen, race_facegen) {
+        Ok(resolved) => (resolved, Vec::new()),
+        Err(diagnostic) => {
+            diagnostics.push(format!("facegen: {diagnostic}"));
+            (None, vec![diagnostic])
+        }
+    };
     if let Some(class) = actor.class_form_id
         && !inputs.classes.contains(&class)
     {
@@ -1201,7 +1232,11 @@ fn build_blueprint(
         hair_form_id: traits.hair_form_id,
         eyes_form_id: traits.eyes_form_id,
         head_part_form_ids: traits.head_part_form_ids.clone(),
-        facegen_present: traits.facegen_present,
+        facegen_present: traits.facegen_present
+            || facegen.is_some()
+            || !facegen_diagnostics.is_empty(),
+        facegen,
+        facegen_diagnostics,
         voice_form_id: traits.voice_form_id,
         creature_base_scale: model_animation.creature_base_scale,
         level_or_mult: stats.level_or_mult,

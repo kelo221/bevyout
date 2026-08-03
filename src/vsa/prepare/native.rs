@@ -1,7 +1,9 @@
 //! Bounded in-process native NIF conversion for prepared static assets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic};
 
 use crate::cli::NifConversionMode;
 use crate::vsa::nif_convert::{
@@ -202,6 +204,21 @@ fn convert_native_actor(
         }
     }
 
+    let mut extra_textures = BTreeMap::new();
+    let mut facegen_texture_replacement = None;
+    if let Some(facegen) = descriptor.facegen.as_ref()
+        && let Some(anchor_key) = head_anchor
+        && let Some((path, _, scene)) = decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
+    {
+        match apply_native_facegen(scene, facegen, data_root, archives, &mut extra_textures) {
+            Ok(replacement) => facegen_texture_replacement = Some(replacement),
+            Err(error) => warnings.push(format!(
+                "actor head FaceGen {} could not be applied; retaining authored rest pose: {error}",
+                path
+            )),
+        }
+    }
+
     let mut occupied_slots = 0u32;
     for (path, key, scene) in decoded
         .iter()
@@ -275,6 +292,13 @@ fn convert_native_actor(
             ));
         }
     }
+    if let Some(replacement) = facegen_texture_replacement {
+        for material in &mut actor.materials {
+            if material.diffuse_texture.as_deref() == Some(replacement.source_path.as_str()) {
+                material.diffuse_texture = Some(replacement.generated_path.clone());
+            }
+        }
+    }
     actor.animations.clear();
     let mut result = convert_actor_scene(ActorSceneConversionRequest {
         source_name: &job.model,
@@ -285,6 +309,7 @@ fn convert_native_actor(
         allow_lossy: !strict,
         data_root: Some(data_root),
         archives,
+        extra_textures,
     })?;
     result.lossy_scene_issues += warnings.len();
     result.lines.extend(
@@ -293,6 +318,86 @@ fn convert_native_actor(
             .map(|warning| format!("native actor warning: {warning}")),
     );
     Ok(result)
+}
+
+struct FaceGenTextureReplacement {
+    source_path: String,
+    generated_path: String,
+}
+
+fn apply_native_facegen(
+    scene: &mut nif::fo3::Scene,
+    descriptor: &ActorFaceGenDescriptor,
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    extra_textures: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<FaceGenTextureReplacement, bevyout_core::facegen::FaceGenDiagnostic> {
+    let geometry_bytes = resolve_asset(data_root, archives, &descriptor.geometry_morph_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            reason: format!("reading {}: {error:#}", descriptor.geometry_morph_path),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            path: descriptor.geometry_morph_path.clone(),
+        })?;
+    let texture_bytes = resolve_asset(data_root, archives, &descriptor.texture_morph_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: format!("reading {}: {error:#}", descriptor.texture_morph_path),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: descriptor.texture_morph_path.clone(),
+        })?;
+    let geometry = parse_geometry_morph(&geometry_bytes)?;
+    let texture = parse_texture_morph(&texture_bytes)?;
+    let mut candidate = scene.clone();
+    apply_geometry_morph(
+        &mut candidate,
+        &geometry,
+        &descriptor.resolved.coefficients,
+        descriptor.base_vertex_count,
+    )?;
+
+    let diffuse_path = candidate
+        .materials
+        .iter()
+        .find_map(|material| material.diffuse_texture.clone())
+        .ok_or_else(|| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: "selected head has no diffuse texture".into(),
+        })?;
+    let base_bytes = resolve_asset(data_root, archives, &diffuse_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: format!("reading {diffuse_path}: {error:#}"),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: diffuse_path.clone(),
+        })?;
+    let synthesized =
+        synthesize_head_diffuse(&base_bytes, &texture, &descriptor.resolved.coefficients)?;
+    let generated_path = facegen_texture_key(&diffuse_path, &descriptor.resolved.coefficients);
+    for material in &mut candidate.materials {
+        if material.diffuse_texture.as_deref() == Some(diffuse_path.as_str()) {
+            material.diffuse_texture = Some(generated_path.clone());
+        }
+    }
+    // Keep the generated identity as the preferred material key, but also
+    // alias the original diffuse path.  The native scene merge can retain an
+    // equivalent material slot from the shared skeleton; aliasing that key
+    // guarantees the authored head diffuse is replaced by the synthesized
+    // pixels without changing any body, hair, eye, mouth, tooth, or apparel
+    // texture references.
+    extra_textures.insert(generated_path.clone(), synthesized.clone());
+    extra_textures.insert(diffuse_path.clone(), synthesized);
+    *scene = candidate;
+    Ok(FaceGenTextureReplacement {
+        source_path: diffuse_path,
+        generated_path,
+    })
 }
 
 fn extract_actor_part(path: &str) -> Result<nif::fo3::Scene> {

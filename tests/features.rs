@@ -539,6 +539,7 @@ use bevyout_core::combat::{
     WeaponConditionPolicy,
 };
 use bevyout_core::disposition;
+use bevyout_core::facegen;
 use bevyout_core::faction;
 use bevyout_core::perception;
 use bevyout_core::weapon;
@@ -551,6 +552,13 @@ use item_transaction::{
 use manifest::{PreparedPlacement, PreparedSceneManifest, PreparedSemantic};
 use paths::{CellSelector, normalize_asset_path, parse_cell_selector, placement_transform_parts};
 use selectors::{CellSummary, SelectionSpec, resolve_selection};
+
+#[derive(Debug, Default)]
+struct FaceGenFeatureState {
+    actor: facegen::FaceGenRaw,
+    race: Option<facegen::FaceGenRaw>,
+    result: Option<Result<facegen::FaceGenResolved, facegen::FaceGenDiagnostic>>,
+}
 
 #[derive(Debug, Default, cucumber::World)]
 struct BevyoutWorld {
@@ -1193,6 +1201,9 @@ struct BevyoutWorld {
         actor_idle_policy::IdleDecision,
     )>,
     idle_loop_count: Option<u8>,
+
+    // -- actor_fallback.feature (M4 static NPC FaceGen reconstruction) --
+    facegen_feature: FaceGenFeatureState,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -16972,4 +16983,125 @@ async fn then_idle_base_resumes(world: &mut BevyoutWorld) {
         world.idle_authority.source,
         actor_idle_policy::IdleSource::IdleManager
     );
+}
+
+// ---------------------------------------------------------------------
+// actor_fallback.feature -- M4 static NPC FaceGen reconstruction.
+// ---------------------------------------------------------------------
+
+fn facegen_fixture_bytes(count: usize, value: f32) -> Vec<u8> {
+    (0..count)
+        .flat_map(|_| value.to_le_bytes())
+        .collect::<Vec<_>>()
+}
+
+fn canonical_facegen_raw(value: f32) -> facegen::FaceGenRaw {
+    facegen::FaceGenRaw {
+        geometry_symmetric: Some(facegen_fixture_bytes(
+            facegen::GEOMETRY_SYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+        geometry_asymmetric: Some(facegen_fixture_bytes(
+            facegen::GEOMETRY_ASYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+        texture_symmetric: Some(facegen_fixture_bytes(
+            facegen::TEXTURE_SYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+    }
+}
+
+#[given("canonical FaceGen coefficient payloads")]
+async fn given_canonical_facegen_payloads(world: &mut BevyoutWorld) {
+    world.facegen_feature.actor = canonical_facegen_raw(1.0);
+    world.facegen_feature.race = None;
+}
+
+#[given("a FaceGen geometry payload with an unsupported length")]
+async fn given_unsupported_facegen_payload(world: &mut BevyoutWorld) {
+    world.facegen_feature.actor = facegen::FaceGenRaw {
+        geometry_symmetric: Some(vec![0; 4]),
+        ..facegen::FaceGenRaw::default()
+    };
+    world.facegen_feature.race = None;
+}
+
+#[given("canonical FaceGen race defaults")]
+async fn given_canonical_facegen_race_defaults(world: &mut BevyoutWorld) {
+    world.facegen_feature.race = Some(canonical_facegen_raw(1.0));
+}
+
+#[given("canonical FaceGen actor traits")]
+async fn given_canonical_facegen_actor_traits(world: &mut BevyoutWorld) {
+    world.facegen_feature.actor = canonical_facegen_raw(2.0);
+}
+
+#[when("FaceGen coefficients are decoded")]
+async fn when_facegen_coefficients_are_decoded(world: &mut BevyoutWorld) {
+    world.facegen_feature.result = match facegen::resolve_facegen(
+        &world.facegen_feature.actor,
+        world.facegen_feature.race.as_ref(),
+    ) {
+        Ok(Some(resolved)) => Some(Ok(resolved)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    };
+}
+
+#[then(regex = r"^FaceGen coefficient policy is (Authored|RestPoseFallback)$")]
+async fn then_facegen_coefficient_policy_is(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world.facegen_feature.result.as_ref() {
+        Some(Ok(_)) => "Authored",
+        Some(Err(_)) => "RestPoseFallback",
+        None => "NotAuthored",
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then(
+    regex = r"^FaceGen (geometry symmetric|geometry asymmetric|texture symmetric) coefficient count is (\d+)$"
+)]
+async fn then_facegen_coefficient_count(
+    world: &mut BevyoutWorld,
+    component: String,
+    expected: usize,
+) {
+    let resolved = match world.facegen_feature.result.as_ref() {
+        Some(Ok(resolved)) => resolved,
+        Some(Err(error)) => panic!("FaceGen coefficients failed: {error}"),
+        None => panic!("FaceGen coefficients were not decoded"),
+    };
+    let component = match component.as_str() {
+        "geometry symmetric" => facegen::FaceGenComponent::GeometrySymmetric,
+        "geometry asymmetric" => facegen::FaceGenComponent::GeometryAsymmetric,
+        "texture symmetric" => facegen::FaceGenComponent::TextureSymmetric,
+        other => panic!("unknown FaceGen component {other}"),
+    };
+    assert_eq!(resolved.coefficients.component(component).len(), expected);
+}
+
+#[then(regex = r####"^FaceGen diagnostic "([^"]+)" is recorded$"####)]
+async fn then_facegen_diagnostic_is_recorded(world: &mut BevyoutWorld, expected: String) {
+    let diagnostic = match world.facegen_feature.result.as_ref() {
+        Some(Err(diagnostic)) => diagnostic,
+        Some(Ok(_)) => panic!("FaceGen decode unexpectedly succeeded"),
+        None => panic!("FaceGen decode was not run"),
+    };
+    assert_eq!(diagnostic.code(), expected);
+}
+
+#[then(regex = r"^combined FaceGen geometry symmetric coefficient (\d+) is (-?[\d.]+)$")]
+async fn then_combined_facegen_coefficient_is(
+    world: &mut BevyoutWorld,
+    index: usize,
+    expected: f32,
+) {
+    let resolved = match world.facegen_feature.result.as_ref() {
+        Some(Ok(resolved)) => resolved,
+        Some(Err(error)) => panic!("FaceGen coefficients failed: {error}"),
+        None => panic!("FaceGen coefficients were not decoded"),
+    };
+    let actual = resolved.coefficients.geometry_symmetric[index];
+    assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
 }
