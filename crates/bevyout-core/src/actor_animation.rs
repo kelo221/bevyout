@@ -145,6 +145,7 @@ pub struct PreparedActorAnimationSet {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedActorIdleDefinition {
     pub form_id: u32,
+    #[serde(default)]
     pub editor_id: Option<String>,
     #[serde(default)]
     pub source_kf_path: Option<String>,
