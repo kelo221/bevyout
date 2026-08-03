@@ -54,6 +54,7 @@ image = { version = "0.25", default-features = false, features = [
   "dds",
   "png",
 ] }
+libc = "0.2"
 lewton = "0.10.2"
 nalgebra = "0.34"
 nif = { git = "https://github.com/kelo221/nifty.git", rev = "17f5769", default-features = false, features = [

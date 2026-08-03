@@ -5,6 +5,9 @@ use serde_json::{Value, json};
 
 use super::lifecycle::ExteriorStreamState;
 
+#[cfg(target_os = "macos")]
+const PROCESS_MEMORY_METHOD: &str = "libproc_process_resident_set";
+#[cfg(not(target_os = "macos"))]
 const PROCESS_MEMORY_METHOD: &str = "sysinfo_process_resident_set";
 const PROCESS_MEMORY_METRIC: &str = "resident_set_bytes";
 
@@ -300,7 +303,27 @@ fn process_memory_support() -> ProcessMemorySupport {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn read_current_process_memory() -> Option<u64> {
+    let pid = std::process::id().try_into().ok()?;
+    let mut task_info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let result = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            task_info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int,
+        )
+    };
+    if result != std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int {
+        return None;
+    }
+    let task_info = unsafe { task_info.assume_init() };
+    (task_info.pti_resident_size > 0).then_some(task_info.pti_resident_size)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn read_current_process_memory() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
     let mut system = sysinfo::System::new();
