@@ -2025,4 +2025,6 @@ mod actors;
 
 mod image_space;
 
+mod idle;
+
 mod navmesh;

@@ -347,6 +347,15 @@ pub(crate) fn walk_container(
                     }
                 }
             }
+            "IDLE" => {
+                if flags & RECORD_DELETED != 0 {
+                    state.idles.remove(&form_id);
+                } else {
+                    state
+                        .idles
+                        .insert(form_id, parse_idle(&subs, form_id, flags, resolver));
+                }
+            }
             "PACK" => {
                 if flags & RECORD_DELETED != 0 {
                     state.packages.remove(&form_id);

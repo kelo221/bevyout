@@ -135,6 +135,107 @@ fn empty_and_partially_invalid_sets_are_retained() {
 }
 
 #[test]
+fn idle_definitions_normalize_paths_and_match_existing_clips() {
+    let mut catalog = build_actor_animation_catalog(
+        "v4",
+        "source",
+        &[actor(&["idleanims/Swatting.KF"])],
+        &[asset(
+            "meshes/characters/_male/idleanims/swatting.kf",
+            "swat",
+        )],
+    );
+    attach_actor_idle_definitions(
+        &mut catalog,
+        vec![
+            PreparedActorIdleDefinition {
+                form_id: 0x20,
+                source_kf_path: Some("Characters\\_Male\\IdleAnims\\Swatting.KF".into()),
+                ..Default::default()
+            },
+            PreparedActorIdleDefinition {
+                form_id: 0x10,
+                ..Default::default()
+            },
+        ],
+    );
+
+    assert_eq!(
+        catalog
+            .idle_definitions
+            .iter()
+            .map(|definition| definition.form_id)
+            .collect::<Vec<_>>(),
+        [0x10, 0x20]
+    );
+    assert_eq!(
+        catalog.idle_definitions[1].source_kf_path.as_deref(),
+        Some("meshes/characters/_male/idleanims/swatting.kf")
+    );
+    assert_eq!(
+        catalog.idle_definitions[1].clip_name.as_deref(),
+        Some("swatting")
+    );
+}
+
+#[test]
+fn authored_idle_sibling_order_uses_previous_links_and_is_bounded() {
+    let definitions = vec![
+        PreparedActorIdleDefinition {
+            form_id: 0x30,
+            parent_form_id: Some(0x100),
+            previous_sibling_form_id: Some(0x20),
+            ..Default::default()
+        },
+        PreparedActorIdleDefinition {
+            form_id: 0x10,
+            parent_form_id: Some(0x100),
+            ..Default::default()
+        },
+        PreparedActorIdleDefinition {
+            form_id: 0x20,
+            parent_form_id: Some(0x100),
+            previous_sibling_form_id: Some(0x10),
+            ..Default::default()
+        },
+    ];
+    let order = reconstruct_idle_sibling_order(&definitions);
+
+    assert_eq!(order.children_by_parent[&Some(0x100)], [0x10, 0x20, 0x30]);
+    assert!(order.diagnostics.is_empty());
+
+    let cycle = vec![
+        PreparedActorIdleDefinition {
+            form_id: 1,
+            parent_form_id: Some(9),
+            previous_sibling_form_id: Some(2),
+            ..Default::default()
+        },
+        PreparedActorIdleDefinition {
+            form_id: 2,
+            parent_form_id: Some(9),
+            previous_sibling_form_id: Some(1),
+            ..Default::default()
+        },
+    ];
+    let cycle_order = reconstruct_idle_sibling_order(&cycle);
+    assert_eq!(cycle_order.children_by_parent[&Some(9)], [1, 2]);
+    assert!(
+        cycle_order
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("cycle"))
+    );
+}
+
+#[test]
+fn idle_group_section_preserves_authored_high_bits() {
+    assert_eq!(canonical_idle_group_section(0x47), 7);
+    assert_eq!(canonical_idle_group_section(0x87), 7);
+    assert_eq!(canonical_idle_group_section(0x54), 20);
+}
+
+#[test]
 fn normalized_clip_runtime_metadata_round_trips() {
     let clip = PreparedActorAnimationClip {
         name: "equip".into(),
