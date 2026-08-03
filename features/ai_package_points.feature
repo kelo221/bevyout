@@ -26,3 +26,13 @@ Feature: AI package editor-location and patrol marker-chain resolution
     And chain marker 1 resolves to 1.0 0.0 0.0
     And chain marker 2 resolves to 2.0 0.0 0.0
     And chain marker 3 resolves to 3.0 0.0 0.0
+
+  Scenario: A current-cell package editor marker is retained as a nonvisual point
+    Given actor package links "00004153"
+    And package 0x00004153 has a Near Reference point 0x00076f52
+    And package 0x00004153 has a Specific Reference target 0x00076f52
+    And a current-cell editor marker 0x00076f52 at 12.0 0.0 34.0
+    And an unrelated current-cell editor marker 0x0000beef at 90.0 0.0 90.0
+    When package-linked marker points are retained
+    Then package marker 0x00076f52 is retained as a nonvisual point at 12.0 0.0 34.0
+    And unrelated editor marker 0x0000beef is omitted

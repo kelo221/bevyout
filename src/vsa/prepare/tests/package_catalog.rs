@@ -9,7 +9,10 @@ fn package(form_id: u32) -> PackageInput {
 
 #[test]
 fn revision_is_pinned() {
-    assert_eq!(PACKAGE_CATALOG_REVISION, "openmw-packages-v2");
+    assert_eq!(
+        PACKAGE_CATALOG_REVISION,
+        "openmw-packages-v3-idle-collections-package-points"
+    );
 }
 
 #[test]
@@ -395,4 +398,107 @@ fn writes_content_set_wide_artifact_under_catalogs() {
     let bytes = std::fs::read(cache_dir.join(&relative)).unwrap();
     assert_eq!(fingerprint(&bytes), hash);
     std::fs::remove_dir_all(&cache_dir).unwrap();
+}
+
+#[test]
+fn idle_collection_round_trips_into_the_prepared_catalog() {
+    let mut input = package(0x10);
+    input.idle_collection = Some(PreparedPackageIdleCollection {
+        flags: 0x05,
+        timer_seconds: 12.5,
+        animation_form_ids: vec![0x100, 0x101],
+    });
+    let inputs = PackageCatalogInputs {
+        packages: HashMap::from([(0x10, input)]),
+        ..PackageCatalogInputs::default()
+    };
+    let catalog = build_package_catalog(&inputs, "fp");
+    assert_eq!(
+        catalog.packages[0].idle_collection,
+        inputs.packages[&0x10].idle_collection
+    );
+}
+
+#[test]
+fn idle_collection_count_diagnostic_preserves_all_animation_ids() {
+    let mut input = package(0x10);
+    input.idle_collection = Some(PreparedPackageIdleCollection {
+        flags: 0,
+        timer_seconds: 0.0,
+        animation_form_ids: vec![0x100, 0x101],
+    });
+    input
+        .diagnostics
+        .push("IDLC count mismatch: DATA declares 1, decoded 2".into());
+    let inputs = PackageCatalogInputs {
+        packages: HashMap::from([(0x10, input)]),
+        ..PackageCatalogInputs::default()
+    };
+    let catalog = build_package_catalog(&inputs, "fp");
+    assert_eq!(
+        catalog.packages[0]
+            .idle_collection
+            .as_ref()
+            .unwrap()
+            .animation_form_ids,
+        vec![0x100, 0x101]
+    );
+    assert_eq!(
+        catalog.packages[0].diagnostics,
+        vec!["IDLC count mismatch: DATA declares 1, decoded 2"]
+    );
+}
+
+#[test]
+fn supported_idle_subrecords_are_not_reclassified_as_deferred_or_unsupported() {
+    for subrecord in ["IDLF", "IDLC", "IDLT", "IDLA"] {
+        let mut input = package(0x10);
+        input.unsupported_subrecords = vec![subrecord.into()];
+        let catalog = build_package_catalog(
+            &PackageCatalogInputs {
+                packages: HashMap::from([(0x10, input)]),
+                ..PackageCatalogInputs::default()
+            },
+            "fp",
+        );
+        assert_eq!(catalog.counters.unsupported_subrecord, 0, "{subrecord}");
+        assert_eq!(catalog.counters.deferred_subrecord, 0, "{subrecord}");
+        assert!(catalog.packages[0].diagnostics.is_empty(), "{subrecord}");
+    }
+}
+
+#[test]
+fn package_point_retention_is_scoped_to_reachable_editor_markers() {
+    let mut package = package(0x41);
+    package.location = Some(PackageLocationInput {
+        location_type: 0,
+        form_id: Some(0x76),
+        raw_value: 0x76,
+        radius: 0,
+    });
+    package.target = Some(PackageTargetInput {
+        target_type: 0,
+        form_id: Some(0x76),
+        raw_value: 0x76,
+        count_or_distance: 0,
+    });
+    let retained = retain_package_marker_points(
+        &[vec![0x41]],
+        &HashMap::from([(0x41, package)]),
+        &[
+            PackagePointReference {
+                reference_form_id: 0x76,
+                position: [1.0, 2.0, 3.0],
+                is_editor_marker: true,
+            },
+            PackagePointReference {
+                reference_form_id: 0xbeef,
+                position: [9.0, 9.0, 9.0],
+                is_editor_marker: true,
+            },
+        ],
+    );
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].reference_form_id, 0x76);
+    assert_eq!(retained[0].position, [1.0, 2.0, 3.0]);
 }

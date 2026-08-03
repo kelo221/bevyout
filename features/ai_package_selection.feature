@@ -29,7 +29,7 @@ Feature: AI package selection policy
   Scenario: A schedule window excludes an out-of-window hour
     Given a selection game hour of 20.0
     And a package candidate 0x00000010 of type 0
-    And candidate 0x00000010 has schedule time 8 duration 60
+    And candidate 0x00000010 has schedule time 8 duration 1
     When the actor's package is selected
     Then no package is selected
     And the selection counts unsupported_type 0 out_of_schedule 1 conditions_false 0 conditions_unevaluable 0 schedule_gap 1
@@ -37,14 +37,14 @@ Feature: AI package selection policy
   Scenario: A schedule includes its inclusive start hour
     Given a selection game hour of 8.0
     And a package candidate 0x00000010 of type 0
-    And candidate 0x00000010 has schedule time 8 duration 120
+    And candidate 0x00000010 has schedule time 8 duration 2
     When the actor's package is selected
     Then the selected package is 0x00000010
 
   Scenario: A schedule wraps past midnight
     Given a selection game hour of 0.5
     And a package candidate 0x00000010 of type 0
-    And candidate 0x00000010 has schedule time 22 duration 240
+    And candidate 0x00000010 has schedule time 22 duration 4
     When the actor's package is selected
     Then the selected package is 0x00000010
 
@@ -74,3 +74,24 @@ Feature: AI package selection policy
     Then no package is selected
     And package candidate 0x00000010 was rejected as "conditions-unevaluable"
     And the selection counts unsupported_type 0 out_of_schedule 0 conditions_false 0 conditions_unevaluable 1 schedule_gap 1
+
+  Scenario: A positive duration is measured in hours and has an exclusive end
+    Given a selection game hour of 19.99
+    And a package candidate 0x00000010 of type 0
+    And candidate 0x00000010 has schedule time 8 duration 12
+    When the actor's package is selected
+    Then the selected package is 0x00000010
+
+  Scenario: A schedule duration of at least 24 hours is active all day
+    Given a selection game hour of 3.0
+    And a package candidate 0x00000010 of type 0
+    And candidate 0x00000010 has schedule time 8 duration 24
+    When the actor's package is selected
+    Then the selected package is 0x00000010
+
+  Scenario: A non-positive duration remains open until midnight
+    Given a selection game hour of 23.5
+    And a package candidate 0x00000010 of type 0
+    And candidate 0x00000010 has schedule time 8 duration 0
+    When the actor's package is selected
+    Then the selected package is 0x00000010

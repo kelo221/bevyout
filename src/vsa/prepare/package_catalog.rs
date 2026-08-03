@@ -72,12 +72,11 @@ use super::super::paths::fingerprint;
 
 /// Bump whenever this catalog's shape changes, even when new fields are
 /// serde-defaulted, per the `ITEM_CATALOG_REVISION`/`ACTOR_CATALOG_REVISION`
-/// precedent (AGENTS.md's prepared-asset rule). v2 (M4 wave 11 follow-up):
-/// `PackageCatalogCounters` gained `deferred_subrecord`/`out_of_scope_location`/
-/// `out_of_scope_target`, and `unsupported_subrecord`/`unresolved_location`/
-/// `unresolved_target` now mean something narrower than v1 -- see the module
-/// doc comment above.
-pub(crate) const PACKAGE_CATALOG_REVISION: &str = "openmw-packages-v2";
+/// precedent (AGENTS.md's prepared-asset rule). v3 adds package-authored
+/// idle collections, their stable decode diagnostics, and the package-point
+/// retention seam used by current-cell actor packages.
+pub(crate) const PACKAGE_CATALOG_REVISION: &str =
+    "openmw-packages-v3-idle-collections-package-points";
 
 /// Highest FO3-documented `PKDT.type` value (fopdoc's Fallout3 PACK page:
 /// 0 Find .. 16 Use Weapon, including the page's own undocumented-but-
@@ -94,6 +93,8 @@ pub(crate) const MAX_KNOWN_PACKAGE_TYPE: u8 = 16;
 /// registry, not this prepare-time data catalog -- see the module doc
 /// comment for the real-data measurement that motivated splitting these out
 /// of "unsupported".
+const SUPPORTED_PACKAGE_SUBRECORDS: &[&str] = &["IDLF", "IDLC", "IDLT", "IDLA"];
+
 const KNOWN_DEFERRED_PACKAGE_SUBRECORDS: &[&str] = &[
     // OnBegin/OnChange/OnEnd action-block markers plus their idle animation
     // and dialogue topic references.
@@ -101,8 +102,9 @@ const KNOWN_DEFERRED_PACKAGE_SUBRECORDS: &[&str] = &[
     // The shared embedded-Script subrecord group (script header, compiled
     // bytecode, source text, referenced objects, local variables).
     "SCHR", "SCDA", "SCTX", "SCRO", "SLSD", "SCVR", "SCRV",
-    // Idle animation list/flags/count and the resolved idle reference.
-    "IDLA", "IDLB", "IDLC", "IDLF", "IDLT",
+    // The unresolved idle reference is still deferred to the authored-idle
+    // preparation lane; the collection fields themselves are decoded here.
+    "IDLB",
     // Package-type-specific data (eat/escort/follow/patrol/weapon/use-item/
     // ambush/dialog).
     "PKED", "PKE2", "PKFD", "PKPT", "PKW3", "PUID", "PKAM", "PKDD",
@@ -140,6 +142,38 @@ const CHECKABLE_TARGET_TYPES: [i32; 1] = [1];
 // ---------------------------------------------------------------------
 // Plain input types (boundary conversion happens in orchestrator.rs)
 // ---------------------------------------------------------------------
+
+/// Prepared form of the package-authored `IDLF`/`IDLC`/`IDLT`/`IDLA`
+/// collection. `animation_form_ids` retains every complete decoded FormID;
+/// count mismatches are diagnostics, never a reason to truncate valid IDs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct PreparedPackageIdleCollection {
+    pub(crate) flags: u8,
+    pub(crate) timer_seconds: f32,
+    pub(crate) animation_form_ids: Vec<u32>,
+}
+
+impl PartialEq for PreparedPackageIdleCollection {
+    fn eq(&self, other: &Self) -> bool {
+        self.flags == other.flags
+            && self.timer_seconds.to_bits() == other.timer_seconds.to_bits()
+            && self.animation_form_ids == other.animation_form_ids
+    }
+}
+
+impl Eq for PreparedPackageIdleCollection {}
+
+/// An editor-marker reference projected only as a package point. The real
+/// orchestrator converts these facts into an asset-less `PreparedPlacement`;
+/// this plain contract keeps the eligibility rule executable in Cucumber.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PackagePointReference {
+    pub(crate) reference_form_id: u32,
+    pub(crate) position: [f32; 3],
+    pub(crate) is_editor_marker: bool,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -183,11 +217,14 @@ pub(crate) struct PackageInput {
     pub(crate) location: Option<PackageLocationInput>,
     pub(crate) schedule: Option<PackageScheduleInput>,
     pub(crate) target: Option<PackageTargetInput>,
+    pub(crate) idle_collection: Option<PreparedPackageIdleCollection>,
     /// Raw `CTDA` payloads, data only (see module doc comment).
     pub(crate) conditions: Vec<Vec<u8>>,
     /// `PackageRecord::ignored_subrecords` -- subrecords this decode pass
     /// does not understand, diagnosed rather than silently dropped.
     pub(crate) unsupported_subrecords: Vec<String>,
+    /// Stable non-fatal parser diagnostics, such as an `IDLC` count mismatch.
+    pub(crate) diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -205,6 +242,60 @@ pub(crate) struct PackageCatalogInputs {
     pub(crate) known_form_ids: HashSet<u32>,
 }
 
+/// Collects package location/target reference FormIDs reachable from the
+/// selected cell's actor blueprints. Only `Near Reference` locations and
+/// `Specific Reference` targets carry the package-point contract; all other
+/// package slots stay under their existing runtime resolution policy.
+pub(crate) fn package_linked_reference_ids(
+    actor_package_form_ids: &[Vec<u32>],
+    packages: &HashMap<u32, PackageInput>,
+) -> HashSet<u32> {
+    let mut references = HashSet::new();
+    for package_form_ids in actor_package_form_ids {
+        for package_form_id in package_form_ids {
+            let Some(package) = packages.get(package_form_id) else {
+                continue;
+            };
+            if let Some(location) = package.location
+                && location.location_type == 0
+                && let Some(reference_form_id) = location.form_id
+                && reference_form_id != 0
+            {
+                references.insert(reference_form_id);
+            }
+            if let Some(target) = package.target
+                && target.target_type == 0
+                && let Some(reference_form_id) = target.form_id
+                && reference_form_id != 0
+            {
+                references.insert(reference_form_id);
+            }
+        }
+    }
+    references
+}
+
+/// Retains only editor-marker references named by a current-cell actor's
+/// reachable package points. Sorting by FormID makes the prepared point
+/// ordering deterministic and excludes unrelated markers.
+#[cfg(test)]
+pub(crate) fn retain_package_marker_points(
+    actor_package_form_ids: &[Vec<u32>],
+    packages: &HashMap<u32, PackageInput>,
+    references: &[PackagePointReference],
+) -> Vec<PackagePointReference> {
+    let linked = package_linked_reference_ids(actor_package_form_ids, packages);
+    let mut retained = references
+        .iter()
+        .copied()
+        .filter(|reference| {
+            reference.is_editor_marker && linked.contains(&reference.reference_form_id)
+        })
+        .collect::<Vec<_>>();
+    retained.sort_by_key(|reference| reference.reference_form_id);
+    retained
+}
+
 // ---------------------------------------------------------------------
 // Output types
 // ---------------------------------------------------------------------
@@ -219,8 +310,9 @@ pub(crate) struct PreparedPackageEntry {
     pub(crate) location: Option<PackageLocationInput>,
     pub(crate) schedule: Option<PackageScheduleInput>,
     pub(crate) target: Option<PackageTargetInput>,
+    pub(crate) idle_collection: Option<PreparedPackageIdleCollection>,
     pub(crate) conditions: Vec<Vec<u8>>,
-    /// Stable per-package diagnostics: unsupported package type, unsupported
+    /// Stable per-package diagnostics: parser diagnostics, unsupported package type, unsupported
     /// subrecord(s), unresolved location/target FormID. Sorted and
     /// deduplicated, mirroring `ActorBlueprint::diagnostics`.
     pub(crate) diagnostics: Vec<String>,
@@ -281,7 +373,7 @@ pub(crate) fn build_package_catalog(
         .into_iter()
         .map(|form_id| {
             let input = &inputs.packages[&form_id];
-            let mut diagnostics = Vec::new();
+            let mut diagnostics = input.diagnostics.clone();
             if input.package_type > MAX_KNOWN_PACKAGE_TYPE {
                 counters.unsupported_type += 1;
                 diagnostics.push(format!(
@@ -289,8 +381,11 @@ pub(crate) fn build_package_catalog(
                     input.package_type
                 ));
             }
-            let (deferred, truly_unsupported): (Vec<&String>, Vec<&String>) =
-                input.unsupported_subrecords.iter().partition(|subrecord| {
+            let (deferred, truly_unsupported): (Vec<&String>, Vec<&String>) = input
+                .unsupported_subrecords
+                .iter()
+                .filter(|subrecord| !SUPPORTED_PACKAGE_SUBRECORDS.contains(&subrecord.as_str()))
+                .partition(|subrecord| {
                     KNOWN_DEFERRED_PACKAGE_SUBRECORDS.contains(&subrecord.as_str())
                 });
             if !deferred.is_empty() {
@@ -350,6 +445,7 @@ pub(crate) fn build_package_catalog(
                 location: input.location,
                 schedule: input.schedule,
                 target: input.target,
+                idle_collection: input.idle_collection.clone(),
                 conditions: input.conditions.clone(),
                 diagnostics,
             }
