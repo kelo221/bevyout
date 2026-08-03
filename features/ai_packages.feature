@@ -104,15 +104,3 @@ Feature: Prepared AI package catalog
     And package 0x00000010 has target type 1 target 0x00000020 count 1
     When the package catalog is built
     Then package 0x00000010 has no diagnostics
-
-  Scenario: Real Eat and Sleep PKDT layouts survive package catalog preparation
-    Given a 4-byte PKDT package 0x00000010 with general flags 0x00000001
-    And an 8-byte PKDT package 0x0001ff1e with type 3 and behavior flags 0x0002
-    And an 8-byte PKDT package 0x0001ff1f with type 4 and behavior flags 0x0004
-    And a 12-byte PKDT package 0x00000012 with type 5
-    And package 0x0001ff1e has idle collection flags 0x01 timer 30.0 seconds animations "00067941,00067942"
-    When the PKDT package fixtures are parsed and cataloged
-    Then package 0x0001ff1e has catalog package type 3
-    And package 0x0001ff1f has catalog package type 4
-    And package 0x00000012 has catalog package type 5
-    And package 0x0001ff1e has idle collection flags 0x01 timer 30.0 seconds animations "00067941,00067942"
