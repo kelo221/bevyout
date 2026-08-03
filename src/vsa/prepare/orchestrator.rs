@@ -1314,6 +1314,7 @@ fn prepare_cell(
         &source_fingerprint,
         &data_root,
         &session.archives,
+        &parsed.idles,
     )?;
     let conversion_context = ActorAnimationConversionContext {
         converter: actor_animation_backend,

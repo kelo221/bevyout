@@ -1,15 +1,17 @@
 //! Actor external-KF discovery, clip-pack conversion, and catalog caching.
 
 use super::*;
+use crate::vsa::openmw_esm4::IdleRecord;
 use bevyout_core::actor_animation::{
     ActorAnimationAsset, ActorAnimationAssetState, ActorAnimationDiscoveryInput,
     PreparedActorAnimationCatalog, PreparedActorAnimationClip, PreparedActorAnimationClipStatus,
     PreparedActorAnimationDiagnostic, PreparedActorAnimationKind, PreparedActorAnimationSet,
-    build_actor_animation_catalog, canonical_mesh_path,
+    PreparedActorIdleDefinition, attach_actor_idle_definitions, build_actor_animation_catalog,
+    canonical_mesh_path,
 };
 
 pub(crate) const ACTOR_ANIMATION_CATALOG_REVISION: &str =
-    "actor-animations-v3-normalized-runtime-contract";
+    "actor-animations-v4-authored-idle-definitions";
 pub(crate) const ACTOR_ANIMATION_NATIVE_CONVERTER_REVISION: &str =
     "nifty-native-kf-clip-pack-v5-bspline-evaluation-source-metadata";
 
@@ -156,11 +158,49 @@ fn discovery_inputs(
     Ok(output)
 }
 
+pub(crate) fn prepare_actor_idle_definitions(
+    catalog: &mut PreparedActorAnimationCatalog,
+    idles: &HashMap<u32, IdleRecord>,
+) {
+    let mut records = idles.values().collect::<Vec<_>>();
+    records.sort_by_key(|idle| idle.form_id);
+    let definitions = records
+        .iter()
+        .map(|idle| PreparedActorIdleDefinition {
+            form_id: idle.form_id,
+            editor_id: idle.editor_id.clone(),
+            source_kf_path: idle.model_path.clone(),
+            parent_form_id: idle.parent_form_id,
+            previous_sibling_form_id: idle.previous_sibling_form_id,
+            conditions: idle.conditions.clone(),
+            group_section_raw: idle.group_section_raw,
+            group_section: idle.group_section,
+            loop_min: idle.loop_min,
+            loop_max: idle.loop_max,
+            replay_delay_seconds: idle.replay_delay_seconds,
+            flags: idle.flags,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    attach_actor_idle_definitions(catalog, definitions);
+    for idle in records {
+        for message in &idle.diagnostics {
+            catalog.diagnostics.push(animation_diagnostic(
+                "warning",
+                "idle_decode",
+                idle.model_path.as_deref(),
+                format!("IDLE {:08x}: {message}", idle.form_id),
+            ));
+        }
+    }
+}
+
 pub(crate) fn discover_actor_animation_catalog(
     actor_catalog: &PreparedActorCatalog,
     source_fingerprint: &str,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
+    idles: &HashMap<u32, IdleRecord>,
 ) -> Result<PreparedActorAnimationCatalog> {
     let actors = discovery_inputs(actor_catalog, data_root, archives)?;
     let paths = available_kf_paths(data_root, archives)?;
@@ -198,12 +238,14 @@ pub(crate) fn discover_actor_animation_catalog(
             state: ActorAnimationAssetState::Compatible,
         });
     }
-    Ok(build_actor_animation_catalog(
+    let mut catalog = build_actor_animation_catalog(
         ACTOR_ANIMATION_CATALOG_REVISION,
         source_fingerprint,
         &actors,
         &assets,
-    ))
+    );
+    prepare_actor_idle_definitions(&mut catalog, idles);
+    Ok(catalog)
 }
 
 fn animation_diagnostic(
