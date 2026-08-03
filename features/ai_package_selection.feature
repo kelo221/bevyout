@@ -89,7 +89,7 @@ Feature: AI package selection policy
     When the actor's package is selected
     Then the selected package is 0x00000010
 
-  Scenario: A non-positive duration remains open until midnight
+  Scenario: A non-positive duration retains the open-ended policy
     Given a selection game hour of 23.5
     And a package candidate 0x00000010 of type 0
     And candidate 0x00000010 has schedule time 8 duration 0

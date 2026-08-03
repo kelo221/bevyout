@@ -287,24 +287,20 @@ fn schedule_duration_at_least_24_hours_is_active_all_day() {
 }
 
 #[test]
-fn non_positive_duration_remains_open_until_midnight() {
+fn non_positive_duration_remains_open_ended() {
     let schedule = PackageSchedule {
         time: 8,
         duration: 0,
         ..PackageSchedule::default()
     };
-    assert_eq!(
-        schedule.evaluate(GameInstant {
-            hour: 23.5,
-            ..GameInstant::default()
-        }),
-        ScheduleMatch::InWindow
-    );
-    assert_eq!(
-        schedule.evaluate(GameInstant {
-            hour: 7.99,
-            ..GameInstant::default()
-        }),
-        ScheduleMatch::OutOfWindow
-    );
+    for hour in [0.0, 7.99, 23.5] {
+        assert_eq!(
+            schedule.evaluate(GameInstant {
+                hour,
+                ..GameInstant::default()
+            }),
+            ScheduleMatch::InWindow,
+            "hour {hour}"
+        );
+    }
 }
