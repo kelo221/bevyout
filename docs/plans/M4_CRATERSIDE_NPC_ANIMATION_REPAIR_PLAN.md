@@ -820,4 +820,5 @@ Write the manual so a human can repeat the same numbered commands verbatim.
 Append acceptance-driven changes here. Do not edit the approved sections above
 to hide implementation discoveries.
 
-- None yet.
+- **2026-08-03 — Lane B package schedule clarification:** positive `PSDT.duration` is hours; the existing non-positive open-ended policy remains unchanged and is now explicitly covered by the final unit/feature assertions.
+- **2026-08-03 — Real-data acceptance:** `MegatonCratersideSupply` (`00003a2a`) was prepared with native conversion and `--force`; the resulting catalog reports v4, 3 actor mappings, 2 sets, and 1396 Ready clips. The scene was baked with the Rust irradiance path and launched through the agent bridge. Mercenary `0001ff18` visibly bound 67 animation targets, played `mtfastforward__3`, and returned from Run to `mtidle__2`; Moira `0002d2bc` bound and played base idle, but her authored Sandbox package reported `TargetNotOnNavMesh`/sandbox failure in this run, so Moira service movement and forced special-idle playback remain unverified. The bridge launch reached `InGame`; no animation repair loop occurred after the ready native cache was created. Dialogue voice fallback warnings and existing facegen/root-transform warnings are unrelated and do not block this animation repair.
