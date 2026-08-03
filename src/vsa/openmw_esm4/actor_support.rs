@@ -494,6 +494,16 @@ pub(crate) struct PackageTarget {
     pub(crate) unknown: f32,
 }
 
+/// Fallout package-authored idle collection decoded from `IDLF`/`IDLC`/
+/// `IDLT`/`IDLA`. The FormIDs are already adjusted through the plugin's
+/// resolver, while the collection policy flags and timer remain lossless.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PackageIdleCollection {
+    pub(crate) flags: u8,
+    pub(crate) timer_seconds: f32,
+    pub(crate) animation_form_ids: Vec<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PackageRecord {
     pub(crate) form_id: u32,
@@ -504,6 +514,11 @@ pub(crate) struct PackageRecord {
     pub(crate) location: Option<PackageLocation>,
     pub(crate) schedule: Option<PackageSchedule>,
     pub(crate) target: Option<PackageTarget>,
+    pub(crate) idle_collection: Option<PackageIdleCollection>,
+    /// Stable decode diagnostics which are not record-fatal (for example an
+    /// `IDLC` count mismatch). They cross into the prepared package catalog;
+    /// valid decoded IDs are never discarded merely because the count is bad.
+    pub(crate) diagnostics: Vec<String>,
     /// Raw `CTDA` payloads, retained opaquely in stream order exactly like
     /// `RecipeRecord::conditions` -- no condition evaluator exists yet.
     pub(crate) conditions: Vec<Vec<u8>>,
@@ -515,11 +530,11 @@ pub(crate) struct PackageRecord {
 /// `PKDT` is required. OpenMW's own `AIPackage::load` (`loadpack.cpp`) only
 /// special-cases a legacy 4-byte "flags only" `PKDT` (`dataSize == 4`,
 /// `type` defaulted to 0); for every other size, including FO3's documented
-/// 12-byte layout, it calls `reader.skipSubRecordData()` (marked
+/// 8- and 12-byte layouts, it calls `reader.skipSubRecordData()` (marked
 /// `// FIXME: FO3` in the source) -- OpenMW does not actually decode FO3
-/// `PKDT`. The 12-byte decode below (general flags u32, type u8, 1 unused
-/// byte, fallout-behaviour flags u16, type-specific flags u16, 2 unused
-/// bytes) is this project's own addition from the fopdoc Fallout3 PACK page.
+/// `PKDT`. The 8-byte decode is the real Fallout layout (general flags u32,
+/// type u8, one unused byte, behaviour flags u16). The 12-byte decode below
+/// retains the existing type read without touching type-specific tail bytes.
 ///
 /// `PLDT`/`PSDT`/`PTDT` are decoded using fopdoc's FO3 sizes (12/8/16 bytes
 /// respectively), which differ from OpenMW's TES4-only structs in
@@ -551,12 +566,22 @@ pub(crate) fn parse_package(
             u32_at(pkdt, 0).ok_or_else(|| "truncated PKDT".to_string())?,
             0,
         ),
+        8 => {
+            let general_flags = u32_at(pkdt, 0).ok_or_else(|| "truncated PKDT".to_string())?;
+            // The 8-byte FO3 layout ends after behaviour_flags. Do not index
+            // into the type-specific bytes present only in the 12-byte form.
+            let package_type = pkdt[4];
+            let _behavior_flags = u16::from_le_bytes([pkdt[6], pkdt[7]]);
+            (general_flags, package_type)
+        }
         12 => (
             u32_at(pkdt, 0).ok_or_else(|| "truncated PKDT".to_string())?,
             pkdt[4],
         ),
-        length => return Err(format!("PKDT must be 4 or 12 bytes, got {length}")),
+        length => return Err(format!("PKDT must be 4, 8, or 12 bytes, got {length}")),
     };
+
+    let (idle_collection, diagnostics) = decode_package_idle_collection(subs, resolver);
 
     let location = sub(subs, "PLDT").and_then(|data| {
         if data.len() != 12 {
@@ -609,6 +634,8 @@ pub(crate) fn parse_package(
         location,
         schedule,
         target,
+        idle_collection,
+        diagnostics,
         conditions: subs
             .iter()
             .filter(|subrecord| subrecord.signature == "CTDA")
@@ -616,7 +643,95 @@ pub(crate) fn parse_package(
             .collect(),
         ignored_subrecords: ignored_signatures(
             subs,
-            &["EDID", "PKDT", "PLDT", "PSDT", "PTDT", "CTDA"],
+            &[
+                "EDID", "PKDT", "PLDT", "PSDT", "PTDT", "CTDA", "IDLF", "IDLC", "IDLT", "IDLA",
+            ],
         ),
     })
+}
+
+fn decode_package_idle_collection(
+    subs: &[Subrecord],
+    resolver: &FormIdResolver,
+) -> (Option<PackageIdleCollection>, Vec<String>) {
+    let has_collection_subrecord = subs.iter().any(|subrecord| {
+        matches!(
+            subrecord.signature.as_str(),
+            "IDLF" | "IDLC" | "IDLT" | "IDLA"
+        )
+    });
+    if !has_collection_subrecord {
+        return (None, Vec::new());
+    }
+
+    let mut diagnostics = Vec::new();
+    let flags = match sub(subs, "IDLF") {
+        Some(data) => match data.first().copied() {
+            Some(flags) => flags,
+            None => {
+                diagnostics.push("IDLF malformed: expected at least 1 byte, got 0".into());
+                0
+            }
+        },
+        None => 0,
+    };
+    let declared_count = match sub(subs, "IDLC") {
+        Some(data) if matches!(data.len(), 1 | 4) => Some(data[0]),
+        Some(data) => {
+            diagnostics.push(format!(
+                "IDLC malformed: expected 1 or 4 bytes, got {}",
+                data.len()
+            ));
+            None
+        }
+        None => None,
+    };
+    let timer_seconds = match sub(subs, "IDLT") {
+        Some(data) if data.len() == 4 => f32_at(data, 0).unwrap_or_default(),
+        Some(data) => {
+            diagnostics.push(format!(
+                "IDLT malformed: expected 4 bytes, got {}",
+                data.len()
+            ));
+            0.0
+        }
+        None => 0.0,
+    };
+    let mut raw_animation_form_ids = Vec::new();
+    if let Some(data) = sub(subs, "IDLA") {
+        let complete_len = data.len() / 4 * 4;
+        raw_animation_form_ids.extend(
+            data[..complete_len]
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())),
+        );
+        if complete_len != data.len() {
+            diagnostics.push(format!(
+                "IDLA malformed: {} trailing byte(s) after {} decoded FormID(s)",
+                data.len() - complete_len,
+                raw_animation_form_ids.len()
+            ));
+        }
+    }
+    if let Some(declared_count) = declared_count
+        && usize::from(declared_count) != raw_animation_form_ids.len()
+    {
+        diagnostics.push(format!(
+            "IDLC count mismatch: DATA declares {declared_count}, decoded {}",
+            raw_animation_form_ids.len()
+        ));
+    }
+    let animation_form_ids = raw_animation_form_ids
+        .into_iter()
+        .map(|form_id| resolver.adjust(form_id))
+        .filter(|form_id| *form_id != 0)
+        .collect();
+    (
+        Some(PackageIdleCollection {
+            flags,
+            timer_seconds,
+            animation_form_ids,
+        }),
+        diagnostics,
+    )
 }

@@ -1155,6 +1155,15 @@ struct BevyoutWorld {
     m6_nav_residents: Vec<landmass_graph::ResidentNavCell>,
     m6_nav_portals: Vec<landmass_graph::ResidentPortal>,
     m6_nav_topology: landmass_graph::ResidentNavTopology,
+
+    // -- M4 Craterside NPC animation repair, Lane B package seams --
+    package_point_actor_packages: Vec<Vec<u32>>,
+    package_point_packages: std::collections::HashMap<u32, package_catalog::PackageInput>,
+    package_point_references: Vec<package_catalog::PackagePointReference>,
+    package_point_result: Vec<package_catalog::PackagePointReference>,
+    package_pkdt_fixtures: Vec<(u32, usize, u8, u16, u32)>,
+    package_pkdt_collections:
+        std::collections::HashMap<u32, package_catalog::PreparedPackageIdleCollection>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -15656,5 +15665,355 @@ async fn then_m6_resident_nav_topology_counts(
     assert_eq!(
         archipelago.map_or(0, |archipelago| archipelago.merge_links.len()),
         link_count
+    );
+}
+
+// =======================================================================
+// M4 Craterside NPC animation repair, Lane B package seams.
+// These steps are appended-only shared feature steps for #292.
+// =======================================================================
+
+fn lane_b_pkdt_payload(
+    length: usize,
+    package_type: u8,
+    behavior_flags: u16,
+    general_flags: u32,
+) -> Vec<u8> {
+    let mut data = general_flags.to_le_bytes().to_vec();
+    match length {
+        4 => {}
+        8 => {
+            data.extend_from_slice(&[package_type, 0]);
+            data.extend_from_slice(&behavior_flags.to_le_bytes());
+        }
+        12 => {
+            data.extend_from_slice(&[package_type, 0]);
+            data.extend_from_slice(&behavior_flags.to_le_bytes());
+            data.extend_from_slice(&0_u16.to_le_bytes());
+            data.extend_from_slice(&[0, 0]);
+        }
+        other => panic!("unsupported PKDT fixture length {other}"),
+    }
+    data
+}
+
+#[given(regex = r"^a 4-byte PKDT package 0x([0-9a-fA-F]+) with general flags 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_pkdt_four(world: &mut BevyoutWorld, form_hex: String, general_hex: String) {
+    world
+        .package_pkdt_fixtures
+        .push((parse_hex(&form_hex), 4, 0, 0, parse_hex(&general_hex)));
+}
+
+#[given(
+    regex = r"^an 8-byte PKDT package 0x([0-9a-fA-F]+) with type (\d+) and behavior flags 0x([0-9a-fA-F]+)$"
+)]
+async fn given_lane_b_pkdt_eight(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    package_type: u8,
+    behavior_hex: String,
+) {
+    world.package_pkdt_fixtures.push((
+        parse_hex(&form_hex),
+        8,
+        package_type,
+        u16::try_from(parse_hex(&behavior_hex)).expect("PKDT behavior flags fit u16"),
+        0,
+    ));
+}
+
+#[given(regex = r"^a 12-byte PKDT package 0x([0-9a-fA-F]+) with type (\d+)$")]
+async fn given_lane_b_pkdt_twelve(world: &mut BevyoutWorld, form_hex: String, package_type: u8) {
+    world
+        .package_pkdt_fixtures
+        .push((parse_hex(&form_hex), 12, package_type, 0, 0));
+}
+
+#[given(
+    regex = r#"^package 0x([0-9a-fA-F]+) has idle collection flags 0x([0-9a-fA-F]+) timer ([\d.]+) seconds animations \"([^\"]*)\"$"#
+)]
+async fn given_lane_b_idle_collection(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    flags_hex: String,
+    timer_seconds: f32,
+    animations: String,
+) {
+    world.package_pkdt_collections.insert(
+        parse_hex(&form_hex),
+        package_catalog::PreparedPackageIdleCollection {
+            flags: u8::try_from(parse_hex(&flags_hex)).expect("IDLF flags fit u8"),
+            timer_seconds,
+            animation_form_ids: parse_hex_list(&animations),
+        },
+    );
+}
+
+fn lane_b_package_input(record: &openmw_esm4::PackageRecord) -> package_catalog::PackageInput {
+    package_catalog::PackageInput {
+        form_id: record.form_id,
+        editor_id: record.editor_id.clone(),
+        general_flags: record.general_flags,
+        package_type: record.package_type,
+        location: record
+            .location
+            .map(|location| package_catalog::PackageLocationInput {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            }),
+        schedule: record
+            .schedule
+            .map(|schedule| package_catalog::PackageScheduleInput {
+                month: schedule.month,
+                day_of_week: schedule.day_of_week,
+                date: schedule.date,
+                time: schedule.time,
+                duration: schedule.duration,
+            }),
+        target: record
+            .target
+            .map(|target| package_catalog::PackageTargetInput {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            }),
+        idle_collection: record.idle_collection.as_ref().map(|collection| {
+            package_catalog::PreparedPackageIdleCollection {
+                flags: collection.flags,
+                timer_seconds: collection.timer_seconds,
+                animation_form_ids: collection.animation_form_ids.clone(),
+            }
+        }),
+        conditions: record.conditions.clone(),
+        unsupported_subrecords: record.ignored_subrecords.clone(),
+        diagnostics: record.diagnostics.clone(),
+    }
+}
+
+#[when("the PKDT package fixtures are parsed and cataloged")]
+async fn when_lane_b_pkdt_fixtures_are_cataloged(world: &mut BevyoutWorld) {
+    let mut plugin = nav_tes4(&[]);
+    let cell_data = [
+        nav_subrecord(b"EDID", b"LaneBPackageCell\0"),
+        nav_subrecord(b"DATA", &[1]),
+    ]
+    .concat();
+    plugin.extend(nav_record(b"CELL", 0, 1, &cell_data));
+    for (form_id, length, package_type, behavior_flags, general_flags) in
+        &world.package_pkdt_fixtures
+    {
+        let mut data = nav_subrecord(b"EDID", format!("LaneBPackage{form_id:08x}\0").as_bytes());
+        data.extend(nav_subrecord(
+            b"PKDT",
+            &lane_b_pkdt_payload(*length, *package_type, *behavior_flags, *general_flags),
+        ));
+        if let Some(collection) = world.package_pkdt_collections.get(form_id) {
+            data.extend(nav_subrecord(b"IDLF", &[collection.flags]));
+            data.extend(nav_subrecord(
+                b"IDLC",
+                &[collection.animation_form_ids.len() as u8],
+            ));
+            data.extend(nav_subrecord(
+                b"IDLT",
+                &collection.timer_seconds.to_le_bytes(),
+            ));
+            let idla = collection
+                .animation_form_ids
+                .iter()
+                .flat_map(|form_id| form_id.to_le_bytes())
+                .collect::<Vec<_>>();
+            data.extend(nav_subrecord(b"IDLA", &idla));
+        }
+        plugin.extend(nav_record(b"PACK", 0, *form_id, &data));
+    }
+    let parsed = openmw_esm4::parse_content_set(
+        &[openmw_esm4::PluginSource {
+            name: "LaneBPackageTests.esm",
+            bytes: &plugin,
+        }],
+        &CellSelector::FormId(1),
+    )
+    .expect("synthetic package fixtures parse");
+    let known_form_ids = parsed
+        .bases
+        .keys()
+        .copied()
+        .chain(parsed.references.iter().map(|reference| reference.form_id))
+        .collect();
+    let packages = parsed
+        .packages
+        .values()
+        .map(|record| (record.form_id, lane_b_package_input(record)))
+        .collect();
+    world.package_catalog_result = Some(package_catalog::build_package_catalog(
+        &package_catalog::PackageCatalogInputs {
+            packages,
+            known_form_ids,
+        },
+        "lane-b-fixture",
+    ));
+}
+
+#[then(regex = r"^package 0x([0-9a-fA-F]+) has catalog package type (\d+)$")]
+async fn then_lane_b_catalog_package_type(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    expected: u8,
+) {
+    assert_eq!(
+        package_catalog_entry(world, &form_hex).package_type,
+        expected
+    );
+}
+
+#[then(
+    regex = r#"^package 0x([0-9a-fA-F]+) has idle collection flags 0x([0-9a-fA-F]+) timer ([\d.]+) seconds animations \"([^\"]*)\"$"#
+)]
+async fn then_lane_b_idle_collection(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    flags_hex: String,
+    timer_seconds: f32,
+    animations: String,
+) {
+    let collection = package_catalog_entry(world, &form_hex)
+        .idle_collection
+        .as_ref()
+        .expect("package idle collection");
+    assert_eq!(collection.flags, parse_hex(&flags_hex) as u8);
+    assert!((collection.timer_seconds - timer_seconds).abs() < f32::EPSILON);
+    assert_eq!(collection.animation_form_ids, parse_hex_list(&animations));
+}
+
+#[given(regex = r#"^actor package links \"([^\"]*)\"$"#)]
+async fn given_lane_b_actor_package_links(world: &mut BevyoutWorld, packages: String) {
+    world
+        .package_point_actor_packages
+        .push(parse_hex_list(&packages));
+}
+
+#[given(regex = r"^package 0x([0-9a-fA-F]+) has a Near Reference point 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_near_reference_point(
+    world: &mut BevyoutWorld,
+    package_hex: String,
+    reference_hex: String,
+) {
+    let package_form_id = parse_hex(&package_hex);
+    let reference_form_id = parse_hex(&reference_hex);
+    let package = world
+        .package_point_packages
+        .entry(package_form_id)
+        .or_insert_with(|| package_catalog::PackageInput {
+            form_id: package_form_id,
+            ..Default::default()
+        });
+    package.location = Some(package_catalog::PackageLocationInput {
+        location_type: 0,
+        form_id: Some(reference_form_id),
+        raw_value: reference_form_id,
+        radius: 0,
+    });
+}
+
+#[given(regex = r"^package 0x([0-9a-fA-F]+) has a Specific Reference target 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_specific_reference_target(
+    world: &mut BevyoutWorld,
+    package_hex: String,
+    reference_hex: String,
+) {
+    let package_form_id = parse_hex(&package_hex);
+    let reference_form_id = parse_hex(&reference_hex);
+    let package = world
+        .package_point_packages
+        .entry(package_form_id)
+        .or_insert_with(|| package_catalog::PackageInput {
+            form_id: package_form_id,
+            ..Default::default()
+        });
+    package.target = Some(package_catalog::PackageTargetInput {
+        target_type: 0,
+        form_id: Some(reference_form_id),
+        raw_value: reference_form_id,
+        count_or_distance: 0,
+    });
+}
+
+#[given(
+    regex = r"^a current-cell editor marker 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_lane_b_editor_marker(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    world
+        .package_point_references
+        .push(package_catalog::PackagePointReference {
+            reference_form_id: parse_hex(&reference_hex),
+            position: [x, y, z],
+            is_editor_marker: true,
+        });
+}
+
+#[given(
+    regex = r"^an unrelated current-cell editor marker 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_lane_b_unrelated_editor_marker(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    world
+        .package_point_references
+        .push(package_catalog::PackagePointReference {
+            reference_form_id: parse_hex(&reference_hex),
+            position: [x, y, z],
+            is_editor_marker: true,
+        });
+}
+
+#[when("package-linked marker points are retained")]
+async fn when_lane_b_package_points_retained(world: &mut BevyoutWorld) {
+    world.package_point_result = package_catalog::retain_package_marker_points(
+        &world.package_point_actor_packages,
+        &world.package_point_packages,
+        &world.package_point_references,
+    );
+}
+
+#[then(
+    regex = r"^package marker 0x([0-9a-fA-F]+) is retained as a nonvisual point at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn then_lane_b_package_marker_retained(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let reference_form_id = parse_hex(&reference_hex);
+    let point = world
+        .package_point_result
+        .iter()
+        .find(|point| point.reference_form_id == reference_form_id)
+        .expect("package marker should be retained");
+    assert!(point.is_editor_marker);
+    assert_eq!(point.position, [x, y, z]);
+}
+
+#[then(regex = r"^unrelated editor marker 0x([0-9a-fA-F]+) is omitted$")]
+async fn then_lane_b_unrelated_marker_omitted(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(
+        !world
+            .package_point_result
+            .iter()
+            .any(|point| point.reference_form_id == parse_hex(&reference_hex))
     );
 }

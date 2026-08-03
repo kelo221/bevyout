@@ -444,7 +444,7 @@ fn package_truncated_pkdt_produces_diagnostic_without_panicking() {
         &resolver,
     )
     .unwrap_err();
-    assert!(error.contains("4 or 12 bytes"));
+    assert!(error.contains("4, 8, or 12 bytes"));
 }
 
 #[test]
@@ -638,4 +638,102 @@ fn unknown_race_subrecords_are_retained_as_diagnostics() {
             .iter()
             .any(|message| message.contains("RACE 00009700") && message.contains("ZZZZ"))
     );
+}
+
+#[test]
+fn package_pkdt_eight_byte_layout_decodes_real_eat_and_sleep_types() {
+    let resolver = direct_resolver();
+    for (form_id, package_type) in [(0x0001_ff1e, 3_u8), (0x0001_ff1f, 4_u8)] {
+        let mut pkdt = 0x0102_0304_u32.to_le_bytes().to_vec();
+        pkdt.extend_from_slice(&[package_type, 0]);
+        pkdt.extend_from_slice(&0x1234_u16.to_le_bytes());
+        let package =
+            parse_package(&[direct_subrecord("PKDT", pkdt)], form_id, 0, &resolver).unwrap();
+        assert_eq!(package.form_id, form_id);
+        assert_eq!(package.general_flags, 0x0102_0304);
+        assert_eq!(package.package_type, package_type);
+    }
+}
+
+#[test]
+fn package_pkdt_twelve_byte_layout_ignores_absent_type_specific_bytes() {
+    let resolver = direct_resolver();
+    let package = parse_package(
+        &[direct_subrecord("PKDT", pkdt12(0x99, 7))],
+        0x0001_ff20,
+        0,
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(package.general_flags, 0x99);
+    assert_eq!(package.package_type, 7);
+}
+
+#[test]
+fn package_idle_collection_decodes_and_resolves_all_valid_idla_entries() {
+    let resolver = direct_resolver();
+    let mut idla = Vec::new();
+    idla.extend_from_slice(&0x0006_7941_u32.to_le_bytes());
+    idla.extend_from_slice(&0x0006_7942_u32.to_le_bytes());
+    let package = parse_package(
+        &[
+            direct_subrecord("PKDT", pkdt8(0, 5)),
+            direct_subrecord("IDLF", vec![0x05]),
+            direct_subrecord("IDLC", vec![2]),
+            direct_subrecord("IDLT", 12.5_f32.to_le_bytes().to_vec()),
+            direct_subrecord("IDLA", idla),
+        ],
+        0x0001_ff30,
+        0,
+        &resolver,
+    )
+    .unwrap();
+    let collection = package.idle_collection.expect("IDLE collection");
+    assert_eq!(collection.flags, 0x05);
+    assert_eq!(collection.timer_seconds, 12.5);
+    assert_eq!(
+        collection.animation_form_ids,
+        vec![0x0006_7941, 0x0006_7942]
+    );
+    assert!(package.diagnostics.is_empty());
+    assert!(package.ignored_subrecords.is_empty());
+}
+
+#[test]
+fn package_idle_collection_count_mismatch_is_diagnosed_without_truncating_ids() {
+    let resolver = direct_resolver();
+    let mut idla = Vec::new();
+    idla.extend_from_slice(&0x100_u32.to_le_bytes());
+    idla.extend_from_slice(&0x101_u32.to_le_bytes());
+    let package = parse_package(
+        &[
+            direct_subrecord("PKDT", pkdt8(0, 5)),
+            direct_subrecord("IDLC", vec![1]),
+            direct_subrecord("IDLA", idla),
+        ],
+        0x0001_ff31,
+        0,
+        &resolver,
+    )
+    .unwrap();
+    assert_eq!(
+        package
+            .idle_collection
+            .expect("IDLE collection")
+            .animation_form_ids,
+        vec![0x100, 0x101]
+    );
+    assert!(
+        package
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("IDLC count mismatch"))
+    );
+}
+
+fn pkdt8(general_flags: u32, package_type: u8) -> Vec<u8> {
+    let mut data = general_flags.to_le_bytes().to_vec();
+    data.extend_from_slice(&[package_type, 0]);
+    data.extend_from_slice(&0_u16.to_le_bytes());
+    data
 }

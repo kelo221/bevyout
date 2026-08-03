@@ -57,7 +57,7 @@ impl Default for GameInstant {
 
 /// Plain mirror of `PackageScheduleInput` (`PSDT`). `-1`/`0` sentinels mean
 /// "any" per fopdoc's Fallout3 PACK page; `time == -1` is an unscheduled
-/// package (always in schedule); `duration` is in minutes.
+/// package (always in schedule); positive `duration` is in hours.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageSchedule {
     pub month: i8,
@@ -105,15 +105,19 @@ impl PackageSchedule {
         let span_hours = if self.duration <= 0 {
             24.0
         } else {
-            self.duration as f32 / 60.0
+            self.duration as f32
         };
-        let end = start + span_hours;
-        let in_window = if end <= 24.0 {
-            now.hour >= start && now.hour < end
+        let in_window = if span_hours >= 24.0 {
+            true
         } else {
-            // Past-midnight wraparound: active from `start` to 24:00 and from
-            // 00:00 to `end - 24`.
-            now.hour >= start || now.hour < (end - 24.0)
+            let end = start + span_hours;
+            if end <= 24.0 {
+                now.hour >= start && now.hour < end
+            } else {
+                // Past-midnight wraparound: active from `start` to 24:00 and
+                // from 00:00 to `end - 24`.
+                now.hour >= start || now.hour < (end - 24.0)
+            }
         };
         if in_window {
             ScheduleMatch::InWindow
