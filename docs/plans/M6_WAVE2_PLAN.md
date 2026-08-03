@@ -201,3 +201,87 @@ deterministic `tp` probes and the held-input run covered only one boundary in
 each direction, not the full ordinary route. Actor, travel/save, and final
 budget sign-off were not run. Issues #274, #275, and #285 remain open; no W2,
 #87, or final M6 completion claim is made from these measurements.
+
+### Acceptance continuation — 2026-08-03
+
+The next acceptance pass is being run from the authenticated human's local
+macOS checkout (`nippongun`) against the configured Fallout 3 data, on the
+current clean `m5-wave3` worktree. Issues #274 and #275 were corrected to be
+assigned to `nippongun`; #10 remains open, so #278 runtime actor integration is
+out of scope and will not be started.
+
+This pass keeps the original W2 exit boundary fixed:
+
+- prepare the frozen 14-selector v21 route in a new ignored cache, then repeat
+  the identical command warm and run the fingerprint check;
+- launch the exact prepared `00000c49` manifest with physics and the loopback
+  bridge, enable `worldstream trace`, and drive the six cells with ordinary
+  focused keyboard input in both directions;
+- perform rapid reversal/cancellation at a boundary and at least ten complete
+  crossings, recording status/cells/summary after collision readiness;
+- verify stale-generation, root, collision-ledger, teardown, and residual
+  ownership fields from the live report, with focused lifecycle tests as the
+  deterministic regression evidence;
+- close the trace and record current/peak/ending process-resident-set samples,
+  frame-window statistics, preparation timings/cache bytes, and the configured
+  route/budget values as separate measured or unavailable fields.
+
+Input evidence is labelled precisely: focused OS keyboard holds are
+`ordinary_input_measured`; reflected `KeyboardInput` BRP messages are
+`synthetic_input_measured`; `tp` is `deterministic_streaming_diagnostic` only.
+Synthetic or teleport runs cannot satisfy the ordinary-input row. The route
+is not promoted to W2-complete, and the #13 checklist is not ticked, until the
+ordinary-input route and acceptance-grade preparation/budget rows are both
+demonstrated. Any newly observed lifecycle defect becomes a separate assigned
+child issue under #13 rather than an unrecorded Wave 2 expansion.
+
+### Native macOS sampler and current-data acceptance — 2026-08-03
+
+The local macOS acceptance run found that `sysinfo` reported a supported
+platform but enumerated no process for the viewer, leaving the #274 sampler at
+`sample_count=0`. This was an in-scope platform adapter defect, not a new
+Wave 2 issue. The diagnostics adapter now uses macOS `libproc` directly for
+`proc_taskinfo.pti_resident_size` and reports the method as
+`libproc_process_resident_set`; Linux and Windows retain
+`sysinfo_process_resident_set`. A focused macOS regression test was added and
+passes.
+
+Preparation evidence from the new ignored cache
+`.bevyout/m6-w2-acceptance-20260803`:
+
+- clean native preparation with the frozen 14 selectors and `--jobs 1`:
+  `14 done, 0 failed`, `1608/1608` native assets successful, `/usr/bin/time`
+  real `619.64s`;
+- warm repeat: `14 cells valid, 0 stale`, `0 done, 0 failed`, real `8.31s`;
+- the current prepared scene reports source fingerprint
+  `24efdfcef26d1ebb3d347c976da6c85cd8a17e313b8a22c2709ff90b180941d0` and
+  prepare revision `prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition`.
+
+The real viewer ran on macOS 26.5 / Apple M5 Max / Metal, dev profile, bridge
+port `15736`, from that cache. Targeted CoreGraphics `KeyA`/`KeyD` events were
+posted to the viewer process, so the normal player input, physics, collision
+handoff, and streaming path—not BRP `tp` or reflected `KeyboardInput`—was
+exercised. This is an OS-injected input measurement, not literal human
+frontmost-keyboard acceptance; macOS Accessibility/focus control prevented
+the latter in this environment.
+
+The trace closed at grid `(4,-5)` with `requests=18`, `ready_total=18`,
+`evictions=12`, `resident_cells=7`, `peak_resident_cells=9`,
+`failed=0`, `cancellations=0`, `stale_completions=0`,
+`invalid_unload_count=0`, `collision_tracked=7`, and
+`collision_pending=0`. Repeated live logs show collision teardown before
+eviction for `00000c6b` and `00000c4c`. Process memory was supported with
+`13` samples, method `libproc_process_resident_set`, peak
+`1,600,290,816` bytes, ending `1,312,915,456` bytes. Package estimates stayed
+separate at resident `1,998,243`, peak `2,687,447`, against the
+`134,217,728` byte package budget. The 600-sample frame window was p50
+`6.225959ms`, p95 `6.82575ms`, max `9.283125ms`, over-budget `0`.
+
+The 32 exterior unit tests cover queued/loading/collision-pending/evicting
+cancellation, stale completion, duplicate-root/ownership, collision-ledger,
+and final teardown paths; the 640-scenario executable feature suite also
+passes. The live OS-injected run did not produce a nonzero cancellation
+counter because prepared tasks completed before the rapid reversal window;
+therefore cancellation remains test-demonstrated rather than live-count
+demonstrated in this pass. Issues #274 and #275 remain open, the #13 Wave 2
+checklist remains unticked, and #10 continues to block #278.

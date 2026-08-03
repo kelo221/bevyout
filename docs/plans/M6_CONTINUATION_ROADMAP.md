@@ -432,3 +432,21 @@ live issue state:
   evidence; W6-C/#285 owns the pre-W7 numeric decision.
 - #13's distant/VWD wording keeps the required/default seam-safe route split
   separate from optional far-worldspace presentation work in W8.
+
+### Acceptance checkpoint — 2026-08-03
+
+Wave 2 acceptance was rerun on the configured local macOS checkout with a new
+14-cell native-prepared cache. Clean preparation completed all 14 cells in
+`619.64s`; the warm repeat validated all 14 in `8.31s`. A narrow #274 fix
+switched macOS process sampling from the nonfunctional `sysinfo` enumeration
+path to `libproc_process_resident_set`; the focused test and full repository
+gates pass.
+
+The real viewer exercised twelve OS-injected normal-input crossings in both
+directions and closed with zero failures, stale completions, invalid unloads,
+and pending collision entries. Process memory was measured separately from
+package estimates (`1,600,290,816` byte peak and `1,312,915,456` byte ending
+RSS). This remains partial acceptance: the environment could not provide a
+literal human frontmost keyboard run, the live cancellation counter remained
+zero, and actor/travel/save/budget gates are outside this wave. Issues #274,
+#275, and parent #13 remain open; #10 still blocks #278.

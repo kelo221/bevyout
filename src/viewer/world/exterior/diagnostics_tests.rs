@@ -3,6 +3,13 @@ use bevy::prelude::World;
 use super::super::lifecycle::ExteriorStreamState;
 use super::{ProcessMemoryDiagnostics, status, status_with_memory};
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_process_memory_uses_native_resident_set_sampler() {
+    assert_eq!(super::PROCESS_MEMORY_METHOD, "libproc_process_resident_set");
+    assert!(super::read_current_process_memory().is_some());
+}
+
 #[test]
 fn supported_memory_stays_not_yet_sampled_until_a_real_sample_is_recorded() {
     let state = ExteriorStreamState::default();
@@ -14,7 +21,7 @@ fn supported_memory_stays_not_yet_sampled_until_a_real_sample_is_recorded() {
     assert_eq!(report["memory_measurement_status"], "not_yet_sampled");
     assert_eq!(
         report["memory_measurement_method"],
-        "sysinfo_process_resident_set"
+        super::PROCESS_MEMORY_METHOD
     );
     assert_eq!(report["memory_measurement_platform"], std::env::consts::OS);
     assert_eq!(report["resident_bytes"], serde_json::Value::Null);
