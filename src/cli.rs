@@ -223,8 +223,8 @@ pub struct PrepareArgs {
     /// Legacy hexadecimal cell FormID input.
     #[arg(long, hide = true, conflicts_with = "selectors")]
     pub(crate) cell: Option<String>,
-    /// External-KF clip-pack backend. Disabled by default; select `native` to
-    /// decode KF files with Nifty.
+    /// External-KF clip-pack backend. Native by default; select `disabled` to
+    /// skip actor animation conversion.
     #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
     pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// KTX-Software `ktx.exe` path used for prepared point-shadow cubemaps.
@@ -398,6 +398,10 @@ pub struct RenderArgs {
     /// KTX-Software executable used if render needs to bake irradiance.
     #[arg(long, hide = true)]
     pub(crate) toktx: Option<PathBuf>,
+    /// External-KF clip-pack backend. Native by default; select `disabled` to
+    /// skip actor animation conversion.
+    #[arg(long, value_enum, default_value_t = ActorAnimationConverter::default())]
+    pub(crate) actor_animation_converter: ActorAnimationConverter,
     /// Cubemap face resolution used if render needs to prepare static point shadows.
     #[arg(long, default_value_t = 512, value_parser = parse_shadow_resolution)]
     pub(crate) shadow_resolution: u32,

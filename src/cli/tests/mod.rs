@@ -231,6 +231,34 @@ fn native_conversion_is_authoritative_and_blender_flags_are_rejected() {
 }
 
 #[test]
+fn render_actor_animation_converter_defaults_to_native_and_accepts_disabled() {
+    let cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(
+        args.actor_animation_converter,
+        ActorAnimationConverter::Native
+    );
+
+    let cli = Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--actor-animation-converter",
+        "disabled",
+    ])
+    .unwrap();
+    let CommandLine::Render(args) = cli.command else {
+        panic!("expected render command");
+    };
+    assert_eq!(
+        args.actor_animation_converter,
+        ActorAnimationConverter::Disabled
+    );
+}
+
+#[test]
 fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     let cli = Cli::try_parse_from(["bevyout", "bake", "--manifest", "scene.ron"]).unwrap();
     let CommandLine::Bake(args) = cli.command else {
