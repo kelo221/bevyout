@@ -44,3 +44,50 @@ Feature: Prepared actor animation catalog
     When the prepared actor animation catalog is built
     Then the prepared actor animation catalog has 2 actor mappings and 1 animation set
     And references 0x00000001 and 0x00000002 use the same animation set
+
+  Scenario: Authored IDLE override and deletion winners are deterministic
+    Given an authored IDLE winner set with override 0x00000020 and deleted 0x00000030
+    When authored IDLE definitions are prepared
+    Then prepared authored IDLE FormIDs are "0x00000010,0x00000020"
+
+  Scenario: Folder IDLE roots remain valid without a KF clip
+    Given an authored IDLE folder root 0x00000010 without a KF path
+    When authored IDLE definitions are prepared
+    Then authored IDLE 0x00000010 has no clip
+
+  Scenario: Authored IDLE paths normalize and match existing clips
+    Given animation actor reference 0x00000001 base 0x00000010 model "meshes/characters/_male/skeleton.nif" skeleton "meshes/characters/_male/skeleton.nif" explicit clips "IdleAnims/Swatting.KF"
+    And available KF assets "meshes/characters/_male/idleanims/swatting.kf@swat-hash"
+    And an authored IDLE 0x00000020 references KF "Characters\\_Male\\IdleAnims\\Swatting.KF"
+    When the prepared actor animation catalog is built with authored IDLE definitions
+    Then authored IDLE 0x00000020 resolves clip "swatting"
+
+  Scenario: ANAM links preserve the authored IDLE tree
+    Given an authored IDLE child 0x00000020 has parent 0x00000100 and previous sibling 0x00000010
+    When authored IDLE definitions are prepared
+    Then authored IDLE 0x00000020 keeps parent 0x00000100 and previous sibling 0x00000010
+
+  Scenario: Authored IDLE sibling order follows previous-sibling links
+    Given authored IDLE siblings are supplied in FormID order "0x00000030,0x00000010,0x00000020"
+    When the authored IDLE sibling order is reconstructed
+    Then authored IDLE sibling order is "0x00000010,0x00000020,0x00000030"
+
+  Scenario: Raw IDLE group bytes map without losing authored bits
+    Given authored IDLE raw group bytes "0x47,0x87,0x54"
+    When authored IDLE definitions are prepared
+    Then authored IDLE canonical group sections are "7,7,20"
+
+  Scenario: Truncated IDLE DATA is diagnosed without dropping the record
+    Given an authored IDLE has truncated DATA and an unknown field
+    When authored IDLE definitions are prepared
+    Then authored IDLE preparation has diagnostic "DATA malformed"
+
+  Scenario: IDLE CTDA payloads remain byte-exact and stream ordered
+    Given an authored IDLE has CTDA payloads "01020304,0506"
+    When authored IDLE definitions are prepared
+    Then authored IDLE CTDA payloads remain "01020304,0506"
+
+  Scenario: Authored IDLE catalog ordering and hash are deterministic
+    Given authored IDLE definitions have FormIDs "0x00000020,0x00000010"
+    When authored IDLE definitions are prepared twice
+    Then authored IDLE catalog ordering and hash match

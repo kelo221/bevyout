@@ -30,3 +30,14 @@ Feature: Explicit actor animation compatibility conversion
     And actor animation clip-pack rebuild is requested
     When the actor animation clip-pack cache decision is made
     Then the actor animation clip-pack cache decision is "build"
+
+  Scenario: Existing IDLE-referenced KFs share one converted clip pack
+    Given an animation set contains one KF "meshes/characters/_male/idleanims/swatting.kf"
+    And an authored IDLE references the existing KF "meshes/characters/_male/idleanims/swatting.kf"
+    When authored IDLE conversion is staged
+    Then authored IDLE conversion uses 1 animation set and 1 clip
+    And authored IDLE conversion invokes no duplicate pack job
+
+  Scenario: Authored IDLE catalog revision is pinned to v4
+    Given the authored IDLE catalog revision is inspected
+    Then the authored IDLE catalog revision is "actor-animations-v4-authored-idle-definitions"

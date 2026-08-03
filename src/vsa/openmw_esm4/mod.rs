@@ -20,6 +20,7 @@ mod actor_support;
 mod actors;
 mod binary;
 mod enable;
+mod idle;
 mod inventory;
 mod navmesh;
 mod reader;
@@ -29,6 +30,7 @@ pub(crate) use actor_support::*;
 pub(crate) use actors::*;
 pub(crate) use binary::*;
 pub(crate) use enable::*;
+pub(crate) use idle::*;
 pub(crate) use inventory::*;
 pub(crate) use navmesh::*;
 pub(crate) use reader::*;
@@ -610,6 +612,7 @@ pub(crate) struct ParsedPlugin {
     pub(crate) classes: HashMap<u32, ClassRecord>,
     pub(crate) factions: HashMap<u32, FactionRecord>,
     pub(crate) packages: HashMap<u32, PackageRecord>,
+    pub(crate) idles: HashMap<u32, IdleRecord>,
     pub(crate) image_spaces: HashMap<u32, ImageSpaceInfo>,
     pub(crate) image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
     pub(crate) sounds: HashMap<u32, SoundRecord>,
@@ -867,6 +870,11 @@ impl ParsedContentSet {
             .collect::<Vec<_>>();
         diagnostics.extend(state.recipe_diagnostics);
         diagnostics.extend(state.actor_support_diagnostics);
+        for idle in state.idles.values() {
+            for message in &idle.diagnostics {
+                diagnostics.push(format!("IDLE {:08x}: {message}", idle.form_id));
+            }
+        }
         diagnostics.extend(state.navigation_diagnostics);
         for navmesh in &navmeshes {
             for message in &navmesh.diagnostics {
@@ -882,6 +890,7 @@ impl ParsedContentSet {
             classes: state.classes,
             factions: state.factions,
             packages: state.packages,
+            idles: state.idles,
             image_spaces: state.image_spaces,
             image_space_modifiers: state.image_space_modifiers,
             sounds: state.sounds,
@@ -920,6 +929,7 @@ pub(crate) struct ParsedState {
     classes: HashMap<u32, ClassRecord>,
     factions: HashMap<u32, FactionRecord>,
     packages: HashMap<u32, PackageRecord>,
+    idles: HashMap<u32, IdleRecord>,
     image_spaces: HashMap<u32, ImageSpaceInfo>,
     image_space_modifiers: HashMap<u32, ImageSpaceModifier>,
     sounds: HashMap<u32, SoundRecord>,

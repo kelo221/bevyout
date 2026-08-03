@@ -139,6 +139,46 @@ pub struct PreparedActorAnimationSet {
     pub diagnostics: Vec<PreparedActorAnimationDiagnostic>,
 }
 
+/// One authored Fallout `IDLE` definition. Folder/root nodes legitimately
+/// have no model/KF path or resolved clip name; their tree links and
+/// conditions remain useful to the later idle selector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreparedActorIdleDefinition {
+    pub form_id: u32,
+    #[serde(default)]
+    pub editor_id: Option<String>,
+    #[serde(default)]
+    pub source_kf_path: Option<String>,
+    #[serde(default)]
+    pub clip_name: Option<String>,
+    #[serde(default)]
+    pub parent_form_id: Option<u32>,
+    #[serde(default)]
+    pub previous_sibling_form_id: Option<u32>,
+    #[serde(default)]
+    pub conditions: Vec<Vec<u8>>,
+    #[serde(default)]
+    pub group_section_raw: u8,
+    #[serde(default)]
+    pub group_section: u8,
+    #[serde(default)]
+    pub loop_min: u8,
+    #[serde(default)]
+    pub loop_max: u8,
+    #[serde(default)]
+    pub replay_delay_seconds: i16,
+    #[serde(default)]
+    pub flags: u8,
+}
+
+/// Deterministic, non-serialized sibling order reconstructed from authored
+/// `ANAM` predecessor links. The catalog itself remains FormID sorted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreparedActorIdleOrder {
+    pub children_by_parent: BTreeMap<Option<u32>, Vec<u32>>,
+    pub diagnostics: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedActorAnimationReference {
     pub reference_form_id: u32,
@@ -153,6 +193,10 @@ pub struct PreparedActorAnimationCatalog {
     pub source_fingerprint: String,
     pub actor_mappings: Vec<PreparedActorAnimationReference>,
     pub animation_sets: Vec<PreparedActorAnimationSet>,
+    /// FormID-sorted authored IDLE definitions. Old catalogs deserialize with
+    /// an empty list, but the preparation revision must still be bumped.
+    #[serde(default)]
+    pub idle_definitions: Vec<PreparedActorIdleDefinition>,
     #[serde(default)]
     pub diagnostics: Vec<PreparedActorAnimationDiagnostic>,
 }
@@ -240,6 +284,11 @@ pub fn canonical_mesh_path(path: &str) -> String {
     } else {
         format!("meshes/{path}")
     }
+}
+
+#[must_use]
+pub const fn canonical_idle_group_section(raw: u8) -> u8 {
+    raw & 0x3f
 }
 
 fn parent_path(path: &str) -> &str {
@@ -482,8 +531,183 @@ pub fn build_actor_animation_catalog(
         source_fingerprint: source_fingerprint.to_owned(),
         actor_mappings,
         animation_sets,
+        idle_definitions: Vec::new(),
         diagnostics: Vec::new(),
     }
+}
+
+/// Normalizes authored IDLE KF paths, resolves them to an already-discovered
+/// clip in the shared animation sets, and stores the definitions in stable
+/// FormID order. This deliberately never adds a clip or creates a second
+/// conversion job.
+pub fn attach_actor_idle_definitions(
+    catalog: &mut PreparedActorAnimationCatalog,
+    mut definitions: Vec<PreparedActorIdleDefinition>,
+) {
+    definitions.sort_by_key(|definition| definition.form_id);
+    for definition in &mut definitions {
+        let Some(path) = definition
+            .source_kf_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            definition.source_kf_path = None;
+            definition.clip_name = None;
+            continue;
+        };
+        let path = canonical_mesh_path(path);
+        definition.source_kf_path = Some(path.clone());
+        definition.clip_name = catalog
+            .animation_sets
+            .iter()
+            .flat_map(|set| set.clips.iter())
+            .find(|clip| clip.source_kf_path == path)
+            .map(|clip| clip.name.clone());
+        if definition.clip_name.is_none() {
+            catalog.diagnostics.push(diagnostic(
+                "missing_idle_clip",
+                &path,
+                format!(
+                    "authored IDLE {:08x} has no discovered matching KF clip",
+                    definition.form_id
+                ),
+            ));
+        }
+    }
+    catalog.idle_definitions = definitions;
+}
+
+/// Reconstructs each parent's authored sibling chain without trusting FormID
+/// or parser order. Malformed links are diagnosed and disconnected nodes are
+/// appended in stable FormID order.
+pub fn reconstruct_idle_sibling_order(
+    definitions: &[PreparedActorIdleDefinition],
+) -> PreparedActorIdleOrder {
+    let mut groups = BTreeMap::<Option<u32>, Vec<&PreparedActorIdleDefinition>>::new();
+    for definition in definitions {
+        groups
+            .entry(definition.parent_form_id)
+            .or_default()
+            .push(definition);
+    }
+    let mut result = PreparedActorIdleOrder::default();
+    for (parent, mut group) in groups {
+        group.sort_by_key(|definition| definition.form_id);
+        let ids = group
+            .iter()
+            .map(|definition| definition.form_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut successors = BTreeMap::<Option<u32>, Vec<u32>>::new();
+        for definition in &group {
+            successors
+                .entry(definition.previous_sibling_form_id)
+                .or_default()
+                .push(definition.form_id);
+            if let Some(previous) = definition.previous_sibling_form_id
+                && !ids.contains(&previous)
+            {
+                result.diagnostics.push(format!(
+                    "idle {:08x} has missing predecessor {:08x}",
+                    definition.form_id, previous
+                ));
+            }
+        }
+        for children in successors.values_mut() {
+            children.sort_unstable();
+        }
+        for (previous, children) in &successors {
+            if children.len() > 1 {
+                result.diagnostics.push(format!(
+                    "idle parent {} has duplicate successor for {}: {}",
+                    parent
+                        .map(|value| format!("{value:08x}"))
+                        .unwrap_or_else(|| "root".to_owned()),
+                    previous
+                        .map(|value| format!("{value:08x}"))
+                        .unwrap_or_else(|| "zero predecessor".to_owned()),
+                    children
+                        .iter()
+                        .map(|value| format!("{value:08x}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+            }
+        }
+        let next = successors
+            .iter()
+            .filter_map(|(previous, children)| {
+                previous
+                    .and_then(|previous| children.first().copied().map(|child| (previous, child)))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut cycle_nodes = std::collections::BTreeSet::new();
+        let mut reported_cycles = std::collections::BTreeSet::new();
+        for start in &ids {
+            let mut path = Vec::new();
+            let mut positions = BTreeMap::<u32, usize>::new();
+            let mut current = *start;
+            loop {
+                if let Some(index) = positions.get(&current).copied() {
+                    let cycle = path[index..].to_vec();
+                    if let Some(first) = cycle.iter().min().copied()
+                        && reported_cycles.insert(first)
+                    {
+                        result.diagnostics.push(format!(
+                            "idle parent {} has sibling cycle at {first:08x}",
+                            parent
+                                .map(|value| format!("{value:08x}"))
+                                .unwrap_or_else(|| "root".to_owned())
+                        ));
+                    }
+                    cycle_nodes.extend(cycle);
+                    break;
+                }
+                positions.insert(current, path.len());
+                path.push(current);
+                let Some(next_id) = next.get(&current).copied() else {
+                    break;
+                };
+                if !ids.contains(&next_id) {
+                    break;
+                }
+                current = next_id;
+            }
+        }
+        let mut ordered = Vec::new();
+        let root = successors
+            .get(&None)
+            .and_then(|children| children.first())
+            .copied();
+        let mut current = root;
+        while let Some(id) = current {
+            if cycle_nodes.contains(&id) || ordered.contains(&id) {
+                break;
+            }
+            ordered.push(id);
+            current = next.get(&id).copied();
+        }
+        let disconnected = ids
+            .iter()
+            .filter(|id| !ordered.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        if !disconnected.is_empty() {
+            result.diagnostics.push(format!(
+                "idle parent {} has disconnected children: {}",
+                parent
+                    .map(|value| format!("{value:08x}"))
+                    .unwrap_or_else(|| "root".to_owned()),
+                disconnected
+                    .iter()
+                    .map(|value| format!("{value:08x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        ordered.extend(disconnected);
+        result.children_by_parent.insert(parent, ordered);
+    }
+    result
 }
 
 #[cfg(test)]

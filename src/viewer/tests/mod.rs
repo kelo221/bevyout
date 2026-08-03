@@ -1,8 +1,10 @@
 use super::*;
+use crate::cli::{ActorAnimationConverter, Cli, CommandLine};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::light::{FogVolume, NotShadowCaster, VolumetricFog};
 use bevy::pbr::BakedPointShadowReceiver;
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode};
+use clap::Parser;
 
 fn compatible_render_manifest() -> PreparedSceneManifest {
     let mut manifest: PreparedSceneManifest =
@@ -14,6 +16,339 @@ fn compatible_render_manifest() -> PreparedSceneManifest {
     manifest.physics_schema_version = Some(PHYSICS_ASSET_SCHEMA_VERSION);
     manifest.bake = None;
     manifest
+}
+
+fn current_render_bake(manifest: &mut PreparedSceneManifest) {
+    manifest.bake = Some(crate::vsa::PreparedBake {
+        bake_revision: Some(crate::vsa::CURRENT_BAKE_REVISION.into()),
+        source_fingerprint: "fixture".into(),
+        scene_path: "baked/scene.glb".into(),
+        irradiance_volume: Some(crate::vsa::PreparedIrradianceVolume {
+            asset_path: "baked/irradiance.ktx2".into(),
+            translation: [0.0; 3],
+            rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            resolution: [1; 3],
+            intensity: 1.0,
+        }),
+    });
+}
+
+fn ready_actor_animation_clip(
+    name: &str,
+    source_kf_path: &str,
+) -> bevyout_core::actor_animation::PreparedActorAnimationClip {
+    bevyout_core::actor_animation::PreparedActorAnimationClip {
+        name: name.into(),
+        source_kf_path: source_kf_path.into(),
+        status: bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready,
+        ..Default::default()
+    }
+}
+
+fn actor_animation_fixture(
+    name: &str,
+) -> (
+    PreparedSceneManifest,
+    bevyout_core::actor_animation::PreparedActorAnimationCatalog,
+    std::path::PathBuf,
+) {
+    use std::fs;
+
+    let root = std::env::temp_dir().join(format!(
+        "bevyout-render-actor-animation-{name}-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("assets")).unwrap();
+    let pack_bytes = b"synthetic actor animation pack";
+    fs::write(root.join("assets/humanoid.animations.glb"), pack_bytes).unwrap();
+
+    let mut manifest = compatible_render_manifest();
+    manifest.asset_root = root.to_string_lossy().into_owned();
+    let mut actor = manifest.placements[0].clone();
+    actor.reference_form_id = 0x100;
+    actor.base_form_id = 0x200;
+    actor.reference_kind = "ACHR".into();
+    actor.base_kind = "NPC_".into();
+    actor.semantic =
+        bevyout_core::manifest::PreparedSemantic::Npc(bevyout_core::manifest::PreparedActor {
+            assembly: Some(bevyout_core::actor::ActorAssemblyBlueprint::default()),
+            ..Default::default()
+        });
+    manifest.placements = vec![actor];
+
+    let catalog = bevyout_core::actor_animation::PreparedActorAnimationCatalog {
+        revision: ACTOR_ANIMATION_CATALOG_REVISION.into(),
+        source_fingerprint: manifest.source_fingerprint.clone(),
+        actor_mappings: vec![
+            bevyout_core::actor_animation::PreparedActorAnimationReference {
+                reference_form_id: 0x100,
+                base_form_id: 0x200,
+                kind: bevyout_core::actor_animation::PreparedActorAnimationKind::Npc,
+                animation_set_id: "humanoid".into(),
+            },
+        ],
+        animation_sets: vec![bevyout_core::actor_animation::PreparedActorAnimationSet {
+            id: "humanoid".into(),
+            clip_pack_asset_path: Some("assets/humanoid.animations.glb".into()),
+            clip_pack_hash: Some(fingerprint(pack_bytes)),
+            clips: vec![
+                ready_actor_animation_clip(
+                    "mtidle",
+                    "meshes/characters/_male/locomotion/mtidle.kf",
+                ),
+                ready_actor_animation_clip(
+                    "mtforward",
+                    "meshes/characters/_male/locomotion/mtforward.kf",
+                ),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    persist_actor_animation_catalog(&mut manifest, &root, &catalog);
+    (manifest, catalog, root)
+}
+
+fn persist_actor_animation_catalog(
+    manifest: &mut PreparedSceneManifest,
+    root: &std::path::Path,
+    catalog: &bevyout_core::actor_animation::PreparedActorAnimationCatalog,
+) {
+    let serialized = ron::ser::to_string(catalog).unwrap();
+    std::fs::write(root.join("actor_animations.ron"), serialized.as_bytes()).unwrap();
+    manifest.actor_animation_catalog_path = Some("actor_animations.ron".into());
+    manifest.actor_animation_catalog_revision = Some(catalog.revision.clone());
+    manifest.actor_animation_catalog_hash = Some(fingerprint(serialized.as_bytes()));
+}
+
+fn assert_actor_animation_repair_case(
+    name: &str,
+    mutate_catalog: impl FnOnce(&mut bevyout_core::actor_animation::PreparedActorAnimationCatalog),
+    mutate_manifest: impl FnOnce(&mut PreparedSceneManifest),
+    expected_reason: &str,
+) {
+    let (mut manifest, mut catalog, root) = actor_animation_fixture(name);
+    mutate_catalog(&mut catalog);
+    persist_actor_animation_catalog(&mut manifest, &root, &catalog);
+    mutate_manifest(&mut manifest);
+
+    assert_eq!(
+        actor_animation_cache_readiness(&manifest, ActorAnimationConverter::Native),
+        ActorAnimationCacheReadiness::RepairRequired(expected_reason.into())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn actor_animation_cache_readiness_accepts_actorless_cells_without_repair() {
+    let mut manifest = compatible_render_manifest();
+    assert_eq!(
+        actor_animation_cache_readiness(&manifest, ActorAnimationConverter::Native),
+        ActorAnimationCacheReadiness::NoActors
+    );
+    assert_ne!(
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
+        RenderCacheAction::RepairActorAnimations
+    );
+
+    current_render_bake(&mut manifest);
+    assert_eq!(
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
+        RenderCacheAction::Ready
+    );
+}
+
+#[test]
+fn actor_animation_cache_readiness_accepts_a_hashed_idle_and_forward_pack() {
+    let (mut manifest, _catalog, root) = actor_animation_fixture("ready");
+    current_render_bake(&mut manifest);
+
+    assert_eq!(
+        actor_animation_cache_readiness(&manifest, ActorAnimationConverter::Native),
+        ActorAnimationCacheReadiness::Ready
+    );
+    assert_eq!(
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
+        RenderCacheAction::Ready
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn actor_animation_cache_readiness_rejects_stale_and_missing_catalog_metadata() {
+    assert_actor_animation_repair_case(
+        "catalog-path-missing",
+        |_| {},
+        |manifest| manifest.actor_animation_catalog_path = None,
+        "actor animation catalog path is missing",
+    );
+    assert_actor_animation_repair_case(
+        "catalog-file-missing",
+        |_| {},
+        |manifest| manifest.actor_animation_catalog_path = Some("missing.ron".into()),
+        "actor animation catalog file is missing",
+    );
+    assert_actor_animation_repair_case(
+        "catalog-hash-mismatch",
+        |_| {},
+        |manifest| manifest.actor_animation_catalog_hash = Some("wrong".into()),
+        "actor animation catalog hash mismatch",
+    );
+    assert_actor_animation_repair_case(
+        "catalog-hash-missing",
+        |_| {},
+        |manifest| manifest.actor_animation_catalog_hash = None,
+        "actor animation catalog hash mismatch",
+    );
+    assert_actor_animation_repair_case(
+        "catalog-stale-revision",
+        |catalog| catalog.revision = "stale-actor-animation-catalog".into(),
+        |_| {},
+        "actor animation catalog is stale",
+    );
+}
+
+#[test]
+fn actor_animation_cache_readiness_rejects_bad_pack_mapping_and_locomotion() {
+    assert_actor_animation_repair_case(
+        "pack-path-missing",
+        |catalog| catalog.animation_sets[0].clip_pack_asset_path = None,
+        |_| {},
+        "actor animation clip pack path is missing",
+    );
+    assert_actor_animation_repair_case(
+        "pack-hash-missing",
+        |catalog| catalog.animation_sets[0].clip_pack_hash = None,
+        |_| {},
+        "actor animation clip pack hash is missing",
+    );
+    assert_actor_animation_repair_case(
+        "pack-file-missing",
+        |catalog| {
+            catalog.animation_sets[0].clip_pack_asset_path =
+                Some("assets/missing.animations.glb".into())
+        },
+        |_| {},
+        "actor animation clip pack file is missing",
+    );
+    assert_actor_animation_repair_case(
+        "pack-hash-mismatch",
+        |catalog| catalog.animation_sets[0].clip_pack_hash = Some("wrong".into()),
+        |_| {},
+        "actor animation clip pack hash mismatch",
+    );
+    assert_actor_animation_repair_case(
+        "mapping-set-missing",
+        |catalog| catalog.actor_mappings[0].animation_set_id = "missing".into(),
+        |_| {},
+        "actor animation set is missing for actor animation mapping",
+    );
+    assert_actor_animation_repair_case(
+        "idle-missing",
+        |catalog| {
+            catalog.animation_sets[0]
+                .clips
+                .retain(|clip| clip.name == "mtforward")
+        },
+        |_| {},
+        "actor animation set has no Ready base idle clip",
+    );
+    assert_actor_animation_repair_case(
+        "forward-missing",
+        |catalog| {
+            catalog.animation_sets[0]
+                .clips
+                .retain(|clip| clip.name == "mtidle")
+        },
+        |_| {},
+        "actor animation set has no Ready forward locomotion clip",
+    );
+}
+
+#[test]
+fn actor_animation_disabled_is_intentionally_static_and_never_repairs() {
+    let (mut manifest, _catalog, root) = actor_animation_fixture("disabled");
+    current_render_bake(&mut manifest);
+
+    assert_eq!(
+        actor_animation_cache_readiness(&manifest, ActorAnimationConverter::Disabled),
+        ActorAnimationCacheReadiness::IntentionallyDisabled
+    );
+    assert_eq!(
+        next_render_cache_action(&manifest, ActorAnimationConverter::Disabled),
+        RenderCacheAction::Ready
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn render_prepare_for_render_preserves_requested_backend_and_forces_native_repair() {
+    let native_cli = Cli::try_parse_from(["bevyout", "render", "SuperDuperMart"]).unwrap();
+    let CommandLine::Render(native_args) = native_cli.command else {
+        panic!("expected render command");
+    };
+    let native_prepare = prepare_args_for_render(
+        &native_args,
+        Path::new("cache"),
+        false,
+        native_args.actor_animation_converter,
+    );
+    assert_eq!(
+        native_prepare.actor_animation_converter,
+        ActorAnimationConverter::Native
+    );
+    assert!(!native_prepare.force);
+
+    let disabled_cli = Cli::try_parse_from([
+        "bevyout",
+        "render",
+        "SuperDuperMart",
+        "--actor-animation-converter",
+        "disabled",
+    ])
+    .unwrap();
+    let CommandLine::Render(disabled_args) = disabled_cli.command else {
+        panic!("expected render command");
+    };
+    let disabled_prepare = prepare_args_for_render(
+        &disabled_args,
+        Path::new("cache"),
+        false,
+        disabled_args.actor_animation_converter,
+    );
+    assert_eq!(
+        disabled_prepare.actor_animation_converter,
+        ActorAnimationConverter::Disabled
+    );
+
+    let repair_prepare = prepare_args_for_render(
+        &disabled_args,
+        Path::new("cache"),
+        true,
+        ActorAnimationConverter::Native,
+    );
+    assert_eq!(
+        repair_prepare.actor_animation_converter,
+        ActorAnimationConverter::Native
+    );
+    assert!(repair_prepare.force);
+}
+
+#[test]
+fn actor_animation_repair_refusal_warns_once_and_bridge_error_has_exact_command() {
+    assert_eq!(
+        actor_animation_static_warning(),
+        "warning: actor animation repair declined; actors may render statically"
+    );
+    let error = actor_animation_bridge_error(
+        "actor animation clip pack is missing",
+        "MegatonCratersideSupply",
+    );
+    assert!(error.to_string().contains(
+        "cargo run-dev -- prepare MegatonCratersideSupply --actor-animation-converter native --force"
+    ));
 }
 
 #[test]
@@ -115,13 +450,13 @@ fn render_recovery_refreshes_preparation_before_offering_a_bake() {
     let mut manifest = compatible_render_manifest();
     manifest.schema_version -= 1;
     assert_eq!(
-        next_render_cache_action(&manifest),
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
         RenderCacheAction::Reprepare
     );
 
     manifest.schema_version = crate::vsa::CURRENT_MANIFEST_SCHEMA_VERSION;
     assert_eq!(
-        next_render_cache_action(&manifest),
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
         RenderCacheAction::Rebake
     );
 }
@@ -143,13 +478,13 @@ fn render_recovery_rebakes_stale_bakes_and_accepts_current_ones() {
         }),
     });
     assert_eq!(
-        next_render_cache_action(&manifest),
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
         RenderCacheAction::Ready
     );
 
     manifest.bake.as_mut().unwrap().bake_revision = Some("stale-bake".into());
     assert_eq!(
-        next_render_cache_action(&manifest),
+        next_render_cache_action(&manifest, ActorAnimationConverter::Native),
         RenderCacheAction::Rebake
     );
 }

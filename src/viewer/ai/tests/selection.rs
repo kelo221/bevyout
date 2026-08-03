@@ -76,7 +76,7 @@ fn a_schedule_gap_selects_nothing_and_is_counted() {
     let mut only = candidate(0x10);
     only.schedule = Some(PackageSchedule {
         time: 8,
-        duration: 60,
+        duration: 1,
         ..PackageSchedule::default()
     });
     let now = GameInstant {
@@ -103,7 +103,7 @@ fn no_schedule_is_always_in_window() {
 fn schedule_boundaries_are_half_open() {
     let schedule = PackageSchedule {
         time: 8,
-        duration: 120, // 08:00..10:00
+        duration: 2, // 08:00..10:00
         ..PackageSchedule::default()
     };
     let at = |hour| {
@@ -122,7 +122,7 @@ fn schedule_boundaries_are_half_open() {
 fn schedule_wraps_past_midnight() {
     let schedule = PackageSchedule {
         time: 22,
-        duration: 240, // 22:00..02:00
+        duration: 4, // 22:00..02:00
         ..PackageSchedule::default()
     };
     let at = |hour| {
@@ -145,7 +145,7 @@ fn month_date_and_day_gates_reject() {
         date: 15,
         day_of_week: 2,
         time: 0,
-        duration: 1440,
+        duration: 24,
     };
     let base = GameInstant {
         month: 3,
@@ -242,4 +242,65 @@ fn empty_candidate_list_is_a_gap() {
     assert_eq!(report.selected, None);
     assert_eq!(report.counters.total, 0);
     assert_eq!(report.counters.schedule_gap, 1);
+}
+
+#[test]
+fn positive_schedule_duration_is_in_hours_and_end_is_exclusive() {
+    let schedule = PackageSchedule {
+        time: 8,
+        duration: 12,
+        ..PackageSchedule::default()
+    };
+    assert_eq!(
+        schedule.evaluate(GameInstant {
+            hour: 19.99,
+            ..GameInstant::default()
+        }),
+        ScheduleMatch::InWindow
+    );
+    assert_eq!(
+        schedule.evaluate(GameInstant {
+            hour: 20.0,
+            ..GameInstant::default()
+        }),
+        ScheduleMatch::OutOfWindow
+    );
+}
+
+#[test]
+fn schedule_duration_at_least_24_hours_is_active_all_day() {
+    let schedule = PackageSchedule {
+        time: 8,
+        duration: 24,
+        ..PackageSchedule::default()
+    };
+    for hour in [0.0, 3.0, 8.0, 23.99] {
+        assert_eq!(
+            schedule.evaluate(GameInstant {
+                hour,
+                ..GameInstant::default()
+            }),
+            ScheduleMatch::InWindow,
+            "hour {hour}"
+        );
+    }
+}
+
+#[test]
+fn non_positive_duration_remains_open_ended() {
+    let schedule = PackageSchedule {
+        time: 8,
+        duration: 0,
+        ..PackageSchedule::default()
+    };
+    for hour in [0.0, 7.99, 23.5] {
+        assert_eq!(
+            schedule.evaluate(GameInstant {
+                hour,
+                ..GameInstant::default()
+            }),
+            ScheduleMatch::InWindow,
+            "hour {hour}"
+        );
+    }
 }

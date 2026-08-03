@@ -30,8 +30,11 @@ pub(crate) const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 24;
 /// Bumped again while merging M5 screen feedback: the manifest now also
 /// carries `screen_fx_catalog_path`, so neither branch's previously current
 /// cache may silently stand in for the combined shape.
-pub(crate) const CURRENT_PREPARE_REVISION: &str =
-    "prepare-v22-m6-worldspace-lod-imad-screen-fx-combat-condition";
+/// Bumped for M4 issue #292: package catalog contents and package-linked
+/// marker retention now change prepared placement meaning.
+/// Bumped for Lane C issue #290: authored IDLE definitions and their
+/// animation-catalog meaning are now part of prepared content.
+pub(crate) const CURRENT_PREPARE_REVISION: &str = "prepare-v24-m4-craterside-authored-idle-catalog";
 pub(crate) const CURRENT_BAKE_REVISION: &str = "rust-cpu-irradiance-v16-material-extensions-local-thickness-emissive-quarter-cap-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769";
 pub(crate) const STATIC_POINT_SHADOW_REVISION: &str = "bvh-d32-v8-light-cards-v1";
 pub(crate) const REFLECTION_PROBE_REVISION: &str =

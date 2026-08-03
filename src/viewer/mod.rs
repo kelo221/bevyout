@@ -24,14 +24,16 @@ use bevy::window::{CursorGrabMode, CursorOptions, PresentMode};
 use ron::de::from_str;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::app_state::{
     AppState, GameplayModal, LoadingTarget, auto_advance_from_boot, auto_advance_from_loading,
 };
-use crate::cli::{BakeArgs, PrepareArgs, RenderArgs, ViewArgs};
+use crate::cli::{ActorAnimationConverter, BakeArgs, PrepareArgs, RenderArgs, ViewArgs};
 #[cfg(test)]
 use crate::vsa::PREPARED_CONVERTER_REVISION;
+use bevyout_core::actor_animation::{PreparedActorAnimationKind, PreparedActorAnimationSet};
+
 use crate::vsa::{
     ACTOR_ANIMATION_CATALOG_REVISION, CellInfo, FO3_SCALE, ITEM_CATALOG_REVISION, ImageSpaceInfo,
     PHYSICS_ASSET_SCHEMA_VERSION, PreparedCellLighting, PreparedItemCatalog, PreparedItemCategory,
@@ -138,9 +140,9 @@ pub fn render(args: RenderArgs) -> Result<()> {
         None => {
             if args.agent_bridge {
                 return Err(anyhow::anyhow!(
-                    "agent bridge launch requires a cached prepared scene for '{}'; run `prepare {}` first",
+                    "agent bridge launch requires a cached prepared scene for '{}'; run `{}` first",
                     args.selector,
-                    args.selector,
+                    actor_animation_repair_command(&args.selector),
                 ));
             }
             let prompt = format!(
@@ -154,7 +156,8 @@ pub fn render(args: RenderArgs) -> Result<()> {
         }
     };
     let mut manifest = read_manifest(&manifest_path)?;
-    if next_render_cache_action(&manifest) == RenderCacheAction::Reprepare {
+    let mut cache_action = next_render_cache_action(&manifest, args.actor_animation_converter);
+    if cache_action == RenderCacheAction::Reprepare {
         let compatibility_error = ensure_prepared_manifest_compatible_any(
             &manifest,
             SUPPORTED_PREPARED_CONVERTER_REVISIONS,
@@ -163,8 +166,8 @@ pub fn render(args: RenderArgs) -> Result<()> {
         .expect_err("reprepare action requires an incompatible prepared manifest");
         if args.agent_bridge {
             return Err(anyhow::anyhow!(
-                "{compatibility_error}\nagent bridge launch will not reprepare interactively; run `prepare {}` first",
-                args.selector,
+                "{compatibility_error}\nagent bridge launch will not reprepare interactively; run `{}`",
+                actor_animation_repair_command(&args.selector),
             ));
         }
         let prompt = format!(
@@ -181,9 +184,76 @@ pub fn render(args: RenderArgs) -> Result<()> {
             SUPPORTED_PREPARED_CONVERTER_REVISIONS,
             PHYSICS_ASSET_SCHEMA_VERSION,
         )?;
+        cache_action = next_render_cache_action(&manifest, args.actor_animation_converter);
     }
 
-    if next_render_cache_action(&manifest) == RenderCacheAction::Rebake {
+    if cache_action == RenderCacheAction::RepairActorAnimations {
+        let readiness = actor_animation_cache_readiness(&manifest, args.actor_animation_converter);
+        if let ActorAnimationCacheReadiness::RepairRequired(reason) = readiness {
+            if args.agent_bridge {
+                return Err(actor_animation_bridge_error(&reason, &args.selector));
+            }
+            let repair_command = actor_animation_repair_command(&args.selector);
+            let prompt = format!(
+                "{reason}\nRepair actor animations for '{}' with native conversion now? Run `{repair_command}`",
+                cell_label(&manifest.cell),
+            );
+            if confirm(&prompt)? {
+                manifest_path = prepare_for_render_with_converter(
+                    &args,
+                    &cache_dir,
+                    true,
+                    ActorAnimationConverter::Native,
+                )?;
+                manifest = read_manifest(&manifest_path)?;
+                ensure_prepared_manifest_compatible_any(
+                    &manifest,
+                    SUPPORTED_PREPARED_CONVERTER_REVISIONS,
+                    PHYSICS_ASSET_SCHEMA_VERSION,
+                )?;
+                match actor_animation_cache_readiness(&manifest, ActorAnimationConverter::Native) {
+                    ActorAnimationCacheReadiness::Ready
+                    | ActorAnimationCacheReadiness::NoActors => {}
+                    ActorAnimationCacheReadiness::IntentionallyDisabled => {
+                        return Err(anyhow::anyhow!(
+                            "actor animation repair unexpectedly disabled conversion"
+                        ));
+                    }
+                    ActorAnimationCacheReadiness::RepairRequired(reason) => {
+                        return Err(anyhow::anyhow!(
+                            "actor animation repair did not produce a ready cache: {reason}"
+                        ));
+                    }
+                }
+                cache_action = next_render_cache_action(&manifest, args.actor_animation_converter);
+            } else {
+                eprintln!("{}", actor_animation_static_warning());
+                // Refusal is an explicit opt-out for this launch, not a reason
+                // to ask the same question again after the bake decision.
+                cache_action = next_render_bake_action(&manifest);
+            }
+        } else {
+            // The catalog can be replaced by another process between the
+            // action check and this proof. Do not prompt when it is already
+            // ready, and let the normal bake policy make the next decision.
+            cache_action = next_render_cache_action(&manifest, args.actor_animation_converter);
+            if cache_action == RenderCacheAction::RepairActorAnimations {
+                return Err(anyhow::anyhow!(
+                    "actor animation cache changed while checking readiness"
+                ));
+            }
+        }
+    }
+
+    if args.actor_animation_converter == ActorAnimationConverter::Disabled
+        && manifest_has_runtime_actor_placements(&manifest)
+    {
+        eprintln!(
+            "warning: actor animation conversion intentionally disabled; actors may render statically"
+        );
+    }
+
+    if cache_action == RenderCacheAction::Rebake {
         let bake_error = ensure_baked_scene_compatible(&manifest).err();
         let prompt = if let Some(error) = bake_error.as_ref() {
             format!("{error}\nRe-bake '{}' now?", cell_label(&manifest.cell))
@@ -351,11 +421,226 @@ fn spawn_reticle(mut commands: Commands) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenderCacheAction {
     Reprepare,
+    RepairActorAnimations,
     Rebake,
     Ready,
 }
 
-fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheAction {
+/// Engine-independent result of validating the prepared actor-animation cache.
+///
+/// This deliberately describes cache facts rather than Bevy asset state. The
+/// viewer can therefore make the repair decision before creating a window or
+/// scheduling any animation systems.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActorAnimationCacheReadiness {
+    Ready,
+    NoActors,
+    IntentionallyDisabled,
+    RepairRequired(String),
+}
+
+fn manifest_has_runtime_actor_placements(manifest: &PreparedSceneManifest) -> bool {
+    manifest.placements.iter().any(|placement| {
+        matches!(
+            placement.semantic,
+            PreparedSemantic::Npc(_) | PreparedSemantic::Creature(_)
+        )
+    })
+}
+
+fn actor_animation_catalog_repair_reason(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    if message.contains("hash does not match") {
+        "actor animation catalog hash mismatch".into()
+    } else if message.contains("revision does not match") {
+        "actor animation catalog revision mismatch".into()
+    } else if message.contains("is stale") {
+        "actor animation catalog is stale".into()
+    } else if message.contains("fingerprint") {
+        "actor animation catalog source fingerprint mismatch".into()
+    } else if message.contains("invalid actor animation catalog") {
+        "actor animation catalog is invalid".into()
+    } else if message.contains("reading actor animation catalog") {
+        "actor animation catalog file is missing".into()
+    } else {
+        "actor animation catalog could not be validated".into()
+    }
+}
+
+fn resolve_actor_animation_asset_path(asset_root: &Path, relative: &str) -> Option<PathBuf> {
+    let relative = PathBuf::from(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        None
+    } else {
+        Some(asset_root.join(relative))
+    }
+}
+
+fn actor_animation_set_repair_reason(
+    set: &PreparedActorAnimationSet,
+    kind: PreparedActorAnimationKind,
+    female: bool,
+    asset_root: &Path,
+) -> Option<String> {
+    let Some(pack_relative_path) = set.clip_pack_asset_path.as_deref() else {
+        return Some("actor animation clip pack path is missing".into());
+    };
+    let Some(expected_hash) = set.clip_pack_hash.as_deref() else {
+        return Some("actor animation clip pack hash is missing".into());
+    };
+    let Some(pack_path) = resolve_actor_animation_asset_path(asset_root, pack_relative_path) else {
+        return Some("actor animation clip pack path is not relative to the asset root".into());
+    };
+    let pack_bytes = match fs::read(&pack_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Some("actor animation clip pack file is missing".into()),
+    };
+    if fingerprint(&pack_bytes) != expected_hash {
+        return Some("actor animation clip pack hash mismatch".into());
+    }
+
+    let context = actor_animation::policy::ActorAnimationContext {
+        kind,
+        female,
+        weapon_prefix: None,
+    };
+    let idle = actor_animation::policy::resolve_clip(
+        &set.clips,
+        context,
+        actor_animation::policy::ActorAnimationState::Idle,
+    );
+    if idle.is_none_or(|selection| {
+        selection.state != actor_animation::policy::ActorAnimationState::Idle
+    }) {
+        return Some("actor animation set has no Ready base idle clip".into());
+    }
+    let forward = actor_animation::policy::resolve_clip(
+        &set.clips,
+        context,
+        actor_animation::policy::ActorAnimationState::Walk,
+    );
+    if forward.is_none_or(|selection| {
+        selection.state != actor_animation::policy::ActorAnimationState::Walk
+    }) {
+        return Some("actor animation set has no Ready forward locomotion clip".into());
+    }
+    None
+}
+
+fn actor_animation_cache_readiness(
+    manifest: &PreparedSceneManifest,
+    converter: ActorAnimationConverter,
+) -> ActorAnimationCacheReadiness {
+    if converter == ActorAnimationConverter::Disabled {
+        return ActorAnimationCacheReadiness::IntentionallyDisabled;
+    }
+    if !manifest_has_runtime_actor_placements(manifest) {
+        return ActorAnimationCacheReadiness::NoActors;
+    }
+    let Some(catalog_relative_path) = manifest.actor_animation_catalog_path.as_deref() else {
+        return ActorAnimationCacheReadiness::RepairRequired(
+            "actor animation catalog path is missing".into(),
+        );
+    };
+    let asset_root = PathBuf::from(&manifest.asset_root);
+    if resolve_actor_animation_asset_path(&asset_root, catalog_relative_path).is_none() {
+        return ActorAnimationCacheReadiness::RepairRequired(
+            "actor animation catalog path is not relative to the asset root".into(),
+        );
+    }
+    let catalog = match actor_animation::load_catalog_for_manifest(manifest, &asset_root) {
+        Ok(Some(catalog)) => catalog,
+        Ok(None) => {
+            return ActorAnimationCacheReadiness::RepairRequired(
+                "actor animation catalog path is missing".into(),
+            );
+        }
+        Err(error) => {
+            return ActorAnimationCacheReadiness::RepairRequired(
+                actor_animation_catalog_repair_reason(&error),
+            );
+        }
+    };
+
+    for placement in &manifest.placements {
+        let (female, expected_kind) = match &placement.semantic {
+            PreparedSemantic::Npc(actor) => (
+                actor
+                    .assembly
+                    .as_ref()
+                    .is_some_and(|assembly| assembly.female),
+                PreparedActorAnimationKind::Npc,
+            ),
+            PreparedSemantic::Creature(actor) => (
+                actor
+                    .assembly
+                    .as_ref()
+                    .is_some_and(|assembly| assembly.female),
+                PreparedActorAnimationKind::Creature,
+            ),
+            _ => continue,
+        };
+        let Some(mapping) = catalog.actor_mappings.iter().find(|mapping| {
+            mapping.reference_form_id == placement.reference_form_id
+                || (mapping.reference_form_id == 0
+                    && mapping.base_form_id == placement.base_form_id)
+        }) else {
+            return ActorAnimationCacheReadiness::RepairRequired(
+                "actor animation mapping is missing for a placed actor".into(),
+            );
+        };
+        if mapping.kind != expected_kind {
+            return ActorAnimationCacheReadiness::RepairRequired(
+                "actor animation mapping kind does not match a placed actor".into(),
+            );
+        }
+        let Some(set) = catalog
+            .animation_sets
+            .iter()
+            .find(|set| set.id == mapping.animation_set_id)
+        else {
+            return ActorAnimationCacheReadiness::RepairRequired(
+                "actor animation set is missing for actor animation mapping".into(),
+            );
+        };
+        if mapping.kind == PreparedActorAnimationKind::Creature
+            && !set.clips.iter().any(|clip| {
+                clip.status
+                    == bevyout_core::actor_animation::PreparedActorAnimationClipStatus::Ready
+            })
+        {
+            // Creature coverage is not yet universal (for example the
+            // Protectron set can be mapped but have no compatible native KF
+            // clips). Do not make an otherwise repairable humanoid cache
+            // unlaunchable; the actor runtime will retain its normal static
+            // fallback diagnostics for this unsupported set.
+            continue;
+        }
+        if let Some(reason) =
+            actor_animation_set_repair_reason(set, mapping.kind, female, &asset_root)
+        {
+            return ActorAnimationCacheReadiness::RepairRequired(reason);
+        }
+    }
+    ActorAnimationCacheReadiness::Ready
+}
+
+fn next_render_bake_action(manifest: &PreparedSceneManifest) -> RenderCacheAction {
+    if needs_irradiance_bake(manifest) || ensure_baked_scene_compatible(manifest).is_err() {
+        RenderCacheAction::Rebake
+    } else {
+        RenderCacheAction::Ready
+    }
+}
+
+fn next_render_cache_action(
+    manifest: &PreparedSceneManifest,
+    converter: ActorAnimationConverter,
+) -> RenderCacheAction {
     if ensure_prepared_manifest_compatible_any(
         manifest,
         SUPPORTED_PREPARED_CONVERTER_REVISIONS,
@@ -364,15 +649,42 @@ fn next_render_cache_action(manifest: &PreparedSceneManifest) -> RenderCacheActi
     .is_err()
     {
         RenderCacheAction::Reprepare
-    } else if needs_irradiance_bake(manifest) || ensure_baked_scene_compatible(manifest).is_err() {
-        RenderCacheAction::Rebake
     } else {
-        RenderCacheAction::Ready
+        match actor_animation_cache_readiness(manifest, converter) {
+            ActorAnimationCacheReadiness::RepairRequired(_) => {
+                RenderCacheAction::RepairActorAnimations
+            }
+            ActorAnimationCacheReadiness::Ready
+            | ActorAnimationCacheReadiness::NoActors
+            | ActorAnimationCacheReadiness::IntentionallyDisabled => {
+                next_render_bake_action(manifest)
+            }
+        }
     }
 }
 
-fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Result<PathBuf> {
-    prepare(PrepareArgs {
+fn actor_animation_repair_command(selector: &str) -> String {
+    format!("cargo run-dev -- prepare {selector} --actor-animation-converter native --force")
+}
+
+fn actor_animation_static_warning() -> &'static str {
+    "warning: actor animation repair declined; actors may render statically"
+}
+
+fn actor_animation_bridge_error(reason: &str, selector: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{reason}\nagent bridge cannot prompt for actor animation repair; run `{}`",
+        actor_animation_repair_command(selector),
+    )
+}
+
+fn prepare_args_for_render(
+    args: &RenderArgs,
+    cache_dir: &Path,
+    force: bool,
+    actor_animation_converter: ActorAnimationConverter,
+) -> PrepareArgs {
+    PrepareArgs {
         selectors: vec![args.selector.clone()],
         all: false,
         all_interiors: false,
@@ -382,7 +694,7 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         game_root: args.game_root.clone(),
         plugin: args.plugin.clone(),
         cell: None,
-        actor_animation_converter: crate::cli::ActorAnimationConverter::Disabled,
+        actor_animation_converter,
         toktx: args.toktx.clone(),
         shadow_resolution: args.shadow_resolution,
         rebuild_shadows: args.rebuild_shadows,
@@ -397,7 +709,25 @@ fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Resul
         strict: false,
         jobs: None,
         retry_failed: false,
-    })?;
+    }
+}
+
+fn prepare_for_render(args: &RenderArgs, cache_dir: &Path, force: bool) -> Result<PathBuf> {
+    prepare_for_render_with_converter(args, cache_dir, force, args.actor_animation_converter)
+}
+
+fn prepare_for_render_with_converter(
+    args: &RenderArgs,
+    cache_dir: &Path,
+    force: bool,
+    actor_animation_converter: ActorAnimationConverter,
+) -> Result<PathBuf> {
+    prepare(prepare_args_for_render(
+        args,
+        cache_dir,
+        force,
+        actor_animation_converter,
+    ))?;
     resolve_cached_manifest(cache_dir, &args.selector)
 }
 

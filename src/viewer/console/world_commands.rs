@@ -9,6 +9,7 @@ impl ConsoleCommandProvider for WorldCommandProvider {
         for command in [
             ConsoleCommand::new("actorinspect", "actorinspect <actor-reference>", "Report a prepared actor's identity, assembly, animation, fallback tier/reasons, scale, canonical holder, proxy, and weapon attachment state.", actor_inspect),
             ConsoleCommand::new("actoranim", "actoranim <actor-reference> <idle|walk|run|turn_left|turn_right|equip|unequip>", "Request a gameplay animation through the same actor controller used by AI and scripted behavior.", actor_animation).mutating(),
+            ConsoleCommand::new("playidle", "playidle <actor-reference> <idle-formid>", "Force a prepared Special Idle or Whole Body authored IDLE through the actor's loaded shared animation set.", play_idle).mutating(),
             ConsoleCommand::new("ragdoll", "ragdoll <actor-reference> [on|off|reset]", "Toggle a prepared NPC/creature's developer ragdoll body; actors stay locked in T-pose by default.", ragdoll).mutating(),
             ConsoleCommand::new("ragdollprobe", "ragdollprobe <actor-reference>", "Report live ragdoll constraint, velocity, sleep, and visual-node errors without changing the actor.", ragdoll_probe),
             ConsoleCommand::new("activate", "activate <reference>", "Activate a door, container, corpse, or pickup reference; a door with a destination requests cell travel (locks bypassed).", activate_reference).mutating(),
@@ -369,6 +370,49 @@ pub(super) fn actor_inspect(
             })
         },
     );
+    let idle_state = animation_runtime.map_or_else(
+        || {
+            json!({
+                "source": "idle_manager",
+                "selected_form_id": null,
+                "current_form_id": null,
+                "last_form_id": null,
+                "next_evaluation_seconds": 0.0,
+                "cooldowns": {},
+                "collection": {
+                    "package_form_id": null,
+                    "cursor": 0,
+                    "do_once_exhausted": false,
+                },
+                "last_rejection": null,
+            })
+        },
+        |runtime| {
+            let authority = runtime.idle_authority();
+            let cooldowns = authority
+                .replay_cooldowns
+                .iter()
+                .map(|(form_id, eligible_at)| (format!("{form_id:08x}"), json!(eligible_at)))
+                .collect::<serde_json::Map<_, _>>();
+            json!({
+                "source": runtime
+                    .special_idle_source()
+                    .unwrap_or(authority.source)
+                    .label(),
+                "selected_form_id": authority.current_idle_form_id,
+                "current_form_id": runtime.special_idle_form_id(),
+                "last_form_id": authority.last_idle_form_id,
+                "next_evaluation_seconds": authority.next_eligible_evaluation_seconds,
+                "cooldowns": cooldowns,
+                "collection": {
+                    "package_form_id": authority.active_package_form_id,
+                    "cursor": authority.package_collection_cursor,
+                    "do_once_exhausted": authority.do_once_exhausted,
+                },
+                "last_rejection": authority.last_rejection.map(|reason| reason.label()),
+            })
+        },
+    );
     let fallback_tier = assembly.map_or("missing_blueprint", |assembly| {
         assembly.fallback.level.label()
     });
@@ -419,6 +463,11 @@ pub(super) fn actor_inspect(
                 },
             },
             "fallback": fallback,
+            "idle_source": idle_state["source"].clone(),
+            "selected_idle_form_id": idle_state["selected_form_id"].clone(),
+            "current_idle_form_id": idle_state["current_form_id"].clone(),
+            "last_idle_rejection": idle_state["last_rejection"].clone(),
+            "idle": idle_state.clone(),
             "animation": {
                 "present": animation_runtime.is_some(),
                 "set_id": animation_runtime.map(|runtime| runtime.set_id()),
@@ -428,6 +477,7 @@ pub(super) fn actor_inspect(
                 "loop_mode": animation_runtime.map(|runtime| format!("{:?}", runtime.loop_mode())),
                 "root_motion_policy": animation_runtime.map(|runtime| format!("{:?}", runtime.root_motion_policy())),
                 "diagnostic": animation_runtime.and_then(|runtime| runtime.diagnostic()),
+                "idle": idle_state,
             },
             "runtime": {
                 "present": runtime.is_some(),
@@ -473,6 +523,40 @@ pub(super) fn actor_animation(
         vec![format!(
             "actoranim {reference_form_id:08x} {}",
             state.label()
+        )],
+    ))
+}
+
+pub(super) fn play_idle(
+    world: &mut World,
+    invocation: &ConsoleInvocation,
+) -> Result<ConsoleCommandResult, ConsoleError> {
+    let [selector, idle_form_id] = invocation.args.as_slice() else {
+        return Err(ConsoleError::new(
+            "bad_arity",
+            "playidle requires an actor reference and IDLE FormID",
+        ));
+    };
+    let entity = resolve_reference(world, selector).map_err(|_| {
+        ConsoleError::new(
+            "unknown_actor",
+            format!("unknown actor reference {selector}"),
+        )
+    })?;
+    let idle_form_id = parse_item_form_id(idle_form_id).ok_or_else(|| {
+        ConsoleError::new("bad_form_id", "playidle IDLE FormID must be hexadecimal")
+    })?;
+    let reference_form_id = actor_animation::request_forced_idle(world, entity, idle_form_id)
+        .map_err(|error| ConsoleError::new(error.code, error.message))?;
+    Ok(ConsoleCommandResult::new(
+        json!({
+            "reference_form_id": reference_form_id,
+            "idle_form_id": format!("{idle_form_id:08x}"),
+            "source": "forced",
+            "queued": true,
+        }),
+        vec![format!(
+            "playidle {reference_form_id:08x} {idle_form_id:08x} queued"
         )],
     ))
 }

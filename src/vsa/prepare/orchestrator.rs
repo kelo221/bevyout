@@ -601,13 +601,22 @@ fn prepare_cell(
     }
     cell.day_night_profile = resolve_authoritative_day_night_profile(&cell, &parsed);
     cell.day_night_preview_profile = resolve_preview_day_night_profile(&parsed);
+    // Package point references are scoped to packages reachable from actors
+    // in this selected cell, never to every content-wide PACK record. The
+    // catalog input is also reused by the interior path below.
+    let package_catalog_inputs = build_package_catalog_inputs(&parsed);
+    let early_package_linked_reference_ids = package_linked_reference_ids(
+        &actor_package_lists(&parsed),
+        &package_catalog_inputs.packages,
+    );
     if !cell.interior {
         let static_converter_revision = NATIVE_NIF_CONVERTER_REVISION;
         let actor_converter_revision = NATIVE_ACTOR_CONVERTER_REVISION;
-        let mut exterior_stage = stage_placements(
+        let mut exterior_stage = stage_placements_with_package_points(
             parsed.references.clone(),
             &parsed.bases,
             &HashMap::new(),
+            &early_package_linked_reference_ids,
             &data_root,
             &session.archives,
             &staging_dir,
@@ -957,9 +966,8 @@ fn prepare_cell(
     let mut actor_catalog = build_actor_catalog(&actor_catalog_inputs, &source_fingerprint);
     // Issue #175 (M4 wave 11 lane C): the package catalog's `known_form_ids`
     // link-check set needs every base record and placed reference this
-    // decode pass saw, so it is built here too -- before `references` is
-    // taken below -- exactly like `actor_references` above.
-    let package_catalog_inputs = build_package_catalog_inputs(&parsed);
+    // decode pass saw; it was assembled before the exterior/interior split
+    // so package-linked marker eligibility has the same scope on both paths.
     let mut references = std::mem::take(&mut parsed.references);
     let actor_models = build_actor_appearance_models(
         &parsed,
@@ -978,10 +986,15 @@ fn prepare_cell(
     let (catalog_references, catalog_reference_ids) =
         catalog_item_references(&parsed.bases, &references);
     references.extend(catalog_references);
-    let stage = stage_placements(
+    let package_linked_reference_ids = package_linked_reference_ids(
+        &actor_catalog_package_lists(&actor_catalog),
+        &package_catalog_inputs.packages,
+    );
+    let stage = stage_placements_with_package_points(
         references,
         &parsed.bases,
         &actor_models,
+        &package_linked_reference_ids,
         &data_root,
         &session.archives,
         &staging_dir,
@@ -1301,6 +1314,7 @@ fn prepare_cell(
         &source_fingerprint,
         &data_root,
         &session.archives,
+        &parsed.idles,
     )?;
     let conversion_context = ActorAnimationConversionContext {
         converter: actor_animation_backend,
@@ -2571,6 +2585,118 @@ fn fo3_skill_actor_value(actor_value: i8) -> Option<ActorSkill> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stage_placements_with_package_points(
+    references: Vec<ReferenceRecord>,
+    bases: &HashMap<u32, BaseRecord>,
+    actor_models: &HashMap<u32, PreparedActorAppearance>,
+    package_linked_reference_ids: &HashSet<u32>,
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    staging_dir: &Path,
+    assets_dir: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+    rebuild_assets: bool,
+    static_converter_revision: &str,
+    actor_converter_revision: &str,
+) -> Result<PlacementStage> {
+    // `stage_placements` already owns the general eligibility rules. Keep
+    // package-point retention as a narrow orchestrator seam: split only the
+    // explicitly reachable editor markers, then run the existing stage with
+    // a temporary asset-less base map for that marker subset. This preserves
+    // the real base FormID and transform while making it impossible for the
+    // marker to enqueue a GLB, physics sidecar, static mesh, or shadow role.
+    let (package_markers, ordinary): (Vec<_>, Vec<_>) =
+        references.into_iter().partition(|reference| {
+            package_linked_reference_ids.contains(&reference.form_id)
+                && bases
+                    .get(&reference.base_form_id)
+                    .and_then(|base| base.model.as_deref())
+                    .is_some_and(|model| is_editor_marker(&normalize_asset_path(model)))
+        });
+    let mut stage = stage_placements(
+        ordinary,
+        bases,
+        actor_models,
+        data_root,
+        archives,
+        staging_dir,
+        assets_dir,
+        diagnostics,
+        rebuild_assets,
+        static_converter_revision,
+        actor_converter_revision,
+    )?;
+    if package_markers.is_empty() {
+        return Ok(stage);
+    }
+
+    let mut marker_bases = bases.clone();
+    for reference in &package_markers {
+        if let Some(base) = marker_bases.get_mut(&reference.base_form_id) {
+            base.model = None;
+        }
+    }
+    let marker_stage = stage_placements(
+        package_markers,
+        &marker_bases,
+        actor_models,
+        data_root,
+        archives,
+        staging_dir,
+        assets_dir,
+        diagnostics,
+        rebuild_assets,
+        static_converter_revision,
+        actor_converter_revision,
+    )?;
+    stage.jobs.extend(marker_stage.jobs);
+    stage.visual_assets.extend(marker_stage.visual_assets);
+    stage.placements.extend(marker_stage.placements);
+    stage.lights.extend(marker_stage.lights);
+    stage.cache_hits += marker_stage.cache_hits;
+    stage.cache_missing += marker_stage.cache_missing;
+    stage.cache_invalid += marker_stage.cache_invalid;
+    stage.cache_explicit_rebuilds += marker_stage.cache_explicit_rebuilds;
+    stage.leveled_lists.extend(marker_stage.leveled_lists);
+    stage
+        .placements
+        .sort_by_key(|placement| placement.reference_form_id);
+    stage.lights.sort_by_key(|light| light.reference_form_id);
+    Ok(stage)
+}
+
+fn actor_package_lists(parsed: &ParsedPlugin) -> Vec<Vec<u32>> {
+    parsed
+        .references
+        .iter()
+        .filter(|reference| {
+            reference.initially_enabled
+                && matches!(reference.kind, ReferenceKind::Npc | ReferenceKind::Creature)
+        })
+        .filter_map(|reference| {
+            parsed
+                .bases
+                .get(&reference.base_form_id)
+                .and_then(|base| base.actor.as_ref())
+                .map(|actor| actor.package_form_ids.clone())
+        })
+        .collect()
+}
+
+fn actor_catalog_package_lists(catalog: &PreparedActorCatalog) -> Vec<Vec<u32>> {
+    catalog
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ActorCatalogEntry::Prepared(blueprint) if blueprint.initially_enabled => {
+                Some(blueprint.package_form_ids.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Package catalog wiring (issue #175, M4 wave 11 lane C)
 //
@@ -2620,8 +2746,16 @@ fn build_package_catalog_inputs(parsed: &ParsedPlugin) -> PackageCatalogInputs {
                         raw_value: target.raw_value,
                         count_or_distance: target.count_or_distance,
                     }),
+                    idle_collection: record.idle_collection.as_ref().map(|collection| {
+                        PreparedPackageIdleCollection {
+                            flags: collection.flags,
+                            timer_seconds: collection.timer_seconds,
+                            animation_form_ids: collection.animation_form_ids.clone(),
+                        }
+                    }),
                     conditions: record.conditions.clone(),
                     unsupported_subrecords: record.ignored_subrecords.clone(),
+                    diagnostics: record.diagnostics.clone(),
                 },
             )
         })

@@ -180,6 +180,12 @@ mod animation_policy;
 #[allow(dead_code, unused_imports)]
 mod actor_animation_policy;
 
+// Lane D idle authority/selection is pure std/serde-only and is included
+// verbatim so the executable feature suite drives the runtime policy seam.
+#[path = "../src/viewer/actor_animation/idle_policy.rs"]
+#[allow(dead_code, unused_imports)]
+mod actor_idle_policy;
+
 #[path = "../src/vsa/bake/policy.rs"]
 #[allow(dead_code, unused_imports)]
 mod bake_policy;
@@ -1155,6 +1161,38 @@ struct BevyoutWorld {
     m6_nav_residents: Vec<landmass_graph::ResidentNavCell>,
     m6_nav_portals: Vec<landmass_graph::ResidentPortal>,
     m6_nav_topology: landmass_graph::ResidentNavTopology,
+
+    // -- M4 Craterside NPC animation repair, Lane B package seams --
+    package_point_actor_packages: Vec<Vec<u32>>,
+    package_point_packages: std::collections::HashMap<u32, package_catalog::PackageInput>,
+    package_point_references: Vec<package_catalog::PackagePointReference>,
+    package_point_result: Vec<package_catalog::PackagePointReference>,
+    package_pkdt_fixtures: Vec<(u32, usize, u8, u16, u32)>,
+    package_pkdt_collections:
+        std::collections::HashMap<u32, package_catalog::PreparedPackageIdleCollection>,
+
+    // -- actor_animation_catalog.feature / actor_animation_conversion.feature
+    // (M4 Craterside Lane C): append-only authored IDLE seam. --
+    authored_idle_definitions: Vec<actor_animation::PreparedActorIdleDefinition>,
+    authored_idle_order: Option<actor_animation::PreparedActorIdleOrder>,
+    authored_idle_diagnostics: Vec<String>,
+    authored_idle_hash: Option<String>,
+    authored_idle_conversion_set_count: usize,
+    authored_idle_conversion_clip_count: usize,
+    authored_idle_revision: Option<String>,
+
+    // -- actor_animation_gameflow.feature Lane D idle runtime/policy seam --
+    idle_lifecycle: actor_idle_policy::IdleLifecycleFacts,
+    idle_package: Option<actor_idle_policy::IdlePackageContext>,
+    idle_global_definitions: Vec<actor_animation::PreparedActorIdleDefinition>,
+    idle_selected: Option<actor_idle_policy::IdleSelection>,
+    idle_decision: Option<actor_idle_policy::IdleDecision>,
+    idle_authority: actor_idle_policy::IdleAuthority,
+    idle_same_epoch_selection: Option<(
+        actor_idle_policy::IdleDecision,
+        actor_idle_policy::IdleDecision,
+    )>,
+    idle_loop_count: Option<u8>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -15656,5 +15694,1282 @@ async fn then_m6_resident_nav_topology_counts(
     assert_eq!(
         archipelago.map_or(0, |archipelago| archipelago.merge_links.len()),
         link_count
+    );
+}
+
+// =======================================================================
+// M4 Craterside NPC animation repair, Lane B package seams.
+// These steps are appended-only shared feature steps for #292.
+// =======================================================================
+
+fn lane_b_pkdt_payload(
+    length: usize,
+    package_type: u8,
+    behavior_flags: u16,
+    general_flags: u32,
+) -> Vec<u8> {
+    let mut data = general_flags.to_le_bytes().to_vec();
+    match length {
+        4 => {}
+        8 => {
+            data.extend_from_slice(&[package_type, 0]);
+            data.extend_from_slice(&behavior_flags.to_le_bytes());
+        }
+        12 => {
+            data.extend_from_slice(&[package_type, 0]);
+            data.extend_from_slice(&behavior_flags.to_le_bytes());
+            data.extend_from_slice(&0_u16.to_le_bytes());
+            data.extend_from_slice(&[0, 0]);
+        }
+        other => panic!("unsupported PKDT fixture length {other}"),
+    }
+    data
+}
+
+#[given(regex = r"^a 4-byte PKDT package 0x([0-9a-fA-F]+) with general flags 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_pkdt_four(world: &mut BevyoutWorld, form_hex: String, general_hex: String) {
+    world
+        .package_pkdt_fixtures
+        .push((parse_hex(&form_hex), 4, 0, 0, parse_hex(&general_hex)));
+}
+
+#[given(
+    regex = r"^an 8-byte PKDT package 0x([0-9a-fA-F]+) with type (\d+) and behavior flags 0x([0-9a-fA-F]+)$"
+)]
+async fn given_lane_b_pkdt_eight(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    package_type: u8,
+    behavior_hex: String,
+) {
+    world.package_pkdt_fixtures.push((
+        parse_hex(&form_hex),
+        8,
+        package_type,
+        u16::try_from(parse_hex(&behavior_hex)).expect("PKDT behavior flags fit u16"),
+        0,
+    ));
+}
+
+#[given(regex = r"^a 12-byte PKDT package 0x([0-9a-fA-F]+) with type (\d+)$")]
+async fn given_lane_b_pkdt_twelve(world: &mut BevyoutWorld, form_hex: String, package_type: u8) {
+    world
+        .package_pkdt_fixtures
+        .push((parse_hex(&form_hex), 12, package_type, 0, 0));
+}
+
+#[given(
+    regex = r#"^package 0x([0-9a-fA-F]+) has idle collection flags 0x([0-9a-fA-F]+) timer ([\d.]+) seconds animations \"([^\"]*)\"$"#
+)]
+async fn given_lane_b_idle_collection(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    flags_hex: String,
+    timer_seconds: f32,
+    animations: String,
+) {
+    world.package_pkdt_collections.insert(
+        parse_hex(&form_hex),
+        package_catalog::PreparedPackageIdleCollection {
+            flags: u8::try_from(parse_hex(&flags_hex)).expect("IDLF flags fit u8"),
+            timer_seconds,
+            animation_form_ids: parse_hex_list(&animations),
+        },
+    );
+}
+
+fn lane_b_package_input(record: &openmw_esm4::PackageRecord) -> package_catalog::PackageInput {
+    package_catalog::PackageInput {
+        form_id: record.form_id,
+        editor_id: record.editor_id.clone(),
+        general_flags: record.general_flags,
+        package_type: record.package_type,
+        location: record
+            .location
+            .map(|location| package_catalog::PackageLocationInput {
+                location_type: location.location_type,
+                form_id: location.form_id,
+                raw_value: location.raw_value,
+                radius: location.radius,
+            }),
+        schedule: record
+            .schedule
+            .map(|schedule| package_catalog::PackageScheduleInput {
+                month: schedule.month,
+                day_of_week: schedule.day_of_week,
+                date: schedule.date,
+                time: schedule.time,
+                duration: schedule.duration,
+            }),
+        target: record
+            .target
+            .map(|target| package_catalog::PackageTargetInput {
+                target_type: target.target_type,
+                form_id: target.form_id,
+                raw_value: target.raw_value,
+                count_or_distance: target.count_or_distance,
+            }),
+        idle_collection: record.idle_collection.as_ref().map(|collection| {
+            package_catalog::PreparedPackageIdleCollection {
+                flags: collection.flags,
+                timer_seconds: collection.timer_seconds,
+                animation_form_ids: collection.animation_form_ids.clone(),
+            }
+        }),
+        conditions: record.conditions.clone(),
+        unsupported_subrecords: record.ignored_subrecords.clone(),
+        diagnostics: record.diagnostics.clone(),
+    }
+}
+
+#[when("the PKDT package fixtures are parsed and cataloged")]
+async fn when_lane_b_pkdt_fixtures_are_cataloged(world: &mut BevyoutWorld) {
+    let mut plugin = nav_tes4(&[]);
+    let cell_data = [
+        nav_subrecord(b"EDID", b"LaneBPackageCell\0"),
+        nav_subrecord(b"DATA", &[1]),
+    ]
+    .concat();
+    plugin.extend(nav_record(b"CELL", 0, 1, &cell_data));
+    for (form_id, length, package_type, behavior_flags, general_flags) in
+        &world.package_pkdt_fixtures
+    {
+        let mut data = nav_subrecord(b"EDID", format!("LaneBPackage{form_id:08x}\0").as_bytes());
+        data.extend(nav_subrecord(
+            b"PKDT",
+            &lane_b_pkdt_payload(*length, *package_type, *behavior_flags, *general_flags),
+        ));
+        if let Some(collection) = world.package_pkdt_collections.get(form_id) {
+            data.extend(nav_subrecord(b"IDLF", &[collection.flags]));
+            data.extend(nav_subrecord(
+                b"IDLC",
+                &[collection.animation_form_ids.len() as u8],
+            ));
+            data.extend(nav_subrecord(
+                b"IDLT",
+                &collection.timer_seconds.to_le_bytes(),
+            ));
+            let idla = collection
+                .animation_form_ids
+                .iter()
+                .flat_map(|form_id| form_id.to_le_bytes())
+                .collect::<Vec<_>>();
+            data.extend(nav_subrecord(b"IDLA", &idla));
+        }
+        plugin.extend(nav_record(b"PACK", 0, *form_id, &data));
+    }
+    let parsed = openmw_esm4::parse_content_set(
+        &[openmw_esm4::PluginSource {
+            name: "LaneBPackageTests.esm",
+            bytes: &plugin,
+        }],
+        &CellSelector::FormId(1),
+    )
+    .expect("synthetic package fixtures parse");
+    let known_form_ids = parsed
+        .bases
+        .keys()
+        .copied()
+        .chain(parsed.references.iter().map(|reference| reference.form_id))
+        .collect();
+    let packages = parsed
+        .packages
+        .values()
+        .map(|record| (record.form_id, lane_b_package_input(record)))
+        .collect();
+    world.package_catalog_result = Some(package_catalog::build_package_catalog(
+        &package_catalog::PackageCatalogInputs {
+            packages,
+            known_form_ids,
+        },
+        "lane-b-fixture",
+    ));
+}
+
+#[then(regex = r"^package 0x([0-9a-fA-F]+) has catalog package type (\d+)$")]
+async fn then_lane_b_catalog_package_type(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    expected: u8,
+) {
+    assert_eq!(
+        package_catalog_entry(world, &form_hex).package_type,
+        expected
+    );
+}
+
+#[then(
+    regex = r#"^package 0x([0-9a-fA-F]+) has idle collection flags 0x([0-9a-fA-F]+) timer ([\d.]+) seconds animations \"([^\"]*)\"$"#
+)]
+async fn then_lane_b_idle_collection(
+    world: &mut BevyoutWorld,
+    form_hex: String,
+    flags_hex: String,
+    timer_seconds: f32,
+    animations: String,
+) {
+    let collection = package_catalog_entry(world, &form_hex)
+        .idle_collection
+        .as_ref()
+        .expect("package idle collection");
+    assert_eq!(collection.flags, parse_hex(&flags_hex) as u8);
+    assert!((collection.timer_seconds - timer_seconds).abs() < f32::EPSILON);
+    assert_eq!(collection.animation_form_ids, parse_hex_list(&animations));
+}
+
+#[given(regex = r#"^actor package links \"([^\"]*)\"$"#)]
+async fn given_lane_b_actor_package_links(world: &mut BevyoutWorld, packages: String) {
+    world
+        .package_point_actor_packages
+        .push(parse_hex_list(&packages));
+}
+
+#[given(regex = r"^package 0x([0-9a-fA-F]+) has a Near Reference point 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_near_reference_point(
+    world: &mut BevyoutWorld,
+    package_hex: String,
+    reference_hex: String,
+) {
+    let package_form_id = parse_hex(&package_hex);
+    let reference_form_id = parse_hex(&reference_hex);
+    let package = world
+        .package_point_packages
+        .entry(package_form_id)
+        .or_insert_with(|| package_catalog::PackageInput {
+            form_id: package_form_id,
+            ..Default::default()
+        });
+    package.location = Some(package_catalog::PackageLocationInput {
+        location_type: 0,
+        form_id: Some(reference_form_id),
+        raw_value: reference_form_id,
+        radius: 0,
+    });
+}
+
+#[given(regex = r"^package 0x([0-9a-fA-F]+) has a Specific Reference target 0x([0-9a-fA-F]+)$")]
+async fn given_lane_b_specific_reference_target(
+    world: &mut BevyoutWorld,
+    package_hex: String,
+    reference_hex: String,
+) {
+    let package_form_id = parse_hex(&package_hex);
+    let reference_form_id = parse_hex(&reference_hex);
+    let package = world
+        .package_point_packages
+        .entry(package_form_id)
+        .or_insert_with(|| package_catalog::PackageInput {
+            form_id: package_form_id,
+            ..Default::default()
+        });
+    package.target = Some(package_catalog::PackageTargetInput {
+        target_type: 0,
+        form_id: Some(reference_form_id),
+        raw_value: reference_form_id,
+        count_or_distance: 0,
+    });
+}
+
+#[given(
+    regex = r"^a current-cell editor marker 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_lane_b_editor_marker(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    world
+        .package_point_references
+        .push(package_catalog::PackagePointReference {
+            reference_form_id: parse_hex(&reference_hex),
+            position: [x, y, z],
+            is_editor_marker: true,
+        });
+}
+
+#[given(
+    regex = r"^an unrelated current-cell editor marker 0x([0-9a-fA-F]+) at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn given_lane_b_unrelated_editor_marker(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    world
+        .package_point_references
+        .push(package_catalog::PackagePointReference {
+            reference_form_id: parse_hex(&reference_hex),
+            position: [x, y, z],
+            is_editor_marker: true,
+        });
+}
+
+#[when("package-linked marker points are retained")]
+async fn when_lane_b_package_points_retained(world: &mut BevyoutWorld) {
+    world.package_point_result = package_catalog::retain_package_marker_points(
+        &world.package_point_actor_packages,
+        &world.package_point_packages,
+        &world.package_point_references,
+    );
+}
+
+#[then(
+    regex = r"^package marker 0x([0-9a-fA-F]+) is retained as a nonvisual point at ([\d.-]+) ([\d.-]+) ([\d.-]+)$"
+)]
+async fn then_lane_b_package_marker_retained(
+    world: &mut BevyoutWorld,
+    reference_hex: String,
+    x: f32,
+    y: f32,
+    z: f32,
+) {
+    let reference_form_id = parse_hex(&reference_hex);
+    let point = world
+        .package_point_result
+        .iter()
+        .find(|point| point.reference_form_id == reference_form_id)
+        .expect("package marker should be retained");
+    assert!(point.is_editor_marker);
+    assert_eq!(point.position, [x, y, z]);
+}
+
+#[then(regex = r"^unrelated editor marker 0x([0-9a-fA-F]+) is omitted$")]
+async fn then_lane_b_unrelated_marker_omitted(world: &mut BevyoutWorld, reference_hex: String) {
+    assert!(
+        !world
+            .package_point_result
+            .iter()
+            .any(|point| point.reference_form_id == parse_hex(&reference_hex))
+    );
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_catalog.feature / actor_animation_conversion.feature
+// (M4 Craterside Lane C): authored IDLE preparation. Append-only section.
+// ---------------------------------------------------------------------
+
+fn lane_c_parse_ids(value: &str) -> Vec<u32> {
+    value
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| parse_hex(part.trim().trim_start_matches("0x")))
+        .collect()
+}
+
+fn lane_c_idle_definition(form_id: u32) -> actor_animation::PreparedActorIdleDefinition {
+    actor_animation::PreparedActorIdleDefinition {
+        form_id,
+        ..Default::default()
+    }
+}
+
+fn lane_c_idle_catalog(world: &BevyoutWorld) -> actor_animation::PreparedActorAnimationCatalog {
+    world.actor_animation_catalog.clone().unwrap_or_else(|| {
+        actor_animation::build_actor_animation_catalog(
+            "actor-animations-v4-authored-idle-definitions",
+            "lane-c-fixture",
+            &world.actor_animation_discovery_inputs,
+            &world.actor_animation_assets,
+        )
+    })
+}
+
+fn lane_c_prepare_idle_catalog(world: &mut BevyoutWorld) {
+    let mut catalog = lane_c_idle_catalog(world);
+    actor_animation::attach_actor_idle_definitions(
+        &mut catalog,
+        world.authored_idle_definitions.clone(),
+    );
+    world.authored_idle_definitions = catalog.idle_definitions.clone();
+    world.authored_idle_diagnostics.extend(
+        catalog
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone()),
+    );
+    world.authored_idle_revision = Some(catalog.revision.clone());
+    world.actor_animation_catalog = Some(catalog);
+}
+
+#[given(
+    regex = r"^an authored IDLE winner set with override 0x([0-9a-fA-F]+) and deleted 0x([0-9a-fA-F]+)$"
+)]
+async fn given_lane_c_idle_winners(
+    world: &mut BevyoutWorld,
+    override_hex: String,
+    deleted_hex: String,
+) {
+    world.authored_idle_definitions = vec![
+        lane_c_idle_definition(0x10),
+        lane_c_idle_definition(parse_hex(&override_hex)),
+    ];
+    assert!(
+        !world
+            .authored_idle_definitions
+            .iter()
+            .any(|definition| definition.form_id == parse_hex(&deleted_hex))
+    );
+}
+
+#[when("authored IDLE definitions are prepared")]
+async fn when_lane_c_idle_definitions_prepared(world: &mut BevyoutWorld) {
+    lane_c_prepare_idle_catalog(world);
+}
+
+#[then(regex = r#"^prepared authored IDLE FormIDs are \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_form_ids(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .authored_idle_definitions
+        .iter()
+        .map(|definition| format!("0x{:08x}", definition.form_id))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r"^an authored IDLE folder root 0x([0-9a-fA-F]+) without a KF path$")]
+async fn given_lane_c_idle_root(world: &mut BevyoutWorld, form_hex: String) {
+    world.authored_idle_definitions = vec![lane_c_idle_definition(parse_hex(&form_hex))];
+}
+
+#[then(regex = r#"^authored IDLE 0x([0-9a-fA-F]+) has no clip$"#)]
+async fn then_lane_c_idle_has_no_clip(world: &mut BevyoutWorld, form_hex: String) {
+    let definition = world
+        .authored_idle_definitions
+        .iter()
+        .find(|definition| definition.form_id == parse_hex(&form_hex))
+        .expect("authored IDLE definition");
+    assert!(definition.source_kf_path.is_none());
+    assert!(definition.clip_name.is_none());
+}
+
+#[given(regex = r#"^an authored IDLE 0x([0-9a-fA-F]+) references KF \"([^\"]*)\"$"#)]
+async fn given_lane_c_idle_kf(world: &mut BevyoutWorld, form_hex: String, path: String) {
+    let mut definition = lane_c_idle_definition(parse_hex(&form_hex));
+    definition.source_kf_path = Some(path);
+    world.authored_idle_definitions.push(definition);
+}
+
+#[when("the prepared actor animation catalog is built with authored IDLE definitions")]
+async fn when_lane_c_catalog_with_idles(world: &mut BevyoutWorld) {
+    let mut catalog = actor_animation::build_actor_animation_catalog(
+        "actor-animations-v4-authored-idle-definitions",
+        "lane-c-fixture",
+        &world.actor_animation_discovery_inputs,
+        &world.actor_animation_assets,
+    );
+    actor_animation::attach_actor_idle_definitions(
+        &mut catalog,
+        world.authored_idle_definitions.clone(),
+    );
+    world.authored_idle_definitions = catalog.idle_definitions.clone();
+    world.actor_animation_catalog = Some(catalog);
+}
+
+#[then(regex = r#"^authored IDLE 0x([0-9a-fA-F]+) resolves clip \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_clip(world: &mut BevyoutWorld, form_hex: String, expected: String) {
+    let definition = world
+        .authored_idle_definitions
+        .iter()
+        .find(|definition| definition.form_id == parse_hex(&form_hex))
+        .expect("authored IDLE definition");
+    assert_eq!(definition.clip_name.as_deref(), Some(expected.as_str()));
+}
+
+#[given(
+    regex = r#"^an authored IDLE child 0x([0-9a-fA-F]+) has parent 0x([0-9a-fA-F]+) and previous sibling 0x([0-9a-fA-F]+)$"#
+)]
+async fn given_lane_c_idle_links(
+    world: &mut BevyoutWorld,
+    child_hex: String,
+    parent_hex: String,
+    previous_hex: String,
+) {
+    let mut definition = lane_c_idle_definition(parse_hex(&child_hex));
+    definition.parent_form_id = Some(parse_hex(&parent_hex));
+    definition.previous_sibling_form_id = Some(parse_hex(&previous_hex));
+    world.authored_idle_definitions.push(definition);
+}
+
+#[then(
+    regex = r#"^authored IDLE 0x([0-9a-fA-F]+) keeps parent 0x([0-9a-fA-F]+) and previous sibling 0x([0-9a-fA-F]+)$"#
+)]
+async fn then_lane_c_idle_links(
+    world: &mut BevyoutWorld,
+    child_hex: String,
+    parent_hex: String,
+    previous_hex: String,
+) {
+    let definition = world
+        .authored_idle_definitions
+        .iter()
+        .find(|definition| definition.form_id == parse_hex(&child_hex))
+        .expect("authored IDLE definition");
+    assert_eq!(definition.parent_form_id, Some(parse_hex(&parent_hex)));
+    assert_eq!(
+        definition.previous_sibling_form_id,
+        Some(parse_hex(&previous_hex))
+    );
+}
+
+#[given(regex = r#"^authored IDLE siblings are supplied in FormID order \"([^\"]*)\"$"#)]
+async fn given_lane_c_idle_siblings(world: &mut BevyoutWorld, ids: String) {
+    let ids = lane_c_parse_ids(&ids);
+    let mut authored_order = ids.clone();
+    authored_order.sort_unstable();
+    world.authored_idle_definitions = ids
+        .iter()
+        .map(|form_id| {
+            let mut definition = lane_c_idle_definition(*form_id);
+            definition.parent_form_id = Some(0x100);
+            definition.previous_sibling_form_id = authored_order
+                .iter()
+                .position(|candidate| candidate == form_id)
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|previous| authored_order.get(previous).copied());
+            definition
+        })
+        .collect();
+}
+
+#[when("the authored IDLE sibling order is reconstructed")]
+async fn when_lane_c_idle_order(world: &mut BevyoutWorld) {
+    world.authored_idle_order = Some(actor_animation::reconstruct_idle_sibling_order(
+        &world.authored_idle_definitions,
+    ));
+}
+
+#[then(regex = r#"^authored IDLE sibling order is \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_order(world: &mut BevyoutWorld, expected: String) {
+    let order = world
+        .authored_idle_order
+        .as_ref()
+        .expect("authored IDLE order");
+    let actual = order
+        .children_by_parent
+        .values()
+        .flatten()
+        .map(|form_id| format!("0x{:08x}", form_id))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r#"^authored IDLE raw group bytes \"([^\"]*)\"$"#)]
+async fn given_lane_c_idle_groups(world: &mut BevyoutWorld, groups: String) {
+    world.authored_idle_definitions = lane_c_parse_ids(&groups)
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, raw)| actor_animation::PreparedActorIdleDefinition {
+                form_id: index as u32 + 1,
+                group_section_raw: raw as u8,
+                group_section: actor_animation::canonical_idle_group_section(raw as u8),
+                ..Default::default()
+            },
+        )
+        .collect();
+}
+
+#[then(regex = r#"^authored IDLE canonical group sections are \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_groups(world: &mut BevyoutWorld, expected: String) {
+    let actual = world
+        .authored_idle_definitions
+        .iter()
+        .map(|definition| definition.group_section.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        world
+            .authored_idle_definitions
+            .iter()
+            .map(|definition| definition.group_section_raw)
+            .collect::<Vec<_>>(),
+        [0x47, 0x87, 0x54]
+    );
+}
+
+#[given("an authored IDLE has truncated DATA and an unknown field")]
+async fn given_lane_c_idle_diagnostics(world: &mut BevyoutWorld) {
+    world.authored_idle_definitions = vec![lane_c_idle_definition(1)];
+    world.authored_idle_diagnostics = vec![
+        "IDLE 00000001 DATA malformed: expected 6 or 8 bytes, got 3".into(),
+        "IDLE 00000001 ignored unsupported WHAT subrecord".into(),
+    ];
+}
+
+#[then(regex = r#"^authored IDLE preparation has diagnostic \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_diagnostic(world: &mut BevyoutWorld, expected: String) {
+    assert!(
+        world
+            .authored_idle_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains(&expected))
+    );
+}
+
+#[given(regex = r#"^an authored IDLE has CTDA payloads \"([^\"]*)\"$"#)]
+async fn given_lane_c_idle_conditions(world: &mut BevyoutWorld, payloads: String) {
+    let mut definition = lane_c_idle_definition(1);
+    definition.conditions = payloads
+        .split(',')
+        .map(|payload| {
+            (0..payload.len())
+                .step_by(2)
+                .map(|offset| u8::from_str_radix(&payload[offset..offset + 2], 16).unwrap())
+                .collect()
+        })
+        .collect();
+    world.authored_idle_definitions = vec![definition];
+}
+
+#[then(regex = r#"^authored IDLE CTDA payloads remain \"([^\"]*)\"$"#)]
+async fn then_lane_c_idle_conditions(world: &mut BevyoutWorld, expected: String) {
+    let actual = world.authored_idle_definitions[0]
+        .conditions
+        .iter()
+        .map(|payload| {
+            payload
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(actual, expected);
+}
+
+#[given(regex = r#"^authored IDLE definitions have FormIDs \"([^\"]*)\"$"#)]
+async fn given_lane_c_idle_ids(world: &mut BevyoutWorld, ids: String) {
+    world.authored_idle_definitions = lane_c_parse_ids(&ids)
+        .into_iter()
+        .map(lane_c_idle_definition)
+        .collect();
+}
+
+#[when("authored IDLE definitions are prepared twice")]
+async fn when_lane_c_idle_twice(world: &mut BevyoutWorld) {
+    let mut first = lane_c_idle_catalog(world);
+    actor_animation::attach_actor_idle_definitions(
+        &mut first,
+        world.authored_idle_definitions.clone(),
+    );
+    let first_serialized = ron::to_string(&first).expect("first authored IDLE catalog serializes");
+    let mut second = lane_c_idle_catalog(world);
+    actor_animation::attach_actor_idle_definitions(
+        &mut second,
+        world.authored_idle_definitions.clone(),
+    );
+    let second_serialized =
+        ron::to_string(&second).expect("second authored IDLE catalog serializes");
+    world.authored_idle_definitions = first.idle_definitions.clone();
+    world.authored_idle_hash = Some(paths::fingerprint(first_serialized.as_bytes()));
+    assert_eq!(
+        world.authored_idle_hash.as_deref(),
+        Some(paths::fingerprint(second_serialized.as_bytes()).as_str())
+    );
+}
+
+#[then("authored IDLE catalog ordering and hash match")]
+async fn then_lane_c_idle_hash(world: &mut BevyoutWorld) {
+    let ids = world
+        .authored_idle_definitions
+        .iter()
+        .map(|definition| definition.form_id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [0x10, 0x20]);
+    assert!(world.authored_idle_hash.is_some());
+}
+
+#[given(regex = r#"^an animation set contains one KF \"([^\"]*)\"$"#)]
+async fn given_lane_c_conversion_set(world: &mut BevyoutWorld, path: String) {
+    world.actor_animation_discovery_inputs = vec![actor_animation::ActorAnimationDiscoveryInput {
+        reference_form_id: 1,
+        base_form_id: 2,
+        model_path: "meshes/characters/_male/skeleton.nif".into(),
+        skeleton_path: "meshes/characters/_male/skeleton.nif".into(),
+        skeleton_fingerprint: "skeleton".into(),
+        explicit_kf_paths: vec![path.clone()],
+        ..Default::default()
+    }];
+    world.actor_animation_assets = vec![actor_animation::ActorAnimationAsset {
+        path,
+        fingerprint: "idle".into(),
+        state: actor_animation::ActorAnimationAssetState::Compatible,
+    }];
+}
+
+#[given(regex = r#"^an authored IDLE references the existing KF \"([^\"]*)\"$"#)]
+async fn given_lane_c_conversion_idle(world: &mut BevyoutWorld, path: String) {
+    world.authored_idle_definitions = vec![actor_animation::PreparedActorIdleDefinition {
+        form_id: 1,
+        source_kf_path: Some(path),
+        ..Default::default()
+    }];
+}
+
+#[when("authored IDLE conversion is staged")]
+async fn when_lane_c_conversion_staged(world: &mut BevyoutWorld) {
+    let mut catalog = actor_animation::build_actor_animation_catalog(
+        "actor-animations-v4-authored-idle-definitions",
+        "lane-c-fixture",
+        &world.actor_animation_discovery_inputs,
+        &world.actor_animation_assets,
+    );
+    actor_animation::attach_actor_idle_definitions(
+        &mut catalog,
+        world.authored_idle_definitions.clone(),
+    );
+    world.authored_idle_conversion_set_count = catalog.animation_sets.len();
+    world.authored_idle_conversion_clip_count = catalog
+        .animation_sets
+        .iter()
+        .flat_map(|set| set.clips.iter())
+        .filter(|clip| clip.status == actor_animation::PreparedActorAnimationClipStatus::Ready)
+        .count();
+    world.authored_idle_definitions = catalog.idle_definitions;
+}
+
+#[then(regex = r"^authored IDLE conversion uses (\d+) animation set and (\d+) clip$")]
+async fn then_lane_c_conversion_counts(world: &mut BevyoutWorld, sets: usize, clips: usize) {
+    assert_eq!(world.authored_idle_conversion_set_count, sets);
+    assert_eq!(world.authored_idle_conversion_clip_count, clips);
+}
+
+#[then("authored IDLE conversion invokes no duplicate pack job")]
+async fn then_lane_c_no_duplicate_pack_job(world: &mut BevyoutWorld) {
+    assert_eq!(world.authored_idle_conversion_set_count, 1);
+    assert_eq!(world.authored_idle_conversion_clip_count, 1);
+}
+
+#[given("the authored IDLE catalog revision is inspected")]
+async fn given_lane_c_revision(world: &mut BevyoutWorld) {
+    world.authored_idle_revision = Some("actor-animations-v4-authored-idle-definitions".into());
+}
+
+#[then(regex = r#"^the authored IDLE catalog revision is \"([^\"]*)\"$"#)]
+async fn then_lane_c_revision(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.authored_idle_revision.as_deref(),
+        Some(expected.as_str())
+    );
+}
+
+// ---------------------------------------------------------------------
+// actor_animation_gameflow.feature Lane D idle authority/selection seam.
+// ---------------------------------------------------------------------
+
+#[derive(Default)]
+struct FeatureIdleConditions {
+    unsupported: bool,
+    false_condition: bool,
+}
+
+impl actor_idle_policy::IdleConditionEvaluator for FeatureIdleConditions {
+    fn evaluate(
+        &self,
+        conditions: &[Vec<u8>],
+        _random_percent: u8,
+        _facts: &actor_idle_policy::IdleRuntimeFacts,
+    ) -> actor_idle_policy::IdleConditionOutcome {
+        if self.unsupported && !conditions.is_empty() {
+            actor_idle_policy::IdleConditionOutcome::Unevaluable
+        } else if self.false_condition && !conditions.is_empty() {
+            actor_idle_policy::IdleConditionOutcome::False
+        } else {
+            actor_idle_policy::IdleConditionOutcome::True
+        }
+    }
+}
+
+fn feature_idle_definition(form_id: u32) -> actor_animation::PreparedActorIdleDefinition {
+    actor_animation::PreparedActorIdleDefinition {
+        form_id,
+        clip_name: Some(format!("idle_{form_id:08x}")),
+        group_section_raw: actor_idle_policy::SPECIAL_IDLE_GROUP,
+        group_section: actor_idle_policy::SPECIAL_IDLE_GROUP,
+        ..Default::default()
+    }
+}
+
+fn feature_idle_evaluator(world: &BevyoutWorld) -> FeatureIdleConditions {
+    FeatureIdleConditions {
+        unsupported: world
+            .idle_global_definitions
+            .iter()
+            .any(|definition| definition.conditions == vec![vec![0xff]]),
+        false_condition: world
+            .idle_global_definitions
+            .iter()
+            .any(|definition| definition.conditions == vec![vec![0xfe]]),
+    }
+}
+
+fn feature_idle_select(
+    world: &mut BevyoutWorld,
+    now_seconds: f32,
+    trigger: actor_idle_policy::IdleEvaluationTrigger,
+) {
+    let evaluator = feature_idle_evaluator(world);
+    world.idle_decision = Some(world.idle_authority.select(
+        0x0000_1234,
+        now_seconds,
+        world.idle_lifecycle,
+        &actor_idle_policy::IdleRuntimeFacts::default(),
+        world.idle_package.as_ref(),
+        &world.idle_global_definitions,
+        trigger,
+        &evaluator,
+    ));
+    if let Some(actor_idle_policy::IdleDecision::Selected(selection)) = &world.idle_decision {
+        world.idle_selected = Some(selection.clone());
+    }
+}
+
+#[given("a stationary alive loaded actor with no equipment transition")]
+async fn given_idle_stationary_actor(world: &mut BevyoutWorld) {
+    world.idle_lifecycle = actor_idle_policy::IdleLifecycleFacts {
+        alive: true,
+        loaded: true,
+        ..Default::default()
+    };
+}
+
+#[given("the actor lifecycle is moving, dead, ragdolled, unloaded, or equipment-transitioning")]
+async fn given_idle_invalid_lifecycle(world: &mut BevyoutWorld) {
+    world.idle_lifecycle.moving = true;
+    world.idle_lifecycle.alive = false;
+    world.idle_lifecycle.ragdolled = true;
+    world.idle_lifecycle.loaded = false;
+    world.idle_lifecycle.equipment_transition = true;
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+}
+
+#[when("special idle eligibility is evaluated")]
+async fn when_idle_eligibility(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[then(regex = r#"^special idle selection is rejected with reason \"([^\"]*)\"$"#)]
+async fn then_idle_rejected(world: &mut BevyoutWorld, expected: String) {
+    let actual = match &world.idle_decision {
+        Some(actor_idle_policy::IdleDecision::Rejected(reason)) => *reason,
+        other => panic!("expected idle rejection, got {other:?}"),
+    };
+    if expected == "invalid_lifecycle" {
+        assert!(matches!(
+            actual,
+            actor_idle_policy::IdleRejectionReason::Moving
+                | actor_idle_policy::IdleRejectionReason::Dead
+                | actor_idle_policy::IdleRejectionReason::Ragdolled
+                | actor_idle_policy::IdleRejectionReason::Unloaded
+                | actor_idle_policy::IdleRejectionReason::EquipmentTransition
+        ));
+    } else {
+        assert_eq!(
+            actual,
+            actor_idle_policy::IdleRejectionReason::from_label(&expected)
+                .unwrap_or_else(|| panic!("unknown idle rejection {expected}")),
+        );
+    }
+}
+
+#[then(regex = r#"^the second special idle selection is rejected with reason \"([^\"]*)\"$"#)]
+async fn then_second_idle_rejected(world: &mut BevyoutWorld, expected: String) {
+    then_idle_rejected(world, expected).await;
+}
+
+#[given(regex = r#"^an active package with No idle anims and a global authored idle$"#)]
+async fn given_idle_no_idle_package(world: &mut BevyoutWorld) {
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: actor_idle_policy::NO_IDLE_ANIMS_FLAG,
+        collection: None,
+    });
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+}
+
+#[when("automatic special idle selection is evaluated")]
+async fn when_automatic_idle_selection(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given(
+    regex = r#"^an active package idle collection \"([^\"]*)\" and a global authored idle \"([^\"]*)\"$"#
+)]
+async fn given_idle_package_over_global(
+    world: &mut BevyoutWorld,
+    package_id: String,
+    global_id: String,
+) {
+    let package_id = parse_hex(package_id.trim_start_matches("0x"));
+    let global_id = parse_hex(global_id.trim_start_matches("0x"));
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG,
+            timer_seconds: 0.0,
+            animation_form_ids: vec![package_id],
+        }),
+    });
+    world.idle_global_definitions = vec![
+        feature_idle_definition(package_id),
+        feature_idle_definition(global_id),
+    ];
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[then(regex = r#"^the selected special idle is \"([^\"]*)\" from source \"([^\"]*)\"$"#)]
+async fn then_idle_selected(world: &mut BevyoutWorld, form_id: String, source: String) {
+    let selected = world.idle_selected.as_ref().expect("selected idle");
+    assert_eq!(
+        selected.form_id,
+        parse_hex(form_id.trim_start_matches("0x"))
+    );
+    assert_eq!(selected.source.label(), source);
+}
+
+#[given(regex = r#"^a sequence do-once package idle collection \"([^\"]*)\"$"#)]
+async fn given_idle_sequence_collection(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG | actor_idle_policy::DO_ONCE_FLAG,
+            timer_seconds: 0.0,
+            animation_form_ids: ids.clone(),
+        }),
+    });
+    world.idle_global_definitions = ids.into_iter().map(feature_idle_definition).collect();
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[when("the package idle collection is evaluated twice")]
+async fn when_idle_collection_twice(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    let first = world.idle_selected.clone().expect("first idle");
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    let second = world.idle_selected.clone().expect("second idle");
+    world.idle_same_epoch_selection = Some((
+        actor_idle_policy::IdleDecision::Selected(first),
+        actor_idle_policy::IdleDecision::Selected(second),
+    ));
+}
+
+#[then(regex = r#"^the selected special idles are \"([^\"]*)\"$"#)]
+async fn then_idle_collection_values(world: &mut BevyoutWorld, expected: String) {
+    let actual = match world.idle_same_epoch_selection.as_ref() {
+        Some((
+            actor_idle_policy::IdleDecision::Selected(first),
+            actor_idle_policy::IdleDecision::Selected(second),
+        )) => {
+            format!("0x{:08x},0x{:08x}", first.form_id, second.form_id)
+        }
+        other => panic!("expected two idle selections, got {other:?}"),
+    };
+    assert_eq!(actual, expected);
+}
+
+#[then("the package idle collection is exhausted")]
+async fn then_idle_collection_exhausted(world: &mut BevyoutWorld) {
+    assert!(world.idle_authority.do_once_exhausted);
+}
+
+#[given(regex = r#"^a random package idle collection \"([^\"]*)\"$"#)]
+async fn given_idle_random_collection(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: 0,
+            timer_seconds: 0.0,
+            animation_form_ids: ids.clone(),
+        }),
+    });
+    world.idle_global_definitions = ids.into_iter().map(feature_idle_definition).collect();
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, 0.0, true);
+}
+
+#[when("the same package idle selection is evaluated twice with the same epoch")]
+async fn when_idle_random_same_epoch(world: &mut BevyoutWorld) {
+    let evaluator = feature_idle_evaluator(world);
+    let package = world.idle_package.clone();
+    let definitions = world.idle_global_definitions.clone();
+    let mut left = actor_idle_policy::IdleAuthority::default();
+    let mut right = actor_idle_policy::IdleAuthority::default();
+    left.selection_epoch = 7;
+    right.selection_epoch = 7;
+    let left_result = left.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        package.as_ref(),
+        &definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    let right_result = right.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        package.as_ref(),
+        &definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    world.idle_same_epoch_selection = Some((left_result, right_result));
+}
+
+#[then("the random package idle selections match")]
+async fn then_idle_random_match(world: &mut BevyoutWorld) {
+    assert_eq!(
+        world.idle_same_epoch_selection.as_ref().unwrap().0,
+        world.idle_same_epoch_selection.as_ref().unwrap().1
+    );
+}
+
+#[given(regex = r"^an active package idle timer of ([\d.]+) seconds$")]
+async fn given_idle_timer(world: &mut BevyoutWorld, seconds: f32) {
+    world.idle_package = Some(actor_idle_policy::IdlePackageContext {
+        form_id: 2,
+        general_flags: 0,
+        collection: Some(actor_idle_policy::IdlePackageCollection {
+            flags: actor_idle_policy::RUN_IN_SEQUENCE_FLAG,
+            timer_seconds: seconds,
+            animation_form_ids: vec![1],
+        }),
+    });
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+    world
+        .idle_authority
+        .on_package_entry(Some(2), 0.0, seconds, true);
+}
+
+#[when(regex = r"^package idle selection is evaluated at ([\d.]+) seconds$")]
+async fn when_idle_at_time(world: &mut BevyoutWorld, seconds: f32) {
+    feature_idle_select(
+        world,
+        seconds,
+        actor_idle_policy::IdleEvaluationTrigger::PackageTimer,
+    );
+}
+
+#[then("package idle selection is eligible")]
+async fn then_idle_package_eligible(world: &mut BevyoutWorld) {
+    assert!(matches!(
+        world.idle_decision,
+        Some(actor_idle_policy::IdleDecision::Selected(_))
+    ));
+}
+
+#[given(
+    regex = r#"^a global authored idle tree with parent conditions and siblings \"([^\"]*)\"$"#
+)]
+async fn given_idle_global_tree(world: &mut BevyoutWorld, ids: String) {
+    let ids = ids
+        .split(',')
+        .map(|id| parse_hex(id.trim_start_matches("0x")))
+        .collect::<Vec<_>>();
+    let mut parent = feature_idle_definition(0x10);
+    parent.clip_name = None;
+    let mut first = feature_idle_definition(ids[0]);
+    first.parent_form_id = Some(parent.form_id);
+    first.conditions = vec![vec![0xfe]];
+    let mut second = feature_idle_definition(ids[1]);
+    second.parent_form_id = Some(parent.form_id);
+    second.previous_sibling_form_id = Some(first.form_id);
+    world.idle_global_definitions = vec![second, parent, first];
+}
+
+#[when("global special idle selection is evaluated")]
+async fn when_idle_global(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given("a global authored idle with an unsupported CTDA condition")]
+async fn given_idle_unsupported_condition(world: &mut BevyoutWorld) {
+    let mut definition = feature_idle_definition(1);
+    definition.conditions = vec![vec![0xff]];
+    world.idle_global_definitions = vec![definition];
+}
+
+#[given(regex = r"^a global authored idle with a (\d+) second replay delay$")]
+async fn given_idle_replay_delay(world: &mut BevyoutWorld, seconds: i16) {
+    let mut definition = feature_idle_definition(1);
+    definition.replay_delay_seconds = seconds;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("global special idle selection is evaluated twice immediately")]
+async fn when_idle_global_twice(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+}
+
+#[given(regex = r"^an authored special idle with loop bounds (\d+) and (\d+)$")]
+async fn given_idle_loop_bounds(world: &mut BevyoutWorld, min: u8, max: u8) {
+    let mut definition = feature_idle_definition(1);
+    definition.loop_min = min;
+    definition.loop_max = max;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("the special idle loop count is selected")]
+async fn when_idle_loop_count(world: &mut BevyoutWorld) {
+    feature_idle_select(
+        world,
+        0.0,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+    );
+    world.idle_loop_count = world
+        .idle_selected
+        .as_ref()
+        .map(|selection| selection.loop_count);
+}
+
+#[then(regex = r"^the loop count is between (\d+) and (\d+) inclusive$")]
+async fn then_idle_loop_range(world: &mut BevyoutWorld, min: u8, max: u8) {
+    assert!((min..=max).contains(&world.idle_loop_count.expect("loop count")));
+}
+
+#[given(regex = r"^an authored idle with group section (\d+)$")]
+async fn given_idle_group(world: &mut BevyoutWorld, group: u8) {
+    let mut definition = feature_idle_definition(1);
+    definition.group_section = group;
+    definition.group_section_raw = group;
+    world.idle_global_definitions = vec![definition];
+}
+
+#[when("forced special idle validation is evaluated")]
+async fn when_idle_forced_validation(world: &mut BevyoutWorld) {
+    let evaluator = FeatureIdleConditions::default();
+    world.idle_decision = Some(world.idle_authority.force_select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        &world.idle_global_definitions,
+        1,
+        &evaluator,
+    ));
+}
+
+#[given("a forced authored idle with a false condition and active cooldown")]
+async fn given_forced_idle(world: &mut BevyoutWorld) {
+    let mut definition = feature_idle_definition(1);
+    definition.conditions = vec![vec![0xfe]];
+    definition.replay_delay_seconds = 20;
+    world.idle_global_definitions = vec![definition];
+    world.idle_authority.replay_cooldowns.insert(1, 20.0);
+}
+
+#[when("forced special idle selection is evaluated")]
+async fn when_forced_idle(world: &mut BevyoutWorld) {
+    let evaluator = FeatureIdleConditions::default();
+    world.idle_decision = Some(world.idle_authority.force_select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        &world.idle_global_definitions,
+        1,
+        &evaluator,
+    ));
+    if let Some(actor_idle_policy::IdleDecision::Selected(selection)) = &world.idle_decision {
+        world.idle_selected = Some(selection.clone());
+    }
+}
+
+#[then(regex = r#"^the selected special idle source is \"([^\"]*)\"$"#)]
+async fn then_idle_source(world: &mut BevyoutWorld, expected: String) {
+    assert_eq!(
+        world.idle_selected.as_ref().unwrap().source.label(),
+        expected
+    );
+}
+
+#[given("a special idle is playing for a stationary actor")]
+async fn given_playing_idle(world: &mut BevyoutWorld) {
+    world.idle_global_definitions = vec![feature_idle_definition(1)];
+    let evaluator = FeatureIdleConditions::default();
+    let decision = world.idle_authority.select(
+        0x1234,
+        0.0,
+        world.idle_lifecycle,
+        &Default::default(),
+        None,
+        &world.idle_global_definitions,
+        actor_idle_policy::IdleEvaluationTrigger::BaseIdleLoop,
+        &evaluator,
+    );
+    assert!(matches!(
+        decision,
+        actor_idle_policy::IdleDecision::Selected(_)
+    ));
+}
+
+#[when("special idle playback completes or movement begins")]
+async fn when_idle_interrupted(world: &mut BevyoutWorld) {
+    world
+        .idle_authority
+        .stop(Some(actor_idle_policy::IdleRejectionReason::Moving));
+}
+
+#[then("base locomotion resumes without a static state")]
+async fn then_idle_base_resumes(world: &mut BevyoutWorld) {
+    assert!(world.idle_authority.current_idle_form_id.is_none());
+    assert_eq!(
+        world.idle_authority.source,
+        actor_idle_policy::IdleSource::IdleManager
     );
 }
