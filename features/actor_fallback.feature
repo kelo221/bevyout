@@ -59,3 +59,24 @@ Feature: Deterministic actor appearance fallbacks
     When actor appearance fallback is resolved
     Then actor fallback level is ProxyMesh
     And actor fallback reasons are "missing_skeleton,missing_head_model,incompatible_skin"
+
+  Scenario: Canonical FaceGen coefficients retain their exact layout
+    Given canonical FaceGen coefficient payloads
+    When FaceGen coefficients are decoded
+    Then FaceGen coefficient policy is Authored
+    And FaceGen geometry symmetric coefficient count is 50
+    And FaceGen geometry asymmetric coefficient count is 30
+    And FaceGen texture symmetric coefficient count is 50
+
+  Scenario: Unsupported FaceGen payload uses the rest-pose fallback
+    Given a FaceGen geometry payload with an unsupported length
+    When FaceGen coefficients are decoded
+    Then FaceGen coefficient policy is RestPoseFallback
+    And FaceGen diagnostic "unsupported_facegen_layout" is recorded
+
+  Scenario: Race defaults and actor traits combine deterministically
+    Given canonical FaceGen race defaults
+    And canonical FaceGen actor traits
+    When FaceGen coefficients are decoded
+    Then FaceGen coefficient policy is Authored
+    And combined FaceGen geometry symmetric coefficient 0 is 3

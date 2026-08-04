@@ -309,6 +309,36 @@ pub(super) fn actor_inspect(
             }).count(),
         })
     });
+    let facegen_reconstruction = assembly.map_or_else(
+        || {
+            json!({
+                "status": "NotAuthored",
+                "geometry_status": "NotAuthored",
+                "texture_status": "NotAuthored",
+                "fingerprint": null,
+                "diagnostics": [],
+            })
+        },
+        |assembly| {
+            let status = match assembly.fallback.facegen_policy {
+                bevyout_core::actor::FaceGenPolicy::Authored if assembly.facegen.is_some() => {
+                    "Applied"
+                }
+                bevyout_core::actor::FaceGenPolicy::RestPoseFallback => "RestPoseFallback",
+                _ => "NotAuthored",
+            };
+            json!({
+                "status": status,
+                "geometry_status": status,
+                "texture_status": status,
+                "fingerprint": assembly.facegen_reconstruction_fingerprint,
+                "diagnostics": assembly.facegen_diagnostics.iter().map(|diagnostic| json!({
+                    "code": diagnostic.code(),
+                    "detail": diagnostic.to_string(),
+                })).collect::<Vec<_>>(),
+            })
+        },
+    );
     let prepared_weapon = assembly
         .and_then(|assembly| assembly.equipped_weapon.as_ref())
         .map(|weapon| {
@@ -453,6 +483,7 @@ pub(super) fn actor_inspect(
             "skeleton_path": assembly.and_then(|assembly| assembly.skeleton_path.as_ref()),
             "parts": parts,
             "eyes": eyes,
+            "facegen": facegen_reconstruction,
             "apparel": apparel,
             "weapon": {
                 "prepared": prepared_weapon,

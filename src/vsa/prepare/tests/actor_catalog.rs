@@ -33,7 +33,90 @@ fn placement(
 fn revision_is_pinned() {
     assert_eq!(
         ACTOR_CATALOG_REVISION,
-        "openmw-actors-v7-faction-relation-table"
+        "openmw-actors-v8-facegen-faction-relation-table"
+    );
+}
+
+fn facegen_bytes(count: usize, value: f32) -> Vec<u8> {
+    (0..count)
+        .flat_map(|_| value.to_le_bytes())
+        .collect::<Vec<_>>()
+}
+
+fn facegen_raw(value: f32) -> FaceGenRaw {
+    FaceGenRaw {
+        geometry_symmetric: Some(facegen_bytes(
+            bevyout_core::facegen::GEOMETRY_SYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+        geometry_asymmetric: Some(facegen_bytes(
+            bevyout_core::facegen::GEOMETRY_ASYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+        texture_symmetric: Some(facegen_bytes(
+            bevyout_core::facegen::TEXTURE_SYMMETRIC_COEFFICIENTS,
+            value,
+        )),
+    }
+}
+
+#[test]
+fn facegen_uses_traits_inheritance_and_selected_race_sex_defaults() {
+    let mut template = npc(0x10);
+    template.traits.race_form_id = Some(0xAA);
+    template.traits.facegen = facegen_raw(1.0);
+    let mut source = npc(0x20);
+    source.base_template_form_id = Some(0x10);
+    source.template_usage.traits = true;
+    source.traits.race_form_id = Some(0xBB);
+    source.traits.facegen = facegen_raw(2.0);
+    let inherited_actor_facegen = template.traits.facegen.clone();
+
+    let inputs = ActorCatalogInputs {
+        actors: HashMap::from([(0x10, template), (0x20, source)]),
+        races: HashSet::from([0xAA]),
+        race_modifiers: HashMap::from([(
+            0xAA,
+            RaceModifierInput {
+                facegen_male: facegen_raw(3.0),
+                ..Default::default()
+            },
+        )]),
+        placements: vec![placement(1, 0x20, ActorRecordKind::Npc)],
+        ..ActorCatalogInputs::default()
+    };
+
+    let catalog = build_actor_catalog(&inputs, "fp");
+    let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+        panic!("expected a prepared blueprint");
+    };
+    let resolved = blueprint.facegen.as_ref().expect("FaceGen must resolve");
+    assert_eq!(blueprint.race_form_id, Some(0xAA));
+    assert_eq!(resolved.coefficients.geometry_symmetric[0], 4.0);
+    assert_eq!(
+        resolved.actor.geometry_symmetric,
+        inherited_actor_facegen.geometry_symmetric
+    );
+    assert!(blueprint.facegen_diagnostics.is_empty());
+}
+
+#[test]
+fn malformed_facegen_is_kept_as_a_typed_actor_diagnostic() {
+    let mut actor = npc(0x10);
+    actor.traits.facegen.geometry_symmetric = Some(vec![0; 4]);
+    let inputs = ActorCatalogInputs {
+        actors: HashMap::from([(0x10, actor)]),
+        placements: vec![placement(1, 0x10, ActorRecordKind::Npc)],
+        ..ActorCatalogInputs::default()
+    };
+    let catalog = build_actor_catalog(&inputs, "fp");
+    let ActorCatalogEntry::Prepared(blueprint) = &catalog.entries[0] else {
+        panic!("expected a prepared blueprint");
+    };
+    assert!(blueprint.facegen.is_none());
+    assert_eq!(
+        blueprint.facegen_diagnostics[0].code(),
+        "unsupported_facegen_layout"
     );
 }
 

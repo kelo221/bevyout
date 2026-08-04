@@ -45,6 +45,8 @@ pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
 #[derive(Debug, Deserialize)]
 struct FalloutMaterialExtra {
     #[serde(default)]
+    shader_type: u32,
+    #[serde(default)]
     shader_flags_1: u32,
     #[serde(default)]
     emission_authorized: Option<bool>,
@@ -77,9 +79,16 @@ fn parse_fallout_material_extra(value: &str) -> Option<FalloutMaterialExtra> {
 const FALLOUT_SURFACE_STANDARD: u32 = 0;
 const FALLOUT_SURFACE_HAIR: u32 = 1;
 const FALLOUT_SURFACE_EYE: u32 = 2;
+const FALLOUT_SURFACE_SKIN: u32 = 3;
+const FALLOUT_SHADER_TYPE_SKIN_TINT: u32 = 5;
+const FALLOUT_SHADER_TYPE_HAIR_TINT: u32 = 6;
 const FALLOUT_SHADER_FLAG1_EYE_ENVIRONMENT_MAPPING: u32 = 1 << 17;
 const FALLOUT_SHADER_FLAG1_HAIR_SOFT_LIGHTING: u32 = 1 << 18;
-const FALLOUT_HAIR_ANISOTROPY_STRENGTH: f32 = 1.0;
+const FALLOUT_HAIR_ANISOTROPY_STRENGTH: f32 = 0.65;
+const FALLOUT_HAIR_MIN_ROUGHNESS: f32 = 0.72;
+const FALLOUT_HAIR_REFLECTANCE: f32 = 0.25;
+const FALLOUT_SKIN_MIN_ROUGHNESS: f32 = 0.62;
+const FALLOUT_SKIN_REFLECTANCE: f32 = 0.35;
 const FALLOUT_EYE_CLEARCOAT: f32 = 1.0;
 const FALLOUT_EYE_CLEARCOAT_ROUGHNESS: f32 = 0.04;
 
@@ -88,8 +97,14 @@ fn is_eye_surface_mesh_name(name: &str) -> bool {
 }
 
 fn fallout_surface_kind(metadata: &FalloutMaterialExtra, mesh_name: Option<&str>) -> u32 {
-    if metadata.shader_flags_1 & FALLOUT_SHADER_FLAG1_HAIR_SOFT_LIGHTING != 0 {
+    if metadata.shader_type == FALLOUT_SHADER_TYPE_HAIR_TINT
+        || metadata.shader_flags_1 & FALLOUT_SHADER_FLAG1_HAIR_SOFT_LIGHTING != 0
+    {
         return FALLOUT_SURFACE_HAIR;
+    }
+
+    if metadata.shader_type == FALLOUT_SHADER_TYPE_SKIN_TINT {
+        return FALLOUT_SURFACE_SKIN;
     }
 
     // The eye-environment flag is also authored on some glasses materials.
@@ -104,7 +119,7 @@ fn fallout_surface_kind(metadata: &FalloutMaterialExtra, mesh_name: Option<&str>
     FALLOUT_SURFACE_STANDARD
 }
 
-/// Applies the runtime-only Fallout hair and eye variants to the existing
+/// Applies the runtime-only Fallout skin, hair, and eye variants to the existing
 /// `StandardMaterial` handles. The GLB metadata remains the source of truth;
 /// no scene hierarchy or prepared manifest data is changed here.
 #[allow(clippy::type_complexity)]
@@ -139,11 +154,22 @@ pub(crate) fn configure_fallout_surface_materials(
                 // This also selects Bevy's tangent-capable PBR variant. The
                 // shader falls back to GGX if the mesh has no tangent data.
                 material.anisotropy_strength = FALLOUT_HAIR_ANISOTROPY_STRENGTH;
+                material.perceptual_roughness = material
+                    .perceptual_roughness
+                    .max(FALLOUT_HAIR_MIN_ROUGHNESS);
+                material.reflectance = material.reflectance.min(FALLOUT_HAIR_REFLECTANCE);
             }
             FALLOUT_SURFACE_EYE => {
                 material.fallout_surface_kind = FALLOUT_SURFACE_EYE;
                 material.clearcoat = FALLOUT_EYE_CLEARCOAT;
                 material.clearcoat_perceptual_roughness = FALLOUT_EYE_CLEARCOAT_ROUGHNESS;
+            }
+            FALLOUT_SURFACE_SKIN => {
+                material.fallout_surface_kind = FALLOUT_SURFACE_SKIN;
+                material.perceptual_roughness = material
+                    .perceptual_roughness
+                    .max(FALLOUT_SKIN_MIN_ROUGHNESS);
+                material.reflectance = material.reflectance.min(FALLOUT_SKIN_REFLECTANCE);
             }
             _ => {}
         }

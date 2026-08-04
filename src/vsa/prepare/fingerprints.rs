@@ -43,7 +43,7 @@ pub(crate) const PHYSICS_PIPELINE_REVISION: &str = "physics-classification-v1";
 /// `prepare_cell` produces from the same source content, so a resumable
 /// *batch* prepare run must not skip a cell completed under either old
 /// logic.
-pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v8-corpse-nested-actors-actor-animations-weapon-animation-type-ktx2-textures-image-space-layouts-hud-sprites";
+pub(crate) const PREPARE_PIPELINE_REVISION: &str = "prepare-pipeline-v9-static-facegen-reconstruction-corpse-nested-actors-actor-animations-weapon-animation-type-ktx2-textures-image-space-layouts-hud-sprites";
 
 /// The four fingerprints recorded for one completed cell (F49.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -43,6 +43,24 @@ fn fallback_keeps_identity_when_no_visual_assets_are_supported() {
 }
 
 #[test]
+fn compatible_facegen_keeps_authored_exact_assembly_without_missing_reason() {
+    let decision = resolve_actor_fallback(
+        &ActorAppearanceAvailability {
+            kind: ActorKind::Humanoid,
+            base_form_id: 0x10,
+            reference_form_id: 0x20,
+            exact_available: true,
+            facegen: FaceGenAvailability::Compatible,
+            ..Default::default()
+        },
+        Vec::new(),
+    );
+    assert_eq!(decision.level, ActorFallbackLevel::AuthoredExact);
+    assert_eq!(decision.facegen_policy, FaceGenPolicy::Authored);
+    assert!(decision.reasons.is_empty());
+}
+
+#[test]
 fn blueprint_default_uses_neutral_root_scale() {
     assert_eq!(ActorAssemblyBlueprint::default().root_scale, 1.0);
 }

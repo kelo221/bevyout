@@ -878,6 +878,9 @@ fn register_actor_placement(app: &mut App) -> bevyout_core::item_transaction::It
         }],
         eye_form_id: Some(7),
         eye_texture_path: Some("textures/characters/eyes/brown.dds".into()),
+        facegen: None,
+        facegen_reconstruction_fingerprint: None,
+        facegen_diagnostics: Vec::new(),
         equipped_weapon: Some(AssembledWeapon {
             item_form_id: 6,
             model_path: Some("assets/rifle.glb".into()),
@@ -963,6 +966,15 @@ fn actorinspect_reports_prepared_and_runtime_assembly_state() {
     assert_eq!(
         output.value["fallback"]["reasons"][0]["code"],
         "missing_facegen"
+    );
+    assert_eq!(output.value["facegen"]["status"], "RestPoseFallback");
+    assert_eq!(
+        output.value["facegen"]["geometry_status"],
+        "RestPoseFallback"
+    );
+    assert_eq!(
+        output.value["facegen"]["texture_status"],
+        "RestPoseFallback"
     );
     assert_eq!(output.value["parts"][0]["role"], "Head(0)");
     assert_eq!(output.value["eyes"]["form_id"], 7);

@@ -1,7 +1,9 @@
 //! Bounded in-process native NIF conversion for prepared static assets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic};
 
 use crate::cli::NifConversionMode;
 use crate::vsa::nif_convert::{
@@ -9,6 +11,9 @@ use crate::vsa::nif_convert::{
     convert_nif,
 };
 
+use super::native_hair::{
+    NativeFaceGenHeadFit, build_native_facegen_head_fit, fit_native_hair_to_facegen,
+};
 use super::*;
 
 #[derive(Debug)]
@@ -189,6 +194,7 @@ fn convert_native_actor(
     let head_anchor = head_part_keys.first();
     let mut decoded = Vec::new();
     let mut warnings = Vec::new();
+    let mut facegen_head_fit: Option<NativeFaceGenHeadFit> = None;
     let skeleton_key = actor_path_key(&descriptor.skeleton);
     for path in &descriptor.visual_inputs {
         let key = actor_path_key(path);
@@ -199,6 +205,36 @@ fn convert_native_actor(
             Ok(scene) if scene.has_visible_geometry() => decoded.push((path.clone(), key, scene)),
             Ok(_) => warnings.push(format!("{} contributed no visible geometry", path)),
             Err(error) => warnings.push(format!("{} could not be decoded: {error:#}", path)),
+        }
+    }
+
+    let mut extra_textures = BTreeMap::new();
+    if let Some(facegen) = descriptor.facegen.as_ref() {
+        match head_anchor {
+            Some(anchor_key) => {
+                if let Some((path, _, scene)) =
+                    decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
+                {
+                    let rest_head = scene.clone();
+                    if let Err(error) = apply_native_facegen(
+                        scene,
+                        facegen,
+                        data_root,
+                        archives,
+                        &mut extra_textures,
+                    ) {
+                        warnings.push(format!(
+                            "actor head FaceGen {} could not be applied; retaining authored rest pose: {error}",
+                            path
+                        ));
+                    } else {
+                        facegen_head_fit = build_native_facegen_head_fit(&actor, &rest_head, scene);
+                    }
+                } else {
+                    warnings.push(facegen_head_skip_warning(Some(anchor_key.as_str())));
+                }
+            }
+            None => warnings.push(facegen_head_skip_warning(None)),
         }
     }
 
@@ -243,10 +279,15 @@ fn convert_native_actor(
             path, error
         ));
     }
-    for (path, key, scene) in decoded.iter().filter(|(_, key, _)| {
+    for (path, key, scene) in decoded.iter_mut().filter(|(_, key, _)| {
         head_parts.contains(key) && head_anchor.is_none_or(|anchor| key != anchor)
     }) {
         let attachment = head_part_attachment(head_anim_parts.contains(key));
+        if actor_hair_part(path)
+            && let Some(facegen_head_fit) = facegen_head_fit.as_ref()
+        {
+            fit_native_hair_to_facegen(&actor, scene, attachment, facegen_head_fit);
+        }
         if let Err(error) = nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
             warnings.push(format!(
                 "actor head visual {} could not bind to the shared skeleton: {}",
@@ -285,6 +326,7 @@ fn convert_native_actor(
         allow_lossy: !strict,
         data_root: Some(data_root),
         archives,
+        extra_textures,
     })?;
     result.lossy_scene_issues += warnings.len();
     result.lines.extend(
@@ -293,6 +335,87 @@ fn convert_native_actor(
             .map(|warning| format!("native actor warning: {warning}")),
     );
     Ok(result)
+}
+
+fn apply_native_facegen(
+    scene: &mut nif::fo3::Scene,
+    descriptor: &ActorFaceGenDescriptor,
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+    extra_textures: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), bevyout_core::facegen::FaceGenDiagnostic> {
+    let geometry_bytes = resolve_asset(data_root, archives, &descriptor.geometry_morph_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            reason: format!("reading {}: {error:#}", descriptor.geometry_morph_path),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            path: descriptor.geometry_morph_path.clone(),
+        })?;
+    let texture_bytes = resolve_asset(data_root, archives, &descriptor.texture_morph_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: format!("reading {}: {error:#}", descriptor.texture_morph_path),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: descriptor.texture_morph_path.clone(),
+        })?;
+    let geometry = parse_geometry_morph(&geometry_bytes)?;
+    let texture = parse_texture_morph(&texture_bytes)?;
+    let mut candidate = scene.clone();
+    apply_geometry_morph(
+        &mut candidate,
+        &geometry,
+        &descriptor.resolved.coefficients,
+        descriptor.base_vertex_count,
+    )?;
+
+    let diffuse_path = candidate
+        .materials
+        .iter()
+        .find_map(|material| material.diffuse_texture.clone())
+        .ok_or_else(|| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: "selected head has no diffuse texture".into(),
+        })?;
+    let base_bytes = resolve_asset(data_root, archives, &diffuse_path)
+        .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: format!("reading {diffuse_path}: {error:#}"),
+        })?
+        .ok_or_else(|| FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: diffuse_path.clone(),
+        })?;
+    let synthesized =
+        synthesize_head_diffuse(&base_bytes, &texture, &descriptor.resolved.coefficients)?;
+    let generated_path = facegen_texture_key(&diffuse_path, &descriptor.resolved.coefficients);
+    replace_facegen_diffuse(&mut candidate, &diffuse_path, &generated_path);
+    extra_textures.insert(generated_path, synthesized);
+    *scene = candidate;
+    Ok(())
+}
+
+fn replace_facegen_diffuse(scene: &mut nif::fo3::Scene, source_path: &str, generated_path: &str) {
+    for material in &mut scene.materials {
+        if material.diffuse_texture.as_deref() == Some(source_path) {
+            material.diffuse_texture = Some(generated_path.to_owned());
+        }
+    }
+}
+
+fn facegen_head_skip_warning(head_anchor: Option<&str>) -> String {
+    match head_anchor {
+        Some(anchor) => format!(
+            "actor head FaceGen skipped: head visual {anchor} was not decoded; retaining authored rest pose"
+        ),
+        None => {
+            "actor head FaceGen skipped: descriptor has no head anchor; retaining authored rest pose"
+                .into()
+        }
+    }
 }
 
 fn extract_actor_part(path: &str) -> Result<nif::fo3::Scene> {
@@ -314,6 +437,11 @@ fn actor_helper_geometry(path: &str) -> bool {
     ["blowaway", "gore", "gib", "meatcap", "meat_cap"]
         .iter()
         .any(|marker| key.contains(marker))
+}
+
+fn actor_hair_part(path: &str) -> bool {
+    let key = actor_path_key(path);
+    key.starts_with("hair/") || key.contains("/hair/")
 }
 
 /// Skeleton node a head accessory parents under during actor assembly (#160,

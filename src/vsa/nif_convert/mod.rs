@@ -98,6 +98,10 @@ pub(crate) struct ActorSceneConversionRequest<'a> {
     pub(crate) allow_lossy: bool,
     pub(crate) data_root: Option<&'a Path>,
     pub(crate) archives: &'a [super::bsa::BsaArchive],
+    /// Deterministic in-memory images synthesized during actor assembly.
+    /// They are merged after ordinary Data/BSA resolution and then take the
+    /// same embedded-GLB -> UASTC KTX2 path as authored textures.
+    pub(crate) extra_textures: BTreeMap<String, Vec<u8>>,
 }
 
 pub fn nif_convert(args: NifConvertArgs) -> Result<()> {
@@ -628,6 +632,7 @@ pub(crate) fn convert_actor_scene(
         bail!("actor assembly contains no visible geometry");
     }
     let mut textures = resolve_textures(&scene, request.data_root, request.archives)?;
+    textures.extend(request.extra_textures);
     prepare_native_normal_textures(&mut scene.materials, &mut textures)?;
     let mut output = nif::fo3::encode_glb(
         &scene,

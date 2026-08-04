@@ -8,6 +8,7 @@ use bevyout_core::actor::{
     select_starting_weapon,
 };
 use bevyout_core::actor_state::{ActorSkill, ActorValue};
+use bevyout_core::facegen::{FaceGenAssetKind, FaceGenDiagnostic, FaceGenRaw};
 use bevyout_core::image_space::IMAGE_SPACE_MODIFIER_CATALOG_REVISION;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2319,6 +2320,11 @@ fn actor_record_input(
         eyes_form_id: actor.eyes_form_id,
         head_part_form_ids: actor.head_part_form_ids.clone(),
         voice_form_id: actor.voice_form_id,
+        facegen: FaceGenRaw {
+            geometry_symmetric: actor.facegen_geometry_symmetric.clone(),
+            geometry_asymmetric: actor.facegen_geometry_asymmetric.clone(),
+            texture_symmetric: actor.facegen_texture_symmetric.clone(),
+        },
         facegen_present: actor.facegen_geometry_symmetric.is_some()
             || actor.facegen_geometry_asymmetric.is_some()
             || actor.facegen_texture_symmetric.is_some(),
@@ -2491,6 +2497,16 @@ fn build_actor_catalog_inputs(
                     .entry(ActorValue::Skill(skill))
                     .or_default() += f32::from(boost.boost);
             }
+            modifiers.facegen_male = FaceGenRaw {
+                geometry_symmetric: race.face_gen_male.geometry_symmetric.clone(),
+                geometry_asymmetric: race.face_gen_male.geometry_asymmetric.clone(),
+                texture_symmetric: race.face_gen_male.texture_symmetric.clone(),
+            };
+            modifiers.facegen_female = FaceGenRaw {
+                geometry_symmetric: race.face_gen_female.geometry_symmetric.clone(),
+                geometry_asymmetric: race.face_gen_female.geometry_asymmetric.clone(),
+                texture_symmetric: race.face_gen_female.texture_symmetric.clone(),
+            };
             modifiers.diagnostics.sort();
             modifiers.diagnostics.dedup();
             (form_id, modifiers)
@@ -3324,8 +3340,63 @@ fn build_actor_appearance_models(
             });
         }
 
-        let facegen = if actor.facegen_present {
+        let facegen_head_path = exact_parts
+            .iter()
+            .chain(race_sex_parts.iter())
+            .chain(race_default_parts.iter())
+            .find(|part| matches!(part.role, ActorMeshRole::Head(_)))
+            .map(|part| part.model_path.clone());
+        let (facegen_descriptor, facegen_asset_diagnostic) =
+            if let Some(resolved) = actor.facegen.as_ref() {
+                match facegen_head_path.as_deref() {
+                    Some(head_path) => match prepare_actor_facegen_descriptor(
+                        actor, resolved, head_path, data_root, archives,
+                    )? {
+                        Ok(descriptor) => (Some(descriptor), None),
+                        Err(diagnostic) => (None, Some(diagnostic)),
+                    },
+                    None => (
+                        None,
+                        Some(FaceGenDiagnostic::MissingAsset {
+                            asset: FaceGenAssetKind::GeometryMorph,
+                            path: "<selected head>".into(),
+                        }),
+                    ),
+                }
+            } else {
+                (None, None)
+            };
+        if let Some(diagnostic) = facegen_asset_diagnostic.as_ref() {
+            reasons.push(ActorFallbackReason::MissingFaceGen);
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                message: format!(
+                    "actor {:08x} FaceGen fallback: {diagnostic}",
+                    reference.form_id
+                ),
+            });
+        }
+        let facegen_diagnostics = actor
+            .facegen_diagnostics
+            .iter()
+            .cloned()
+            .chain(facegen_asset_diagnostic.iter().cloned())
+            .collect::<Vec<_>>();
+        let facegen_reconstruction_fingerprint = facegen_descriptor.as_ref().map(|descriptor| {
+            fingerprint(
+                &serde_json::to_vec(descriptor)
+                    .expect("FaceGen descriptor serialization must be deterministic"),
+            )
+        });
+        let assembled_facegen = facegen_descriptor
+            .is_some()
+            .then(|| actor.facegen.clone())
+            .flatten();
+        let facegen = if !actor.facegen_diagnostics.is_empty() || facegen_asset_diagnostic.is_some()
+        {
             FaceGenAvailability::Incompatible
+        } else if facegen_descriptor.is_some() {
+            FaceGenAvailability::Compatible
         } else {
             FaceGenAvailability::NotAuthored
         };
@@ -3394,6 +3465,7 @@ fn build_actor_appearance_models(
                     format!("textures/{path}")
                 }
             });
+            assembly.facegen = facegen_descriptor.clone();
         }
 
         let blueprint = CoreActorAssemblyBlueprint {
@@ -3409,6 +3481,9 @@ fn build_actor_appearance_models(
             apparel: assembled_apparel,
             eye_form_id: selected_eye_form_id,
             eye_texture_path: selected_eye_texture_path,
+            facegen: assembled_facegen,
+            facegen_reconstruction_fingerprint,
+            facegen_diagnostics,
             equipped_weapon,
             fallback,
         };
@@ -3445,6 +3520,171 @@ fn build_actor_appearance_models(
         );
     }
     Ok(result)
+}
+
+fn prepare_actor_facegen_descriptor(
+    actor: &ActorBlueprint,
+    resolved: &bevyout_core::facegen::FaceGenResolved,
+    head_path: &str,
+    data_root: &Path,
+    archives: &[crate::vsa::bsa::BsaArchive],
+) -> Result<Result<ActorFaceGenDescriptor, FaceGenDiagnostic>> {
+    let head_path = normalize_asset_path(head_path);
+    let tri_path = facegen_companion_path(&head_path, "tri");
+    let geometry_morph_path = facegen_companion_path(&head_path, "egm");
+    let texture_morph_path = facegen_companion_path(&head_path, "egt");
+    let Some(tri_bytes) = resolve_asset(data_root, archives, &tri_path)? else {
+        return Ok(Err(FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TriMorph,
+            path: tri_path,
+        }));
+    };
+    let Some(geometry_bytes) = resolve_asset(data_root, archives, &geometry_morph_path)? else {
+        return Ok(Err(FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            path: geometry_morph_path,
+        }));
+    };
+    let Some(texture_bytes) = resolve_asset(data_root, archives, &texture_morph_path)? else {
+        return Ok(Err(FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: texture_morph_path,
+        }));
+    };
+    let tri = match parse_tri_layout(&tri_bytes) {
+        Ok(layout) => layout,
+        Err(diagnostic) => return Ok(Err(diagnostic)),
+    };
+    let geometry = match parse_geometry_morph(&geometry_bytes) {
+        Ok(morph) => morph,
+        Err(diagnostic) => return Ok(Err(diagnostic)),
+    };
+    let texture = match parse_texture_morph(&texture_bytes) {
+        Ok(morph) => morph,
+        Err(diagnostic) => return Ok(Err(diagnostic)),
+    };
+    let Some(head_bytes) = resolve_asset(data_root, archives, &head_path)? else {
+        return Ok(Err(FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::GeometryMorph,
+            path: head_path,
+        }));
+    };
+    let head_document = match nif::fo3::parse(&head_bytes) {
+        Ok(document) => document,
+        Err(error) => {
+            return Ok(Err(FaceGenDiagnostic::UnsupportedAsset {
+                asset: FaceGenAssetKind::GeometryMorph,
+                reason: format!("head NIF could not be parsed: {error}"),
+            }));
+        }
+    };
+    let head_scene = match nif::fo3::extract_scene(&head_document) {
+        Ok(scene) => scene,
+        Err(error) => {
+            return Ok(Err(FaceGenDiagnostic::UnsupportedAsset {
+                asset: FaceGenAssetKind::GeometryMorph,
+                reason: format!("head NIF scene could not be extracted: {error}"),
+            }));
+        }
+    };
+    let head_vertices = head_scene
+        .nodes
+        .iter()
+        .filter_map(|node| node.mesh.as_ref())
+        .map(|mesh| mesh.positions.len())
+        .sum::<usize>();
+    let head_triangles = head_scene
+        .nodes
+        .iter()
+        .filter_map(|node| node.mesh.as_ref())
+        .map(|mesh| mesh.indices.len() / 3)
+        .sum::<usize>();
+    let head_uvs = head_scene
+        .nodes
+        .iter()
+        .filter_map(|node| node.mesh.as_ref())
+        .map(|mesh| mesh.tex_coords.len())
+        .sum::<usize>();
+    if geometry.vertex_count != tri.combined_vertex_count {
+        return Ok(Err(FaceGenDiagnostic::GeometryVertexCountMismatch {
+            expected: tri.combined_vertex_count,
+            actual: geometry.vertex_count,
+        }));
+    }
+    if head_vertices != tri.base_vertex_count {
+        return Ok(Err(FaceGenDiagnostic::GeometryBaseVertexCountMismatch {
+            expected: tri.base_vertex_count,
+            actual: head_vertices,
+        }));
+    }
+    if tri.texture_coordinate_count != head_uvs {
+        return Ok(Err(FaceGenDiagnostic::GeometryUvCountMismatch {
+            expected: tri.texture_coordinate_count,
+            actual: head_uvs,
+        }));
+    }
+    if tri.triangle_count != head_triangles {
+        return Ok(Err(FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TriMorph,
+            reason: format!(
+                "TRI has {} triangles but the head has {head_triangles}",
+                tri.triangle_count
+            ),
+        }));
+    }
+    let Some(diffuse_path) = head_scene
+        .materials
+        .iter()
+        .find_map(|material| material.diffuse_texture.clone())
+    else {
+        return Ok(Err(FaceGenDiagnostic::UnsupportedAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            reason: "selected head has no diffuse texture".into(),
+        }));
+    };
+    let Some(diffuse_bytes) = resolve_asset(data_root, archives, &diffuse_path)? else {
+        return Ok(Err(FaceGenDiagnostic::MissingAsset {
+            asset: FaceGenAssetKind::TextureMorph,
+            path: diffuse_path,
+        }));
+    };
+    let image = match image::load_from_memory(&diffuse_bytes) {
+        Ok(image) => image,
+        Err(error) => {
+            return Ok(Err(FaceGenDiagnostic::UnsupportedAsset {
+                asset: FaceGenAssetKind::TextureMorph,
+                reason: format!("head diffuse texture could not be decoded: {error}"),
+            }));
+        }
+    };
+    if !texture_dimensions_compatible(image.width(), image.height(), texture.width, texture.height)
+    {
+        return Ok(Err(FaceGenDiagnostic::TextureDimensionsMismatch {
+            expected_width: texture.width,
+            expected_height: texture.height,
+            actual_width: image.width(),
+            actual_height: image.height(),
+        }));
+    }
+    Ok(Ok(ActorFaceGenDescriptor {
+        base_form_id: actor.base_form_id,
+        race_form_id: actor.race_form_id,
+        head_path,
+        tri_path,
+        geometry_morph_path,
+        texture_morph_path,
+        tri_hash: fingerprint(&tri_bytes),
+        geometry_morph_hash: fingerprint(&geometry_bytes),
+        texture_morph_hash: fingerprint(&texture_bytes),
+        base_vertex_count: tri.base_vertex_count,
+        texture_coordinate_count: tri.texture_coordinate_count,
+        resolved: resolved.clone(),
+    }))
+}
+
+fn facegen_companion_path(head_path: &str, extension: &str) -> String {
+    let stem = head_path.strip_suffix(".nif").unwrap_or(head_path);
+    format!("{stem}.{extension}")
 }
 
 fn normalized_actor_nif(path: &str) -> Option<String> {
