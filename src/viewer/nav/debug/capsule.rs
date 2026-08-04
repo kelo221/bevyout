@@ -1,0 +1,1 @@
+//! Debug capsule lifecycle boundary.

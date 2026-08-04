@@ -379,5 +379,5 @@ pub(crate) fn next_locomotion_state(
 }
 
 #[cfg(test)]
-#[path = "tests/locomotion.rs"]
+#[path = "../tests/locomotion.rs"]
 mod tests;

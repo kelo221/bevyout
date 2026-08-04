@@ -273,7 +273,7 @@ mod container_policy;
 #[allow(dead_code, unused_imports)]
 mod landmass_graph;
 
-#[path = "../src/viewer/nav/door_link.rs"]
+#[path = "../src/viewer/nav/doors/fsm.rs"]
 #[allow(dead_code, unused_imports)]
 mod door_link;
 
@@ -298,7 +298,7 @@ mod movement_policy;
 
 // `viewer::nav::locomotion` (issue #188) is std-only, same flat top-level
 // include rationale as `movement_policy`/`fall_guard` above.
-#[path = "../src/viewer/nav/locomotion.rs"]
+#[path = "../src/viewer/nav/agent/locomotion.rs"]
 #[allow(dead_code, unused_imports)]
 mod locomotion;
 
@@ -9988,7 +9988,7 @@ async fn then_actor_animation_pack_cache_decision(world: &mut BevyoutWorld, expe
 // merge-seam convention (only World fields and one delimited step section
 // appended at the end of this file).
 // =====================================================================
-#[path = "../src/viewer/nav/fall_guard.rs"]
+#[path = "../src/viewer/nav/agent/fall_guard.rs"]
 #[allow(dead_code, unused_imports)]
 mod fall_guard;
 

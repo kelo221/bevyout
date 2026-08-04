@@ -135,7 +135,7 @@ pub(crate) fn scripted_container_toggle(world: &mut World, entity: Entity) -> bo
 }
 
 /// M4 wave 3 (#112): scripted intra-cell door open, for the `bevy_landmass`
-/// nav-agent door-link spike (`nav::agent`'s door-link system) to request an
+/// nav-agent door-link runtime to request an
 /// off-mesh-link door through the same boundary the `activate` console
 /// command uses, rather than inventing a parallel door-opening path.
 /// `scripted_door_travel` (above) only covers the destination/cell-swap

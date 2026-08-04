@@ -3,10 +3,9 @@
 //! the seam the navigation feature (#111-#184) and the actor-animation
 //! feature (#104/#106) previously did not meet across.
 //!
-//! Included into `nav/agent.rs` as a `#[path]` submodule (the same shape
-//! `fall_guard` uses) so it can reach that module's private agent
-//! components and constants through `super::` without growing its already
-//! oversized module root (post-mortem verdict §2.6).
+//! Owned by the `nav::agent` composition module as a normal capability
+//! module. It reaches shared agent components through `super::` without
+//! growing the composition root (post-mortem verdict §2.6).
 //!
 //! # One movement authority
 //!
@@ -120,7 +119,7 @@ fn bound_actor_target_yaw(desired: Vec2) -> f32 {
 /// the bounded motion filters that keep collision/facing jitter from
 /// restarting clips.
 #[derive(Component, Debug, Clone, Copy, Default)]
-pub(super) struct NavBoundActor {
+pub(crate) struct NavBoundActor {
     /// The locomotion state last requested, i.e. the `previous` argument
     /// `locomotion::next_locomotion_state` needs for its hysteresis bands.
     pub(super) locomotion: LocomotionState,
@@ -152,7 +151,7 @@ pub(super) struct NavBoundActor {
 /// Stop/arrival transition (while `AgentKcc.last_desired_horizontal` is still
 /// decaying) exactly one writer sets rotation, with pose taking precedence.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum FacingAuthority {
+pub(crate) enum FacingAuthority {
     #[default]
     NavDerived,
     PoseAuthored,
@@ -174,7 +173,7 @@ pub(super) const BOUND_ACTOR_CAPSULE_OFFSET_Y: f32 = AGENT_HEIGHT / 2.0;
 /// stashed on [`AgentKcc`] this tick. Writing `Transform.rotation` here is
 /// not a second movement authority -- translation, the thing the KCC owns,
 /// is never touched (see the module doc comment).
-pub(super) fn face_bound_actors(
+pub(crate) fn face_bound_actors(
     time: Res<Time>,
     mut actors: Query<(
         &mut Transform,
@@ -237,7 +236,7 @@ fn shortest_yaw_delta(delta: f32) -> f32 {
 /// `apply_agent_physics_movement` samples for
 /// `movement_policy::decide_collision_outcome`, and the yaw rate is what
 /// [`face_bound_actors`] actually applied.
-pub(super) fn drive_bound_actor_locomotion(world: &mut World) {
+pub(crate) fn drive_bound_actor_locomotion(world: &mut World) {
     let dt = world.resource::<Time>().delta_secs();
     let mut query = world.query_filtered::<(Entity, &AgentKcc, &mut NavBoundActor), ()>();
     let requests: Vec<(Entity, LocomotionState, LocomotionState)> = query
@@ -308,7 +307,7 @@ const fn animation_state(state: LocomotionState) -> ActorAnimationState {
 
 /// Resolves the live [`ActorRuntime`] entity whose reference FormID is
 /// `reference_form_id`.
-pub(super) fn actor_entity_by_reference(
+pub(crate) fn actor_entity_by_reference(
     world: &mut World,
     reference_form_id: u32,
 ) -> Option<Entity> {
@@ -341,5 +340,5 @@ pub(super) fn release_bound_actor(world: &mut World, entity: Entity) {
 }
 
 #[cfg(test)]
-#[path = "tests/actor_binding.rs"]
+#[path = "../tests/actor_binding.rs"]
 mod tests;

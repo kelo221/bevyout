@@ -54,7 +54,7 @@ struct SwapRequest {
     translation: Vec3,
     rotation_xyzw: [f32; 4],
     /// Issue #134: the origin door reference the player used, threaded
-    /// through to `nav::agent::note_player_swap_door` so the intercell
+    /// through to `nav::api::note_player_door_transition` so the intercell
     /// agent ledger's swap-eligibility policy can tell a follow-through
     /// from a freeze.
     door_form_id: u32,
@@ -437,7 +437,7 @@ fn activate_resident_cell(world: &mut World, request: SwapRequest, kind: SwapKin
     // consumes this the next time it detects the resulting stale
     // archipelago, to decide follow-through vs. freeze for any live nav
     // agent still in the departing cell.
-    nav::agent::note_player_swap_door(world, door_form_id);
+    nav::api::note_player_door_transition(world, door_form_id.into());
 
     let destination_manifest = world
         .resource::<ResidentCells>()
