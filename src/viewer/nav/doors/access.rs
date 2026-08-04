@@ -4,7 +4,8 @@ use bevy::prelude::*;
 use bevy_landmass::AgentTypeIndexCostOverrides;
 
 use crate::viewer::interaction;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{CLOSED_DOOR_TYPE_INDEX_COST, LOCKED_DOOR_TYPE_INDEX_COST};
+use crate::viewer::nav::world::state::{DoorLockInfo, NavArchipelagoState};
 use crate::viewer::nav::{openmw_doors, repath};
 
 /// Whether `agent_entity` currently holds an item stack whose base FormID is

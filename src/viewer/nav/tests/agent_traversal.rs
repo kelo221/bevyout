@@ -1,14 +1,6 @@
-use std::collections::HashSet;
-
 use super::*;
-use crate::console::{ConsoleError, ConsoleInvocation, ConsoleSessionId};
-use crate::viewer::nav::world::links::*;
-use crate::viewer::nav::world::portals::*;
-use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
-use bevy::ecs::system::SystemState;
-use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
-use bevy_landmass::prelude::*;
-use bevyout_core::manifest::exterior::ExteriorBorderPortal;
+use crate::viewer::nav::world::portals::{MergeLinkRejection, validate_merge_link_collision};
+use std::collections::HashSet;
 
 use super::tests_support::*;
 
@@ -401,7 +393,10 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
                 active_link: Some(LinkKind::Merge { kind: 2 }),
                 // A live travel intent, to prove #162 preserves it
                 // (the pre-#162 behaviour cleared it unconditionally).
-                travel_intent: Some(0x77),
+                travel_intent: Some(TravelIntent {
+                    generation: RouteGeneration(1),
+                    door_form_id: 0x77,
+                }),
                 ..default()
             },
             MergeTraversal {
@@ -494,7 +489,10 @@ fn merge_traversal_system_quarantines_the_link_and_preserves_the_real_destinatio
     ));
     assert_eq!(
         world.get::<AgentRuntime>(agent).unwrap().travel_intent,
-        Some(0x77),
+        Some(TravelIntent {
+            generation: RouteGeneration(1),
+            door_form_id: 0x77,
+        }),
         "issue #162: an in-progress travel intent is the real destination and must survive a quarantine, unlike the pre-#162 wholesale clear"
     );
 }
@@ -654,7 +652,7 @@ fn request_travel_clears_a_live_merge_link_quarantine() {
     let mut world = harness_world();
     let mut runtime = AgentRuntime::default();
     runtime.quarantined_merge_link_kinds.insert(1);
-    let agent = world.spawn((NavAgent, runtime)).id();
+    let agent = world.spawn((NavAgent, runtime, AgentKcc::default())).id();
     world.resource_mut::<DebugAgentRoster>().entities[0] = Some(agent);
     world
         .resource_mut::<NavArchipelagoState>()

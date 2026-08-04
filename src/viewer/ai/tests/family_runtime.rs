@@ -20,6 +20,7 @@ fn controller_world(controller: ActorPackageController, position: Vec3) -> (Worl
             controller,
         ))
         .id();
+    api::insert_test_nav_agent(&mut world, entity);
     (world, entity)
 }
 
@@ -216,6 +217,7 @@ fn follow_family_routes_to_the_leader_without_moving_the_actor() {
             controller,
         ))
         .id();
+    api::insert_test_nav_agent(&mut world, entity);
 
     world.run_system_once(drive_actor_packages).unwrap();
 

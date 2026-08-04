@@ -1,5 +1,7 @@
 use super::actor_binding;
 use super::*;
+use crate::viewer::nav::world::build::ensure_archipelago;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 
 pub(crate) fn advance_nav_solve_step_counter(mut counter: ResMut<NavSolveStepCounter>) {
     counter.0 = counter.0.wrapping_add(1);

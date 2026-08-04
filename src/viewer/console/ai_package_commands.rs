@@ -876,7 +876,7 @@ fn stop_package(
             .0
             .remove(&point);
     }
-    api::cancel_goal(world, entity);
+    let _ = api::cancel_goal(world, entity);
     // Clear the nav-owned door policy and hand facing back to navigation: the
     // package that set them is ending.
     api::set_door_policy(world, entity, api::DoorUsePolicy::MayOpen);

@@ -1,13 +1,6 @@
-use std::collections::HashSet;
-
 use super::*;
-use crate::console::{ConsoleError, ConsoleInvocation, ConsoleSessionId};
-use crate::viewer::nav::world::links::*;
 use crate::viewer::nav::world::portals::*;
 use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
-use bevy::ecs::system::SystemState;
-use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
-use bevy_landmass::prelude::*;
 use bevyout_core::manifest::exterior::ExteriorBorderPortal;
 
 use super::tests_support::*;
@@ -142,6 +135,45 @@ fn a_late_setlock_change_still_applies_without_a_rebuild() {
         door_lock_level_for_test(&world, 0x99),
         None,
         "a lock change after the archipelago exists must apply immediately, no rebuild needed"
+    );
+}
+
+#[test]
+fn failed_replacement_keeps_the_last_active_nav_world() {
+    let mut world = archipelago_build_world();
+    let manifest_a = manifest_with_nav_graph_and_door(0xBEEF, 0x99, None);
+    world.insert_resource(crate::viewer::LoadedSceneManifest(manifest_a.clone()));
+    ensure_archipelago(&mut world).expect("world A builds");
+
+    let state_a = world.resource::<NavArchipelagoState>();
+    let archipelago_a = state_a.archipelago.expect("world A archipelago");
+    let islands_a = state_a.islands.clone();
+    assert!(!islands_a.is_empty());
+
+    let mut manifest_b = manifest_a;
+    manifest_b.cell.form_id = 0xCAFE;
+    manifest_b
+        .nav_graph
+        .as_mut()
+        .expect("world A has a graph source")
+        .asset_path = "missing-world-b.ron".into();
+    world.insert_resource(crate::viewer::LoadedSceneManifest(manifest_b));
+
+    assert!(ensure_archipelago(&mut world).is_err());
+    let state = world.resource::<NavArchipelagoState>();
+    assert_eq!(state.cell_form_id, Some(0xBEEF));
+    assert_eq!(state.archipelago, Some(archipelago_a));
+    assert!(world.get_entity(archipelago_a).is_ok());
+    assert!(
+        islands_a
+            .iter()
+            .all(|entity| world.get_entity(*entity).is_ok())
+    );
+    assert!(
+        state
+            .links
+            .iter()
+            .all(|entity| world.get_entity(*entity).is_ok())
     );
 }
 

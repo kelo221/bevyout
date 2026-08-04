@@ -1,14 +1,5 @@
-use std::collections::HashSet;
-
 use super::*;
-use crate::console::{ConsoleError, ConsoleInvocation, ConsoleSessionId};
-use crate::viewer::nav::world::links::*;
-use crate::viewer::nav::world::portals::*;
-use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
-use bevy::ecs::system::SystemState;
-use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
-use bevy_landmass::prelude::*;
-use bevyout_core::manifest::exterior::ExteriorBorderPortal;
+use crate::viewer::nav::world::player_obstacle::spawn_player_nav_character;
 
 use super::tests_support::*;
 

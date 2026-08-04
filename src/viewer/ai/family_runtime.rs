@@ -241,12 +241,23 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         }
         match request {
             Some(FamilyRequest::Route(point)) => {
-                let _ = api::set_goal(world, entity, api::NavGoal::Point(Vec3::from_array(point)));
+                if let Err(error) =
+                    api::set_goal(world, entity, api::NavGoal::Point(Vec3::from_array(point)))
+                {
+                    warn!(
+                        "package nav submission failed actor={ref_form_id:08x} code={} message={}",
+                        error.code(),
+                        error.message()
+                    );
+                    if let Some(mut controller) = world.get_mut::<ActorPackageController>(entity) {
+                        controller.lifecycle.fail();
+                    }
+                }
                 // Moving: facing belongs to navigation again.
                 api::set_pose_authority(world, entity, false);
             }
             Some(FamilyRequest::Stop) => {
-                api::cancel_goal(world, entity);
+                let _ = api::cancel_goal(world, entity);
                 api::set_pose_authority(world, entity, false);
             }
             Some(FamilyRequest::Play(animation)) => {
@@ -271,7 +282,7 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         // Completion/failure also stops any lingering nav route so the actor
         // does not keep steering toward a finished package's target.
         if matches!(signal, LifecycleSignal::Complete | LifecycleSignal::Fail) {
-            api::cancel_goal(world, entity);
+            let _ = api::cancel_goal(world, entity);
         }
         if signal != LifecycleSignal::Continue {
             // A follow that failed because of a door it could not open names

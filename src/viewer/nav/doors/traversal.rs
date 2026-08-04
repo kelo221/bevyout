@@ -4,7 +4,18 @@ use bevy_landmass::prelude::*;
 use bevy_landmass::{PauseAgent, UsingAnimationLink};
 
 use crate::viewer::interaction;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    AGENT_HEIGHT, AgentKcc, AgentRuntime, DOOR_TRAVERSAL_SECONDS, DoorTraversal, MergeTraversal,
+    NavAgent, NavAgentLedger, RefreshLandmassAnimationLinkInput, TRAVEL_ARRIVAL_DISTANCE,
+    agent_ledger_id, write_agent_translation,
+};
+use crate::viewer::nav::debug::DebugAgentRoster;
+use crate::viewer::nav::diagnostics::all_agent_entities;
+use crate::viewer::nav::doors::access::door_open_and_locked;
+use crate::viewer::nav::traversal::{
+    merge_crossing_already_started, merge_traversal_reached_distance, merge_traversal_timeout,
+};
+use crate::viewer::nav::world::state::{LinkKind, MidRouteDoor, NavArchipelagoState};
 use crate::viewer::nav::{door_link, landmass_graph, ledger_policy, movement_policy};
 
 use crate::viewer::nav::doors::runtime::*;
@@ -104,6 +115,20 @@ pub(crate) fn door_traversal_system(
                         runtime.active_link = None;
                         continue;
                     };
+                    let travel_matches_generation = runtime.travel_intent.is_some_and(|intent| {
+                        intent.generation == runtime.route_generation
+                            && intent.door_form_id == door_form_id
+                    });
+                    if !travel_matches_generation {
+                        // A stale physical completion must never hand off an
+                        // actor after its route was replaced. Intra-cell
+                        // door crossings do not reach TravelReached, so this
+                        // guard is specific to the intercell handoff path.
+                        runtime.door_link = door_link::DoorLinkState::Idle;
+                        runtime.active_link = None;
+                        runtime.travel_intent = None;
+                        continue;
+                    }
                     // Issue #241: the intercell ledger is keyed by console
                     // index (`agent_ledger_id`), so only a roster agent can
                     // actually be handed off to another cell -- an
@@ -116,14 +141,17 @@ pub(crate) fn door_traversal_system(
                     // this issue is about. Fall through to the same "left at
                     // the travel door" terminal the missing-metadata branch
                     // below already used.
-                    let ledger_target = roster.index_of(entity).and_then(|index| {
-                        archipelago_state
-                            .travel_doors
-                            .get(&door_form_id)
-                            .map(|link| {
-                                (agent_ledger_id(index), index, link.destination_door_form_id)
-                            })
-                    });
+                    let ledger_target = roster
+                        .index_of(entity)
+                        .filter(|&index| roster.is_spawned_capsule(index))
+                        .and_then(|index| {
+                            archipelago_state
+                                .travel_doors
+                                .get(&door_form_id)
+                                .map(|link| {
+                                    (agent_ledger_id(index), index, link.destination_door_form_id)
+                                })
+                        });
                     // Issue #113's terminal travel seam: the agent stopped at
                     // the traversed door. Issue #134 owns what happens next:
                     // the agent leaves the active cell entirely, ledgered for
@@ -207,7 +235,8 @@ pub(crate) fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity)
             let travel_arrival = world
                 .get::<AgentRuntime>(agent_entity)
                 .and_then(|runtime| runtime.travel_intent)
-                .and_then(|door_form_id| {
+                .and_then(|intent| {
+                    let door_form_id = intent.door_form_id;
                     let link = world
                         .resource::<NavArchipelagoState>()
                         .travel_doors
@@ -220,9 +249,19 @@ pub(crate) fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity)
                         TRAVEL_ARRIVAL_DISTANCE,
                         AGENT_HEIGHT,
                     )
-                    .then_some((door_form_id, link))
+                    .then_some((intent.generation, door_form_id, link))
                 });
-            if let Some((door_form_id, link)) = travel_arrival {
+            if let Some((generation, door_form_id, link)) = travel_arrival {
+                let current_generation = world
+                    .get::<AgentRuntime>(agent_entity)
+                    .map(|runtime| runtime.route_generation);
+                if current_generation != Some(generation) {
+                    // A completion from a replaced route is inert. The
+                    // replacement seam normally removes this state eagerly;
+                    // this guard covers a completion already observed by a
+                    // scheduler before the replacement was committed.
+                    return;
+                }
                 // Issue #165: consult the same lock/open source of truth the
                 // mid-route crossing gate (`crossing_gate`, just below) and
                 // `request_door_open`'s own internal `door_usable_now` check
@@ -294,7 +333,8 @@ pub(crate) fn drive_door_link_for_agent(world: &mut World, agent_entity: Entity)
             // not excluded.
             let travel_target_door = world
                 .get::<AgentRuntime>(agent_entity)
-                .and_then(|runtime| runtime.travel_intent);
+                .and_then(|runtime| runtime.travel_intent)
+                .map(|intent| intent.door_form_id);
             // Issue #155 feature 3: corridor-based containment
             // (`landmass_graph::point_in_door_triangle` against the door's
             // own un-eroded triangle vertices), not the earlier

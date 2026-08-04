@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 use bevy_landmass::prelude::*;
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::debug::player::player_transform_query;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 use crate::viewer::player;
 
 /// Spawns the landmass `Character3d` mirroring the FPS player (issue #114

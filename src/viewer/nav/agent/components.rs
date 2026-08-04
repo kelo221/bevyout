@@ -13,50 +13,16 @@ pub(crate) struct DebugNavAgent {
     pub(crate) index: usize,
 }
 
-/// Growable roster used only to resolve debug command indices to entities.
-#[derive(Resource)]
-pub(crate) struct DebugAgentRoster {
-    pub(crate) entities: Vec<Option<Entity>>,
-}
+/// Monotonic identity for one accepted route. Completion systems compare
+/// their captured generation with the runtime's current generation before
+/// applying terminal state or requesting a handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct RouteGeneration(pub(crate) u64);
 
-impl Default for DebugAgentRoster {
-    fn default() -> Self {
-        Self {
-            entities: vec![None; INITIAL_AGENT_SLOTS],
-        }
-    }
-}
-
-impl DebugAgentRoster {
-    pub(crate) fn index_of(&self, entity: Entity) -> Option<usize> {
-        self.entities.iter().position(|slot| *slot == Some(entity))
-    }
-
-    /// Every currently-spawned `(index, entity)` pair, in index order.
-    pub(crate) fn active(&self) -> impl Iterator<Item = (usize, Entity)> + '_ {
-        self.entities
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| slot.map(|entity| (index, entity)))
-    }
-
-    /// The entity occupying `index`, if any.
-    pub(crate) fn get(&self, index: usize) -> Option<Entity> {
-        self.entities.get(index).copied().flatten()
-    }
-
-    pub(crate) fn is_occupied(&self, index: usize) -> bool {
-        self.get(index).is_some()
-    }
-
-    /// Sets a slot, growing the dense debug roster on demand.
-    pub(crate) fn set(&mut self, index: usize, value: Option<Entity>) {
-        debug_assert!(index <= MAX_AGENT_INDEX);
-        if index >= self.entities.len() {
-            self.entities.resize(index + 1, None);
-        }
-        self.entities[index] = value;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TravelIntent {
+    pub(crate) generation: RouteGeneration,
+    pub(crate) door_form_id: u32,
 }
 
 pub(crate) const AGENT_RADIUS: f32 = 0.35;
@@ -515,6 +481,9 @@ pub(crate) struct AgentDesiredVelocityBlend {
 /// index.
 #[derive(Component, Default)]
 pub(crate) struct AgentRuntime {
+    /// Generation of the currently accepted route. Incremented only by the
+    /// authoritative route replacement seam.
+    pub(crate) route_generation: RouteGeneration,
     pub(crate) door_link: door_link::DoorLinkState,
     /// Set by `door_link_system` when a link is first reached, consumed by
     /// the same system once the door opens to start the `DoorTraversal`.
@@ -526,7 +495,7 @@ pub(crate) struct AgentRuntime {
     /// A pending travel-door route (issue #113 feature 3): the agent is
     /// heading to this door's triangle; arrival starts the door lifecycle
     /// with a `Travel` destination. Consumed by #134's `tna travel`.
-    pub(crate) travel_intent: Option<u32>,
+    pub(crate) travel_intent: Option<TravelIntent>,
     /// `Time::elapsed_secs()` when the last `tna goto` ran, for the
     /// path-latency log line.
     pub(crate) goto_started_at: Option<f32>,

@@ -1,14 +1,4 @@
-use std::collections::HashSet;
-
 use super::*;
-use crate::console::{ConsoleError, ConsoleInvocation, ConsoleSessionId};
-use crate::viewer::nav::world::links::*;
-use crate::viewer::nav::world::portals::*;
-use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
-use bevy::ecs::system::SystemState;
-use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
-use bevy_landmass::prelude::*;
-use bevyout_core::manifest::exterior::ExteriorBorderPortal;
 
 use super::tests_support::*;
 
@@ -45,14 +35,12 @@ fn archipelago_teardown_on_cell_swap_ledgers_the_agent_instead_of_losing_it() {
     world.insert_resource(crate::viewer::LoadedSceneManifest(minimal_manifest(0xBEEF)));
     despawn_stale_navmesh_archipelago(&mut world);
 
-    assert!(world.get_entity(archipelago).is_err());
-    assert!(world.get_entity(island).is_err());
+    assert!(world.get_entity(archipelago).is_ok());
+    assert!(world.get_entity(island).is_ok());
     assert!(world.get_entity(agent).is_err(), "the live entity is gone");
-    assert!(
-        world
-            .resource::<NavArchipelagoState>()
-            .cell_form_id
-            .is_none()
+    assert_eq!(
+        world.resource::<NavArchipelagoState>().cell_form_id,
+        Some(0xC0DE)
     );
     assert!(world.resource::<DebugAgentRoster>().entities[0].is_none());
 
@@ -67,6 +55,44 @@ fn archipelago_teardown_on_cell_swap_ledgers_the_agent_instead_of_losing_it() {
         ledger_policy::SpawnKind::FrozenPosition {
             position: [1.0, 2.0, 3.0]
         }
+    );
+}
+
+#[test]
+fn bound_actor_is_retained_instead_of_becoming_a_debug_ledger_capsule() {
+    let mut world = harness_world();
+    let actor = world
+        .spawn((
+            NavAgent,
+            AgentRuntime::default(),
+            AgentKcc::default(),
+            Transform::from_xyz(1.0, 2.0, 3.0),
+        ))
+        .id();
+    world.resource_mut::<DebugAgentRoster>().set_with_origin(
+        0,
+        Some(actor),
+        crate::viewer::nav::debug::DebugAgentOrigin::BoundActor {
+            reference_form_id: 0x1234,
+        },
+    );
+
+    ledger_departing_agent(&mut world, 0xC0DE, None);
+
+    assert!(world.get_entity(actor).is_ok(), "bound actor remains live");
+    assert_eq!(
+        world.resource::<DebugAgentRoster>().origin_of(actor),
+        Some(crate::viewer::nav::debug::DebugAgentOrigin::BoundActor {
+            reference_form_id: 0x1234,
+        })
+    );
+    assert!(
+        world
+            .resource::<NavAgentLedger>()
+            .0
+            .entry_for(agent_ledger_id(0))
+            .is_none(),
+        "bound actors never enter the debug capsule ledger"
     );
 }
 
@@ -91,7 +117,10 @@ fn a_player_swap_through_the_agents_own_route_door_follows_through() {
         .spawn((
             NavAgent,
             AgentRuntime {
-                travel_intent: Some(0x99),
+                travel_intent: Some(TravelIntent {
+                    generation: RouteGeneration(1),
+                    door_form_id: 0x99,
+                }),
                 ..default()
             },
             Transform::from_xyz(5.0, 0.0, 0.0),
@@ -132,7 +161,10 @@ fn a_player_swap_through_a_different_door_still_freezes_the_agent() {
             // The agent is routed to a different travel door than the
             // one the player used.
             AgentRuntime {
-                travel_intent: Some(0x50),
+                travel_intent: Some(TravelIntent {
+                    generation: RouteGeneration(1),
+                    door_form_id: 0x50,
+                }),
                 ..default()
             },
             Transform::from_xyz(7.0, 0.0, 0.0),
@@ -334,6 +366,7 @@ fn a_travel_target_left_open_by_a_prior_handoff_still_fails_when_locked() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
         ))

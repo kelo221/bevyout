@@ -8,9 +8,19 @@ use bevy_landmass::NavMeshHandle;
 use bevy_landmass::coords::ThreeD;
 use bevy_landmass::prelude::*;
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    AGENT_HEIGHT, AGENT_RADIUS, NavCellFallBounds, PREFERRED_PATHING_TYPE_INDEX_COST,
+    archipelago_options,
+};
 use crate::viewer::nav::api;
 use crate::viewer::nav::landmass_graph;
+use crate::viewer::nav::world::portals::{
+    exterior_portal_merge_inputs, validate_exterior_merge_link_collision,
+    validate_merge_link_collision,
+};
+use crate::viewer::nav::world::state::{
+    BlockedDoorLink, DoorLockInfo, LinkKind, MidRouteDoor, NavArchipelagoState, TravelDoorLink,
+};
 use crate::viewer::player;
 use crate::viewer::player::{CellPhysicsReadiness, PhysicsDisabled};
 
@@ -122,8 +132,6 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
         door_lock_info.insert(door_form_id, info);
     }
 
-    teardown_archipelago(world);
-
     let manifest = world
         .get_resource::<crate::viewer::LoadedSceneManifest>()
         .ok_or_else(no_nav_graph_error)?;
@@ -139,7 +147,7 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
     // Issue #164: capture this cell's lowest prepared geometry Y so the fall
     // guard can derive its kill plane from real per-cell bounds rather than a
     // hard-coded world Y (see `fall_guard`'s module doc).
-    world.resource_mut::<NavCellFallBounds>().min_y = Some(graph.bounds.min[1]);
+    let graph_min_y = graph.bounds.min[1];
     if let Some(position) = player_transform_query(world)
         && (!position.is_finite() || position.y < fall_guard::fall_kill_z(graph.bounds.min[1]))
     {
@@ -192,15 +200,10 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
 
     // Widened sample distances plus the clamped border-avoidance horizon --
     // see `archipelago_options`, which every build (runtime and test) shares.
-    let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
-    apply_preferred_pathing_base_cost(
-        world,
-        archipelago_entity,
-        &door_type_indices,
-        &closed_door_type_indices,
-    );
-
-    let mut islands = Vec::new();
+    // Stage every fallible graph conversion before touching the currently
+    // active Bevy entities. A streamed exterior rebuild that cannot produce a
+    // valid replacement therefore leaves the old archipelago authoritative.
+    let mut prepared_nav_meshes = Vec::new();
     for mesh in &mesh_inputs {
         let result = landmass_graph::build_navigation_mesh(
             mesh,
@@ -214,12 +217,34 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
                 mesh.form_id, diagnostic.message
             );
         }
-        let Some(valid) = result.nav_mesh else {
-            continue;
-        };
-        let handle = world.resource_mut::<Assets<NavMesh3d>>().add(NavMesh3d {
-            nav_mesh: Arc::new(valid),
-        });
+        if let Some(valid) = result.nav_mesh {
+            prepared_nav_meshes.push(Arc::new(valid));
+        }
+    }
+    if prepared_nav_meshes.is_empty() {
+        return Err(api::NavError::new(
+            "nav_mesh_invalid",
+            "prepared nav graph produced no valid landmass islands",
+        ));
+    }
+
+    // Commit boundary: all graph input, player validation, mesh conversion,
+    // and the non-mutating link validation above have succeeded. Only now may
+    // the old owned world be retired and the pending replacement spawned.
+    teardown_archipelago(world);
+    let archipelago_entity = world.spawn(Archipelago3d::new(archipelago_options())).id();
+    apply_preferred_pathing_base_cost(
+        world,
+        archipelago_entity,
+        &door_type_indices,
+        &closed_door_type_indices,
+    );
+
+    let mut islands = Vec::new();
+    for nav_mesh in prepared_nav_meshes {
+        let handle = world
+            .resource_mut::<Assets<NavMesh3d>>()
+            .add(NavMesh3d { nav_mesh });
         let island_entity = world
             .spawn(Island3dBundle {
                 island: Island,
@@ -569,6 +594,7 @@ pub(crate) fn ensure_archipelago(world: &mut World) -> Result<(), api::NavError>
         door_open,
         merge_link_kind_count,
     };
+    world.resource_mut::<NavCellFallBounds>().min_y = Some(graph_min_y);
     if exterior_mode {
         retarget_live_exterior_agents(world, archipelago_entity);
     }

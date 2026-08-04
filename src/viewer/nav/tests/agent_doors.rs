@@ -1,14 +1,5 @@
-use std::collections::HashSet;
-
 use super::*;
-use crate::console::{ConsoleError, ConsoleInvocation, ConsoleSessionId};
-use crate::viewer::nav::world::links::*;
-use crate::viewer::nav::world::portals::*;
-use crate::vsa::{PreparedNavGraph, PreparedNavMesh, PreparedNavPolygon};
-use bevy::ecs::system::SystemState;
-use bevy_boxddd::boxddd::{BodyDef, BodyType, BoxHull, Filter, ShapeDef};
-use bevy_landmass::prelude::*;
-use bevyout_core::manifest::exterior::ExteriorBorderPortal;
+use crate::viewer::nav::world::links::{animation_link_start_edge, spawn_link_pair};
 
 use super::tests_support::*;
 
@@ -177,6 +168,7 @@ fn travel_request_routes_to_the_door_and_completes_the_lifecycle() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ))
         .id();
@@ -275,6 +267,7 @@ fn travel_arrival_tolerates_the_agent_capsule_centre_sitting_above_the_feet_leve
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ))
         .id();
@@ -329,6 +322,7 @@ fn locked_travel_door_fails_deterministically_without_opening() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
         ))
         .id();
@@ -666,6 +660,7 @@ fn mid_route_crossing_gate_tolerates_the_agent_capsule_centre_vertical_offset() 
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(0.0, 0.9, 0.0),
             AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
         ))
@@ -713,6 +708,7 @@ fn a_travel_request_to_a_door_still_hands_off_even_though_it_is_also_a_crossing_
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ))
         .id();
@@ -795,6 +791,7 @@ fn a_goto_crossing_a_locked_travel_door_mid_route_fails_deterministically_withou
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
         ))
@@ -879,6 +876,7 @@ fn unlocking_a_mid_route_door_triggers_one_repath_that_frees_a_paused_agent() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
         ))
@@ -969,6 +967,7 @@ fn a_failed_mid_route_door_wait_does_not_leave_the_agent_permanently_paused() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(10.0, 0.0, 0.0)),
         ))
@@ -1021,6 +1020,7 @@ fn a_failed_travel_arrival_does_not_leave_the_agent_permanently_paused() {
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
         ))
@@ -1070,7 +1070,9 @@ fn a_failed_travel_arrival_does_not_leave_the_agent_permanently_paused() {
 #[test]
 fn concurrent_travel_requests_are_rejected() {
     let mut world = harness_world();
-    let agent = world.spawn((NavAgent, AgentRuntime::default())).id();
+    let agent = world
+        .spawn((NavAgent, AgentRuntime::default(), AgentKcc::default()))
+        .id();
     world.resource_mut::<DebugAgentRoster>().entities[0] = Some(agent);
     world
         .resource_mut::<NavArchipelagoState>()
@@ -1086,20 +1088,22 @@ fn concurrent_travel_requests_are_rejected() {
         );
     request_travel(&mut world, 0, 0x99).expect("first request succeeds");
     let error = request_travel(&mut world, 0, 0x99).unwrap_err();
-    assert_eq!(error.code, "travel_in_progress");
+    assert_eq!(error.code(), "travel_in_progress");
 }
 
 #[test]
 fn travel_request_errors_without_an_agent_or_a_known_door() {
     let mut world = harness_world();
     assert_eq!(
-        request_travel(&mut world, 0, 0x99).unwrap_err().code,
+        request_travel(&mut world, 0, 0x99).unwrap_err().code(),
         "no_agent"
     );
-    let agent = world.spawn((NavAgent, AgentRuntime::default())).id();
+    let agent = world
+        .spawn((NavAgent, AgentRuntime::default(), AgentKcc::default()))
+        .id();
     world.resource_mut::<DebugAgentRoster>().entities[0] = Some(agent);
     assert_eq!(
-        request_travel(&mut world, 0, 0x99).unwrap_err().code,
+        request_travel(&mut world, 0, 0x99).unwrap_err().code(),
         "unknown_travel_door"
     );
 }
@@ -1430,6 +1434,7 @@ fn locked_travel_arrival_settles_at_a_stable_unreachable_terminal_not_an_oscilla
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
         ))
@@ -1526,6 +1531,7 @@ fn unlocking_after_a_failed_travel_arrival_and_reissuing_travel_hands_off_normal
         .spawn((
             NavAgent,
             AgentRuntime::default(),
+            AgentKcc::default(),
             Transform::from_xyz(5.0, 0.0, 0.0),
             AgentTarget3d::Point(Vec3::new(5.0, 0.0, 0.0)),
         ))

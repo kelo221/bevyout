@@ -7,7 +7,10 @@ use bevy::prelude::*;
 use bevy_landmass::prelude::AgentTarget3d;
 use bevy_landmass::{AgentTypeIndexCostOverrides, PermittedAnimationLinks};
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    AgentRuntime, PendingMergeRepath, RefreshLandmassAnimationLinkInput,
+    SuspendedLandmassTypeIndexCosts,
+};
 use crate::viewer::nav::landmass_graph;
 
 pub(crate) fn copied_type_index_cost_overrides(

@@ -2,8 +2,11 @@
 
 use bevy::prelude::*;
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::PendingPlayerSwapDoor;
+use crate::viewer::nav::handoff::ledger::ledger_departing_agent;
+use crate::viewer::nav::world::build::ensure_archipelago;
 use crate::viewer::nav::world::exterior::exterior_resident_grid_signature;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 
 pub(crate) fn note_player_swap_door(world: &mut World, door_form_id: u32) {
     world.resource_mut::<PendingPlayerSwapDoor>().0 = Some(door_form_id);
@@ -65,20 +68,22 @@ pub(crate) fn despawn_stale_navmesh_archipelago(world: &mut World) {
     if source_cell.is_none() && !exterior_resident_set_changed {
         return;
     }
+    let cell_swap = source_cell.is_some();
     if let Some(source_cell) = source_cell {
         let used_door = world.resource_mut::<PendingPlayerSwapDoor>().0.take();
         ledger_departing_agent(world, source_cell, used_door);
     } else {
         info!("exterior nav resident set changed; rebuilding owned islands and border links");
     }
-    teardown_archipelago(world);
-    // Cell swaps restore ledgered agents in the following system. A resident
-    // set change keeps the current entities in place, so rebuild immediately
-    // and retarget their `ArchipelagoRef3d` before the next landmass solve.
-    if exterior_resident_set_changed && let Err(error) = ensure_archipelago(world) {
+    // `ensure_archipelago` stages and validates the replacement before it
+    // retires the current world. Do not tear down here: a failed streamed
+    // rebuild must leave the last usable archipelago alive.
+    if (cell_swap || exterior_resident_set_changed)
+        && let Err(error) = ensure_archipelago(world)
+    {
         warn!(
             "exterior nav resident-set rebuild failed: {}",
-            error.message
+            error.message()
         );
     }
 }

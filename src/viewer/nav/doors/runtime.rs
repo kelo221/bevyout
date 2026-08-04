@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 
 use crate::viewer::interaction;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::AgentRefusesDoors;
+use crate::viewer::nav::doors::access::door_usable_now;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 
 pub(crate) fn request_door_open(world: &mut World, agent_entity: Entity, door_form_id: u32) {
     // OpenMW parity (`AiWander::execute` never calls `openDoors()`,

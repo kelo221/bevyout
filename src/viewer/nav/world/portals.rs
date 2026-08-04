@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_boxddd::boxddd;
 use bevyout_core::manifest::exterior::{ExteriorCellPackage, GridCoordinate, matching_portals};
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{AGENT_HEIGHT, AGENT_RADIUS, MERGE_LINK_SWEEP_TOLERANCE};
 use crate::viewer::nav::landmass_graph;
 use crate::viewer::nav::world::links::animation_link_start_edge;
 use crate::viewer::player;

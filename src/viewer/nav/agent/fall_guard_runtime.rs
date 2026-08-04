@@ -1,6 +1,8 @@
 use super::actor_binding;
 use super::fall_guard;
 use super::*;
+use crate::viewer::nav::debug::DebugAgentRoster;
+use crate::viewer::nav::diagnostics::{agent_log_id, all_agent_entities};
 
 pub(crate) fn nav_fall_guard_system(world: &mut World) {
     let Some(min_y) = world.resource::<NavCellFallBounds>().min_y else {

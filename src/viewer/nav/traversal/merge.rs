@@ -6,8 +6,18 @@ use bevy_landmass::UsingAnimationLink;
 use bevy_landmass::prelude::*;
 
 use crate::viewer::actor::ActorRuntime;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    AGENT_DESIRED_SPEED, AGENT_HEIGHT, AGENT_RADIUS, AgentKcc, AgentRuntime, AgentTargetSnapshot,
+    MERGE_SOURCE_ALIGNMENT_DISTANCE, MERGE_TRAVERSAL_REACHED_DISTANCE,
+    MERGE_TRAVERSAL_TIMEOUT_FACTOR, MERGE_TRAVERSAL_TIMEOUT_FLOOR_SECONDS, MergeTraversal,
+    NavAgent, PendingMergeRepath, RefreshLandmassAnimationLinkInput, step_agent_kcc,
+    world_contact_report, write_agent_translation,
+};
+use crate::viewer::nav::debug::DebugAgentRoster;
+use crate::viewer::nav::diagnostics::format_agent_id;
 use crate::viewer::nav::movement_policy;
+use crate::viewer::nav::traversal::permitted_animation_links_for;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 use crate::viewer::player;
 use crate::viewer::player::{CellPhysicsReadiness, PhysicsDisabled};
 

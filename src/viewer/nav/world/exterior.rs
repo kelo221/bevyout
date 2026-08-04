@@ -4,8 +4,9 @@ use bevyout_core::manifest::exterior::{
     ExteriorCellLifecycle, ExteriorCellPackage, GridCoordinate,
 };
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::NavAgent;
 use crate::viewer::nav::api;
+use crate::viewer::nav::world::build::no_nav_graph_error;
 use crate::viewer::world::exterior::ExteriorStreamState;
 use crate::vsa::PreparedNavGraph;
 

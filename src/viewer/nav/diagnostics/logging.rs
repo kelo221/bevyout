@@ -2,7 +2,9 @@ use bevy::prelude::*;
 use bevy_landmass::prelude::*;
 
 use crate::viewer::actor::ActorRuntime;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{AgentRuntime, NavAgent};
+use crate::viewer::nav::debug::DebugAgentRoster;
+use crate::viewer::nav::diagnostics::hud::format_agent_id;
 
 pub(crate) fn log_agent_state_changes(
     mut agents: Query<

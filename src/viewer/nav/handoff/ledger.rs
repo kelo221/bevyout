@@ -3,8 +3,15 @@
 use bevy::prelude::*;
 use bevy_landmass::prelude::AgentTarget3d;
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    AgentRuntime, DebugNavAgent, MAX_AGENT_INDEX, NavAgentLedger, agent_ledger_id,
+};
+use crate::viewer::nav::debug::{
+    DebugAgentEntry, DebugAgentOrigin, DebugAgentRoster, spawn_test_agent,
+};
 use crate::viewer::nav::ledger_policy;
+use crate::viewer::nav::world::build::ensure_archipelago;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 
 /// The point-target component of `AgentTarget3d`, if any -- an `Entity`
 /// target (e.g. `tna goto player`) cannot be meaningfully frozen, since the
@@ -24,11 +31,36 @@ pub(crate) fn point_target(target: &AgentTarget3d) -> Option<[f32; 3]> {
 /// `teardown_archipelago` clears `NavArchipelagoState.travel_doors`, the
 /// source of a follow-through's destination-door metadata.
 pub(crate) fn ledger_departing_agent(world: &mut World, source_cell: u32, used_door: Option<u32>) {
-    let active: Vec<(usize, Entity)> = world.resource::<DebugAgentRoster>().active().collect();
-    for (index, agent_entity) in active {
-        ledger_departing_one_agent(world, index, agent_entity, source_cell, used_door);
+    let active: Vec<(usize, DebugAgentEntry)> = world
+        .resource::<DebugAgentRoster>()
+        .active_entries()
+        .collect();
+    let mut retained_bound = Vec::new();
+    for (index, entry) in active {
+        match entry.origin {
+            DebugAgentOrigin::SpawnedCapsule => {
+                ledger_departing_one_agent(world, index, entry.entity, source_cell, used_door);
+            }
+            DebugAgentOrigin::BoundActor { .. } => {
+                // Production actors are owned by the actor/world slices, not
+                // by the disposable debug ledger. Keep the live entity and
+                // its roster address; a failed handoff must never recreate it
+                // as a cyan capsule.
+                warn!(
+                    "nav agent handoff index={index}: bound actor is not supported by debug ledger; retaining production actor"
+                );
+                retained_bound.push((index, entry));
+            }
+        }
     }
     *world.resource_mut::<DebugAgentRoster>() = DebugAgentRoster::default();
+    for (index, entry) in retained_bound {
+        world.resource_mut::<DebugAgentRoster>().set_with_origin(
+            index,
+            Some(entry.entity),
+            entry.origin,
+        );
+    }
 }
 
 pub(crate) fn ledger_departing_one_agent(
@@ -41,7 +73,8 @@ pub(crate) fn ledger_departing_one_agent(
     let agent_id = agent_ledger_id(index);
     let route_door = world
         .get::<AgentRuntime>(agent_entity)
-        .and_then(|runtime| runtime.travel_intent);
+        .and_then(|runtime| runtime.travel_intent)
+        .map(|intent| intent.door_form_id);
     let position = world
         .get::<Transform>(agent_entity)
         .map(|transform| transform.translation.to_array())

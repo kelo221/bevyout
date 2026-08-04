@@ -20,8 +20,26 @@ pub(crate) enum NavRuntimeSet {
 use bevy::prelude::*;
 use bevy_landmass::{Landmass3dPlugin, LandmassSystems};
 
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::{
+    NavAgentLedger, NavCellFallBounds, NavSolveRate, NavSolveStepCounter, PendingPlayerSwapDoor,
+};
+use crate::viewer::nav::agent::{
+    advance_nav_solve_step_counter, apply_agent_physics_movement, drive_bound_actor_locomotion,
+    face_bound_actors, nav_fall_guard_system, nav_solve_gate, update_agent_desired_velocity_blend,
+};
+use crate::viewer::nav::debug::DebugAgentRoster;
+use crate::viewer::nav::diagnostics::logging::{log_agent_state_changes, log_path_latency};
+use crate::viewer::nav::doors::availability::door_availability_system;
+use crate::viewer::nav::doors::traversal::{door_link_system, door_traversal_system};
+use crate::viewer::nav::handoff::{
+    despawn_stale_navmesh_archipelago, restore_ledgered_agents_system,
+};
+use crate::viewer::nav::traversal::landmass_sync::{
+    refresh_landmass_animation_link_input, restore_landmass_type_index_costs,
+};
+use crate::viewer::nav::traversal::{merge_traversal_system, resume_pending_merge_repath_system};
 use crate::viewer::nav::world::player_obstacle::sync_player_nav_character;
+use crate::viewer::nav::world::state::NavArchipelagoState;
 
 pub(crate) struct NavBackendPlugin;
 

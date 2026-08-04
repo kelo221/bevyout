@@ -10,18 +10,54 @@ use bevy::prelude::{Entity, Vec3, World};
 use bevyout_core::form_id::FormId;
 
 use super::agent;
+use super::doors::access::{
+    set_door_key_form_id as door_set_door_key_form_id,
+    set_door_lock_level as door_set_door_lock_level,
+};
+use super::handoff::note_player_swap_door;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NavError {
-    pub(crate) code: String,
-    pub(crate) message: String,
+pub(crate) enum NavError {
+    ActorUnavailable(Entity),
+    ActorNotBound(Entity),
+    TargetUnavailable(Entity),
+    WorldUnavailable,
+    GoalBusy,
+    DoorUnavailable(FormId),
+    Custom { code: String, message: String },
 }
 
 impl NavError {
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
+        Self::Custom {
             code: code.into(),
             message: message.into(),
+        }
+    }
+
+    pub(crate) fn code(&self) -> String {
+        match self {
+            Self::ActorUnavailable(_) => "actor_unavailable".to_string(),
+            Self::ActorNotBound(_) => "actor_not_bound".to_string(),
+            Self::TargetUnavailable(_) => "target_unavailable".to_string(),
+            Self::WorldUnavailable => "world_unavailable".to_string(),
+            Self::GoalBusy => "travel_in_progress".to_string(),
+            Self::DoorUnavailable(_) => "unknown_travel_door".to_string(),
+            Self::Custom { code, .. } => code.clone(),
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::ActorUnavailable(actor) => format!("navigation actor {actor:?} no longer exists"),
+            Self::ActorNotBound(actor) => format!("navigation actor {actor:?} is not fully bound"),
+            Self::TargetUnavailable(target) => {
+                format!("navigation target {target:?} no longer exists")
+            }
+            Self::WorldUnavailable => "navigation world is unavailable".to_string(),
+            Self::GoalBusy => "navigation goal is already in progress".to_string(),
+            Self::DoorUnavailable(door) => format!("travel door {door:?} is unavailable"),
+            Self::Custom { message, .. } => message.clone(),
         }
     }
 }
@@ -65,6 +101,7 @@ pub(crate) enum NavStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NavObservation {
     pub(crate) status: NavStatus,
+    pub(crate) generation: agent::RouteGeneration,
 }
 
 impl NavObservation {
@@ -93,16 +130,13 @@ pub(crate) fn release_actor(world: &mut World, actor: Entity) {
 }
 
 pub(crate) fn set_goal(world: &mut World, actor: Entity, goal: NavGoal) -> Result<(), NavError> {
-    match goal {
-        NavGoal::Point(point) => agent::route_agent_to_point(world, actor, point),
-        NavGoal::Entity(target) => agent::route_agent_to_entity(world, actor, target),
-        NavGoal::TravelDoor(door) => agent::request_travel_for_actor(world, actor, door.into())?,
-    }
+    agent::replace_goal(world, actor, Some(goal))?;
     Ok(())
 }
 
-pub(crate) fn cancel_goal(world: &mut World, actor: Entity) {
-    agent::clear_agent_target(world, actor);
+pub(crate) fn cancel_goal(world: &mut World, actor: Entity) -> Result<(), NavError> {
+    agent::replace_goal(world, actor, None)?;
+    Ok(())
 }
 
 pub(crate) fn observation(world: &World, actor: Entity) -> NavObservation {
@@ -119,15 +153,15 @@ pub(crate) fn set_pose_authority(world: &mut World, actor: Entity, pose_authored
 
 #[allow(dead_code)]
 pub(crate) fn note_player_door_transition(world: &mut World, door: FormId) {
-    agent::note_player_swap_door(world, door.into());
+    note_player_swap_door(world, door.into());
 }
 
 pub(crate) fn set_door_lock_level(world: &mut World, door: FormId, lock_level: Option<i8>) {
-    agent::set_door_lock_level(world, door.into(), lock_level);
+    door_set_door_lock_level(world, door.into(), lock_level);
 }
 
 pub(crate) fn set_door_key_form_id(world: &mut World, door: FormId, key_form_id: Option<FormId>) {
-    agent::set_door_key_form_id(world, door.into(), key_form_id.map(Into::into));
+    door_set_door_key_form_id(world, door.into(), key_form_id.map(Into::into));
 }
 
 pub(crate) fn is_bound(world: &World, actor: Entity) -> bool {
@@ -153,6 +187,15 @@ pub(crate) fn mark_test_archipelago_current(
     archipelago: Entity,
 ) {
     agent::mark_test_archipelago_current(world, cell_form_id, archipelago);
+}
+
+#[cfg(test)]
+pub(crate) fn insert_test_nav_agent(world: &mut World, actor: Entity) {
+    world.entity_mut(actor).insert((
+        agent::NavAgent,
+        agent::AgentRuntime::default(),
+        agent::AgentKcc::default(),
+    ));
 }
 
 #[cfg(test)]

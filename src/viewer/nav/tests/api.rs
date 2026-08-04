@@ -1,9 +1,11 @@
 use super::*;
+use crate::viewer::nav::agent::RouteGeneration;
 
 #[test]
 fn observations_expose_reached_and_blocking_door_without_backend_types() {
     let reached = NavObservation {
         status: NavStatus::Reached,
+        generation: RouteGeneration::default(),
     };
     assert!(reached.is_reached());
     assert!(!reached.is_failed());
@@ -11,6 +13,7 @@ fn observations_expose_reached_and_blocking_door_without_backend_types() {
 
     let blocked = NavObservation {
         status: NavStatus::Failed(NavFailureReason::BlockedDoor(FormId(0x1234))),
+        generation: RouteGeneration::default(),
     };
     assert!(!blocked.is_reached());
     assert!(blocked.is_failed());

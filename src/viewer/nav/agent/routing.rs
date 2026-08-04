@@ -1,4 +1,3 @@
-use super::actor_binding;
 /// Sets `target` on `agent_entity` and resets the per-route bookkeeping: the
 /// merge-portal quarantine (issue #162), the path-latency timer, and the pure
 /// stuck-tracking window. The single routing seam every caller that hands an
@@ -7,63 +6,132 @@ use super::actor_binding;
 /// #196/#197) both call this so neither can drift into a different notion of
 /// "a fresh route intent".
 use super::*;
+use crate::viewer::nav::doors::access::apply_door_lock_overrides;
+use crate::viewer::nav::traversal::clear_merge_link_quarantine;
+use crate::viewer::nav::world::state::{LinkKind, NavArchipelagoState};
 
 pub(crate) fn route_agent_to_target(
     world: &mut World,
     agent_entity: Entity,
     target: AgentTarget3d,
-) {
-    world.entity_mut(agent_entity).insert(target);
-    // Issue #162 feature 2: a fresh target is a new routing intent -- any
-    // merge-portal quarantine from a previous route no longer applies.
-    clear_merge_link_quarantine(world, agent_entity);
-    // Issue #185: a fresh target is also a fresh chance for this agent's
-    // key-aware door-lock overrides to reflect whatever the agent is
-    // holding right now (e.g. a key granted since the last route) rather
-    // than whatever was last computed at spawn or the last door flip.
-    apply_door_lock_overrides(world, agent_entity);
-    let elapsed = world.resource::<Time>().elapsed_secs();
-    if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
-        runtime.goto_started_at = Some(elapsed);
-        runtime.latency_logged = false;
+) -> Result<RouteGeneration, api::NavError> {
+    match target {
+        AgentTarget3d::None => replace_goal(world, agent_entity, None),
+        AgentTarget3d::Point(point) => {
+            replace_goal(world, agent_entity, Some(api::NavGoal::Point(point)))
+        }
+        AgentTarget3d::Entity(target) => {
+            replace_goal(world, agent_entity, Some(api::NavGoal::Entity(target)))
+        }
     }
-    // A fresh target resets the pure stuck-tracking window (movement_policy)
-    // -- the agent gets a clean run at the new waypoint.
+}
+
+/// The sole route transition seam. It validates the complete actor and goal
+/// before mutating anything, invalidates all state owned by the previous goal,
+/// then initializes the new target and its generation through one path.
+pub(crate) fn replace_goal(
+    world: &mut World,
+    agent_entity: Entity,
+    goal: Option<api::NavGoal>,
+) -> Result<RouteGeneration, api::NavError> {
+    if world.get_entity(agent_entity).is_err() {
+        return Err(api::NavError::ActorUnavailable(agent_entity));
+    }
+    if world.get::<NavAgent>(agent_entity).is_none()
+        || world.get::<AgentRuntime>(agent_entity).is_none()
+        || world.get::<AgentKcc>(agent_entity).is_none()
+    {
+        return Err(api::NavError::ActorNotBound(agent_entity));
+    }
+    if world.get_resource::<NavArchipelagoState>().is_none() {
+        return Err(api::NavError::WorldUnavailable);
+    }
+
+    let resolved_goal = match goal {
+        Some(api::NavGoal::Entity(target)) => {
+            if world.get_entity(target).is_err() {
+                return Err(api::NavError::TargetUnavailable(target));
+            }
+            Some((AgentTarget3d::Entity(target), None))
+        }
+        Some(api::NavGoal::Point(point)) => Some((AgentTarget3d::Point(point), None)),
+        Some(api::NavGoal::TravelDoor(door)) => {
+            let link = super::super::doors::travel::resolve_travel_door(world, door.into())?;
+            Some((
+                AgentTarget3d::Point(link.triangle_midpoint),
+                Some(door.into()),
+            ))
+        }
+        None => None,
+    };
+
+    let generation = {
+        let mut runtime = world
+            .get_mut::<AgentRuntime>(agent_entity)
+            .expect("validated AgentRuntime exists");
+        runtime.route_generation =
+            RouteGeneration(runtime.route_generation.0.wrapping_add(1).max(1));
+        let generation = runtime.route_generation;
+        runtime.door_link = door_link::DoorLinkState::Idle;
+        runtime.pending_traversal = None;
+        runtime.active_link = None;
+        runtime.travel_intent = None;
+        runtime.goto_started_at = None;
+        runtime.latency_logged = false;
+        generation
+    };
+
+    // These components are the physical and Landmass sides of an active
+    // crossing. Remove them immediately so a replacement cannot be consumed
+    // by a later traversal system in the same frame.
+    world
+        .entity_mut(agent_entity)
+        .remove::<PauseAgent>()
+        .remove::<DoorTraversal>()
+        .remove::<MergeTraversal>()
+        .remove::<PendingMergeRepath>()
+        .remove::<SuspendedLandmassTypeIndexCosts>()
+        .remove::<UsingAnimationLink>()
+        .remove::<ReachedAnimationLink3d>()
+        .remove::<RefreshLandmassAnimationLinkInput>()
+        .insert(AgentTarget3d::None);
+
+    clear_merge_link_quarantine(world, agent_entity);
     if let Some(mut kcc) = world.get_mut::<AgentKcc>(agent_entity) {
         kcc.best_distance = f32::MAX;
         kcc.ticks_without_progress = 0;
         kcc.recovery_active = false;
         kcc.stuck = false;
+        kcc.route_progress = 0.0;
     }
-}
 
-/// Routes `agent_entity` to a fixed world point (the AI package families'
-/// `FamilyRequest::Route`). Thin wrapper over [`route_agent_to_target`].
-pub(crate) fn route_agent_to_point(world: &mut World, agent_entity: Entity, point: Vec3) {
-    route_agent_to_target(world, agent_entity, AgentTarget3d::Point(point));
-}
+    let Some((target, travel_door)) = resolved_goal else {
+        return Ok(generation);
+    };
 
-/// Routes `agent_entity` to another entity's current position. This is the
-/// entity-target half of the navigation façade; the Landmass target component
-/// stays private to the runtime adapter.
-pub(crate) fn route_agent_to_entity(world: &mut World, agent_entity: Entity, target: Entity) {
-    route_agent_to_target(world, agent_entity, AgentTarget3d::Entity(target));
-}
-
-/// Clears any nav route on `agent_entity` (the families' `FamilyRequest::Stop`
-/// on travel arrival / package completion), so landmass stops steering it and
-/// the locomotion policy idles the now-stationary actor.
-pub(crate) fn clear_agent_target(world: &mut World, agent_entity: Entity) {
-    if let Ok(mut entity) = world.get_entity_mut(agent_entity) {
-        entity.insert(AgentTarget3d::None);
+    // All goal kinds use this common initialization path. Travel-door
+    // resolution only changes the target and intent attached after it.
+    world.entity_mut(agent_entity).insert(target);
+    apply_door_lock_overrides(world, agent_entity);
+    let elapsed = world.get_resource::<Time>().map_or(0.0, Time::elapsed_secs);
+    if let Some(mut runtime) = world.get_mut::<AgentRuntime>(agent_entity) {
+        runtime.goto_started_at = Some(elapsed);
+        runtime.latency_logged = false;
+        runtime.travel_intent = travel_door.map(|door_form_id| TravelIntent {
+            generation,
+            door_form_id,
+        });
     }
+    Ok(generation)
 }
 
 /// Whether `entity` currently owns a nav agent (`tna bind`/`tna spawn`
 /// inserted the `AgentKcc`). The AI package families route only nav-bound
 /// actors; the `runpackage` console command checks this before starting one.
 pub(crate) fn is_nav_bound(world: &World, entity: Entity) -> bool {
-    world.get::<AgentKcc>(entity).is_some()
+    world.get::<NavAgent>(entity).is_some()
+        && world.get::<AgentRuntime>(entity).is_some()
+        && world.get::<AgentKcc>(entity).is_some()
 }
 
 /// Projects the current Landmass/door-link state into the navigation API's
@@ -74,47 +142,47 @@ pub(crate) fn nav_observation(world: &World, agent_entity: Entity) -> api::NavOb
     if world.get::<AgentKcc>(agent_entity).is_none() {
         return api::NavObservation {
             status: api::NavStatus::Failed(api::NavFailureReason::WorldUnavailable),
+            generation: RouteGeneration::default(),
         };
     }
 
-    let door_state = world
+    let (door_state, generation) = world
         .get::<AgentRuntime>(agent_entity)
-        .map(|runtime| runtime.door_link);
+        .map(|runtime| (runtime.door_link, runtime.route_generation))
+        .unwrap_or((door_link::DoorLinkState::Idle, RouteGeneration::default()));
     let status = match door_state {
-        Some(door_link::DoorLinkState::Paused { door_form_id, .. }) => {
+        door_link::DoorLinkState::Paused { door_form_id, .. } => {
             api::NavStatus::WaitingForDoor(door_form_id.into())
         }
-        Some(door_link::DoorLinkState::Traversing { door_form_id, .. }) => {
+        door_link::DoorLinkState::Traversing { door_form_id, .. } => {
             api::NavStatus::TraversingDoor(door_form_id.into())
         }
-        Some(door_link::DoorLinkState::TravelReached { door_form_id, .. }) => {
+        door_link::DoorLinkState::TravelReached { door_form_id, .. } => {
             api::NavStatus::TravelReady(door_form_id.into())
         }
-        Some(door_link::DoorLinkState::Failed { door_form_id }) => {
+        door_link::DoorLinkState::Failed { door_form_id } => {
             api::NavStatus::Failed(api::NavFailureReason::BlockedDoor(door_form_id.into()))
         }
-        Some(door_link::DoorLinkState::Idle) | None => {
-            match world.get::<AgentState>(agent_entity).copied() {
-                Some(AgentState::Idle) => api::NavStatus::Idle,
-                Some(AgentState::ReachedTarget) => api::NavStatus::Reached,
-                Some(AgentState::NoPath) => api::NavStatus::Failed(api::NavFailureReason::NoPath),
-                Some(AgentState::AgentNotOnNavMesh) => {
-                    api::NavStatus::Failed(api::NavFailureReason::AgentOffNavmesh)
-                }
-                Some(AgentState::TargetNotOnNavMesh) => {
-                    api::NavStatus::Failed(api::NavFailureReason::TargetOffNavmesh)
-                }
-                Some(
-                    AgentState::Moving
-                    | AgentState::ReachedAnimationLink
-                    | AgentState::UsingAnimationLink
-                    | AgentState::Paused,
-                )
-                | None => api::NavStatus::Routing,
+        door_link::DoorLinkState::Idle => match world.get::<AgentState>(agent_entity).copied() {
+            Some(AgentState::Idle) => api::NavStatus::Idle,
+            Some(AgentState::ReachedTarget) => api::NavStatus::Reached,
+            Some(AgentState::NoPath) => api::NavStatus::Failed(api::NavFailureReason::NoPath),
+            Some(AgentState::AgentNotOnNavMesh) => {
+                api::NavStatus::Failed(api::NavFailureReason::AgentOffNavmesh)
             }
-        }
+            Some(AgentState::TargetNotOnNavMesh) => {
+                api::NavStatus::Failed(api::NavFailureReason::TargetOffNavmesh)
+            }
+            Some(
+                AgentState::Moving
+                | AgentState::ReachedAnimationLink
+                | AgentState::UsingAnimationLink
+                | AgentState::Paused,
+            )
+            | None => api::NavStatus::Routing,
+        },
     };
-    api::NavObservation { status }
+    api::NavObservation { status, generation }
 }
 
 /// Test-only: seeds the empty [`NavArchipelagoState`] a minimal-`World` needs

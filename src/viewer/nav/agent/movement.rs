@@ -1,3 +1,4 @@
+use crate::viewer::nav::debug::DebugAgentRoster;
 /// One tick of the physics-authoritative agent KCC (issue #114): sweeps
 /// `mover` through the real `boxddd::World` using the same free
 /// `move_mover`/step-support helpers the player capsule controller uses
@@ -9,6 +10,8 @@
 /// `player/tests/mod.rs`'s own `move_mover` fixtures) without a Bevy `App`.
 /// Returns the new world position, the new KCC velocity to remember for
 /// next tick, and the new grounded state.
+use crate::viewer::nav::diagnostics::format_agent_id;
+
 use super::*;
 
 pub(crate) fn write_agent_translation(transform: &mut Transform, position: Vec3) {

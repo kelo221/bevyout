@@ -1,5 +1,7 @@
 use crate::viewer::actor::ActorRuntime;
-use crate::viewer::nav::agent::*;
+use crate::viewer::nav::agent::resolve_status;
+use crate::viewer::nav::agent::{AgentKcc, AgentRuntime, DebugNavAgent, NavAgent};
+use crate::viewer::nav::debug::DebugAgentRoster;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_landmass::AgentState;

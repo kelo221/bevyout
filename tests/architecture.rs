@@ -198,7 +198,79 @@ fn navigation_agent_uses_the_composition_directory_and_named_markers() {
     let components =
         fs::read_to_string(root.join("agent/components.rs")).expect("read nav agent components");
     assert!(components.contains("NavAgent"));
-    assert!(components.contains("DebugAgentRoster"));
+    let roster = fs::read_to_string(root.join("debug/roster.rs")).expect("read debug roster");
+    assert!(roster.contains("DebugAgentRoster"));
+    assert!(roster.contains("DebugAgentOrigin"));
+    let capsule = fs::read_to_string(root.join("debug/capsule.rs")).expect("read debug capsule");
+    assert!(capsule.contains("spawn_debug_capsule"));
+    assert!(capsule.contains("despawn_debug_capsule"));
+    let probes = fs::read_to_string(root.join("debug/probes.rs")).expect("read debug probes");
+    assert!(probes.contains("AnimationLinkDebugCapture"));
+    assert!(probes.contains("format_path_steps"));
+    for owner in [
+        "path_probe",
+        "animation_link_probe",
+        "agent_status",
+        "solve_rate_command",
+    ] {
+        assert!(
+            probes.contains(&format!("pub(crate) fn {owner}")),
+            "debug probes must own {owner}"
+        );
+    }
+    let actions = fs::read_to_string(root.join("debug/actions.rs")).expect("read debug actions");
+    for owner in [
+        "spawn_agent",
+        "bind_agent",
+        "goto_agent",
+        "travel_agent",
+        "despawn_agent",
+    ] {
+        assert!(
+            actions.contains(&format!("pub(crate) fn {owner}")),
+            "debug actions must own {owner}"
+        );
+    }
+    let command = fs::read_to_string(root.join("debug/command.rs")).expect("read debug command");
+    assert!(command.contains("tna_command"));
+    assert!(command.contains("parse_agent_index"));
+    for dispatched in [
+        "path_probe",
+        "animation_link_probe",
+        "agent_status",
+        "solve_rate_command",
+        "spawn_agent",
+        "bind_agent",
+        "goto_agent",
+        "travel_agent",
+        "despawn_agent",
+    ] {
+        assert!(
+            !command.contains(&format!("pub(crate) fn {dispatched}")),
+            "debug command must dispatch {dispatched}, not own it"
+        );
+    }
+}
+
+#[test]
+fn navigation_agent_glob_imports_do_not_cross_the_agent_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav");
+    let agent_root = root.join("agent");
+    let mut files = Vec::new();
+    rust_files_below(&root, &mut files);
+    let offenders = files
+        .into_iter()
+        .filter(|path| !path.starts_with(&agent_root))
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read navigation source")
+                .contains("use crate::viewer::nav::agent::*")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "navigation capabilities must import named agent contracts: {offenders:?}"
+    );
 }
 
 #[test]
@@ -259,6 +331,7 @@ fn navigation_slice_has_named_capability_boundaries() {
             &[
                 "mod.rs",
                 "command.rs",
+                "actions.rs",
                 "roster.rs",
                 "capsule.rs",
                 "probes.rs",
@@ -343,6 +416,7 @@ fn navigation_tests_are_split_by_capability() {
         "agent_traversal.rs",
         "agent_doors.rs",
         "agent_handoff.rs",
+        "agent_routing.rs",
         "agent_wedge.rs",
         "agent_diagnostics.rs",
     ] {

@@ -117,7 +117,8 @@ fn drive_pending_autonomous_starts(world: &mut World) {
         if let Err(error) = api::bind_actor(world, entity) {
             warn!(
                 "autonomous package driver: bind {reference_form_id:08x} skipped: {} ({})",
-                error.message, error.code
+                error.message(),
+                error.code()
             );
             continue;
         }

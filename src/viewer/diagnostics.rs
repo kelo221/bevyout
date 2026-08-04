@@ -851,7 +851,7 @@ pub(crate) fn update_debug_info_hud(
     mut refresh: Local<Option<Timer>>,
     players: Query<&Transform, With<player::FpsPlayer>>,
     manifest: Option<Res<crate::viewer::LoadedSceneManifest>>,
-    agents: nav::agent::HudAgentProjection,
+    agents: nav::diagnostics::HudAgentProjection,
     mut hud_text: Query<&mut Text, With<DebugInfoHud>>,
 ) {
     let toggled = state.is_changed();
