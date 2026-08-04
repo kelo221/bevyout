@@ -205,17 +205,29 @@ fn convert_native_actor(
     }
 
     let mut extra_textures = BTreeMap::new();
-    let mut facegen_texture_replacement = None;
-    if let Some(facegen) = descriptor.facegen.as_ref()
-        && let Some(anchor_key) = head_anchor
-        && let Some((path, _, scene)) = decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
-    {
-        match apply_native_facegen(scene, facegen, data_root, archives, &mut extra_textures) {
-            Ok(replacement) => facegen_texture_replacement = Some(replacement),
-            Err(error) => warnings.push(format!(
-                "actor head FaceGen {} could not be applied; retaining authored rest pose: {error}",
-                path
-            )),
+    if let Some(facegen) = descriptor.facegen.as_ref() {
+        match head_anchor {
+            Some(anchor_key) => {
+                if let Some((path, _, scene)) =
+                    decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
+                {
+                    if let Err(error) = apply_native_facegen(
+                        scene,
+                        facegen,
+                        data_root,
+                        archives,
+                        &mut extra_textures,
+                    ) {
+                        warnings.push(format!(
+                            "actor head FaceGen {} could not be applied; retaining authored rest pose: {error}",
+                            path
+                        ));
+                    }
+                } else {
+                    warnings.push(facegen_head_skip_warning(Some(anchor_key.as_str())));
+                }
+            }
+            None => warnings.push(facegen_head_skip_warning(None)),
         }
     }
 
@@ -292,13 +304,6 @@ fn convert_native_actor(
             ));
         }
     }
-    if let Some(replacement) = facegen_texture_replacement {
-        for material in &mut actor.materials {
-            if material.diffuse_texture.as_deref() == Some(replacement.source_path.as_str()) {
-                material.diffuse_texture = Some(replacement.generated_path.clone());
-            }
-        }
-    }
     actor.animations.clear();
     let mut result = convert_actor_scene(ActorSceneConversionRequest {
         source_name: &job.model,
@@ -320,18 +325,13 @@ fn convert_native_actor(
     Ok(result)
 }
 
-struct FaceGenTextureReplacement {
-    source_path: String,
-    generated_path: String,
-}
-
 fn apply_native_facegen(
     scene: &mut nif::fo3::Scene,
     descriptor: &ActorFaceGenDescriptor,
     data_root: &Path,
     archives: &[crate::vsa::bsa::BsaArchive],
     extra_textures: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<FaceGenTextureReplacement, bevyout_core::facegen::FaceGenDiagnostic> {
+) -> Result<(), bevyout_core::facegen::FaceGenDiagnostic> {
     let geometry_bytes = resolve_asset(data_root, archives, &descriptor.geometry_morph_path)
         .map_err(|error| FaceGenDiagnostic::UnsupportedAsset {
             asset: FaceGenAssetKind::GeometryMorph,
@@ -380,24 +380,30 @@ fn apply_native_facegen(
     let synthesized =
         synthesize_head_diffuse(&base_bytes, &texture, &descriptor.resolved.coefficients)?;
     let generated_path = facegen_texture_key(&diffuse_path, &descriptor.resolved.coefficients);
-    for material in &mut candidate.materials {
-        if material.diffuse_texture.as_deref() == Some(diffuse_path.as_str()) {
-            material.diffuse_texture = Some(generated_path.clone());
+    replace_facegen_diffuse(&mut candidate, &diffuse_path, &generated_path);
+    extra_textures.insert(generated_path, synthesized);
+    *scene = candidate;
+    Ok(())
+}
+
+fn replace_facegen_diffuse(scene: &mut nif::fo3::Scene, source_path: &str, generated_path: &str) {
+    for material in &mut scene.materials {
+        if material.diffuse_texture.as_deref() == Some(source_path) {
+            material.diffuse_texture = Some(generated_path.to_owned());
         }
     }
-    // Keep the generated identity as the preferred material key, but also
-    // alias the original diffuse path.  The native scene merge can retain an
-    // equivalent material slot from the shared skeleton; aliasing that key
-    // guarantees the authored head diffuse is replaced by the synthesized
-    // pixels without changing any body, hair, eye, mouth, tooth, or apparel
-    // texture references.
-    extra_textures.insert(generated_path.clone(), synthesized.clone());
-    extra_textures.insert(diffuse_path.clone(), synthesized);
-    *scene = candidate;
-    Ok(FaceGenTextureReplacement {
-        source_path: diffuse_path,
-        generated_path,
-    })
+}
+
+fn facegen_head_skip_warning(head_anchor: Option<&str>) -> String {
+    match head_anchor {
+        Some(anchor) => format!(
+            "actor head FaceGen skipped: head visual {anchor} was not decoded; retaining authored rest pose"
+        ),
+        None => {
+            "actor head FaceGen skipped: descriptor has no head anchor; retaining authored rest pose"
+                .into()
+        }
+    }
 }
 
 fn extract_actor_part(path: &str) -> Result<nif::fo3::Scene> {

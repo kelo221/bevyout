@@ -15,7 +15,10 @@ fn job(root: &Path, index: usize) -> AssetJob {
     }
 }
 
-use nif::fo3::{Scene, SceneMesh, SceneNode, Transform, merge_actor_scene_attached};
+use nif::fo3::{
+    Scene, SceneAlphaMode, SceneMaterial, SceneMesh, SceneNode, Transform, merge_actor_scene,
+    merge_actor_scene_attached,
+};
 
 fn identity_transform() -> Transform {
     Transform {
@@ -71,6 +74,40 @@ fn empty_scene() -> Scene {
     }
 }
 
+fn test_material(diffuse_texture: &str) -> SceneMaterial {
+    SceneMaterial {
+        name: "synthetic".into(),
+        base_color: [1.0; 4],
+        emissive: [0.0; 3],
+        emissive_multiplier: 1.0,
+        roughness: 0.5,
+        alpha_mode: SceneAlphaMode::Opaque,
+        alpha_cutoff: None,
+        double_sided: false,
+        unlit: false,
+        diffuse_texture: Some(diffuse_texture.into()),
+        normal_texture: None,
+        specular_texture: None,
+        glow_texture: None,
+        height_texture: None,
+        environment_texture: None,
+        environment_mask: None,
+        shader_type: 0,
+        shader_flags_1: 0,
+        shader_flags_2: 0,
+    }
+}
+
+fn textured_part(name: &str, diffuse_texture: &str) -> Scene {
+    let mut scene = empty_scene();
+    scene.materials.push(test_material(diffuse_texture));
+    let mut node = mesh_node(name);
+    node.mesh.as_mut().unwrap().material = Some(0);
+    scene.nodes.push(node);
+    scene.roots.push(0);
+    scene
+}
+
 /// A minimal FO3-shaped skeleton carrying the two head attachment frames
 /// the assembler targets: the static `Bip01 Head` bone and the animated
 /// `HeadAnims` node.
@@ -111,6 +148,37 @@ fn descends_from(scene: &Scene, ancestor: usize, target: usize) -> bool {
 fn head_anim_parts_attach_to_headanims_others_to_bip01_head() {
     assert_eq!(head_part_attachment(true), "HeadAnims");
     assert_eq!(head_part_attachment(false), "Bip01 Head");
+}
+
+#[test]
+fn facegen_head_replacement_does_not_rewrite_shared_actor_material() {
+    let source = "textures/head.dds";
+    let generated = "__bevyout_facegen/head.png";
+    let mut actor = textured_part("Body", source);
+    let mut head = textured_part("Head", source);
+
+    replace_facegen_diffuse(&mut head, source, generated);
+    merge_actor_scene(&mut actor, &head).unwrap();
+
+    assert_eq!(actor.materials[0].diffuse_texture.as_deref(), Some(source));
+    assert_eq!(
+        actor.materials[1].diffuse_texture.as_deref(),
+        Some(generated)
+    );
+    assert_eq!(actor.nodes[0].mesh.as_ref().unwrap().material, Some(0));
+    assert_eq!(actor.nodes[1].mesh.as_ref().unwrap().material, Some(1));
+}
+
+#[test]
+fn facegen_head_skip_warning_covers_missing_anchor_and_decoded_head() {
+    assert_eq!(
+        facegen_head_skip_warning(None),
+        "actor head FaceGen skipped: descriptor has no head anchor; retaining authored rest pose"
+    );
+    assert_eq!(
+        facegen_head_skip_warning(Some("meshes/head.nif")),
+        "actor head FaceGen skipped: head visual meshes/head.nif was not decoded; retaining authored rest pose"
+    );
 }
 
 // #206: merging a hair part with the `HeadAnims` attachment the assembler

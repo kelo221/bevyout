@@ -102,6 +102,19 @@ that must remain part of the final PR.
 
 ## Shipped amendments
 
+### Review follow-up: head-only texture scope and diagnostic fallback
+
+- Removed the original diffuse-path alias and post-assembly source-path rewrite
+  from native actor conversion. FaceGen now registers only the generated head
+  texture key, so another actor material sharing the authored path remains
+  unchanged.
+- Native conversion now emits a stable warning when a compatible FaceGen
+  descriptor has no head anchor or its expected head visual was not decoded.
+- Bumped the native actor converter to v18 and the composite prepared converter
+  to the matching `actor-assembly-v18-facegen-head-only` segment.
+- Added focused regression tests covering shared diffuse paths and both missing
+  FaceGen head prerequisites.
+
 - The real FO3 companion layout uses TRI base vertices plus expression vertices:
   `headfemale.tri` reports 1,211 base vertices and 1,078 expression vertices,
   while its EGM reports 2,289 vertices. The bounded TRI header validation now
