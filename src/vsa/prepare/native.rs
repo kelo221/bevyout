@@ -11,6 +11,9 @@ use crate::vsa::nif_convert::{
     convert_nif,
 };
 
+use super::native_hair::{
+    NativeFaceGenHeadFit, build_native_facegen_head_fit, fit_native_hair_to_facegen,
+};
 use super::*;
 
 #[derive(Debug)]
@@ -191,6 +194,7 @@ fn convert_native_actor(
     let head_anchor = head_part_keys.first();
     let mut decoded = Vec::new();
     let mut warnings = Vec::new();
+    let mut facegen_head_fit: Option<NativeFaceGenHeadFit> = None;
     let skeleton_key = actor_path_key(&descriptor.skeleton);
     for path in &descriptor.visual_inputs {
         let key = actor_path_key(path);
@@ -211,6 +215,7 @@ fn convert_native_actor(
                 if let Some((path, _, scene)) =
                     decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
                 {
+                    let rest_head = scene.clone();
                     if let Err(error) = apply_native_facegen(
                         scene,
                         facegen,
@@ -222,6 +227,8 @@ fn convert_native_actor(
                             "actor head FaceGen {} could not be applied; retaining authored rest pose: {error}",
                             path
                         ));
+                    } else {
+                        facegen_head_fit = build_native_facegen_head_fit(&actor, &rest_head, scene);
                     }
                 } else {
                     warnings.push(facegen_head_skip_warning(Some(anchor_key.as_str())));
@@ -272,10 +279,15 @@ fn convert_native_actor(
             path, error
         ));
     }
-    for (path, key, scene) in decoded.iter().filter(|(_, key, _)| {
+    for (path, key, scene) in decoded.iter_mut().filter(|(_, key, _)| {
         head_parts.contains(key) && head_anchor.is_none_or(|anchor| key != anchor)
     }) {
         let attachment = head_part_attachment(head_anim_parts.contains(key));
+        if actor_hair_part(path)
+            && let Some(facegen_head_fit) = facegen_head_fit.as_ref()
+        {
+            fit_native_hair_to_facegen(&actor, scene, attachment, facegen_head_fit);
+        }
         if let Err(error) = nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
             warnings.push(format!(
                 "actor head visual {} could not bind to the shared skeleton: {}",
@@ -425,6 +437,11 @@ fn actor_helper_geometry(path: &str) -> bool {
     ["blowaway", "gore", "gib", "meatcap", "meat_cap"]
         .iter()
         .any(|marker| key.contains(marker))
+}
+
+fn actor_hair_part(path: &str) -> bool {
+    let key = actor_path_key(path);
+    key.starts_with("hair/") || key.contains("/hair/")
 }
 
 /// Skeleton node a head accessory parents under during actor assembly (#160,

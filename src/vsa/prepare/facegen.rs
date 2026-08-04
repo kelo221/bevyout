@@ -461,6 +461,12 @@ fn sample_texture_delta(
     output_width: u32,
     output_height: u32,
 ) -> [f32; 3] {
+    // Fallout's native texture coordinates use a bottom-origin V axis while
+    // decoded image rows and the FaceGen EGT raster are addressed from the
+    // top.  Mirror the output row before sampling so a FaceGen delta lands on
+    // the same facial feature as the base diffuse instead of being vertically
+    // inverted.
+    let output_y = output_height - 1 - output_y;
     if morph_width == output_width && morph_height == output_height {
         let index = (output_y * output_width + output_x) as usize;
         return mode[index];

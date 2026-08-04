@@ -30,13 +30,13 @@ pub(crate) const NATIVE_NIF_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-nor
 
 /// Native actor assembly cache identity. Keep this separate from static NIFs
 /// so skin-binding fixes rebuild actors without invalidating the world.
-pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str = "nifty-fo3-native-actor-assembly-v18-facegen-head-only-fregm002-fregt003-frtri003-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-0dfd052";
+pub(crate) const NATIVE_ACTOR_CONVERTER_REVISION: &str = "nifty-fo3-native-actor-assembly-v20-facegen-head-only-fregm002-fregt003-frtri003-egt-native-row-origin-hair-fit-v1-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-0dfd052";
 
 /// Legacy prepared-scene revision retained only so old manifests can produce a
 /// clear stale-cache result; new preparation records the native revision below.
 pub(crate) const PREPARED_CONVERTER_REVISION: &str = "niftools-blender52-visual-audit-havok-anim-audio-emission-actors-v36-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-environment-light-emission-v1-emission-authority-v2-pbr-material-v3-ktx2-uastc-v1+pynifly-v32-normal-y-v1-pbr-material-v3-actor-bindpose-v22-eyes-creature-primary-fallback-ktx2-uastc-v1+day-night-profile-v1";
 
-pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1+actor-assembly-v18-facegen-head-only-fregm002-fregt003-frtri003-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
+pub(crate) const NATIVE_PREPARED_CONVERTER_REVISION: &str = "nifty-fo3-native-v10-normal-y-v1-specular-normal-alpha-v1-fallout-shader-semantics-v1-emissive-quarter-cap-v1-shader-emission-gate-v2-physical-effect-bulb-v1-effect-emission-control-v1-light-card-promotion-v1-env-light-emission-v1-17f5769-pbr-material-v3-workers-v2-anim-xyzw-v1-audio-cues-v1-havok-joints-v1-com-frame-v1-ktx2-uastc-v1-segmented-trishape-v1+actor-assembly-v20-facegen-head-only-fregm002-fregt003-frtri003-egt-native-row-origin-hair-fit-v1-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-17f5769+day-night-profile-v1";
 
 pub(crate) const SUPPORTED_PREPARED_CONVERTER_REVISIONS: &[&str] = &[
     PREPARED_CONVERTER_REVISION,

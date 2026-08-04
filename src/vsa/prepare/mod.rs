@@ -25,6 +25,7 @@ mod interface;
 mod items;
 mod jobs;
 mod native;
+mod native_hair;
 mod native_policy;
 mod nav_clearance;
 mod nav_clip;

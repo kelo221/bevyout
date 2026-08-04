@@ -10,7 +10,7 @@ Feature: PyNifly actor conversion contract
     When the actor conversion inputs are canonicalized
     Then the actor reference skeleton is "meshes/characters/_male/skeleton.nif"
     And the actor visual inputs are "meshes/characters/_male/skeleton.nif,meshes/characters/_male/head.nif,meshes/characters/_male/upperbody.nif"
-    And the actor converter profile is "nifty-fo3-native-actor-assembly-v18-facegen-head-only-fregm002-fregt003-frtri003-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-0dfd052"
+    And the actor converter profile is "nifty-fo3-native-actor-assembly-v20-facegen-head-only-fregm002-fregt003-frtri003-egt-native-row-origin-hair-fit-v1-normal-y-v1-specular-normal-alpha-v1-pbr-material-v3-selective-head-anims-ktx2-uastc-v1-0dfd052"
 
   Scenario: Inventory weapons are not baked into the actor body
     Given actor gear record kinds "ARMO,WEAP,ARMO"

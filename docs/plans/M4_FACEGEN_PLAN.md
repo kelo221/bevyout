@@ -142,3 +142,29 @@ that must remain part of the final PR.
   Its prepared descendant assemblies and FaceGen assets remain validated;
   the Megaton mercenary supplies the live male geometry/texture/animation/
   weapon gate.
+
+### Visual acceptance follow-up: native FaceGen texture row origin
+
+- A close-up audit found the synthesized EGT deltas vertically inverted on the
+  native Fallout texture boundary, producing a bright mouth-band artifact even
+  though the FaceGen status fields were `Applied`.
+- Native EGT sampling now maps decoded image rows through the bottom-origin
+  Fallout texture V convention before bilinear expansion. The actor converter
+  is v19 and the composite prepared converter carries the matching revision.
+- Added a distinct-row regression test and re-prepared Megaton. Moira's
+  regenerated actor asset is `AuthoredExact` with FaceGen geometry and texture
+  both `Applied`, empty diagnostics, and preserved idle animation.
+
+### Visual acceptance follow-up: FaceGen hair fit
+
+- The close-up hair audit confirmed that FaceGen moved the head surface toward
+  an unchanged hair cap by up to roughly 9 mm in actor space; the hair vertex
+  buffers themselves were unchanged, and the hair texture retains intentional
+  alpha cutouts.
+- Native actor preparation now builds a shared-skeleton head displacement field
+  and applies only outward, scalp-facing corrections to hair parts, with a
+  small deterministic clearance. Head, eyes, mouth, teeth, apparel, topology,
+  and UVs remain unchanged.
+- Bumped the native actor converter to v20 and added synthetic inward/outward
+  hair-fit regression coverage. Real-data regeneration and live close-up
+  verification remain required before the PR handoff.
