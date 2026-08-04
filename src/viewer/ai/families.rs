@@ -71,7 +71,7 @@ pub enum PackageFamily {
     /// FO3 PACK type 12 (Sandbox): bounded, deterministic random movement
     /// within a radius of the resolved package location, idling between legs.
     /// Unlike every other moving family, a sandboxing actor does **not** open
-    /// doors (OpenMW `AiWander` parity -- gated in `nav::agent`).
+    /// doors (OpenMW `AiWander` parity -- exposed through the nav API).
     Sandbox,
 }
 

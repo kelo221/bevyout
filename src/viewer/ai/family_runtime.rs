@@ -12,7 +12,7 @@
 //! # One movement authority (verdict §2.3)
 //!
 //! This adapter translates a family's request into exactly two runtime effects:
-//! a nav route (`agent::route_agent_to_point`/`clear_agent_target`) and an
+//! a nav route (`nav::api::set_goal`/`cancel_goal`) and an
 //! animation state (`request_actor_animation`). It never writes
 //! `Transform.translation`; occupying an interaction point is a claim in
 //! [`PackageInteractionOccupancy`] plus the nav route that already put the actor
@@ -32,7 +32,7 @@ use super::resolution::{ResolutionContext, ResolvedReference};
 use crate::viewer::actor_animation::policy::ActorAnimationState;
 use crate::viewer::actor_animation::request_actor_animation;
 use crate::viewer::interaction;
-use crate::viewer::nav::agent;
+use crate::viewer::nav::api;
 
 /// Compatibility re-export for the Bevy adapter and console callers. The
 /// policy lives in the pure family module so feature tests exercise the same
@@ -166,15 +166,16 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         let target_position = follow_target
             .and_then(|leader| world.get::<Transform>(leader))
             .map(|transform| transform.translation.to_array());
+        let nav_observation = api::observation(world, entity);
         let observation = FamilyObservation {
             target_position,
             // #185's door-link `Failed` terminal names the door the agent's
             // route gave up on; a follow abandons at a door it cannot open.
-            blocking_door: agent::agent_blocking_door(world, entity),
+            blocking_door: nav_observation.blocking_door(),
             ..FamilyObservation::new(
                 actor_position,
-                agent::agent_reached_target(world, entity),
-                agent::agent_route_failed(world, entity),
+                nav_observation.is_reached(),
+                nav_observation.is_failed(),
             )
         };
 
@@ -240,13 +241,24 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         }
         match request {
             Some(FamilyRequest::Route(point)) => {
-                agent::route_agent_to_point(world, entity, Vec3::from_array(point));
+                if let Err(error) =
+                    api::set_goal(world, entity, api::NavGoal::Point(Vec3::from_array(point)))
+                {
+                    warn!(
+                        "package nav submission failed actor={ref_form_id:08x} code={} message={}",
+                        error.code(),
+                        error.message()
+                    );
+                    if let Some(mut controller) = world.get_mut::<ActorPackageController>(entity) {
+                        controller.lifecycle.fail();
+                    }
+                }
                 // Moving: facing belongs to navigation again.
-                agent::set_facing_authority(world, entity, false);
+                api::set_pose_authority(world, entity, false);
             }
             Some(FamilyRequest::Stop) => {
-                agent::clear_agent_target(world, entity);
-                agent::set_facing_authority(world, entity, false);
+                let _ = api::cancel_goal(world, entity);
+                api::set_pose_authority(world, entity, false);
             }
             Some(FamilyRequest::Play(animation)) => {
                 let _ = request_actor_animation(world, entity, animation_state(animation));
@@ -256,13 +268,13 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
                     // yaw. Exactly one system writes rotation this frame -- this
                     // is a rotation write only; translation (the KCC's sole
                     // authority) is never touched here.
-                    agent::set_facing_authority(world, entity, true);
+                    api::set_pose_authority(world, entity, true);
                     if let Some(mut transform) = world.get_mut::<Transform>(entity) {
                         transform.rotation = Quat::from_rotation_y(yaw);
                     }
                 } else {
                     // No authored pose to hold: let navigation steer facing.
-                    agent::set_facing_authority(world, entity, false);
+                    api::set_pose_authority(world, entity, false);
                 }
             }
             None => {}
@@ -270,7 +282,7 @@ pub(crate) fn drive_actor_packages(world: &mut World) {
         // Completion/failure also stops any lingering nav route so the actor
         // does not keep steering toward a finished package's target.
         if matches!(signal, LifecycleSignal::Complete | LifecycleSignal::Fail) {
-            agent::clear_agent_target(world, entity);
+            let _ = api::cancel_goal(world, entity);
         }
         if signal != LifecycleSignal::Continue {
             // A follow that failed because of a door it could not open names
@@ -335,7 +347,7 @@ impl Plugin for AiPackagePlugin {
         // actor (the #164 fall guard / `tna despawn`), tear its package down too
         // -- otherwise the controller keeps ticking an agent-less actor forever
         // and its interaction point never frees.
-        agent::register_bound_actor_release_hook(app.world_mut(), release_actor_package);
+        api::register_release_hook(app.world_mut(), release_actor_package);
         // Issue #218: the always-on autonomous package driver. Registered
         // here (not a separate plugin) because it is the other half of this
         // plugin's job -- making a package actually run -- just triggered by

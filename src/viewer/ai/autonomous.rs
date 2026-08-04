@@ -21,7 +21,7 @@
 //! `nav/agent.rs` uses for its *unfiltered* queries) would see every
 //! matching entity as "added" on every single call, not just genuinely new
 //! ones. Binding + starting a package needs `&mut World` (through
-//! [`agent::bind_agent_entity`] and
+//! [`nav::api::bind_actor`] and
 //! [`crate::viewer::console::ai_package_commands::start_package`]), which an
 //! ordinary system cannot also do alongside a `Query` parameter. So this
 //! splits in two: an ordinary system with a real `Query<..., Added<..>>`
@@ -47,7 +47,7 @@ use crate::viewer::actor::ActorRuntime;
 use crate::viewer::actor_state::ActorStateRuntime;
 use crate::viewer::console::ai_package_commands::start_package;
 use crate::viewer::day_night::GameClock;
-use crate::viewer::nav::agent;
+use crate::viewer::nav::api;
 
 /// Toggle for the autonomous driver, default on -- this wave's whole
 /// deliverable is "on by default, no console command needed". Exists so
@@ -109,15 +109,16 @@ fn drive_pending_autonomous_starts(world: &mut World) {
     }
     let instant = game_instant(world);
     for (entity, reference_form_id, is_alive) in pending {
-        let already_nav_bound = agent::is_nav_bound(world, entity);
+        let already_nav_bound = api::is_bound(world, entity);
         let already_has_controller = world.get::<ActorPackageController>(entity).is_some();
         if !eligible_for_autonomous_start(is_alive, already_nav_bound, already_has_controller) {
             continue;
         }
-        if let Err(error) = agent::bind_agent_entity(world, entity) {
+        if let Err(error) = api::bind_actor(world, entity) {
             warn!(
                 "autonomous package driver: bind {reference_form_id:08x} skipped: {} ({})",
-                error.message, error.code
+                error.message(),
+                error.code()
             );
             continue;
         }
@@ -129,7 +130,7 @@ fn drive_pending_autonomous_starts(world: &mut World) {
                 // Binding and package start form one autonomous transaction.
                 // A catalog/schedule/resolution failure must not leave an
                 // agent with no controller consuming nav runtime work forever.
-                agent::release_bound_actor(world, entity);
+                api::release_actor(world, entity);
                 warn!(
                     "autonomous package driver: start {reference_form_id:08x} skipped: {} ({})",
                     error.message, error.code

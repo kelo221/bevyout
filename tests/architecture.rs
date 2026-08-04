@@ -152,3 +152,277 @@ fn viewer_console_coordinator_stays_small_and_delegates_by_command_family() {
         );
     }
 }
+
+#[test]
+fn ai_uses_the_navigation_api_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/ai");
+    let mut files = Vec::new();
+    rust_files_below(&root, &mut files);
+    let offenders = files
+        .into_iter()
+        .filter(|path| {
+            let source = fs::read_to_string(path).expect("read AI source");
+            source.contains("viewer::nav::agent")
+                || source.contains("nav::agent")
+                || source.contains("nav\\agent")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "AI must depend on nav::api, not nav::agent internals: {offenders:?}"
+    );
+}
+
+#[test]
+fn navigation_agent_uses_the_composition_directory_and_named_markers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav");
+    assert!(
+        !root.join("agent.rs").exists(),
+        "agent root must be a module directory"
+    );
+    for module in [
+        "mod.rs",
+        "components.rs",
+        "actor_binding.rs",
+        "locomotion.rs",
+        "fall_guard.rs",
+    ] {
+        assert!(
+            root.join("agent").join(module).is_file(),
+            "missing agent capability module {module}"
+        );
+    }
+    let source = fs::read_to_string(root.join("agent/mod.rs")).expect("read nav agent root");
+    assert!(!source.contains("TestNavAgentMarker"));
+    assert!(!source.contains("TestNavAgentState"));
+    let components =
+        fs::read_to_string(root.join("agent/components.rs")).expect("read nav agent components");
+    assert!(components.contains("NavAgent"));
+    let roster = fs::read_to_string(root.join("debug/roster.rs")).expect("read debug roster");
+    assert!(roster.contains("DebugAgentRoster"));
+    assert!(roster.contains("DebugAgentOrigin"));
+    let capsule = fs::read_to_string(root.join("debug/capsule.rs")).expect("read debug capsule");
+    assert!(capsule.contains("spawn_debug_capsule"));
+    assert!(capsule.contains("despawn_debug_capsule"));
+    let probes = fs::read_to_string(root.join("debug/probes.rs")).expect("read debug probes");
+    assert!(probes.contains("AnimationLinkDebugCapture"));
+    assert!(probes.contains("format_path_steps"));
+    for owner in [
+        "path_probe",
+        "animation_link_probe",
+        "agent_status",
+        "solve_rate_command",
+    ] {
+        assert!(
+            probes.contains(&format!("pub(crate) fn {owner}")),
+            "debug probes must own {owner}"
+        );
+    }
+    let actions = fs::read_to_string(root.join("debug/actions.rs")).expect("read debug actions");
+    for owner in [
+        "spawn_agent",
+        "bind_agent",
+        "goto_agent",
+        "travel_agent",
+        "despawn_agent",
+    ] {
+        assert!(
+            actions.contains(&format!("pub(crate) fn {owner}")),
+            "debug actions must own {owner}"
+        );
+    }
+    let command = fs::read_to_string(root.join("debug/command.rs")).expect("read debug command");
+    assert!(command.contains("tna_command"));
+    assert!(command.contains("parse_agent_index"));
+    for dispatched in [
+        "path_probe",
+        "animation_link_probe",
+        "agent_status",
+        "solve_rate_command",
+        "spawn_agent",
+        "bind_agent",
+        "goto_agent",
+        "travel_agent",
+        "despawn_agent",
+    ] {
+        assert!(
+            !command.contains(&format!("pub(crate) fn {dispatched}")),
+            "debug command must dispatch {dispatched}, not own it"
+        );
+    }
+}
+
+#[test]
+fn navigation_agent_glob_imports_do_not_cross_the_agent_boundary() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav");
+    let agent_root = root.join("agent");
+    let mut files = Vec::new();
+    rust_files_below(&root, &mut files);
+    let offenders = files
+        .into_iter()
+        .filter(|path| !path.starts_with(&agent_root))
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read navigation source")
+                .contains("use crate::viewer::nav::agent::*")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "navigation capabilities must import named agent contracts: {offenders:?}"
+    );
+}
+
+#[test]
+fn navigation_api_does_not_leak_backend_types() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav/api.rs");
+    let source = fs::read_to_string(path).expect("read navigation API");
+    assert!(!source.contains("bevy_landmass"));
+    assert!(!source.contains("bevy_boxddd"));
+    assert!(!source.contains("Boxddd"));
+}
+
+#[test]
+fn navigation_slice_has_named_capability_boundaries() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav");
+    let nav_root = fs::read_to_string(root.join("mod.rs")).expect("read navigation root");
+    let agent_root = fs::read_to_string(root.join("agent/mod.rs")).expect("read agent root");
+
+    assert!(
+        nav_root.lines().count() <= 120,
+        "nav/mod.rs is a composition boundary"
+    );
+    assert!(
+        agent_root.lines().count() <= 150,
+        "agent/mod.rs is a composition boundary"
+    );
+    assert!(!nav_root.contains("pub(crate) fn read_nav_graph"));
+    assert!(!agent_root.contains("agent_part_"));
+
+    let requirements: &[(&str, &[&str])] = &[
+        (
+            "world",
+            &[
+                "mod.rs",
+                "state.rs",
+                "build.rs",
+                "exterior.rs",
+                "portals.rs",
+                "links.rs",
+                "player_obstacle.rs",
+            ],
+        ),
+        (
+            "doors",
+            &[
+                "mod.rs",
+                "access.rs",
+                "availability.rs",
+                "runtime.rs",
+                "traversal.rs",
+                "travel.rs",
+                "fsm.rs",
+            ],
+        ),
+        ("handoff", &["mod.rs", "ledger.rs", "cell_transition.rs"]),
+        ("diagnostics", &["mod.rs", "logging.rs", "hud.rs"]),
+        (
+            "debug",
+            &[
+                "mod.rs",
+                "command.rs",
+                "actions.rs",
+                "roster.rs",
+                "capsule.rs",
+                "probes.rs",
+            ],
+        ),
+    ];
+    for (directory, modules) in requirements {
+        for module in (*modules).iter() {
+            assert!(
+                root.join(directory).join(module).is_file(),
+                "missing navigation capability module {directory}/{module}"
+            );
+        }
+    }
+}
+
+#[test]
+fn navigation_runtime_state_and_console_errors_have_one_owner() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav");
+    let mut files = Vec::new();
+    rust_files_below(&root, &mut files);
+    let state_definitions = files
+        .iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(path).ok()?;
+            source
+                .contains("struct NavArchipelagoState")
+                .then_some(path)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        state_definitions,
+        vec![root.join("world/state.rs")],
+        "active archipelago state must have one definition"
+    );
+
+    for path in files {
+        let relative = path.strip_prefix(&root).expect("nav path is below root");
+        let source = fs::read_to_string(&path).expect("read nav source");
+        if relative.starts_with("world")
+            || relative.starts_with("handoff")
+            || relative.starts_with("traversal")
+            || relative.starts_with("doors")
+        {
+            assert!(
+                !source.contains("ConsoleError"),
+                "runtime policy modules must return NavError or domain values: {}",
+                relative.display()
+            );
+        }
+    }
+
+    let movement = fs::read_to_string(root.join("agent/movement.rs")).expect("read movement");
+    assert_eq!(
+        movement.matches("transform.translation =").count(),
+        1,
+        "movement owns the single agent translation write"
+    );
+    for path in [
+        root.join("doors/traversal.rs"),
+        root.join("traversal/merge.rs"),
+    ] {
+        assert!(
+            !fs::read_to_string(path)
+                .expect("read traversal source")
+                .contains("transform.translation ="),
+            "traversal adapters use the movement translation seam"
+        );
+    }
+}
+
+#[test]
+fn navigation_tests_are_split_by_capability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viewer/nav/tests");
+    assert!(!root.join("agent.rs").exists());
+    for module in [
+        "support.rs",
+        "agent_world.rs",
+        "agent_debug.rs",
+        "agent_movement.rs",
+        "agent_traversal.rs",
+        "agent_doors.rs",
+        "agent_handoff.rs",
+        "agent_routing.rs",
+        "agent_wedge.rs",
+        "agent_diagnostics.rs",
+    ] {
+        assert!(
+            root.join(module).is_file(),
+            "missing split navigation test {module}"
+        );
+    }
+}

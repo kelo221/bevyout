@@ -35,7 +35,7 @@ fn build_fixture(test_name: &str, reference_form_id: u32, package_type: u8) -> F
     world.init_resource::<PendingAutonomousStarts>();
 
     let archipelago = world.spawn_empty().id();
-    agent::mark_test_archipelago_current(&mut world, cell_form_id, archipelago);
+    api::mark_test_archipelago_current(&mut world, cell_form_id, archipelago);
 
     let fingerprint = format!("autonomous-fp-{test_name}");
     let temp_root = std::env::temp_dir().join(format!(
@@ -150,7 +150,7 @@ fn an_alive_actor_with_a_resolvable_package_auto_binds_and_starts() {
     drive_pending_autonomous_starts(&mut fixture.world);
 
     assert!(
-        agent::is_nav_bound(&fixture.world, actor),
+        api::is_bound(&fixture.world, actor),
         "the alive actor must be nav-bound"
     );
     assert!(
@@ -171,7 +171,7 @@ fn a_dead_actor_is_never_auto_bound() {
     drive_pending_autonomous_starts(&mut fixture.world);
 
     assert!(
-        !agent::is_nav_bound(&fixture.world, actor),
+        !api::is_bound(&fixture.world, actor),
         "a corpse must never be nav-bound by the autonomous driver"
     );
     assert!(fixture.world.get::<ActorPackageController>(actor).is_none());
@@ -186,8 +186,8 @@ fn an_already_nav_bound_actor_is_not_double_bound() {
     let actor = spawn_actor(&mut fixture.world, 0x1003, ActorLifeState::Alive);
     // Simulate a `tna bind` that already ran, through the real bind
     // entry point (not a private-component insert -- `AgentKcc` is not
-    // nameable outside `nav::agent`).
-    agent::bind_agent_entity(&mut fixture.world, actor).expect("pre-bind succeeds");
+    // nameable outside the nav runtime implementation).
+    api::bind_actor(&mut fixture.world, actor).expect("pre-bind succeeds");
 
     fixture
         .world
@@ -218,7 +218,7 @@ fn the_disabled_toggle_is_a_complete_no_op() {
         .unwrap();
     drive_pending_autonomous_starts(&mut fixture.world);
 
-    assert!(!agent::is_nav_bound(&fixture.world, actor));
+    assert!(!api::is_bound(&fixture.world, actor));
     assert!(fixture.world.get::<ActorPackageController>(actor).is_none());
 }
 
@@ -273,6 +273,6 @@ fn a_failed_package_start_rolls_back_the_autonomous_bind() {
         .unwrap();
     drive_pending_autonomous_starts(&mut fixture.world);
 
-    assert!(!agent::is_nav_bound(&fixture.world, actor));
+    assert!(!api::is_bound(&fixture.world, actor));
     assert!(fixture.world.get::<ActorPackageController>(actor).is_none());
 }

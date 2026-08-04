@@ -12,7 +12,7 @@ fn controller_world(controller: ActorPackageController, position: Vec3) -> (Worl
     world.init_resource::<PackageInteractionOccupancy>();
     // `route_agent_to_target` (the `FamilyRequest::Route` seam) reads the
     // nav archipelago state; seed the empty one a minimal world needs.
-    agent::insert_test_archipelago_state(&mut world);
+    api::insert_test_archipelago_state(&mut world);
     let entity = world
         .spawn((
             Transform::from_translation(position),
@@ -20,6 +20,7 @@ fn controller_world(controller: ActorPackageController, position: Vec3) -> (Worl
             controller,
         ))
         .id();
+    api::insert_test_nav_agent(&mut world, entity);
     (world, entity)
 }
 
@@ -144,7 +145,7 @@ fn releasing_a_bound_actor_tears_down_its_running_package() {
     );
     let (mut world, entity) = controller_world(controller, Vec3::ZERO);
     // Register the AI teardown hook exactly as `AiPackagePlugin::build` does.
-    agent::register_bound_actor_release_hook(&mut world, release_actor_package);
+    api::register_release_hook(&mut world, release_actor_package);
 
     world.run_system_once(drive_actor_packages).unwrap();
     assert!(
@@ -156,7 +157,7 @@ fn releasing_a_bound_actor_tears_down_its_running_package() {
     );
 
     // Nav releases the actor (the fall-guard / `tna despawn` path).
-    agent::release_bound_actor(&mut world, entity);
+    api::release_actor(&mut world, entity);
 
     // Observable outcome: the package controller is gone and the point freed.
     assert!(
@@ -195,7 +196,7 @@ fn follow_family_routes_to_the_leader_without_moving_the_actor() {
     let mut world = World::new();
     world.insert_resource(Time::<()>::default());
     world.init_resource::<PackageInteractionOccupancy>();
-    agent::insert_test_archipelago_state(&mut world);
+    api::insert_test_archipelago_state(&mut world);
     // The moving leader the follower samples each tick.
     let leader = world
         .spawn(Transform::from_translation(Vec3::new(30.0, 0.0, 0.0)))
@@ -216,6 +217,7 @@ fn follow_family_routes_to_the_leader_without_moving_the_actor() {
             controller,
         ))
         .id();
+    api::insert_test_nav_agent(&mut world, entity);
 
     world.run_system_once(drive_actor_packages).unwrap();
 

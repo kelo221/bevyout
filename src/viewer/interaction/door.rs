@@ -20,7 +20,7 @@ use super::*;
 ///
 /// Issue #134: `door_form_id` is the *origin* door reference the player
 /// activated (`PreparedPlacement::reference_form_id`) -- `world::swap`
-/// threads it through to `nav::agent::note_player_swap_door` so the
+/// threads it through to `nav::api::note_player_door_transition` so the
 /// intercell agent ledger can decide follow-through vs. freeze for any
 /// live nav agent still in the departing cell.
 #[derive(Message, Clone, Copy, Debug)]

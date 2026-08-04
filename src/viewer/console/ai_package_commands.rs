@@ -31,7 +31,7 @@ use super::super::ai::resolution::{
 use super::super::ai::selection::{
     self, CandidateOutcome, GameInstant, NoConditionFunctions, PackageCandidate, PackageSchedule,
 };
-use super::super::nav::agent;
+use super::super::nav::api;
 use super::*;
 
 /// Follow band maximum (chase radius, metres) when the package's `PTDT`
@@ -541,7 +541,7 @@ pub(crate) fn start_package(
     reference_form_id: u32,
     instant: GameInstant,
 ) -> Result<ConsoleCommandResult, ConsoleError> {
-    if !agent::is_nav_bound(world, entity) {
+    if !api::is_bound(world, entity) {
         return Err(ConsoleError::new(
             "not_bound",
             format!(
@@ -601,7 +601,15 @@ pub(crate) fn start_package(
     // Set the nav-owned door policy for this family before dispatching: only
     // Sandbox/Wander refuses to open doors (#198). Nav reads this marker at its
     // door-open seam and never learns the family type itself.
-    agent::set_agent_refuses_doors(world, entity, !family.opens_doors());
+    api::set_door_policy(
+        world,
+        entity,
+        if family.opens_doors() {
+            api::DoorUsePolicy::MayOpen
+        } else {
+            api::DoorUsePolicy::RefusesDoors
+        },
+    );
 
     let context = build_resolution_context(world, reference_form_id);
     // The dynamic families (#198) resolve differently: Follow needs the live
@@ -868,11 +876,11 @@ fn stop_package(
             .0
             .remove(&point);
     }
-    agent::clear_agent_target(world, entity);
+    let _ = api::cancel_goal(world, entity);
     // Clear the nav-owned door policy and hand facing back to navigation: the
     // package that set them is ending.
-    agent::set_agent_refuses_doors(world, entity, false);
-    agent::set_facing_authority(world, entity, false);
+    api::set_door_policy(world, entity, api::DoorUsePolicy::MayOpen);
+    api::set_pose_authority(world, entity, false);
     world.entity_mut(entity).remove::<ActorPackageController>();
     Ok(ConsoleCommandResult::new(
         json!({

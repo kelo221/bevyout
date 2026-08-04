@@ -2,27 +2,33 @@
 //! the prepared per-cell nav graph (#111's `navgraph.ron`, the same way
 //! `nav_overlay.rs` reads it), converting it into a validated
 //! `bevy_landmass` navigation mesh via the pure `landmass_graph` module, and
-//! running a crude kinematic test agent (`agent.rs`) driven by the `tna`
+//! running a crude kinematic test agent (`agent/`) driven by the `tna`
 //! console command family. This is the runtime navigation slice seam #113
 //! grows into the full Fallout adapter (travel doors, AI packages); this
 //! wave stays a spike -- one archipelago per active cell (one island per
 //! prepared nav mesh within it), built lazily, torn down on cell swap.
 
-use std::path::{Path, PathBuf};
-
-use anyhow::Context;
 use bevy::prelude::*;
-use serde_json::json;
-
-use crate::console::{ConsoleCommandResult, ConsoleError, ConsoleInvocation};
-use crate::vsa::{PreparedNavGraph, PreparedSceneManifest};
 
 pub(crate) mod agent;
+pub(crate) mod api;
+pub(crate) mod debug;
+pub(crate) mod diagnostics;
 pub(crate) mod door_link;
+pub(crate) mod doors;
+pub(crate) mod handoff;
+mod input;
 pub(crate) mod landmass_graph;
 pub(crate) mod ledger_policy;
 pub(crate) mod movement_policy;
+pub(crate) mod openmw_doors;
+mod plugin;
 pub(crate) mod repath;
+pub(crate) mod traversal;
+pub(crate) mod world;
+
+pub(crate) use input::*;
+pub(crate) use plugin::NavBackendPlugin;
 
 pub(crate) struct NavPlugin;
 
@@ -34,227 +40,4 @@ impl Plugin for NavPlugin {
 
 fn install(app: &mut App) {
     agent::install(app);
-}
-
-/// Reads+parses `navgraph.ron`. Duplicated from `nav_overlay::read_nav_graph`
-/// rather than shared: that function is private to `nav_overlay.rs`, which
-/// this wave's file-ownership boundary does not include.
-pub(crate) fn read_nav_graph(path: &Path) -> anyhow::Result<PreparedNavGraph> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("nav graph does not exist: {}", path.display()))?;
-    ron::de::from_str(&text).with_context(|| format!("invalid nav graph RON: {}", path.display()))
-}
-
-/// Resolve a prepared navigation graph for tooling and interior runtime use.
-/// Exterior packages can be converted to the same DTO for diagnostics, but
-/// `nav::agent` rejects that flattened form until the full NAVM semantics and
-/// resident-cell stitching contract are preserved.
-pub(crate) fn read_nav_graph_for_manifest(
-    manifest: &PreparedSceneManifest,
-) -> anyhow::Result<PreparedNavGraph> {
-    if let Some(path) = nav_graph_path(manifest) {
-        return read_nav_graph(&path);
-    }
-    let package = manifest
-        .exterior
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no prepared exterior package"))?;
-    read_nav_graph_for_exterior_package(Path::new(&manifest.asset_root), package)
-}
-
-/// Reads the semantic prepared graph owned by one streamed exterior package.
-/// The graph path is relative to the prepared cache root, just like the
-/// manifest-level `PreparedNavGraphSource` path. The flattened fallback is
-/// retained only for old diagnostic packages; callers that need production
-/// navigation must check `PreparedExteriorNavigation::clearance_ready`.
-pub(crate) fn read_nav_graph_for_exterior_package(
-    asset_root: &Path,
-    package: &bevyout_core::manifest::exterior::ExteriorCellPackage,
-) -> anyhow::Result<PreparedNavGraph> {
-    let navigation = package
-        .navigation
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("exterior package has no navigation tile"))?;
-    if let Some(path) = navigation.graph_asset_path.as_deref() {
-        let graph_path =
-            PathBuf::from(asset_root).join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
-        return read_nav_graph(&graph_path);
-    }
-    Ok(crate::vsa::exterior_nav_graph(
-        package.cell_form_id,
-        navigation.vertices.clone(),
-        navigation.triangles.clone(),
-    ))
-}
-
-/// Resolves `manifest.nav_graph`'s `asset_path` against `asset_root`, the
-/// same way `nav_overlay::toggle_nav_mesh` does. `None` when the cell has no
-/// prepared nav graph.
-pub(crate) fn nav_graph_path(manifest: &PreparedSceneManifest) -> Option<PathBuf> {
-    let source = manifest.nav_graph.as_ref()?;
-    Some(
-        PathBuf::from(&manifest.asset_root).join(
-            source
-                .asset_path
-                .replace('/', std::path::MAIN_SEPARATOR_STR),
-        ),
-    )
-}
-
-/// Boundary conversion: `PreparedNavGraph`/`PreparedNavMesh` (vsa's decode
-/// output, issue #111) -> `landmass_graph`'s own plain input DTOs. Keeps
-/// `landmass_graph` free of any `vsa`/Bevy import so it stays includable
-/// verbatim by `tests/features.rs` via `#[path]` -- see that module's doc
-/// comment for why this boundary conversion cannot live inside it.
-///
-/// Issue #153 (M4 wave 10): the prepared graph's vertices already carry the
-/// collision-derived agent-radius clearance offset, and each polygon's
-/// `walkable` flag records the prepare-side validation verdict (removed for
-/// lacking collision support, cut by an interior collider, or disconnected as
-/// a sub-diameter corridor throat). `!walkable` polygons are excluded here so
-/// they never reach the landmass navigation mesh -- a route into a dropped
-/// region is then `unreachable` at query time. The interim runtime erosion
-/// pass is retired; clearance now lives entirely prepare-side.
-pub(crate) fn mesh_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MeshInput> {
-    graph
-        .meshes
-        .iter()
-        .map(|mesh| landmass_graph::MeshInput {
-            form_id: mesh.form_id,
-            vertices: mesh.vertices.clone(),
-            polygons: mesh
-                .polygons
-                .iter()
-                .filter(|polygon| polygon.walkable)
-                .map(|polygon| landmass_graph::PolygonInput {
-                    index: polygon.index,
-                    vertex_indices: polygon.vertex_indices,
-                    is_water: polygon.is_water,
-                    is_preferred_pathing: polygon.is_preferred_pathing,
-                })
-                .collect(),
-            doors: mesh
-                .doors
-                .iter()
-                .map(|door| landmass_graph::DoorInput {
-                    triangle_index: door.triangle_index,
-                    door_reference_form_id: door.door_reference_form_id,
-                })
-                .collect(),
-            // Issue #177: collision-derived blocker associations, carried
-            // separately from the authored `NVDP` list -- see
-            // `landmass_graph::MeshInput::derived_doors` for why they must
-            // never be merged into it.
-            derived_doors: mesh
-                .derived_doors
-                .iter()
-                .map(|door| landmass_graph::DerivedDoorInput {
-                    triangle_index: door.triangle_index,
-                    door_reference_form_id: door.door_reference_form_id,
-                    blocks_when_closed: door.blocks_when_closed,
-                    openable: door.openable,
-                })
-                .collect(),
-        })
-        .collect()
-}
-
-/// Boundary conversion: `PreparedNavGraph::mesh_merges` (prepare-time
-/// spatial cross-mesh connections, issue #113 feature 2; validated portal
-/// intervals added issue #154 feature 1) -> plain
-/// `landmass_graph::MergeInput`s. Same split rationale as `mesh_inputs`.
-/// `edge_a`/`edge_b` (the matched edges' vertex-index identity) stay
-/// prepare-side only -- nothing at runtime needs to re-derive geometry from
-/// them, only the already-resolved `interval_a`/`interval_b` world points.
-pub(crate) fn merge_inputs(graph: &PreparedNavGraph) -> Vec<landmass_graph::MergeInput> {
-    graph
-        .mesh_merges
-        .iter()
-        .map(|merge| landmass_graph::MergeInput {
-            mesh_a_form_id: merge.mesh_a_form_id,
-            triangle_a: merge.triangle_a,
-            mesh_b_form_id: merge.mesh_b_form_id,
-            triangle_b: merge.triangle_b,
-            interval_a: merge.interval_a,
-            interval_b: merge.interval_b,
-        })
-        .collect()
-}
-
-/// A travel door's resolved far side (issue #113 feature 3 / #134): the
-/// destination cell, and the door reference FormID *in that cell* the
-/// destination metadata pairs this door with (`PreparedDoorDestination::
-/// door_reference_form_id`) -- the same marker position the player's own
-/// teleport uses, and what #134's ledger keys a door-marker spawn on.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TravelDestination {
-    pub(crate) cell_form_id: u32,
-    pub(crate) door_reference_form_id: u32,
-}
-
-/// Door reference FormID -> resolved travel destination, for every
-/// placement in `manifest` whose semantic is a travel door (issue #113
-/// feature 3). Reuses the existing world-transition door-destination data
-/// (`PreparedDoor`, #51/#52) rather than a new lookup -- a placement's
-/// `reference_form_id` is exactly the FormID the prepared nav graph's door
-/// array keys triangle associations by
-/// (`PreparedNavDoor::door_reference_form_id`).
-pub(crate) fn travel_door_destinations(
-    manifest: &PreparedSceneManifest,
-) -> std::collections::HashMap<u32, TravelDestination> {
-    manifest
-        .placements
-        .iter()
-        .filter_map(|placement| match &placement.semantic {
-            crate::vsa::PreparedSemantic::Door(door) => {
-                door.destination.as_ref().map(|destination| {
-                    (
-                        placement.reference_form_id,
-                        TravelDestination {
-                            cell_form_id: destination.cell_form_id,
-                            door_reference_form_id: destination.door_reference_form_id,
-                        },
-                    )
-                })
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// Visible exterior navigation diagnostics. This deliberately reports the
-/// prepared tile and border evidence without forcing a landmass build, so it
-/// is useful before `tna spawn` and remains safe when a package has no NAVM.
-pub(crate) fn exterior_command(
-    world: &mut World,
-    invocation: &ConsoleInvocation,
-) -> Result<ConsoleCommandResult, ConsoleError> {
-    let manifest = world
-        .get_resource::<crate::viewer::LoadedSceneManifest>()
-        .ok_or_else(|| ConsoleError::new("unavailable", "no prepared scene is loaded"))?;
-    let package = manifest
-        .exterior
-        .as_ref()
-        .ok_or_else(|| ConsoleError::new("not_exterior", "active scene is not exterior"))?;
-    let navigation = package.navigation.as_ref().ok_or_else(|| {
-        ConsoleError::new("no_exterior_nav", "exterior package has no navigation tile")
-    })?;
-    match invocation.args.as_slice() {
-        [command] if command == "exterior" => Ok(ConsoleCommandResult::value(json!({
-            "cell_form_id": package.cell_form_id,
-            "grid": [package.grid.x, package.grid.y],
-            "vertices": navigation.vertices.len(),
-            "triangles": navigation.triangles.len(),
-            "border_portals": navigation.border_portals.len(),
-            "revision": navigation.revision.as_str(),
-        }))),
-        [command] if command == "borders" => Ok(ConsoleCommandResult::value(json!({
-            "cell_form_id": package.cell_form_id,
-            "portals": &navigation.border_portals,
-        }))),
-        _ => Err(ConsoleError::new(
-            "bad_args",
-            "nav expects exterior or borders",
-        )),
-    }
 }

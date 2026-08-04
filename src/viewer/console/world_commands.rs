@@ -746,12 +746,12 @@ pub(super) fn activate_reference(
 /// in-cell acceptance door didn't exist in either prepared acceptance cell
 /// (#155's manual script gap), so this is the runtime surface that flips a
 /// door's lock level for both consumers from one call site, matching
-/// `interaction::door_is_locked`/`nav::agent::door_open_and_locked`'s shared
+/// `interaction::door_is_locked`/the navigation API's shared
 /// "level <= 0 or absent is unlocked" rule:
 ///  - `interaction::PlacementRoot::set_door_lock_level` -- the same
 ///    component the player's own E-activation reads (`door_is_locked`), so
 ///    the very next activation attempt sees the change.
-///  - `nav::agent::set_door_lock_level` -- `NavArchipelagoState`'s
+///  - `nav::api::set_door_lock_level` -- `NavArchipelagoState`'s
 ///    `door_lock_info` snapshot `door_availability_system` polls every
 ///    frame, so a route through a newly locked door is excluded (or a
 ///    newly unlocked one re-included) without any extra plumbing.
@@ -821,9 +821,13 @@ pub(super) fn setlock(
     if let Some(key_form_id) = key_form_id {
         root.set_door_key_form_id(key_form_id);
     }
-    nav::agent::set_door_lock_level(world, placement.reference_form_id, lock_level);
+    nav::api::set_door_lock_level(world, placement.reference_form_id.into(), lock_level);
     if let Some(key_form_id) = key_form_id {
-        nav::agent::set_door_key_form_id(world, placement.reference_form_id, key_form_id);
+        nav::api::set_door_key_form_id(
+            world,
+            placement.reference_form_id.into(),
+            key_form_id.map(Into::into),
+        );
     }
     let mut summary = match lock_level {
         Some(level) => format!("setlock {:08x} level {level}", placement.reference_form_id),
@@ -1066,7 +1070,7 @@ pub(super) fn teleport_player_in_place(
 /// `activate_resident_cell` places the player there via `player::
 /// teleport_active_player` as part of the very same swap a door uses; a
 /// synthetic `door_form_id: 0` (never a real FormID) marks it as not a real
-/// door for `nav::agent::note_player_swap_door`'s follow-through/freeze
+/// door for `nav::api::note_player_door_transition`'s follow-through/freeze
 /// bookkeeping. A destination already equal to the active cell skips the
 /// swap and falls back to the plain in-place teleport above. An unprepared
 /// destination cell fails synchronously and deterministically, matching

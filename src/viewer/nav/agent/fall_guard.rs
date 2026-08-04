@@ -18,7 +18,8 @@
 //! Std-only (no `bevy`/`bevy_landmass` import) so `tests/features.rs` can
 //! include it verbatim via `#[path]`, mirroring `movement_policy.rs`.
 //!
-//! The Bevy system that applies this verdict lives in `nav/agent.rs`; it
+//! The Bevy system that applies this verdict lives in the adjacent runtime
+//! adapter; it
 //! samples each agent's real capsule-centre Y and the active cell's bounds
 //! and does nothing but feed them here and act on the result -- no
 //! decision-making in the system itself.
@@ -65,5 +66,5 @@ pub(crate) fn evaluate_fall(bounds_min_y: f32, agent_y: f32) -> FallVerdict {
 }
 
 #[cfg(test)]
-#[path = "tests/fall_guard.rs"]
+#[path = "../tests/fall_guard.rs"]
 mod tests;
