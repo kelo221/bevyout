@@ -1127,6 +1127,38 @@ struct AtlasLayout {
     height: u32,
 }
 
+/// Reject pages that cannot be represented by the one-primitive/one-binding
+/// atlas contract before the backend starts tracing them. A later geometry
+/// split could remove this restriction, but slicing a finished page would
+/// invalidate UV1, cache identities, variance artifacts, and runtime bindings.
+pub(crate) fn validate_page_dimensions(
+    scene: &super::rust_scene::RustBakeScene,
+    max_size: u32,
+) -> Result<()> {
+    if max_size <= LIGHTMAP_ATLAS_GUTTER_TEXELS * 2 {
+        bail!("lightmap atlas page size must exceed its gutter");
+    }
+    let usable_size = max_size - LIGHTMAP_ATLAS_GUTTER_TEXELS * 2;
+    for primitive in &scene.primitives {
+        let [width, height] = primitive.lightmap_dimensions;
+        if width <= usable_size && height <= usable_size {
+            continue;
+        }
+        let required = width.max(height).max(1) as f32;
+        let density_limit = primitive.lightmap_texels_per_meter * usable_size as f32 / required;
+        bail!(
+            "lightmap primitive {} requires {}x{} atlas texels, exceeding {}; reduce --lightmap-texels-per-meter to <= {:.2} (current {:.2})",
+            primitive.name,
+            width.saturating_add(LIGHTMAP_ATLAS_GUTTER_TEXELS * 2),
+            height.saturating_add(LIGHTMAP_ATLAS_GUTTER_TEXELS * 2),
+            max_size,
+            density_limit,
+            primitive.lightmap_texels_per_meter,
+        );
+    }
+    Ok(())
+}
+
 /// Packs the deterministic per-primitive pages into atlas images while
 /// preserving each primitive's local UV1. The two-texel gutter copies edge
 /// texels so bilinear sampling cannot immediately read a neighboring tile.

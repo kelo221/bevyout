@@ -264,7 +264,7 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     let CommandLine::Bake(args) = cli.command else {
         panic!("expected bake command");
     };
-    assert_eq!(args.static_batch_chunk_meters, 64.0);
+    assert_eq!(args.static_batch_chunk_meters, None);
     assert_eq!(args.lightmap_backend, LightmapBackendPreference::Cpu);
     assert!(args.lightmap_environment_map.is_none());
     assert_eq!(args.irradiance_spacing_meters, 8.0);
@@ -272,12 +272,12 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
     assert_eq!(args.lightmap_min_samples, 4);
     assert_eq!(args.lightmap_max_samples, 32);
     assert_eq!(args.lightmap_bounces, 2);
-    assert_eq!(args.lightmap_texels_per_meter, 16.0);
+    assert_eq!(args.lightmap_texels_per_meter, None);
     assert!(args.lightmap_density_overrides.is_empty());
     assert!(!args.lightmap_debug_uv);
     assert!(!args.lightmap_debug_samples);
     assert!(!args.lightmap_debug_variance);
-    assert_eq!(args.lightmap_tile_size, 128);
+    assert_eq!(args.lightmap_tile_size, None);
     assert_eq!(args.lightmap_denoise_iterations, 1);
     assert!(!args.lightmap_force_retrace);
     assert!(

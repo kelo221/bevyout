@@ -4,6 +4,47 @@ use super::rust_scene::synthetic_lightmap_scene_for_test;
 use super::*;
 
 #[test]
+fn backend_defaults_keep_cpu_quality_and_make_solari_fast() {
+    assert_eq!(
+        default_lightmap_texels_per_meter(LightmapBackendPreference::Cpu),
+        16.0
+    );
+    assert_eq!(
+        default_lightmap_tile_size(LightmapBackendPreference::Cpu),
+        128
+    );
+    assert_eq!(
+        default_static_batch_chunk_meters(LightmapBackendPreference::Cpu),
+        64.0
+    );
+    assert_eq!(
+        default_lightmap_texels_per_meter(LightmapBackendPreference::Solari),
+        4.0
+    );
+    assert_eq!(
+        default_lightmap_tile_size(LightmapBackendPreference::Solari),
+        512
+    );
+    assert_eq!(
+        default_static_batch_chunk_meters(LightmapBackendPreference::Solari),
+        32.0
+    );
+}
+
+#[test]
+fn oversized_lightmap_pages_fail_before_backend_dispatch() {
+    let mut scene = synthetic_lightmap_scene_for_test();
+    scene.primitives[0].lightmap_dimensions = [4093, 8];
+
+    let error = super::lightmap::validate_page_dimensions(&scene, 4096).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("reduce --lightmap-texels-per-meter")
+    );
+}
+
+#[test]
 fn lightmap_binding_projection_preserves_primitive_identity_and_uv_rect() {
     let scene = synthetic_lightmap_scene_for_test();
     let pages = vec![LightmapPage {

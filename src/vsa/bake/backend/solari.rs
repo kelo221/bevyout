@@ -41,7 +41,6 @@ use bevy::solari::scene::RaytracingSceneBindings;
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy::winit::WinitPlugin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 pub(crate) fn required_wgpu_features() -> bevy::render::settings::WgpuFeatures {
     bevy::solari::SolariPlugins::required_wgpu_features()
@@ -747,10 +746,7 @@ impl SolariBakeSession {
                 .world()
                 .resource::<RenderDevice>()
                 .wgpu_device()
-                .poll(bevy::render::render_resource::PollType::Wait {
-                    submission_index: None,
-                    timeout: Some(Duration::from_millis(50)),
-                })
+                .poll(bevy::render::render_resource::PollType::wait_indefinitely())
                 .context("waiting for Solari bake GPU work")?;
             if let Some(result) = readback
                 .lock()

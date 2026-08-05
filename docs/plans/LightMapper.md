@@ -1592,6 +1592,20 @@ custom BVH/traversal implementation:
   `.bevyout/screenshots/gpu_bake_solari.png`. This is visual runtime evidence
   for the integrated path, not a cross-adapter parity gate or a production
   quality bake.
+* Solari now has an explicit fast default profile when density, tile size, and
+  static batch size are omitted: `4` texels/metre, `512`-texel accumulation
+  tiles, and `32 m` static batches. CPU/Auto defaults remain `16`, `128`, and
+  `64 m`. Higher Solari density remains an explicit quality choice.
+* Atlas-size validation now runs immediately after composition, before any
+  backend dispatch. It reports the maximum fitting density instead of spending
+  minutes tracing an unrepresentable page. Solari readback also waits
+  indefinitely for the submitted GPU work rather than treating a normal 50 ms
+  wgpu poll timeout as a bake failure.
+* The exact fast Solari command completed on real `Tenpenny01` (`00017f34`) in
+  `68.04 s` after compilation with `--lightmap-tile-size 512`: `192` primitive
+  pages, `4` atlases, `379` GPU tile misses/writes, and the existing CPU
+  irradiance volume. This is a successful real-cell acceptance result, not a
+  claim that all adapters have the same timing.
 
 ### Review correction — 2026-08-05
 

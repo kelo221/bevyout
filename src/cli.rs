@@ -538,13 +538,10 @@ pub struct BakeArgs {
         value_parser = parse_lightmap_bounce_count
     )]
     pub(crate) lightmap_bounces: u32,
-    /// Default surface-lightmap texel density in texels per world-space metre.
-    #[arg(
-        long,
-        default_value_t = 16.0,
-        value_parser = parse_lightmap_texels_per_meter
-    )]
-    pub(crate) lightmap_texels_per_meter: f32,
+    /// Surface-lightmap texel density in texels per world-space metre.
+    /// When omitted, CPU/Auto uses 16 and Solari uses a fast 4-texel preset.
+    #[arg(long, value_parser = parse_lightmap_texels_per_meter)]
+    pub(crate) lightmap_texels_per_meter: Option<f32>,
     /// Per-placement density override in the form FORM_ID=TEXELS_PER_METER.
     /// May be repeated; overrides are keyed by the prepared reference FormID.
     #[arg(long = "lightmap-density", value_parser = parse_lightmap_density_override)]
@@ -567,22 +564,18 @@ pub struct BakeArgs {
     )]
     pub(crate) lightmap_denoise_iterations: u32,
     /// Persistent surface-lightmap accumulation tile edge in texels.
-    #[arg(
-        long,
-        default_value_t = 128,
-        value_parser = parse_lightmap_tile_size
-    )]
-    pub(crate) lightmap_tile_size: u32,
+    /// When omitted, CPU/Auto uses 128 and Solari uses 512 to reduce
+    /// per-dispatch/readback overhead.
+    #[arg(long, value_parser = parse_lightmap_tile_size)]
+    pub(crate) lightmap_tile_size: Option<u32>,
     /// Discard completed surface-lightmap accumulation tiles before tracing.
     #[arg(long)]
     pub(crate) lightmap_force_retrace: bool,
     /// World-space size of material-compatible static geometry batches, in metres.
-    #[arg(
-        long,
-        default_value_t = 64.0,
-        value_parser = parse_static_batch_chunk_meters
-    )]
-    pub(crate) static_batch_chunk_meters: f32,
+    /// When omitted, CPU/Auto uses 64 m and Solari uses 32 m to keep pages
+    /// within the one-primitive atlas contract.
+    #[arg(long, value_parser = parse_static_batch_chunk_meters)]
+    pub(crate) static_batch_chunk_meters: Option<f32>,
     /// Unified KTX-Software `ktx.exe` path (legacy option name).
     #[arg(long)]
     pub(crate) toktx: Option<PathBuf>,

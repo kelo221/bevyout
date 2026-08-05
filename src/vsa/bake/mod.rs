@@ -190,6 +190,15 @@ pub(crate) fn build_bake_job(
                 directional_rgba: manifest.cell.directional_rgba,
                 ..Default::default()
             });
+    let lightmap_texels_per_meter = args
+        .lightmap_texels_per_meter
+        .unwrap_or_else(|| default_lightmap_texels_per_meter(args.lightmap_backend));
+    let lightmap_tile_size = args
+        .lightmap_tile_size
+        .unwrap_or_else(|| default_lightmap_tile_size(args.lightmap_backend));
+    let static_batch_chunk_meters = args
+        .static_batch_chunk_meters
+        .unwrap_or_else(|| default_static_batch_chunk_meters(args.lightmap_backend));
     BakeJob {
         asset_root: job_path(&outputs.asset_root),
         output_scene: job_path(&outputs.output_scene),
@@ -199,7 +208,7 @@ pub(crate) fn build_bake_job(
         lightmap_max_samples: args.lightmap_max_samples,
         lightmap_variance_threshold: args.lightmap_variance_threshold,
         lightmap_bounces: args.lightmap_bounces,
-        lightmap_texels_per_meter: args.lightmap_texels_per_meter,
+        lightmap_texels_per_meter,
         lightmap_density_overrides: args
             .lightmap_density_overrides
             .iter()
@@ -211,9 +220,9 @@ pub(crate) fn build_bake_job(
             })
             .collect::<BTreeMap<_, _>>(),
         lightmap_denoise_iterations: args.lightmap_denoise_iterations,
-        lightmap_tile_size: args.lightmap_tile_size,
+        lightmap_tile_size,
         lightmap_backend: args.lightmap_backend.as_str().into(),
-        static_batch_chunk_meters: args.static_batch_chunk_meters,
+        static_batch_chunk_meters,
         ambient_rgba: cell_lighting.ambient_rgba,
         lightmap_environment_map: args.lightmap_environment_map.as_ref().map(|path| {
             let resolved = if path.is_absolute() {
@@ -265,6 +274,27 @@ pub(crate) fn build_bake_job(
                 spot_falloff_exponent: light.spot_falloff_exponent,
             })
             .collect(),
+    }
+}
+
+fn default_lightmap_texels_per_meter(backend: LightmapBackendPreference) -> f32 {
+    match backend {
+        LightmapBackendPreference::Solari => 4.0,
+        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 16.0,
+    }
+}
+
+fn default_lightmap_tile_size(backend: LightmapBackendPreference) -> u32 {
+    match backend {
+        LightmapBackendPreference::Solari => 512,
+        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 128,
+    }
+}
+
+fn default_static_batch_chunk_meters(backend: LightmapBackendPreference) -> f32 {
+    match backend {
+        LightmapBackendPreference::Solari => 32.0,
+        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 64.0,
     }
 }
 
@@ -421,7 +451,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
     let mut rust_scene = rust_scene::compose_scene_with_lightmap_density(
         asset_root,
         &job.placements,
-        args.static_batch_chunk_meters,
+        job.static_batch_chunk_meters,
         job.lightmap_texels_per_meter,
         &job.lightmap_density_overrides,
     )?;
@@ -431,6 +461,7 @@ pub(crate) fn bake_manifest(args: &BakeArgs, manifest_path: &Path) -> Result<()>
         rust_scene.primitives.len(),
         composed_elapsed.as_secs_f64()
     );
+    lightmap::validate_page_dimensions(&rust_scene, lightmap::LIGHTMAP_ATLAS_PAGE_SIZE)?;
     let lightmap_raw_dir = output_dir.join("lightmaps");
     let accumulation_fingerprint = lightmap_accumulation_fingerprint(&manifest, &job)?;
     let mut lightmap_cache = cache::TileCache::open(
