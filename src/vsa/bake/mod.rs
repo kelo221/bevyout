@@ -355,6 +355,39 @@ fn default_static_batch_chunk_meters_for_backend(backend: SelectedLightmapBacken
     }
 }
 
+const MAX_AUTO_LIGHTMAP_DENSITY_RETRIES: usize = 3;
+
+fn reduce_lightmap_density_for_atlas(job: &mut BakeJob, scale: f32) -> Option<(f32, f32)> {
+    let factor = (scale * 0.98).clamp(0.01, 0.98);
+    let current = job
+        .lightmap_density_overrides
+        .values()
+        .copied()
+        .chain(std::iter::once(job.lightmap_texels_per_meter))
+        .fold(0.0_f32, f32::max);
+    let next_default = (job.lightmap_texels_per_meter * factor).max(1.0);
+    let next_override = job
+        .lightmap_density_overrides
+        .values()
+        .copied()
+        .map(|density| (density * factor).max(1.0))
+        .fold(0.0_f32, f32::max);
+    if next_default.max(next_override) >= current - f32::EPSILON {
+        return None;
+    }
+    job.lightmap_texels_per_meter = next_default;
+    for density in job.lightmap_density_overrides.values_mut() {
+        *density = (*density * factor).max(1.0);
+    }
+    let next = job
+        .lightmap_density_overrides
+        .values()
+        .copied()
+        .chain(std::iter::once(job.lightmap_texels_per_meter))
+        .fold(0.0_f32, f32::max);
+    Some((current, next))
+}
+
 /// The job-parameter fingerprint recorded as `PreparedBake.source_fingerprint`
 /// after a successful bake, and recomputed by the batch skip check to decide
 /// whether a recorded bake is still valid (F62.1): the prepared manifest's
@@ -519,12 +552,12 @@ fn bake_manifest_with_backend(
     } = &outputs;
     let mut job = build_bake_job_for_backend(&manifest, args, &outputs, backend);
     exclude_animated_static_assets(asset_root, &mut job)?;
+    let requested_job = job.clone();
     let environment_map = job
         .lightmap_environment_map
         .as_deref()
         .map(|path| EnvironmentMap::load(Path::new(path)))
         .transpose()?;
-    fs::write(job_file, serde_json::to_vec_pretty(&job)?)?;
 
     if output_scene.exists() {
         fs::remove_file(output_scene)?;
@@ -542,20 +575,50 @@ fn bake_manifest_with_backend(
         job.placements.len()
     );
     progress.phase_started("scene composition", None);
-    let mut rust_scene = rust_scene::compose_scene_with_lightmap_density(
-        asset_root,
-        &job.placements,
-        job.static_batch_chunk_meters,
-        job.lightmap_texels_per_meter,
-        &job.lightmap_density_overrides,
-    )?;
+    let mut density_retries = 0;
+    let mut rust_scene = loop {
+        let rust_scene = rust_scene::compose_scene_with_lightmap_density(
+            asset_root,
+            &job.placements,
+            job.static_batch_chunk_meters,
+            job.lightmap_texels_per_meter,
+            &job.lightmap_density_overrides,
+        )?;
+        match lightmap::validate_page_dimensions(&rust_scene, lightmap::LIGHTMAP_ATLAS_PAGE_SIZE) {
+            Ok(()) => break rust_scene,
+            Err(error) => {
+                if density_retries >= MAX_AUTO_LIGHTMAP_DENSITY_RETRIES {
+                    return Err(error);
+                }
+                let Some(scale) = lightmap::page_density_scale_to_fit(
+                    &rust_scene,
+                    lightmap::LIGHTMAP_ATLAS_PAGE_SIZE,
+                )?
+                else {
+                    return Err(error);
+                };
+                let Some((current_density, next_density)) =
+                    reduce_lightmap_density_for_atlas(&mut job, scale)
+                else {
+                    return Err(error);
+                };
+                density_retries += 1;
+                progress.transient_message(format!(
+                    "warning: lightmap atlas page exceeds {} texels; automatically reducing maximum density from {:.2} to {:.2} texels/m",
+                    lightmap::LIGHTMAP_ATLAS_PAGE_SIZE,
+                    current_density,
+                    next_density,
+                ));
+            }
+        }
+    };
     let composed_elapsed = started.elapsed();
     println!(
         "Rust bake: composed {} primitives in {:.2}s",
         rust_scene.primitives.len(),
         composed_elapsed.as_secs_f64()
     );
-    lightmap::validate_page_dimensions(&rust_scene, lightmap::LIGHTMAP_ATLAS_PAGE_SIZE)?;
+    fs::write(job_file, serde_json::to_vec_pretty(&job)?)?;
     let lightmap_raw_dir = output_dir.join("lightmaps");
     let accumulation_fingerprint = lightmap_accumulation_fingerprint(&manifest, &job)?;
     let mut lightmap_cache = cache::TileCache::open(
@@ -865,7 +928,10 @@ fn bake_manifest_with_backend(
     progress.phase_started("manifest publication", None);
     let scene_path = relative_asset_path(asset_root, output_scene)?;
     let irradiance_path = relative_asset_path(asset_root, &ktx2_path)?;
-    let source_fingerprint = bake_job_fingerprint(&manifest, &job)?;
+    // Keep validity keyed to the user's requested settings. Automatic atlas
+    // density reduction is deterministic for the same prepared assets, while
+    // the accumulation fingerprint below still uses the effective density.
+    let source_fingerprint = bake_job_fingerprint(&manifest, &requested_job)?;
     let lightmap_bindings =
         build_lightmap_bindings(&rust_scene, &lightmap_pages, &lightmap_atlases)?;
     manifest.schema_version = CURRENT_MANIFEST_SCHEMA_VERSION;

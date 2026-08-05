@@ -13,7 +13,7 @@ pub(crate) fn authored_point_light_intensity(radius: f32, intensity_lumens: f32)
     point_light_intensity(radius, intensity_lumens, AUTHORED_LIGHTING_SCALE)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct BakeJob {
     pub(crate) asset_root: String,
     pub(crate) output_scene: String,
@@ -38,7 +38,7 @@ pub(crate) struct BakeJob {
     pub(crate) lights: Vec<JobLight>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct JobPlacement {
     pub(crate) reference_form_id: u32,
     pub(crate) asset_path: String,
@@ -49,7 +49,7 @@ pub(crate) struct JobPlacement {
     pub(crate) scale: f32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct JobLight {
     pub(crate) translation: [f32; 3],
     pub(crate) rotation_xyzw: [f32; 4],

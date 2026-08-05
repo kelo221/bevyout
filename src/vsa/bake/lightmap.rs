@@ -1155,6 +1155,38 @@ struct AtlasLayout {
     height: u32,
 }
 
+/// Returns the multiplicative density reduction required for every generated
+/// page to fit within the single-page atlas contract. `None` means the current
+/// pages already fit. The caller can apply the same reduction to the default
+/// density and all per-placement overrides, preserving their relative quality.
+pub(crate) fn page_density_scale_to_fit(
+    scene: &super::rust_scene::RustBakeScene,
+    max_size: u32,
+) -> Result<Option<f32>> {
+    if max_size <= LIGHTMAP_ATLAS_GUTTER_TEXELS * 2 {
+        bail!("lightmap atlas page size must exceed its gutter");
+    }
+    let usable_size = max_size - LIGHTMAP_ATLAS_GUTTER_TEXELS * 2;
+    let mut scale = 1.0_f32;
+    for primitive in &scene.primitives {
+        let [width, height] = primitive.lightmap_dimensions;
+        if width <= usable_size && height <= usable_size {
+            continue;
+        }
+        let required = width.max(height).max(1) as f32;
+        let density = primitive.lightmap_texels_per_meter;
+        if !density.is_finite() || density <= 0.0 {
+            bail!(
+                "lightmap primitive {} has invalid texel density {:.3}",
+                primitive.name,
+                density
+            );
+        }
+        scale = scale.min(usable_size as f32 / required);
+    }
+    Ok((scale < 1.0).then_some(scale))
+}
+
 /// Reject pages that cannot be represented by the one-primitive/one-binding
 /// atlas contract before the backend starts tracing them. A later geometry
 /// split could remove this restriction, but slicing a finished page would

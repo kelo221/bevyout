@@ -749,15 +749,18 @@ fn bake_for_render(args: &RenderArgs, cache_dir: &Path) -> Result<()> {
         lightmap_max_samples: 8,
         lightmap_variance_threshold: 0.0,
         lightmap_bounces: 1,
-        lightmap_texels_per_meter: Some(16.0),
+        // Let the selected bake backend choose its density. The GPU path uses
+        // its fast default and the bake path can lower it automatically if a
+        // large primitive still exceeds the atlas page limit.
+        lightmap_texels_per_meter: None,
         lightmap_density_overrides: Vec::new(),
         lightmap_debug_uv: false,
         lightmap_debug_samples: false,
         lightmap_debug_variance: false,
         lightmap_denoise_iterations: 1,
-        lightmap_tile_size: Some(128),
+        lightmap_tile_size: None,
         lightmap_force_retrace: false,
-        static_batch_chunk_meters: Some(64.0),
+        static_batch_chunk_meters: None,
         toktx: args.toktx.clone(),
         force: false,
         keep_intermediate: false,

@@ -168,7 +168,8 @@ fn convert_native_actor(
         .with_context(|| format!("parsing actor skeleton {}", descriptor.skeleton))?;
     let mut actor = nif::fo3::extract_scene(&skeleton_document)
         .with_context(|| format!("extracting actor skeleton scene {}", descriptor.skeleton))?;
-    super::super::nif_convert::apply_native_material_policy(&skeleton_document, &mut actor)?;
+    let mut glossiness_exponents =
+        super::super::nif_convert::apply_native_material_policy(&skeleton_document, &mut actor)?;
 
     let apparel = descriptor
         .apparel
@@ -202,7 +203,9 @@ fn convert_native_actor(
             continue;
         }
         match extract_actor_part(path) {
-            Ok(scene) if scene.has_visible_geometry() => decoded.push((path.clone(), key, scene)),
+            Ok((scene, exponents)) if scene.has_visible_geometry() => {
+                decoded.push((path.clone(), key, scene, exponents));
+            }
             Ok(_) => warnings.push(format!("{} contributed no visible geometry", path)),
             Err(error) => warnings.push(format!("{} could not be decoded: {error:#}", path)),
         }
@@ -212,8 +215,8 @@ fn convert_native_actor(
     if let Some(facegen) = descriptor.facegen.as_ref() {
         match head_anchor {
             Some(anchor_key) => {
-                if let Some((path, _, scene)) =
-                    decoded.iter_mut().find(|(_, key, _)| key == anchor_key)
+                if let Some((path, _, scene, _)) =
+                    decoded.iter_mut().find(|(_, key, _, _)| key == anchor_key)
                 {
                     let rest_head = scene.clone();
                     if let Err(error) = apply_native_facegen(
@@ -239,9 +242,9 @@ fn convert_native_actor(
     }
 
     let mut occupied_slots = 0u32;
-    for (path, key, scene) in decoded
+    for (path, key, scene, exponents) in decoded
         .iter()
-        .filter(|(_, key, _)| apparel.contains_key(key))
+        .filter(|(_, key, _, _)| apparel.contains_key(key))
     {
         if !scene.has_visible_weighted_geometry() {
             warnings.push(format!(
@@ -251,7 +254,10 @@ fn convert_native_actor(
             continue;
         }
         match nif::fo3::merge_actor_scene(&mut actor, scene) {
-            Ok(()) => occupied_slots |= apparel[key],
+            Ok(()) => {
+                occupied_slots |= apparel[key];
+                glossiness_exponents.extend_from_slice(exponents);
+            }
             Err(error) => warnings.push(format!(
                 "apparel {} could not bind to the shared skeleton: {}; retaining body fallback",
                 path, error
@@ -259,27 +265,31 @@ fn convert_native_actor(
         }
     }
 
-    for (path, _key, scene) in decoded.iter().filter(|(_, key, _)| {
+    for (path, _key, scene, exponents) in decoded.iter().filter(|(_, key, _, _)| {
         !apparel.contains_key(key) && !body_parts.contains_key(key) && !head_parts.contains(key)
     }) {
-        if let Err(error) = nif::fo3::merge_actor_scene(&mut actor, scene) {
-            warnings.push(format!(
+        match nif::fo3::merge_actor_scene(&mut actor, scene) {
+            Ok(()) => glossiness_exponents.extend_from_slice(exponents),
+            Err(error) => warnings.push(format!(
                 "actor visual {} could not bind to the shared skeleton: {}",
                 path, error
-            ));
+            )),
         }
     }
 
     if let Some(anchor_key) = head_anchor
-        && let Some((path, _, scene)) = decoded.iter().find(|(_, key, _)| key == anchor_key)
-        && let Err(error) = nif::fo3::merge_actor_scene(&mut actor, scene)
+        && let Some((path, _, scene, exponents)) =
+            decoded.iter().find(|(_, key, _, _)| key == anchor_key)
     {
-        warnings.push(format!(
-            "actor head anchor {} could not bind to the shared skeleton: {}",
-            path, error
-        ));
+        match nif::fo3::merge_actor_scene(&mut actor, scene) {
+            Ok(()) => glossiness_exponents.extend_from_slice(exponents),
+            Err(error) => warnings.push(format!(
+                "actor head anchor {} could not bind to the shared skeleton: {}",
+                path, error
+            )),
+        }
     }
-    for (path, key, scene) in decoded.iter_mut().filter(|(_, key, _)| {
+    for (path, key, scene, exponents) in decoded.iter_mut().filter(|(_, key, _, _)| {
         head_parts.contains(key) && head_anchor.is_none_or(|anchor| key != anchor)
     }) {
         let attachment = head_part_attachment(head_anim_parts.contains(key));
@@ -288,17 +298,18 @@ fn convert_native_actor(
         {
             fit_native_hair_to_facegen(&actor, scene, attachment, facegen_head_fit);
         }
-        if let Err(error) = nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
-            warnings.push(format!(
+        match nif::fo3::merge_actor_scene_attached(&mut actor, scene, attachment) {
+            Ok(()) => glossiness_exponents.extend_from_slice(exponents),
+            Err(error) => warnings.push(format!(
                 "actor head visual {} could not bind to the shared skeleton: {}",
                 path, error
-            ));
+            )),
         }
     }
 
-    for (path, key, scene) in decoded
+    for (path, key, scene, exponents) in decoded
         .iter()
-        .filter(|(_, key, _)| body_parts.contains_key(key))
+        .filter(|(_, key, _, _)| body_parts.contains_key(key))
     {
         let slot = match body_parts[key] {
             0 => 0x0000_0004,
@@ -309,17 +320,19 @@ fn convert_native_actor(
         if slot != 0 && occupied_slots & slot != 0 {
             continue;
         }
-        if let Err(error) = nif::fo3::merge_actor_scene(&mut actor, scene) {
-            warnings.push(format!(
+        match nif::fo3::merge_actor_scene(&mut actor, scene) {
+            Ok(()) => glossiness_exponents.extend_from_slice(exponents),
+            Err(error) => warnings.push(format!(
                 "body fallback {} could not bind to the shared skeleton: {}",
                 path, error
-            ));
+            )),
         }
     }
     actor.animations.clear();
     let mut result = convert_actor_scene(ActorSceneConversionRequest {
         source_name: &job.model,
         scene: actor,
+        glossiness_exponents,
         skeleton_document: &skeleton_document,
         output: &job.output,
         physics_output: &job.physics_output,
@@ -418,14 +431,15 @@ fn facegen_head_skip_warning(head_anchor: Option<&str>) -> String {
     }
 }
 
-fn extract_actor_part(path: &str) -> Result<nif::fo3::Scene> {
+fn extract_actor_part(path: &str) -> Result<(nif::fo3::Scene, Vec<f32>)> {
     let bytes = fs::read(path).with_context(|| format!("reading actor visual {path}"))?;
     let document =
         nif::fo3::parse(&bytes).with_context(|| format!("parsing actor visual {path}"))?;
     let mut scene = nif::fo3::extract_scene(&document)
         .with_context(|| format!("extracting actor visual {path}"))?;
-    super::super::nif_convert::apply_native_material_policy(&document, &mut scene)?;
-    Ok(scene)
+    let glossiness_exponents =
+        super::super::nif_convert::apply_native_material_policy(&document, &mut scene)?;
+    Ok((scene, glossiness_exponents))
 }
 
 fn actor_path_key(path: &str) -> String {

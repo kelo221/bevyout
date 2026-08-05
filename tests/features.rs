@@ -1204,6 +1204,12 @@ struct BevyoutWorld {
 
     // -- actor_fallback.feature (M4 static NPC FaceGen reconstruction) --
     facegen_feature: FaceGenFeatureState,
+
+    // -- asset_materials.feature legacy world shading --
+    legacy_chan_master_strength: f32,
+    legacy_glossiness_exponent: Option<f32>,
+    legacy_micro_roughness: Option<f32>,
+    legacy_chan_weight: Option<f32>,
 }
 
 fn synthetic_dialogue_source() -> dialogue::DialogueSource {
@@ -17112,4 +17118,62 @@ async fn then_combined_facegen_coefficient_is(
     };
     let actual = resolved.coefficients.geometry_symmetric[index];
     assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+}
+
+// -- asset_materials.feature legacy world shading --
+
+#[given(regex = r"^the master Chan strength is (-?[\d.]+)$")]
+async fn given_master_chan_strength(world: &mut BevyoutWorld, strength: f32) {
+    world.legacy_chan_master_strength = strength;
+}
+
+#[given(regex = r"^a legacy Fallout material with glossiness exponent (-?[\d.]+)$")]
+async fn given_legacy_glossiness_exponent(world: &mut BevyoutWorld, exponent: f32) {
+    world.legacy_glossiness_exponent = Some(exponent);
+}
+
+#[given("a legacy Fallout material with a non-finite glossiness exponent")]
+async fn given_non_finite_legacy_glossiness_exponent(world: &mut BevyoutWorld) {
+    world.legacy_glossiness_exponent = Some(f32::NAN);
+}
+
+#[when("its legacy world shading policy is evaluated")]
+async fn when_legacy_world_shading_policy_is_evaluated(world: &mut BevyoutWorld) {
+    let exponent = assets::sanitized_glossiness_exponent(
+        world
+            .legacy_glossiness_exponent
+            .or(world.material_glossiness.flatten()),
+    );
+    world.legacy_glossiness_exponent = Some(exponent);
+    world.legacy_micro_roughness = Some(assets::legacy_micro_roughness_from_glossiness(Some(
+        exponent,
+    )));
+    world.legacy_chan_weight = Some(assets::legacy_chan_weight(
+        Some(exponent),
+        world.legacy_chan_master_strength,
+    ));
+}
+
+#[then(regex = r"^its preserved glossiness exponent is approximately ([\d.]+)$")]
+async fn then_preserved_glossiness_exponent_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_glossiness_exponent
+        .expect("legacy glossiness exponent should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+}
+
+#[then(regex = r"^its legacy micro-roughness is approximately ([\d.]+)$")]
+async fn then_legacy_micro_roughness_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_micro_roughness
+        .expect("legacy micro-roughness should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-3, "{actual} != {expected}");
+}
+
+#[then(regex = r"^its automatic Chan weight is approximately ([\d.]+)$")]
+async fn then_effective_chan_weight_is(world: &mut BevyoutWorld, expected: f32) {
+    let actual = world
+        .legacy_chan_weight
+        .expect("legacy Chan weight should be evaluated");
+    assert!((actual - expected).abs() < 1.0e-3, "{actual} != {expected}");
 }

@@ -16,13 +16,17 @@ RIGID_BODY_TYPES = {'bhkRigidBody', 'bhkRigidBodyT'}
 FALLOUT_EMISSIVE_SCALE = 0.25
 FALLOUT_EMISSIVE_MAX = 1.0
 
-def perceptual_roughness_from_glossiness(glossiness):
+def sanitized_glossiness_exponent(glossiness):
     try:
         exponent = float(glossiness)
     except (TypeError, ValueError):
         exponent = 10.0
     if not math.isfinite(exponent) or exponent < 0.0:
         exponent = 10.0
+    return exponent
+
+def perceptual_roughness_from_glossiness(glossiness):
+    exponent = sanitized_glossiness_exponent(glossiness)
     return max(0.0, min(1.0, 1.75 * (2.0 / (exponent + 2.0)) ** 0.25))
 
 def canonical_texture_reference(path):
@@ -31,9 +35,11 @@ def canonical_texture_reference(path):
     return normalized[marker:] if marker >= 0 else None
 
 def set_material_roughness(material, glossiness):
+    exponent = sanitized_glossiness_exponent(glossiness)
     roughness = perceptual_roughness_from_glossiness(glossiness)
     material.roughness = roughness
     material['bevyout_perceptual_roughness'] = roughness
+    material['bevyout_glossiness_exponent'] = exponent
     if material.use_nodes:
         for node in material.node_tree.nodes:
             if node.bl_idname == 'ShaderNodeBsdfPrincipled':
@@ -826,7 +832,10 @@ def fallout_material_semantics(material, glow_node=None):
     )
     strength = 0.35 if back_lighting else 0.2 if soft_lighting else 0.15 if shader_type in (5, 6) else 0.0
     semantics = {
-        'schema': 1,
+        'schema': 2,
+        'glossiness_exponent': sanitized_glossiness_exponent(
+            material.get('bevyout_glossiness_exponent', 10.0)
+        ),
         'shader_type': shader_type,
         'shader_flags_1': flags1,
         'shader_flags_2': flags2,

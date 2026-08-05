@@ -197,9 +197,9 @@ pub(crate) struct FogStrength(pub(crate) f32);
 
 /// Live multiplier for the cell-driven volumetric fog density. This is kept
 /// separate from `FogStrength` so the existing distance-fog tuning remains
-/// unchanged. The 0.05 baseline preserves authored cell values without the
-/// over-dense result observed in SuperDuperMart.
-pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 0.05;
+/// unchanged. The 0.01 baseline starts from the authored cell fog profile
+/// without overpowering the Super-Duper Mart atmosphere.
+pub(crate) const DEFAULT_VOLUMETRIC_FOG_MULTIPLIER: f32 = 0.01;
 
 #[derive(Resource)]
 pub(crate) struct VolumetricFogMultiplier(pub(crate) f32);
@@ -215,6 +215,29 @@ pub(crate) const DEFAULT_EMISSION_SCALE: f32 = 0.15;
 
 #[derive(Resource)]
 pub(crate) struct EmissionScale(pub(crate) f32);
+
+/// Master strength for the legacy-world Chan diffuse contribution. Authored
+/// material glossiness still determines the per-material maximum in WGSL.
+#[derive(Clone, Copy, Debug, Resource)]
+pub(crate) struct LegacyChanSettings {
+    strength: f32,
+}
+
+impl Default for LegacyChanSettings {
+    fn default() -> Self {
+        Self { strength: 1.0 }
+    }
+}
+
+impl LegacyChanSettings {
+    pub(crate) fn strength(&self) -> f32 {
+        self.strength
+    }
+
+    pub(crate) fn set_strength(&mut self, strength: f32) {
+        self.strength = strength;
+    }
+}
 
 /// Combined settings for the viewer's material-clamp policy (issue #269):
 /// metallic gate, dielectric-specular gate, and roughness scale behind one

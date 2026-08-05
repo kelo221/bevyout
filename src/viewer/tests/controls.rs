@@ -412,7 +412,7 @@ fn reflection_probe_settings_preserve_strength_across_the_gate_and_catch_late_pr
             .get::<EnvironmentMapLight>()
             .unwrap()
             .intensity,
-        PREPARED_REFLECTION_PROBE_INTENSITY * 100.0
+        PREPARED_REFLECTION_PROBE_INTENSITY * 10.0
     );
 
     app.world_mut()

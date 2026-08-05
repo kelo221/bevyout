@@ -1,7 +1,7 @@
 use super::*;
 use crate::console::{ConsoleExecutor, ConsolePlugin, ConsoleRequest, ConsoleSessionId};
-use crate::viewer::ImageSpaceBloomOverrides;
 use crate::viewer::world::exterior::ExteriorWorldspaceLodSettings;
+use crate::viewer::{ImageSpaceBloomOverrides, LegacyChanSettings};
 use crate::vsa::{PreparedItemCategory, PreparedItemDefinition, PreparedSceneManifest};
 use bevy::state::app::StatesPlugin;
 
@@ -18,6 +18,7 @@ fn test_app() -> App {
         .insert_resource(AoStrength(1.0))
         .insert_resource(EmissionScale(0.0))
         .insert_resource(MaterialClampSettings::default())
+        .insert_resource(LegacyChanSettings::default())
         .insert_resource(super::super::controls::ReflectionProbeSettings::default())
         .insert_resource(ImageSpaceBloomOverrides::default())
         .init_resource::<super::super::screen_fx::ScreenFxRuntime>()
@@ -412,7 +413,7 @@ fn render_settings_validate_boundaries_before_mutation() {
     let mut app = test_app();
     assert_eq!(
         exec(&mut app, "getrender reflection_probe_strength").value["value"],
-        100.0
+        10.0
     );
     for (setting, low, high) in [
         ("lighting", 0.0001, 262_144.0),
@@ -425,6 +426,7 @@ fn render_settings_validate_boundaries_before_mutation() {
         ("ao", 0.0, 1.0),
         ("emission", 0.0, 1.0),
         ("roughness_scale", 0.5, 2.0),
+        ("chan_strength", 0.0, 1.0),
         ("reflection_probe_strength", 0.0, 4096.0),
     ] {
         assert!(exec(&mut app, &format!("setrender {setting} {low}")).ok);
@@ -494,6 +496,12 @@ fn render_settings_validate_boundaries_before_mutation() {
     assert_eq!(
         exec(&mut app, "getrender roughness_scale").value["value"],
         1.75
+    );
+    assert!(exec(&mut app, "setrender chan_strength 0.5").ok);
+    assert_eq!(app.world().resource::<LegacyChanSettings>().strength(), 0.5);
+    assert_eq!(
+        exec(&mut app, "getrender chan_strength").value["value"],
+        0.5
     );
     assert!(exec(&mut app, "setrender reflection_probe_strength 2.5").ok);
     assert_eq!(
@@ -566,6 +574,13 @@ fn render_settings_validate_boundaries_before_mutation() {
         "out_of_range"
     );
     assert_eq!(
+        exec(&mut app, "setrender chan_strength 1.01")
+            .error
+            .unwrap()
+            .code,
+        "out_of_range"
+    );
+    assert_eq!(
         exec(&mut app, "setrender reflection_probe_strength 4096.01")
             .error
             .unwrap()
@@ -579,12 +594,31 @@ fn render_settings_validate_boundaries_before_mutation() {
     );
     assert_eq!(
         exec(&mut app, "getrender").value.as_object().unwrap().len(),
-        19
+        20
     );
     assert!(exec(&mut app, "setrender day_night_preview 1").ok);
     assert_eq!(
         exec(&mut app, "getrender day_night_preview").value["value"],
         1
+    );
+}
+
+#[test]
+fn unchanged_chan_strength_does_not_trigger_material_propagation() {
+    let mut app = test_app();
+    app.world_mut().clear_trackers();
+    assert!(exec(&mut app, "setrender chan_strength 1").ok);
+    assert!(
+        !app.world()
+            .resource_ref::<LegacyChanSettings>()
+            .is_changed()
+    );
+
+    assert!(exec(&mut app, "setrender chan_strength 0.5").ok);
+    assert!(
+        app.world()
+            .resource_ref::<LegacyChanSettings>()
+            .is_changed()
     );
 }
 

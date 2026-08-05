@@ -274,7 +274,7 @@ fn fallout_surface_classification_uses_authored_types_and_flags() {
     );
     assert_eq!(
         fallout_surface_kind(&eye, Some("GlassesReadingGO:0")),
-        FALLOUT_SURFACE_STANDARD
+        FALLOUT_SURFACE_LEGACY_WORLD
     );
     assert_eq!(
         fallout_surface_kind(&eye, None),
@@ -323,6 +323,75 @@ fn fallout_surface_configuration_bounds_skin_and_hair_specular_response() {
     assert_eq!(skin.fallout_surface_kind, FALLOUT_SURFACE_SKIN);
     assert_eq!(skin.perceptual_roughness, FALLOUT_SKIN_MIN_ROUGHNESS);
     assert_eq!(skin.reflectance, FALLOUT_SKIN_REFLECTANCE);
+}
+
+#[test]
+fn legacy_world_materials_preserve_glossiness_and_receive_only_changed_chan_values() {
+    let mut app = test_app();
+    app.add_systems(
+        Update,
+        (
+            configure_fallout_surface_materials,
+            apply_legacy_chan_strength,
+        )
+            .chain(),
+    );
+    let legacy = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    let generic = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    app.world_mut().spawn((
+        Mesh3d::default(),
+        MeshMaterial3d(legacy.clone()),
+        GltfMaterialExtras {
+            value: serde_json::json!({
+                "bevyout_fallout_material": {
+                    "schema": 2,
+                    "shader_type": 0,
+                    "glossiness_exponent": 128.0
+                }
+            })
+            .to_string(),
+        },
+    ));
+    app.world_mut()
+        .spawn((Mesh3d::default(), MeshMaterial3d(generic.clone())));
+
+    app.update();
+    {
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let legacy = materials.get(&legacy).unwrap();
+        assert_eq!(legacy.fallout_surface_kind, FALLOUT_SURFACE_LEGACY_WORLD);
+        assert_eq!(legacy.fallout_glossiness_exponent, 128.0);
+        assert_eq!(legacy.fallout_chan_strength, 1.0);
+        assert_eq!(
+            materials.get(&generic).unwrap().fallout_surface_kind,
+            FALLOUT_SURFACE_STANDARD
+        );
+    }
+    assert_eq!(
+        app.world().resource::<LegacyWorldMaterials>().handles.len(),
+        1
+    );
+
+    app.world_mut()
+        .resource_mut::<LegacyChanSettings>()
+        .set_strength(0.25);
+    app.update();
+    let materials = app.world().resource::<Assets<StandardMaterial>>();
+    assert_eq!(materials.get(&legacy).unwrap().fallout_chan_strength, 0.25);
+    assert_eq!(materials.get(&generic).unwrap().fallout_chan_strength, 1.0);
+}
+
+#[test]
+fn invalid_legacy_world_exponent_falls_back_to_ten() {
+    for value in [-1.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(sanitized_fallout_glossiness_exponent(value), 10.0);
+    }
 }
 
 #[test]
@@ -384,6 +453,8 @@ fn test_app() -> App {
     app.add_plugins((bevy::MinimalPlugins, bevy::asset::AssetPlugin::default()));
     app.init_resource::<Assets<Mesh>>();
     app.init_resource::<Assets<StandardMaterial>>();
+    app.init_resource::<LegacyChanSettings>();
+    app.init_resource::<LegacyWorldMaterials>();
     app
 }
 

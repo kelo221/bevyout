@@ -58,6 +58,11 @@ fn oversized_lightmap_pages_fail_before_backend_dispatch() {
     let mut scene = synthetic_lightmap_scene_for_test();
     scene.primitives[0].lightmap_dimensions = [4093, 8];
 
+    let scale = super::lightmap::page_density_scale_to_fit(&scene, 4096)
+        .unwrap()
+        .unwrap();
+    assert!((scale - 4092.0 / 4093.0).abs() < 1e-6);
+
     let error = super::lightmap::validate_page_dimensions(&scene, 4096).unwrap_err();
     assert!(
         error

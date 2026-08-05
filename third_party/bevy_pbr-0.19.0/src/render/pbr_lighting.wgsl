@@ -17,6 +17,7 @@ const FALLOUT_SURFACE_STANDARD: u32 = 0u;
 const FALLOUT_SURFACE_HAIR: u32 = 1u;
 const FALLOUT_SURFACE_EYE: u32 = 2u;
 const FALLOUT_SURFACE_SKIN: u32 = 3u;
+const FALLOUT_SURFACE_LEGACY_WORLD: u32 = 4u;
 
 // Kajiya–Kay controls. These remain deliberately fixed until visual review
 // establishes a need for material-level tuning.
@@ -109,8 +110,13 @@ struct LightingInput {
     // What we call `F_ab` they call `AB`.
     F_ab: vec2<f32>,
 
-    // Internal Fallout surface variant: standard, hair, or eye.
+    // Internal Fallout surface variant.
     surface_kind: u32,
+
+    // Authored Blinn-Phong exponent and viewer Chan master control. These are
+    // consumed only by the legacy-world direct-light path.
+    glossiness_exponent: f32,
+    chan_strength: f32,
 
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     // The strength of the clearcoat layer.
@@ -604,6 +610,12 @@ fn fallout_surface_specular(
         return specular(input, derived_input, roughness, specular_intensity)
             * FALLOUT_SKIN_SPECULAR_STRENGTH;
     }
+    if (*input).surface_kind == FALLOUT_SURFACE_LEGACY_WORLD {
+        let exponent = fallout_legacy_glossiness_exponent(input);
+        let F = fallout_legacy_fresnel(input, derived_input);
+        return F * ((exponent + 8.0) / (8.0 * PI))
+            * pow((*derived_input).NdotH, exponent);
+    }
 
 #ifdef STANDARD_MATERIAL_ANISOTROPY
     return specular_anisotropy(input, derived_input, L, roughness, specular_intensity);
@@ -673,6 +685,29 @@ fn Fd_Chan(
     let fd = mix(fd0, fd255, t) +
         A * exp2(-B * sqrt(NdotH)) * LdotH;
     return fd * (1.0 / PI);
+}
+
+fn fallout_legacy_glossiness_exponent(input: ptr<function, LightingInput>) -> f32 {
+    let exponent = (*input).glossiness_exponent;
+    return select(10.0, exponent, exponent >= 0.0 && exponent < 1.0e20);
+}
+
+fn fallout_legacy_fresnel(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+) -> vec3<f32> {
+    let F0 = mix((*input).F0_dielectric, (*input).F0_metallic, (*input).metallic);
+    return fresnel(F0, (*derived_input).LdotH);
+}
+
+fn Fd_FalloutLegacy(
+    input: ptr<function, LightingInput>,
+    derived_input: ptr<function, DerivedLightingInput>,
+) -> f32 {
+    let exponent = fallout_legacy_glossiness_exponent(input);
+    let alpha = sqrt(2.0 / (exponent + 2.0));
+    let chan_weight = saturate(alpha * saturate((*input).chan_strength));
+    return mix(1.0 / PI, Fd_Chan(input, derived_input), chan_weight);
 }
 
 // A restrained artistic wrap for direct diffuse visibility. Keep this
@@ -897,16 +932,26 @@ fn point_light(
     // Diffuse.
     // Comes after specular since its N⋅L is used in the lighting equation.
     var derived_input = derive_lighting_input(N, V, L);
+    let legacy_world = (*input).surface_kind == FALLOUT_SURFACE_LEGACY_WORLD;
+    if legacy_world {
+        specular_light = fallout_surface_specular(input, &derived_input, L, a, 1.0);
+    }
     var diffuse = vec3(0.0);
     if (enable_diffuse) {
-        let diffuse_brdf = select(
-            Fd_Burley(input, &derived_input),
-            Fd_Chan(input, &derived_input),
-            use_chan_diffuse,
-        );
-        diffuse = diffuse_color * diffuse_brdf;
+        if legacy_world {
+            let F = fallout_legacy_fresnel(input, &derived_input);
+            diffuse = diffuse_color * (vec3(1.0) - F) * Fd_FalloutLegacy(input, &derived_input);
+        } else {
+            let diffuse_brdf = select(
+                Fd_Burley(input, &derived_input),
+                Fd_Chan(input, &derived_input),
+                use_chan_diffuse,
+            );
+            diffuse = diffuse_color * diffuse_brdf;
+        }
     }
-    let diffuse_visibility = diffuse_wrap_visibility(N, L);
+    let diffuse_visibility = select(diffuse_wrap_visibility(N, L), derived_input.NdotL, legacy_world);
+    let specular_visibility = select(specular_derived_input.NdotL, derived_input.NdotL, legacy_world);
 
     // See https://google.github.io/filament/Filament.md.html#mjx-eqn-pointLightLuminanceEquation
     // Lout = f(v,l) Φ / { 4 π d^2 }⟨n⋅l⟩
@@ -926,9 +971,9 @@ fn point_light(
     // Account for the Fresnel term from the clearcoat darkening the main layer.
     //
     // <https://google.github.io/filament/Filament.md.html#materialsystem/clearcoatmodel/integrationinthesurfaceresponse>
-    color_times_NdotL = (diffuse * diffuse_visibility + specular_light * specular_derived_input.NdotL * inv_Fc) * inv_Fc + Frc * clearcoat_specular_derived_input.NdotL;
+    color_times_NdotL = (diffuse * diffuse_visibility + specular_light * specular_visibility * inv_Fc) * inv_Fc + Frc * clearcoat_specular_derived_input.NdotL;
 #else   // STANDARD_MATERIAL_CLEARCOAT
-    color_times_NdotL = diffuse * diffuse_visibility + specular_light * specular_derived_input.NdotL;
+    color_times_NdotL = diffuse * diffuse_visibility + specular_light * specular_visibility;
 #endif  // STANDARD_MATERIAL_CLEARCOAT
 
     var texture_sample = 1f;
@@ -1021,16 +1066,22 @@ fn directional_light(
     let L = (*light).direction_to_light.xyz;
     var derived_input = derive_lighting_input(N, V, L);
 
+    let legacy_world = (*input).surface_kind == FALLOUT_SURFACE_LEGACY_WORLD;
     var diffuse = vec3(0.0);
     if (enable_diffuse) {
-        let diffuse_brdf = select(
-            Fd_Burley(input, &derived_input),
-            Fd_Chan(input, &derived_input),
-            use_chan_diffuse,
-        );
-        diffuse = diffuse_color * diffuse_brdf;
+        if legacy_world {
+            let F = fallout_legacy_fresnel(input, &derived_input);
+            diffuse = diffuse_color * (vec3(1.0) - F) * Fd_FalloutLegacy(input, &derived_input);
+        } else {
+            let diffuse_brdf = select(
+                Fd_Burley(input, &derived_input),
+                Fd_Chan(input, &derived_input),
+                use_chan_diffuse,
+            );
+            diffuse = diffuse_color * diffuse_brdf;
+        }
     }
-    let diffuse_visibility = diffuse_wrap_visibility(N, L);
+    let diffuse_visibility = select(diffuse_wrap_visibility(N, L), derived_input.NdotL, legacy_world);
 
     let specular_light = fallout_surface_specular(input, &derived_input, L, roughness, 1.0);
 

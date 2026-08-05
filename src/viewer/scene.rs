@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::controls::{
     AmbientScale, AuthorizedEmissionMaterials, FogStrength, ImageSpaceBloomOverrides,
-    LightingScale, VolumetricFogMultiplier, image_space_emission_multiplier,
+    LegacyChanSettings, LightingScale, VolumetricFogMultiplier, image_space_emission_multiplier,
 };
 use super::world::{ResidentCell, ResidentCells, ResidentState};
 use super::*;
@@ -36,6 +36,11 @@ pub(crate) struct FalloutMaterialConfigured;
 #[derive(Component)]
 pub(crate) struct FalloutSurfaceConfigured;
 
+#[derive(Resource, Default)]
+pub(crate) struct LegacyWorldMaterials {
+    pub(crate) handles: HashSet<AssetId<StandardMaterial>>,
+}
+
 #[derive(Component)]
 pub(crate) struct CellVolumetricFog;
 
@@ -64,7 +69,7 @@ pub(crate) fn runtime_lightmapped_diffuse_enabled(bake: Option<&PreparedBake>) -
 }
 
 pub(crate) const PREPARED_REFLECTION_PROBE_INTENSITY: f32 = 0.025;
-pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 100.0;
+pub(crate) const DEFAULT_REFLECTION_PROBE_STRENGTH: f32 = 10.0;
 
 fn prepared_light_is_spot(light: &bevyout_core::manifest::PreparedLight) -> bool {
     let authored_spot = light.kind.eq_ignore_ascii_case("spot") || light.flags & 0x200 != 0;
@@ -83,6 +88,8 @@ struct FalloutMaterialExtra {
     shader_type: u32,
     #[serde(default)]
     shader_flags_1: u32,
+    #[serde(default = "default_fallout_glossiness_exponent")]
+    glossiness_exponent: f32,
     #[serde(default)]
     emission_authorized: Option<bool>,
     #[serde(default)]
@@ -91,6 +98,18 @@ struct FalloutMaterialExtra {
     translucency_strength: f32,
     #[serde(default)]
     local_thickness: Option<LocalThicknessExtra>,
+}
+
+fn default_fallout_glossiness_exponent() -> f32 {
+    10.0
+}
+
+fn sanitized_fallout_glossiness_exponent(value: f32) -> f32 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        default_fallout_glossiness_exponent()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,10 +130,12 @@ fn parse_fallout_material_extra(value: &str) -> Option<FalloutMaterialExtra> {
     }
 }
 
+#[cfg(test)]
 const FALLOUT_SURFACE_STANDARD: u32 = 0;
 const FALLOUT_SURFACE_HAIR: u32 = 1;
 const FALLOUT_SURFACE_EYE: u32 = 2;
 const FALLOUT_SURFACE_SKIN: u32 = 3;
+const FALLOUT_SURFACE_LEGACY_WORLD: u32 = 4;
 const FALLOUT_SHADER_TYPE_SKIN_TINT: u32 = 5;
 const FALLOUT_SHADER_TYPE_HAIR_TINT: u32 = 6;
 const FALLOUT_SHADER_FLAG1_EYE_ENVIRONMENT_MAPPING: u32 = 1 << 17;
@@ -151,7 +172,7 @@ fn fallout_surface_kind(metadata: &FalloutMaterialExtra, mesh_name: Option<&str>
         return FALLOUT_SURFACE_EYE;
     }
 
-    FALLOUT_SURFACE_STANDARD
+    FALLOUT_SURFACE_LEGACY_WORLD
 }
 
 /// Applies the runtime-only Fallout skin, hair, and eye variants to the existing
@@ -170,6 +191,8 @@ pub(crate) fn configure_fallout_surface_materials(
         (With<Mesh3d>, Without<FalloutSurfaceConfigured>),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    chan_settings: Res<LegacyChanSettings>,
+    mut legacy_materials: ResMut<LegacyWorldMaterials>,
 ) {
     for (entity, material_handle, extras, mesh_name) in &extras {
         let Some(metadata) = parse_fallout_material_extra(&extras.value) else {
@@ -206,11 +229,38 @@ pub(crate) fn configure_fallout_surface_materials(
                     .max(FALLOUT_SKIN_MIN_ROUGHNESS);
                 material.reflectance = material.reflectance.min(FALLOUT_SKIN_REFLECTANCE);
             }
+            FALLOUT_SURFACE_LEGACY_WORLD => {
+                material.fallout_surface_kind = FALLOUT_SURFACE_LEGACY_WORLD;
+                material.fallout_glossiness_exponent =
+                    sanitized_fallout_glossiness_exponent(metadata.glossiness_exponent);
+                material.fallout_chan_strength = chan_settings.strength();
+                legacy_materials.handles.insert(material_handle.id());
+            }
             _ => {}
         }
 
         commands.entity(entity).insert(FalloutSurfaceConfigured);
     }
+}
+
+/// Applies a changed master value only to handles that were classified from
+/// Fallout material extras. Ordinary Bevy materials never enter this registry.
+pub(crate) fn apply_legacy_chan_strength(
+    chan_settings: Res<LegacyChanSettings>,
+    mut legacy_materials: ResMut<LegacyWorldMaterials>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !chan_settings.is_changed() {
+        return;
+    }
+    let strength = chan_settings.strength();
+    legacy_materials.handles.retain(|material_id| {
+        let Some(mut material) = materials.get_mut(*material_id) else {
+            return false;
+        };
+        material.fallout_chan_strength = strength;
+        true
+    });
 }
 
 /// Registers the shader-authorized material handles used by the live

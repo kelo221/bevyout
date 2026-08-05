@@ -781,9 +781,17 @@ pub struct StandardMaterial {
 
     /// Internal Fallout surface variant consumed by the local PBR shader.
     ///
-    /// `0` is the regular material path, `1` is hair, and `2` is an eye.
+    /// `0` is the regular material path, `1` is hair, `2` is an eye, `3` is
+    /// skin, and `4` is a legacy Fallout world surface.
     /// This is configured from GLB material metadata by the viewer.
     pub fallout_surface_kind: u32,
+
+    /// Authored Fallout Blinn-Phong glossiness exponent. Used only for direct
+    /// lighting on legacy-world surfaces; indirect GGX keeps `perceptual_roughness`.
+    pub fallout_glossiness_exponent: f32,
+
+    /// Viewer master control for legacy-world Chan diffuse.
+    pub fallout_chan_strength: f32,
 
     /// The transform applied to the UVs corresponding to `ATTRIBUTE_UV_0` on the mesh before sampling. Default is identity.
     pub uv_transform: Affine2,
@@ -942,6 +950,8 @@ impl Default for StandardMaterial {
             opaque_render_method: OpaqueRendererMethod::Auto,
             deferred_lighting_pass_id: DEFAULT_PBR_DEFERRED_LIGHTING_PASS_ID,
             fallout_surface_kind: 0,
+            fallout_glossiness_exponent: 10.0,
+            fallout_chan_strength: 1.0,
             uv_transform: Affine2::IDENTITY,
         }
     }
@@ -1070,6 +1080,10 @@ pub struct StandardMaterialUniform {
     pub deferred_lighting_pass_id: u32,
     /// Internal Fallout surface variant consumed by the local PBR shader.
     pub fallout_surface_kind: u32,
+    /// Authored Fallout direct-light glossiness exponent.
+    pub fallout_glossiness_exponent: f32,
+    /// Master strength for legacy-world Chan diffuse.
+    pub fallout_chan_strength: f32,
 }
 
 impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
@@ -1216,6 +1230,8 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
             fallout_surface_kind: self.fallout_surface_kind,
+            fallout_glossiness_exponent: self.fallout_glossiness_exponent,
+            fallout_chan_strength: self.fallout_chan_strength,
             uv_transform: self.uv_transform.into(),
         }
     }

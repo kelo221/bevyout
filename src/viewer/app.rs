@@ -325,6 +325,8 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
         .insert_resource(EmissionScale(DEFAULT_EMISSION_SCALE))
         .init_resource::<MaterialClampSettings>()
         .init_resource::<MaterialClampBaselines>()
+        .init_resource::<LegacyChanSettings>()
+        .init_resource::<LegacyWorldMaterials>()
         .insert_resource(ReflectionProbeSettings::default())
         .insert_resource(image_space_emission)
         .insert_resource(ImageSpaceBloomOverrides::default())
@@ -407,6 +409,7 @@ pub(crate) fn run_view(manifest_path: PathBuf, options: RunViewOptions) -> Resul
                 apply_reflection_probe_settings,
                 configure_glow_cards,
                 configure_fallout_surface_materials,
+                apply_legacy_chan_strength,
                 configure_fallout_translucency,
             ),
         )

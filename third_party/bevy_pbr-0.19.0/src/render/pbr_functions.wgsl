@@ -410,6 +410,8 @@ fn apply_pbr_lighting(
     lighting_input.F0_metallic = output_color.rgb;
     lighting_input.F_ab = F_ab;
     lighting_input.surface_kind = in.material.fallout_surface_kind;
+    lighting_input.glossiness_exponent = in.material.fallout_glossiness_exponent;
+    lighting_input.chan_strength = in.material.fallout_chan_strength;
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     lighting_input.layers[LAYER_CLEARCOAT].NdotV = clearcoat_NdotV;
     lighting_input.layers[LAYER_CLEARCOAT].N = clearcoat_N;
@@ -440,6 +442,8 @@ fn apply_pbr_lighting(
     transmissive_lighting_input.F0_metallic = vec3(0.0);
     transmissive_lighting_input.F_ab = vec2(0.1);
     transmissive_lighting_input.surface_kind = 0u;
+    transmissive_lighting_input.glossiness_exponent = 10.0;
+    transmissive_lighting_input.chan_strength = 1.0;
 #ifdef STANDARD_MATERIAL_CLEARCOAT
     transmissive_lighting_input.layers[LAYER_CLEARCOAT].NdotV = 0.0;
     transmissive_lighting_input.layers[LAYER_CLEARCOAT].N = vec3(0.0);
