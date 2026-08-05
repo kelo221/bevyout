@@ -82,6 +82,7 @@ impl BHShape<f32, 3> for IrradianceTriangle {
 #[derive(Clone, Copy)]
 struct SurfaceHit<'a> {
     triangle: &'a IrradianceTriangle,
+    triangle_index: usize,
     distance: f32,
     barycentric: [f32; 3],
 }
@@ -613,7 +614,8 @@ fn trace_radiance_with_bounces(
     let mut radiance = Vec3::ZERO;
     for _ in 0..MAX_TRANSPARENT_LAYERS {
         let Some(hit) = nearest_hit(bvh, triangles, origin, direction, remaining) else {
-            radiance += escaped_radiance(environment_map, direction, ambient_irradiance);
+            radiance +=
+                escaped_radiance(environment_map, direction, ambient_irradiance) * throughput;
             break;
         };
         let material = &materials[hit.triangle.material];
@@ -1211,6 +1213,7 @@ fn trace_indirect_path(
     direction: Vec3,
     mut remaining: f32,
 ) -> Vec3 {
+    let entry_origin = origin;
     let mut throughput = 1.0_f32;
     let mut radiance = Vec3::ZERO;
     for _ in 0..MAX_TRANSPARENT_LAYERS {
@@ -1311,9 +1314,10 @@ fn trace_indirect_path(
                         emitters,
                         triangles,
                         materials,
+                        hit.triangle_index,
                         hit.triangle,
                         hit.barycentric,
-                        origin,
+                        entry_origin,
                         direction,
                     )
                 })
@@ -1462,14 +1466,15 @@ fn emissive_pdf_for_hit(
     emitters: &EmissiveSampler,
     triangles: &[IrradianceTriangle],
     materials: &[TransportMaterial],
+    triangle_index: usize,
     triangle: &IrradianceTriangle,
     barycentric: [f32; 3],
     origin: Vec3,
     direction: Vec3,
 ) -> Option<f32> {
-    let triangle_index = triangles
-        .iter()
-        .position(|candidate| std::ptr::eq(candidate, triangle))?;
+    if !std::ptr::eq(triangles.get(triangle_index)?, triangle) {
+        return None;
+    }
     let selection_probability = emitters.selection_probability(triangle_index);
     if selection_probability <= 0.0 || !selection_probability.is_finite() {
         return None;
@@ -1559,7 +1564,12 @@ fn nearest_hit<'a>(
 ) -> Option<SurfaceHit<'a>> {
     let ray = Ray::new(point3(origin), vector3(direction));
     bvh.traverse_iterator(&ray, triangles)
-        .filter_map(|triangle| intersect_triangle(origin, direction, triangle))
+        .filter_map(|triangle| {
+            let triangle_index =
+                unsafe { (triangle as *const IrradianceTriangle).offset_from(triangles.as_ptr()) };
+            let triangle_index = usize::try_from(triangle_index).ok()?;
+            intersect_triangle(origin, direction, triangle, triangle_index)
+        })
         .filter(|hit| {
             hit.distance > ray_epsilon_for_triangle(origin, hit.triangle)
                 && hit.distance < max_distance
@@ -1596,6 +1606,7 @@ fn intersect_triangle<'a>(
     origin: Vec3,
     direction: Vec3,
     triangle: &'a IrradianceTriangle,
+    triangle_index: usize,
 ) -> Option<SurfaceHit<'a>> {
     let v0 = vec3(triangle.vertices[0]);
     let v1 = vec3(triangle.vertices[1]);
@@ -1621,6 +1632,7 @@ fn intersect_triangle<'a>(
     let distance = edge2.dot(q) * inverse;
     (distance > 0.0).then_some(SurfaceHit {
         triangle,
+        triangle_index,
         distance,
         barycentric: [1.0 - u - v, u, v],
     })

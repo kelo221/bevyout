@@ -14,7 +14,9 @@ pub(crate) fn sample_seed(scene_seed: u64, spatial_index: usize, sample_index: u
 /// The half-open interval keeps roulette decisions away from an exact zero
 /// while remaining independent of Rayon scheduling.
 pub(crate) fn sample_uniform_1d(scene_seed: u64, spatial_index: usize, sample_index: u32) -> f32 {
-    (sample_seed(scene_seed, spatial_index, sample_index) as f32 + 0.5) * (1.0 / 4_294_967_296.0)
+    let seed = f64::from(sample_seed(scene_seed, spatial_index, sample_index));
+    let value = ((seed + 0.5) / 4_294_967_296.0) as f32;
+    value.min(f32::from_bits(1.0_f32.to_bits() - 1))
 }
 
 pub(crate) fn seed_from_fingerprint(fingerprint: &str) -> u64 {

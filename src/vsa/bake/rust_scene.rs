@@ -249,6 +249,7 @@ pub(crate) fn synthetic_lightmap_scene_for_test() -> RustBakeScene {
 #[derive(Clone)]
 struct SourcePrimitive {
     name: String,
+    source_node_identity: String,
     material: usize,
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
@@ -695,7 +696,14 @@ pub(crate) fn compose_scene(
     placements: &[JobPlacement],
     chunk_size: f32,
 ) -> Result<RustBakeScene> {
-    compose_scene_with_lightmap_density(asset_root, placements, chunk_size, 16.0, &BTreeMap::new())
+    compose_scene_with_lightmap_density(
+        asset_root,
+        placements,
+        chunk_size,
+        16.0,
+        &BTreeMap::new(),
+        &mut Vec::new(),
+    )
 }
 
 pub(crate) fn compose_scene_with_lightmap_density(
@@ -704,8 +712,23 @@ pub(crate) fn compose_scene_with_lightmap_density(
     chunk_size: f32,
     default_texels_per_meter: f32,
     density_overrides: &BTreeMap<u32, f32>,
+    density_warnings: &mut Vec<String>,
 ) -> Result<RustBakeScene> {
-    let default_texels_per_meter = validated_texels_per_meter(default_texels_per_meter);
+    let default_texels_per_meter =
+        validated_texels_per_meter(default_texels_per_meter, "default", density_warnings);
+    let density_overrides = density_overrides
+        .iter()
+        .map(|(form_id, value)| {
+            (
+                *form_id,
+                validated_texels_per_meter(
+                    *value,
+                    &format!("FormID {form_id:08x}"),
+                    density_warnings,
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut resources = OutputResources::default();
     let mut asset_cache = HashMap::<String, LoadedAsset>::new();
     let mut fragments = Vec::new();
@@ -752,14 +775,16 @@ pub(crate) fn compose_scene_with_lightmap_density(
             let lightmap_texels_per_meter = density_overrides
                 .get(&placement.reference_form_id)
                 .copied()
-                .map(validated_texels_per_meter)
                 .unwrap_or(default_texels_per_meter);
             *contribution.entry(placement.reference_form_id).or_default() += 1;
             fragments.push(ComposedPrimitive {
                 name: format!("{}_{:08x}", primitive.name, placement.reference_form_id),
                 primitive_key: format!(
-                    "ref:{:08x}/asset:{}/primitive:{}",
-                    placement.reference_form_id, placement.asset_path, primitive.name
+                    "ref:{:08x}/asset:{}/source:{}/primitive:{}",
+                    placement.reference_form_id,
+                    placement.asset_path,
+                    primitive.source_node_identity,
+                    primitive.name
                 ),
                 reference_form_ids: vec![placement.reference_form_id],
                 material: primitive.material,
@@ -1205,6 +1230,11 @@ fn collect_node_primitives(
                 .context("GLB primitive material could not be resolved")?;
             output.push(SourcePrimitive {
                 name: format!("{}_{}", mesh.name().unwrap_or("mesh"), primitive_index),
+                source_node_identity: format!(
+                    "node:{}/mesh:{}/primitive:{primitive_index}",
+                    node.index(),
+                    mesh.index()
+                ),
                 material,
                 positions,
                 normals,
@@ -2194,12 +2224,20 @@ fn batch_fragments(
     (passthrough, stats)
 }
 
-fn validated_texels_per_meter(value: f32) -> f32 {
-    if value.is_finite() && value > 0.0 {
-        value.clamp(1.0, 128.0)
-    } else {
-        16.0
+fn validated_texels_per_meter(value: f32, source: &str, warnings: &mut Vec<String>) -> f32 {
+    if !value.is_finite() || value <= 0.0 {
+        warnings.push(format!(
+            "warning: invalid lightmap density for {source}: requested {value}, applied 16"
+        ));
+        return 16.0;
     }
+    let applied = value.clamp(1.0, 128.0);
+    if applied != value {
+        warnings.push(format!(
+            "warning: out-of-range lightmap density for {source}: requested {value}, applied {applied}"
+        ));
+    }
+    applied
 }
 
 fn stable_key_hash(value: &str) -> u64 {

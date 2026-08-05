@@ -608,6 +608,8 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                 Some(tile_total),
             );
         }
+        let tile_fingerprint =
+            primitive_tile_fingerprint(cache_fingerprint, primitive_index, primitive, lights);
 
         for tile_y in 0..tile_count_y {
             let tile_start_y = tile_y * tile_size;
@@ -620,7 +622,7 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                     tile_x: tile_x as u32,
                     tile_y: tile_y as u32,
                 };
-                if let Some(record) = cache.read(key, cache_fingerprint)? {
+                if let Some(record) = cache.read(key, &tile_fingerprint)? {
                     let decoded =
                         decode_tile_payload(&record, tile_width as u32, tile_height as u32)?;
                     copy_solari_tile_to_page(
@@ -738,7 +740,7 @@ pub(crate) fn bake_direct_pages_solari_bounded(
                 )?;
                 cache.write(
                     key,
-                    cache_fingerprint,
+                    &tile_fingerprint,
                     tile_width as u32,
                     tile_height as u32,
                     &payload,
@@ -1226,11 +1228,16 @@ pub(crate) fn pack_lightmap_pages(
     mut pages: Vec<LightmapPage>,
     output_dir: &Path,
     max_size: u32,
+    progress: Option<&ProgressReporter>,
 ) -> Result<(Vec<LightmapPage>, Vec<LightmapAtlas>)> {
     if max_size == 0 {
         bail!("lightmap atlas page size must be nonzero");
     }
     let gutter = LIGHTMAP_ATLAS_GUTTER_TEXELS;
+    let page_total = pages.len() as u64;
+    if let Some(progress) = progress {
+        progress.phase_started("UV/page packing", Some(page_total));
+    }
     let mut order = (0..pages.len()).collect::<Vec<_>>();
     order.sort_by_key(|index| {
         (
@@ -1339,6 +1346,9 @@ pub(crate) fn pack_lightmap_pages(
             }
             pages[page_index].atlas_index = atlas_index;
             pages[page_index].atlas_offset = [x + gutter, y + gutter];
+            if let Some(progress) = progress {
+                progress.unit_completed(Some(page_total), None);
+            }
         }
         let content_hash = format!("{:x}", Sha256::digest(&bytes));
         let raw_path = output_dir.join(format!("lightmap-atlas-{atlas_index:04}.rgba16f.raw"));

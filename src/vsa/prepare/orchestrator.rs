@@ -274,13 +274,19 @@ fn prepare_batch(
         progress.unit_completed_in_phase("cell", Some(resolved.len() as u64), None);
     }
 
-    let session = BatchSession::new(
+    let session = match BatchSession::new(
         &plugin_path,
         &data_root,
         &cache_dir,
         loaded_plugins,
         fingerprint,
-    )?;
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            progress.finished(false);
+            return Err(error);
+        }
+    };
 
     // F48.4: bounded worker pool. `--jobs N` overrides; otherwise the
     // machine's available parallelism, and never more workers than there

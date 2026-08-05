@@ -576,6 +576,7 @@ fn bake_manifest_with_backend(
     );
     progress.phase_started("scene composition", None);
     let mut density_retries = 0;
+    let mut density_warnings = Vec::new();
     let mut rust_scene = loop {
         let rust_scene = rust_scene::compose_scene_with_lightmap_density(
             asset_root,
@@ -583,6 +584,7 @@ fn bake_manifest_with_backend(
             job.static_batch_chunk_meters,
             job.lightmap_texels_per_meter,
             &job.lightmap_density_overrides,
+            &mut density_warnings,
         )?;
         match lightmap::validate_page_dimensions(&rust_scene, lightmap::LIGHTMAP_ATLAS_PAGE_SIZE) {
             Ok(()) => break rust_scene,
@@ -612,6 +614,9 @@ fn bake_manifest_with_backend(
             }
         }
     };
+    for warning in density_warnings {
+        progress.transient_message(warning);
+    }
     let composed_elapsed = started.elapsed();
     println!(
         "Rust bake: composed {} primitives in {:.2}s",
@@ -661,7 +666,7 @@ fn bake_manifest_with_backend(
                         material_warnings.len()
                     ));
                 }
-                lightmap::bake_direct_pages_solari_bounded(
+                let result = lightmap::bake_direct_pages_solari_bounded(
                     &rust_scene,
                     &job.lights,
                     &directional,
@@ -677,9 +682,14 @@ fn bake_manifest_with_backend(
                     debug,
                     &mut lightmap_cache,
                     Some(progress),
-                )
-                .map_err(GpuBackendFailure)
-                .map_err(anyhow::Error::new)?
+                );
+                match result {
+                    Ok(result) => result,
+                    Err(error) if backend::solari::is_device_error(&error) => {
+                        return Err(anyhow::Error::new(GpuBackendFailure(error)));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             #[cfg(not(feature = "lightmap-gpu-solari"))]
             {
@@ -714,15 +724,12 @@ fn bake_manifest_with_backend(
     };
     let lightmap_sampling = lightmap_bake.sampling;
     let lightmap_pages = lightmap_bake.pages;
-    progress.phase_started("UV/page packing", Some(lightmap_pages.len() as u64));
     let (lightmap_pages, lightmap_atlases) = lightmap::pack_lightmap_pages(
         lightmap_pages,
         &lightmap_raw_dir,
         lightmap::LIGHTMAP_ATLAS_PAGE_SIZE,
+        Some(progress),
     )?;
-    for _ in &lightmap_pages {
-        progress.unit_completed(Some(lightmap_pages.len() as u64), None);
-    }
     println!(
         "surface lightmaps: packed {} primitive pages into {} atlases; adaptive samples {}..{} mean {:.2} max relative variance {:.6}",
         lightmap_pages.len(),
@@ -1015,6 +1022,7 @@ fn build_lightmap_bindings(
     lightmap_pages: &[lightmap::LightmapPage],
     lightmap_atlases: &[lightmap::LightmapAtlas],
 ) -> Result<Vec<PreparedLightmapBinding>> {
+    let mut binding_ids = HashMap::<u32, &str>::new();
     rust_scene
         .primitives
         .iter()
@@ -1040,10 +1048,17 @@ fn build_lightmap_bindings(
                 (offset_x + page.width) as f32 / atlas.width as f32,
                 (offset_y + page.height) as f32 / atlas.height as f32,
             ];
+            let binding_id = primitive
+                .lightmap_binding_id
+                .context("lightmap primitive has no generated binding ID")?;
+            if let Some(previous_key) = binding_ids.insert(binding_id, &primitive.primitive_key) {
+                bail!(
+                    "lightmap binding ID {binding_id} collides for primitives {previous_key} and {}",
+                    primitive.primitive_key
+                );
+            }
             Ok(PreparedLightmapBinding {
-                binding_id: primitive
-                    .lightmap_binding_id
-                    .context("lightmap primitive has no generated binding ID")?,
+                binding_id,
                 primitive_key: primitive.primitive_key.clone(),
                 atlas_index: page
                     .atlas_index

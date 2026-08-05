@@ -149,15 +149,23 @@ fn reporter_tty_updates_one_line_and_finishes_with_a_newline() {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let reporter =
         ProgressReporter::with_writer(ProgressMode::Tty, SharedBuffer(bytes.clone()), false);
-    reporter.started("Solari bake Tenpenny01", None);
+    reporter.started(
+        "Solari bake Tenpenny01 with a deliberately long progress message",
+        None,
+    );
     reporter.phase_started("primitive", Some(96));
     reporter.unit_completed(Some(96), None);
+    reporter.started("Bake", None);
     reporter.finished(true);
 
     let text = output(&bytes);
     assert!(text.contains('\r'));
     assert_eq!(text.matches('\n').count(), 1);
     assert!(!text.contains('\u{1b}'));
+    let final_frame = text.rsplit('\r').next().unwrap();
+    assert!(final_frame.starts_with("Bake | work 0"));
+    assert!(final_frame.ends_with('\n'));
+    assert!(final_frame.trim_end_matches([' ', '\n']).len() < final_frame.len() - 1);
 }
 
 #[test]

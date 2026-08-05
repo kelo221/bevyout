@@ -209,24 +209,21 @@ fn generate_mesh(
     }
     let vertex_count = unsafe { bevyout_xatlas_mesh_vertex_count(handle.as_ptr(), 0) } as usize;
     let index_count = unsafe { bevyout_xatlas_mesh_index_count(handle.as_ptr(), 0) } as usize;
-    let vertices = unsafe {
-        slice::from_raw_parts(
-            bevyout_xatlas_mesh_vertices(handle.as_ptr(), 0),
-            vertex_count,
-        )
+    let vertex_ptr = unsafe { bevyout_xatlas_mesh_vertices(handle.as_ptr(), 0) };
+    let index_ptr = unsafe { bevyout_xatlas_mesh_indices(handle.as_ptr(), 0) };
+    if vertex_ptr.is_null() || index_ptr.is_null() {
+        return Err(Error::NoOutput);
     }
-    .iter()
-    .map(|vertex| Vertex {
-        atlas_index: vertex.atlas_index,
-        chart_index: vertex.chart_index,
-        uv: vertex.uv,
-        xref: vertex.xref,
-    })
-    .collect();
-    let indices = unsafe {
-        slice::from_raw_parts(bevyout_xatlas_mesh_indices(handle.as_ptr(), 0), index_count)
-    }
-    .to_vec();
+    let vertices = unsafe { slice::from_raw_parts(vertex_ptr, vertex_count) }
+        .iter()
+        .map(|vertex| Vertex {
+            atlas_index: vertex.atlas_index,
+            chart_index: vertex.chart_index,
+            uv: vertex.uv,
+            xref: vertex.xref,
+        })
+        .collect();
+    let indices = unsafe { slice::from_raw_parts(index_ptr, index_count) }.to_vec();
     Ok(Mesh {
         width: unsafe { bevyout_xatlas_width(handle.as_ptr()) },
         height: unsafe { bevyout_xatlas_height(handle.as_ptr()) },

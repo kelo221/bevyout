@@ -47,6 +47,21 @@ use bevy::window::{ExitCondition, WindowPlugin};
 use bevy::winit::WinitPlugin;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug)]
+pub(crate) struct SolariDeviceError(String);
+
+impl std::fmt::Display for SolariDeviceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SolariDeviceError {}
+
+pub(crate) fn is_device_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SolariDeviceError>().is_some()
+}
+
 pub(crate) fn required_wgpu_features() -> bevy::render::settings::WgpuFeatures {
     bevy::solari::SolariPlugins::required_wgpu_features()
 }
@@ -741,10 +756,10 @@ impl SolariBakeSession {
         let features = sub_apps.main.world().resource::<RenderDevice>().features();
         let required = required_wgpu_features();
         if !features.contains(required) {
-            bail!(
+            return Err(anyhow::Error::new(SolariDeviceError(format!(
                 "Solari bake adapter is unavailable on the selected GPU; missing features: {:?}",
                 required.difference(features)
-            );
+            ))));
         }
         Ok(Self {
             sub_apps,
@@ -848,7 +863,11 @@ impl SolariBakeSession {
                 .resource::<RenderDevice>()
                 .wgpu_device()
                 .poll(bevy::render::render_resource::PollType::wait_indefinitely())
-                .context("waiting for Solari bake GPU work")?;
+                .map_err(|error| {
+                    anyhow::Error::new(SolariDeviceError(format!(
+                        "waiting for Solari bake GPU work failed: {error}"
+                    )))
+                })?;
             if let Some(result) = readback
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Solari bake readback lock was poisoned"))?
@@ -857,7 +876,9 @@ impl SolariBakeSession {
                 return result.map_err(anyhow::Error::msg);
             }
         }
-        bail!("Solari bake session timed out while waiting for GPU readback")
+        Err(anyhow::Error::new(SolariDeviceError(
+            "Solari bake session timed out while waiting for GPU readback".into(),
+        )))
     }
 }
 

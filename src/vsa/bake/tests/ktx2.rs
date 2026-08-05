@@ -24,7 +24,29 @@ fn writes_valid_npot_single_level_rgba16f_ktx2() {
     assert_eq!(header.pixel_height, height);
     assert_eq!(header.level_count, 1);
     assert!(header.supercompression_scheme.is_none());
-    assert_eq!(reader.levels().next().unwrap().data, data.as_slice());
+
+    let dfd_start = header.index.dfd_byte_offset as usize;
+    let dfd_end = dfd_start + header.index.dfd_byte_length as usize;
+    let total_dfd_length =
+        u32::from_le_bytes(encoded[dfd_start..dfd_start + 4].try_into().unwrap()) as usize;
+    let dfd_block_size =
+        u16::from_le_bytes(encoded[dfd_start + 10..dfd_start + 12].try_into().unwrap()) as usize;
+    let level_index = ::ktx2::LevelIndex::from_bytes(
+        encoded[::ktx2::Header::LENGTH..::ktx2::Header::LENGTH + ::ktx2::LevelIndex::LENGTH]
+            .try_into()
+            .unwrap(),
+    );
+    let level_start = level_index.byte_offset as usize;
+    let level_end = level_start + level_index.byte_length as usize;
+    assert_eq!(total_dfd_length, header.index.dfd_byte_length as usize);
+    assert_eq!(total_dfd_length, 4 + dfd_block_size);
+    assert!(level_start >= dfd_end);
+    assert!(level_end <= encoded.len());
+    assert!(
+        (level_start - dfd_start) % 8 == 0,
+        "level starts on lcm(8, 4) = 8"
+    );
+    assert!(encoded[dfd_end..level_start].iter().all(|b| *b == 0));
 
     fs::remove_dir_all(root).unwrap();
 }

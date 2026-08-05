@@ -64,7 +64,6 @@ GLB TEXCOORD_1 + PreparedBake Lightmap Bindings
 Bevy Lightmap Components
 ```
 
-
 ## Solari 7 review and impact on the current code
 
 Solari v7, as described by the [v7 change set][12] and its [tracking issue][13],
@@ -1011,10 +1010,12 @@ Expose it only when the build includes:
 lightmap-gpu-solari = ["bevy/bevy_solari"]
 ```
 
-The feature must remain off in the default game build. `Auto` still resolves to
-the CPU reference path; a feature-enabled explicit `Solari` request attempts
-the adapter and returns a clear capability or unsupported-input error. A build
-without the feature rejects it before baking. Bevy 0.19 already exposes the
+The feature must remain off in the default game build. `Auto` selects the
+Solari GPU backend when the feature is enabled and a compatible adapter is
+available, then falls back to the CPU reference path on typed adapter or device
+failure. A feature-enabled explicit `Solari` request attempts the adapter and
+returns a clear capability or unsupported-input error. A build without the
+feature rejects an explicit Solari request before baking. Bevy 0.19 already exposes the
 feature, but Solari remains experimental, so the adapter should stay narrow and
 disposable when bevyout migrates to Bevy 0.20.
 
@@ -1068,7 +1069,7 @@ This permits:
 * Reusing UV layouts after lighting changes.
 * Rebaking only affected atlas pages or spatial tiles.
 
-### Shipped amendments — 2026-08-05
+## Shipped amendments — 2026-08-05
 
 * The CPU bake now writes sparse raw transport tiles to
   `baked/lightmap-accumulation/` and validates each tile with a cache
@@ -1695,8 +1696,10 @@ Still required for the complete optional backend:
 * Add stronger analytical fixtures for constant environments, emissive panels,
   sidedness, texture/factor color spaces, and non-ring sample distributions;
   keep the CPU path authoritative until those fixtures are hardware-verified.
-* Add capability-aware `Auto` selection only after GPU/CPU parity is proven;
-  until then `Auto` stays on CPU and explicit `Solari` remains opt-in.
+* Historical limitation: `Auto` stayed on CPU while GPU/CPU parity was being
+  established. Current behavior selects Solari when the feature and compatible
+  adapter are available and falls back to CPU only for typed adapter or device
+  failures; explicit `Solari` remains available for strict GPU-only requests.
 * Keep the Solari adapter's material/light policy narrow and bevyout-owned; do
   not reuse camera-space path tracing, exposure, temporal reservoirs, or the
   real-time ReSTIR path as bake authority.

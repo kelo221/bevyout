@@ -109,13 +109,18 @@ fn write_uncompressed(
             type_size
         );
     }
+    let texel_block_size = usize::from(basic_dfd.bytes_planes[0]);
     let dfd_block = ::ktx2::dfd::Block::Basic(basic_dfd).to_vec();
     let dfd_byte_length = 4usize
         .checked_add(dfd_block.len())
         .context("KTX2 DFD size overflowed")?;
+    let alignment = lcm(texel_block_size, 4);
     let dfd_byte_offset = (::ktx2::Header::LENGTH + ::ktx2::LevelIndex::LENGTH) as u32;
-    let level_byte_offset =
-        (::ktx2::Header::LENGTH + ::ktx2::LevelIndex::LENGTH + dfd_byte_length) as u64;
+    let unpadded_level_offset = dfd_byte_offset as usize + dfd_byte_length;
+    let level_padding = (alignment - unpadded_level_offset % alignment) % alignment;
+    let level_byte_offset = unpadded_level_offset
+        .checked_add(level_padding)
+        .context("KTX2 level offset overflowed")? as u64;
     let header = ::ktx2::Header {
         format: Some(format),
         type_size,
@@ -146,8 +151,18 @@ fn write_uncompressed(
     encoded.extend_from_slice(&level.as_bytes());
     encoded.extend_from_slice(&(dfd_byte_length as u32).to_le_bytes());
     encoded.extend_from_slice(&dfd_block);
+    encoded.resize(encoded.len() + level_padding, 0);
     encoded.extend_from_slice(&data);
     fs::write(output_path, encoded)
         .with_context(|| format!("could not write KTX2 output {}", output_path.display()))?;
     Ok(())
+}
+
+fn lcm(left: usize, right: usize) -> usize {
+    let mut a = left;
+    let mut b = right;
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    left / a * right
 }

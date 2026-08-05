@@ -136,6 +136,33 @@ fn batching_offsets_indices_and_preserves_reference_ids() {
 }
 
 #[test]
+fn lightmap_density_validation_reports_fallbacks_and_clamps() {
+    let mut warnings = Vec::new();
+    assert_eq!(
+        validated_texels_per_meter(f32::NAN, "default", &mut warnings),
+        16.0
+    );
+    assert_eq!(
+        validated_texels_per_meter(0.0, "FormID 00000001", &mut warnings),
+        16.0
+    );
+    assert_eq!(validated_texels_per_meter(0.5, "low", &mut warnings), 1.0);
+    assert_eq!(
+        validated_texels_per_meter(256.0, "high", &mut warnings),
+        128.0
+    );
+    assert_eq!(
+        validated_texels_per_meter(32.0, "valid", &mut warnings),
+        32.0
+    );
+    assert_eq!(warnings.len(), 4);
+    assert!(warnings[0].contains("requested NaN, applied 16"));
+    assert!(warnings[1].contains("requested 0, applied 16"));
+    assert!(warnings[2].contains("requested 0.5, applied 1"));
+    assert!(warnings[3].contains("requested 256, applied 128"));
+}
+
+#[test]
 fn batching_keeps_different_lightmap_densities_in_separate_primitives() {
     let fragment = |name: &str, density| {
         let mut fragment = open_sheet_fragment(0);

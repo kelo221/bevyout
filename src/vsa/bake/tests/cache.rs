@@ -128,6 +128,45 @@ fn force_clear_leaves_a_fresh_metadata_root() {
 }
 
 #[test]
+fn force_clear_removes_only_owned_cache_files() {
+    let root = temp_root("clear-owned-only");
+    let mut cache = TileCache::open(&root, "fingerprint-a", false).unwrap();
+    let key = TileKey {
+        primitive: 7,
+        tile_x: 8,
+        tile_y: 9,
+    };
+    cache
+        .write(key, "tile-fingerprint", 1, 1, b"payload")
+        .unwrap();
+    drop(cache);
+    fs::write(root.join(".cache.meta.123.tmp"), b"temporary metadata").unwrap();
+    fs::write(
+        root.join(".page_0007_tile_0008_0009.bin.123.tmp"),
+        b"temporary tile",
+    )
+    .unwrap();
+    fs::write(root.join("page_notes.txt"), b"keep notes").unwrap();
+    fs::write(root.join("other.tmp"), b"keep unrelated temporary").unwrap();
+
+    let mut cleared = TileCache::open(&root, "fingerprint-b", true).unwrap();
+
+    assert_eq!(cleared.read(key, "tile-fingerprint").unwrap(), None);
+    assert!(root.join("cache.meta").is_file());
+    assert!(!root.join(".cache.meta.123.tmp").exists());
+    assert!(!root.join(".page_0007_tile_0008_0009.bin.123.tmp").exists());
+    assert_eq!(
+        fs::read(root.join("page_notes.txt")).unwrap(),
+        b"keep notes"
+    );
+    assert_eq!(
+        fs::read(root.join("other.tmp")).unwrap(),
+        b"keep unrelated temporary"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn stale_tile_fingerprints_are_misses_without_clearing_unrelated_tiles() {
     let root = temp_root("partial");
     let mut first = TileCache::open(&root, "scene-fingerprint", false).unwrap();

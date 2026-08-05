@@ -157,7 +157,7 @@ fn miniature_surface_bake_produces_finite_ktx2() {
     assert!(resumed_cache.stats().hits > 0);
     assert_eq!(resumed_cache.stats().writes, 0);
 
-    let (pages, atlases) = pack_lightmap_pages(result.pages, &output_dir, 32).unwrap();
+    let (pages, atlases) = pack_lightmap_pages(result.pages, &output_dir, 32, None).unwrap();
     assert_eq!(pages[0].atlas_index, 0);
     assert_eq!(atlases.len(), 1);
     let atlas = &atlases[0];
@@ -337,7 +337,7 @@ fn atlas_packing_assigns_guttered_non_overlapping_regions() {
         },
     ];
 
-    let (pages, atlases) = pack_lightmap_pages(pages, &root, 32).unwrap();
+    let (pages, atlases) = pack_lightmap_pages(pages, &root, 32, None).unwrap();
 
     assert_eq!(atlases.len(), 1);
     assert!(atlases[0].width <= 32 && atlases[0].height <= 32);

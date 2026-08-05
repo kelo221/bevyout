@@ -138,6 +138,48 @@ fn lightmap_binding_projection_preserves_primitive_identity_and_uv_rect() {
 }
 
 #[test]
+fn duplicate_lightmap_binding_ids_are_rejected_before_publication() {
+    let mut scene = synthetic_lightmap_scene_for_test();
+    let mut duplicate = scene.primitives[0].clone();
+    duplicate.primitive_key = "fixture/colliding_triangle".into();
+    scene.primitives.push(duplicate);
+    let pages = [
+        LightmapPage {
+            primitive_index: 0,
+            width: 1,
+            height: 1,
+            raw_path: "first.raw".into(),
+            covered_texels: 1,
+            dilated_texels: 0,
+            atlas_index: 0,
+            atlas_offset: [0, 0],
+        },
+        LightmapPage {
+            primitive_index: 1,
+            width: 1,
+            height: 1,
+            raw_path: "second.raw".into(),
+            covered_texels: 1,
+            dilated_texels: 0,
+            atlas_index: 0,
+            atlas_offset: [1, 0],
+        },
+    ];
+    let atlases = [LightmapAtlas {
+        width: 2,
+        height: 1,
+        raw_path: "atlas.raw".into(),
+        content_hash: "hash".into(),
+    }];
+
+    let error = build_lightmap_bindings(&scene, &pages, &atlases).unwrap_err();
+
+    assert!(error.to_string().contains("lightmap binding ID 1 collides"));
+    assert!(error.to_string().contains("fixture/synthetic_triangle"));
+    assert!(error.to_string().contains("fixture/colliding_triangle"));
+}
+
+#[test]
 fn duplicate_lightmap_density_overrides_are_rejected() {
     let overrides = vec![
         crate::cli::LightmapDensityOverrideArg {

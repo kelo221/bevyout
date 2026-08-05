@@ -298,12 +298,34 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("publishing cache file {}", path.display()))
 }
 
+fn is_owned_cache_name(name: &str) -> bool {
+    name == "cache.meta"
+        || (name.starts_with("page_")
+            && name.ends_with(".bin")
+            && name.len() == "page_0000_tile_0000_0000.bin".len()
+            && name[5..9].chars().all(|c| c.is_ascii_digit())
+            && name[15..19].chars().all(|c| c.is_ascii_digit())
+            && name[20..24].chars().all(|c| c.is_ascii_digit()))
+}
+
 fn clear_cache_entries(root: &Path) -> Result<()> {
     for entry in fs::read_dir(root)
         .with_context(|| format!("listing lightmap accumulation cache {}", root.display()))?
     {
         let path = entry?.path();
-        if path.is_file() {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let owned_temporary = name.starts_with('.')
+            && name.ends_with(".tmp")
+            && name[1..name.len() - 4]
+                .rsplit_once('.')
+                .is_some_and(|(owned_name, pid)| {
+                    is_owned_cache_name(owned_name)
+                        && !pid.is_empty()
+                        && pid.chars().all(|c| c.is_ascii_digit())
+                });
+        if (is_owned_cache_name(name) || owned_temporary) && path.is_file() {
             fs::remove_file(&path)
                 .with_context(|| format!("invalidating cache file {}", path.display()))?;
         }
