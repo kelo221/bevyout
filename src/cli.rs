@@ -67,22 +67,12 @@ pub enum CommandLine {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum LightmapBackendPreference {
-    /// Select the first available backend, currently the CPU reference path.
+    /// Select GPU Solari when this build supports it, then fall back to CPU.
     Auto,
     /// Use the deterministic CPU reference backend.
     Cpu,
     /// Request the optional Solari-backed GPU prototype.
     Solari,
-}
-
-impl LightmapBackendPreference {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Cpu => "cpu",
-            Self::Solari => "solari",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -504,9 +494,9 @@ pub struct BakeArgs {
     /// Prepared scene cache directory used by selector-based and batch baking.
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
-    /// Lightmap transport backend. Solari is an explicit opt-in prototype;
-    /// CPU remains the default and cross-platform reference implementation.
-    #[arg(long = "bake-backend", value_enum, default_value_t = LightmapBackendPreference::Cpu)]
+    /// Lightmap transport backend. Auto prefers GPU Solari and falls back to
+    /// the deterministic CPU reference backend when GPU support is unavailable.
+    #[arg(long = "bake-backend", value_enum, default_value_t = LightmapBackendPreference::Auto)]
     pub(crate) lightmap_backend: LightmapBackendPreference,
     /// Optional authored equirectangular HDR environment map used additively
     /// with the prepared cell ambient during CPU light transport.
@@ -526,37 +516,40 @@ pub struct BakeArgs {
         value_parser = parse_irradiance_samples
     )]
     pub(crate) irradiance_samples: u32,
-    /// Minimum surface-lightmap samples per covered texel before convergence
-    /// may stop the adaptive estimator.
+    /// Minimum surface-lightmap samples per covered texel. The GPU-fast
+    /// default uses fixed eight-sample transport.
     #[arg(
         long,
-        default_value_t = 4,
+        default_value_t = 8,
         value_parser = parse_lightmap_sample_count
     )]
     pub(crate) lightmap_min_samples: u32,
-    /// Maximum surface-lightmap samples per covered texel.
+    /// Maximum surface-lightmap samples per covered texel. Keep this equal to
+    /// the minimum for the Solari GPU backend.
     #[arg(
         long,
-        default_value_t = 32,
+        default_value_t = 8,
         value_parser = parse_lightmap_sample_count
     )]
     pub(crate) lightmap_max_samples: u32,
     /// Relative per-texel variance threshold for adaptive surface sampling.
+    /// Zero is the GPU-compatible fixed-sampling default.
     #[arg(
         long,
-        default_value_t = 0.01,
+        default_value_t = 0.0,
         value_parser = parse_lightmap_variance_threshold
     )]
     pub(crate) lightmap_variance_threshold: f32,
     /// Number of secondary diffuse surfaces sampled by each surface-lightmap texel.
     #[arg(
         long,
-        default_value_t = 2,
+        default_value_t = 1,
         value_parser = parse_lightmap_bounce_count
     )]
     pub(crate) lightmap_bounces: u32,
     /// Surface-lightmap texel density in texels per world-space metre.
-    /// When omitted, CPU/Auto uses 16 and Solari uses a fast 4-texel preset.
+    /// When omitted, CPU uses 16, Solari uses a fast 4-texel preset, and Auto
+    /// follows the backend it selects.
     #[arg(long, value_parser = parse_lightmap_texels_per_meter)]
     pub(crate) lightmap_texels_per_meter: Option<f32>,
     /// Per-placement density override in the form FORM_ID=TEXELS_PER_METER.
@@ -581,16 +574,16 @@ pub struct BakeArgs {
     )]
     pub(crate) lightmap_denoise_iterations: u32,
     /// Persistent surface-lightmap accumulation tile edge in texels.
-    /// When omitted, CPU/Auto uses 128 and Solari uses 512 to reduce
-    /// per-dispatch/readback overhead.
+    /// When omitted, CPU uses 128, Solari uses 512 to reduce per-dispatch
+    /// overhead, and Auto follows the backend it selects.
     #[arg(long, value_parser = parse_lightmap_tile_size)]
     pub(crate) lightmap_tile_size: Option<u32>,
     /// Discard completed surface-lightmap accumulation tiles before tracing.
     #[arg(long)]
     pub(crate) lightmap_force_retrace: bool,
     /// World-space size of material-compatible static geometry batches, in metres.
-    /// When omitted, CPU/Auto uses 64 m and Solari uses 32 m to keep pages
-    /// within the one-primitive atlas contract.
+    /// When omitted, CPU uses 64 m, Solari uses 32 m to keep pages within the
+    /// one-primitive atlas contract, and Auto follows the backend it selects.
     #[arg(long, value_parser = parse_static_batch_chunk_meters)]
     pub(crate) static_batch_chunk_meters: Option<f32>,
     /// Unified KTX-Software `ktx.exe` path (legacy option name).

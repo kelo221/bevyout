@@ -265,13 +265,14 @@ fn static_batch_chunk_size_defaults_to_64_metres_and_enforces_bounds() {
         panic!("expected bake command");
     };
     assert_eq!(args.static_batch_chunk_meters, None);
-    assert_eq!(args.lightmap_backend, LightmapBackendPreference::Cpu);
+    assert_eq!(args.lightmap_backend, LightmapBackendPreference::Auto);
     assert!(args.lightmap_environment_map.is_none());
     assert_eq!(args.irradiance_spacing_meters, 8.0);
     assert_eq!(args.irradiance_samples, 64);
-    assert_eq!(args.lightmap_min_samples, 4);
-    assert_eq!(args.lightmap_max_samples, 32);
-    assert_eq!(args.lightmap_bounces, 2);
+    assert_eq!(args.lightmap_min_samples, 8);
+    assert_eq!(args.lightmap_max_samples, 8);
+    assert_eq!(args.lightmap_variance_threshold, 0.0);
+    assert_eq!(args.lightmap_bounces, 1);
     assert_eq!(args.lightmap_texels_per_meter, None);
     assert!(args.lightmap_density_overrides.is_empty());
     assert!(!args.lightmap_debug_uv);

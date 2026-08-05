@@ -192,7 +192,7 @@ fn bake_shader_keeps_solari_scene_and_bevyout_bindings_separate() {
 }
 
 #[test]
-fn solari_rejects_unsupported_emissive_and_blended_bounce_materials() {
+fn solari_warns_for_experimental_material_transport() {
     use crate::vsa::bake::rust_scene::{AlphaMode, SampledTexture, TransportMaterial};
     use image::RgbaImage;
 
@@ -205,32 +205,19 @@ fn solari_rejects_unsupported_emissive_and_blended_bounce_materials() {
         ))),
         ..TransportMaterial::default()
     };
-    let error = validate_solari_material_contract(&[textured_emitter], 0).unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<SolariUnsupportedMaterial>(),
-        Some(SolariUnsupportedMaterial::TexturedEmission { material_index: 0 })
-    ));
-
     let masked_emitter = TransportMaterial {
         emissive_factor: Vec3::ONE,
         alpha_mode: AlphaMode::Mask,
         ..TransportMaterial::default()
     };
-    let error = validate_solari_material_contract(&[masked_emitter], 0).unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<SolariUnsupportedMaterial>(),
-        Some(SolariUnsupportedMaterial::NonOpaqueEmission { material_index: 0 })
-    ));
-
     let blended = TransportMaterial {
         alpha_mode: AlphaMode::Blend,
         ..TransportMaterial::default()
     };
-    let error = validate_solari_material_contract(&[blended], 1).unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<SolariUnsupportedMaterial>(),
-        Some(SolariUnsupportedMaterial::BlendedIndirect { material_index: 0 })
-    ));
+    assert_eq!(
+        solari_material_warning_indices(&[textured_emitter, masked_emitter, blended], 1),
+        vec![0, 1, 2]
+    );
 }
 
 #[test]

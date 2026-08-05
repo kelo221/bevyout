@@ -58,6 +58,15 @@ pub enum ProgressEvent {
 pub struct PhaseSnapshot {
     pub name: String,
     pub work: WorkEstimate,
+    pub timing: ProgressTiming,
+}
+
+/// Coarse phase timing derived from completed work units. ETA stays unknown
+/// until at least two units establish a usable rate.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProgressTiming {
+    pub elapsed_ms: u64,
+    pub eta_ms: Option<u64>,
 }
 
 /// Immutable state passed to renderers and future JSON/GUI backends.
@@ -68,6 +77,7 @@ pub struct ProgressSnapshot {
     pub phases: Vec<PhaseSnapshot>,
     pub current_phase: Option<String>,
     pub current_work: WorkEstimate,
+    pub current_timing: ProgressTiming,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub jobs_completed: u64,

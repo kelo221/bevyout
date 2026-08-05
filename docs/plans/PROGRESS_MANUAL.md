@@ -17,22 +17,35 @@ does not contain that cell.
    final `prepared ...` and `asset cache: ...` summaries remain normal stdout
    lines.
 
-2. Run a terminal CPU bake:
+2. Run a terminal bake with the default backend:
+
+   ```powershell
+   cargo run-dev -- bake SuperDuperMart --progress tty
+   ```
+
+   Expected: the default profile is GPU-oriented: 8 fixed lightmap samples
+   and 1 bounce. Progress identifies `GPU` when the GPU feature and required
+   adapter are available. If GPU setup, material compatibility, or a GPU tile
+   dispatch fails, progress reports the reason and changes the label to `CPU`.
+   The CPU line includes a one-time warning that the current CPU route is slow
+   and may not saturate all CPU cores.
+   It includes scene
+   composition, primitive/tile transport, cache hits/misses, ETA after enough
+   completed units, denoise/dilation, atlas encoding, irradiance probes, and
+   manifest publication. The existing `Rust bake: ...`, surface lightmap,
+   cache, and batching summaries remain unchanged on stdout.
+
+   To force the deterministic reference path, run:
 
    ```powershell
    cargo run-dev -- bake SuperDuperMart --progress tty --bake-backend cpu
    ```
 
-   Expected: progress identifies `CPU`, scene composition, primitive/tile
-   transport, cache hits/misses, denoise/dilation, atlas encoding, irradiance
-   probes, and manifest publication. The existing `Rust bake: ...`, surface
-   lightmap, cache, and batching summaries remain unchanged on stdout.
-
 3. Verify redirected plain output:
 
    ```powershell
    cargo run-dev -- prepare SuperDuperMart --progress plain 1>prepare.stdout 2>prepare.stderr
-   cargo run-dev -- bake SuperDuperMart --progress plain --bake-backend cpu 1>bake.stdout 2>bake.stderr
+   cargo run-dev -- bake SuperDuperMart --progress plain 1>bake.stdout 2>bake.stderr
    ```
 
    Expected: `prepare.stderr` and `bake.stderr` contain newline-delimited
@@ -43,7 +56,7 @@ does not contain that cell.
 
    ```powershell
    cargo run-dev -- prepare SuperDuperMart --progress off 1>off.stdout 2>off.stderr
-   cargo run-dev -- bake SuperDuperMart --progress off --bake-backend cpu 1>off-bake.stdout 2>off-bake.stderr
+   cargo run-dev -- bake SuperDuperMart --progress off 1>off-bake.stdout 2>off-bake.stderr
    ```
 
    Expected: no progress lines are added to stderr. Compare the stdout files

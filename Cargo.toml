@@ -14,8 +14,8 @@ default = []
 # The Bevy 0.18-only upstream plugin is intentionally not enabled; the viewer
 # adapter owns the Bevy 0.19 integration and keeps the default build Yarn-free.
 dialogue-yarn = ["dep:yarnspinner"]
-# Solari is an opt-in GPU infrastructure dependency. The default bake selector
-# remains on the CPU reference path; explicit Solari uses the UV-texel adapter.
+# Solari is an optional GPU infrastructure dependency. The auto bake selector
+# prefers it when the build includes the feature and falls back to CPU.
 lightmap-gpu-solari = ["bevy/bevy_solari"]
 
 [dependencies]

@@ -7,6 +7,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[derive(Debug)]
+struct GpuBackendFailure(anyhow::Error);
+
+impl std::fmt::Display for GpuBackendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GPU lightmap backend failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for GpuBackendFailure {}
+
 mod backend;
 mod batch;
 mod cache;
@@ -24,7 +35,7 @@ pub(crate) mod rust_scene;
 mod tools;
 mod transport;
 
-pub(crate) use backend::validate_backend;
+pub(crate) use backend::{SelectedLightmapBackend, select_backend, validate_backend};
 pub(crate) use batch::*;
 pub(crate) use job::*;
 pub(crate) use plan::*;
@@ -87,8 +98,18 @@ pub fn bake(args: BakeArgs) -> Result<()> {
 
 fn bake_operation_label(backend: LightmapBackendPreference) -> &'static str {
     match backend {
-        LightmapBackendPreference::Solari => "Solari bake",
-        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => "CPU bake",
+        LightmapBackendPreference::Solari => "GPU bake",
+        LightmapBackendPreference::Auto => {
+            #[cfg(feature = "lightmap-gpu-solari")]
+            {
+                "GPU bake"
+            }
+            #[cfg(not(feature = "lightmap-gpu-solari"))]
+            {
+                "CPU bake"
+            }
+        }
+        LightmapBackendPreference::Cpu => "CPU bake",
     }
 }
 
@@ -187,10 +208,34 @@ pub(crate) fn bake_outputs(manifest: &PreparedSceneManifest) -> Result<BakeOutpu
 /// the same manifest, bake arguments, and output paths always produce the
 /// same job, which is what makes `bake_job_fingerprint` a meaningful
 /// validity key for the batch skip check (F62.1).
-pub(crate) fn build_bake_job(
+pub(crate) fn backend_for_existing_bake(
+    args: &BakeArgs,
+    manifest: &PreparedSceneManifest,
+) -> SelectedLightmapBackend {
+    if args.lightmap_backend != LightmapBackendPreference::Auto {
+        return select_backend(args.lightmap_backend);
+    }
+    let Some(integrator_revision) = manifest
+        .bake
+        .as_ref()
+        .map(|bake| bake.bake_settings.integrator_revision.as_str())
+    else {
+        return select_backend(args.lightmap_backend);
+    };
+    if integrator_revision.starts_with("solari-") {
+        SelectedLightmapBackend::Solari
+    } else if integrator_revision.starts_with("transport-cpu-") {
+        SelectedLightmapBackend::Cpu
+    } else {
+        select_backend(args.lightmap_backend)
+    }
+}
+
+fn build_bake_job_for_backend(
     manifest: &PreparedSceneManifest,
     args: &BakeArgs,
     outputs: &BakeOutputs,
+    backend: SelectedLightmapBackend,
 ) -> BakeJob {
     let cell_lighting =
         manifest
@@ -204,13 +249,13 @@ pub(crate) fn build_bake_job(
             });
     let lightmap_texels_per_meter = args
         .lightmap_texels_per_meter
-        .unwrap_or_else(|| default_lightmap_texels_per_meter(args.lightmap_backend));
+        .unwrap_or_else(|| default_lightmap_texels_per_meter_for_backend(backend));
     let lightmap_tile_size = args
         .lightmap_tile_size
-        .unwrap_or_else(|| default_lightmap_tile_size(args.lightmap_backend));
+        .unwrap_or_else(|| default_lightmap_tile_size_for_backend(backend));
     let static_batch_chunk_meters = args
         .static_batch_chunk_meters
-        .unwrap_or_else(|| default_static_batch_chunk_meters(args.lightmap_backend));
+        .unwrap_or_else(|| default_static_batch_chunk_meters_for_backend(backend));
     BakeJob {
         asset_root: job_path(&outputs.asset_root),
         output_scene: job_path(&outputs.output_scene),
@@ -233,7 +278,7 @@ pub(crate) fn build_bake_job(
             .collect::<BTreeMap<_, _>>(),
         lightmap_denoise_iterations: args.lightmap_denoise_iterations,
         lightmap_tile_size,
-        lightmap_backend: args.lightmap_backend.as_str().into(),
+        lightmap_backend: backend.as_str().into(),
         static_batch_chunk_meters,
         ambient_rgba: cell_lighting.ambient_rgba,
         lightmap_environment_map: args.lightmap_environment_map.as_ref().map(|path| {
@@ -289,24 +334,24 @@ pub(crate) fn build_bake_job(
     }
 }
 
-fn default_lightmap_texels_per_meter(backend: LightmapBackendPreference) -> f32 {
+fn default_lightmap_texels_per_meter_for_backend(backend: SelectedLightmapBackend) -> f32 {
     match backend {
-        LightmapBackendPreference::Solari => 4.0,
-        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 16.0,
+        SelectedLightmapBackend::Solari => 4.0,
+        SelectedLightmapBackend::Cpu => 16.0,
     }
 }
 
-fn default_lightmap_tile_size(backend: LightmapBackendPreference) -> u32 {
+fn default_lightmap_tile_size_for_backend(backend: SelectedLightmapBackend) -> u32 {
     match backend {
-        LightmapBackendPreference::Solari => 512,
-        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 128,
+        SelectedLightmapBackend::Solari => 512,
+        SelectedLightmapBackend::Cpu => 128,
     }
 }
 
-fn default_static_batch_chunk_meters(backend: LightmapBackendPreference) -> f32 {
+fn default_static_batch_chunk_meters_for_backend(backend: SelectedLightmapBackend) -> f32 {
     match backend {
-        LightmapBackendPreference::Solari => 32.0,
-        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => 64.0,
+        SelectedLightmapBackend::Solari => 32.0,
+        SelectedLightmapBackend::Cpu => 64.0,
     }
 }
 
@@ -423,6 +468,37 @@ pub(crate) fn bake_manifest(
     manifest_path: &Path,
     progress: &ProgressReporter,
 ) -> Result<()> {
+    let backend = select_backend(args.lightmap_backend);
+    if backend == SelectedLightmapBackend::Solari
+        && args.lightmap_backend == LightmapBackendPreference::Auto
+    {
+        match bake_manifest_with_backend(args, manifest_path, progress, backend) {
+            Ok(()) => Ok(()),
+            Err(error) if error.downcast_ref::<GpuBackendFailure>().is_some() => {
+                progress.message(format!(
+                    "GPU bake failed; retrying on CPU: {}",
+                    error.root_cause()
+                ));
+                bake_manifest_with_backend(
+                    args,
+                    manifest_path,
+                    progress,
+                    SelectedLightmapBackend::Cpu,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        bake_manifest_with_backend(args, manifest_path, progress, backend)
+    }
+}
+
+fn bake_manifest_with_backend(
+    args: &BakeArgs,
+    manifest_path: &Path,
+    progress: &ProgressReporter,
+    backend: SelectedLightmapBackend,
+) -> Result<()> {
     let mut manifest = load_prepared_manifest(manifest_path)?;
     progress.message(format!("cell {}", cell_label(&manifest.cell)));
     validate_lightmap_density_override_targets(&manifest, &args.lightmap_density_overrides)?;
@@ -441,7 +517,7 @@ pub(crate) fn bake_manifest(
         irradiance_raw,
         job_file,
     } = &outputs;
-    let mut job = build_bake_job(&manifest, args, &outputs);
+    let mut job = build_bake_job_for_backend(&manifest, args, &outputs, backend);
     exclude_animated_static_assets(asset_root, &mut job)?;
     let environment_map = job
         .lightmap_environment_map
@@ -505,13 +581,23 @@ pub(crate) fn bake_manifest(
         samples: args.lightmap_debug_samples,
         variance: args.lightmap_debug_variance,
     };
-    let lightmap_bake = match args.lightmap_backend {
-        LightmapBackendPreference::Solari => {
-            progress.set_backend("Solari");
+    let lightmap_bake = match backend {
+        SelectedLightmapBackend::Solari => {
+            progress.set_backend("GPU");
             progress.set_sampling(Some(job.lightmap_max_samples), Some(job.lightmap_bounces));
             progress.phase_started("lightmap tile dispatch/readback", None);
             #[cfg(feature = "lightmap-gpu-solari")]
             {
+                let material_warnings = backend::solari::solari_material_warning_indices(
+                    &rust_scene.materials,
+                    job.lightmap_bounces,
+                );
+                if !material_warnings.is_empty() {
+                    progress.transient_message(format!(
+                        "warning: GPU bake continuing with {} experimental material(s); emission/alpha transport may differ",
+                        material_warnings.len()
+                    ));
+                }
                 lightmap::bake_direct_pages_solari_bounded(
                     &rust_scene,
                     &job.lights,
@@ -528,7 +614,9 @@ pub(crate) fn bake_manifest(
                     debug,
                     &mut lightmap_cache,
                     Some(progress),
-                )?
+                )
+                .map_err(GpuBackendFailure)
+                .map_err(anyhow::Error::new)?
             }
             #[cfg(not(feature = "lightmap-gpu-solari"))]
             {
@@ -537,8 +625,9 @@ pub(crate) fn bake_manifest(
                 )
             }
         }
-        LightmapBackendPreference::Auto | LightmapBackendPreference::Cpu => {
+        SelectedLightmapBackend::Cpu => {
             progress.set_backend("CPU");
+            progress.warn_cpu_bake();
             progress.set_sampling(Some(job.lightmap_max_samples), Some(job.lightmap_bounces));
             progress.phase_started("lightmap primitive/tile transport", None);
             lightmap::bake_direct_pages(

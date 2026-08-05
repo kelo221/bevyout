@@ -82,6 +82,7 @@ fn aggregator_supports_unknown_totals_and_parallel_unit_completion() {
             Duration::ZERO,
         ))),
         current_phase: Arc::new(Mutex::new(None)),
+        cpu_warning_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     thread::scope(|scope| {
         for index in 0..8 {
@@ -218,6 +219,7 @@ fn snapshot_formats_backend_sampling_and_cache_context() {
             Duration::ZERO,
         ))),
         current_phase: Arc::new(Mutex::new(None)),
+        cpu_warning_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     reporter.started("Solari bake Tenpenny01", None);
     reporter.set_backend("Solari");
@@ -232,4 +234,80 @@ fn snapshot_formats_backend_sampling_and_cache_context() {
     assert!(text.contains("cache 1 hit / 1 miss"));
     assert!(text.contains("1 sample"));
     assert!(text.contains("1 bounce"));
+}
+
+#[test]
+fn bake_progress_uses_the_resolved_gpu_or_cpu_label() {
+    let reporter = ProgressReporter::with_writer_and_interval(
+        ProgressMode::Off,
+        io::sink(),
+        false,
+        Duration::ZERO,
+    );
+    reporter.started("Bake", None);
+    reporter.set_backend("GPU");
+    assert!(format_snapshot_for_test(&reporter.snapshot()).contains("GPU bake"));
+
+    reporter.set_backend("CPU");
+    let text = format_snapshot_for_test(&reporter.snapshot());
+    assert!(text.contains("CPU bake"));
+    assert!(!text.contains("Auto"));
+
+    reporter.started("GPU bake", None);
+    reporter.set_backend("CPU");
+    assert!(format_snapshot_for_test(&reporter.snapshot()).contains("CPU bake"));
+}
+
+#[test]
+fn eta_appears_only_after_multiple_known_units() {
+    let reporter = ProgressReporter::with_writer_and_interval(
+        ProgressMode::Off,
+        io::sink(),
+        false,
+        Duration::ZERO,
+    );
+    reporter.started("CPU bake", None);
+    reporter.phase_started("tiles", Some(4));
+    assert_eq!(reporter.snapshot().current_timing.eta_ms, None);
+    reporter.unit_completed(Some(4), None);
+    assert_eq!(reporter.snapshot().current_timing.eta_ms, None);
+    reporter.unit_completed(Some(4), None);
+    assert!(reporter.snapshot().current_timing.eta_ms.is_some());
+    assert!(format_snapshot_for_test(&reporter.snapshot()).contains("eta "));
+}
+
+#[test]
+fn messages_are_not_lost_to_render_throttling() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let reporter = ProgressReporter::with_writer_and_interval(
+        ProgressMode::Plain,
+        SharedBuffer(bytes.clone()),
+        false,
+        Duration::from_secs(60),
+    );
+    reporter.started("Auto bake", None);
+    reporter.message("GPU bake failed; retrying on CPU");
+
+    assert!(output(&bytes).contains("retrying on CPU"));
+}
+
+#[test]
+fn cpu_warning_is_emitted_once() {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let reporter = ProgressReporter::with_writer_and_interval(
+        ProgressMode::Plain,
+        SharedBuffer(bytes.clone()),
+        false,
+        Duration::ZERO,
+    );
+    reporter.started("CPU bake", None);
+    reporter.set_backend("CPU");
+    reporter.warn_cpu_bake();
+    reporter.warn_cpu_bake();
+    reporter.phase_started("tiles", Some(1));
+    reporter.unit_completed(Some(1), None);
+
+    let text = output(&bytes);
+    assert_eq!(text.matches("warning: CPU bake").count(), 1);
+    assert!(text.contains("may not saturate all CPU cores"));
 }

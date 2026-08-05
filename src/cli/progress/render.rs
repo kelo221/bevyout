@@ -70,8 +70,25 @@ impl ProgressRenderer {
 
 fn format_snapshot(snapshot: &ProgressSnapshot) -> String {
     let mut parts = Vec::new();
+    let mut operation_contains_backend = false;
     if let Some(operation) = &snapshot.operation {
-        parts.push(operation.clone());
+        let rendered_operation = if matches!(
+            operation.as_str(),
+            "Bake" | "GPU bake" | "CPU bake" | "Solari bake"
+        ) {
+            snapshot
+                .backend
+                .as_ref()
+                .map_or_else(|| operation.clone(), |backend| format!("{backend} bake"))
+        } else {
+            operation.clone()
+        };
+        operation_contains_backend = snapshot.backend.as_ref().is_some_and(|backend| {
+            rendered_operation
+                .to_ascii_lowercase()
+                .contains(&backend.to_ascii_lowercase())
+        });
+        parts.push(rendered_operation);
     }
 
     let phase_start = snapshot.phases.len().saturating_sub(2);
@@ -94,11 +111,7 @@ fn format_snapshot(snapshot: &ProgressSnapshot) -> String {
         ));
     }
     if let Some(backend) = &snapshot.backend
-        && snapshot.operation.as_deref().is_none_or(|operation| {
-            !operation
-                .to_ascii_lowercase()
-                .contains(&backend.to_ascii_lowercase())
-        })
+        && !operation_contains_backend
     {
         parts.push(backend.clone());
     }
@@ -114,6 +127,9 @@ fn format_snapshot(snapshot: &ProgressSnapshot) -> String {
             if bounces == 1 { "" } else { "s" }
         ));
     }
+    if let Some(eta_ms) = snapshot.current_timing.eta_ms {
+        parts.push(format!("eta {}", format_duration(eta_ms)));
+    }
     if let Some(message) = &snapshot.message {
         parts.push(message.clone());
     }
@@ -127,6 +143,18 @@ fn format_work(name: &str, work: WorkEstimate) -> String {
     match work.total {
         Some(total) => format!("{name} {}/{}", work.completed, total),
         None => format!("{name} {}", work.completed),
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    let total_seconds = milliseconds.div_ceil(1_000);
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours != 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 

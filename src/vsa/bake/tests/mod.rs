@@ -6,28 +6,50 @@ use super::*;
 #[test]
 fn backend_defaults_keep_cpu_quality_and_make_solari_fast() {
     assert_eq!(
-        default_lightmap_texels_per_meter(LightmapBackendPreference::Cpu),
+        default_lightmap_texels_per_meter_for_backend(SelectedLightmapBackend::Cpu),
         16.0
     );
     assert_eq!(
-        default_lightmap_tile_size(LightmapBackendPreference::Cpu),
+        default_lightmap_tile_size_for_backend(SelectedLightmapBackend::Cpu),
         128
     );
     assert_eq!(
-        default_static_batch_chunk_meters(LightmapBackendPreference::Cpu),
+        default_static_batch_chunk_meters_for_backend(SelectedLightmapBackend::Cpu),
         64.0
     );
     assert_eq!(
-        default_lightmap_texels_per_meter(LightmapBackendPreference::Solari),
+        default_lightmap_texels_per_meter_for_backend(SelectedLightmapBackend::Solari),
         4.0
     );
     assert_eq!(
-        default_lightmap_tile_size(LightmapBackendPreference::Solari),
+        default_lightmap_tile_size_for_backend(SelectedLightmapBackend::Solari),
         512
     );
     assert_eq!(
-        default_static_batch_chunk_meters(LightmapBackendPreference::Solari),
+        default_static_batch_chunk_meters_for_backend(SelectedLightmapBackend::Solari),
         32.0
+    );
+}
+
+#[test]
+fn bake_progress_label_uses_a_concrete_backend_name() {
+    assert_eq!(
+        bake_operation_label(LightmapBackendPreference::Cpu),
+        "CPU bake"
+    );
+    assert_eq!(
+        bake_operation_label(LightmapBackendPreference::Solari),
+        "GPU bake"
+    );
+    #[cfg(feature = "lightmap-gpu-solari")]
+    assert_eq!(
+        bake_operation_label(LightmapBackendPreference::Auto),
+        "GPU bake"
+    );
+    #[cfg(not(feature = "lightmap-gpu-solari"))]
+    assert_eq!(
+        bake_operation_label(LightmapBackendPreference::Auto),
+        "CPU bake"
     );
 }
 

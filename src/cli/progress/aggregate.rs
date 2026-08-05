@@ -1,6 +1,11 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use super::model::{PhaseSnapshot, ProgressEvent, ProgressSnapshot, WorkEstimate};
+use super::model::{PhaseSnapshot, ProgressEvent, ProgressSnapshot, ProgressTiming, WorkEstimate};
+
+const ETA_SAMPLE_LIMIT: usize = 16;
+const ETA_MIN_SAMPLES: usize = 1;
 
 #[derive(Clone, Default)]
 pub struct ProgressAggregator {
@@ -29,6 +34,86 @@ struct ProgressState {
 struct PhaseState {
     name: String,
     work: WorkEstimate,
+    started_at: Instant,
+    last_unit_at: Option<Instant>,
+    recent_unit_ms: VecDeque<u64>,
+}
+
+impl PhaseState {
+    fn new(name: String, total: Option<u64>) -> Self {
+        Self {
+            name,
+            work: WorkEstimate {
+                completed: 0,
+                total,
+            },
+            started_at: Instant::now(),
+            last_unit_at: None,
+            recent_unit_ms: VecDeque::with_capacity(ETA_SAMPLE_LIMIT),
+        }
+    }
+
+    fn reset(&mut self, total: Option<u64>) {
+        self.work = WorkEstimate {
+            completed: 0,
+            total,
+        };
+        self.started_at = Instant::now();
+        self.last_unit_at = None;
+        self.recent_unit_ms.clear();
+    }
+
+    fn complete_unit(&mut self, total: Option<u64>, now: Instant) {
+        self.work.complete_unit(total);
+        self.record_unit_timing(now);
+    }
+
+    fn set_completed(&mut self, completed: u64, total: Option<u64>, now: Instant) {
+        self.work.completed = completed;
+        if total.is_some() {
+            self.work.total = total;
+        }
+        self.record_unit_timing(now);
+    }
+
+    fn record_unit_timing(&mut self, now: Instant) {
+        if let Some(previous) = self.last_unit_at {
+            let elapsed_ms = now
+                .duration_since(previous)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            if self.recent_unit_ms.len() == ETA_SAMPLE_LIMIT {
+                self.recent_unit_ms.pop_front();
+            }
+            self.recent_unit_ms.push_back(elapsed_ms);
+        }
+        self.last_unit_at = Some(now);
+    }
+
+    fn timing(&self, now: Instant) -> ProgressTiming {
+        let elapsed_ms = now
+            .duration_since(self.started_at)
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let eta_ms = self.work.total.and_then(|total| {
+            let remaining = total.saturating_sub(self.work.completed);
+            if remaining == 0 || self.recent_unit_ms.len() < ETA_MIN_SAMPLES {
+                return None;
+            }
+            let total_ms: u128 = self
+                .recent_unit_ms
+                .iter()
+                .map(|value| u128::from(*value))
+                .sum();
+            let average_ms = total_ms / self.recent_unit_ms.len() as u128;
+            Some(
+                average_ms
+                    .saturating_mul(u128::from(remaining))
+                    .min(u128::from(u64::MAX)) as u64,
+            )
+        });
+        ProgressTiming { elapsed_ms, eta_ms }
+    }
 }
 
 impl ProgressAggregator {
@@ -51,8 +136,9 @@ impl ProgressAggregator {
         cache_hit: Option<bool>,
     ) -> ProgressSnapshot {
         let mut state = self.lock();
+        let now = Instant::now();
         if let Some(phase) = state.current_phase_mut() {
-            phase.work.complete_unit(total);
+            phase.complete_unit(total, now);
         } else {
             state.operation_work.complete_unit(total);
         }
@@ -71,6 +157,7 @@ impl ProgressAggregator {
         cache_hit: Option<bool>,
     ) -> ProgressSnapshot {
         let mut state = self.lock();
+        let now = Instant::now();
         let phase = phase.into();
         state.current_phase = Some(phase.clone());
         let phase_state = if let Some(existing) = state
@@ -80,13 +167,10 @@ impl ProgressAggregator {
         {
             existing
         } else {
-            state.phases.push(PhaseState {
-                name: phase,
-                work: WorkEstimate::default(),
-            });
+            state.phases.push(PhaseState::new(phase, total));
             state.phases.last_mut().expect("phase was inserted")
         };
-        phase_state.work.complete_unit(total);
+        phase_state.complete_unit(total, now);
         match cache_hit {
             Some(true) => state.cache_hits = state.cache_hits.saturating_add(1),
             Some(false) => state.cache_misses = state.cache_misses.saturating_add(1),
@@ -115,6 +199,12 @@ impl ProgressAggregator {
     pub(crate) fn set_backend(&self, backend: impl Into<String>) -> ProgressSnapshot {
         let mut state = self.lock();
         state.backend = Some(backend.into());
+        state.snapshot()
+    }
+
+    pub(crate) fn clear_message(&self) -> ProgressSnapshot {
+        let mut state = self.lock();
+        state.message = None;
         state.snapshot()
     }
 
@@ -164,18 +254,9 @@ impl ProgressState {
             }
             ProgressEvent::PhaseStarted { phase, total } => {
                 if let Some(existing) = self.phases.iter_mut().find(|item| item.name == phase) {
-                    existing.work = WorkEstimate {
-                        completed: 0,
-                        total,
-                    };
+                    existing.reset(total);
                 } else {
-                    self.phases.push(PhaseState {
-                        name: phase.clone(),
-                        work: WorkEstimate {
-                            completed: 0,
-                            total,
-                        },
-                    });
+                    self.phases.push(PhaseState::new(phase.clone(), total));
                 }
                 self.current_phase = Some(phase);
             }
@@ -184,11 +265,9 @@ impl ProgressState {
                 total,
                 cache_hit,
             } => {
+                let now = Instant::now();
                 if let Some(phase) = self.current_phase_mut() {
-                    phase.work.completed = completed;
-                    if total.is_some() {
-                        phase.work.total = total;
-                    }
+                    phase.set_completed(completed, total, now);
                 } else {
                     self.operation_work.completed = completed;
                     if total.is_some() {
@@ -215,26 +294,29 @@ impl ProgressState {
     }
 
     fn snapshot(&self) -> ProgressSnapshot {
+        let now = Instant::now();
         let phases = self
             .phases
             .iter()
             .map(|phase| PhaseSnapshot {
                 name: phase.name.clone(),
                 work: phase.work,
+                timing: phase.timing(now),
             })
             .collect::<Vec<_>>();
-        let current_work = self
+        let (current_work, current_timing) = self
             .current_phase
             .as_deref()
             .and_then(|name| self.phases.iter().find(|phase| phase.name == name))
-            .map(|phase| phase.work)
-            .unwrap_or(self.operation_work);
+            .map(|phase| (phase.work, phase.timing(now)))
+            .unwrap_or((self.operation_work, ProgressTiming::default()));
         ProgressSnapshot {
             operation: self.operation.clone(),
             operation_work: self.operation_work,
             phases,
             current_phase: self.current_phase.clone(),
             current_work,
+            current_timing,
             cache_hits: self.cache_hits,
             cache_misses: self.cache_misses,
             jobs_completed: self.jobs_completed,

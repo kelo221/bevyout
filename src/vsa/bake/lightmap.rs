@@ -328,8 +328,9 @@ pub(crate) fn bake_direct_pages(
 /// publication path as the CPU backend. The prototype is intentionally narrow:
 /// opaque, alpha-mask, and blended receivers, point/spot lights, ambient/directional
 /// input, bounded authored-environment and emissive-mesh transport, and at
-/// most four secondary diffuse bounces. Unsupported inputs fail explicitly
-/// so an explicit GPU request cannot silently change the bake meaning.
+/// most four secondary diffuse bounces. Experimental emissive and alpha
+/// material contracts continue with a warning; hard-invalid scene inputs fail
+/// explicitly.
 #[cfg(feature = "lightmap-gpu-solari")]
 #[allow(clippy::too_many_arguments)]
 #[allow(

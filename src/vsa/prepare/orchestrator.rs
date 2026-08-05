@@ -1636,6 +1636,8 @@ fn prepare_cell(
         &placements,
         &lights,
         &mut diagnostics,
+        Some(progress),
+        &format!("cell {selector_input}/static point shadows"),
     )?;
     let reflection_layouts = if cell.interior {
         nav_graph_full

@@ -45,7 +45,6 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 use bevy::solari::scene::RaytracingSceneBindings;
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy::winit::WinitPlugin;
-use std::fmt;
 use std::sync::{Arc, Mutex};
 
 pub(crate) fn required_wgpu_features() -> bevy::render::settings::WgpuFeatures {
@@ -380,61 +379,22 @@ fn build_emissive_scene(
     })
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum SolariUnsupportedMaterial {
-    TexturedEmission { material_index: usize },
-    NonOpaqueEmission { material_index: usize },
-    BlendedIndirect { material_index: usize },
-}
-
-impl fmt::Display for SolariUnsupportedMaterial {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TexturedEmission { material_index } => write!(
-                formatter,
-                "Solari bake does not support textured emissive material {material_index}; use --bake-backend cpu"
-            ),
-            Self::NonOpaqueEmission { material_index } => write!(
-                formatter,
-                "Solari bake does not support masked or blended emissive material {material_index}; use --bake-backend cpu"
-            ),
-            Self::BlendedIndirect { material_index } => write!(
-                formatter,
-                "Solari bake does not support reflected indirect transport through blended material {material_index} with bounce_count > 0; use --bake-backend cpu or --lightmap-bounces 0"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SolariUnsupportedMaterial {}
-
-fn validate_solari_material_contract(
+pub(crate) fn solari_material_warning_indices(
     materials: &[TransportMaterial],
     bounce_count: u32,
-) -> Result<Option<usize>> {
-    let mut first_blended_material = None;
-    for (material_index, material) in materials.iter().enumerate() {
-        let emits = material.emissive_factor.max_element() > f32::EPSILON;
-        if emits && material.emissive_texture.is_some() {
-            return Err(anyhow::Error::new(
-                SolariUnsupportedMaterial::TexturedEmission { material_index },
-            ));
-        }
-        if emits && matches!(material.alpha_mode, AlphaMode::Mask | AlphaMode::Blend) {
-            return Err(anyhow::Error::new(
-                SolariUnsupportedMaterial::NonOpaqueEmission { material_index },
-            ));
-        }
-        if material.alpha_mode == AlphaMode::Blend {
-            first_blended_material.get_or_insert(material_index);
-            if bounce_count > 0 {
-                return Err(anyhow::Error::new(
-                    SolariUnsupportedMaterial::BlendedIndirect { material_index },
-                ));
-            }
-        }
-    }
-    Ok(first_blended_material)
+) -> Vec<usize> {
+    materials
+        .iter()
+        .enumerate()
+        .filter_map(|(material_index, material)| {
+            let emits = material.emissive_factor.max_element() > f32::EPSILON;
+            let textured_emission = emits && material.emissive_texture.is_some();
+            let non_opaque_emission =
+                emits && matches!(material.alpha_mode, AlphaMode::Mask | AlphaMode::Blend);
+            let blended_indirect = material.alpha_mode == AlphaMode::Blend && bounce_count > 0;
+            (textured_emission || non_opaque_emission || blended_indirect).then_some(material_index)
+        })
+        .collect()
 }
 
 fn build_scene_expectation(
@@ -719,7 +679,6 @@ pub(crate) struct SolariBakeSession {
     sub_apps: SubApps,
     alpha_scene: SolariBakeAlphaScene,
     emissive_scene: SolariBakeEmissiveScene,
-    first_blended_material: Option<usize>,
     scene_expectation: SolariBakeSceneExpectation,
 }
 
@@ -729,7 +688,6 @@ impl SolariBakeSession {
         materials: &[TransportMaterial],
         scene_revision: u32,
     ) -> Result<Self> {
-        let first_blended_material = validate_solari_material_contract(materials, 0)?;
         let scene_expectation = build_scene_expectation(primitives, materials, scene_revision)?;
         let alpha_scene = build_alpha_scene(primitives, materials)?;
         let emissive_scene = build_emissive_scene(primitives, materials)?;
@@ -792,7 +750,6 @@ impl SolariBakeSession {
             sub_apps,
             alpha_scene,
             emissive_scene,
-            first_blended_material,
             scene_expectation,
         })
     }
@@ -863,13 +820,6 @@ impl SolariBakeSession {
             bail!(
                 "Solari bake prototype supports at most {SOLARI_BAKE_MAX_BOUNCES} diffuse bounces"
             );
-        }
-        if bounce_count > 0
-            && let Some(material_index) = self.first_blended_material
-        {
-            return Err(anyhow::Error::new(
-                SolariUnsupportedMaterial::BlendedIndirect { material_index },
-            ));
         }
         let lights = point_lights(lights)?;
         let (mut request, readback) =

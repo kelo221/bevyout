@@ -7,9 +7,12 @@ mod render;
 mod tests;
 
 pub use aggregate::ProgressAggregator;
-pub use model::{PhaseSnapshot, ProgressEvent, ProgressMode, ProgressSnapshot, WorkEstimate};
+pub use model::{
+    PhaseSnapshot, ProgressEvent, ProgressMode, ProgressSnapshot, ProgressTiming, WorkEstimate,
+};
 
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +28,7 @@ pub struct ProgressReporter {
     aggregate: ProgressAggregator,
     renderer: Arc<Mutex<ProgressRenderer>>,
     current_phase: Arc<Mutex<Option<String>>>,
+    cpu_warning_emitted: Arc<AtomicBool>,
 }
 
 impl ProgressReporter {
@@ -62,6 +66,7 @@ impl ProgressReporter {
                 interval,
             ))),
             current_phase: Arc::new(Mutex::new(None)),
+            cpu_warning_emitted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -73,12 +78,16 @@ impl ProgressReporter {
             aggregate: self.aggregate.clone(),
             renderer: self.renderer.clone(),
             current_phase: Arc::new(Mutex::new(None)),
+            cpu_warning_emitted: self.cpu_warning_emitted.clone(),
         }
     }
 
     pub fn emit(&self, event: ProgressEvent) -> ProgressSnapshot {
         match &event {
-            ProgressEvent::Started { .. } => self.set_current_phase(None),
+            ProgressEvent::Started { .. } => {
+                self.set_current_phase(None);
+                self.cpu_warning_emitted.store(false, Ordering::Relaxed);
+            }
             ProgressEvent::PhaseStarted { phase, .. } => {
                 self.set_current_phase(Some(phase.clone()))
             }
@@ -88,7 +97,9 @@ impl ProgressReporter {
         }
         let force = matches!(
             event,
-            ProgressEvent::Started { .. } | ProgressEvent::Finished { .. }
+            ProgressEvent::Started { .. }
+                | ProgressEvent::Message { .. }
+                | ProgressEvent::Finished { .. }
         );
         let snapshot = self.aggregate.record(event);
         self.render(&snapshot, force);
@@ -111,6 +122,12 @@ impl ProgressReporter {
 
     pub fn message(&self, text: impl Into<String>) -> ProgressSnapshot {
         self.emit(ProgressEvent::Message { text: text.into() })
+    }
+
+    pub(crate) fn transient_message(&self, text: impl Into<String>) -> ProgressSnapshot {
+        let snapshot = self.message(text);
+        self.aggregate.clear_message();
+        snapshot
     }
 
     pub fn unit_completed(&self, total: Option<u64>, cache_hit: Option<bool>) -> ProgressSnapshot {
@@ -155,6 +172,15 @@ impl ProgressReporter {
         let snapshot = self.aggregate.set_backend(backend);
         self.render(&snapshot, false);
         snapshot
+    }
+
+    pub fn warn_cpu_bake(&self) -> ProgressSnapshot {
+        if !self.cpu_warning_emitted.swap(true, Ordering::Relaxed) {
+            self.transient_message(
+                "warning: CPU bake is currently slow and may not saturate all CPU cores",
+            );
+        }
+        self.snapshot()
     }
 
     pub fn set_sampling(&self, samples: Option<u32>, bounces: Option<u32>) -> ProgressSnapshot {

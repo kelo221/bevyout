@@ -23,6 +23,7 @@ use super::{
     PreparedRuntimeMutability, PreparedSemantic, PreparedStaticPointShadowLight,
     PreparedStaticPointShadows, STATIC_POINT_SHADOW_REVISION,
 };
+use crate::cli::progress::ProgressReporter;
 use crate::vsa::bake::{
     find_unified_ktx_tool, ktx_supports_input_file_lists, relative_asset_path, tail,
 };
@@ -77,6 +78,8 @@ pub(crate) fn prepare_static_point_shadows(
     placements: &[PreparedPlacement],
     lights: &[PreparedLight],
     diagnostics: &mut Vec<Diagnostic>,
+    progress: Option<&ProgressReporter>,
+    progress_phase: &str,
 ) -> Result<Option<PreparedStaticPointShadows>> {
     let casters = sorted_shadow_casters(placements);
     let prepared_lights = sorted_shadow_lights(lights)?;
@@ -119,6 +122,10 @@ pub(crate) fn prepare_static_point_shadows(
         near_z: STATIC_POINT_SHADOW_NEAR_Z,
         lights: manifest_lights,
     };
+    let face_total = (prepared.lights.len() * FACE_COUNT) as u64;
+    if let Some(progress) = progress {
+        progress.phase_started(progress_phase, Some(face_total));
+    }
     if output_path.is_file() && !options.rebuild {
         let message = format!(
             "static point shadows: cache hit, {} light layer(s) at {}x{} -> {}",
@@ -128,6 +135,11 @@ pub(crate) fn prepare_static_point_shadows(
             output_path.display()
         );
         println!("{message}");
+        if let Some(progress) = progress {
+            for _ in 0..face_total {
+                progress.unit_completed(Some(face_total), Some(true));
+            }
+        }
         diagnostics.push(Diagnostic {
             severity: "info".into(),
             message,
@@ -158,6 +170,8 @@ pub(crate) fn prepare_static_point_shadows(
         &prepared_lights,
         options.resolution,
         STATIC_POINT_SHADOW_NEAR_Z,
+        progress,
+        face_total,
     );
     let ktx = find_unified_ktx_tool(options.ktx)?;
     write_ktx2(
@@ -444,10 +458,10 @@ fn trace_shadow_faces(
     lights: &[&PreparedLight],
     resolution: u32,
     near_z: f32,
+    progress: Option<&ProgressReporter>,
+    total: u64,
 ) -> Vec<Vec<f32>> {
-    let total = lights.len() * FACE_COUNT;
-    let completed = AtomicUsize::new(0);
-    (0..total)
+    (0..(total as usize))
         .into_par_iter()
         .map(|index| {
             let light = lights[index / FACE_COUNT];
@@ -467,8 +481,9 @@ fn trace_shadow_faces(
                     });
                 }
             }
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            println!("static point shadows: traced face {done}/{total}");
+            if let Some(progress) = progress {
+                progress.unit_completed(Some(total), None);
+            }
             depths
         })
         .collect()
