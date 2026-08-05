@@ -43,7 +43,7 @@ fn writes_valid_npot_single_level_rgba16f_ktx2() {
     assert!(level_start >= dfd_end);
     assert!(level_end <= encoded.len());
     assert!(
-        (level_start - dfd_start) % 8 == 0,
+        (level_start - dfd_start).is_multiple_of(8),
         "level starts on lcm(8, 4) = 8"
     );
     assert!(encoded[dfd_end..level_start].iter().all(|b| *b == 0));

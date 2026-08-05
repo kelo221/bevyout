@@ -1314,9 +1314,7 @@ fn trace_indirect_path(
                         emitters,
                         triangles,
                         materials,
-                        hit.triangle_index,
-                        hit.triangle,
-                        hit.barycentric,
+                        &hit,
                         entry_origin,
                         direction,
                     )
@@ -1466,24 +1464,23 @@ fn emissive_pdf_for_hit(
     emitters: &EmissiveSampler,
     triangles: &[IrradianceTriangle],
     materials: &[TransportMaterial],
-    triangle_index: usize,
-    triangle: &IrradianceTriangle,
-    barycentric: [f32; 3],
+    hit: &SurfaceHit<'_>,
     origin: Vec3,
     direction: Vec3,
 ) -> Option<f32> {
-    if !std::ptr::eq(triangles.get(triangle_index)?, triangle) {
+    if !std::ptr::eq(triangles.get(hit.triangle_index)?, hit.triangle) {
         return None;
     }
-    let selection_probability = emitters.selection_probability(triangle_index);
+    let selection_probability = emitters.selection_probability(hit.triangle_index);
     if selection_probability <= 0.0 || !selection_probability.is_finite() {
         return None;
     }
+    let triangle = hit.triangle;
     let material = materials.get(triangle.material)?;
     let sample = sample_material(
         material,
-        interpolate_vec2(triangle.uvs, barycentric),
-        interpolate_vec4(triangle.colors, barycentric),
+        interpolate_vec2(triangle.uvs, hit.barycentric),
+        interpolate_vec4(triangle.colors, hit.barycentric),
     );
     if material.alpha_mode == AlphaMode::Mask && sample.alpha < material.alpha_cutoff {
         return None;
@@ -1491,7 +1488,7 @@ fn emissive_pdf_for_hit(
     if sample.emissive.max_element() <= 0.0 || !sample.emissive.is_finite() {
         return None;
     }
-    let emitter_normal = interpolate_vec3(triangle.normals, barycentric).normalize_or_zero();
+    let emitter_normal = interpolate_vec3(triangle.normals, hit.barycentric).normalize_or_zero();
     if emitter_normal == Vec3::ZERO {
         return None;
     }
@@ -1503,7 +1500,7 @@ fn emissive_pdf_for_hit(
     if emitter_cosine <= 0.0 {
         return None;
     }
-    let emitter_position = vec3(interpolate_point3(triangle.vertices, barycentric));
+    let emitter_position = vec3(interpolate_point3(triangle.vertices, hit.barycentric));
     let distance_squared = emitter_position.distance_squared(origin);
     let area = triangle_area(triangle);
     let pdf = selection_probability * distance_squared / (area * emitter_cosine);
