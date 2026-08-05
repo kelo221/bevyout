@@ -17,18 +17,21 @@ use super::super::transport::material::sample_material;
 use anyhow::{Context, Result, bail};
 use bevy::app::{App, Plugin, SubApps};
 use bevy::asset::{
-    AssetServer, Assets, Handle, RenderAssetUsages, embedded_asset, load_embedded_asset,
+    AssetId, AssetServer, Assets, Handle, RenderAssetUsages, embedded_asset, load_embedded_asset,
 };
 use bevy::color::LinearRgba;
+use bevy::ecs::component::Component;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Commands, Res, ResMut};
+use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::material::AlphaMode as BevyAlphaMode;
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::{Color, DefaultPlugins, Mesh3d, PluginGroup, Transform, default};
+use bevy::render::mesh::allocator::MeshAllocator;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer,
     BufferDescriptor, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
@@ -36,10 +39,13 @@ use bevy::render::render_resource::{
     ShaderStages, TextureDimension, TextureFormat, binding_types,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::sync_world::RenderEntity;
+use bevy::render::texture::GpuImage;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::solari::scene::RaytracingSceneBindings;
 use bevy::window::{ExitCondition, WindowPlugin};
 use bevy::winit::WinitPlugin;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 pub(crate) fn required_wgpu_features() -> bevy::render::settings::WgpuFeatures {
@@ -374,6 +380,95 @@ fn build_emissive_scene(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SolariUnsupportedMaterial {
+    TexturedEmission { material_index: usize },
+    NonOpaqueEmission { material_index: usize },
+    BlendedIndirect { material_index: usize },
+}
+
+impl fmt::Display for SolariUnsupportedMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TexturedEmission { material_index } => write!(
+                formatter,
+                "Solari bake does not support textured emissive material {material_index}; use --bake-backend cpu"
+            ),
+            Self::NonOpaqueEmission { material_index } => write!(
+                formatter,
+                "Solari bake does not support masked or blended emissive material {material_index}; use --bake-backend cpu"
+            ),
+            Self::BlendedIndirect { material_index } => write!(
+                formatter,
+                "Solari bake does not support reflected indirect transport through blended material {material_index} with bounce_count > 0; use --bake-backend cpu or --lightmap-bounces 0"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SolariUnsupportedMaterial {}
+
+fn validate_solari_material_contract(
+    materials: &[TransportMaterial],
+    bounce_count: u32,
+) -> Result<Option<usize>> {
+    let mut first_blended_material = None;
+    for (material_index, material) in materials.iter().enumerate() {
+        let emits = material.emissive_factor.max_element() > f32::EPSILON;
+        if emits && material.emissive_texture.is_some() {
+            return Err(anyhow::Error::new(
+                SolariUnsupportedMaterial::TexturedEmission { material_index },
+            ));
+        }
+        if emits && matches!(material.alpha_mode, AlphaMode::Mask | AlphaMode::Blend) {
+            return Err(anyhow::Error::new(
+                SolariUnsupportedMaterial::NonOpaqueEmission { material_index },
+            ));
+        }
+        if material.alpha_mode == AlphaMode::Blend {
+            first_blended_material.get_or_insert(material_index);
+            if bounce_count > 0 {
+                return Err(anyhow::Error::new(
+                    SolariUnsupportedMaterial::BlendedIndirect { material_index },
+                ));
+            }
+        }
+    }
+    Ok(first_blended_material)
+}
+
+fn build_scene_expectation(
+    primitives: &[ComposedPrimitive],
+    materials: &[TransportMaterial],
+    scene_revision: u32,
+) -> Result<SolariBakeSceneExpectation> {
+    let mut expected_texture_count = 0u32;
+    let mut expected_emitter_count = 0u32;
+    for primitive in primitives {
+        let material = materials.get(primitive.material).with_context(|| {
+            format!(
+                "Solari scene expectation material index {} is invalid for {}",
+                primitive.material, primitive.name
+            )
+        })?;
+        expected_texture_count = expected_texture_count
+            .saturating_add(u32::from(material.base_color_texture.is_some()))
+            .saturating_add(u32::from(material.emissive_texture.is_some()));
+        expected_emitter_count = expected_emitter_count.saturating_add(u32::from(
+            material.emissive_factor.max_element() > f32::EPSILON,
+        ));
+    }
+    Ok(SolariBakeSceneExpectation {
+        scene_revision,
+        expected_proxy_count: u32::try_from(primitives.len())
+            .context("Solari proxy count exceeded u32")?,
+        expected_material_count: u32::try_from(primitives.len())
+            .context("Solari material count exceeded u32")?,
+        expected_texture_count,
+        expected_emitter_count,
+    })
+}
+
 const SOLARI_BAKE_WORKGROUP_SIZE: u32 = 64;
 pub(crate) const SOLARI_BAKE_MAX_BOUNCES: u32 = 4;
 
@@ -466,6 +561,42 @@ impl SolariBakeEnvironment {
 
 pub(crate) type SolariBakeReadback = Arc<Mutex<Option<Result<Vec<[f32; 4]>, String>>>>;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SolariBakeSceneExpectation {
+    scene_revision: u32,
+    expected_proxy_count: u32,
+    expected_material_count: u32,
+    expected_texture_count: u32,
+    expected_emitter_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SolariBakeSceneReadiness {
+    scene_revision: u32,
+    expected_proxy_count: u32,
+    bound_instance_count: u32,
+    expected_material_count: u32,
+    bound_material_count: u32,
+    expected_texture_count: u32,
+    bound_texture_count: u32,
+    expected_emitter_count: u32,
+    bound_emitter_count: u32,
+}
+
+impl SolariBakeSceneReadiness {
+    fn is_complete(self, expected: SolariBakeSceneExpectation) -> bool {
+        self.scene_revision == expected.scene_revision
+            && self.expected_proxy_count == expected.expected_proxy_count
+            && self.bound_instance_count == expected.expected_proxy_count
+            && self.expected_material_count == expected.expected_material_count
+            && self.bound_material_count == expected.expected_material_count
+            && self.expected_texture_count == expected.expected_texture_count
+            && self.bound_texture_count == expected.expected_texture_count
+            && self.expected_emitter_count == expected.expected_emitter_count
+            && self.bound_emitter_count == expected.expected_emitter_count
+    }
+}
+
 /// Main-world request shared with the render-world adapter. `revision` is
 /// explicit so extraction can be repeated every frame without rebuilding GPU
 /// buffers unless the bake frontend publishes a new request.
@@ -488,6 +619,7 @@ pub(crate) struct SolariBakeRequest {
     pub(crate) emissive_triangles: Arc<Vec<SolariBakeEmissiveTriangle>>,
     pub(crate) emissive_total_weight: f32,
     pub(crate) environment: Option<SolariBakeEnvironment>,
+    scene_expectation: SolariBakeSceneExpectation,
     pub(crate) readback: SolariBakeReadback,
 }
 
@@ -518,6 +650,7 @@ impl SolariBakeRequest {
                 emissive_triangles: Arc::new(Vec::new()),
                 emissive_total_weight: 0.0,
                 environment: None,
+                scene_expectation: SolariBakeSceneExpectation::default(),
                 readback: readback.clone(),
             },
             readback,
@@ -565,7 +698,7 @@ pub(crate) fn bake_direct_texels_with_environment(
     sample_count: u32,
     revision: u64,
 ) -> Result<Vec<[f32; 4]>> {
-    let mut session = SolariBakeSession::new(primitives, materials)?;
+    let mut session = SolariBakeSession::new(primitives, materials, revision as u32)?;
     session.bake_texels_with_environment(
         texels,
         lights,
@@ -586,13 +719,18 @@ pub(crate) struct SolariBakeSession {
     sub_apps: SubApps,
     alpha_scene: SolariBakeAlphaScene,
     emissive_scene: SolariBakeEmissiveScene,
+    first_blended_material: Option<usize>,
+    scene_expectation: SolariBakeSceneExpectation,
 }
 
 impl SolariBakeSession {
     pub(crate) fn new(
         primitives: &[ComposedPrimitive],
         materials: &[TransportMaterial],
+        scene_revision: u32,
     ) -> Result<Self> {
+        let first_blended_material = validate_solari_material_contract(materials, 0)?;
+        let scene_expectation = build_scene_expectation(primitives, materials, scene_revision)?;
         let alpha_scene = build_alpha_scene(primitives, materials)?;
         let emissive_scene = build_emissive_scene(primitives, materials)?;
         let proxy_meshes = primitives
@@ -629,8 +767,11 @@ impl SolariBakeSession {
         );
         add_scene_plugin(&mut app);
         add_bake_plugin(&mut app);
-        app.insert_resource(SolariProxyMeshes(proxy_meshes))
-            .add_systems(bevy::app::Startup, spawn_solari_proxies);
+        app.insert_resource(SolariProxyMeshes {
+            proxies: proxy_meshes,
+            scene_revision,
+        })
+        .add_systems(bevy::app::Startup, spawn_solari_proxies);
 
         // Match Bevy's externally-driven headless renderer lifecycle: finish
         // the plugin graph once, then pump SubApps manually so the render
@@ -651,6 +792,8 @@ impl SolariBakeSession {
             sub_apps,
             alpha_scene,
             emissive_scene,
+            first_blended_material,
+            scene_expectation,
         })
     }
 
@@ -721,6 +864,13 @@ impl SolariBakeSession {
                 "Solari bake prototype supports at most {SOLARI_BAKE_MAX_BOUNCES} diffuse bounces"
             );
         }
+        if bounce_count > 0
+            && let Some(material_index) = self.first_blended_material
+        {
+            return Err(anyhow::Error::new(
+                SolariUnsupportedMaterial::BlendedIndirect { material_index },
+            ));
+        }
         let lights = point_lights(lights)?;
         let (mut request, readback) =
             SolariBakeRequest::new(texels, lights, sample_count, revision);
@@ -735,6 +885,7 @@ impl SolariBakeSession {
         request.emissive_triangles = self.emissive_scene.triangles.clone();
         request.emissive_total_weight = self.emissive_scene.total_weight;
         request.environment = environment.map(SolariBakeEnvironment::from_map);
+        request.scene_expectation = self.scene_expectation;
         request.ambient = ambient;
         request.directional = directional;
         self.sub_apps.main.world_mut().insert_resource(request);
@@ -837,8 +988,18 @@ struct SolariProxy {
     side_table_id: u32,
 }
 
+#[derive(Component, Clone, Debug)]
+struct SolariBakeProxy {
+    scene_revision: u32,
+    texture_ids: Vec<AssetId<Image>>,
+    emitter: bool,
+}
+
 #[derive(Resource)]
-struct SolariProxyMeshes(Vec<SolariProxy>);
+struct SolariProxyMeshes {
+    proxies: Vec<SolariProxy>,
+    scene_revision: u32,
+}
 
 fn spawn_solari_proxies(
     mut commands: Commands,
@@ -847,19 +1008,37 @@ fn spawn_solari_proxies(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut proxies: ResMut<SolariProxyMeshes>,
 ) {
-    for proxy in proxies.0.drain(..) {
+    let scene_revision = proxies.scene_revision;
+    for proxy in proxies.proxies.drain(..) {
         let mesh_handle = meshes.add(proxy.mesh);
-        let material_handle = materials.add(solari_material(
-            &proxy.material,
-            proxy.side_table_id,
-            &mut images,
-        ));
+        let material = solari_material(&proxy.material, proxy.side_table_id, &mut images);
+        let texture_ids = material
+            .base_color_texture
+            .iter()
+            .chain(material.emissive_texture.iter())
+            .map(|handle| handle.id())
+            .collect();
+        let material_handle = materials.add(material);
         commands.spawn((
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(material_handle),
             bevy::solari::prelude::RaytracingMesh3d(mesh_handle),
             Transform::IDENTITY,
+            SolariBakeProxy {
+                scene_revision,
+                texture_ids,
+                emitter: proxy.material.emissive_factor.max_element() > f32::EPSILON,
+            },
         ));
+    }
+}
+
+fn extract_solari_bake_proxies(
+    proxies: Extract<Query<(RenderEntity, &SolariBakeProxy)>>,
+    mut commands: Commands,
+) {
+    for (render_entity, proxy) in &proxies {
+        commands.entity(render_entity).insert(proxy.clone());
     }
 }
 
@@ -938,6 +1117,7 @@ struct SolariBakePipelines {
 #[derive(Resource)]
 struct SolariBakeGpuResources {
     revision: u64,
+    scene_expectation: SolariBakeSceneExpectation,
     texel_count: u32,
     output_size: u64,
     texel_buffer: Buffer,
@@ -991,7 +1171,10 @@ impl Plugin for SolariBakePlugin {
         }
         render_app
             .add_systems(RenderStartup, init_solari_bake_pipelines)
-            .add_systems(ExtractSchedule, extract_solari_bake_request)
+            .add_systems(
+                ExtractSchedule,
+                (extract_solari_bake_request, extract_solari_bake_proxies),
+            )
             .add_systems(
                 Render,
                 prepare_solari_bake_buffers.in_set(RenderSystems::PrepareResources),
@@ -1130,10 +1313,6 @@ fn prepare_solari_bake_buffers(
         || vec![0.0],
         |environment| (*environment.importance_cdf).clone(),
     );
-    let environment_constant = request
-        .environment
-        .as_ref()
-        .is_some_and(|environment| environment.constant);
     let params = [
         request.texels.len() as u32,
         request.lights.len() as u32,
@@ -1144,7 +1323,14 @@ fn prepare_solari_bake_buffers(
         environment_height,
         environment_enabled,
         environment_cdf_words.len() as u32,
-        u32::from(environment_constant),
+        // Constant environments still trace visibility, but use the cheaper
+        // cosine-hemisphere estimator without environment-PDF MIS samples.
+        u32::from(
+            request
+                .environment
+                .as_ref()
+                .is_some_and(|environment| environment.constant),
+        ),
         request.vertex_records.len() as u32,
         request.emissive_triangles.len() as u32,
         request.emissive_total_weight.to_bits(),
@@ -1336,6 +1522,7 @@ fn prepare_solari_bake_buffers(
     });
     commands.insert_resource(SolariBakeGpuResources {
         revision: request.revision,
+        scene_expectation: request.scene_expectation,
         texel_count: request.texels.len() as u32,
         output_size,
         texel_buffer,
@@ -1361,11 +1548,19 @@ fn prepare_solari_bake_buffers(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_solari_bake(
     mut ctx: RenderContext,
     pipelines: Option<Res<SolariBakePipelines>>,
     pipeline_cache: Res<PipelineCache>,
     scene_bindings: Option<Res<RaytracingSceneBindings>>,
+    proxies: Query<(
+        &bevy::solari::prelude::RaytracingMesh3d,
+        &MeshMaterial3d<StandardMaterial>,
+        &SolariBakeProxy,
+    )>,
+    mesh_allocator: Res<MeshAllocator>,
+    texture_assets: Res<RenderAssets<GpuImage>>,
     render_device: Res<RenderDevice>,
     mut gpu: Option<ResMut<SolariBakeGpuResources>>,
 ) {
@@ -1380,14 +1575,57 @@ fn dispatch_solari_bake(
     let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.pipeline) else {
         return;
     };
+    let scene_bind_group_ready = scene_bindings.bind_group.is_some();
+    let expected = gpu.scene_expectation;
+    let mut same_scene_revision = true;
+    let mut bound_instance_count = 0u32;
+    let mut bound_material_count = 0u32;
+    let mut ready_texture_ids = Vec::new();
+    let mut bound_emitter_count = 0u32;
+    for (mesh, _material, proxy) in &proxies {
+        same_scene_revision &= proxy.scene_revision == expected.scene_revision;
+        bound_material_count = bound_material_count.saturating_add(1);
+        let mesh_ready = mesh_allocator.mesh_vertex_slice(&mesh.0.id()).is_some()
+            && mesh_allocator.mesh_index_slice(&mesh.0.id()).is_some();
+        if scene_bind_group_ready && mesh_ready {
+            bound_instance_count = bound_instance_count.saturating_add(1);
+            bound_emitter_count = bound_emitter_count.saturating_add(u32::from(proxy.emitter));
+        }
+        for texture_id in &proxy.texture_ids {
+            if texture_assets.get(*texture_id).is_some() && !ready_texture_ids.contains(texture_id)
+            {
+                ready_texture_ids.push(*texture_id);
+            }
+        }
+    }
+    let readiness = SolariBakeSceneReadiness {
+        scene_revision: if same_scene_revision {
+            expected.scene_revision
+        } else {
+            0
+        },
+        expected_proxy_count: expected.expected_proxy_count,
+        bound_instance_count,
+        expected_material_count: expected.expected_material_count,
+        bound_material_count,
+        expected_texture_count: expected.expected_texture_count,
+        bound_texture_count: u32::try_from(ready_texture_ids.len()).unwrap_or(u32::MAX),
+        expected_emitter_count: expected.expected_emitter_count,
+        bound_emitter_count,
+    };
+    if !readiness.is_complete(expected) {
+        gpu.scene_binding_ready_frames = 0;
+        return;
+    }
     let Some(scene_bind_group) = scene_bindings.bind_group.as_ref() else {
         gpu.scene_binding_ready_frames = 0;
         return;
     };
     // Bevy Solari 0.19 rebuilds this bind group after compacting only the
-    // instances whose BLAS, mesh slices, and materials are ready. Require two
-    // consecutive prepared frames before dispatch so startup cannot bake a
-    // partial scene; the session owns a static proxy set after that point.
+    // instances whose BLAS, mesh slices, and materials are ready. The
+    // adapter-owned readiness record above additionally requires every proxy,
+    // material, texture, and emitter expected by this session before the
+    // two-frame stability fence can pass.
     gpu.scene_binding_ready_frames = gpu.scene_binding_ready_frames.saturating_add(1);
     if gpu.scene_binding_ready_frames < 2 {
         return;

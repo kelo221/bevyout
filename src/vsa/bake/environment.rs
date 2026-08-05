@@ -82,7 +82,7 @@ impl EnvironmentMap {
         let mut importance_total = 0.0;
         for (index, pixel) in pixels.iter().enumerate() {
             let y = index / width as usize;
-            importance_total += Self::importance_weight(*pixel, y as u32, height);
+            importance_total += Self::importance_weight(*pixel, y as u32, width, height);
             importance_cdf.push(importance_total);
         }
         if !importance_total.is_finite() {
@@ -158,7 +158,10 @@ impl EnvironmentMap {
         let x = index % self.width as usize;
         let y = index / self.width as usize;
         let u = (x as f32 + u1.rem_euclid(1.0)) / self.width as f32;
-        let v = (y as f32 + cdf_residual) / self.height as f32;
+        let theta0 = std::f32::consts::PI * y as f32 / self.height as f32;
+        let theta1 = std::f32::consts::PI * (y + 1) as f32 / self.height as f32;
+        let cos_theta = theta0.cos() * (1.0 - cdf_residual) + theta1.cos() * cdf_residual;
+        let v = cos_theta.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
         let direction = Self::direction_from_uv(u, v);
         EnvironmentImportanceSample {
             direction,
@@ -177,8 +180,8 @@ impl EnvironmentMap {
         let x = ((u * self.width as f32).floor() as u32).min(self.width - 1);
         let y = ((v * self.height as f32).floor() as u32).min(self.height - 1);
         let index = (y * self.width + x) as usize;
-        let probability =
-            Self::importance_weight(self.pixels[index], y, self.height) / self.importance_total;
+        let probability = Self::importance_weight(self.pixels[index], y, self.width, self.height)
+            / self.importance_total;
         let solid_angle = self.pixel_solid_angle(y);
         if probability <= 0.0 || solid_angle <= 0.0 {
             0.0
@@ -205,10 +208,13 @@ impl EnvironmentMap {
         )
     }
 
-    fn importance_weight(pixel: [f32; 3], y: u32, height: u32) -> f32 {
+    fn importance_weight(pixel: [f32; 3], y: u32, width: u32, height: u32) -> f32 {
         let luminance = 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
-        let theta = std::f32::consts::PI * (y as f32 + 0.5) / height as f32;
-        luminance.max(0.0) * theta.sin().max(0.0)
+        let theta0 = std::f32::consts::PI * y as f32 / height as f32;
+        let theta1 = std::f32::consts::PI * (y + 1) as f32 / height as f32;
+        let solid_angle =
+            std::f32::consts::TAU / width as f32 * (theta0.cos() - theta1.cos()).max(0.0);
+        luminance.max(0.0) * solid_angle
     }
 
     fn pixel_solid_angle(&self, y: u32) -> f32 {

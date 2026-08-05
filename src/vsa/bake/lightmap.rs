@@ -570,7 +570,8 @@ pub(crate) fn bake_direct_pages_solari_bounded(
         ]),
         illuminance: directional.illuminance,
     };
-    let mut session = SolariBakeSession::new(&scene.primitives, &scene.materials)?;
+    let mut session =
+        SolariBakeSession::new(&scene.primitives, &scene.materials, scene_seed as u32)?;
     let mut revision = scene_seed;
     let mut output_pages = Vec::with_capacity(scene.primitives.len());
     let mut summary = LightmapSamplingSummary::default();

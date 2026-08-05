@@ -1618,6 +1618,10 @@ evidence:
 * glTF `baseColorFactor`, `emissiveFactor`, and `COLOR_0` are now treated as
   linear values in both CPU and Solari transport. Only sampled color textures
   receive sRGB decoding. The material contract tests were updated accordingly.
+* Solari constant environments no longer use a visibility-bypassing shortcut.
+  They use a cheaper visibility-only cosine estimator, while varying maps use
+  the exact lat-long pixel solid-angle importance table and cosine-theta row
+  sampling.
 * All custom Solari transport and alpha-peel rays use closest-hit semantics
   (`RAY_FLAG_NONE`). Solari proxy identity is carried explicitly through the
   pinned 0.19 `ResolvedMaterial.reflectance` field; alpha, vertex-color, and
@@ -1630,11 +1634,23 @@ evidence:
   to NEE emitter visibility. The adapter instead owns its solid-angle emitter
   table and MIS, while the CPU reference remains authoritative for richer
   texture-varying emitter sampling.
+* The explicit Solari material contract now rejects textured emissive
+  materials and masked/blended emitters. Any blend material is rejected when
+  `--lightmap-bounces` is greater than zero because reflected indirect blend
+  transport is not implemented. Direct/transmission blend remains a
+  zero-bounce-only path.
+* Hit-emission MIS now uses the immutable scattering point before alpha or
+  backface peeling. The adapter-owned scene-readiness record requires the
+  expected scene revision, proxy/material/texture/emitter counts, render-world
+  mesh allocations, GPU textures, and Solari bind group before the two-frame
+  stability fence. Pinned Bevy 0.19 does not expose Solari's private compact
+  instance/light-source counts, so this is a conservative adapter-owned gate,
+  not independent proof of every upstream binder entry. The bake revision was
+  bumped for these corrected contracts.
 * Environment radiance is evaluated at the current surface's direct vertex;
-  an indirect miss no longer adds it a second time. Constant maps therefore
-  use `radiance × PI`, not `radiance × 2PI`. Environment-CDF vertical jitter
-  uses the selected CDF interval residual, and cosine-path sampling uses a
-  radial jitter plus a global page/primitive/texel/sample seed identity.
+  an indirect miss no longer adds it a second time. Constant maps now use the
+  visibility-aware estimator. Environment-CDF sampling uses exact solid-angle
+  weights and cosine-theta row sampling; global seed uniqueness remains open.
 * Solari now accepts fixed sample counts greater than one, but still rejects
   adaptive variance stopping. Its dispatch waits for two consecutive prepared
   Solari scene frames before submitting work. The cache fingerprint includes
@@ -1644,11 +1660,15 @@ evidence:
   accepts NPOT dimensions such as `3996×3980`; power-of-two padding is not a
   requirement. Cross-OS runtime verification of that NPOT one-mip asset is
   still outstanding.
-* After these corrections, the ignored Solari matrix passes eight fixtures on
+* Before the new material/readiness gate, the ignored Solari matrix passed eight fixtures on
   the current compatible adapter: direct/session, CPU parity, alpha mask,
   blended alpha, constant environment, one and two authored diffuse bounces,
   and emissive-mesh transport. This is adapter-local evidence, not a
   representative-GPU release gate.
+* The earlier `Tenpenny01` timing is also pre-gate evidence. Current Solari
+  validation intentionally rejects that cell's textured emissive material 46;
+  use the CPU backend for it until UV/texture-aware emitter sampling is
+  implemented.
 
 This leaves the optional backend an experimental transport prototype. The
 feature build, source-contract tests, CPU analytical oracles, and the current
@@ -1662,14 +1682,16 @@ Still required for the complete optional backend:
 * Rerun and then broaden hardware validation: direct, alpha-mask, linear
   material/vertex-color, geometric-sidedness, multi-sample, environment, and
   bounded-bounce fixtures must pass on representative adapters. The current
-  two-frame readiness fence is conservative but does not yet read back Solari's
-  compact instance counts.
+  two-frame readiness fence now includes adapter-owned expected proxy,
+  material, texture, emitter, mesh-allocation, and scene-revision checks, but
+  representative hardware validation remains open; a public upstream compact
+  instance-count signal is still needed to close the strict P1.6 gate.
 * Complete the remaining full-lighting-contract parity work. The current GPU
-  path supports zero through four bounded diffuse bounces, opaque/mask/blend
-  alpha transport, a bevyout-owned solid-angle emissive sample with MIS, and
-  direct authored-environment transport. It does not yet claim CPU-equivalent
-  texture-varying emitter sampling, production-scale emitter lookup cost, or
-  adaptive convergence.
+  path supports bounded opaque/mask transport and zero-bounce blend
+  direct/transmission. Textured emissive NEE, masked/blended emitters,
+  reflected multibounce blend transport, CPU-equivalent texture-varying emitter
+  sampling, production-scale emitter lookup cost, and adaptive convergence
+  remain out of contract.
 * Add stronger analytical fixtures for constant environments, emissive panels,
   sidedness, texture/factor color spaces, and non-ring sample distributions;
   keep the CPU path authoritative until those fixtures are hardware-verified.

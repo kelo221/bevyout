@@ -46,6 +46,15 @@ pub(crate) struct SampledTexture {
 }
 
 impl SampledTexture {
+    #[cfg(all(test, feature = "lightmap-gpu-solari"))]
+    pub(crate) fn from_test_image(image: RgbaImage) -> Self {
+        Self {
+            image: Arc::new(image),
+            wrap_s: WrapMode::Clamp,
+            wrap_t: WrapMode::Clamp,
+        }
+    }
+
     #[cfg(feature = "lightmap-gpu-solari")]
     pub(crate) fn image(&self) -> &RgbaImage {
         &self.image

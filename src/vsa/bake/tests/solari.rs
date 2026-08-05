@@ -182,8 +182,82 @@ fn bake_shader_keeps_solari_scene_and_bevyout_bindings_separate() {
     assert!(!shader.contains("random_emissive_light_pdf"));
     assert!(!shader.contains("RAY_FLAG_TERMINATE_ON_FIRST_HIT"));
     assert!(shader.contains("environment_radiance"));
+    assert!(!shader.contains("environment_texels[0].xyz * SOLARI_PI"));
+    assert!(shader.contains("if params[9] != 0u"));
+    assert!(shader.contains("cosine * cosine_visibility / pdf"));
+    assert!(shader.contains("hit.world_position,\n                            path_position"));
+    assert!(shader.contains("let cos_theta = mix(cos(theta0), cos(theta1), cdf_residual)"));
     assert!(shader.contains("@compute @workgroup_size(64, 1, 1)"));
     assert!(shader.contains("trace_ray("));
+}
+
+#[test]
+fn solari_rejects_unsupported_emissive_and_blended_bounce_materials() {
+    use crate::vsa::bake::rust_scene::{AlphaMode, SampledTexture, TransportMaterial};
+    use image::RgbaImage;
+
+    let textured_emitter = TransportMaterial {
+        emissive_factor: Vec3::ONE,
+        emissive_texture: Some(SampledTexture::from_test_image(RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([255, 32, 16, 255]),
+        ))),
+        ..TransportMaterial::default()
+    };
+    let error = validate_solari_material_contract(&[textured_emitter], 0).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<SolariUnsupportedMaterial>(),
+        Some(SolariUnsupportedMaterial::TexturedEmission { material_index: 0 })
+    ));
+
+    let masked_emitter = TransportMaterial {
+        emissive_factor: Vec3::ONE,
+        alpha_mode: AlphaMode::Mask,
+        ..TransportMaterial::default()
+    };
+    let error = validate_solari_material_contract(&[masked_emitter], 0).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<SolariUnsupportedMaterial>(),
+        Some(SolariUnsupportedMaterial::NonOpaqueEmission { material_index: 0 })
+    ));
+
+    let blended = TransportMaterial {
+        alpha_mode: AlphaMode::Blend,
+        ..TransportMaterial::default()
+    };
+    let error = validate_solari_material_contract(&[blended], 1).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<SolariUnsupportedMaterial>(),
+        Some(SolariUnsupportedMaterial::BlendedIndirect { material_index: 0 })
+    ));
+}
+
+#[test]
+fn scene_readiness_requires_every_expected_binding() {
+    let expected = SolariBakeSceneExpectation {
+        scene_revision: 7,
+        expected_proxy_count: 3,
+        expected_material_count: 3,
+        expected_texture_count: 2,
+        expected_emitter_count: 1,
+    };
+    let complete = SolariBakeSceneReadiness {
+        scene_revision: 7,
+        expected_proxy_count: 3,
+        bound_instance_count: 3,
+        expected_material_count: 3,
+        bound_material_count: 3,
+        expected_texture_count: 2,
+        bound_texture_count: 2,
+        expected_emitter_count: 1,
+        bound_emitter_count: 1,
+    };
+    assert!(complete.is_complete(expected));
+
+    let mut partial = complete;
+    partial.bound_instance_count = 2;
+    assert!(!partial.is_complete(expected));
 }
 
 #[test]
@@ -241,7 +315,7 @@ fn headless_solari_alpha_mask_skips_transparent_occluders() {
                 ..TransportMaterial::default()
             },
         ];
-        let mut session = SolariBakeSession::new(&primitives, &materials)
+        let mut session = SolariBakeSession::new(&primitives, &materials, 0)
             .expect("headless Solari alpha fixture should create a scene");
         let result = session
             .bake_texels(
@@ -365,7 +439,7 @@ fn headless_solari_blended_alpha_matches_cpu_transmittance() {
                 ..TransportMaterial::default()
             },
         ];
-        let mut session = SolariBakeSession::new(&primitives, &materials)
+        let mut session = SolariBakeSession::new(&primitives, &materials, 0)
             .expect("headless Solari blended-alpha fixture should create a scene");
         let result = session
             .bake_texels(
@@ -501,7 +575,7 @@ fn headless_solari_one_bounce_uses_authored_diffuse_material() {
         spot_fov_radians: 0.0,
         spot_falloff_exponent: 0.0,
     };
-    let mut session = SolariBakeSession::new(&primitives, &materials)
+    let mut session = SolariBakeSession::new(&primitives, &materials, 0)
         .expect("headless Solari scene should accept authored materials");
     let directional = SolariBakeDirectionalLight {
         direction: [0.0, 0.0, -1.0],
@@ -624,7 +698,7 @@ fn headless_solari_two_bounces_accumulate_authored_diffuse_transport() {
         half_albedo.clone(),
         half_albedo,
     ];
-    let mut session = SolariBakeSession::new(&primitives, &materials)
+    let mut session = SolariBakeSession::new(&primitives, &materials, 0)
         .expect("headless Solari deeper-bounce fixture should create a scene");
     let texel = vec![SolariBakeTexel {
         position: [0.0, 0.0, 0.0],
@@ -713,7 +787,7 @@ fn headless_solari_emissive_mesh_contributes_to_bounce_transport() {
             ..TransportMaterial::default()
         },
     ];
-    let mut session = SolariBakeSession::new(&primitives, &materials)
+    let mut session = SolariBakeSession::new(&primitives, &materials, 0)
         .expect("headless Solari emissive fixture should create a scene");
     let result = session
         .bake_texels(
@@ -769,6 +843,7 @@ fn headless_solari_constant_environment_matches_pi_irradiance() {
     let mut session = SolariBakeSession::new(
         std::slice::from_ref(&primitive),
         &[crate::vsa::bake::rust_scene::TransportMaterial::default()],
+        0,
     )
     .expect("headless Solari environment fixture should create a scene");
     let texel = vec![SolariBakeTexel {
@@ -805,19 +880,81 @@ fn headless_solari_constant_environment_matches_pi_irradiance() {
     let direct_value = Vec3::from_array([direct[0][0], direct[0][1], direct[0][2]]);
     let escape_value = Vec3::from_array([with_escape[0][0], with_escape[0][1], with_escape[0][2]]);
     let expected_direct = std::f32::consts::PI;
+    for (label, value) in [("direct", direct_value), ("escape", escape_value)] {
+        assert!(
+            value.is_finite()
+                && value.min_element() > 0.0
+                && (value - Vec3::splat(expected_direct)).abs().max_element() <= 0.5,
+            "constant environment {label} estimate is not a visible finite cosine estimate: actual={value:?}, expected={expected_direct}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a compatible hardware ray-query adapter"]
+fn headless_solari_constant_environment_respects_a_closed_ceiling() {
+    use crate::vsa::bake::rust_scene::TransportMaterial;
+
+    let quad = |name: &str, z: f32, material: usize| ComposedPrimitive {
+        name: name.into(),
+        primitive_key: name.into(),
+        reference_form_ids: vec![material as u32 + 1],
+        material,
+        positions: vec![
+            Vec3::new(-10_000.0, -10_000.0, z),
+            Vec3::new(10_000.0, -10_000.0, z),
+            Vec3::new(10_000.0, 10_000.0, z),
+            Vec3::new(-10_000.0, 10_000.0, z),
+        ],
+        normals: vec![Vec3::Z; 4],
+        uvs: vec![
+            [0.0, 0.0].into(),
+            [1.0, 0.0].into(),
+            [1.0, 1.0].into(),
+            [0.0, 1.0].into(),
+        ],
+        colors: vec![[1.0; 4].into(); 4],
+        transport_colors: vec![[1.0; 4].into(); 4],
+        indices: vec![0, 1, 2, 0, 2, 3],
+        uv1: vec![[0.0, 0.0].into(); 4],
+        uv1_chart_ids: vec![0; 4],
+        lightmap_texels_per_meter: 1.0,
+        lightmap_dimensions: [1, 1],
+        lightmap_binding_id: Some(material as u32 + 1),
+    };
+    let primitives = vec![quad("receiver", 0.0, 0), quad("ceiling", 1.0, 1)];
+    let materials = vec![
+        TransportMaterial::default(),
+        TransportMaterial {
+            double_sided: true,
+            ..TransportMaterial::default()
+        },
+    ];
+    let environment = EnvironmentMap::from_pixels(2, 1, vec![[1.0; 3], [1.0; 3]])
+        .expect("constant equirectangular environment should be valid");
+    let mut session = SolariBakeSession::new(&primitives, &materials, 63)
+        .expect("closed-ceiling fixture should create a scene");
+    let result = session
+        .bake_texels_with_environment(
+            vec![SolariBakeTexel {
+                position: [0.0, 0.0, 0.0],
+                normal: Vec3::Z.to_array(),
+                spatial_index: 0,
+            }],
+            &[],
+            [0.0; 3],
+            SolariBakeDirectionalLight::default(),
+            1,
+            0,
+            Some(&environment),
+            63,
+            63,
+        )
+        .expect("closed-ceiling environment bake should return a readback");
+    let value = Vec3::from_array([result[0][0], result[0][1], result[0][2]]);
     assert!(
-        (direct_value - Vec3::splat(expected_direct))
-            .abs()
-            .max_element()
-            <= 1.0e-3,
-        "constant environment direct mismatch: actual={direct_value:?}, expected={expected_direct}"
-    );
-    assert!(
-        (escape_value - Vec3::splat(expected_direct))
-            .abs()
-            .max_element()
-            <= 1.0e-3,
-        "constant environment escape mismatch: actual={escape_value:?}, expected={expected_direct}"
+        value.is_finite() && value.max_element() < 0.1,
+        "closed ceiling did not occlude constant environment: {value:?}"
     );
 }
 

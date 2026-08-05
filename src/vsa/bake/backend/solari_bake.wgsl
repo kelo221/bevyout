@@ -155,7 +155,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                             side_table_id,
                             ray.primitive_index,
                             hit.world_position,
-                            ray_origin,
+                            path_position,
                             direction,
                             max(dot(path_normal, direction), 0.0) / SOLARI_PI,
                             hit.material.emissive,
@@ -366,7 +366,7 @@ fn hit_emission_weight(
     side_table_id: u32,
     primitive_index: u32,
     hit_position: vec3<f32>,
-    ray_origin: vec3<f32>,
+    scattering_origin: vec3<f32>,
     ray_direction: vec3<f32>,
     bsdf_pdf: f32,
     emission: vec3<f32>,
@@ -388,7 +388,10 @@ fn hit_emission_weight(
         if triangle.selection_cdf_probability_flags.z > 0.5 {
             emitter_cosine = abs(dot(emitter_normal, -ray_direction));
         }
-        let distance_squared = dot(hit_position - ray_origin, hit_position - ray_origin);
+        let distance_squared = dot(
+            hit_position - scattering_origin,
+            hit_position - scattering_origin,
+        );
         let area = triangle.emission_and_area.w;
         let pdf = triangle.selection_cdf_probability_flags.y
             * distance_squared
@@ -429,8 +432,7 @@ fn environment_pixel_solid_angle(y: u32) -> f32 {
 fn environment_importance_weight(x: u32, y: u32) -> f32 {
     let pixel = environment_texels[y * params[5] + x].xyz;
     let luminance = dot(pixel, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let theta = SOLARI_PI * (f32(y) + 0.5) / f32(params[6]);
-    return max(luminance, 0.0) * max(sin(theta), 0.0);
+    return max(luminance, 0.0) * environment_pixel_solid_angle(y);
 }
 
 fn environment_importance_pdf(incoming_direction: vec3<f32>) -> f32 {
@@ -494,8 +496,10 @@ fn sample_environment_importance(u0: f32, u1: f32) -> EnvironmentImportanceSampl
     let x = index % params[5];
     let y = index / params[5];
     let u = (f32(x) + (u1 - floor(u1))) / f32(params[5]);
-    let v = (f32(y) + cdf_residual) / f32(params[6]);
-    let theta = v * SOLARI_PI;
+    let theta0 = SOLARI_PI * f32(y) / f32(params[6]);
+    let theta1 = SOLARI_PI * f32(y + 1u) / f32(params[6]);
+    let cos_theta = mix(cos(theta0), cos(theta1), cdf_residual);
+    let theta = acos(clamp(cos_theta, -1.0, 1.0));
     let phi = (u - 0.5) * 2.0 * SOLARI_PI;
     let radius = sin(theta);
     let direction = vec3<f32>(radius * cos(phi), cos(theta), radius * sin(phi));
@@ -531,9 +535,6 @@ fn environment_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     if params[7] == 0u {
         return vec3<f32>(0.0, 0.0, 0.0);
     }
-    if params[9] != 0u {
-        return environment_texels[0].xyz * SOLARI_PI;
-    }
     let seed = params[4]
         ^ bitcast<u32>(position.x)
         ^ bitcast<u32>(position.y)
@@ -553,9 +554,16 @@ fn environment_irradiance(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         let pdf = cosine / SOLARI_PI;
         let cosine_visibility = ray_visibility(position + normal * RAY_T_MIN, direction, RAY_T_MAX);
         if pdf > 0.0 && cosine_visibility > 0.0 {
-            let environment_pdf = environment_importance_pdf(direction);
-            let weight = power_heuristic(pdf, environment_pdf);
-            cosine_sum += environment_radiance(direction) * (cosine * cosine_visibility * weight / pdf);
+            if params[9] != 0u {
+                cosine_sum += environment_radiance(direction) * (cosine * cosine_visibility / pdf);
+            } else {
+                let environment_pdf = environment_importance_pdf(direction);
+                let weight = power_heuristic(pdf, environment_pdf);
+                cosine_sum += environment_radiance(direction) * (cosine * cosine_visibility * weight / pdf);
+            }
+        }
+        if params[9] != 0u {
+            continue;
         }
         let environment_sample = sample_environment_importance(random_u, random_v);
         let environment_cosine = max(dot(normal, environment_sample.direction), 0.0);

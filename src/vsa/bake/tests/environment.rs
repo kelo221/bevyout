@@ -96,6 +96,29 @@ fn importance_sampling_is_deterministic_and_has_a_solid_angle_pdf() {
 }
 
 #[test]
+fn importance_sampling_uses_exact_solid_angle_and_cosine_uniform_rows() {
+    let width = 4;
+    let height = 4;
+    let mut pixels = vec![[0.0; 3]; (width * height) as usize];
+    pixels[0] = [1.0, 1.0, 1.0];
+    let map = EnvironmentMap::from_pixels(width, height, pixels).unwrap();
+
+    let expected_solid_angle =
+        std::f32::consts::TAU / width as f32 * (1.0 - (std::f32::consts::PI / height as f32).cos());
+    assert!((map.pixel_solid_angle(0) - expected_solid_angle).abs() < 1.0e-6);
+    assert!((map.importance_total - expected_solid_angle).abs() < 1.0e-6);
+
+    for residual in [0.1, 0.5, 0.9] {
+        let residual = residual * 0.9;
+        let sample = map.sample_importance(residual, 0.25);
+        let expected_cosine =
+            (1.0 - residual) * 1.0 + (std::f32::consts::PI / height as f32).cos() * residual;
+        assert!((sample.direction[1] - expected_cosine).abs() < 1.0e-5);
+        assert!(sample.pdf_solid_angle.is_finite() && sample.pdf_solid_angle > 0.0);
+    }
+}
+
+#[test]
 fn invalid_dimensions_and_radiance_are_rejected() {
     assert!(EnvironmentMap::from_pixels(0, 1, Vec::new()).is_err());
     assert!(EnvironmentMap::from_pixels(1, 1, vec![[-1.0, 0.0, 0.0]]).is_err());
